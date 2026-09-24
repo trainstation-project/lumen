@@ -50,11 +50,9 @@ fn detect_cuda() {
 /// Compile the Objective-C++ Metal shim (macOS only), mirroring how PyTorch
 /// builds its MPS .mm files only on Apple targets.
 fn build_mps_shim() {
+    // `mps` is a default feature, so skip quietly elsewhere (PyTorch
+    // likewise just builds without MPS off Apple platforms).
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        println!(
-            "cargo:warning=feature `mps` is only supported on macOS; \
-             building without the Metal backend"
-        );
         return;
     }
 

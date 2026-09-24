@@ -3,7 +3,7 @@
 // Metal's API is Objective-C only, so — exactly like PyTorch's
 // MPSAllocator.mm — the raw calls live in an Objective-C++ file that
 // build.rs compiles on macOS. The Rust side (src/allocator/mps.rs) sees
-// only the three extern "C" functions below.
+// only the extern "C" functions below.
 //
 // We allocate MTLBuffers in Shared storage mode: on Apple Silicon's unified
 // memory, buffer.contents is an ordinary CPU pointer, which is what lets
@@ -11,6 +11,8 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+
+#include <mach/vm_page_size.h>
 
 #include <mutex>
 #include <unordered_map>
@@ -34,6 +36,30 @@ static std::mutex g_buffers_mu;
 
 extern "C" {
 int lumen_mps_available(void) { return lumen_default_device() != nil ? 1 : 0; }
+
+// Device properties the allocator's size math needs, mirroring what
+// MPSHeapAllocatorImpl reads from Metal. Returns 0 if there is no device.
+typedef struct {
+  size_t alignment;                  // heap buffer placement alignment
+  size_t page_size;                  // vm_page_size
+  size_t max_buffer_length;          // MTLDevice.maxBufferLength
+  size_t recommended_max_working_set; // MTLDevice.recommendedMaxWorkingSetSize
+} lumen_mps_limits_t;
+
+int lumen_mps_limits(lumen_mps_limits_t *out) {
+  id<MTLDevice> device = lumen_default_device();
+  if (device == nil) {
+    return 0;
+  }
+  // Same options as the buffers lumen_mps_alloc creates (and as MPS's shared
+  // pools use); MPS's BufferPool queries the alignment with length 1.
+  MTLResourceOptions options = MTLResourceStorageModeShared | MTLResourceCPUCacheModeDefaultCache;
+  out->alignment = [device heapBufferSizeAndAlignWithLength:1 options:options].align;
+  out->page_size = vm_page_size;
+  out->max_buffer_length = device.maxBufferLength;
+  out->recommended_max_working_set = (size_t)device.recommendedMaxWorkingSetSize;
+  return 1;
+}
 
 // Returns the contents pointer of a new Shared-mode MTLBuffer, or nullptr.
 void *lumen_mps_alloc(size_t nbytes) {

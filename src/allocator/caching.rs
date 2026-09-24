@@ -1,15 +1,15 @@
 //! A device-agnostic caching allocator, modeled on c10's
-//! `CUDACachingAllocator` (`c10/cuda/CUDACachingAllocator.cpp`).
+//! `CUDACachingAllocator` (`c10/cuda/CUDACachingAllocator.cpp`) and aten's
+//! `MPSHeapAllocatorImpl` (`aten/src/ATen/mps/MPSAllocator.mm`).
 //!
 //! Raw device memory operations are abstracted behind [`DeviceBackend`] so
 //! the pooling logic is shared across device families (CUDA, MPS) and can be
-//! tested with a mock. Tuning comes from [`CacheConfig`]; PyTorch likewise
-//! shares this design between `CUDACachingAllocator` and `MPSAllocator`,
-//! though with separate implementations and MPS-specific extras we do not
-//! model (MTLHeap suballocation, watermark GC).
+//! tested with a mock. The size math — rounding, segment sizes, split
+//! thresholds — differs between the two in PyTorch; it is a [`CachePolicy`]
+//! implemented next to each backend (`cuda.rs`, `mps.rs`).
 //!
 //! Layout of the machinery:
-//! - A *segment* is one big backend allocation.
+//! - A *segment* is one big backend allocation (MPS: a heap).
 //! - A *block* is a slice of a segment handed out (or cached) by `allocate`.
 //! - Free blocks live in size-ordered pools; freed blocks coalesce with
 //!   neighbors; `empty_cache` releases whole free segments.
@@ -18,64 +18,42 @@ use crate::allocator::{Allocator, DataPtr};
 use crate::device::Device;
 use std::alloc::Layout;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::ptr::NonNull;
+use std::sync::{Arc, Mutex, PoisonError};
 
-// ---------------- tuning ----------------
+// ---------------- size policy ----------------
 
-/// All sizes are rounded up to a multiple of this (c10: kMinBlockSize).
-pub const K_MIN_BLOCK_SIZE: usize = 512;
-/// Largest "small" allocation; anything bigger goes to the large pool (c10: kSmallSize).
+/// Largest "small" allocation; anything bigger goes to the large pool
+/// (c10: kSmallSize, MPS: kMaxSmallAlloc).
 pub const K_SMALL_SIZE: usize = 1 << 20; // 1 MiB
-/// Allocations at least this big bypass splitting (c10: kMinLargeAlloc).
+/// Allocations at least this big get a dedicated segment (c10/MPS: kMinLargeAlloc).
 pub const K_MIN_LARGE_ALLOC: usize = 10 << 20; // 10 MiB
-/// Round-up granularity for large allocations (c10: kRoundLarge).
+/// Round-up granularity for dedicated segments (c10/MPS: kRoundLarge).
 pub const K_ROUND_LARGE: usize = 2 << 20; // 2 MiB
 
-/// Segment-size tuning for a [`CachingAllocator`]. The thresholds
-/// (`K_SMALL_SIZE`, `K_MIN_LARGE_ALLOC`, `K_ROUND_LARGE`) are shared by CUDA
-/// and MPS in PyTorch; only the segment sizes differ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CacheConfig {
-    /// Segment size carved up for small allocations (c10: kSmallBuffer /
-    /// MPS: kSmallHeap).
-    pub small_buffer: usize,
-    /// Segment size for mid-size large allocations (c10: kLargeBuffer /
-    /// MPS: kLargeHeap).
-    pub large_buffer: usize,
+/// A dedicated segment for a `size`-byte block: `size` rounded up to
+/// [`K_ROUND_LARGE`].
+pub(crate) fn dedicated_segment_size(size: usize) -> usize {
+    size.div_ceil(K_ROUND_LARGE) * K_ROUND_LARGE
 }
 
-impl CacheConfig {
-    /// c10's CUDA values: 2 MiB / 20 MiB segments.
-    pub const fn cuda() -> Self {
-        Self {
-            small_buffer: 2 << 20,
-            large_buffer: 20 << 20,
-        }
-    }
-
-    /// aten's MPS values: 8 MiB / 32 MiB heaps, mapped onto our segments.
-    pub const fn mps() -> Self {
-        Self {
-            small_buffer: 8 << 20,
-            large_buffer: 32 << 20,
-        }
-    }
-}
-
-/// Round up to a multiple of `K_MIN_BLOCK_SIZE`.
-fn round_size(size: usize) -> usize {
-    size.div_ceil(K_MIN_BLOCK_SIZE) * K_MIN_BLOCK_SIZE
-}
-
-/// How big a segment to grab from the device for a request of `size` bytes.
-fn segment_size(size: usize, config: &CacheConfig) -> usize {
-    if size <= K_SMALL_SIZE {
-        config.small_buffer
-    } else if size < K_MIN_LARGE_ALLOC {
-        config.large_buffer
-    } else {
-        size.div_ceil(K_ROUND_LARGE) * K_ROUND_LARGE
-    }
+/// The size math that differs between PyTorch's CUDA and MPS allocators
+/// ([`crate::CudaPolicy`], [`crate::MpsPolicy`]). Everything else — pools,
+/// best-fit search, splitting, coalescing, stats, releasing segments — is
+/// shared by [`CachingAllocator`].
+pub trait CachePolicy: Send + Sync + 'static {
+    /// Alignment of every block, and so of every pointer handed out.
+    fn alignment(&self) -> usize;
+    /// Block size for a request of `nbytes` (> 0) bytes.
+    fn round_size(&self, nbytes: usize) -> usize;
+    /// Whether to split `remaining` bytes off a block in the small (or
+    /// large) pool into a new free block.
+    fn should_split(&self, small: bool, remaining: usize) -> bool;
+    /// How big a segment to grab from the device for a `size`-byte block
+    /// when `reserved` bytes are already held.
+    fn segment_size(&self, size: usize, reserved: usize) -> usize;
+    /// Panic on requests the device can never serve. Default: none.
+    fn check_request(&self, _nbytes: usize) {}
 }
 
 // ---------------- backend abstraction ----------------
@@ -105,7 +83,7 @@ pub trait DeviceBackend: Send + Sync + 'static {
 /// A snapshot of the allocator's counters (subset of c10's `DeviceStats`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CacheStats {
-    /// Bytes currently handed out to users.
+    /// Bytes currently handed out to users (block sizes, not request sizes).
     pub allocated_bytes: usize,
     /// Peak of `allocated_bytes` since the last `reset_peak_stats`.
     pub allocated_bytes_peak: usize,
@@ -133,9 +111,11 @@ struct Block {
     size: usize,
     /// True while handed out to a user.
     allocated: bool,
-    /// Blocks from the same `device_alloc` call form a segment; a segment is
-    /// released only when every one of its blocks is free.
-    segment_start: usize,
+    /// Base pointer of the `device_alloc`ed segment this block was carved
+    /// from. Blocks merge only within a segment (segments can be
+    /// address-adjacent), and the pointers handed out are derived from it
+    /// with `with_addr` so they keep its provenance.
+    segment: NonNull<u8>,
     segment_size: usize,
     /// Which pool this block belongs to. Membership is a property of the
     /// segment the block was carved from, NOT of its current size: a small
@@ -160,6 +140,10 @@ struct State {
     stats: CacheStats,
 }
 
+// SAFETY: the `NonNull`s in `blocks` are device pointers owned by the
+// allocator; `State` is only reached through its `Mutex`.
+unsafe impl Send for State {}
+
 impl State {
     fn pool_for(&mut self, small: bool) -> &mut BTreeSet<PoolKey> {
         if small {
@@ -170,9 +154,9 @@ impl State {
     }
 }
 
-struct Inner<B: DeviceBackend> {
+struct Inner<B: DeviceBackend, P: CachePolicy> {
     device: Device,
-    config: CacheConfig,
+    policy: P,
     backend: B,
     state: Mutex<State>,
 }
@@ -181,11 +165,11 @@ struct Inner<B: DeviceBackend> {
 ///
 /// Construct via the device modules (`cuda::get`, `mps::get`) or directly
 /// with a custom [`DeviceBackend`].
-pub struct CachingAllocator<B: DeviceBackend> {
-    inner: Arc<Inner<B>>,
+pub struct CachingAllocator<B: DeviceBackend, P: CachePolicy> {
+    inner: Arc<Inner<B, P>>,
 }
 
-impl<B: DeviceBackend> Clone for CachingAllocator<B> {
+impl<B: DeviceBackend, P: CachePolicy> Clone for CachingAllocator<B, P> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -193,12 +177,12 @@ impl<B: DeviceBackend> Clone for CachingAllocator<B> {
     }
 }
 
-impl<B: DeviceBackend> CachingAllocator<B> {
-    pub fn new(device: Device, backend: B, config: CacheConfig) -> Self {
+impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
+    pub fn new(device: Device, backend: B, policy: P) -> Self {
         Self {
             inner: Arc::new(Inner {
                 device,
-                config,
+                policy,
                 backend,
                 state: Mutex::new(State::default()),
             }),
@@ -214,69 +198,32 @@ impl<B: DeviceBackend> CachingAllocator<B> {
     /// device (c10: `emptyCache` / `releaseCachedBlocks`).
     pub fn empty_cache(&self) {
         let mut state = self.inner.state.lock().unwrap();
-        let releasable: Vec<usize> = state
-            .blocks
-            .iter()
-            .filter(|(_, b)| b.ptr == b.segment_start && !b.allocated)
-            .filter(|(_, b)| {
-                // The whole segment must be free: check successors by
-                // walking forward through the address-ordered map.
-                let mut covered = b.segment_size;
-                let mut addr = b.ptr;
-                while covered > 0 {
-                    match state.blocks.get(&addr) {
-                        Some(block) if !block.allocated => {
-                            covered -= block.size;
-                            addr += block.size;
-                        }
-                        _ => return false,
-                    }
-                }
-                true
-            })
-            .map(|(ptr, _)| *ptr)
-            .collect();
-
-        for ptr in releasable {
-            let mut addr = ptr;
-            while let Some(block) = state.blocks.remove(&addr) {
-                let is_segment_end =
-                    block.ptr + block.size == block.segment_start + block.segment_size;
-                state
-                    .pool_for(block.pool_small)
-                    .remove(&(block.size, block.ptr));
-                state.stats.reserved_bytes -= block.size;
-                state.stats.num_device_free += 1;
-                addr = block.ptr + block.size;
-                if is_segment_end {
-                    break;
-                }
-            }
-            unsafe { self.inner.backend.device_free(ptr as *mut u8) };
-        }
+        self.inner.release_free_segments(&mut state);
     }
 
     fn allocate(&self, nbytes: usize) -> DataPtr {
         if nbytes == 0 {
             return DataPtr::with_deleter(
-                std::ptr::NonNull::dangling(),
+                NonNull::dangling(),
                 Layout::from_size_align(0, 1).unwrap(),
                 |_| {},
             );
         }
 
-        let size = round_size(nbytes);
+        let policy = &self.inner.policy;
+        policy.check_request(nbytes);
+        let size = policy.round_size(nbytes);
         let mut state = self.inner.state.lock().unwrap();
 
         // 1. Best-fit search in the pool.
-        if let Some(block) = Self::try_alloc(&mut state, size) {
-            return self.make_data_ptr(&mut state, block);
+        if let Some(block) = self.try_alloc(&mut state, size) {
+            return self.make_data_ptr(&state, block);
         }
 
         // 2. Nothing cached: ask the device for a fresh segment.
-        let seg_size = segment_size(size, &self.inner.config);
+        let seg_size = policy.segment_size(size, state.stats.reserved_bytes);
         match self.alloc_new_segment(&mut state, size, seg_size) {
-            Ok(block) => self.make_data_ptr(&mut state, block),
+            Ok(block) => self.make_data_ptr(&state, block),
             // 3. Device is out of memory: release cached segments and retry
             //    once (c10's OutOfMemoryError path).
             Err(_) => {
@@ -284,12 +231,12 @@ impl<B: DeviceBackend> CachingAllocator<B> {
                 self.empty_cache();
                 let mut state = self.inner.state.lock().unwrap();
                 match self.alloc_new_segment(&mut state, size, seg_size) {
-                    Ok(block) => self.make_data_ptr(&mut state, block),
+                    Ok(block) => self.make_data_ptr(&state, block),
                     Err(e) => {
                         // Release the lock before panicking: panicking while
                         // holding the guard would poison the cache's mutex,
                         // making the allocator unusable for whoever catches
-                        // the panic (and panic again in our own Drop).
+                        // the panic.
                         drop(state);
                         panic!("{e} (after empty_cache retry)");
                     }
@@ -298,71 +245,72 @@ impl<B: DeviceBackend> CachingAllocator<B> {
         }
     }
 
-    /// Find the smallest free block that fits, splitting it if it is much
-    /// bigger than needed. Returns the allocated block's address.
-    fn try_alloc(state: &mut State, size: usize) -> Option<usize> {
-        let small = size <= K_SMALL_SIZE;
-        let pool = if small {
+    /// Find the smallest free block that fits and hand it out. Returns the
+    /// allocated block's address.
+    fn try_alloc(&self, state: &mut State, size: usize) -> Option<usize> {
+        let pool = if size <= K_SMALL_SIZE {
             &state.small_pool
         } else {
             &state.large_pool
         };
         // First entry >= (size, 0) is the best fit.
-        let key = *pool.range((size, 0)..).next()?;
-        let (block_size, ptr) = key;
+        let &(_, ptr) = pool.range((size, 0)..).next()?;
+        Some(self.take_block(state, ptr, size))
+    }
 
-        let should_split = if size <= K_SMALL_SIZE {
-            // c10: remaining >= kMinBlockSize (keep small blocks splittable)
-            block_size - size >= K_MIN_BLOCK_SIZE
-        } else {
-            // c10: remaining > kSmallSize
-            block_size - size > K_SMALL_SIZE
-        };
+    /// Hand out the free block at `ptr` for a `size`-byte request, splitting
+    /// off the remainder if it is worth keeping
+    /// (c10: `alloc_found_block`, MPS: `split_free_block`).
+    fn take_block(&self, state: &mut State, ptr: usize, size: usize) -> usize {
+        let block = &state.blocks[&ptr];
+        let (block_size, small) = (block.size, block.pool_small);
+        let (segment, segment_size) = (block.segment, block.segment_size);
+        state.pool_for(small).remove(&(block_size, ptr));
 
-        state.pool_for(small).remove(&key);
-        let mut block = state.blocks.remove(&ptr).expect("pool/block mismatch");
-        if should_split {
-            let remaining = Block {
-                ptr: ptr + size,
-                size: block_size - size,
-                allocated: false,
-                segment_start: block.segment_start,
-                segment_size: block.segment_size,
-                pool_small: small,
-            };
-            block.size = size;
-            state.blocks.insert(remaining.ptr, remaining);
-            state
-                .pool_for(small)
-                .insert((block_size - size, ptr + size));
+        let remaining = block_size - size;
+        if self.inner.policy.should_split(small, remaining) {
+            state.blocks.insert(
+                ptr + size,
+                Block {
+                    ptr: ptr + size,
+                    size: remaining,
+                    allocated: false,
+                    segment,
+                    segment_size,
+                    pool_small: small,
+                },
+            );
+            state.pool_for(small).insert((remaining, ptr + size));
+            state.blocks.get_mut(&ptr).unwrap().size = size;
         }
+
+        let block = state.blocks.get_mut(&ptr).unwrap();
         block.allocated = true;
-        state.blocks.insert(ptr, block);
-        state.stats.allocated_bytes += size;
+        // Count the whole block: it may be bigger than `size` if unsplit.
+        state.stats.allocated_bytes += block.size;
         state.stats.allocated_bytes_peak = state
             .stats
             .allocated_bytes_peak
             .max(state.stats.allocated_bytes);
         state.stats.num_alloc += 1;
-        Some(ptr)
+        ptr
     }
 
-    /// Obtain a new segment from the backend and carve the request out of it.
+    /// Obtain a new segment from the backend and carve the request out of it
+    /// (c10: `alloc_block`, MPS: `alloc_heap`).
     fn alloc_new_segment(
         &self,
         state: &mut State,
         size: usize,
         seg_size: usize,
     ) -> Result<usize, String> {
-        let ptr = unsafe { self.inner.backend.device_alloc(seg_size) };
-        if ptr.is_null() {
+        let raw = unsafe { self.inner.backend.device_alloc(seg_size) };
+        let Some(segment) = NonNull::new(raw) else {
             return Err(format!(
                 "failed to allocate {seg_size} bytes on {}",
                 self.inner.device
             ));
-        }
-        let ptr = ptr as usize;
-        let small = size <= K_SMALL_SIZE;
+        };
         state.stats.reserved_bytes += seg_size;
         state.stats.reserved_bytes_peak = state
             .stats
@@ -370,53 +318,39 @@ impl<B: DeviceBackend> CachingAllocator<B> {
             .max(state.stats.reserved_bytes);
         state.stats.num_device_alloc += 1;
 
-        let mut block = Block {
+        // The segment starts out as one free block the request is cut from.
+        let ptr = raw.addr();
+        let small = size <= K_SMALL_SIZE;
+        state.blocks.insert(
             ptr,
-            size: seg_size,
-            allocated: false,
-            segment_start: ptr,
-            segment_size: seg_size,
-            pool_small: small,
-        };
-        // Split the request off the front; cache the remainder.
-        if seg_size > size {
-            let remaining = Block {
-                ptr: ptr + size,
-                size: seg_size - size,
+            Block {
+                ptr,
+                size: seg_size,
                 allocated: false,
-                segment_start: ptr,
+                segment,
                 segment_size: seg_size,
                 pool_small: small,
-            };
-            state.blocks.insert(remaining.ptr, remaining);
-            state.pool_for(small).insert((seg_size - size, ptr + size));
-        }
-        block.size = size;
-        block.allocated = true;
-        state.blocks.insert(ptr, block);
-        state.stats.allocated_bytes += size;
-        state.stats.allocated_bytes_peak = state
-            .stats
-            .allocated_bytes_peak
-            .max(state.stats.allocated_bytes);
-        state.stats.num_alloc += 1;
-        Ok(ptr)
+            },
+        );
+        state.pool_for(small).insert((seg_size, ptr));
+        Ok(self.take_block(state, ptr, size))
     }
 
     /// Wrap an allocated block in a `DataPtr` whose deleter returns the block
     /// to the cache.
-    fn make_data_ptr(&self, state: &mut State, ptr: usize) -> DataPtr {
-        let block_size = state.blocks[&ptr].size;
+    fn make_data_ptr(&self, state: &State, ptr: usize) -> DataPtr {
+        let block = &state.blocks[&ptr];
+        let (block_size, segment) = (block.size, block.segment);
         let inner = Arc::clone(&self.inner);
         DataPtr::with_deleter(
-            std::ptr::NonNull::new(ptr as *mut u8).expect("block ptr null"),
-            Layout::from_size_align(block_size, K_MIN_BLOCK_SIZE).unwrap(),
-            move |ptr| inner.free_block(ptr.as_ptr() as usize, block_size),
+            NonNull::new(segment.as_ptr().with_addr(ptr)).expect("block ptr null"),
+            Layout::from_size_align(block_size, self.inner.policy.alignment()).unwrap(),
+            move |ptr| inner.free_block(ptr.addr().get(), block_size),
         )
     }
 }
 
-impl<B: DeviceBackend> Inner<B> {
+impl<B: DeviceBackend, P: CachePolicy> Inner<B, P> {
     /// Return a block to its pool, coalescing with free neighbors
     /// (c10: `free_block` + `coalesce_block`).
     fn free_block(&self, ptr: usize, size: usize) {
@@ -441,7 +375,7 @@ impl<B: DeviceBackend> Inner<B> {
         let prev_ptr = state.blocks.range(..ptr).next_back().map(|(&p, _)| p);
         if let Some(prev_ptr) = prev_ptr
             && !state.blocks[&prev_ptr].allocated
-            && state.blocks[&prev_ptr].segment_start == state.blocks[&ptr].segment_start
+            && state.blocks[&prev_ptr].segment == state.blocks[&ptr].segment
         {
             let merged_size = state.blocks[&prev_ptr].size + state.blocks[&ptr].size;
             let (prev_size, small) = (
@@ -457,7 +391,7 @@ impl<B: DeviceBackend> Inner<B> {
         let end = start + state.blocks[&start].size;
         if let Some(next) = state.blocks.get(&end)
             && !next.allocated
-            && next.segment_start == state.blocks[&start].segment_start
+            && next.segment == state.blocks[&start].segment
         {
             let (next_size, small) = (next.size, next.pool_small);
             state.pool_for(small).remove(&(next_size, end));
@@ -466,23 +400,45 @@ impl<B: DeviceBackend> Inner<B> {
         }
         start
     }
+
+    /// Return every wholly free segment to the device. Free neighbors always
+    /// coalesce, so a segment is wholly free exactly when one free block
+    /// spans it (c10: `release_cached_blocks`, MPS: `release_free_heaps`).
+    fn release_free_segments(&self, state: &mut State) {
+        let whole: Vec<usize> = state
+            .blocks
+            .values()
+            .filter(|b| !b.allocated && b.size == b.segment_size)
+            .map(|b| b.ptr)
+            .collect();
+        for ptr in whole {
+            let block = state.blocks.remove(&ptr).unwrap();
+            state.pool_for(block.pool_small).remove(&(block.size, ptr));
+            state.stats.reserved_bytes -= block.size;
+            state.stats.num_device_free += 1;
+            // SAFETY: a whole segment from device_alloc; no block refers to
+            // it any more.
+            unsafe { self.backend.device_free(block.segment.as_ptr()) };
+        }
+    }
 }
 
-impl<B: DeviceBackend> Allocator for CachingAllocator<B> {
+/// Flush the cache once the last reference goes away. Every `DataPtr` holds
+/// a reference too, so by now every block is free.
+impl<B: DeviceBackend, P: CachePolicy> Drop for Inner<B, P> {
+    fn drop(&mut self) {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let mut state = std::mem::take(state);
+        self.release_free_segments(&mut state);
+    }
+}
+
+impl<B: DeviceBackend, P: CachePolicy> Allocator for CachingAllocator<B, P> {
     fn device(&self) -> Device {
         self.inner.device
     }
 
     fn allocate(&self, nbytes: usize) -> DataPtr {
         CachingAllocator::allocate(self, nbytes)
-    }
-}
-
-/// Flush the cache when the last clone of an allocator goes away.
-impl<B: DeviceBackend> Drop for CachingAllocator<B> {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.inner) == 1 {
-            self.empty_cache();
-        }
     }
 }

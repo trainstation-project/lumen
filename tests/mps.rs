@@ -11,7 +11,7 @@
 #![cfg(lumen_mps_linked)] // file references shim-backed types; empty on other builds
 
 use lumen::allocator::mps;
-use lumen::{Allocator, CacheConfig, CachingAllocator, Device};
+use lumen::{Allocator, CachingAllocator, Device, MpsPolicy};
 
 /// Skip guard: returns early from a test when Metal is unavailable.
 macro_rules! require_mps {
@@ -25,7 +25,7 @@ macro_rules! require_mps {
 
 /// An allocator with its own private cache (not the global one).
 fn fresh() -> mps::MpsAllocator {
-    CachingAllocator::new(Device::Mps, mps::MpsBackend, CacheConfig::mps())
+    CachingAllocator::new(Device::Mps, mps::MpsBackend, MpsPolicy::from_device())
 }
 
 #[test]
@@ -110,4 +110,26 @@ fn stats_track_allocated_and_peak() {
     assert_eq!(alloc.stats().allocated_bytes, 1024);
     assert_eq!(alloc.stats().allocated_bytes_peak, 2048);
     drop(b);
+}
+
+#[test]
+fn limits_come_from_metal() {
+    require_mps!();
+    let limits = MpsPolicy::from_device();
+    assert!(limits.alignment.is_power_of_two());
+    assert!(limits.page_size.is_power_of_two());
+    assert!(limits.max_buffer_size > 1 << 30);
+    assert!(limits.low_watermark_limit > limits.max_buffer_size / 2);
+    eprintln!("{limits:?}");
+}
+
+#[test]
+fn small_alloc_rounds_to_metal_alignment() {
+    require_mps!();
+    let alloc = fresh();
+    let _data = alloc.allocate(1);
+    assert_eq!(
+        alloc.stats().allocated_bytes,
+        MpsPolicy::from_device().alignment
+    );
 }

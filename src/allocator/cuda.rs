@@ -1,20 +1,65 @@
 //! CUDA support for the caching allocator.
 //!
-//! The pooling logic lives in [`super::caching`]; this module only provides
-//! the raw `cudaMalloc`/`cudaFree` seam ([`CudaBackend`]) and the global
-//! per-device allocator registry, mirroring c10's
-//! `CUDACachingAllocator::get()`.
+//! The pooling logic lives in [`super::caching`]; this module provides
+//! c10's size math ([`CudaPolicy`]), the raw `cudaMalloc`/`cudaFree` seam
+//! (`CudaBackend`) and the global per-device allocator registry,
+//! mirroring c10's `CUDACachingAllocator::get()`.
 //!
 //! The backend is only available when built on a machine with the CUDA
-//! runtime (see `build.rs`); otherwise this module is empty and tests use
-//! their own mock backend.
+//! runtime (see `build.rs`); the policy is always available, so tests
+//! exercise it with their own mock backend.
 
+use super::caching::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
 #[cfg(lumen_cuda_linked)]
-use super::caching::{CacheConfig, CachingAllocator, DeviceBackend};
+use super::caching::{CachingAllocator, DeviceBackend};
 #[cfg(lumen_cuda_linked)]
 use crate::device::Device;
 #[cfg(lumen_cuda_linked)]
 use std::sync::{Mutex, OnceLock};
+
+/// All sizes are rounded up to a multiple of this (c10: kMinBlockSize).
+pub const K_MIN_BLOCK_SIZE: usize = 512;
+/// Segment for small allocations (c10: kSmallBuffer).
+pub const K_SMALL_BUFFER: usize = 2 << 20; // 2 MiB
+/// Segment for 1–10 MiB allocations (c10: kLargeBuffer).
+pub const K_LARGE_BUFFER: usize = 20 << 20; // 20 MiB
+
+/// c10's `CUDACachingAllocator` size math, under the default
+/// `PYTORCH_CUDA_ALLOC_CONF` (no `max_split_size_mb`,
+/// `roundup_power2_divisions`, or `expandable_segments`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CudaPolicy;
+
+impl CachePolicy for CudaPolicy {
+    fn alignment(&self) -> usize {
+        K_MIN_BLOCK_SIZE
+    }
+
+    /// c10: `round_size`.
+    fn round_size(&self, nbytes: usize) -> usize {
+        nbytes.div_ceil(K_MIN_BLOCK_SIZE) * K_MIN_BLOCK_SIZE
+    }
+
+    /// c10: `should_split`.
+    fn should_split(&self, small: bool, remaining: usize) -> bool {
+        if small {
+            remaining >= K_MIN_BLOCK_SIZE
+        } else {
+            remaining > K_SMALL_SIZE
+        }
+    }
+
+    /// c10: `get_allocation_size`.
+    fn segment_size(&self, size: usize, _reserved: usize) -> usize {
+        if size <= K_SMALL_SIZE {
+            K_SMALL_BUFFER
+        } else if size < K_MIN_LARGE_ALLOC {
+            K_LARGE_BUFFER
+        } else {
+            dedicated_segment_size(size)
+        }
+    }
+}
 
 #[cfg(lumen_cuda_linked)]
 mod ffi {
@@ -61,7 +106,7 @@ impl DeviceBackend for CudaBackend {
 
 /// The global CUDA caching allocator type.
 #[cfg(lumen_cuda_linked)]
-pub type CudaAllocator = CachingAllocator<CudaBackend>;
+pub type CudaAllocator = CachingAllocator<CudaBackend, CudaPolicy>;
 
 /// Get (creating on first use) the global allocator for a CUDA device,
 /// mirroring `c10::cuda::CUDACachingAllocator::get()`.
@@ -80,7 +125,7 @@ pub fn get(device_index: usize) -> CudaAllocator {
                 CudaBackend {
                     device_index: device_index as i32,
                 },
-                CacheConfig::cuda(),
+                CudaPolicy,
             )
         })
         .clone()

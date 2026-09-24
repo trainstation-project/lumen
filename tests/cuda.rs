@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lumen::allocator::caching::{K_MIN_BLOCK_SIZE, K_SMALL_SIZE};
-use lumen::{Allocator, CacheConfig, CachingAllocator, Device, DeviceBackend};
+use lumen::allocator::caching::K_SMALL_SIZE;
+use lumen::allocator::cuda::K_MIN_BLOCK_SIZE;
+use lumen::{Allocator, CachingAllocator, CudaPolicy, Device, DeviceBackend};
 
 /// Shared observation state: the allocator owns the backend, so tests
 /// keep a clone of this handle to inspect it.
@@ -99,14 +100,16 @@ impl Drop for MockBackend {
     }
 }
 
-fn allocator(byte_limit: Option<usize>) -> (CachingAllocator<MockBackend>, Arc<MockState>) {
+fn allocator(
+    byte_limit: Option<usize>,
+) -> (CachingAllocator<MockBackend, CudaPolicy>, Arc<MockState>) {
     let state = Arc::new(MockState::default());
     let backend = MockBackend {
         state: Arc::clone(&state),
         byte_limit,
     };
     (
-        CachingAllocator::new(Device::Cuda(0), backend, CacheConfig::cuda()),
+        CachingAllocator::new(Device::Cuda(0), backend, CudaPolicy),
         state,
     )
 }
@@ -124,7 +127,7 @@ fn reports_cuda_device() {
                     state: Arc::clone(&state),
                     byte_limit: None,
                 },
-                CacheConfig::cuda(),
+                CudaPolicy,
             ),
             state,
         )
@@ -355,7 +358,7 @@ impl DeviceBackend for ArenaBackend {
 fn adjacent_segments_never_coalesce() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
     let base = backend.base.addr();
-    let alloc = CachingAllocator::new(Device::Cuda(0), backend, CacheConfig::cuda());
+    let alloc = CachingAllocator::new(Device::Cuda(0), backend, CudaPolicy);
 
     // a and b fill segment 1 exactly; c starts segment 2, which the
     // arena places right after segment 1.
@@ -389,7 +392,7 @@ fn adjacent_segments_never_coalesce() {
 fn whole_segment_next_to_busy_segment_is_released() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
     let base = backend.base.addr();
-    let alloc = CachingAllocator::new(Device::Cuda(0), backend, CacheConfig::cuda());
+    let alloc = CachingAllocator::new(Device::Cuda(0), backend, CudaPolicy);
 
     // a and b keep segment 1 busy; c's segment 2 sits right after it.
     let a = alloc.allocate(K_SMALL_SIZE);
