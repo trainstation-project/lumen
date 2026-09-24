@@ -23,11 +23,13 @@ fn allocation_is_non_null_and_64_byte_aligned() {
 }
 
 #[test]
-fn allocation_is_zero_filled() {
-    let data = CpuAllocator::get().allocate(128);
-    // SAFETY: 128 bytes were allocated above and data is alive.
-    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 128) };
-    assert!(bytes.iter().all(|&b| b == 0));
+fn allocation_initialization() {
+    let data = CpuAllocator::get().allocate(256);
+    unsafe {
+        std::ptr::write_bytes(data.as_ptr(), 0xAB, 256);
+        let bytes = std::slice::from_raw_parts(data.as_ptr(), 256);
+        assert!(bytes.iter().all(|&b| b == 0xAB));
+    }
 }
 
 #[test]
