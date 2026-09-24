@@ -3,4 +3,9 @@ name = "lumen"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Real CUDA backend (cudaMalloc/cudaFree via the CUDA runtime API).
+# Off by default so the crate builds on machines without a GPU/toolkit.
+cuda = []
+
 [dependencies]
