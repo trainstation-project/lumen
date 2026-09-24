@@ -9,9 +9,11 @@
 //! runtime (see `build.rs`); the policy is always available, so tests
 //! exercise it with their own mock backend.
 
-use super::caching::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
 #[cfg(lumen_cuda_linked)]
-use super::caching::{CachingAllocator, DeviceBackend};
+use super::caching::CachingAllocator;
+#[cfg(lumen_cuda_linked)]
+use super::traits::DeviceBackend;
+use super::traits::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
 #[cfg(lumen_cuda_linked)]
 use crate::device::Device;
 #[cfg(lumen_cuda_linked)]

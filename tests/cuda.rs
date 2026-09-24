@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lumen::allocator::caching::K_SMALL_SIZE;
 use lumen::allocator::cuda::K_MIN_BLOCK_SIZE;
+use lumen::allocator::traits::K_SMALL_SIZE;
 use lumen::{Allocator, CachingAllocator, CudaPolicy, Device, DeviceBackend};
 
 /// Shared observation state: the allocator owns the backend, so tests

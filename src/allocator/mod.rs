@@ -2,6 +2,7 @@ pub mod caching;
 mod cpu;
 pub mod cuda;
 pub mod mps;
+pub mod traits;
 
 pub use cpu::CpuAllocator;
 
