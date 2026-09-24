@@ -10,8 +10,9 @@ fn allocator_reports_cpu_device() {
 fn get_returns_the_same_global_instance() {
     let a = CpuAllocator::get();
     let b = CpuAllocator::get();
-    // Both references point at the one static CPU_ALLOCATOR.
-    assert!(std::ptr::eq(a, b));
+    // Both references point at the one static CPU_ALLOCATOR. Compare data
+    // addresses only: vtable pointers of `&dyn` aren't guaranteed unique.
+    assert!(std::ptr::addr_eq(a, b));
 }
 
 #[test]
