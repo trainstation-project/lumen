@@ -7,5 +7,12 @@ edition = "2024"
 # Real CUDA backend (cudaMalloc/cudaFree via the CUDA runtime API).
 # Off by default so the crate builds on machines without a GPU/toolkit.
 cuda = []
+# Apple Silicon (Metal) backend. On by default; build.rs compiles the shim
+# only on macOS, so this is a no-op elsewhere.
+mps = []
+default = ["mps"]
 
 [dependencies]
+
+[build-dependencies]
+cc = "1"

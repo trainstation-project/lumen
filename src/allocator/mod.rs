@@ -1,5 +1,7 @@
+pub mod caching;
 mod cpu;
 pub mod cuda;
+pub mod mps;
 
 pub use cpu::CpuAllocator;
 
