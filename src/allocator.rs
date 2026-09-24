@@ -1,5 +1,3 @@
-//! Allocator abstraction, modeled on `c10::Allocator`.
-//!
 //! An allocator hands out [`DataPtr`]s: an owning raw pointer plus the
 //! layout needed to free it (PyTorch carries a deleter fn in its
 //! `UniqueVoidPtr`; Rust lets us use `alloc::Layout` + `Drop` instead).
@@ -10,7 +8,6 @@ use std::ptr::NonNull;
 use crate::device::Device;
 
 /// An owning, type-erased data pointer with an associated deleter.
-/// Mirrors `c10::DataPtr`.
 pub struct DataPtr {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -40,7 +37,6 @@ pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> DataPtr;
 }
 
-/// CPU allocator backed by the global allocator (c10: `CPUAllocator`).
 pub struct CpuAllocator;
 
 static CPU_ALLOCATOR: CpuAllocator = CpuAllocator;
@@ -57,7 +53,7 @@ impl Allocator for CpuAllocator {
     }
 
     fn allocate(&self, nbytes: usize) -> DataPtr {
-        // 64-byte alignment, like c10::gAlignment, to keep SIMD loads happy.
+        // 64-byte alignment to keep SIMD loads happy.
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
 
         let ptr = if nbytes == 0 {

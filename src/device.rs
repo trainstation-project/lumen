@@ -1,5 +1,3 @@
-//! Compute devices, analogous to `c10::Device`.
-
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
