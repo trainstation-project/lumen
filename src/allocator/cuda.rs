@@ -117,11 +117,15 @@ struct Block {
     small_pool: bool,
     /// Whether the block is currently free (in a pool).
     free: bool,
-    /// Base address of the `cudaMalloc`ed segment this block was carved
+    /// Base pointer of the `cudaMalloc`ed segment this block was carved
     /// from. Two segments can be address-adjacent, so address adjacency
     /// alone doesn't mean two blocks may merge; they must also share a
     /// segment (PyTorch's prev/next links never cross segments).
-    segment: usize,
+    ///
+    /// Kept as a pointer, not an address, so the pointer handed to the
+    /// user is derived from it (`with_addr`) and keeps its provenance;
+    /// Miri's strict-provenance mode rejects integer-to-pointer casts.
+    segment: NonNull<u8>,
 }
 
 /// Mutable allocator state, guarded by a mutex (PyTorch uses
@@ -137,6 +141,10 @@ struct State {
     large_pool: BTreeSet<(usize, usize)>,
     stats: CacheStats,
 }
+
+// SAFETY: the `NonNull`s in `blocks` are device pointers owned by the
+// allocator; `State` is only reached through its `Mutex`.
+unsafe impl Send for State {}
 
 impl State {
     fn pool(&mut self, small: bool) -> &mut BTreeSet<(usize, usize)> {
@@ -261,8 +269,8 @@ impl State {
     /// coalesced). PyTorch checks the same via `block->prev/next ==
     /// nullptr`.
     ///
-    /// Returns the pointers to `device_free` (done outside the lock).
-    fn drain_free_blocks(&mut self) -> Vec<(usize, usize)> {
+    /// Returns the segments to `device_free` (done outside the lock).
+    fn drain_free_blocks(&mut self) -> Vec<NonNull<u8>> {
         let free_ptrs: Vec<usize> = self
             .small_pool
             .iter()
@@ -276,7 +284,7 @@ impl State {
             }
             let block = self.blocks.remove(&ptr).expect("free block exists");
             self.pool(block.small_pool).remove(&(block.size, ptr));
-            freed.push((ptr, block.size));
+            freed.push(block.segment);
             self.stats.reserved_bytes -= block.size;
             self.stats.num_device_free += 1;
         }
@@ -348,10 +356,10 @@ impl<B: DeviceBackend> CachingAllocator<B> {
     /// (`torch.cuda.empty_cache()`).
     pub fn empty_cache(&self) {
         let freed = self.inner.lock().drain_free_blocks();
-        for (ptr, _size) in freed {
+        for segment in freed {
             // SAFETY: these are whole segments from device_alloc, no
             // longer referenced by any block.
-            unsafe { self.inner.backend.device_free(ptr as *mut u8) };
+            unsafe { self.inner.backend.device_free(segment.as_ptr()) };
         }
     }
 }
@@ -390,8 +398,8 @@ impl<B: DeviceBackend + 'static> Allocator for CachingAllocator<B> {
                     // cached blocks on OOM before raising).
                     let freed = state.drain_free_blocks();
                     drop(state); // don't hold the lock across driver calls
-                    for (ptr, _) in freed {
-                        unsafe { self.inner.backend.device_free(ptr as *mut u8) };
+                    for segment in freed {
+                        unsafe { self.inner.backend.device_free(segment.as_ptr()) };
                     }
                     // SAFETY: as above.
                     raw = unsafe { self.inner.backend.device_alloc(seg_size) };
@@ -410,7 +418,8 @@ impl<B: DeviceBackend + 'static> Allocator for CachingAllocator<B> {
                     .stats
                     .reserved_bytes_peak
                     .max(state.stats.reserved_bytes);
-                let ptr = raw as usize;
+                let segment = NonNull::new(raw).expect("checked non-null above");
+                let ptr = raw.addr();
                 state.blocks.insert(
                     ptr,
                     Block {
@@ -418,7 +427,7 @@ impl<B: DeviceBackend + 'static> Allocator for CachingAllocator<B> {
                         requested: 0,
                         small_pool: small,
                         free: false,
-                        segment: ptr,
+                        segment,
                     },
                 );
                 ptr
@@ -430,7 +439,10 @@ impl<B: DeviceBackend + 'static> Allocator for CachingAllocator<B> {
             let block = state.blocks.get_mut(&ptr).expect("block exists");
             block.requested = nbytes;
         }
-        let block_size = state.blocks[&ptr].size;
+        let (block_size, segment) = {
+            let block = &state.blocks[&ptr];
+            (block.size, block.segment)
+        };
         state.stats.allocated_bytes += block_size;
         state.stats.allocated_bytes_peak = state
             .stats
@@ -443,9 +455,9 @@ impl<B: DeviceBackend + 'static> Allocator for CachingAllocator<B> {
         let inner = Arc::clone(&self.inner);
         let layout = Layout::from_size_align(block_size, K_MIN_BLOCK_SIZE).unwrap();
         DataPtr::with_deleter(
-            NonNull::new(ptr as *mut u8).expect("device pointer is non-null"),
+            NonNull::new(segment.as_ptr().with_addr(ptr)).expect("device pointer is non-null"),
             layout,
-            move |ptr| inner.free_block(ptr.as_ptr() as usize, block_size),
+            move |ptr| inner.free_block(ptr.addr().get(), block_size),
         )
     }
 }

@@ -22,9 +22,20 @@ struct MockState {
     frees: AtomicUsize,
     /// Sizes passed to `device_alloc` (the segment sizes).
     malloc_sizes: Mutex<Vec<usize>>,
-    /// Live allocations, for correct deallocation.
-    live: Mutex<HashMap<usize, Layout>>,
+    /// Live allocations by address, for correct deallocation.
+    live: Mutex<HashMap<usize, LiveAlloc>>,
 }
+
+/// A live host allocation. Keeps the pointer itself (not just its
+/// address) so it can be freed without an integer-to-pointer cast,
+/// which Miri's strict-provenance mode rejects.
+struct LiveAlloc {
+    ptr: *mut u8,
+    layout: Layout,
+}
+
+// SAFETY: plain owned host memory; access is serialized by the `Mutex`.
+unsafe impl Send for LiveAlloc {}
 
 /// Pretends to be the GPU: `device_alloc` is host `malloc` with
 /// accounting, `device_free` is `free`. `byte_limit` simulates VRAM size.
@@ -42,7 +53,7 @@ impl DeviceBackend for MockBackend {
                 .lock()
                 .unwrap()
                 .values()
-                .map(|l| l.size())
+                .map(|l| l.layout.size())
                 .sum();
             if live_bytes + nbytes > limit {
                 return std::ptr::null_mut(); // pretend the GPU is full
@@ -54,21 +65,37 @@ impl DeviceBackend for MockBackend {
         let layout = Layout::from_size_align(nbytes, 256).unwrap();
         let ptr = unsafe { alloc::alloc(layout) };
         if !ptr.is_null() {
-            self.state.live.lock().unwrap().insert(ptr as usize, layout);
+            self.state
+                .live
+                .lock()
+                .unwrap()
+                .insert(ptr.addr(), LiveAlloc { ptr, layout });
         }
         ptr
     }
 
     unsafe fn device_free(&self, ptr: *mut u8) {
         self.state.frees.fetch_add(1, Ordering::SeqCst);
-        let layout = self
+        let LiveAlloc { layout, .. } = self
             .state
             .live
             .lock()
             .unwrap()
-            .remove(&(ptr as usize))
+            .remove(&(ptr.addr()))
             .expect("double free or unknown pointer");
         unsafe { alloc::dealloc(ptr, layout) };
+    }
+}
+
+impl Drop for MockBackend {
+    // The cache never returns segments on its own (like PyTorch), so
+    // free whatever is still reserved; otherwise Miri reports leaks.
+    fn drop(&mut self) {
+        for (_, LiveAlloc { ptr, layout }) in self.state.live.lock().unwrap().drain() {
+            // SAFETY: allocated in device_alloc with this layout; the
+            // allocator (and every DataPtr into it) is gone.
+            unsafe { alloc::dealloc(ptr, layout) };
+        }
     }
 }
 
@@ -305,7 +332,7 @@ impl DeviceBackend for ArenaBackend {
             return std::ptr::null_mut();
         }
         let ptr = unsafe { self.base.add(offset) };
-        self.sizes.lock().unwrap().insert(ptr as usize, nbytes);
+        self.sizes.lock().unwrap().insert(ptr.addr(), nbytes);
         ptr
     }
 
@@ -314,16 +341,16 @@ impl DeviceBackend for ArenaBackend {
             .sizes
             .lock()
             .unwrap()
-            .remove(&(ptr as usize))
+            .remove(&(ptr.addr()))
             .expect("double free or unknown pointer");
-        self.freed.lock().unwrap().push((ptr as usize, size));
+        self.freed.lock().unwrap().push((ptr.addr(), size));
     }
 }
 
 #[test]
 fn adjacent_segments_never_coalesce() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
-    let base = backend.base as usize;
+    let base = backend.base.addr();
     let alloc = CachingAllocator::new(0, backend);
 
     // a and b fill segment 1 exactly; c starts segment 2, which the
@@ -331,7 +358,7 @@ fn adjacent_segments_never_coalesce() {
     let a = alloc.allocate(K_SMALL_SIZE);
     let b = alloc.allocate(K_SMALL_SIZE);
     let c = alloc.allocate(K_SMALL_SIZE);
-    assert_eq!(c.as_ptr() as usize, base + 2 * K_SMALL_SIZE);
+    assert_eq!(c.as_ptr().addr(), base + 2 * K_SMALL_SIZE);
     assert_eq!(alloc.stats().reserved_bytes, 4 * K_SMALL_SIZE);
 
     // b (end of segment 1) and c (start of segment 2) are free and
@@ -357,7 +384,7 @@ fn adjacent_segments_never_coalesce() {
 #[test]
 fn whole_segment_next_to_busy_segment_is_released() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
-    let base = backend.base as usize;
+    let base = backend.base.addr();
     let alloc = CachingAllocator::new(0, backend);
 
     // a and b keep segment 1 busy; c's segment 2 sits right after it.
