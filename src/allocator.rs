@@ -64,7 +64,11 @@ impl Allocator for CpuAllocator {
             // Layout with size 0 is fine; dangling but aligned.
             NonNull::new(layout.align() as *mut u8).unwrap()
         } else {
-            let raw = unsafe { alloc::alloc_zeroed(layout) };
+            // Uninitialized memory, like C's `malloc` — `torch.empty`
+            // semantics (PyTorch's CPU allocator doesn't zero either).
+            // Callers must write before reading: reading uninitialized
+            // memory is undefined behaviour in Rust.
+            let raw = unsafe { alloc::alloc(layout) };
             NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout))
         };
 
