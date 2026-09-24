@@ -3,9 +3,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     Cpu,
-    /// Apple Silicon GPU via Metal. Single system default device, no index.
     Mps,
-    /// Stub for future accelerator support.
     Cuda(usize),
 }
 

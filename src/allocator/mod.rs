@@ -15,7 +15,7 @@ use crate::device::Device;
 enum Deleter {
     /// Free with `alloc::dealloc` using the stored layout (CPU path).
     Std,
-    /// Custom deleter (PyTorch: `DeleterFnPtr`). Used by the CUDA caching
+    /// Custom deletion function to free memory. Used by the CUDA caching
     /// allocator to return the block to its pool rather than freeing it.
     Custom(Box<dyn FnOnce(NonNull<u8>) + Send + Sync>),
 }
