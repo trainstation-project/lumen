@@ -253,3 +253,127 @@ fn buffer_is_writable_and_readable() {
         assert!(bytes.iter().all(|&b| b == 0xCD));
     }
 }
+
+/// `(ptr, size)` of every `device_free`, in call order.
+type FreedLog = Arc<Mutex<Vec<(usize, usize)>>>;
+
+/// Bump-allocates segments back to back out of one host arena, so
+/// consecutive `device_alloc`s are address-adjacent (real `cudaMalloc`
+/// can do this too). `device_free` only records the pointer.
+struct ArenaBackend {
+    base: *mut u8,
+    layout: Layout,
+    next: AtomicUsize,
+    freed: FreedLog,
+    sizes: Mutex<HashMap<usize, usize>>,
+}
+
+// SAFETY: the arena pointer is only used for address arithmetic and is
+// owned exclusively by this backend.
+unsafe impl Send for ArenaBackend {}
+unsafe impl Sync for ArenaBackend {}
+
+impl ArenaBackend {
+    fn new(nbytes: usize) -> (Self, FreedLog) {
+        let layout = Layout::from_size_align(nbytes, 512).unwrap();
+        // SAFETY: nonzero size.
+        let base = unsafe { alloc::alloc(layout) };
+        assert!(!base.is_null());
+        let freed = Arc::new(Mutex::new(Vec::new()));
+        let backend = ArenaBackend {
+            base,
+            layout,
+            next: AtomicUsize::new(0),
+            freed: Arc::clone(&freed),
+            sizes: Mutex::new(HashMap::new()),
+        };
+        (backend, freed)
+    }
+}
+
+impl Drop for ArenaBackend {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new` with this layout.
+        unsafe { alloc::dealloc(self.base, self.layout) };
+    }
+}
+
+impl DeviceBackend for ArenaBackend {
+    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
+        let offset = self.next.fetch_add(nbytes, Ordering::SeqCst);
+        if offset + nbytes > self.layout.size() {
+            return std::ptr::null_mut();
+        }
+        let ptr = unsafe { self.base.add(offset) };
+        self.sizes.lock().unwrap().insert(ptr as usize, nbytes);
+        ptr
+    }
+
+    unsafe fn device_free(&self, ptr: *mut u8) {
+        let size = self
+            .sizes
+            .lock()
+            .unwrap()
+            .remove(&(ptr as usize))
+            .expect("double free or unknown pointer");
+        self.freed.lock().unwrap().push((ptr as usize, size));
+    }
+}
+
+#[test]
+fn adjacent_segments_never_coalesce() {
+    let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
+    let base = backend.base as usize;
+    let alloc = CachingAllocator::new(0, backend);
+
+    // a and b fill segment 1 exactly; c starts segment 2, which the
+    // arena places right after segment 1.
+    let a = alloc.allocate(K_SMALL_SIZE);
+    let b = alloc.allocate(K_SMALL_SIZE);
+    let c = alloc.allocate(K_SMALL_SIZE);
+    assert_eq!(c.as_ptr() as usize, base + 2 * K_SMALL_SIZE);
+    assert_eq!(alloc.stats().reserved_bytes, 4 * K_SMALL_SIZE);
+
+    // b (end of segment 1) and c (start of segment 2) are free and
+    // address-adjacent, but must not merge across the boundary.
+    drop(b);
+    drop(c);
+    drop(a);
+
+    alloc.empty_cache();
+    let mut freed = freed.lock().unwrap().clone();
+    freed.sort();
+    assert_eq!(
+        freed,
+        vec![
+            (base, 2 * K_SMALL_SIZE),
+            (base + 2 * K_SMALL_SIZE, 2 * K_SMALL_SIZE)
+        ]
+    );
+    assert_eq!(alloc.stats().reserved_bytes, 0);
+    assert_eq!(alloc.stats().num_device_free, 2);
+}
+
+#[test]
+fn whole_segment_next_to_busy_segment_is_released() {
+    let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
+    let base = backend.base as usize;
+    let alloc = CachingAllocator::new(0, backend);
+
+    // a and b keep segment 1 busy; c's segment 2 sits right after it.
+    let a = alloc.allocate(K_SMALL_SIZE);
+    let b = alloc.allocate(K_SMALL_SIZE);
+    let c = alloc.allocate(K_SMALL_SIZE);
+    drop(c);
+
+    // Segment 2 is wholly free; its address neighbor b belongs to another
+    // segment, so it must not count as a split piece.
+    alloc.empty_cache();
+    assert_eq!(
+        freed.lock().unwrap().clone(),
+        vec![(base + 2 * K_SMALL_SIZE, 2 * K_SMALL_SIZE)]
+    );
+    assert_eq!(alloc.stats().reserved_bytes, 2 * K_SMALL_SIZE);
+    drop(a);
+    drop(b);
+}
