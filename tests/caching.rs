@@ -1,17 +1,9 @@
-//! Size-math tests for the caching allocator, CUDA and MPS configurations,
-//! checked against PyTorch (`c10/cuda/CUDACachingAllocator.cpp`,
-//! `aten/src/ATen/mps/MPSAllocator.{h,mm}`).
-//!
-//! The backend hands out fake, never-dereferenced addresses, so multi-GiB
-//! MPS heaps cost nothing and the MPS math runs on any platform (and under
-//! Miri).
-
+use std::alloc::Layout;
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use lumen::allocator::mps::{K_SMALL_HEAP, K_XLARGE_HEAP};
-use lumen::{
-    Allocator, CachePolicy, CachingAllocator, CudaPolicy, DataPtr, Device, DeviceBackend, MpsPolicy,
-};
+use lumen::{Allocator, CachePolicy, CachingAllocator, CudaPolicy, DataPtr, Device, MpsPolicy};
 
 const MIB: usize = 1 << 20;
 

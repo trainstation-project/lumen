@@ -13,8 +13,3 @@ pub trait CachePolicy: Send + Sync + 'static {
     fn segment_size(&self, size: usize, reserved: usize) -> usize;
     fn check_request(&self, _nbytes: usize) {}
 }
-
-pub trait DeviceBackend: Send + Sync + 'static {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8;
-    unsafe fn device_free(&self, ptr: *mut u8);
-}

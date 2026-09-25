@@ -25,7 +25,7 @@ macro_rules! require_mps {
 
 /// An allocator with its own private cache (not the global one).
 fn fresh() -> mps::MpsAllocator {
-    CachingAllocator::new(Device::Mps, mps::MpsBackend, MpsPolicy::from_device())
+    CachingAllocator::new(mps::MpsBackend, MpsPolicy::from_device())
 }
 
 #[test]

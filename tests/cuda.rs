@@ -1,19 +1,12 @@
-//! Tests for the CUDA caching allocator.
-//!
-//! No GPU needed: a mock `DeviceBackend` allocates real host memory (so
-//! pointers are valid) while counting `cudaMalloc`/`cudaFree` calls and
-//! enforcing an optional memory limit. This is how we verify PyTorch's
-//! caching semantics — reuse, rounding, splitting, coalescing, stats —
-//! on a CPU-only machine.
-
 use std::alloc::{self, Layout};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumen::allocator::cuda::K_MIN_BLOCK_SIZE;
 use lumen::allocator::traits::K_SMALL_SIZE;
-use lumen::{Allocator, CachingAllocator, CudaPolicy, Device, DeviceBackend};
+use lumen::{Allocator, CachingAllocator, CudaPolicy, DataPtr, Device};
 
 /// Shared observation state: the allocator owns the backend, so tests
 /// keep a clone of this handle to inspect it.
@@ -38,11 +31,10 @@ struct LiveAlloc {
 // SAFETY: plain owned host memory; access is serialized by the `Mutex`.
 unsafe impl Send for LiveAlloc {}
 
-/// Pretends to be the GPU: `device_alloc` is host `malloc` with
-/// accounting, `device_free` is `free`. `byte_limit` simulates VRAM size.
 struct MockBackend {
     state: Arc<MockState>,
     byte_limit: Option<usize>,
+    device_index: usize,
 }
 
 impl DeviceBackend for MockBackend {

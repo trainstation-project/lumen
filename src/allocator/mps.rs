@@ -1,39 +1,13 @@
-//! Apple Silicon (Metal) support for the caching allocator, modeled on
-//! `aten/src/ATen/mps/MPSAllocator.mm`.
-//!
-//! What we mirror:
-//! - **Shared-mode buffers**: Apple Silicon has unified memory, so an
-//!   `MTLBuffer` created with `MTLResourceStorageModeShared` exposes a real
-//!   CPU pointer (`buffer.contents`). That lets the Metal backend plug into
-//!   the same raw-pointer [`DeviceBackend`] seam as CUDA — no transfer API
-//!   needed for host access.
-//! - **Size math** ([`MpsPolicy`]), which differs from CUDA's:
-//!   - Requests round up to Metal's buffer alignment, not 512 B; requests
-//!     over 1 MiB further round up into 32 buckets per power of two (at
-//!     least a page), never crossing into a larger heap class.
-//!   - Heap (our segment) sizes: 8 MiB for ≤ 1 MiB requests, 32 MiB for
-//!     1–10 MiB, 1 GiB for 10–512 MiB, else the request rounded to 2 MiB.
-//!     Under memory pressure (reserved memory at the low watermark, see
-//!     [`MpsPolicy::from_device`]) large requests skip the 1 GiB tier.
-//!   - A block is split when the remainder is at least the alignment
-//!     (small pool) or 1 MiB (large pool).
-//!
-//! What we do not model (MPS-specific machinery in `MPSHeapAllocatorImpl`):
-//! `MTLHeap` suballocation, `PRIVATE` (GPU-only) storage mode, the scalar
-//! pool, hazard tracking for in-flight GPU work, lazy coalescing,
-//! watermark-driven GC, and the high-watermark allocation cap.
-//!
-//! Metal's API is Objective-C only, so the raw calls live in a small
-//! Objective-C++ shim (`csrc/mps_shim.mm`, compiled by `build.rs`) — the
-//! same reason PyTorch's allocator is a `.mm` file.
-
-#[cfg(lumen_mps_linked)]
 use super::caching::CachingAllocator;
-#[cfg(lumen_mps_linked)]
-use super::traits::DeviceBackend;
 use super::traits::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
 #[cfg(lumen_mps_linked)]
+use crate::allocator::{Allocator, DataPtr};
+#[cfg(lumen_mps_linked)]
 use crate::device::Device;
+#[cfg(lumen_mps_linked)]
+use std::alloc::Layout;
+#[cfg(lumen_mps_linked)]
+use std::ptr::NonNull;
 #[cfg(lumen_mps_linked)]
 use std::sync::OnceLock;
 
@@ -169,9 +143,10 @@ mod ffi {
     }
 }
 
-/// Backend that allocates shared-mode `MTLBuffer`s via the shim. Only
-/// available on macOS builds where the shim was compiled
-/// (cfg `lumen_mps_linked`).
+/// An uncached [`Allocator`] over shared-mode `MTLBuffer`s (via the
+/// Objective-C++ shim): one `newBufferWithLength:` per `try_allocate`,
+/// released when the returned `DataPtr` drops. Only available on macOS
+/// builds where the shim was compiled (cfg `lumen_mps_linked`).
 #[cfg(lumen_mps_linked)]
 pub struct MpsBackend;
 

@@ -123,7 +123,6 @@ pub fn get(device_index: usize) -> CudaAllocator {
     registry[device_index]
         .get_or_insert_with(|| {
             CachingAllocator::new(
-                Device::Cuda(device_index),
                 CudaBackend {
                     device_index: device_index as i32,
                 },

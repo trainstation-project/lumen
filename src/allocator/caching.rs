@@ -1,22 +1,5 @@
-//! A device-agnostic caching allocator, modeled on c10's
-//! `CUDACachingAllocator` (`c10/cuda/CUDACachingAllocator.cpp`) and aten's
-//! `MPSHeapAllocatorImpl` (`aten/src/ATen/mps/MPSAllocator.mm`).
-//!
-//! Raw device memory operations are abstracted behind [`DeviceBackend`] so
-//! the pooling logic is shared across device families (CUDA, MPS) and can be
-//! tested with a mock. The size math — rounding, segment sizes, split
-//! thresholds — differs between the two in PyTorch; it is a [`CachePolicy`]
-//! implemented next to each backend (`cuda.rs`, `mps.rs`). Both traits live
-//! in [`super::traits`].
-//!
-//! Layout of the machinery:
-//! - A *segment* is one big backend allocation (MPS: a heap).
-//! - A *block* is a slice of a segment handed out (or cached) by `allocate`.
-//! - Free blocks live in size-ordered pools; freed blocks coalesce with
-//!   neighbors; `empty_cache` releases whole free segments.
-
 pub use super::cache_stats::CacheStats;
-use super::traits::{CachePolicy, DeviceBackend, K_SMALL_SIZE};
+use super::traits::{CachePolicy, K_SMALL_SIZE};
 use crate::allocator::{Allocator, DataPtr};
 use crate::device::Device;
 use std::alloc::Layout;
