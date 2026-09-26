@@ -7,7 +7,7 @@ export RUSTFLAGS := -D warnings
 ci: fmt-check clippy test
 
 test:
-	cargo test --all-targets --all-features
+	cargo test --all-targets --all-features -- --format=terse
 	cargo test --doc
 	cd python && maturin develop && python -m pytest tests -q
 
