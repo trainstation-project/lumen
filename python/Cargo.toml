@@ -1,0 +1,16 @@
+[package]
+name = "lumen-python"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "lumen_python"
+crate-type = ["cdylib"]
+
+[features]
+# Forwarded to the core crate (see ../Cargo.toml).
+cuda = ["lumen/cuda"]
+
+[dependencies]
+lumen = { path = ".." }
+pyo3 = { version = "0.29", features = ["extension-module"] }

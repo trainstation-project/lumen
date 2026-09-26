@@ -109,6 +109,11 @@ impl<B: Allocator + 'static, P: CachePolicy> CachingAllocator<B, P> {
                 |_| {},
             );
         }
+        // Caching disabled (`lumen.config.memory_caching = False`): hand the
+        // request straight to the backend; nothing is cached or counted.
+        if !crate::config::memory_caching() {
+            return self.inner.backend.allocate(nbytes);
+        }
 
         let policy = &self.inner.policy;
         policy.check_request(nbytes);

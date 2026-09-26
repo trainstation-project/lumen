@@ -1,4 +1,5 @@
 pub mod allocator;
+pub mod config;
 pub mod device;
 
 pub use allocator::caching::CachingAllocator;

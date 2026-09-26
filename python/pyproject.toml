@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "lumen"
+version = "0.1.0"
+description = "A minimal tensor library prototype with a Rust core"
+requires-python = ">=3.9"
+
+[tool.maturin]
+# Mixed Rust/Python project: the cdylib (`lumen_python`) is installed as the
+# native submodule `lumen._C`; the pure-Python package in ./lumen re-exports it.
+module-name = "lumen._C"
+python-source = "."
