@@ -5,7 +5,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use ::lumen as core;
+use crate as core;
 
 // ---------------------------------------------------------------------
 // lumen.device

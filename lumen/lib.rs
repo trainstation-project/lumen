@@ -1,6 +1,8 @@
 pub mod allocator;
 pub mod config;
 pub mod device;
+#[cfg(feature = "python")]
+mod python;
 
 pub use allocator::caching::CachingAllocator;
 pub use allocator::cuda::CudaPolicy;

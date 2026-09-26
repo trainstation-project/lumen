@@ -2,7 +2,7 @@
 //
 // Metal's API is Objective-C only, so — exactly like PyTorch's
 // MPSAllocator.mm — the raw calls live in an Objective-C++ file that
-// build.rs compiles on macOS. The Rust side (src/allocator/mps.rs) sees
+// build.rs compiles on macOS. The Rust side (mps.rs, next to this file) sees
 // only the extern "C" functions below.
 //
 // We allocate MTLBuffers in Shared storage mode: on Apple Silicon's unified

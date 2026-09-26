@@ -125,7 +125,7 @@ pub fn is_available() -> bool {
 
 #[cfg(lumen_mps_linked)]
 mod ffi {
-    // C ABI exported by csrc/mps_shim.mm.
+    // C ABI exported by mps_shim.mm.
     #[repr(C)]
     #[derive(Default)]
     pub struct Limits {

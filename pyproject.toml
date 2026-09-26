@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "lumen"
+version = "0.1.0"
+description = "A minimal tensor library prototype with a Rust core"
+requires-python = ">=3.9"
+
+[tool.maturin]
+# Mixed Rust/Python project in one folder: the crate, built with the
+# `python` feature, is installed as the native submodule `lumen._C`; the
+# Python files in ./lumen re-export it. The Rust and Objective-C++ sources
+# that share the folder stay out of the wheel.
+module-name = "lumen._C"
+python-source = "."
+features = ["python"]
+exclude = ["lumen/**/*.rs", "lumen/**/*.mm"]

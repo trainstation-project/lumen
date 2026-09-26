@@ -33,7 +33,7 @@ fn main() {
 fn detect_cuda() {
     let Some((lib_dir, _)) = find_cudart() else {
         // No toolkit: leave `lumen_cuda_linked` unset. The `cuda`
-        // feature stays "on" but compiles to a stub (see src/allocator/cuda.rs).
+        // feature stays "on" but compiles to a stub (see lumen/allocator/cuda.rs).
         println!(
             "cargo:warning=CUDA feature enabled but cudart was not found; \
              building the no-GPU caching allocator only (set CUDA_HOME or \
@@ -56,10 +56,10 @@ fn build_mps_shim() {
         return;
     }
 
-    println!("cargo:rerun-if-changed=csrc/mps_shim.mm");
+    println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
 
     cc::Build::new()
-        .file("csrc/mps_shim.mm")
+        .file("lumen/allocator/mps_shim.mm")
         .cpp(true)
         .flag("-std=c++17")
         .flag("-fobjc-arc")

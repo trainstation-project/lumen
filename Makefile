@@ -2,14 +2,18 @@
 
 export RUSTFLAGS := -D warnings
 
-.PHONY: all ci test python-test fmt fmt-check clippy miri clean
+.PHONY: all ci test fmt fmt-check clippy miri clean
 
 ci: fmt-check clippy test
 
+# Every feature but `python`: with pyo3 compiled in, Rust test binaries
+# would link against libpython. The bindings are tested from Python.
+RUST_TEST_FEATURES := --features cuda,mps
+
 test:
-	cargo test --all-targets --all-features -- --format=terse
-	cargo test --doc
-	cd python && maturin develop && python -m pytest tests -q
+	cargo test --all-targets $(RUST_TEST_FEATURES) -- --format=terse
+	cargo test --doc $(RUST_TEST_FEATURES)
+	maturin develop && python -m pytest tests -q
 
 fmt:
 	cargo fmt --all
