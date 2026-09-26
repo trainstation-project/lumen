@@ -56,7 +56,7 @@ jobs:
       - name: Set up virtualenv
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest
+          .venv/bin/pip install maturin pytest numpy
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # CPU tests only; `make ci` locally also runs the CUDA and MPS tests.

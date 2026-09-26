@@ -21,6 +21,8 @@ python = ["dep:pyo3"]
 default = ["mps"]
 
 [dependencies]
+# IEEE half (f16) and bfloat16 element types (lumen/dtype.rs).
+half = "2.7"
 pyo3 = { version = "0.29", optional = true }
 
 [build-dependencies]
