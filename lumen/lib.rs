@@ -1,5 +1,4 @@
 pub mod allocator;
-pub mod config;
 pub mod device;
 #[cfg(feature = "python")]
 mod python;

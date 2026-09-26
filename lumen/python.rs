@@ -185,16 +185,16 @@ impl Config {
     /// errors. Applies to subsequent allocations.
     #[getter]
     fn memory_caching(&self) -> bool {
-        core::config::memory_caching()
+        core::allocator::config::memory_caching()
     }
 
     #[setter]
     fn set_memory_caching(&self, enabled: bool) {
-        core::config::set_memory_caching(enabled);
+        core::allocator::config::set_memory_caching(enabled);
     }
 
     fn __repr__(&self) -> String {
-        let caching = if core::config::memory_caching() {
+        let caching = if core::allocator::config::memory_caching() {
             "True"
         } else {
             "False"

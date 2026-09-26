@@ -1,5 +1,6 @@
 pub mod cache_stats;
 pub mod caching;
+pub mod config;
 mod cpu;
 pub mod cuda;
 pub mod mps;

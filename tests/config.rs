@@ -1,4 +1,4 @@
-//! `lumen::config::set_memory_caching`. The flag is process-wide, so this
+//! `lumen::allocator::config::set_memory_caching`. The flag is process-wide, so this
 //! file holds a single test: it runs in its own test binary, where flipping
 //! the flag cannot race the caching tests in other files.
 
@@ -6,7 +6,8 @@ use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
-use lumen::{Allocator, CachingAllocator, CudaPolicy, DataPtr, Device, config};
+use lumen::allocator::config;
+use lumen::{Allocator, CachingAllocator, CudaPolicy, DataPtr, Device};
 
 #[derive(Default)]
 struct Log {
