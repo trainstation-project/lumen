@@ -10,9 +10,10 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // Declare our custom cfg so `-D warnings` (via RUSTFLAGS in the
-    // Makefile/CI) doesn't reject it as an unexpected condition.
+    // Declare our custom cfgs so `-D warnings` (via RUSTFLAGS in the
+    // Makefile/CI) doesn't reject them as unexpected conditions.
     println!("cargo:rustc-check-cfg=cfg(lumen_cuda_linked)");
+    println!("cargo:rustc-check-cfg=cfg(lumen_mps_linked)");
 
     // Re-run only when the relevant configuration changes.
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -20,10 +21,16 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDART_LIB_DIR");
     println!("cargo:rerun-if-changed=build.rs");
 
-    if env::var_os("CARGO_FEATURE_CUDA").is_none() {
-        return; // feature off: nothing to detect
+    if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+        detect_cuda();
     }
 
+    if env::var_os("CARGO_FEATURE_MPS").is_some() {
+        build_mps_shim();
+    }
+}
+
+fn detect_cuda() {
     let Some((lib_dir, _)) = find_cudart() else {
         // No toolkit: leave `lumen_cuda_linked` unset. The `cuda`
         // feature stays "on" but compiles to a stub (see src/allocator/cuda.rs).
@@ -38,6 +45,28 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-cfg=lumen_cuda_linked");
+}
+
+/// Compile the Objective-C++ Metal shim (macOS only), mirroring how PyTorch
+/// builds its MPS .mm files only on Apple targets.
+fn build_mps_shim() {
+    // `mps` is a default feature, so skip quietly elsewhere (PyTorch
+    // likewise just builds without MPS off Apple platforms).
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+
+    println!("cargo:rerun-if-changed=csrc/mps_shim.mm");
+
+    cc::Build::new()
+        .file("csrc/mps_shim.mm")
+        .cpp(true)
+        .flag("-std=c++17")
+        .flag("-fobjc-arc")
+        .compile("lumen_mps_shim");
+    println!("cargo:rustc-link-lib=framework=Metal");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-cfg=lumen_mps_linked");
 }
 
 /// Find the directory containing the CUDA runtime library, honoring the
