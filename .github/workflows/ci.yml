@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: make fmt-check
 
   clippy:
     name: clippy
@@ -34,7 +34,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features
+      - run: make clippy
 
   test:
     name: test (${{ matrix.os }})
@@ -48,8 +48,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets --all-features
-      - run: cargo test --doc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      # `make test-cpu` builds the bindings with `maturin develop`, which
+      # installs into the active virtualenv, then runs pytest.
+      - name: Set up virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      # CPU tests only; `make ci` locally also runs the CUDA and MPS tests.
+      - run: make test-cpu
 
   miri:
     # The allocator hands out raw pointers; Miri catches UB (misaligned
@@ -61,6 +72,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - run: cargo miri test
-        env:
-          MIRIFLAGS: -Zmiri-strict-provenance
+      - run: make miri

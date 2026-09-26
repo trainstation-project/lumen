@@ -1,8 +1,3 @@
-//! CPU allocator: a thin wrapper over the
-//! global Rust allocator handing out 64-byte-aligned, uninitialized
-//! buffers (`torch.empty` semantics — PyTorch's CPU allocator doesn't
-//! zero either; callers must write before reading).
-
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
 

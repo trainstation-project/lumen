@@ -1,18 +1,12 @@
-//! Tests for the CUDA caching allocator.
-//!
-//! No GPU needed: a mock `DeviceBackend` allocates real host memory (so
-//! pointers are valid) while counting `cudaMalloc`/`cudaFree` calls and
-//! enforcing an optional memory limit. This is how we verify PyTorch's
-//! caching semantics — reuse, rounding, splitting, coalescing, stats —
-//! on a CPU-only machine.
-
 use std::alloc::{self, Layout};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lumen::allocator::cuda::{K_MIN_BLOCK_SIZE, K_SMALL_SIZE};
-use lumen::{Allocator, CachingAllocator, Device, DeviceBackend};
+use lumen::allocator::cuda::K_MIN_BLOCK_SIZE;
+use lumen::allocator::traits::K_SMALL_SIZE;
+use lumen::{Allocator, CachingAllocator, CudaPolicy, DataPtr, Device};
 
 /// Shared observation state: the allocator owns the backend, so tests
 /// keep a clone of this handle to inspect it.
@@ -37,15 +31,22 @@ struct LiveAlloc {
 // SAFETY: plain owned host memory; access is serialized by the `Mutex`.
 unsafe impl Send for LiveAlloc {}
 
-/// Pretends to be the GPU: `device_alloc` is host `malloc` with
-/// accounting, `device_free` is `free`. `byte_limit` simulates VRAM size.
 struct MockBackend {
     state: Arc<MockState>,
     byte_limit: Option<usize>,
+    device_index: usize,
 }
 
-impl DeviceBackend for MockBackend {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
+impl Allocator for MockBackend {
+    fn device(&self) -> Device {
+        Device::Cuda(self.device_index)
+    }
+
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        self.try_allocate(nbytes).expect("mock device OOM")
+    }
+
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         if let Some(limit) = self.byte_limit {
             let live_bytes: usize = self
                 .state
@@ -56,34 +57,33 @@ impl DeviceBackend for MockBackend {
                 .map(|l| l.layout.size())
                 .sum();
             if live_bytes + nbytes > limit {
-                return std::ptr::null_mut(); // pretend the GPU is full
+                return None; // pretend the GPU is full
             }
         }
         self.state.mallocs.fetch_add(1, Ordering::SeqCst);
         self.state.malloc_sizes.lock().unwrap().push(nbytes);
         // 256-byte alignment, like cudaMalloc guarantees.
         let layout = Layout::from_size_align(nbytes, 256).unwrap();
-        let ptr = unsafe { alloc::alloc(layout) };
-        if !ptr.is_null() {
-            self.state
+        let ptr = NonNull::new(unsafe { alloc::alloc(layout) })?;
+        self.state.live.lock().unwrap().insert(
+            ptr.as_ptr().addr(),
+            LiveAlloc {
+                ptr: ptr.as_ptr(),
+                layout,
+            },
+        );
+        let state = Arc::clone(&self.state);
+        Some(DataPtr::with_deleter(ptr, layout, move |p| {
+            state.frees.fetch_add(1, Ordering::SeqCst);
+            let LiveAlloc { layout, .. } = state
                 .live
                 .lock()
                 .unwrap()
-                .insert(ptr.addr(), LiveAlloc { ptr, layout });
-        }
-        ptr
-    }
-
-    unsafe fn device_free(&self, ptr: *mut u8) {
-        self.state.frees.fetch_add(1, Ordering::SeqCst);
-        let LiveAlloc { layout, .. } = self
-            .state
-            .live
-            .lock()
-            .unwrap()
-            .remove(&(ptr.addr()))
-            .expect("double free or unknown pointer");
-        unsafe { alloc::dealloc(ptr, layout) };
+                .remove(&p.as_ptr().addr())
+                .expect("double free or unknown pointer");
+            // SAFETY: allocated above with this layout.
+            unsafe { alloc::dealloc(p.as_ptr(), layout) };
+        }))
     }
 }
 
@@ -99,32 +99,30 @@ impl Drop for MockBackend {
     }
 }
 
-fn allocator(byte_limit: Option<usize>) -> (CachingAllocator<MockBackend>, Arc<MockState>) {
+fn allocator(
+    byte_limit: Option<usize>,
+) -> (CachingAllocator<MockBackend, CudaPolicy>, Arc<MockState>) {
     let state = Arc::new(MockState::default());
     let backend = MockBackend {
         state: Arc::clone(&state),
         byte_limit,
+        device_index: 0,
     };
-    (CachingAllocator::new(0, backend), state)
+    (CachingAllocator::new(backend, CudaPolicy), state)
 }
 
 #[test]
 fn reports_cuda_device() {
     let (alloc, _) = allocator(None);
     assert_eq!(alloc.device(), Device::Cuda(0));
-    let (alloc7, _) = {
-        let state = Arc::new(MockState::default());
-        (
-            CachingAllocator::new(
-                7,
-                MockBackend {
-                    state: Arc::clone(&state),
-                    byte_limit: None,
-                },
-            ),
-            state,
-        )
-    };
+    let alloc7 = CachingAllocator::new(
+        MockBackend {
+            state: Arc::new(MockState::default()),
+            byte_limit: None,
+            device_index: 7,
+        },
+        CudaPolicy,
+    );
     assert_eq!(alloc7.device(), Device::Cuda(7));
 }
 
@@ -285,14 +283,14 @@ fn buffer_is_writable_and_readable() {
 type FreedLog = Arc<Mutex<Vec<(usize, usize)>>>;
 
 /// Bump-allocates segments back to back out of one host arena, so
-/// consecutive `device_alloc`s are address-adjacent (real `cudaMalloc`
-/// can do this too). `device_free` only records the pointer.
+/// consecutive `try_allocate`s are address-adjacent (real `cudaMalloc`
+/// can do this too). The `DataPtr` deleter only records the pointer.
 struct ArenaBackend {
     base: *mut u8,
     layout: Layout,
     next: AtomicUsize,
     freed: FreedLog,
-    sizes: Mutex<HashMap<usize, usize>>,
+    sizes: Arc<Mutex<HashMap<usize, usize>>>,
 }
 
 // SAFETY: the arena pointer is only used for address arithmetic and is
@@ -312,7 +310,7 @@ impl ArenaBackend {
             layout,
             next: AtomicUsize::new(0),
             freed: Arc::clone(&freed),
-            sizes: Mutex::new(HashMap::new()),
+            sizes: Arc::new(Mutex::new(HashMap::new())),
         };
         (backend, freed)
     }
@@ -325,25 +323,40 @@ impl Drop for ArenaBackend {
     }
 }
 
-impl DeviceBackend for ArenaBackend {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
-        let offset = self.next.fetch_add(nbytes, Ordering::SeqCst);
-        if offset + nbytes > self.layout.size() {
-            return std::ptr::null_mut();
-        }
-        let ptr = unsafe { self.base.add(offset) };
-        self.sizes.lock().unwrap().insert(ptr.addr(), nbytes);
-        ptr
+impl Allocator for ArenaBackend {
+    fn device(&self) -> Device {
+        Device::Cuda(0)
     }
 
-    unsafe fn device_free(&self, ptr: *mut u8) {
-        let size = self
-            .sizes
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        self.try_allocate(nbytes).expect("arena exhausted")
+    }
+
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+        let offset = self.next.fetch_add(nbytes, Ordering::SeqCst);
+        if offset + nbytes > self.layout.size() {
+            return None;
+        }
+        // SAFETY: offset + nbytes <= arena size; base is 512-aligned.
+        let ptr = NonNull::new(unsafe { self.base.add(offset) })?;
+        self.sizes
             .lock()
             .unwrap()
-            .remove(&(ptr.addr()))
-            .expect("double free or unknown pointer");
-        self.freed.lock().unwrap().push((ptr.addr(), size));
+            .insert(ptr.as_ptr().addr(), nbytes);
+        let sizes = Arc::clone(&self.sizes);
+        let freed = Arc::clone(&self.freed);
+        Some(DataPtr::with_deleter(
+            ptr,
+            Layout::from_size_align(nbytes, 512).unwrap(),
+            move |p| {
+                let size = sizes
+                    .lock()
+                    .unwrap()
+                    .remove(&p.as_ptr().addr())
+                    .expect("double free or unknown pointer");
+                freed.lock().unwrap().push((p.as_ptr().addr(), size));
+            },
+        ))
     }
 }
 
@@ -351,7 +364,7 @@ impl DeviceBackend for ArenaBackend {
 fn adjacent_segments_never_coalesce() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
     let base = backend.base.addr();
-    let alloc = CachingAllocator::new(0, backend);
+    let alloc = CachingAllocator::new(backend, CudaPolicy);
 
     // a and b fill segment 1 exactly; c starts segment 2, which the
     // arena places right after segment 1.
@@ -385,7 +398,7 @@ fn adjacent_segments_never_coalesce() {
 fn whole_segment_next_to_busy_segment_is_released() {
     let (backend, freed) = ArenaBackend::new(8 * K_SMALL_SIZE);
     let base = backend.base.addr();
-    let alloc = CachingAllocator::new(0, backend);
+    let alloc = CachingAllocator::new(backend, CudaPolicy);
 
     // a and b keep segment 1 busy; c's segment 2 sits right after it.
     let a = alloc.allocate(K_SMALL_SIZE);

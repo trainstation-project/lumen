@@ -3,9 +3,25 @@ name = "lumen"
 version = "0.1.0"
 edition = "2024"
 
+# Rust core, Metal shim and Python package all live in ./lumen.
+[lib]
+path = "lumen/lib.rs"
+
 [features]
 # Real CUDA backend (cudaMalloc/cudaFree via the CUDA runtime API).
 # Off by default so the crate builds on machines without a GPU/toolkit.
 cuda = []
+# Apple Silicon (Metal) backend. On by default; build.rs compiles the shim
+# only on macOS, so this is a no-op elsewhere.
+mps = []
+# Python bindings (`lumen._C`, lumen/python.rs). Built by maturin (see
+# pyproject.toml); plain `cargo test` leaves it off, since pyo3 would then
+# link test binaries against libpython.
+python = ["dep:pyo3"]
+default = ["mps"]
 
 [dependencies]
+pyo3 = { version = "0.29", optional = true }
+
+[build-dependencies]
+cc = "1"
