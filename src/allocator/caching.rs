@@ -17,38 +17,32 @@ struct Block {
     size: usize,
     /// True while handed out to a user.
     allocated: bool,
-    /// Base pointer of the `device_alloc`ed segment this block was carved
-    /// from. Blocks merge only within a segment (segments can be
-    /// address-adjacent), and the pointers handed out are derived from it
-    /// with `with_addr` so they keep its provenance.
-    segment: NonNull<u8>,
+    /// Base address of the segment this block was carved from
+    segment_base: usize,
     segment_size: usize,
     /// Which pool this block belongs to. Membership is a property of the
     /// segment the block was carved from, NOT of its current size: a small
     /// block that coalesces back into a whole 2 MiB segment stays in the
-    /// small pool. (c10 stores a `pool` pointer on each Block for the same
-    /// reason.)
+    /// small pool.
     pool_small: bool,
 }
 
-/// Key for the pool sets: ordered by size, then address, matching c10's
-/// `BlockPool` comparator (best-fit with lowest address wins).
+/// Key for the pool sets: ordered by size, then address (best-fit with lowest address wins).
 type PoolKey = (usize, usize);
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct State {
     /// All blocks ever carved, keyed by address (enables neighbor lookups).
     blocks: BTreeMap<usize, Block>,
+    /// Owning handle for each backend segment, keyed by base address.
+    /// Dropping the `DataPtr` frees the segment on the device.
+    segments: BTreeMap<usize, DataPtr>,
     /// Free blocks up to `K_SMALL_SIZE`.
     small_pool: BTreeSet<PoolKey>,
     /// Free blocks above `K_SMALL_SIZE`.
     large_pool: BTreeSet<PoolKey>,
     stats: CacheStats,
 }
-
-// SAFETY: the `NonNull`s in `blocks` are device pointers owned by the
-// allocator; `State` is only reached through its `Mutex`.
-unsafe impl Send for State {}
 
 impl State {
     fn pool_for(&mut self, small: bool) -> &mut BTreeSet<PoolKey> {
