@@ -19,20 +19,35 @@ struct Log {
 /// Returns fake addresses with a gap between segments; never touches memory.
 struct FakeBackend(Arc<Mutex<Log>>);
 
-impl DeviceBackend for FakeBackend {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
-        let mut log = self.0.lock().unwrap();
-        if log.next_addr == 0 {
-            log.next_addr = 1 << 32;
-        }
-        let addr = log.next_addr;
-        log.next_addr += nbytes + MIB;
-        log.allocs.push(nbytes);
-        std::ptr::without_provenance_mut(addr)
+impl Allocator for FakeBackend {
+    fn device(&self) -> Device {
+        Device::Cpu
     }
 
-    unsafe fn device_free(&self, ptr: *mut u8) {
-        self.0.lock().unwrap().frees.push(ptr.addr());
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        self.try_allocate(nbytes).expect("fake backend OOM")
+    }
+
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+        let addr = {
+            let mut log = self.0.lock().unwrap();
+            if log.next_addr == 0 {
+                log.next_addr = 1 << 32;
+            }
+            let addr = log.next_addr;
+            log.next_addr += nbytes + MIB;
+            log.allocs.push(nbytes);
+            addr
+        };
+        let ptr = NonNull::new(std::ptr::without_provenance_mut(addr))?;
+        let handle = Arc::clone(&self.0);
+        Some(DataPtr::with_deleter(
+            ptr,
+            Layout::from_size_align(nbytes, 1).unwrap(),
+            move |p| {
+                handle.lock().unwrap().frees.push(p.as_ptr().addr());
+            },
+        ))
     }
 }
 
@@ -41,7 +56,7 @@ type Fake<P> = CachingAllocator<FakeBackend, P>;
 fn allocator<P: CachePolicy>(policy: P) -> (Fake<P>, Arc<Mutex<Log>>) {
     let log = Arc::new(Mutex::new(Log::default()));
     let backend = FakeBackend(Arc::clone(&log));
-    (CachingAllocator::new(Device::Cpu, backend, policy), log)
+    (CachingAllocator::new(backend, policy), log)
 }
 
 /// Apple Silicon's values (256 B alignment, 16 KiB pages), no memory pressure.

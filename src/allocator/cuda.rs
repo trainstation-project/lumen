@@ -1,9 +1,10 @@
 //! CUDA support for the caching allocator.
 //!
 //! The pooling logic lives in [`super::caching`]; this module provides
-//! c10's size math ([`CudaPolicy`]), the raw `cudaMalloc`/`cudaFree` seam
-//! (`CudaBackend`) and the global per-device allocator registry,
-//! mirroring c10's `CUDACachingAllocator::get()`.
+//! c10's size math ([`CudaPolicy`]), `CudaBackend` (an uncached
+//! [`Allocator`](crate::Allocator) over `cudaMalloc`/`cudaFree`) and the
+//! global per-device allocator registry, mirroring c10's
+//! `CUDACachingAllocator::get()`.
 //!
 //! The backend is only available when built on a machine with the CUDA
 //! runtime (see `build.rs`); the policy is always available, so tests
@@ -11,11 +12,15 @@
 
 #[cfg(lumen_cuda_linked)]
 use super::caching::CachingAllocator;
-#[cfg(lumen_cuda_linked)]
-use super::traits::DeviceBackend;
 use super::traits::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
 #[cfg(lumen_cuda_linked)]
+use crate::allocator::{Allocator, DataPtr};
+#[cfg(lumen_cuda_linked)]
 use crate::device::Device;
+#[cfg(lumen_cuda_linked)]
+use std::alloc::Layout;
+#[cfg(lumen_cuda_linked)]
+use std::ptr::NonNull;
 #[cfg(lumen_cuda_linked)]
 use std::sync::{Mutex, OnceLock};
 
@@ -76,33 +81,48 @@ mod ffi {
     }
 }
 
-/// Backend that calls the CUDA runtime API. Only available when the build
-/// found a CUDA toolkit to link against (cfg `lumen_cuda_linked`).
+/// An uncached [`Allocator`] over the CUDA runtime: one `cudaMalloc` per
+/// `try_allocate`, `cudaFree` when the returned `DataPtr` drops. Only
+/// available when the build found a CUDA toolkit to link against
+/// (cfg `lumen_cuda_linked`).
 #[cfg(lumen_cuda_linked)]
 pub struct CudaBackend {
     device_index: i32,
 }
 
 #[cfg(lumen_cuda_linked)]
-impl DeviceBackend for CudaBackend {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
-        unsafe {
-            // c10 sets the device context before every allocation.
-            ffi::cudaSetDevice(self.device_index);
-            let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-            let err = ffi::cudaMalloc(&mut ptr, nbytes);
-            if err != 0 {
-                return std::ptr::null_mut();
-            }
-            ptr.cast()
-        }
+impl Allocator for CudaBackend {
+    fn device(&self) -> Device {
+        Device::Cuda(self.device_index as usize)
     }
 
-    unsafe fn device_free(&self, ptr: *mut u8) {
-        unsafe {
-            ffi::cudaSetDevice(self.device_index);
-            ffi::cudaFree(ptr.cast());
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        self.try_allocate(nbytes).unwrap_or_else(|| {
+            panic!(
+                "CUDA out of memory: failed to allocate {nbytes} bytes on cuda:{}",
+                self.device_index
+            )
+        })
+    }
+
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+        // c10 sets the device context before every allocation.
+        unsafe { ffi::cudaSetDevice(self.device_index) };
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
+        if err != 0 {
+            return None;
         }
+        let device_index = self.device_index;
+        Some(DataPtr::with_deleter(
+            NonNull::new(ptr.cast())?,
+            // cudaMalloc guarantees 256-byte alignment.
+            Layout::from_size_align(nbytes, 256).unwrap(),
+            move |p| unsafe {
+                ffi::cudaSetDevice(device_index);
+                ffi::cudaFree(p.as_ptr().cast());
+            },
+        ))
     }
 }
 

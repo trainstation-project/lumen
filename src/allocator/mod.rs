@@ -34,7 +34,8 @@ unsafe impl Send for DataPtr {}
 unsafe impl Sync for DataPtr {}
 
 impl DataPtr {
-    pub(crate) fn new(ptr: NonNull<u8>, layout: Layout) -> Self {
+    /// A `DataPtr` freed with `alloc::dealloc` on drop (CPU path).
+    pub fn new(ptr: NonNull<u8>, layout: Layout) -> Self {
         DataPtr {
             ptr,
             layout,
@@ -43,7 +44,10 @@ impl DataPtr {
     }
 
     /// A `DataPtr` whose drop runs `f` instead of `alloc::dealloc`.
-    pub(crate) fn with_deleter(
+    ///
+    /// `ptr` must point to `layout.size()` bytes that stay valid until the
+    /// `DataPtr` is dropped; `f` must release (or recycle) that buffer.
+    pub fn with_deleter(
         ptr: NonNull<u8>,
         layout: Layout,
         f: impl FnOnce(NonNull<u8>) + Send + Sync + 'static,
@@ -74,7 +78,29 @@ impl Drop for DataPtr {
     }
 }
 
+/// The memory-management contract: allocate `nbytes` on a device, get back
+/// an owning [`DataPtr`] that releases the memory on drop.
+///
+/// Implemented by user-facing allocators ([`cpu::CpuAllocator`],
+/// [`caching::CachingAllocator`]) and by raw *backends* alike: to the
+/// caching layer, a backend is just an uncached `Allocator` (one
+/// `cudaMalloc`/Metal allocation per call).
 pub trait Allocator: Send + Sync {
     fn device(&self) -> Device;
+
+    /// Allocate `nbytes`, panicking on failure (c10 semantics: OOM
+    /// surfaces as an error, not a return value).
     fn allocate(&self, nbytes: usize) -> DataPtr;
+
+    /// Fallible allocation: `None` when the device cannot satisfy the
+    /// request right now.
+    ///
+    /// Caching allocators use this on their OOM path — release cached
+    /// segments, then retry — which must not go through a panic. The
+    /// default suits allocators whose failures are unrecoverable (a host
+    /// `malloc` failure ends the process anyway): just call
+    /// [`allocate`](Self::allocate).
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+        Some(self.allocate(nbytes))
+    }
 }

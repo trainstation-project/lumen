@@ -151,13 +151,23 @@ mod ffi {
 pub struct MpsBackend;
 
 #[cfg(lumen_mps_linked)]
-impl DeviceBackend for MpsBackend {
-    unsafe fn device_alloc(&self, nbytes: usize) -> *mut u8 {
-        unsafe { ffi::lumen_mps_alloc(nbytes) }
+impl Allocator for MpsBackend {
+    fn device(&self) -> Device {
+        Device::Mps
     }
 
-    unsafe fn device_free(&self, ptr: *mut u8) {
-        unsafe { ffi::lumen_mps_free(ptr) }
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        self.try_allocate(nbytes)
+            .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
+    }
+
+    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+        let ptr = NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })?;
+        Some(DataPtr::with_deleter(
+            ptr,
+            Layout::from_size_align(nbytes, 256).unwrap(),
+            |p| unsafe { ffi::lumen_mps_free(p.as_ptr()) },
+        ))
     }
 }
 
@@ -243,6 +253,6 @@ pub fn get() -> MpsAllocator {
     assert!(is_available(), "no Metal device available");
     static ALLOCATOR: OnceLock<MpsAllocator> = OnceLock::new();
     ALLOCATOR
-        .get_or_init(|| CachingAllocator::new(Device::Mps, MpsBackend, MpsPolicy::from_device()))
+        .get_or_init(|| CachingAllocator::new(MpsBackend, MpsPolicy::from_device()))
         .clone()
 }

@@ -54,7 +54,7 @@ impl State {
     }
 }
 
-struct Inner<B: DeviceBackend, P: CachePolicy> {
+struct Inner<B: Allocator + 'static, P: CachePolicy> {
     device: Device,
     policy: P,
     backend: B,
@@ -64,12 +64,12 @@ struct Inner<B: DeviceBackend, P: CachePolicy> {
 /// A caching device allocator. Clone it freely: clones share one cache.
 ///
 /// Construct via the device modules (`cuda::get`, `mps::get`) or directly
-/// with a custom [`DeviceBackend`].
-pub struct CachingAllocator<B: DeviceBackend, P: CachePolicy> {
+/// with a custom backend [`Allocator`].
+pub struct CachingAllocator<B: Allocator + 'static, P: CachePolicy> {
     inner: Arc<Inner<B, P>>,
 }
 
-impl<B: DeviceBackend, P: CachePolicy> Clone for CachingAllocator<B, P> {
+impl<B: Allocator + 'static, P: CachePolicy> Clone for CachingAllocator<B, P> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -77,11 +77,11 @@ impl<B: DeviceBackend, P: CachePolicy> Clone for CachingAllocator<B, P> {
     }
 }
 
-impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
-    pub fn new(device: Device, backend: B, policy: P) -> Self {
+impl<B: Allocator + 'static, P: CachePolicy> CachingAllocator<B, P> {
+    pub fn new(backend: B, policy: P) -> Self {
         Self {
             inner: Arc::new(Inner {
-                device,
+                device: backend.device(),
                 policy,
                 backend,
                 state: Mutex::new(State::default()),
@@ -164,7 +164,7 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
     fn take_block(&self, state: &mut State, ptr: usize, size: usize) -> usize {
         let block = &state.blocks[&ptr];
         let (block_size, small) = (block.size, block.pool_small);
-        let (segment, segment_size) = (block.segment, block.segment_size);
+        let (segment_base, segment_size) = (block.segment_base, block.segment_size);
         state.pool_for(small).remove(&(block_size, ptr));
 
         let remaining = block_size - size;
@@ -175,7 +175,7 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
                     ptr: ptr + size,
                     size: remaining,
                     allocated: false,
-                    segment,
+                    segment_base,
                     segment_size,
                     pool_small: small,
                 },
@@ -204,8 +204,7 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
         size: usize,
         seg_size: usize,
     ) -> Result<usize, String> {
-        let raw = unsafe { self.inner.backend.device_alloc(seg_size) };
-        let Some(segment) = NonNull::new(raw) else {
+        let Some(segment) = self.inner.backend.try_allocate(seg_size) else {
             return Err(format!(
                 "failed to allocate {seg_size} bytes on {}",
                 self.inner.device
@@ -219,7 +218,7 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
         state.stats.num_device_alloc += 1;
 
         // The segment starts out as one free block the request is cut from.
-        let ptr = raw.addr();
+        let ptr = segment.as_ptr().addr();
         let small = size <= K_SMALL_SIZE;
         state.blocks.insert(
             ptr,
@@ -227,11 +226,12 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
                 ptr,
                 size: seg_size,
                 allocated: false,
-                segment,
+                segment_base: ptr,
                 segment_size: seg_size,
                 pool_small: small,
             },
         );
+        state.segments.insert(ptr, segment);
         state.pool_for(small).insert((seg_size, ptr));
         Ok(self.take_block(state, ptr, size))
     }
@@ -240,17 +240,20 @@ impl<B: DeviceBackend, P: CachePolicy> CachingAllocator<B, P> {
     /// to the cache.
     fn make_data_ptr(&self, state: &State, ptr: usize) -> DataPtr {
         let block = &state.blocks[&ptr];
-        let (block_size, segment) = (block.size, block.segment);
+        let (block_size, segment_base) = (block.size, block.segment_base);
+        // Derive the block pointer from the segment's own pointer, so it
+        // keeps the segment's provenance.
+        let segment_ptr = state.segments[&segment_base].as_ptr();
         let inner = Arc::clone(&self.inner);
         DataPtr::with_deleter(
-            NonNull::new(segment.as_ptr().with_addr(ptr)).expect("block ptr null"),
+            NonNull::new(segment_ptr.with_addr(ptr)).expect("block ptr null"),
             Layout::from_size_align(block_size, self.inner.policy.alignment()).unwrap(),
             move |ptr| inner.free_block(ptr.addr().get(), block_size),
         )
     }
 }
 
-impl<B: DeviceBackend, P: CachePolicy> Inner<B, P> {
+impl<B: Allocator + 'static, P: CachePolicy> Inner<B, P> {
     /// Return a block to its pool, coalescing with free neighbors
     /// (c10: `free_block` + `coalesce_block`).
     fn free_block(&self, ptr: usize, size: usize) {
@@ -275,7 +278,7 @@ impl<B: DeviceBackend, P: CachePolicy> Inner<B, P> {
         let prev_ptr = state.blocks.range(..ptr).next_back().map(|(&p, _)| p);
         if let Some(prev_ptr) = prev_ptr
             && !state.blocks[&prev_ptr].allocated
-            && state.blocks[&prev_ptr].segment == state.blocks[&ptr].segment
+            && state.blocks[&prev_ptr].segment_base == state.blocks[&ptr].segment_base
         {
             let merged_size = state.blocks[&prev_ptr].size + state.blocks[&ptr].size;
             let (prev_size, small) = (
@@ -291,7 +294,7 @@ impl<B: DeviceBackend, P: CachePolicy> Inner<B, P> {
         let end = start + state.blocks[&start].size;
         if let Some(next) = state.blocks.get(&end)
             && !next.allocated
-            && next.segment == state.blocks[&start].segment
+            && next.segment_base == state.blocks[&start].segment_base
         {
             let (next_size, small) = (next.size, next.pool_small);
             state.pool_for(small).remove(&(next_size, end));
@@ -316,16 +319,16 @@ impl<B: DeviceBackend, P: CachePolicy> Inner<B, P> {
             state.pool_for(block.pool_small).remove(&(block.size, ptr));
             state.stats.reserved_bytes -= block.size;
             state.stats.num_device_free += 1;
-            // SAFETY: a whole segment from device_alloc; no block refers to
-            // it any more.
-            unsafe { self.backend.device_free(block.segment.as_ptr()) };
+            // Dropping the segment's DataPtr returns it to the device; no
+            // block refers to it any more.
+            state.segments.remove(&block.segment_base);
         }
     }
 }
 
 /// Flush the cache once the last reference goes away. Every `DataPtr` holds
 /// a reference too, so by now every block is free.
-impl<B: DeviceBackend, P: CachePolicy> Drop for Inner<B, P> {
+impl<B: Allocator + 'static, P: CachePolicy> Drop for Inner<B, P> {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         let mut state = std::mem::take(state);
@@ -333,7 +336,7 @@ impl<B: DeviceBackend, P: CachePolicy> Drop for Inner<B, P> {
     }
 }
 
-impl<B: DeviceBackend, P: CachePolicy> Allocator for CachingAllocator<B, P> {
+impl<B: Allocator + 'static, P: CachePolicy> Allocator for CachingAllocator<B, P> {
     fn device(&self) -> Device {
         self.inner.device
     }
