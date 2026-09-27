@@ -156,6 +156,11 @@ pub fn is_enabled() -> bool {
     flags() != 0
 }
 
+/// Whether the session records memory events.
+pub(crate) fn memory_enabled() -> bool {
+    flags() & MEMORY != 0
+}
+
 /// Whether the session times device work on `device`.
 // Called by the Metal and CUDA backends, which are compiled only when linked.
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]

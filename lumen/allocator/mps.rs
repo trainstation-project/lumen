@@ -182,12 +182,18 @@ impl Allocator for MpsBackend {
     // Shared buffers are host-addressable, so the default memcpy host
     // copies apply; fills run on the GPU through Metal's blit memset.
     unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
-        let (mut gpu_start, mut gpu_end) = (0.0, 0.0);
-        let status =
-            unsafe { ffi::lumen_mps_memset(dst, value, nbytes, &mut gpu_start, &mut gpu_end) };
+        // GPU start/end times, asked for only while profiling MPS.
+        let mut times = crate::profiler::device_enabled(Device::Mps).then_some((0.0, 0.0));
+        let (start_out, end_out): (*mut f64, *mut f64) = match &mut times {
+            Some((start, end)) => (start, end),
+            None => (std::ptr::null_mut(), std::ptr::null_mut()),
+        };
+
+        let status = unsafe { ffi::lumen_mps_memset(dst, value, nbytes, start_out, end_out) };
         assert_eq!(status, 0, "Metal fillBuffer of {nbytes} bytes failed");
-        if crate::profiler::device_enabled(Device::Mps) {
-            let (start, end) = (host_time_to_ns(gpu_start), host_time_to_ns(gpu_end));
+
+        if let Some((start, end)) = times {
+            let (start, end) = (host_time_to_ns(start), host_time_to_ns(end));
             crate::profiler::record_gpu("Memset", Device::Mps, start, end);
         }
     }
