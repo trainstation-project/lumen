@@ -10,6 +10,7 @@ pub use cpu::CpuAllocator;
 
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
+use std::sync::{Arc, OnceLock};
 
 use crate::device::Device;
 
