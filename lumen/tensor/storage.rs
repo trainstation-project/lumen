@@ -105,11 +105,8 @@ impl Storage {
         // SAFETY: the range is in bounds of this allocator's buffer, and
         // `out` is a distinct host buffer of the same length.
         unsafe {
-            self.allocator.copy_to_host(
-                out.as_mut_ptr(),
-                self.data.as_ptr().add(offset),
-                out.len(),
-            );
+            self.allocator
+                .copy_to_host(out.as_mut_ptr(), self.ptr_at(offset), out.len());
         }
     }
 
@@ -130,11 +127,8 @@ impl Storage {
         }
         // SAFETY: as in `read_bytes`.
         unsafe {
-            self.allocator.copy_from_host(
-                self.data.as_ptr().add(offset),
-                bytes.as_ptr(),
-                bytes.len(),
-            );
+            self.allocator
+                .copy_from_host(self.ptr_at(offset), bytes.as_ptr(), bytes.len());
         }
     }
 
@@ -151,8 +145,7 @@ impl Storage {
         }
         // SAFETY: the range is in bounds of this allocator's buffer.
         unsafe {
-            self.allocator
-                .memset(self.data.as_ptr().add(offset), value, nbytes);
+            self.allocator.memset(self.ptr_at(offset), value, nbytes);
         }
     }
 
@@ -168,6 +161,15 @@ impl Storage {
     /// caveats as [`write_bytes`](Self::write_bytes).
     pub(crate) fn write<T: Element>(&self, offset: usize, data: &[T]) {
         self.write_bytes(offset * size_of::<T>(), as_bytes(data));
+    }
+
+    /// The buffer's address `offset` bytes in, in the device's address
+    /// space. `wrapping_add`, not `add`: device memory (CUDA, or a mock
+    /// device's fake addresses) is not an allocation Rust knows about, and
+    /// `add` is undefined behavior outside one. The allocator's copies and
+    /// memset are what access it, never a Rust dereference.
+    fn ptr_at(&self, offset: usize) -> *mut u8 {
+        self.data.as_ptr().wrapping_add(offset)
     }
 
     fn check_range(&self, offset: usize, len: usize) {

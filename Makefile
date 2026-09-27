@@ -55,13 +55,14 @@ clippy:
 	cargo clippy --all-targets --all-features
 	cargo clippy --all-targets $(NO_METAL_FEATURES)
 
-## miri: the tests under Miri, which catches UB (misaligned access,
-## use-after-free, leaks) in the allocator's raw-pointer code. Built without
-## Metal, as on Linux CI: Miri cannot call into the Metal shim. Needs rustup:
-## `rustup +nightly component add miri`.
+RUSTUP := $(or $(shell command -v rustup),$(wildcard $(HOME)/.cargo/bin/rustup))
+# CI's platform, which Miri emulates on any host: on Apple Silicon, `half`
+# converts f16 with inline assembly, which Miri cannot run.
+MIRI_TARGET := x86_64-unknown-linux-gnu
+
 miri:
-	@command -v rustup >/dev/null || { echo "make miri: needs rustup (https://rustup.rs), then: rustup +nightly component add miri" >&2; exit 1; }
-	MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test --no-default-features
+	@test -n "$(RUSTUP)" || { echo "make miri: needs rustup with nightly miri: curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path --default-toolchain none && ~/.cargo/bin/rustup toolchain install nightly --component miri,rust-src" >&2; exit 1; }
+	MIRIFLAGS=-Zmiri-strict-provenance $(RUSTUP) run nightly cargo miri test --no-default-features --target $(MIRI_TARGET)
 
 clean:
 	cargo clean
