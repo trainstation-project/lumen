@@ -230,6 +230,16 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
 }
 
 #[test]
+fn frees_of_blocks_allocated_before_the_session_are_not_reported() {
+    let _lock = exclusive();
+    let early = Tensor::zeros(&[16], DType::F32);
+    start(with_memory()).unwrap();
+    drop(early);
+    let p = stop().unwrap().for_thread(thread_id());
+    assert!(named(&p, "[memory]").is_empty(), "{:#?}", p.events());
+}
+
+#[test]
 fn memory_is_recorded_only_with_profile_memory() {
     let p = profile(cpu(), || drop(Tensor::zeros(&[8], DType::F32)));
     assert!(named(&p, "[memory]").is_empty());
