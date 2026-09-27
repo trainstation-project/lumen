@@ -12,12 +12,15 @@ wraps:
 * ``lumen.allocator`` (``lumen/allocator/``) — ``lumen.config``, runtime
   settings such as ``lumen.config.memory_caching``.
 * ``lumen.device`` — a device, modeled on ``torch.device``.
+* ``lumen.profiler`` (``lumen/profiler/``) — the profiler, modeled on
+  ``torch.profiler``.
 
 Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
+from lumen import profiler
 from lumen.allocator import config
 from lumen.tensor import (
     Tensor,
@@ -51,6 +54,7 @@ __all__ = [
     "__version__",
     "config",
     "device",
+    "profiler",
     # dtypes
     "float16", "bfloat16", "float32", "float64",
     "int8", "int16", "int32", "int64",

@@ -81,6 +81,11 @@ mod ffi {
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
         pub fn cudaMemset(dst: *mut c_void, value: i32, count: usize) -> i32;
+        pub fn cudaEventCreate(event: *mut *mut c_void) -> i32;
+        pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
+        pub fn cudaEventSynchronize(event: *mut c_void) -> i32;
+        pub fn cudaEventElapsedTime(ms: *mut f32, start: *mut c_void, end: *mut c_void) -> i32;
+        pub fn cudaEventDestroy(event: *mut c_void) -> i32;
     }
 
     // `cudaMemcpyKind` values.
