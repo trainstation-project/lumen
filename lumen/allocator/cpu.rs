@@ -1,5 +1,6 @@
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{Allocator, DataPtr};
 use crate::device::Device;
@@ -7,6 +8,11 @@ use crate::device::Device;
 pub struct CpuAllocator;
 
 static CPU_ALLOCATOR: CpuAllocator = CpuAllocator;
+
+/// Bytes of blocks allocated while memory profiling was on and not yet
+/// freed, for the profiler's memory events (PyTorch:
+/// `ProfiledCPUMemoryReporter`). Other blocks never touch it.
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
 impl CpuAllocator {
     pub fn get() -> &'static dyn Allocator {
@@ -32,6 +38,20 @@ impl Allocator for CpuAllocator {
             let raw = unsafe { alloc::alloc(layout) };
             NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout))
         };
+
+        if nbytes > 0 && crate::profiler::memory_enabled() {
+            // Profiling memory: report this block now and when it is freed.
+            // Blocks allocated before the session are not reported when
+            // freed, as in PyTorch.
+            let addr = ptr.as_ptr().addr();
+            let total = ALLOCATED.fetch_add(nbytes, Ordering::Relaxed) + nbytes;
+            crate::profiler::report_memory(Device::Cpu, addr, nbytes as i64, total, total);
+            return DataPtr::with_deleter(ptr, layout, move |p| {
+                let total = ALLOCATED.fetch_sub(nbytes, Ordering::Relaxed) - nbytes;
+                crate::profiler::report_memory(Device::Cpu, addr, -(nbytes as i64), total, total);
+                unsafe { alloc::dealloc(p.as_ptr(), layout) }
+            });
+        }
 
         DataPtr::new(ptr, layout)
     }

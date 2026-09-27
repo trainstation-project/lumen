@@ -246,6 +246,15 @@ impl<B: Allocator + 'static, P: CachePolicy> CachingAllocator<B, P> {
     fn make_data_ptr(&self, state: &State, ptr: usize) -> DataPtr {
         let block = &state.blocks[&ptr];
         let (block_size, segment_base) = (block.size, block.segment_base);
+        let stats = &state.stats;
+        let (allocated, reserved) = (stats.allocated_bytes, stats.reserved_bytes);
+        crate::profiler::report_memory(
+            self.inner.device,
+            ptr,
+            block_size as i64,
+            allocated,
+            reserved,
+        );
         // Derive the block pointer from the segment's own pointer, so it
         // keeps the segment's provenance.
         let segment_ptr = state.segments[&segment_base].as_ptr();
@@ -268,6 +277,8 @@ impl<B: Allocator + 'static, P: CachePolicy> Inner<B, P> {
         block.allocated = false;
         state.stats.allocated_bytes -= size;
         state.stats.num_free += 1;
+        let (allocated, reserved) = (state.stats.allocated_bytes, state.stats.reserved_bytes);
+        crate::profiler::report_memory(self.device, ptr, -(size as i64), allocated, reserved);
 
         let ptr = Self::coalesce_block(&mut state, ptr);
         let block = &state.blocks[&ptr];

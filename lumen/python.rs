@@ -218,6 +218,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
     crate::tensor::python::register(m)?;
     crate::allocator::python::register(m)?;
+    crate::profiler::python::register(m)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

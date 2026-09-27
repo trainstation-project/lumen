@@ -53,6 +53,7 @@ impl Tensor {
     /// # Panics
     /// If the device is not available.
     pub unsafe fn empty(size: &[usize], options: impl Into<TensorOptions>) -> Self {
+        let _op = crate::profiler::record_op("lumen::empty", || vec![size.to_vec()]);
         let options = options.into();
         let dtype = options.dtype_opt().unwrap_or(DEFAULT_DTYPE);
         let numel: usize = size.iter().product();
@@ -80,6 +81,7 @@ impl Tensor {
 
     /// A tensor of zeros (PyTorch: `at::zeros`).
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
+        let _op = crate::profiler::record_op("lumen::zeros", || vec![size.to_vec()]);
         // SAFETY: `zero_` writes every element — one device memset, as
         // all-zero bytes are zero for every dtype (false, +0.0, 0).
         let t = unsafe { Self::empty(size, options) };
@@ -90,6 +92,7 @@ impl Tensor {
     /// A tensor of ones (PyTorch: `at::ones`; float32 unless the options
     /// say otherwise).
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
+        let _op = crate::profiler::record_op("lumen::ones", || vec![size.to_vec()]);
         Self::filled(size, Scalar::Int(1), options.into())
     }
 
@@ -101,6 +104,7 @@ impl Tensor {
         fill_value: impl Into<Scalar>,
         options: impl Into<TensorOptions>,
     ) -> Self {
+        let _op = crate::profiler::record_op("lumen::full", || vec![size.to_vec()]);
         let (fill_value, options) = (fill_value.into(), options.into());
         let dtype = options
             .dtype_opt()
@@ -112,6 +116,7 @@ impl Tensor {
     /// Without a dtype in `options`, it is inferred from `end` like
     /// [`full`](Self::full).
     pub fn arange(end: impl Into<Scalar>, options: impl Into<TensorOptions>) -> Self {
+        let _op = crate::profiler::record_op("lumen::arange", Vec::new);
         let (end, options) = (end.into(), options.into());
         let dtype = options.dtype_opt().unwrap_or_else(|| end.inferred_dtype());
         let n = end.to_f64().ceil().max(0.0) as i64;
@@ -125,6 +130,7 @@ impl Tensor {
     /// The dtype is `T`'s unless `options` sets one, in which case the
     /// values are converted; reshape for more dimensions.
     pub fn from_slice<T: Element>(data: &[T], options: impl Into<TensorOptions>) -> Self {
+        let _op = crate::profiler::record_op("lumen::from_slice", || vec![vec![data.len()]]);
         let options = options.into();
         let device = device_of(&options);
         match options.dtype_opt() {
@@ -216,6 +222,9 @@ impl Tensor {
     /// Reshape. Only valid on contiguous tensors (PyTorch `Tensor::view`);
     /// call [`Tensor::contiguous`] first if needed.
     pub fn reshape(&self, shape: &[usize]) -> Self {
+        let _op = crate::profiler::record_op("lumen::reshape", || {
+            vec![self.shape.clone(), shape.to_vec()]
+        });
         assert!(
             self.is_contiguous(),
             "reshape requires a contiguous tensor; call .contiguous() first"
@@ -239,6 +248,7 @@ impl Tensor {
 
     /// Narrow `dim` to `[start, start + len)` — a view with a bumped offset.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Self {
+        let _op = crate::profiler::record_op("lumen::narrow", || vec![self.shape.clone()]);
         assert!(dim < self.ndim(), "dim {dim} out of range");
         assert!(
             start + len <= self.shape[dim],
@@ -253,11 +263,13 @@ impl Tensor {
 
     /// Index one dimension, removing it (`t.select(0, i)` == `t[i]`).
     pub fn select(&self, dim: usize, index: usize) -> Self {
+        let _op = crate::profiler::record_op("lumen::select", || vec![self.shape.clone()]);
         self.narrow(dim, index, 1).squeeze_dim(dim)
     }
 
     /// Transpose two dims by swapping sizes/strides (PyTorch: `transpose`).
     pub fn transpose(&self, a: usize, b: usize) -> Self {
+        let _op = crate::profiler::record_op("lumen::transpose", || vec![self.shape.clone()]);
         assert!(a < self.ndim() && b < self.ndim(), "dim out of range");
         let mut t = self.clone();
         t.shape.swap(a, b);
@@ -267,6 +279,7 @@ impl Tensor {
 
     /// Permute all dims (PyTorch: `permute`, JAX: `lax.transpose`).
     pub fn permute(&self, dims: &[usize]) -> Self {
+        let _op = crate::profiler::record_op("lumen::permute", || vec![self.shape.clone()]);
         assert_eq!(dims.len(), self.ndim(), "permute must list every dim");
         let mut seen = vec![false; self.ndim()];
         let mut t = self.clone();
@@ -283,6 +296,7 @@ impl Tensor {
     }
 
     pub fn squeeze_dim(&self, dim: usize) -> Self {
+        let _op = crate::profiler::record_op("lumen::squeeze_dim", || vec![self.shape.clone()]);
         assert_eq!(self.shape[dim], 1, "cannot squeeze dim {dim} of size != 1");
         let mut t = self.clone();
         t.shape.remove(dim);
@@ -291,6 +305,7 @@ impl Tensor {
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Self {
+        let _op = crate::profiler::record_op("lumen::unsqueeze", || vec![self.shape.clone()]);
         assert!(dim <= self.ndim(), "dim out of range");
         let mut t = self.clone();
         let stride = if dim < self.ndim() {
@@ -311,6 +326,7 @@ impl Tensor {
     /// (PyTorch: `Tensor::contiguous`; JAX arrays are always "contiguous"
     /// in this sense since layout is opaque).
     pub fn contiguous<T: Element>(&self) -> Self {
+        let _op = crate::profiler::record_op("lumen::contiguous", || vec![self.shape.clone()]);
         if self.is_contiguous() {
             return self.clone();
         }
@@ -329,6 +345,7 @@ impl Tensor {
     /// # Panics
     /// If `device` is not available.
     pub fn to(&self, device: Device) -> Self {
+        let _op = crate::profiler::record_op("lumen::to", || vec![self.shape.clone()]);
         if device == self.device() {
             return self.clone();
         }
@@ -354,6 +371,7 @@ impl Tensor {
 
     /// Copy the logical contents out in row-major order.
     pub fn to_vec<T: Element>(&self) -> Vec<T> {
+        let _op = crate::profiler::record_op("lumen::to_vec", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
         // One copy of the storage range the view covers, then a host-side
         // gather: a per-element copy would be a device round trip each.
@@ -407,6 +425,7 @@ impl Tensor {
     }
 
     pub fn get<T: Element>(&self, index: &[usize]) -> T {
+        let _op = crate::profiler::record_op("lumen::get", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
         self.storage.read::<T>(off, 1)[0]
@@ -420,6 +439,7 @@ impl Tensor {
     /// the caller must ensure no data races (single-threaded or externally
     /// synchronized use).
     pub fn set<T: Element>(&self, index: &[usize], value: T) {
+        let _op = crate::profiler::record_op("lumen::set", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
         self.storage.write::<T>(off, &[value]);
@@ -435,6 +455,7 @@ impl Tensor {
     /// one host-to-device copy. A strided view rewrites the storage range it
     /// covers, leaving the elements between its own untouched.
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
+        let _op = crate::profiler::record_op("lumen::fill_", || vec![self.shape.clone()]);
         let value = value.into();
         dispatch_dtype!(self.dtype, T => self.fill_typed(T::from_scalar(value)));
         self
@@ -442,6 +463,7 @@ impl Tensor {
 
     /// Set every element to zero (PyTorch: `Tensor::zero_`).
     pub fn zero_(&self) -> &Self {
+        let _op = crate::profiler::record_op("lumen::zero_", || vec![self.shape.clone()]);
         self.fill_(Scalar::Int(0))
     }
 
