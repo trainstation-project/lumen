@@ -10,6 +10,7 @@ pub use cpu::CpuAllocator;
 
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
+use std::sync::{Arc, OnceLock};
 
 use crate::device::Device;
 
@@ -103,5 +104,75 @@ pub trait Allocator: Send + Sync {
     /// [`allocate`](Self::allocate).
     fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         Some(self.allocate(nbytes))
+    }
+
+    /// Copy `nbytes` from host memory at `src` into this allocator's
+    /// memory at `dst` (PyTorch: the host-to-device branch of `copy_`).
+    ///
+    /// The default is a plain `memcpy`, right for host-accessible memory
+    /// (CPU, and MPS's shared-storage buffers on unified memory); device
+    /// allocators whose memory the host cannot touch (CUDA) override it.
+    ///
+    /// # Safety
+    /// `src` must be valid for reading and `dst` (memory from this
+    /// allocator) for writing `nbytes`, and the two must not overlap.
+    unsafe fn copy_from_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, nbytes) }
+    }
+
+    /// Copy `nbytes` from this allocator's memory at `src` into host memory
+    /// at `dst` (PyTorch: the device-to-host branch of `copy_`). Same
+    /// default and contract as [`copy_from_host`](Self::copy_from_host).
+    ///
+    /// # Safety
+    /// `src` (memory from this allocator) must be valid for reading and
+    /// `dst` for writing `nbytes`, and the two must not overlap.
+    unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, nbytes) }
+    }
+}
+
+/// The allocator for `device` (PyTorch: `c10::GetAllocator`): the CPU
+/// allocator, or the device's global caching allocator. Errors if lumen was
+/// built without that backend or the device is not present.
+pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
+    match device {
+        Device::Cpu => {
+            static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+            Ok(Arc::clone(CPU.get_or_init(|| Arc::new(CpuAllocator))))
+        }
+
+        Device::Mps => {
+            if !mps::is_available() {
+                return Err(
+                    "MPS is not available (lumen was built without Metal, or there is no \
+                     Metal device)"
+                        .to_owned(),
+                );
+            }
+
+            #[cfg(lumen_mps_linked)]
+            return Ok(Arc::new(mps::get()));
+            #[cfg(not(lumen_mps_linked))]
+            unreachable!("mps::is_available() is false without Metal")
+        }
+
+        Device::Cuda(index) => {
+            let count = cuda::device_count();
+            if index >= count {
+                return Err(format!(
+                    "CUDA device {index} is not available ({count} device(s) found{})",
+                    if cfg!(lumen_cuda_linked) {
+                        ""
+                    } else {
+                        "; lumen was built without CUDA"
+                    }
+                ));
+            }
+            #[cfg(lumen_cuda_linked)]
+            return Ok(Arc::new(cuda::get(index)));
+            #[cfg(not(lumen_cuda_linked))]
+            unreachable!("cuda::device_count() is 0 without CUDA")
+        }
     }
 }

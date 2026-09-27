@@ -1,0 +1,80 @@
+"""Tensors on devices: the device= argument and Tensor.to()."""
+
+import pytest
+
+import lumen
+
+
+def _require(device):
+    """Skip unless tensors can be created on `device` in this build."""
+    try:
+        lumen.zeros([1], device=device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+
+def test_default_device_is_cpu():
+    assert lumen.zeros([2]).device == "cpu"
+    assert lumen.tensor([1, 2]).device == "cpu"
+
+
+@pytest.mark.parametrize("device", ["cpu", lumen.device("cpu"), None])
+def test_cpu_device_forms(device):
+    t = lumen.arange(3, device=device)
+    assert t.device == "cpu"
+    assert t.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_to_same_device_shares_storage():
+    t = lumen.arange(4)
+    assert t.to("cpu").shares_storage_with(t)
+
+
+def test_invalid_device_arguments():
+    with pytest.raises(ValueError):
+        lumen.zeros([1], device="gpu")
+    with pytest.raises(TypeError):
+        lumen.zeros([1], device=0)
+
+
+def test_unavailable_cuda_raises_runtime_error():
+    try:
+        t = lumen.zeros([1], device="cuda:0")
+    except RuntimeError as e:
+        assert "not available" in str(e)
+    else:  # a machine with CUDA
+        assert t.device == "cuda:0"
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda"])
+def test_tensor_on_device(device):
+    _require(device)
+    t = lumen.tensor([[1, 2, 3], [4, 5, 6]], device=device)
+    assert t.device.startswith(device)
+    t[0, 1] = 9
+    assert t.tolist() == [[1, 9, 3], [4, 5, 6]]
+    row = t[1]
+    assert row.shares_storage_with(t)
+    assert row.tolist() == [4, 5, 6]
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda"])
+def test_to_and_back(device):
+    _require(device)
+    cpu = lumen.arange(6).reshape([2, 3]).transpose(0, 1)
+    moved = cpu.to(lumen.device(device))
+    assert moved.device.startswith(device)
+    assert not moved.shares_storage_with(cpu)
+    assert moved.tolist() == cpu.tolist()
+    assert moved.contiguous().device == moved.device
+    back = moved.to("cpu")
+    assert back.device == "cpu"
+    assert back.tolist() == cpu.tolist()
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda"])
+def test_factories_on_device(device):
+    _require(device)
+    assert lumen.zeros([2], dtype=lumen.int32, device=device).tolist() == [0, 0]
+    assert lumen.ones([2], device=device).tolist() == [1.0, 1.0]
+    assert lumen.full([2], 7, device=device).tolist() == [7, 7]
