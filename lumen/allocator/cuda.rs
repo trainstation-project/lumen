@@ -69,7 +69,7 @@ impl CachePolicy for CudaPolicy {
 }
 
 #[cfg(lumen_cuda_linked)]
-mod ffi {
+pub(crate) mod ffi {
     use std::ffi::c_void;
 
     // Minimal CUDA runtime API surface, linked dynamically against cudart.

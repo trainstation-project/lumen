@@ -43,6 +43,12 @@ fn detect_cuda() {
     };
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    // The driver API (`libcuda`, for element memsets) links against the
+    // toolkit's stub; the driver's real library is loaded at run time.
+    println!(
+        "cargo:rustc-link-search=native={}",
+        lib_dir.join("stubs").display()
+    );
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-cfg=lumen_cuda_linked");
 }
@@ -57,9 +63,11 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps_fill.mm");
 
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
+        .file("lumen/ops/fill/mps_fill.mm")
         .cpp(true)
         .flag("-std=c++17")
         .flag("-fobjc-arc")

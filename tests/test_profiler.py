@@ -144,8 +144,8 @@ def test_device_fills_are_timed_on_the_gpu(activity):
     gpu = [e for e in prof.events() if e["kind"] == "gpu"]
     assert [e["name"] for e in gpu] == ["Memset"]
     assert gpu[0]["device"].startswith(activity.value)
-    fill = next(e for e in prof.events() if e["name"] == "lumen::fill_")
-    assert gpu[0]["parent"] == fill["id"]
+    zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
+    assert gpu[0]["parent"] == zeros["id"]
     name = activity.name  # "MPS" / "CUDA"
     table = prof.key_averages().table(sort_by="self_device_time_total")
     assert f"Self {name}" in table and f"{name} Mem" in table
