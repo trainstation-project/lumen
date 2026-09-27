@@ -324,6 +324,25 @@ impl PyTensor {
         Ok(Self::wrap(tensor_from_flat(&flat, &shape, dtype, device)?))
     }
 
+    /// A tensor whose memory is left uninitialized (PyTorch: `torch.empty`).
+    ///
+    /// As with `torch.empty`, the values are unspecified until written
+    /// (`fill_`, `t[i] = v`, ...). Reading an element before writing it is
+    /// more than garbage here: it is undefined behavior in the Rust core
+    /// (see `Tensor::empty`), which Python cannot rule out.
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None, device=None))]
+    fn empty(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        device: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let options = options(dtype, device)?;
+        // Not upheld here: `Tensor::empty` requires writing every element
+        // before reading it, and Python callers are trusted to (see above).
+        Ok(Self::wrap(unsafe { Tensor::empty(&shape, options) }))
+    }
+
     #[staticmethod]
     #[pyo3(signature = (shape, dtype=None, device=None))]
     fn zeros(
@@ -333,6 +352,19 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let options = options(dtype, device)?;
         Ok(Self::wrap(Tensor::zeros(&shape, options)))
+    }
+
+    /// A tensor of ones, float32 unless `dtype` says otherwise (PyTorch:
+    /// `torch.ones`).
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None, device=None))]
+    fn ones(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        device: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let options = options(dtype, device)?;
+        Ok(Self::wrap(Tensor::ones(&shape, options)))
     }
 
     #[staticmethod]
@@ -463,6 +495,20 @@ impl PyTensor {
     /// of the same storage if it is already there (PyTorch: `Tensor.to`).
     fn to(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self::wrap(self.inner.to(resolve_device(Some(device))?)))
+    }
+
+    /// Set every element to `value` in place and return the tensor
+    /// (PyTorch: `Tensor.fill_`); uses the device's memset when it can.
+    fn fill_<'py>(slf: PyRef<'py, Self>, value: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
+        slf.inner.fill_(to_scalar(value)?);
+        Ok(slf)
+    }
+
+    /// Set every element to zero in place and return the tensor
+    /// (PyTorch: `Tensor.zero_`).
+    fn zero_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf.inner.zero_();
+        slf
     }
 
     // ----------------------------- element access -----------------------------

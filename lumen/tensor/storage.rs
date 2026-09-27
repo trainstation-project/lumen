@@ -29,7 +29,13 @@ fn allocator_or_panic(device: Device) -> Arc<dyn Allocator> {
 }
 
 impl Storage {
-    /// Allocate `nbytes` of zeroed memory on `device`.
+    /// Allocate `nbytes` of uninitialized memory on `device`, like
+    /// PyTorch's `StorageImpl` (the contents are whatever the allocator
+    /// returned).
+    ///
+    /// Sound because nothing public reads raw storage bytes: data comes out
+    /// only through a [`crate::Tensor`], which writes before it reads
+    /// (`Tensor::zeros` zeroes with the device's memset).
     ///
     /// # Panics
     /// If `device` is not available.
@@ -37,18 +43,9 @@ impl Storage {
         Self::with_allocator(nbytes, allocator_or_panic(device))
     }
 
-    /// Allocate `nbytes` of zeroed memory from `allocator`.
+    /// Allocate `nbytes` of uninitialized memory from `allocator` (PyTorch:
+    /// `StorageImpl(size_bytes, allocator)`), e.g. a custom allocator.
     pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
-        let storage = Self::uninit(nbytes, allocator);
-        // Allocators hand out uninitialized memory (like `malloc`), and
-        // `read` may return any byte, so zero it.
-        storage.write_bytes(0, &vec![0; nbytes]);
-        storage
-    }
-
-    /// Allocate `nbytes` without initializing them. The caller must write
-    /// every byte before anything reads the storage.
-    fn uninit(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data: allocator.allocate(nbytes),
@@ -64,20 +61,9 @@ impl Storage {
     /// # Panics
     /// If `device` is not available.
     pub fn from_slice<T: Element>(data: &[T], device: Device) -> Self {
-        Self::from_slice_with(data, allocator_or_panic(device))
-    }
-
-    /// A storage from `allocator` holding a copy of `data`.
-    pub(crate) fn from_slice_with<T: Element>(data: &[T], allocator: Arc<dyn Allocator>) -> Self {
-        Self::from_bytes(as_bytes(data), allocator)
-    }
-
-    /// A storage from `allocator` holding a copy of `bytes`. Crate-private:
-    /// the bytes must be valid values of the dtype they will be read as.
-    pub(crate) fn from_bytes(bytes: &[u8], allocator: Arc<dyn Allocator>) -> Self {
-        let storage = Self::uninit(bytes.len(), allocator);
+        let storage = Self::new(size_of_val(data), device);
         // Fills every byte of the fresh buffer.
-        storage.write_bytes(0, bytes);
+        storage.write(0, data);
         storage
     }
 
@@ -105,9 +91,13 @@ impl Storage {
 
     /// Copy `out.len()` bytes starting at byte `offset` to the host.
     ///
+    /// Crate-private: the storage may be uninitialized (see
+    /// [`new`](Self::new)), so only the tensor layer, which tracks what has
+    /// been written, reads it.
+    ///
     /// # Panics
     /// If the range is out of bounds.
-    pub fn read_bytes(&self, offset: usize, out: &mut [u8]) {
+    pub(crate) fn read_bytes(&self, offset: usize, out: &mut [u8]) {
         self.check_range(offset, out.len());
         if out.is_empty() {
             return;
@@ -115,11 +105,8 @@ impl Storage {
         // SAFETY: the range is in bounds of this allocator's buffer, and
         // `out` is a distinct host buffer of the same length.
         unsafe {
-            self.allocator.copy_to_host(
-                out.as_mut_ptr(),
-                self.data.as_ptr().add(offset),
-                out.len(),
-            );
+            self.allocator
+                .copy_to_host(out.as_mut_ptr(), self.ptr_at(offset), out.len());
         }
     }
 
@@ -140,11 +127,25 @@ impl Storage {
         }
         // SAFETY: as in `read_bytes`.
         unsafe {
-            self.allocator.copy_from_host(
-                self.data.as_ptr().add(offset),
-                bytes.as_ptr(),
-                bytes.len(),
-            );
+            self.allocator
+                .copy_from_host(self.ptr_at(offset), bytes.as_ptr(), bytes.len());
+        }
+    }
+
+    /// Set `nbytes` starting at byte `offset` to `value` with the device's
+    /// memset. Crate-private for the same reason as
+    /// [`write_bytes`](Self::write_bytes).
+    ///
+    /// # Panics
+    /// If the range is out of bounds.
+    pub(crate) fn fill_bytes(&self, offset: usize, value: u8, nbytes: usize) {
+        self.check_range(offset, nbytes);
+        if nbytes == 0 {
+            return;
+        }
+        // SAFETY: the range is in bounds of this allocator's buffer.
+        unsafe {
+            self.allocator.memset(self.ptr_at(offset), value, nbytes);
         }
     }
 
@@ -162,6 +163,15 @@ impl Storage {
         self.write_bytes(offset * size_of::<T>(), as_bytes(data));
     }
 
+    /// The buffer's address `offset` bytes in, in the device's address
+    /// space. `wrapping_add`, not `add`: device memory (CUDA, or a mock
+    /// device's fake addresses) is not an allocation Rust knows about, and
+    /// `add` is undefined behavior outside one. The allocator's copies and
+    /// memset are what access it, never a Rust dereference.
+    fn ptr_at(&self, offset: usize) -> *mut u8 {
+        self.data.as_ptr().wrapping_add(offset)
+    }
+
     fn check_range(&self, offset: usize, len: usize) {
         assert!(
             offset
@@ -176,7 +186,7 @@ impl Storage {
 
 /// View elements as their bytes. Sound for [`Element`] types, which are
 /// plain-old-data without padding.
-fn as_bytes<T: Element>(data: &[T]) -> &[u8] {
+pub(crate) fn as_bytes<T: Element>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), size_of_val(data)) }
 }
 

@@ -6,6 +6,8 @@ pub mod cuda;
 pub mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+#[cfg(test)]
+mod tests;
 pub mod traits;
 
 pub use cpu::CpuAllocator;
@@ -131,6 +133,17 @@ pub trait Allocator: Send + Sync {
     /// `dst` for writing `nbytes`, and the two must not overlap.
     unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
         unsafe { std::ptr::copy_nonoverlapping(src, dst, nbytes) }
+    }
+
+    /// Set `nbytes` of this allocator's memory at `dst` to `value`
+    /// (CUDA: `cudaMemset`; Metal: a blit encoder's `fillBuffer`). The
+    /// default writes through the pointer, right for CPU memory.
+    ///
+    /// # Safety
+    /// `dst` (memory from this allocator) must be valid for writing
+    /// `nbytes`.
+    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
+        unsafe { std::ptr::write_bytes(dst, value, nbytes) }
     }
 }
 

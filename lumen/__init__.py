@@ -26,6 +26,7 @@ from lumen.tensor import (
     bool,
     default_dtype,
     dtypes,
+    empty,
     float16,
     float32,
     float64,
@@ -58,7 +59,7 @@ __all__ = [
     "dtypes",
     "default_dtype",
     # factories
-    "tensor", "zeros", "ones", "full", "arange",
+    "tensor", "empty", "zeros", "ones", "full", "arange",
     # numpy interop
     "to_numpy", "from_numpy",
 ]

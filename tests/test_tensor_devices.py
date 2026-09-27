@@ -5,6 +5,12 @@ import pytest
 import lumen
 
 
+# Device cases carry a marker so each `make test-*` target runs only its own
+# (`-m mps`, `-m cuda`; `test-cpu` runs `-m "not mps and not cuda"`).
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+
+
 def _require(device):
     """Skip unless tensors can be created on `device` in this build."""
     try:
@@ -46,7 +52,7 @@ def test_unavailable_cuda_raises_runtime_error():
         assert t.device == "cuda:0"
 
 
-@pytest.mark.parametrize("device", ["mps", "cuda"])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 def test_tensor_on_device(device):
     _require(device)
     t = lumen.tensor([[1, 2, 3], [4, 5, 6]], device=device)
@@ -58,7 +64,7 @@ def test_tensor_on_device(device):
     assert row.tolist() == [4, 5, 6]
 
 
-@pytest.mark.parametrize("device", ["mps", "cuda"])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 def test_to_and_back(device):
     _require(device)
     cpu = lumen.arange(6).reshape([2, 3]).transpose(0, 1)
@@ -72,9 +78,34 @@ def test_to_and_back(device):
     assert back.tolist() == cpu.tolist()
 
 
-@pytest.mark.parametrize("device", ["mps", "cuda"])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 def test_factories_on_device(device):
     _require(device)
     assert lumen.zeros([2], dtype=lumen.int32, device=device).tolist() == [0, 0]
     assert lumen.ones([2], device=device).tolist() == [1.0, 1.0]
     assert lumen.full([2], 7, device=device).tolist() == [7, 7]
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_fill_and_zero_in_place(device):
+    if device != "cpu":
+        _require(device)
+    t = lumen.arange(6, device=device).reshape([2, 3])
+    assert t.fill_(1.5) is t  # returns the tensor itself, like torch
+    assert t.tolist() == [[1.5] * 3] * 2
+    t[1].zero_()  # a view: writes through to t
+    assert t.tolist() == [[1.5] * 3, [0.0] * 3]
+    t.transpose(0, 1)[0].fill_(-1)  # strided view (column 0)
+    assert t.tolist() == [[-1.0, 1.5, 1.5], [-1.0, 0.0, 0.0]]
+    with pytest.raises(TypeError):
+        t.fill_("x")
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_empty_and_ones_on_device(device):
+    _require(device)
+    e = lumen.empty([2, 2], dtype=lumen.int64, device=device)
+    assert e.device.startswith(device)
+    assert e.zero_().tolist() == [[0, 0], [0, 0]]
+    o = lumen.ones([3], device=device)
+    assert (o.dtype, o.tolist()) == ("float32", [1.0, 1.0, 1.0])

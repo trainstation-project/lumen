@@ -14,8 +14,8 @@
 
 #include <mach/vm_page_size.h>
 
+#include <map>
 #include <mutex>
-#include <unordered_map>
 
 // The system default device, created lazily (MTLCreateSystemDefaultDevice is
 // documented as expensive; call it once).
@@ -28,10 +28,21 @@ static id<MTLDevice> lumen_default_device(void) {
   return device;
 }
 
+// A command queue for blit work (fills), created with the device.
+static id<MTLCommandQueue> lumen_command_queue(void) {
+  static id<MTLCommandQueue> queue = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    queue = [lumen_default_device() newCommandQueue];
+  });
+  return queue;
+}
+
 // contents pointer -> backing MTLBuffer, so lumen_mps_free can release the
 // buffer given only the pointer the Rust side holds. Entries are __strong:
-// inserting retains, erasing releases (ARC).
-static std::unordered_map<void *, id<MTLBuffer> __strong> g_buffers;
+// inserting retains, erasing releases (ARC). Ordered, so a pointer *inside*
+// a buffer (a caching-allocator block within a segment) finds its buffer.
+static std::map<char *, id<MTLBuffer> __strong> g_buffers;
 static std::mutex g_buffers_mu;
 
 extern "C" {
@@ -75,7 +86,7 @@ void *lumen_mps_alloc(size_t nbytes) {
   void *contents = buffer.contents;
   {
     std::lock_guard<std::mutex> lock(g_buffers_mu);
-    g_buffers[contents] = buffer;
+    g_buffers[static_cast<char *>(contents)] = buffer;
   }
   return contents;
 }
@@ -85,6 +96,40 @@ void lumen_mps_free(void *contents) {
     return;
   }
   std::lock_guard<std::mutex> lock(g_buffers_mu);
-  g_buffers.erase(contents); // releases the MTLBuffer
+  g_buffers.erase(static_cast<char *>(contents)); // releases the MTLBuffer
+}
+
+// Set nbytes at ptr (anywhere inside a buffer from lumen_mps_alloc) to value,
+// with a blit encoder's fillBuffer — Metal's memset — and wait for it.
+// Returns 0 on success, -1 if ptr..ptr+nbytes is not inside one buffer.
+int lumen_mps_memset(void *ptr, uint8_t value, size_t nbytes) {
+  if (nbytes == 0) {
+    return 0;
+  }
+  char *p = static_cast<char *>(ptr);
+  id<MTLBuffer> buffer = nil;
+  NSUInteger offset = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_buffers_mu);
+    auto it = g_buffers.upper_bound(p); // first buffer starting after p
+    if (it == g_buffers.begin()) {
+      return -1;
+    }
+    --it;
+    offset = static_cast<NSUInteger>(p - it->first);
+    if (offset + nbytes > it->second.length) {
+      return -1;
+    }
+    buffer = it->second; // retained for the blit below
+  }
+  @autoreleasepool {
+    id<MTLCommandBuffer> commands = [lumen_command_queue() commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    [blit fillBuffer:buffer range:NSMakeRange(offset, nbytes) value:value];
+    [blit endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    return commands.status == MTLCommandBufferStatusCompleted ? 0 : -1;
+  }
 }
 }

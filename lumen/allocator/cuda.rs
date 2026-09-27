@@ -80,6 +80,7 @@ mod ffi {
         pub fn cudaMalloc(devPtr: *mut *mut c_void, size: usize) -> i32;
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
+        pub fn cudaMemset(dst: *mut c_void, value: i32, count: usize) -> i32;
     }
 
     // `cudaMemcpyKind` values.
@@ -116,6 +117,16 @@ pub fn is_available() -> bool {
 #[cfg(lumen_cuda_linked)]
 pub struct CudaBackend {
     device_index: i32,
+}
+
+#[cfg(lumen_cuda_linked)]
+impl CudaBackend {
+    /// The backend for CUDA device `device_index`.
+    pub fn new(device_index: usize) -> Self {
+        CudaBackend {
+            device_index: device_index as i32,
+        }
+    }
 }
 
 #[cfg(lumen_cuda_linked)]
@@ -162,6 +173,23 @@ impl Allocator for CudaBackend {
     unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
         self.memcpy(dst, src, nbytes, ffi::DEVICE_TO_HOST);
     }
+
+    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
+        if nbytes == 0 {
+            return;
+        }
+
+        let err = unsafe {
+            ffi::cudaSetDevice(self.device_index);
+            ffi::cudaMemset(dst.cast(), value.into(), nbytes)
+        };
+
+        assert_eq!(
+            err, 0,
+            "cudaMemset of {nbytes} bytes on cuda:{} failed (error {err})",
+            self.device_index
+        );
+    }
 }
 
 #[cfg(lumen_cuda_linked)]
@@ -199,13 +227,6 @@ pub fn get(device_index: usize) -> CudaAllocator {
         registry.resize_with(device_index + 1, || None);
     }
     registry[device_index]
-        .get_or_insert_with(|| {
-            CachingAllocator::new(
-                CudaBackend {
-                    device_index: device_index as i32,
-                },
-                CudaPolicy,
-            )
-        })
+        .get_or_insert_with(|| CachingAllocator::new(CudaBackend::new(device_index), CudaPolicy))
         .clone()
 }

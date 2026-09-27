@@ -141,6 +141,7 @@ mod ffi {
         pub fn lumen_mps_limits(out: *mut Limits) -> i32;
         pub fn lumen_mps_alloc(nbytes: usize) -> *mut u8;
         pub fn lumen_mps_free(ptr: *mut u8);
+        pub fn lumen_mps_memset(ptr: *mut u8, value: u8, nbytes: usize) -> i32;
     }
 }
 
@@ -169,6 +170,13 @@ impl Allocator for MpsBackend {
             Layout::from_size_align(nbytes, 256).unwrap(),
             |p| unsafe { ffi::lumen_mps_free(p.as_ptr()) },
         ))
+    }
+
+    // Shared buffers are host-addressable, so the default memcpy host
+    // copies apply; fills run on the GPU through Metal's blit memset.
+    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
+        let status = unsafe { ffi::lumen_mps_memset(dst, value, nbytes) };
+        assert_eq!(status, 0, "Metal fillBuffer of {nbytes} bytes failed");
     }
 }
 

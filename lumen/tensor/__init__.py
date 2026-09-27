@@ -19,7 +19,7 @@ __all__ = [
     "dtypes",
     "default_dtype",
     # factories
-    "tensor", "zeros", "ones", "full", "arange",
+    "tensor", "empty", "zeros", "ones", "full", "arange",
     # numpy interop
     "to_numpy", "from_numpy",
 ]
@@ -66,12 +66,19 @@ def tensor(data, dtype=None, device=None):
     return Tensor(data, dtype=dtype, device=device)
 
 
+def empty(shape, dtype=None, device=None):
+    """An uninitialized tensor, like ``torch.empty``: write every element
+    (``fill_``, ``t[i] = v``, ...) before reading it. Reading first is
+    undefined behavior in lumen's Rust core, not just garbage."""
+    return Tensor.empty(list(shape), dtype, device)
+
+
 def zeros(shape, dtype=None, device=None):
     return Tensor.zeros(list(shape), dtype, device)
 
 
 def ones(shape, dtype=None, device=None):
-    return Tensor.full(list(shape), 1, dtype, device)
+    return Tensor.ones(list(shape), dtype, device)
 
 
 def full(shape, value, dtype=None, device=None):
