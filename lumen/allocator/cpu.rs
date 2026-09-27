@@ -1,5 +1,6 @@
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{Allocator, DataPtr};
 use crate::device::Device;
