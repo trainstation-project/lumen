@@ -4,6 +4,8 @@ pub mod config;
 mod cpu;
 pub mod cuda;
 pub mod mps;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 pub mod traits;
 
 pub use cpu::CpuAllocator;

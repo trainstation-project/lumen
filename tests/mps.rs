@@ -40,10 +40,13 @@ fn get_returns_the_same_global_instance() {
     let a = mps::get();
     let b = mps::get();
     // Clones share one cache: an allocation freed through `a` is reusable by `b`.
-    let p = a.allocate(512);
+    // Other tests put tensors on the global allocator in parallel, but only
+    // small ones; a large-pool size keeps them from taking the freed block.
+    let size = 5 << 20;
+    let p = a.allocate(size);
     let ptr = p.as_ptr();
     drop(p);
-    let q = b.allocate(512);
+    let q = b.allocate(size);
     assert_eq!(
         q.as_ptr(),
         ptr,
