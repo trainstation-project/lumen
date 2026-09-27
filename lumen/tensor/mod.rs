@@ -1,4 +1,6 @@
 pub mod dtype;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 pub mod scalar;
 pub mod storage;
 pub mod tensor_options;
