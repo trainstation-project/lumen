@@ -1,7 +1,7 @@
 //! Tests for the dtype layer: sizes, names, and per-dtype tensor roundtrips.
 
 use lumen::dtype::{bf16, f16};
-use lumen::{DType, Tensor};
+use lumen::{DType, Device, Element, Tensor};
 
 #[test]
 fn size_of_matches_rust_types() {
@@ -41,14 +41,16 @@ macro_rules! test_roundtrip {
         fn $name() {
             let a: $t = $a;
             let b: $t = $b;
-            let t = Tensor::from_slice(&[a, b]);
+            let t = Tensor::from_slice(&[a, b], Device::Cpu);
             assert_eq!(t.dtype(), $dtype);
             assert_eq!(t.numel(), 2);
             assert_eq!(t.get::<$t>(&[0]), a);
             t.set(&[1], a);
             assert_eq!(t.to_vec::<$t>(), vec![a, a]);
             // nbytes = numel * itemsize
-            let m = Tensor::zeros::<$t>(&[2, 3]);
+            let m = Tensor::zeros(&[2, 3], $dtype);
+            assert_eq!(m.dtype(), $dtype);
+            assert_eq!(m.to_vec::<$t>(), vec![<$t as Element>::ZERO; 6]);
             assert_eq!(m.numel() * $dtype.size_of(), 6 * size_of::<$t>());
         }
     };
@@ -81,7 +83,7 @@ test_roundtrip!(
 );
 #[test]
 fn f16_arange_and_display() {
-    let t = Tensor::arange::<f16>(4);
+    let t = Tensor::arange(4, DType::F16);
     assert_eq!(t.dtype(), DType::F16);
     assert_eq!(t.get::<f16>(&[3]), f16::from_f32(3.0));
     let s = format!("{t}");
@@ -92,7 +94,7 @@ fn f16_arange_and_display() {
 fn views_work_for_every_dtype() {
     // Views are dtype-agnostic (they only move metadata), but check one
     // non-trivial element size to be sure offsets are in *elements*.
-    let t = Tensor::arange::<f64>(6).reshape(&[2, 3]);
+    let t = Tensor::arange(6, DType::F64).reshape(&[2, 3]);
     let row = t.select(0, 1);
     assert_eq!(row.storage_offset(), 3);
     assert_eq!(row.get::<f64>(&[0]), 3.0);

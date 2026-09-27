@@ -17,6 +17,8 @@
 
 use std::fmt;
 
+use crate::scalar::Scalar;
+
 // Re-exported so users of the crate can name the element types directly.
 pub use half::{bf16, f16};
 
@@ -99,52 +101,137 @@ impl fmt::Display for DType {
 pub trait Element: Copy + fmt::Debug + fmt::Display + 'static {
     const DTYPE: DType;
     const ZERO: Self;
-    fn from_usize(v: usize) -> Self;
+    /// Convert like a C++ `static_cast` (PyTorch: `Scalar::to<T>()`):
+    /// floats truncate toward zero into integers, nonzero is `true`.
+    fn from_scalar(v: Scalar) -> Self;
+    fn to_scalar(self) -> Scalar;
 }
 
 macro_rules! impl_element {
-    ($t:ty, $dtype:expr) => {
+    ($t:ty, $dtype:expr, $scalar:ident) => {
         impl Element for $t {
             const DTYPE: DType = $dtype;
             const ZERO: Self = 0 as $t;
-            fn from_usize(v: usize) -> Self {
-                v as $t
+            fn from_scalar(v: Scalar) -> Self {
+                match v {
+                    Scalar::Bool(b) => b as u8 as $t,
+                    Scalar::Int(i) => i as $t,
+                    Scalar::Float(f) => f as $t,
+                }
+            }
+            fn to_scalar(self) -> Scalar {
+                Scalar::$scalar(self as _)
             }
         }
     };
 }
 
-impl_element!(f32, DType::F32);
-impl_element!(f64, DType::F64);
-impl_element!(i8, DType::I8);
-impl_element!(i16, DType::I16);
-impl_element!(i32, DType::I32);
-impl_element!(i64, DType::I64);
-impl_element!(u8, DType::U8);
-impl_element!(u16, DType::U16);
-impl_element!(u32, DType::U32);
-impl_element!(u64, DType::U64);
+impl_element!(f32, DType::F32, Float);
+impl_element!(f64, DType::F64, Float);
+impl_element!(i8, DType::I8, Int);
+impl_element!(i16, DType::I16, Int);
+impl_element!(i32, DType::I32, Int);
+impl_element!(i64, DType::I64, Int);
+impl_element!(u8, DType::U8, Int);
+impl_element!(u16, DType::U16, Int);
+impl_element!(u32, DType::U32, Int);
+impl_element!(u64, DType::U64, Int);
 
 impl Element for bool {
     const DTYPE: DType = DType::Bool;
     const ZERO: Self = false;
-    fn from_usize(v: usize) -> Self {
-        v != 0
+    fn from_scalar(v: Scalar) -> Self {
+        match v {
+            Scalar::Bool(b) => b,
+            Scalar::Int(i) => i != 0,
+            Scalar::Float(f) => f != 0.0,
+        }
+    }
+    fn to_scalar(self) -> Scalar {
+        Scalar::Bool(self)
     }
 }
 
 impl Element for f16 {
     const DTYPE: DType = DType::F16;
     const ZERO: Self = f16::ZERO;
-    fn from_usize(v: usize) -> Self {
-        f16::from_f64(v as f64)
+    fn from_scalar(v: Scalar) -> Self {
+        f16::from_f64(v.to_f64())
+    }
+    fn to_scalar(self) -> Scalar {
+        Scalar::Float(self.to_f64())
     }
 }
 
 impl Element for bf16 {
     const DTYPE: DType = DType::BF16;
     const ZERO: Self = bf16::ZERO;
-    fn from_usize(v: usize) -> Self {
-        bf16::from_f64(v as f64)
+    fn from_scalar(v: Scalar) -> Self {
+        bf16::from_f64(v.to_f64())
+    }
+    fn to_scalar(self) -> Scalar {
+        Scalar::Float(self.to_f64())
     }
 }
+
+/// Run `$body` with `$T` bound to the Rust element type of runtime dtype
+/// `$dtype` (PyTorch: `AT_DISPATCH_ALL_TYPES`).
+macro_rules! dispatch_dtype {
+    ($dtype:expr, $T:ident => $body:expr) => {
+        match $dtype {
+            $crate::DType::Bool => {
+                type $T = bool;
+                $body
+            }
+            $crate::DType::U8 => {
+                type $T = u8;
+                $body
+            }
+            $crate::DType::U16 => {
+                type $T = u16;
+                $body
+            }
+            $crate::DType::U32 => {
+                type $T = u32;
+                $body
+            }
+            $crate::DType::U64 => {
+                type $T = u64;
+                $body
+            }
+            $crate::DType::I8 => {
+                type $T = i8;
+                $body
+            }
+            $crate::DType::I16 => {
+                type $T = i16;
+                $body
+            }
+            $crate::DType::I32 => {
+                type $T = i32;
+                $body
+            }
+            $crate::DType::I64 => {
+                type $T = i64;
+                $body
+            }
+            $crate::DType::F16 => {
+                type $T = $crate::dtype::f16;
+                $body
+            }
+            $crate::DType::BF16 => {
+                type $T = $crate::dtype::bf16;
+                $body
+            }
+            $crate::DType::F32 => {
+                type $T = f32;
+                $body
+            }
+            $crate::DType::F64 => {
+                type $T = f64;
+                $body
+            }
+        }
+    };
+}
+pub(crate) use dispatch_dtype;

@@ -6,19 +6,31 @@ __version__: str
 
 Scalar = Union[bool, int, float]
 
+DeviceLike = Union[str, "device"]
+
 class Tensor:
     def __init__(
         self,
         data: Any,
         shape: Optional[Sequence[int]] = None,
         dtype: Optional[str] = None,
+        device: Optional[DeviceLike] = None,
     ) -> None: ...
     @staticmethod
-    def zeros(shape: Sequence[int], dtype: Optional[str] = None) -> Tensor: ...
+    def zeros(
+        shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None
+    ) -> Tensor: ...
     @staticmethod
-    def full(shape: Sequence[int], value: Scalar, dtype: Optional[str] = None) -> Tensor: ...
+    def full(
+        shape: Sequence[int],
+        value: Scalar,
+        dtype: Optional[str] = None,
+        device: Optional[DeviceLike] = None,
+    ) -> Tensor: ...
     @staticmethod
-    def arange(n: int, dtype: Optional[str] = None) -> Tensor: ...
+    def arange(
+        n: int, dtype: Optional[str] = None, device: Optional[DeviceLike] = None
+    ) -> Tensor: ...
 
     # metadata
     @property
@@ -49,6 +61,7 @@ class Tensor:
     def unsqueeze(self, dim: int) -> Tensor: ...
     def squeeze(self, dim: int) -> Tensor: ...
     def contiguous(self) -> Tensor: ...
+    def to(self, device: DeviceLike) -> Tensor: ...
 
     # element access
     def get(self, index: Sequence[int]) -> Scalar: ...

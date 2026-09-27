@@ -6,7 +6,7 @@ use lumen::{Device, Storage, Tensor};
 #[test]
 fn cpu_is_always_available() {
     assert_eq!(allocator_for(Device::Cpu).unwrap().device(), Device::Cpu);
-    let t = Tensor::zeros_on::<f32>(&[2], Device::Cpu);
+    let t = Tensor::zeros(&[2], Device::Cpu);
     assert_eq!(t.device(), Device::Cpu);
     assert_eq!(Storage::new(8, Device::Cpu).device(), Device::Cpu);
 }
@@ -35,5 +35,5 @@ fn unavailable_devices_are_reported() {
 #[test]
 #[should_panic(expected = "is not available")]
 fn tensor_on_unavailable_device_panics() {
-    Tensor::zeros_on::<f32>(&[1], Device::Cuda(cuda::device_count()));
+    Tensor::zeros(&[1], Device::Cuda(cuda::device_count()));
 }
