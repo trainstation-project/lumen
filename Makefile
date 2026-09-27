@@ -23,22 +23,27 @@ NO_METAL_FEATURES := --no-default-features --features cuda
 test: test-cpu test-cuda test-mps
 
 ## test-cpu: every unit test except the per-device modules, and the doc
-## tests (built without Metal), then the Python tests.
+## tests (built without Metal), then the Python tests not marked for a
+## device.
 test-cpu:
 	cargo test --lib --no-default-features -- --format=terse $(DEVICE_TESTS)
 	cargo test --doc --no-default-features
-	maturin develop && python -m pytest tests -q
+	maturin develop && python -m pytest tests -q -m "not mps and not cuda"
 
-## test-cuda: the `cuda` test modules. They run the caching logic against
-## mock backends; the real CUDA backend is compiled too when build.rs finds
-## cudart.
+## test-cuda: the `cuda` test modules and the Python tests marked `cuda`.
+## The caching logic runs against mock backends everywhere; where build.rs
+## finds cudart, the real backend and tensors are also tested on the GPU
+## (skipped when none is visible). The Python wheel is rebuilt with CUDA.
 test-cuda:
 	cargo test --lib $(NO_METAL_FEATURES) -- --format=terse ::tests::cuda::
+	maturin develop --features python,cuda && python -m pytest tests -q -rs -m cuda
 
-## test-mps: the `mps` test modules, against the real Metal device (macOS;
-## elsewhere they compile to nothing).
+## test-mps: the `mps` test modules and the Python tests marked `mps`,
+## against the real Metal device (macOS; elsewhere the Rust modules compile
+## to nothing and the Python tests skip).
 test-mps:
 	cargo test --lib --features mps -- --format=terse ::tests::mps::
+	maturin develop && python -m pytest tests -q -rs -m mps
 
 fmt:
 	cargo fmt --all

@@ -621,8 +621,6 @@ mod mps {
         };
     }
 
-    /// An allocator with its own private cache (not the global one).
-
     #[test]
     fn tensor_on_mps_roundtrips() {
         require_mps!();
@@ -686,6 +684,96 @@ mod mps {
             &[4],
             TensorOptions::new().dtype(DType::Bool).device(Device::Mps),
         );
+        assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
+    }
+}
+
+#[cfg(lumen_cuda_linked)] // needs cudart and a GPU
+mod cuda {
+    //! Tensors on real CUDA devices. Each test skips when no GPU is visible.
+
+    use crate::allocator::cuda;
+    use crate::{DType, Device, Tensor, TensorOptions};
+
+    /// Skip guard: returns early from a test when there is no GPU.
+    macro_rules! require_cuda {
+        () => {
+            if !cuda::is_available() {
+                eprintln!("no CUDA device, skipping");
+                return;
+            }
+        };
+    }
+
+    fn on_gpu(dtype: DType) -> TensorOptions {
+        TensorOptions::new().dtype(dtype).device(Device::Cuda(0))
+    }
+
+    #[test]
+    fn tensor_on_cuda_roundtrips() {
+        require_cuda!();
+        let t = Tensor::arange(6, on_gpu(DType::F32)).reshape(&[2, 3]);
+        assert_eq!(t.device(), Device::Cuda(0));
+        assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
+        t.set(&[0, 1], 9.0f32);
+        assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
+        // Views share the device buffer.
+        let col = t.select(1, 1);
+        assert!(col.shares_storage_with(&t));
+        assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
+    }
+
+    #[test]
+    fn tensor_moves_between_cpu_and_cuda() {
+        require_cuda!();
+        let cpu = Tensor::from_slice(&[1i64, 2, 3, 4], Device::Cpu).reshape(&[2, 2]);
+        let on_gpu = cpu.transpose(0, 1).to(Device::Cuda(0));
+        assert_eq!(on_gpu.device(), Device::Cuda(0));
+        assert!(!on_gpu.is_contiguous(), "layout is kept");
+        assert_eq!(on_gpu.to_vec::<i64>(), vec![1, 3, 2, 4]);
+        let contiguous = on_gpu.contiguous::<i64>();
+        assert_eq!(contiguous.device(), Device::Cuda(0));
+        let back = contiguous.to(Device::Cpu);
+        assert_eq!(back.device(), Device::Cpu);
+        assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn tensor_moves_between_gpus() {
+        require_cuda!();
+        if cuda::device_count() < 2 {
+            eprintln!("fewer than 2 CUDA devices, skipping");
+            return;
+        }
+        let a = Tensor::arange(4, on_gpu(DType::F64));
+        let b = a.to(Device::Cuda(1));
+        assert_eq!(b.device(), Device::Cuda(1));
+        assert!(!b.shares_storage_with(&a));
+        assert_eq!(b.to_vec::<f64>(), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn zeros_on_cuda_are_zero() {
+        require_cuda!();
+        let t = Tensor::zeros(&[3, 5], on_gpu(DType::Bool));
+        assert!(t.to_vec::<bool>().iter().all(|&b| !b));
+        let f = Tensor::zeros(&[1000], on_gpu(DType::F32));
+        assert!(f.to_vec::<f32>().iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn fill_on_cuda_uses_memset_and_respects_views() {
+        require_cuda!();
+        let t = Tensor::arange(12, on_gpu(DType::F32)).reshape(&[3, 4]);
+        t.select(0, 1).zero_(); // contiguous: cudaMemset at an offset
+        t.select(1, 3).fill_(2.5); // strided: read-modify-write
+        assert_eq!(
+            t.to_vec::<f32>(),
+            vec![0.0, 1.0, 2.0, 2.5, 0.0, 0.0, 0.0, 2.5, 8.0, 9.0, 10.0, 2.5]
+        );
+        let bytes = Tensor::zeros(&[5], on_gpu(DType::U8));
+        assert_eq!(bytes.fill_(0xC3).to_vec::<u8>(), vec![0xC3; 5]);
+        let ones = Tensor::ones(&[4], on_gpu(DType::Bool));
         assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
     }
 }

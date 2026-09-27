@@ -890,6 +890,121 @@ mod cuda {
         drop(a);
         drop(b);
     }
+
+    #[cfg(lumen_cuda_linked)] // the real backend exists only when cudart is linked
+    mod device {
+        //! The real CUDA backend on a GPU (the tests above use mocks). Each
+        //! test skips when no device is visible. Tests that assert on stats
+        //! use a fresh allocator, not the global `cuda::get`, so parallel
+        //! tests can't perturb each other's counters.
+
+        use crate::allocator::allocator_for;
+        use crate::allocator::cuda::{self, CudaBackend};
+        use crate::{Allocator, CachingAllocator, CudaPolicy, Device};
+
+        /// Skip guard: returns early from a test when there is no GPU.
+        macro_rules! require_cuda {
+            () => {
+                if !cuda::is_available() {
+                    eprintln!("no CUDA device, skipping");
+                    return;
+                }
+            };
+        }
+
+        /// An allocator on device 0 with its own private cache.
+        fn fresh() -> cuda::CudaAllocator {
+            CachingAllocator::new(CudaBackend::new(0), CudaPolicy)
+        }
+
+        #[test]
+        fn availability_matches_the_device_count() {
+            assert_eq!(cuda::is_available(), cuda::device_count() > 0);
+            assert!(allocator_for(Device::Cuda(cuda::device_count())).is_err());
+        }
+
+        #[test]
+        fn reports_cuda_devices() {
+            require_cuda!();
+            assert_eq!(fresh().device(), Device::Cuda(0));
+            let last = cuda::device_count() - 1;
+            assert_eq!(cuda::get(last).device(), Device::Cuda(last));
+            assert_eq!(
+                allocator_for(Device::Cuda(last)).unwrap().device(),
+                Device::Cuda(last)
+            );
+        }
+
+        #[test]
+        fn host_copies_roundtrip_through_a_block_inside_a_segment() {
+            require_cuda!();
+            let alloc = fresh();
+            let _first = alloc.allocate(4096);
+            let second = alloc.allocate(4096); // same 2 MiB segment, at an offset
+            assert_eq!(alloc.stats().num_device_alloc, 1);
+            let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+            let mut out = vec![0u8; 4096];
+            unsafe {
+                alloc.copy_from_host(second.as_ptr(), data.as_ptr(), data.len());
+                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
+            }
+            assert_eq!(out, data);
+        }
+
+        #[test]
+        fn cuda_memset_fills_a_block_inside_a_segment() {
+            require_cuda!();
+            let alloc = fresh();
+            let _first = alloc.allocate(4096);
+            let second = alloc.allocate(4096);
+            let mut out = vec![0u8; 4096];
+            unsafe {
+                alloc.memset(second.as_ptr(), 0x5A, 4096);
+                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
+            }
+            assert!(out.iter().all(|&b| b == 0x5A));
+        }
+
+        #[test]
+        fn freed_blocks_are_reused_without_another_cuda_malloc() {
+            require_cuda!();
+            let alloc = fresh();
+            {
+                let _a = alloc.allocate(2048);
+            }
+            let _b = alloc.allocate(2048);
+            assert_eq!(alloc.stats().num_device_alloc, 1);
+        }
+
+        #[test]
+        fn empty_cache_returns_segments_with_cuda_free() {
+            require_cuda!();
+            let alloc = fresh();
+            drop(alloc.allocate(1 << 20));
+            assert!(alloc.stats().reserved_bytes > 0);
+            alloc.empty_cache();
+            let stats = alloc.stats();
+            assert_eq!(stats.reserved_bytes, 0);
+            assert_eq!(stats.num_device_free, stats.num_device_alloc);
+        }
+
+        #[test]
+        fn get_returns_the_same_global_instance() {
+            require_cuda!();
+            let (a, b) = (cuda::get(0), cuda::get(0));
+            // Other tests put small tensors on the global allocator in
+            // parallel; a large-pool size keeps them from taking the block.
+            let size = 5 << 20;
+            let p = a.allocate(size);
+            let ptr = p.as_ptr();
+            drop(p);
+            assert_eq!(
+                b.allocate(size).as_ptr(),
+                ptr,
+                "expected block reuse from the shared cache"
+            );
+        }
+    }
 }
 
 #[cfg(lumen_mps_linked)] // shim-backed types exist only when Metal is linked

@@ -17,3 +17,10 @@ module-name = "lumen._C"
 python-source = "."
 features = ["python"]
 exclude = ["lumen/**/*.rs", "lumen/**/*.mm"]
+
+[tool.pytest.ini_options]
+# Device test cases; see tests/test_tensor_devices.py and the Makefile.
+markers = [
+    "mps: needs an MPS (Metal) device",
+    "cuda: needs a CUDA device and a wheel built with the `cuda` feature",
+]

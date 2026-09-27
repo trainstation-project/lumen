@@ -120,6 +120,16 @@ pub struct CudaBackend {
 }
 
 #[cfg(lumen_cuda_linked)]
+impl CudaBackend {
+    /// The backend for CUDA device `device_index`.
+    pub fn new(device_index: usize) -> Self {
+        CudaBackend {
+            device_index: device_index as i32,
+        }
+    }
+}
+
+#[cfg(lumen_cuda_linked)]
 impl Allocator for CudaBackend {
     fn device(&self) -> Device {
         Device::Cuda(self.device_index as usize)
@@ -217,13 +227,6 @@ pub fn get(device_index: usize) -> CudaAllocator {
         registry.resize_with(device_index + 1, || None);
     }
     registry[device_index]
-        .get_or_insert_with(|| {
-            CachingAllocator::new(
-                CudaBackend {
-                    device_index: device_index as i32,
-                },
-                CudaPolicy,
-            )
-        })
+        .get_or_insert_with(|| CachingAllocator::new(CudaBackend::new(device_index), CudaPolicy))
         .clone()
 }
