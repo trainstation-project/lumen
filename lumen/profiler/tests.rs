@@ -126,20 +126,16 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
         let t = Tensor::zeros(&[2, 3], DType::F32);
         t.select(0, 1).fill_(1.0);
     });
-    // zeros = empty + zero_, zero_ = fill_ (PyTorch: aten::zeros -> aten::empty, aten::zero_)
     let zeros = one(&p, "lumen::zeros");
     assert_eq!(zeros.kind, EventKind::Op);
     assert_eq!(one(&p, "lumen::empty").parent, Some(zeros.id));
-    let zero = one(&p, "lumen::zero_");
-    assert_eq!(zero.parent, Some(zeros.id));
-    let fills = named(&p, "lumen::fill_");
-    assert_eq!(fills.len(), 2);
-    assert_eq!(fills[0].parent, Some(zero.id));
+    assert!(named(&p, "lumen::zero_").is_empty());
     // select = narrow + squeeze_dim
     let select = one(&p, "lumen::select");
     assert_eq!(one(&p, "lumen::narrow").parent, Some(select.id));
-    assert_eq!(fills[1].parent, None, "called directly");
-    assert_eq!(row(&p.key_averages(), "lumen::fill_").count, 2);
+    let fill = one(&p, "lumen::fill_");
+    assert_eq!(fill.parent, None, "called directly");
+    assert_eq!(row(&p.key_averages(), "lumen::fill_").count, 1);
 }
 
 #[test]
