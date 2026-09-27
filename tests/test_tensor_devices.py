@@ -93,3 +93,13 @@ def test_fill_and_zero_in_place(device):
     assert t.tolist() == [[-1.0, 1.5, 1.5], [-1.0, 0.0, 0.0]]
     with pytest.raises(TypeError):
         t.fill_("x")
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda"])
+def test_empty_and_ones_on_device(device):
+    _require(device)
+    e = lumen.empty([2, 2], dtype=lumen.int64, device=device)
+    assert e.device.startswith(device)
+    assert e.zero_().tolist() == [[0, 0], [0, 0]]
+    o = lumen.ones([3], device=device)
+    assert (o.dtype, o.tolist()) == ("float32", [1.0, 1.0, 1.0])

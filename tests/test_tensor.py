@@ -2,6 +2,7 @@
 
 import pytest
 
+import lumen
 from lumen import Tensor
 
 
@@ -156,3 +157,30 @@ def test_repr_and_len():
     t = Tensor.arange(6).reshape([2, 3])
     assert "dtype=f32" in repr(t)
     assert len(t) == 2
+
+
+def test_every_rust_factory_is_exposed():
+    for name in ["empty", "zeros", "ones", "full", "arange"]:
+        assert hasattr(Tensor, name), name
+        assert callable(getattr(lumen, name)), name
+
+
+def test_empty_has_the_requested_shape_dtype_and_device():
+    t = lumen.empty([2, 3], dtype=lumen.int32)
+    assert t.shape == [2, 3]
+    assert t.dtype == "int32"
+    assert t.device == "cpu"
+    assert lumen.empty([4]).dtype == "float32"  # torch's default dtype
+    # Contents are unspecified until written; write, then read.
+    assert t.fill_(7).tolist() == [[7, 7, 7], [7, 7, 7]]
+    e = lumen.empty([3])
+    for i in range(3):
+        e[i] = float(i)
+    assert e.tolist() == [0.0, 1.0, 2.0]
+
+
+def test_ones_is_float32_by_default_like_torch():
+    assert lumen.ones([2]).dtype == "float32"
+    assert Tensor.ones([2]).tolist() == [1.0, 1.0]
+    assert lumen.ones([2], dtype=lumen.int64).dtype == "int64"
+    assert lumen.ones([2], dtype=lumen.bool).tolist() == [True, True]

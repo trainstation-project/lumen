@@ -324,6 +324,25 @@ impl PyTensor {
         Ok(Self::wrap(tensor_from_flat(&flat, &shape, dtype, device)?))
     }
 
+    /// A tensor whose memory is left uninitialized (PyTorch: `torch.empty`).
+    ///
+    /// As with `torch.empty`, the values are unspecified until written
+    /// (`fill_`, `t[i] = v`, ...). Reading an element before writing it is
+    /// more than garbage here: it is undefined behavior in the Rust core
+    /// (see `Tensor::empty`), which Python cannot rule out.
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None, device=None))]
+    fn empty(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        device: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let options = options(dtype, device)?;
+        // Not upheld here: `Tensor::empty` requires writing every element
+        // before reading it, and Python callers are trusted to (see above).
+        Ok(Self::wrap(unsafe { Tensor::empty(&shape, options) }))
+    }
+
     #[staticmethod]
     #[pyo3(signature = (shape, dtype=None, device=None))]
     fn zeros(
@@ -333,6 +352,19 @@ impl PyTensor {
     ) -> PyResult<Self> {
         let options = options(dtype, device)?;
         Ok(Self::wrap(Tensor::zeros(&shape, options)))
+    }
+
+    /// A tensor of ones, float32 unless `dtype` says otherwise (PyTorch:
+    /// `torch.ones`).
+    #[staticmethod]
+    #[pyo3(signature = (shape, dtype=None, device=None))]
+    fn ones(
+        shape: Vec<usize>,
+        dtype: Option<&str>,
+        device: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let options = options(dtype, device)?;
+        Ok(Self::wrap(Tensor::ones(&shape, options)))
     }
 
     #[staticmethod]
