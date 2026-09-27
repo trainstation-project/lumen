@@ -7,7 +7,7 @@
 //! | Int                   | [`DType::I32`]  | `i32`      |
 //! | Long                  | [`DType::I64`]  | `i64`      |
 //! | UInt16/32/64          | `U16..U64` | `u16/u32/u64`   |
-//! | Half                  | [`DType::F16`]  | [`f16`]    |
+//! | Half                  | [`DType::F16`]  | [`struct@f16`]    |
 //! | BFloat16              | [`DType::BF16`] | [`bf16`]   |
 //! | Float / Double        | `F32`/`F64`| `f32`/`f64`     |
 //!
@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::scalar::Scalar;
+use super::scalar::Scalar;
 
 // Re-exported so users of the crate can name the element types directly.
 pub use half::{bf16, f16};
@@ -216,11 +216,11 @@ macro_rules! dispatch_dtype {
                 $body
             }
             $crate::DType::F16 => {
-                type $T = $crate::dtype::f16;
+                type $T = $crate::tensor::dtype::f16;
                 $body
             }
             $crate::DType::BF16 => {
-                type $T = $crate::dtype::bf16;
+                type $T = $crate::tensor::dtype::bf16;
                 $body
             }
             $crate::DType::F32 => {

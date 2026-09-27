@@ -1,10 +1,15 @@
+pub mod dtype;
+pub mod scalar;
+pub mod storage;
+pub mod tensor_options;
+
 use std::sync::Arc;
 
 use crate::device::Device;
-use crate::dtype::{DType, Element, bf16, dispatch_dtype, f16};
-use crate::scalar::Scalar;
-use crate::storage::Storage;
-use crate::tensor_options::{DEFAULT_DTYPE, TensorOptions};
+use dtype::{DType, Element, bf16, dispatch_dtype, f16};
+use scalar::Scalar;
+use storage::Storage;
+use tensor_options::{DEFAULT_DTYPE, TensorOptions};
 
 /// The device `options` name, CPU if unset.
 fn device_of(options: &TensorOptions) -> Device {

@@ -2,7 +2,7 @@
 //! API takes a value whose dtype is decided at runtime: `full`'s fill value
 //! and `arange`'s end.
 
-use crate::dtype::{DType, bf16, f16};
+use super::dtype::{DType, bf16, f16};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {
@@ -19,7 +19,7 @@ impl Scalar {
         match self {
             Scalar::Bool(_) => DType::Bool,
             Scalar::Int(_) => DType::I64,
-            Scalar::Float(_) => crate::tensor_options::DEFAULT_DTYPE,
+            Scalar::Float(_) => super::tensor_options::DEFAULT_DTYPE,
         }
     }
 

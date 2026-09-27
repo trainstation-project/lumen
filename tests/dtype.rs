@@ -1,6 +1,6 @@
 //! Tests for the dtype layer: sizes, names, and per-dtype tensor roundtrips.
 
-use lumen::dtype::{bf16, f16};
+use lumen::tensor::dtype::{bf16, f16};
 use lumen::{DType, Device, Element, Tensor};
 
 #[test]

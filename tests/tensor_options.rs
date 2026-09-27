@@ -1,7 +1,7 @@
 //! Tensor factories and `TensorOptions`, checked against PyTorch's
 //! semantics (`at::zeros(size, options)` and friends).
 
-use lumen::dtype::f16;
+use lumen::tensor::dtype::f16;
 use lumen::{DType, Device, Scalar, Tensor, TensorOptions};
 
 #[test]

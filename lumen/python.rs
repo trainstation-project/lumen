@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
 
 use crate as core;
-use crate::dtype::{bf16, f16};
+use crate::tensor::dtype::{bf16, f16};
 use crate::{DType, Scalar, Tensor, TensorOptions};
 
 // ---------------------------------------------------------------------

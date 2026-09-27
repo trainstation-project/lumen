@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::dtype::Element;
 use crate::allocator::{Allocator, DataPtr, allocator_for};
 use crate::device::Device;
-use crate::dtype::Element;
 
 static NEXT_STORAGE_ID: AtomicUsize = AtomicUsize::new(1);
 

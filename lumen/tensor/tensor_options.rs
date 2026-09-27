@@ -13,8 +13,8 @@
 //! assert_eq!((a.dtype(), b.dtype(), c.dtype(), d.dtype()), (DType::F64, DType::F32, DType::I32, DType::F32));
 //! ```
 
+use super::dtype::DType;
 use crate::device::Device;
-use crate::dtype::DType;
 
 /// The dtype factories use when neither the options nor a value decide it
 /// (PyTorch: `torch.get_default_dtype()`).
