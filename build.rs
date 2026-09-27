@@ -43,6 +43,12 @@ fn detect_cuda() {
     };
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    // The driver API (`libcuda`, for element memsets) links against the
+    // toolkit's stub; the driver's real library is loaded at run time.
+    println!(
+        "cargo:rustc-link-search=native={}",
+        lib_dir.join("stubs").display()
+    );
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-cfg=lumen_cuda_linked");
 }

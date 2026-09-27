@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::dtype::{DType, Element, bf16, dispatch_dtype, f16};
 use super::scalar::Scalar;
-use super::storage::{Storage, as_bytes};
+use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
 
@@ -388,7 +388,7 @@ impl Tensor {
     }
 
     /// The storage elements this view can touch, as `(first, count)`.
-    fn span(&self) -> (usize, usize) {
+    pub(crate) fn span(&self) -> (usize, usize) {
         if self.numel() == 0 {
             return (self.offset, 0);
         }
@@ -449,15 +449,10 @@ impl Tensor {
     /// dtype (PyTorch: `Tensor::fill_`). Writes through to aliases, with the
     /// same data-race caveat as [`set`](Self::set).
     ///
-    /// A contiguous tensor whose value is one repeated byte (zero, `true`,
-    /// integer -1, any `u8`, ...) is filled with the device's memset
-    /// (CPU `memset`, `cudaMemset`, Metal `fillBuffer`); other values take
-    /// one host-to-device copy. A strided view rewrites the storage range it
-    /// covers, leaving the elements between its own untouched.
+    /// Runs the `fill_` kernel for the tensor's device (see [`crate::ops`]).
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
         let _op = crate::profiler::record_op("lumen::fill_", || vec![self.shape.clone()]);
-        let value = value.into();
-        dispatch_dtype!(self.dtype, T => self.fill_typed(T::from_scalar(value)));
+        crate::ops::fill_op(self, value.into());
         self
     }
 
@@ -465,32 +460,6 @@ impl Tensor {
     pub fn zero_(&self) -> &Self {
         let _op = crate::profiler::record_op("lumen::zero_", || vec![self.shape.clone()]);
         self.fill_(Scalar::Int(0))
-    }
-
-    fn fill_typed<T: Element>(&self, value: T) {
-        let numel = self.numel();
-        if numel == 0 {
-            return;
-        }
-        let size = size_of::<T>();
-        if self.is_contiguous() {
-            let bytes = as_bytes(std::slice::from_ref(&value));
-            if bytes.iter().all(|&b| b == bytes[0]) {
-                self.storage
-                    .fill_bytes(self.offset * size, bytes[0], numel * size);
-            } else {
-                self.storage.write(self.offset, &vec![value; numel]);
-            }
-            return;
-        }
-        // Read-modify-write the span, so storage elements the view skips
-        // over keep their values.
-        let (start, len) = self.span();
-        let mut span = self.storage.read::<T>(start, len);
-        for_each_index(&self.shape, |idx| {
-            span[self.offset - start + flat_offset(&idx, &self.strides)] = value;
-        });
-        self.storage.write(start, &span);
     }
 }
 
@@ -539,11 +508,11 @@ impl Tensor {
     }
 }
 
-fn flat_offset(index: &[usize], strides: &[usize]) -> usize {
+pub(crate) fn flat_offset(index: &[usize], strides: &[usize]) -> usize {
     index.iter().zip(strides).map(|(i, s)| i * s).sum()
 }
 
-fn for_each_index(shape: &[usize], mut f: impl FnMut(Vec<usize>)) {
+pub(crate) fn for_each_index(shape: &[usize], mut f: impl FnMut(Vec<usize>)) {
     let mut idx = vec![0; shape.len()];
     loop {
         f(idx.clone());
