@@ -426,7 +426,7 @@ mod opaque_device {
 
     impl Allocator for OpaqueDevice {
         fn device(&self) -> Device {
-            Device::Cuda(7)
+            Device::Mps
         }
 
         fn allocate(&self, nbytes: usize) -> DataPtr {
@@ -465,9 +465,19 @@ mod opaque_device {
 
     /// An uninitialized `numel`-element f32 tensor on `device`.
     fn uninit_tensor(device: &OpaqueDevice, numel: usize) -> Tensor {
+        register_fill();
         let storage = Storage::with_allocator(numel * 4, Arc::new(device.clone()));
         // Callers write every element before reading.
         Tensor::wrap(Arc::new(storage), DType::F32, &[numel])
+    }
+
+    /// The device claims MPS; without Metal, `fill_` has no static MPS
+    /// kernel, so register the CPU one (it only goes through the allocator).
+    /// With Metal the static kernel wins and this is a no-op.
+    fn register_fill() {
+        use crate::ops::{DispatchKey, fill::FILL};
+        let cpu = FILL.kernel(DispatchKey::Cpu).unwrap();
+        let _ = FILL.register(DispatchKey::Mps, cpu);
     }
 
     /// A tensor on `device` holding `values`, reshaped to `shape`.
@@ -488,7 +498,7 @@ mod opaque_device {
     #[test]
     fn element_access_goes_through_device_copies() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
-        assert_eq!(t.device(), Device::Cuda(7));
+        assert_eq!(t.device(), Device::Mps);
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
@@ -501,11 +511,7 @@ mod opaque_device {
         let tt = t.transpose(0, 1);
         assert_eq!(tt.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
         let c = tt.contiguous::<f32>();
-        assert_eq!(
-            c.device(),
-            Device::Cuda(7),
-            "contiguous stays on the device"
-        );
+        assert_eq!(c.device(), Device::Mps, "contiguous stays on the device");
         assert!(c.is_contiguous());
         assert_eq!(c.to_vec::<f32>(), tt.to_vec::<f32>());
     }
@@ -665,6 +671,28 @@ mod mps {
     }
 
     #[test]
+    fn fill_on_mps_writes_every_element_size_on_the_gpu() {
+        require_mps!();
+        use crate::tensor::dtype::f16;
+        let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps);
+        let n = 3000; // several threadgroups
+        let halves = crate::Tensor::full(&[n], 1.5, on_mps(DType::F16)); // fill_u16
+        assert_eq!(halves.to_vec::<f16>(), vec![f16::from_f32(1.5); n]);
+        let floats = crate::Tensor::ones(&[n], on_mps(DType::F32)); // fill_u32
+        assert_eq!(floats.to_vec::<f32>(), vec![1.0; n]);
+        let doubles = crate::Tensor::full(&[n], -2.25, on_mps(DType::F64)); // fill_u64
+        assert_eq!(doubles.to_vec::<f64>(), vec![-2.25; n]);
+        let longs = crate::Tensor::full(&[n], i64::MIN + 7, on_mps(DType::I64));
+        assert_eq!(longs.to_vec::<i64>(), vec![i64::MIN + 7; n]);
+        // A contiguous sub-range at an offset: only the view's elements change.
+        let t = crate::Tensor::zeros(&[4, 5], on_mps(DType::F32));
+        t.select(0, 2).fill_(9.5);
+        let mut expected = vec![0.0; 20];
+        expected[10..15].fill(9.5);
+        assert_eq!(t.to_vec::<f32>(), expected);
+    }
+
+    #[test]
     fn fill_on_mps_uses_metal_and_respects_views() {
         require_mps!();
         let opts = TensorOptions::new().dtype(DType::F32).device(Device::Mps);
@@ -759,6 +787,29 @@ mod cuda {
         assert!(t.to_vec::<bool>().iter().all(|&b| !b));
         let f = Tensor::zeros(&[1000], on_gpu(DType::F32));
         assert!(f.to_vec::<f32>().iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn fill_on_cuda_writes_every_element_size_on_the_device() {
+        require_cuda!();
+        use crate::tensor::dtype::f16;
+        let n = 1000;
+        let u8s = Tensor::full(&[n], 0xAB, on_gpu(DType::U8)); // cuMemsetD8
+        assert_eq!(u8s.to_vec::<u8>(), vec![0xAB; n]);
+        let halves = Tensor::full(&[n], 1.5, on_gpu(DType::F16)); // cuMemsetD16
+        assert_eq!(halves.to_vec::<f16>(), vec![f16::from_f32(1.5); n]);
+        let floats = Tensor::ones(&[n], on_gpu(DType::F32)); // cuMemsetD32
+        assert_eq!(floats.to_vec::<f32>(), vec![1.0; n]);
+        let doubles = Tensor::full(&[n], -2.25, on_gpu(DType::F64)); // 2x cuMemsetD2D32
+        assert_eq!(doubles.to_vec::<f64>(), vec![-2.25; n]);
+        let longs = Tensor::full(&[n], i64::MIN + 7, on_gpu(DType::I64));
+        assert_eq!(longs.to_vec::<i64>(), vec![i64::MIN + 7; n]);
+        // A contiguous sub-range: only the view's elements change.
+        let t = Tensor::zeros(&[4, 3], on_gpu(DType::F64));
+        t.select(0, 2).fill_(9.5);
+        let mut expected = vec![0.0; 12];
+        expected[6..9].fill(9.5);
+        assert_eq!(t.to_vec::<f64>(), expected);
     }
 
     #[test]

@@ -63,9 +63,11 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps_fill.mm");
 
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
+        .file("lumen/ops/fill/mps_fill.mm")
         .cpp(true)
         .flag("-std=c++17")
         .flag("-fobjc-arc")

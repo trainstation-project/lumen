@@ -334,11 +334,12 @@ fn device_work_is_attributed_to_the_issuing_op() {
 #[test]
 fn device_work_needs_its_activity() {
     let p = profile(cpu(), || {
+        // Checked inside the session: outside it, another test's may run.
+        assert!(!device_enabled(Device::Cuda(0)));
         let t = now_ns();
         record_gpu("Memset", Device::Cuda(0), t, t + 10);
     });
     assert!(named(&p, "Memset").is_empty());
-    assert!(!device_enabled(Device::Cuda(0)));
 }
 
 // ---------------- summaries ----------------
@@ -517,9 +518,9 @@ mod mps {
         });
         let memset = one(&p, "Memset");
         assert_eq!((memset.kind, memset.device), (EventKind::Gpu, Device::Mps));
-        let fill = one(&p, "lumen::fill_");
-        assert_eq!(memset.parent, Some(fill.id));
-        within(memset, fill, 1_000_000);
+        let zeros = one(&p, "lumen::zeros");
+        assert_eq!(memset.parent, Some(zeros.id));
+        within(memset, zeros, 1_000_000);
         let memory: Vec<&Event> = named(&p, "[memory]")
             .into_iter()
             .filter(|e| e.device == Device::Mps)
@@ -534,13 +535,38 @@ mod mps {
     }
 
     #[test]
+    fn metal_ones_is_a_gpu_fill_kernel() {
+        if !mps::is_available() {
+            return eprintln!("Metal unavailable, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Mps],
+            ..cpu()
+        };
+        let p = profile(config, || {
+            drop(Tensor::ones(&[1 << 16], on_mps(DType::F32)))
+        });
+        let fill = one(&p, "Fill");
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
+        assert_eq!(fill.parent, Some(one(&p, "lumen::ones").id));
+        assert!(
+            named(&p, "Memset").is_empty(),
+            "1.0f32 is not a byte pattern"
+        );
+        assert!(
+            p.chrome_trace()
+                .contains("\"cat\":\"kernel\",\"name\":\"Fill\"")
+        );
+    }
+
+    #[test]
     fn metal_fills_are_not_timed_without_the_mps_activity() {
         if !mps::is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_mps(DType::U8))));
         assert!(named(&p, "Memset").is_empty());
-        assert_eq!(named(&p, "lumen::fill_").len(), 1);
+        assert_eq!(named(&p, "lumen::zeros").len(), 1);
     }
 }
 
@@ -582,6 +608,23 @@ mod cuda {
             table.contains("Self CUDA") && table.contains("CUDA Mem"),
             "{table}"
         );
+    }
+
+    #[test]
+    fn cuda_ones_is_a_device_memset_not_a_host_copy() {
+        if !cuda::is_available() {
+            return eprintln!("no CUDA device, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Cuda],
+            ..cpu()
+        };
+        let on_gpu = TensorOptions::new()
+            .dtype(DType::F32)
+            .device(Device::Cuda(0));
+        let p = profile(config, || drop(Tensor::ones(&[1 << 20], on_gpu)));
+        assert_eq!(named(&p, "Memset").len(), 1);
+        assert!(named(&p, "Memcpy HtoD").is_empty(), "{:#?}", p.events());
     }
 
     #[test]

@@ -12,3 +12,4 @@ pub mod tensor_options;
 mod tests;
 
 pub use tensor::Tensor;
+pub(crate) use tensor::{flat_offset, for_each_index};

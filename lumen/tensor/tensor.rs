@@ -83,7 +83,7 @@ impl Tensor {
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let _op = crate::profiler::record_op("lumen::zeros", || vec![size.to_vec()]);
         let t = unsafe { Self::empty(size, options) };
-        crate::ops::fill_op(&t, Scalar::Int(0));
+        crate::ops::fill::fill_op(&t, Scalar::Int(0));
         t
     }
 
@@ -92,7 +92,7 @@ impl Tensor {
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let _op = crate::profiler::record_op("lumen::ones", || vec![size.to_vec()]);
         let t = unsafe { Self::empty(size, options) };
-        crate::ops::fill_op(&t, Scalar::Int(1));
+        crate::ops::fill::fill_op(&t, Scalar::Int(1));
         t
     }
 
@@ -452,7 +452,7 @@ impl Tensor {
     /// Runs the `fill_` kernel for the tensor's device (see [`crate::ops`]).
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
         let _op = crate::profiler::record_op("lumen::fill_", || vec![self.shape.clone()]);
-        crate::ops::fill_op(self, value.into());
+        crate::ops::fill::fill_op(self, value.into());
         self
     }
 

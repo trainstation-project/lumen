@@ -123,8 +123,10 @@ pub(crate) fn trace(events: &[Event]) -> String {
                 }
                 let cat = if e.name.starts_with("Memset") {
                     "gpu_memset"
-                } else {
+                } else if e.name.starts_with("Memcpy") {
                     "gpu_memcpy"
+                } else {
+                    "kernel"
                 };
                 let gpu_pid = pid(e.device);
                 let correlation = e.parent.unwrap_or(0);
