@@ -9,35 +9,36 @@ export RUSTFLAGS := -D warnings
 ## all tests (CPU, CUDA, MPS), where GitHub CI runs only the CPU ones.
 ci: fmt-check clippy test miri
 
-# Each test runs in exactly one of the targets below. Rust tests never
-# enable `python`: with pyo3 compiled in, test binaries would link against
-# libpython. The bindings are tested from Python instead.
-
-# Device-independent integration tests: every tests/*.rs except the
-# per-device files.
-CPU_TESTS := $(filter-out cuda mps,$(basename $(notdir $(wildcard tests/*.rs))))
+# Each test runs in exactly one of the targets below. The Rust tests are
+# unit tests inside the crate (a `tests.rs` per module folder), picked by
+# module path: `::tests::cuda::` and `::tests::mps::` are the per-device
+# modules. Rust tests never enable `python`: with pyo3 compiled in, test
+# binaries would link against libpython. The bindings are tested from
+# Python (tests/test_*.py) instead.
+DEVICE_TESTS := --skip ::tests::cuda:: --skip ::tests::mps::
 # The build Linux CI gets: the Metal backend is compiled only on macOS, so
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
 test: test-cpu test-cuda test-mps
 
-## test-cpu: library unit tests, device-independent integration tests and
-## doc tests (built without Metal), then the Python tests.
+## test-cpu: every unit test except the per-device modules, and the doc
+## tests (built without Metal), then the Python tests.
 test-cpu:
-	cargo test --lib $(addprefix --test ,$(CPU_TESTS)) --no-default-features -- --format=terse
+	cargo test --lib --no-default-features -- --format=terse $(DEVICE_TESTS)
 	cargo test --doc --no-default-features
 	maturin develop && python -m pytest tests -q
 
-## test-cuda: tests/cuda.rs. Runs the caching logic against mock backends;
-## the real CUDA backend is compiled too when build.rs finds cudart.
+## test-cuda: the `cuda` test modules. They run the caching logic against
+## mock backends; the real CUDA backend is compiled too when build.rs finds
+## cudart.
 test-cuda:
-	cargo test --test cuda $(NO_METAL_FEATURES) -- --format=terse
+	cargo test --lib $(NO_METAL_FEATURES) -- --format=terse ::tests::cuda::
 
-## test-mps: tests/mps.rs against the real Metal device (macOS; elsewhere
-## the file compiles to nothing).
+## test-mps: the `mps` test modules, against the real Metal device (macOS;
+## elsewhere they compile to nothing).
 test-mps:
-	cargo test --test mps --features mps -- --format=terse
+	cargo test --lib --features mps -- --format=terse ::tests::mps::
 
 fmt:
 	cargo fmt --all

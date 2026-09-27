@@ -29,41 +29,23 @@ fn allocator_or_panic(device: Device) -> Arc<dyn Allocator> {
 }
 
 impl Storage {
-    /// Allocate `nbytes` of zeroed memory on `device`.
+    /// Allocate `nbytes` of uninitialized memory on `device`, like
+    /// PyTorch's `StorageImpl` (the contents are whatever the allocator
+    /// returned).
     ///
-    /// Public constructors always initialize: allocators hand out
-    /// uninitialized memory (like `malloc`), and the safe
-    /// [`read_bytes`](Self::read_bytes) may return any byte. Inside the
-    /// crate, [`empty`](Self::empty) skips the zeroing for storage that is
-    /// written right away.
+    /// Sound because nothing public reads raw storage bytes: data comes out
+    /// only through a [`crate::Tensor`], which writes before it reads
+    /// (`Tensor::zeros` zeroes with the device's memset).
     ///
     /// # Panics
     /// If `device` is not available.
     pub fn new(nbytes: usize, device: Device) -> Self {
-        Self::zeroed(nbytes, allocator_or_panic(device))
+        Self::with_allocator(nbytes, allocator_or_panic(device))
     }
 
-    /// Allocate `nbytes` from `allocator` and zero them with its memset (no
-    /// host buffer of zeros).
-    pub(crate) fn zeroed(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
-        let storage = Self::uninit(nbytes, allocator);
-        storage.fill_bytes(0, 0, nbytes);
-        storage
-    }
-
-    /// Allocate `nbytes` on `device` without initializing them (PyTorch:
-    /// `at::empty`). Crate-private: the caller must write every byte before
-    /// anything reads the storage.
-    ///
-    /// # Panics
-    /// If `device` is not available.
-    pub(crate) fn empty(nbytes: usize, device: Device) -> Self {
-        Self::uninit(nbytes, allocator_or_panic(device))
-    }
-
-    /// Allocate `nbytes` without initializing them. The caller must write
-    /// every byte before anything reads the storage.
-    fn uninit(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
+    /// Allocate `nbytes` of uninitialized memory from `allocator` (PyTorch:
+    /// `StorageImpl(size_bytes, allocator)`), e.g. a custom allocator.
+    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data: allocator.allocate(nbytes),
@@ -79,20 +61,9 @@ impl Storage {
     /// # Panics
     /// If `device` is not available.
     pub fn from_slice<T: Element>(data: &[T], device: Device) -> Self {
-        Self::from_slice_with(data, allocator_or_panic(device))
-    }
-
-    /// A storage from `allocator` holding a copy of `data`.
-    pub(crate) fn from_slice_with<T: Element>(data: &[T], allocator: Arc<dyn Allocator>) -> Self {
-        Self::from_bytes(as_bytes(data), allocator)
-    }
-
-    /// A storage from `allocator` holding a copy of `bytes`. Crate-private:
-    /// the bytes must be valid values of the dtype they will be read as.
-    pub(crate) fn from_bytes(bytes: &[u8], allocator: Arc<dyn Allocator>) -> Self {
-        let storage = Self::uninit(bytes.len(), allocator);
+        let storage = Self::new(size_of_val(data), device);
         // Fills every byte of the fresh buffer.
-        storage.write_bytes(0, bytes);
+        storage.write(0, data);
         storage
     }
 
@@ -120,9 +91,13 @@ impl Storage {
 
     /// Copy `out.len()` bytes starting at byte `offset` to the host.
     ///
+    /// Crate-private: the storage may be uninitialized (see
+    /// [`new`](Self::new)), so only the tensor layer, which tracks what has
+    /// been written, reads it.
+    ///
     /// # Panics
     /// If the range is out of bounds.
-    pub fn read_bytes(&self, offset: usize, out: &mut [u8]) {
+    pub(crate) fn read_bytes(&self, offset: usize, out: &mut [u8]) {
         self.check_range(offset, out.len());
         if out.is_empty() {
             return;
