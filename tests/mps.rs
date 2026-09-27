@@ -133,3 +133,41 @@ fn small_alloc_rounds_to_metal_alignment() {
         MpsPolicy::from_device().alignment
     );
 }
+
+// ---------------- tensors on MPS ----------------
+
+#[test]
+fn tensor_on_mps_roundtrips() {
+    require_mps!();
+    let t = lumen::Tensor::arange_on::<f32>(6, Device::Mps).reshape(&[2, 3]);
+    assert_eq!(t.device(), Device::Mps);
+    assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
+    t.set(&[0, 1], 9.0f32);
+    assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
+    // Views share the Metal buffer.
+    let col = t.select(1, 1);
+    assert!(col.shares_storage_with(&t));
+    assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
+}
+
+#[test]
+fn tensor_moves_between_cpu_and_mps() {
+    require_mps!();
+    let cpu = lumen::Tensor::from_slice_shaped(&[1i64, 2, 3, 4], &[2, 2]);
+    let on_mps = cpu.transpose(0, 1).to(Device::Mps);
+    assert_eq!(on_mps.device(), Device::Mps);
+    assert!(!on_mps.is_contiguous(), "layout is kept");
+    assert_eq!(on_mps.to_vec::<i64>(), vec![1, 3, 2, 4]);
+    let contiguous = on_mps.contiguous::<i64>();
+    assert_eq!(contiguous.device(), Device::Mps);
+    let back = contiguous.to(Device::Cpu);
+    assert_eq!(back.device(), Device::Cpu);
+    assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
+}
+
+#[test]
+fn zeros_on_mps_are_zero() {
+    require_mps!();
+    let t = lumen::Tensor::zeros_on::<bool>(&[3, 5], Device::Mps);
+    assert!(t.to_vec::<bool>().iter().all(|&b| !b));
+}
