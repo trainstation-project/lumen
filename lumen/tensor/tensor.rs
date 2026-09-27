@@ -82,10 +82,8 @@ impl Tensor {
     /// A tensor of zeros (PyTorch: `at::zeros`).
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let _op = crate::profiler::record_op("lumen::zeros", || vec![size.to_vec()]);
-        // SAFETY: `zero_` writes every element — one device memset, as
-        // all-zero bytes are zero for every dtype (false, +0.0, 0).
         let t = unsafe { Self::empty(size, options) };
-        t.zero_();
+        crate::ops::fill_op(&t, Scalar::Int(0));
         t
     }
 
@@ -93,7 +91,9 @@ impl Tensor {
     /// say otherwise).
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let _op = crate::profiler::record_op("lumen::ones", || vec![size.to_vec()]);
-        Self::filled(size, Scalar::Int(1), options.into())
+        let t = unsafe { Self::empty(size, options) };
+        crate::ops::fill_op(&t, Scalar::Int(1));
+        t
     }
 
     /// A tensor filled with `fill_value` (PyTorch: `at::full`). Without a
