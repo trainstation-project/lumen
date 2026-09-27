@@ -31,19 +31,34 @@ fn allocator_or_panic(device: Device) -> Arc<dyn Allocator> {
 impl Storage {
     /// Allocate `nbytes` of zeroed memory on `device`.
     ///
+    /// Public constructors always initialize: allocators hand out
+    /// uninitialized memory (like `malloc`), and the safe
+    /// [`read_bytes`](Self::read_bytes) may return any byte. Inside the
+    /// crate, [`empty`](Self::empty) skips the zeroing for storage that is
+    /// written right away.
+    ///
     /// # Panics
     /// If `device` is not available.
     pub fn new(nbytes: usize, device: Device) -> Self {
-        Self::with_allocator(nbytes, allocator_or_panic(device))
+        Self::zeroed(nbytes, allocator_or_panic(device))
     }
 
-    /// Allocate `nbytes` of zeroed memory from `allocator`.
-    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
+    /// Allocate `nbytes` from `allocator` and zero them with its memset (no
+    /// host buffer of zeros).
+    pub(crate) fn zeroed(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
         let storage = Self::uninit(nbytes, allocator);
-        // Allocators hand out uninitialized memory (like `malloc`), and
-        // `read` may return any byte, so zero it.
-        storage.write_bytes(0, &vec![0; nbytes]);
+        storage.fill_bytes(0, 0, nbytes);
         storage
+    }
+
+    /// Allocate `nbytes` on `device` without initializing them (PyTorch:
+    /// `at::empty`). Crate-private: the caller must write every byte before
+    /// anything reads the storage.
+    ///
+    /// # Panics
+    /// If `device` is not available.
+    pub(crate) fn empty(nbytes: usize, device: Device) -> Self {
+        Self::uninit(nbytes, allocator_or_panic(device))
     }
 
     /// Allocate `nbytes` without initializing them. The caller must write
@@ -148,6 +163,24 @@ impl Storage {
         }
     }
 
+    /// Set `nbytes` starting at byte `offset` to `value` with the device's
+    /// memset. Crate-private for the same reason as
+    /// [`write_bytes`](Self::write_bytes).
+    ///
+    /// # Panics
+    /// If the range is out of bounds.
+    pub(crate) fn fill_bytes(&self, offset: usize, value: u8, nbytes: usize) {
+        self.check_range(offset, nbytes);
+        if nbytes == 0 {
+            return;
+        }
+        // SAFETY: the range is in bounds of this allocator's buffer.
+        unsafe {
+            self.allocator
+                .memset(self.data.as_ptr().add(offset), value, nbytes);
+        }
+    }
+
     /// Copy `len` elements of type `T`, starting at element `offset`, to
     /// the host. Crate-private: the bytes must have been written as `T`.
     pub(crate) fn read<T: Element>(&self, offset: usize, len: usize) -> Vec<T> {
@@ -176,7 +209,7 @@ impl Storage {
 
 /// View elements as their bytes. Sound for [`Element`] types, which are
 /// plain-old-data without padding.
-fn as_bytes<T: Element>(data: &[T]) -> &[u8] {
+pub(crate) fn as_bytes<T: Element>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), size_of_val(data)) }
 }
 

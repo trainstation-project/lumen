@@ -181,3 +181,53 @@ fn zeros_on_mps_are_zero() {
     );
     assert!(t.to_vec::<bool>().iter().all(|&b| !b));
 }
+
+#[test]
+fn fill_on_mps_uses_metal_and_respects_views() {
+    require_mps!();
+    let opts = TensorOptions::new().dtype(DType::F32).device(Device::Mps);
+    let t = lumen::Tensor::arange(12, opts).reshape(&[3, 4]);
+    t.select(0, 1).zero_(); // contiguous: Metal fillBuffer at an offset
+    t.select(1, 3).fill_(2.5); // strided: read-modify-write
+    assert_eq!(
+        t.to_vec::<f32>(),
+        vec![0.0, 1.0, 2.0, 2.5, 0.0, 0.0, 0.0, 2.5, 8.0, 9.0, 10.0, 2.5]
+    );
+    let bytes = lumen::Tensor::zeros(
+        &[5],
+        TensorOptions::new().dtype(DType::U8).device(Device::Mps),
+    );
+    assert_eq!(bytes.fill_(0xC3).to_vec::<u8>(), vec![0xC3; 5]);
+    let ones = lumen::Tensor::ones(
+        &[4],
+        TensorOptions::new().dtype(DType::Bool).device(Device::Mps),
+    );
+    assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
+}
+
+#[test]
+fn metal_memset_reaches_blocks_inside_a_segment() {
+    require_mps!();
+    // Two blocks carved from one 8 MiB segment: the second starts inside the
+    // segment's MTLBuffer, so the shim must find the buffer containing it.
+    let alloc = fresh();
+    let _first = alloc.allocate(4096);
+    let second = alloc.allocate(4096);
+    unsafe { alloc.memset(second.as_ptr(), 0x5A, 4096) };
+    let mut out = vec![0u8; 4096];
+    unsafe { alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), 4096) };
+    assert!(out.iter().all(|&b| b == 0x5A));
+    assert_eq!(
+        alloc.stats().num_device_alloc,
+        1,
+        "both blocks in one segment"
+    );
+}
+
+#[test]
+#[should_panic(expected = "fillBuffer")]
+fn metal_memset_rejects_pointers_outside_its_buffers() {
+    require_mps!();
+    let mut host = [0u8; 16];
+    unsafe { mps::MpsBackend.memset(host.as_mut_ptr(), 0, 16) };
+}

@@ -465,6 +465,20 @@ impl PyTensor {
         Ok(Self::wrap(self.inner.to(resolve_device(Some(device))?)))
     }
 
+    /// Set every element to `value` in place and return the tensor
+    /// (PyTorch: `Tensor.fill_`); uses the device's memset when it can.
+    fn fill_<'py>(slf: PyRef<'py, Self>, value: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
+        slf.inner.fill_(to_scalar(value)?);
+        Ok(slf)
+    }
+
+    /// Set every element to zero in place and return the tensor
+    /// (PyTorch: `Tensor.zero_`).
+    fn zero_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf.inner.zero_();
+        slf
+    }
+
     // ----------------------------- element access -----------------------------
 
     fn get(&self, py: Python<'_>, index: Vec<isize>) -> PyResult<Py<PyAny>> {

@@ -78,3 +78,18 @@ def test_factories_on_device(device):
     assert lumen.zeros([2], dtype=lumen.int32, device=device).tolist() == [0, 0]
     assert lumen.ones([2], device=device).tolist() == [1.0, 1.0]
     assert lumen.full([2], 7, device=device).tolist() == [7, 7]
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps", "cuda"])
+def test_fill_and_zero_in_place(device):
+    if device != "cpu":
+        _require(device)
+    t = lumen.arange(6, device=device).reshape([2, 3])
+    assert t.fill_(1.5) is t  # returns the tensor itself, like torch
+    assert t.tolist() == [[1.5] * 3] * 2
+    t[1].zero_()  # a view: writes through to t
+    assert t.tolist() == [[1.5] * 3, [0.0] * 3]
+    t.transpose(0, 1)[0].fill_(-1)  # strided view (column 0)
+    assert t.tolist() == [[-1.0, 1.5, 1.5], [-1.0, 0.0, 0.0]]
+    with pytest.raises(TypeError):
+        t.fill_("x")

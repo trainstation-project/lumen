@@ -80,6 +80,7 @@ mod ffi {
         pub fn cudaMalloc(devPtr: *mut *mut c_void, size: usize) -> i32;
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
+        pub fn cudaMemset(dst: *mut c_void, value: i32, count: usize) -> i32;
     }
 
     // `cudaMemcpyKind` values.
@@ -161,6 +162,23 @@ impl Allocator for CudaBackend {
 
     unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
         self.memcpy(dst, src, nbytes, ffi::DEVICE_TO_HOST);
+    }
+
+    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
+        if nbytes == 0 {
+            return;
+        }
+
+        let err = unsafe {
+            ffi::cudaSetDevice(self.device_index);
+            ffi::cudaMemset(dst.cast(), value.into(), nbytes)
+        };
+
+        assert_eq!(
+            err, 0,
+            "cudaMemset of {nbytes} bytes on cuda:{} failed (error {err})",
+            self.device_index
+        );
     }
 }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::device::Device;
 use dtype::{DType, Element, bf16, dispatch_dtype, f16};
 use scalar::Scalar;
-use storage::Storage;
+use storage::{Storage, as_bytes};
 use tensor_options::{DEFAULT_DTYPE, TensorOptions};
 
 /// The device `options` name, CPU if unset.
@@ -117,9 +117,12 @@ impl Tensor {
     /// `size` elements of `value` converted to `dtype`.
     fn filled(size: &[usize], value: Scalar, dtype: DType, device: Device) -> Self {
         let numel: usize = size.iter().product();
-        dispatch_dtype!(dtype, T => {
-            Self::from_values(&vec![T::from_scalar(value); numel], device).reshape(size)
-        })
+        // Uninitialized storage is fine: `fill_` of a fresh contiguous tensor
+        // writes every byte (a memset when it can).
+        let storage = Arc::new(Storage::empty(numel * dtype.size_of(), device));
+        let t = Self::from_storage(storage, dtype, size.to_vec());
+        t.fill_(value);
+        t
     }
 
     /// A 1-D tensor holding a copy of `data` on `device`.
@@ -387,6 +390,52 @@ impl Tensor {
         let off = self.physical_offset(index);
         self.storage.write::<T>(off, &[value]);
     }
+
+    /// Set every element of the view to `value`, converted to the tensor's
+    /// dtype (PyTorch: `Tensor::fill_`). Writes through to aliases, with the
+    /// same data-race caveat as [`set`](Self::set).
+    ///
+    /// A contiguous tensor whose value is one repeated byte (zero, `true`,
+    /// integer -1, any `u8`, ...) is filled with the device's memset
+    /// (CPU `memset`, `cudaMemset`, Metal `fillBuffer`); other values take
+    /// one host-to-device copy. A strided view rewrites the storage range it
+    /// covers, leaving the elements between its own untouched.
+    pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
+        let value = value.into();
+        dispatch_dtype!(self.dtype, T => self.fill_typed(T::from_scalar(value)));
+        self
+    }
+
+    /// Set every element to zero (PyTorch: `Tensor::zero_`).
+    pub fn zero_(&self) -> &Self {
+        self.fill_(Scalar::Int(0))
+    }
+
+    fn fill_typed<T: Element>(&self, value: T) {
+        let numel = self.numel();
+        if numel == 0 {
+            return;
+        }
+        let size = size_of::<T>();
+        if self.is_contiguous() {
+            let bytes = as_bytes(std::slice::from_ref(&value));
+            if bytes.iter().all(|&b| b == bytes[0]) {
+                self.storage
+                    .fill_bytes(self.offset * size, bytes[0], numel * size);
+            } else {
+                self.storage.write(self.offset, &vec![value; numel]);
+            }
+            return;
+        }
+        // Read-modify-write the span, so storage elements the view skips
+        // over keep their values.
+        let (start, len) = self.span();
+        let mut span = self.storage.read::<T>(start, len);
+        for_each_index(&self.shape, |idx| {
+            span[self.offset - start + flat_offset(&idx, &self.strides)] = value;
+        });
+        self.storage.write(start, &span);
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -472,10 +521,12 @@ mod tests {
     /// never-dereferenced addresses, and the bytes live in a side table
     /// reachable only through the host copies. Any direct access to a
     /// tensor's buffer would crash instead of passing.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct OpaqueDevice {
         /// Base address -> contents.
         memory: Arc<Mutex<BTreeMap<usize, Vec<u8>>>>,
+        /// `(address, value, nbytes)` of every memset, in call order.
+        memsets: Arc<Mutex<Vec<(usize, u8, usize)>>>,
     }
 
     impl OpaqueDevice {
@@ -521,12 +572,71 @@ mod tests {
             let dst = unsafe { std::slice::from_raw_parts_mut(dst, nbytes) };
             self.with_region(src.addr(), nbytes, |region| dst.copy_from_slice(region));
         }
+
+        unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
+            self.memsets
+                .lock()
+                .unwrap()
+                .push((dst.addr(), value, nbytes));
+            self.with_region(dst.addr(), nbytes, |region| region.fill(value));
+        }
     }
 
     fn opaque_tensor(values: &[f32], shape: &[usize]) -> Tensor {
+        opaque_tensor_on(&OpaqueDevice::default(), values, shape)
+    }
+
+    fn opaque_tensor_on(device: &OpaqueDevice, values: &[f32], shape: &[usize]) -> Tensor {
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let storage = Storage::from_bytes(&bytes, Arc::new(OpaqueDevice::default()));
+        let storage = Storage::from_bytes(&bytes, Arc::new(device.clone()));
         Tensor::from_storage(Arc::new(storage), DType::F32, shape.to_vec())
+    }
+
+    #[test]
+    fn zeroed_storage_uses_the_device_memset() {
+        let device = OpaqueDevice::default();
+        let storage = Storage::zeroed(12, Arc::new(device.clone()));
+        let base = storage.data_ptr().addr();
+        assert_eq!(*device.memsets.lock().unwrap(), vec![(base, 0, 12)]);
+        let mut bytes = [0xFF; 12];
+        storage.read_bytes(0, &mut bytes);
+        assert_eq!(bytes, [0; 12]);
+    }
+
+    #[test]
+    fn byte_pattern_fills_use_memset_on_the_view_range() {
+        let device = OpaqueDevice::default();
+        let t = opaque_tensor_on(&device, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let row = t.select(0, 1); // contiguous: elements 3..6
+        row.zero_();
+        let base = t.storage.data_ptr().addr();
+        assert_eq!(*device.memsets.lock().unwrap(), vec![(base + 12, 0, 12)]);
+        assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn other_values_are_copied_not_memset() {
+        let device = OpaqueDevice::default();
+        let t = opaque_tensor_on(&device, &[1.0, 2.0, 3.0], &[3]);
+        t.fill_(2.5);
+        assert_eq!(t.to_vec::<f32>(), vec![2.5; 3]);
+        // -0.0 has a sign byte, so its bytes differ too.
+        t.fill_(-0.0);
+        assert!(
+            t.to_vec::<f32>()
+                .iter()
+                .all(|v| *v == 0.0 && v.is_sign_negative())
+        );
+        assert!(device.memsets.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn strided_fill_leaves_skipped_elements_alone() {
+        let device = OpaqueDevice::default();
+        let t = opaque_tensor_on(&device, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
+        t.select(1, 1).fill_(0); // column 1: storage elements 1 and 4
+        assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
+        assert!(device.memsets.lock().unwrap().is_empty());
     }
 
     #[test]
