@@ -5,7 +5,7 @@ from typing import Any
 import cutlass
 import cutlass.cute as cute
 from cutlass.cute.runtime import from_dlpack
-from ..ops import register
+from ...ops import register
 
 
 OP = "lumen::fill_"
