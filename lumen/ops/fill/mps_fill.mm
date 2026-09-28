@@ -7,7 +7,10 @@
 
 #include <algorithm>
 
+// In stream/mps.mm.
 extern "C" void *lumen_mps_stream_queue(void);
+id<MTLCommandBuffer> lumen_mps_stream_begin(void);
+void lumen_mps_stream_commit(id<MTLCommandBuffer> commands);
 
 static NSString *const kSource = @R"(
 #include <metal_stdlib>
@@ -111,7 +114,7 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
     return -1;
   }
   @autoreleasepool {
-    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    id<MTLCommandBuffer> commands = lumen_mps_stream_begin();
     if (one_byte) {
       id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
       [blit fillBuffer:buffer range:NSMakeRange(first - pages, elem_size * count) value:bytes[0]];
@@ -130,7 +133,7 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
     [commands addCompletedHandler:^(id<MTLCommandBuffer> cb) {
       done(context, cb.GPUStartTime, cb.GPUEndTime, cb.status == MTLCommandBufferStatusCompleted);
     }];
-    [commands commit];
+    lumen_mps_stream_commit(commands);
   }
   return 0;
 }

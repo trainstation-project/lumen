@@ -543,6 +543,36 @@ mod mps {
     }
 
     #[test]
+    fn metal_stream_work_runs_in_order() {
+        if !mps::is_available() {
+            return eprintln!("Metal unavailable, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Mps],
+            ..cpu()
+        };
+        let t = Tensor::zeros(&[1 << 24], on_mps(DType::F32));
+        let p = profile(config, || {
+            for _ in 0..8 {
+                t.zero_(); // Metal fillBuffers of one tensor, not waited on
+                t.fill_(2.0f32);
+            }
+        });
+        // One after another on the GPU, give or take the clocks' alignment.
+        let mut work: Vec<&Event> = p
+            .events()
+            .iter()
+            .filter(|e| e.kind == EventKind::Gpu)
+            .collect();
+        work.sort_by_key(|e| e.start_ns);
+        assert_eq!(work.len(), 16);
+        for pair in work.windows(2) {
+            assert!(pair[1].start_ns + 50_000 >= pair[0].end_ns, "{pair:#?}");
+        }
+        assert_eq!(t.to_vec::<f32>(), vec![2.0; 1 << 24]);
+    }
+
+    #[test]
     fn metal_ones_is_a_gpu_fill_kernel() {
         if !mps::is_available() {
             return eprintln!("Metal unavailable, skipping");
