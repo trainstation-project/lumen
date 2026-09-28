@@ -55,7 +55,7 @@ mod ffi {
 fn memset_elements(device_index: usize, dst: *mut u8, pattern: &[u8], count: usize) {
     let dst = dst.addr() as u64;
     let mut err = 0;
-    crate::stream::cuda::launch(device_index, "Memset", |stream| {
+    crate::stream::cuda::launch(device_index, |stream| {
         err = unsafe {
             match *pattern {
                 [b] => ffi::cuMemsetD8Async(dst, b, count, stream),

@@ -482,7 +482,7 @@ fn json_strings_escape_control_characters() {
 
 /// Assert `gpu` ran inside its op's CPU range, give or take `slack_ns` for
 /// the two clocks' alignment.
-#[cfg(lumen_cuda_linked)]
+#[cfg(lumen_cupti_linked)]
 fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(
         gpu.start_ns + slack_ns >= op.start_ns,
@@ -621,7 +621,7 @@ mod mps {
     }
 }
 
-#[cfg(lumen_cuda_linked)] // needs cudart and a GPU
+#[cfg(lumen_cupti_linked)] // needs cudart, CUPTI and a GPU
 mod cuda {
     use super::*;
     use crate::TensorOptions;

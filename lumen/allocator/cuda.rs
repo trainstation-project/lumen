@@ -81,11 +81,6 @@ pub(crate) mod ffi {
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
         pub fn cudaMemset(dst: *mut c_void, value: i32, count: usize) -> i32;
-        pub fn cudaEventCreate(event: *mut *mut c_void) -> i32;
-        pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
-        pub fn cudaEventSynchronize(event: *mut c_void) -> i32;
-        pub fn cudaEventElapsedTime(ms: *mut f32, start: *mut c_void, end: *mut c_void) -> i32;
-        pub fn cudaEventDestroy(event: *mut c_void) -> i32;
     }
 
     // `cudaMemcpyKind` values.
@@ -185,7 +180,7 @@ impl Allocator for CudaBackend {
         }
 
         let mut err = 0;
-        self.timed("Memset", || {
+        self.timed(|| {
             err = unsafe {
                 ffi::cudaSetDevice(self.device_index);
                 ffi::cudaMemset(dst.cast(), value.into(), nbytes)
@@ -207,13 +202,8 @@ impl CudaBackend {
             return;
         }
 
-        let name = if kind == ffi::HOST_TO_DEVICE {
-            "Memcpy HtoD"
-        } else {
-            "Memcpy DtoH"
-        };
         let mut err = 0;
-        self.timed(name, || {
+        self.timed(|| {
             err = unsafe {
                 ffi::cudaSetDevice(self.device_index);
                 ffi::cudaMemcpy(dst.cast(), src.cast(), nbytes, kind)
@@ -232,40 +222,14 @@ impl CudaBackend {
 
 #[cfg(lumen_cuda_linked)]
 impl CudaBackend {
-    /// Run `work` (device work on the default stream). When the profiler
-    /// times CUDA, bracket it with events and record it as `name` (PyTorch's
-    /// legacy `use_cuda` profiler timed with CUDA events the same way).
-    fn timed(&self, name: &'static str, work: impl FnOnce()) {
-        let device = Device::Cuda(self.device_index as usize);
-        if !crate::profiler::device_enabled(device) {
-            return work();
-        }
-        use crate::stream::cuda::{Event, reference};
-        unsafe { ffi::cudaSetDevice(self.device_index) };
-        let events = reference(self.device_index as usize)
-            .zip(Event::new())
-            .zip(Event::new());
-        let Some(((reference, start), stop)) = events else {
-            return work();
-        };
-        // The legacy default stream, which `cudaMemcpy` runs on, so the
-        // events order with it.
-        let stream = std::ptr::null_mut();
-        start.record(stream);
-        work();
-        let finished = stop.record(stream) && stop.synchronize();
-        let times = reference.ns_until(start).zip(reference.ns_until(stop));
-        let times = times.filter(|_| finished);
-        start.destroy();
-        stop.destroy();
-        if let Some((from_reference_to_start, from_reference_to_stop)) = times {
-            crate::profiler::record_gpu(
-                name,
-                device,
-                reference.ns + from_reference_to_start,
-                reference.ns + from_reference_to_stop,
-            );
-        }
+    /// Run `work` (device work on the default stream), tagged with the
+    /// current op for the profiler, which times it with CUPTI (as PyTorch's
+    /// does through kineto).
+    fn timed(&self, work: impl FnOnce()) {
+        #[cfg(lumen_cupti_linked)]
+        return crate::profiler::cupti::correlated(Device::Cuda(self.device_index as usize), work);
+        #[cfg(not(lumen_cupti_linked))]
+        work()
     }
 }
 
