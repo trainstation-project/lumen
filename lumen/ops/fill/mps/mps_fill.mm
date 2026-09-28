@@ -1,15 +1,9 @@
+#include "../../../stream/mps.h"
+#include "mps_fill_source.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-
 #include <algorithm>
 
-#include "../../../stream/mps.h"
-
-// The fill kernels live in fill.metal; build.rs embeds its text here as the
-// C++ raw string `kMpsFillSource` (compiled at runtime by Metal below).
-#include "mps_fill_source.h"
-
-// In allocator/mps_shim.mm.
 id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset);
 
 struct Pipelines {
@@ -52,16 +46,6 @@ static const Pipelines &pipelines(void) {
 }
 
 extern "C" {
-// Set the count elements of elem_size bytes (1, 2, 4 or 8) starting at ptr,
-// inside a lumen MPS segment, to the element at pattern. With strides null
-// they are contiguous; otherwise a view of ndim sizes and strides (in
-// elements). Encoded into the MPS stream without waiting (timed: sampled for
-// the profiler); once the GPU has run it, done(context, GPU start, GPU end
-// in host-clock seconds, ok) is called on a Metal thread.
-//
-// Returns 0 if encoded (done will be called), or without calling done:
-// -1 if ptr is not in a lumen MPS segment (e.g. a custom allocator's), -2
-// for an unsupported element size, too many elements or no kernels.
 int lumen_mps_fill(void *ptr,
                    const void *pattern,
                    size_t elem_size,
