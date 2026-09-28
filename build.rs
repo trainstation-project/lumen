@@ -122,7 +122,9 @@ fn build_mps_shim() {
         .file("lumen/allocator/mps_shim.mm")
         .file("lumen/ops/fill/mps/mps_fill.mm")
         .file("lumen/stream/mps.mm")
-        .include(PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set")))
+        .include(PathBuf::from(
+            env::var_os("OUT_DIR").expect("OUT_DIR not set"),
+        ))
         .cpp(true)
         .flag("-std=c++17")
         .flag("-fobjc-arc")
@@ -139,8 +141,8 @@ fn build_mps_shim() {
 /// needed to build.
 fn embed_metal_source() {
     const SOURCE: &str = "lumen/ops/fill/mps/fill.metal";
-    let text = std::fs::read_to_string(SOURCE)
-        .unwrap_or_else(|e| panic!("cannot read {SOURCE}: {e}"));
+    let text =
+        std::fs::read_to_string(SOURCE).unwrap_or_else(|e| panic!("cannot read {SOURCE}: {e}"));
     // A delimiter that cannot occur in the source, so the raw string is safe.
     assert!(
         !text.contains(")LUMEN_METAL"),
@@ -151,8 +153,7 @@ fn embed_metal_source() {
          static NSString *const kMpsFillSource = @R\"LUMEN_METAL({text})LUMEN_METAL\";\n"
     );
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set"));
-    std::fs::write(out.join("mps_fill_source.h"), header)
-        .expect("cannot write mps_fill_source.h");
+    std::fs::write(out.join("mps_fill_source.h"), header).expect("cannot write mps_fill_source.h");
 }
 
 /// Find the directory containing the CUDA runtime library, honoring the

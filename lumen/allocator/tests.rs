@@ -1146,31 +1146,4 @@ mod mps {
             MpsPolicy::from_device().alignment
         );
     }
-
-    #[test]
-    fn metal_memset_reaches_blocks_inside_a_segment() {
-        require_mps!();
-        // Two blocks carved from one 8 MiB segment: the second starts inside the
-        // segment's MTLBuffer, so the shim must find the buffer containing it.
-        let alloc = fresh();
-        let _first = alloc.allocate(4096);
-        let second = alloc.allocate(4096);
-        unsafe { alloc.memset(second.as_ptr(), 0x5A, 4096) };
-        let mut out = vec![0u8; 4096];
-        unsafe { alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), 4096) };
-        assert!(out.iter().all(|&b| b == 0x5A));
-        assert_eq!(
-            alloc.stats().num_device_alloc,
-            1,
-            "both blocks in one segment"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "fillBuffer")]
-    fn metal_memset_rejects_pointers_outside_its_buffers() {
-        require_mps!();
-        let mut host = [0u8; 16];
-        unsafe { mps::MpsBackend.memset(host.as_mut_ptr(), 0, 16) };
-    }
 }

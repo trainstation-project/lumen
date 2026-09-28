@@ -141,14 +141,6 @@ mod ffi {
         pub fn lumen_mps_limits(out: *mut Limits) -> i32;
         pub fn lumen_mps_alloc(nbytes: usize) -> *mut u8;
         pub fn lumen_mps_free(ptr: *mut u8);
-        pub fn lumen_mps_memset(
-            ptr: *mut u8,
-            value: u8,
-            nbytes: usize,
-            gpu_start: *mut f64,
-            gpu_end: *mut f64,
-        ) -> i32;
-        pub fn lumen_mps_host_time() -> f64;
     }
 }
 
@@ -180,41 +172,7 @@ impl Allocator for MpsBackend {
     }
 
     // Shared buffers are host-addressable, so the default memcpy host
-    // copies apply; fills run on the GPU through Metal's blit memset.
-    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
-        // GPU start/end times, asked for only while profiling MPS.
-        let mut times = crate::profiler::device_enabled(Device::Mps).then_some((0.0, 0.0));
-        let (start_out, end_out): (*mut f64, *mut f64) = match &mut times {
-            Some((start, end)) => (start, end),
-            None => (std::ptr::null_mut(), std::ptr::null_mut()),
-        };
-
-        let status = unsafe { ffi::lumen_mps_memset(dst, value, nbytes, start_out, end_out) };
-        assert_eq!(status, 0, "Metal fillBuffer of {nbytes} bytes failed");
-
-        if let Some((start, end)) = times {
-            let (start, end) = (host_time_to_ns(start), host_time_to_ns(end));
-            crate::profiler::record_gpu("Memset", Device::Mps, start, end);
-        }
-    }
-}
-
-/// Map a Metal host-clock time (seconds, as in `GPUStartTime`) onto the
-/// profiler clock, via one reading of both clocks taken per session.
-#[cfg(lumen_mps_linked)]
-fn host_time_to_ns(host_seconds: f64) -> u64 {
-    use std::sync::Mutex;
-    // (session, profiler ns, host seconds), read together.
-    static BASE: Mutex<(u64, u64, f64)> = Mutex::new((0, 0, 0.0));
-    let session = crate::profiler::session_id();
-    let mut base = BASE.lock().unwrap_or_else(|e| e.into_inner());
-    if base.0 != session {
-        *base = (session, crate::profiler::now_ns(), unsafe {
-            ffi::lumen_mps_host_time()
-        });
-    }
-    let offset_ns = (host_seconds - base.2) * 1e9;
-    (base.1 as f64 + offset_ns).max(0.0) as u64
+    // copies apply, and the default pointer-writing memset is correct.
 }
 
 /// MPS defaults for the watermark ratios (`default_low_watermark_ratio`,

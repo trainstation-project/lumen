@@ -175,17 +175,6 @@ pub(crate) fn device_enabled(device: Device) -> bool {
     flags() & bit != 0
 }
 
-/// The running session's id (0 when none): device timers use it to know
-/// when their clock alignment is stale.
-#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-pub(crate) fn session_id() -> u64 {
-    if is_enabled() {
-        SESSION.load(Ordering::Relaxed)
-    } else {
-        0
-    }
-}
-
 /// Start a session. Errors if one is already running (PyTorch allows one
 /// profiler at a time too).
 pub fn start(config: ProfilerConfig) -> Result<(), String> {
@@ -399,8 +388,10 @@ pub(crate) fn report_memory(
 
 /// Record device work on `device` that ran from `start_ns` to `end_ns` on
 /// the profiler clock ([`now_ns`]), issued by the current op.
-// Called by the Metal allocator, compiled only when Metal is linked.
-#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+// Called by tests of the timing paths and by device code that captures a
+// context up front; the MPS and CUPTI paths call `record_gpu_in` directly
+// with a context captured at submission.
+#[cfg(test)]
 pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_ns: u64) {
     if let Some(context) = gpu_context(device) {
         record_gpu_in(context, name, device, start_ns, end_ns);
