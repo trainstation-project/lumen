@@ -79,7 +79,6 @@ pub(crate) mod ffi {
         pub fn cudaGetDeviceCount(count: *mut i32) -> i32;
         pub fn cudaMalloc(devPtr: *mut *mut c_void, size: usize) -> i32;
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
-        pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
     }
 }
 
@@ -157,21 +156,6 @@ impl Allocator for CudaBackend {
                 ffi::cudaFree(p.as_ptr().cast());
             },
         ))
-    }
-}
-
-// ---------------- profiler timing ----------------
-
-#[cfg(lumen_cuda_linked)]
-impl CudaBackend {
-    /// Run `work` (device work on the default stream), tagged with the
-    /// current op for the profiler, which times it with CUPTI (as PyTorch's
-    /// does through kineto).
-    fn timed(&self, work: impl FnOnce()) {
-        #[cfg(lumen_cupti_linked)]
-        return crate::profiler::cupti::correlated(Device::Cuda(self.device_index as usize), work);
-        #[cfg(not(lumen_cupti_linked))]
-        work()
     }
 }
 
