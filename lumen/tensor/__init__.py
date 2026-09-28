@@ -8,6 +8,8 @@ import this package's names from ``lumen`` (or ``from lumen.tensor import
 """
 
 from lumen._C import Tensor
+from lumen.tensor import dlpack
+from lumen.tensor.dlpack import from_dlpack
 
 __all__ = [
     "Tensor",
