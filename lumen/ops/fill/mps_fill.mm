@@ -44,11 +44,12 @@ FILL(fill_u64, ulong, ulong2)
                    constant ulong *sizes [[buffer(3)]],                \
                    constant ulong *strides [[buffer(4)]],              \
                    constant uint &ndim [[buffer(5)]],                  \
-                   uint i [[thread_position_in_grid]]) {               \
-    ulong rest = i, offset = 0;                                        \
-    for (uint d = ndim; d-- > 0;) {                                    \
-      offset += (rest % sizes[d]) * strides[d];                        \
-      rest /= sizes[d];                                                \
+                   uint2 tid [[thread_position_in_grid]]) {            \
+    ulong offset = ulong(tid.y) * strides[0];                          \
+    ulong inner = tid.x;                                               \
+    for (uint d = 1; d < ndim; ++d) {                                  \
+      offset += (inner % sizes[d]) * strides[d];                       \
+      inner /= sizes[d];                                               \
     }                                                                  \
     buf[start + offset] = value;                                       \
   }
@@ -139,32 +140,34 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
     uint64_t start = offset / elem_size;
     uint64_t n = count;
     NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
-    // Contiguous kernels loop with a grid stride over vectorized stores, so
-    // the grid is sized to a few waves rather than one thread per element;
-    // strided kernels do one element per thread and cover their grid exactly.
-    NSUInteger grid_threads;
-    if (strided) {
-      grid_threads = ((count + width - 1) / width) * width;
-    } else {
-      NSUInteger waves = 32;
-      grid_threads = std::min<NSUInteger>(width * waves, ((count + width - 1) / width) * width);
-      grid_threads = std::max<NSUInteger>(grid_threads, width);
-    }
     [encoder setComputePipelineState:pso];
     [encoder setBuffer:buffer offset:0 atIndex:0];
     [encoder setBytes:pattern length:elem_size atIndex:1];
     [encoder setBytes:&start length:sizeof(start) atIndex:2];
     if (strided) {
+      // 2D dispatch (PyTorch: fill_mps_kernel's strided branch): y indexes
+      // dim 0, x walks the inner dims, so threads consecutive in x write
+      // consecutive addresses in the innermost dimension.
       uint32_t dims = static_cast<uint32_t>(ndim);
       [encoder setBytes:sizes length:ndim * sizeof(size_t) atIndex:3];
       [encoder setBytes:strides length:ndim * sizeof(size_t) atIndex:4];
       [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+      NSUInteger dim0 = sizes[0];
+      NSUInteger inner = count / dim0;
+      NSUInteger x = std::min<NSUInteger>(std::max<NSUInteger>(inner, 1), width);
+      [encoder dispatchThreads:MTLSizeMake(inner, dim0, 1)
+          threadsPerThreadgroup:MTLSizeMake(x, 1, 1)];
     } else {
-      // The contiguous kernels need the element count for the tail loop.
+      // The contiguous kernels need the element count for the tail loop,
+      // and loop with a grid stride over vectorized stores, so the grid is
+      // a few waves rather than one thread per element.
       [encoder setBytes:&n length:sizeof(n) atIndex:3];
+      NSUInteger waves = 32;
+      NSUInteger grid_threads = std::min<NSUInteger>(width * waves, ((count + width - 1) / width) * width);
+      grid_threads = std::max<NSUInteger>(grid_threads, width);
+      [encoder dispatchThreads:MTLSizeMake(grid_threads, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     }
-    [encoder dispatchThreads:MTLSizeMake(grid_threads, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     lumen_mps_stream_encoded(done, context);
   }
   return 0;
