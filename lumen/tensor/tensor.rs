@@ -200,6 +200,13 @@ impl Tensor {
         &self.storage
     }
 
+    /// An owning handle to the storage, for interop that must keep the
+    /// buffer alive past the tensor (e.g. a DLPack export, whose consumer
+    /// may outlive this view).
+    pub(crate) fn storage_arc(&self) -> Arc<Storage> {
+        Arc::clone(&self.storage)
+    }
+
     pub fn device(&self) -> Device {
         self.storage.device()
     }
@@ -249,6 +256,21 @@ impl Tensor {
     /// sharing a `PjRtBuffer`).
     pub fn shares_storage_with(&self, other: &Tensor) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
+    }
+
+    /// A contiguous tensor over `storage` (offset 0). Used to ingest a
+    /// buffer from another framework (a DLPack import), which arrives as
+    /// storage plus shape and no lumen-side view.
+    pub(crate) fn from_contiguous_storage(
+        storage: Arc<Storage>,
+        dtype: DType,
+        shape: &[usize],
+    ) -> Option<Self> {
+        let numel: usize = shape.iter().product();
+        if numel * dtype.size_of() > storage.nbytes() {
+            return None;
+        }
+        Some(Self::wrap(storage, dtype, shape))
     }
 
     pub fn is_contiguous(&self) -> bool {

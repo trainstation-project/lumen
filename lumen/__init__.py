@@ -38,6 +38,7 @@ from lumen.tensor import (
     float16,
     float32,
     float64,
+    from_dlpack,
     from_numpy,
     full,
     int8,
@@ -73,5 +74,5 @@ __all__ = [
     # factories
     "tensor", "empty", "zeros", "ones", "full", "arange",
     # numpy interop
-    "to_numpy", "from_numpy",
+    "to_numpy", "from_numpy", "from_dlpack",
 ]

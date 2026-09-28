@@ -1,5 +1,7 @@
 pub mod dtype;
 #[cfg(feature = "python")]
+pub(crate) mod dlpack;
+#[cfg(feature = "python")]
 pub(crate) mod python;
 pub mod scalar;
 pub mod storage;

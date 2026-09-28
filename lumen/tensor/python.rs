@@ -4,7 +4,7 @@
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
+use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
 use crate as core;
 use crate::python::resolve_device;
@@ -511,6 +511,40 @@ impl PyTensor {
         slf
     }
 
+    // ----------------------------- DLPack -----------------------------
+
+    /// Export this tensor as a DLPack capsule (the array API's
+    /// `Tensor.__dlpack__`), so another framework — a CuTe DSL kernel — can
+    /// build a device view over the same buffer. Nothing is copied; the
+    /// capsule keeps the storage alive until the consumer is done.
+    ///
+    /// `stream` is accepted to match the signature but ignored: lumen runs
+    /// ops on the default stream.
+    #[pyo3(signature = (stream=None))]
+    fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        crate::tensor::dlpack::dlpack(py, &self.inner, stream)
+    }
+
+    /// `(device_type, device_id)` of this tensor's device, as the array API
+    /// defines it (`__cuda_array_interface__`'s DLPack counterpart).
+    fn __dlpack_device__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::tensor::dlpack::dlpack_device_tuple(py, &self.inner)
+    }
+
+    /// The address of the first element in the device's address space
+    /// (PyTorch: `Tensor.data_ptr`).
+    ///
+    /// A raw escape hatch for interop that cannot use DLPack; unlike
+    /// `__dlpack__`, the caller must keep this tensor alive and honor the
+    /// shape/strides/dtype itself, or it writes to freed or wrong memory.
+    fn data_ptr(&self) -> usize {
+        self.inner.data_ptr() as usize
+    }
+
     // ----------------------------- element access -----------------------------
 
     fn get(&self, py: Python<'_>, index: Vec<isize>) -> PyResult<Py<PyAny>> {
@@ -609,5 +643,16 @@ impl PyTensor {
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyTensor>()
+    m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(_from_dlpack, m)?)
+}
+
+/// `lumen._C._from_dlpack(capsule)` — build a tensor over a DLPack capsule
+/// from another framework, taking ownership of its buffer (no copy).
+/// Backs ``lumen.from_dlpack``.
+#[pyfunction]
+fn _from_dlpack(py: Python<'_>, capsule: &Bound<'_, PyCapsule>) -> PyResult<PyTensor> {
+    Ok(PyTensor::wrap(crate::tensor::dlpack::from_dlpack(
+        py, capsule,
+    )?))
 }
