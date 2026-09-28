@@ -18,7 +18,6 @@ const DEVICE_TO_HOST: i32 = 2;
 
 #[link(name = "cudart")]
 unsafe extern "C" {
-    fn cudaSetDevice(device: i32) -> i32;
     fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
 }
 
