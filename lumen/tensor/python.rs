@@ -511,35 +511,6 @@ impl PyTensor {
         slf
     }
 
-    // ----------------------------- DLPack -----------------------------
-
-    /// Export this tensor as a DLPack capsule (the array API's
-    /// `Tensor.__dlpack__`), so another framework — a CuTe DSL kernel — can
-    /// build a device view over the same buffer. Nothing is copied; the
-    /// capsule keeps the storage alive until the consumer is done.
-    ///
-    /// `stream` is accepted to match the signature but ignored: lumen runs
-    /// ops on the default stream.
-    #[pyo3(signature = (stream=None, max_version=None, **kwargs))]
-    fn __dlpack__<'py>(
-        &self,
-        py: Python<'py>,
-        stream: Option<&Bound<'py, PyAny>>,
-        max_version: Option<&Bound<'py, PyAny>>,
-        kwargs: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyCapsule>> {
-        // Consumed for array-API signature compatibility (NumPy passes
-        // `max_version`); lumen always produces a v1.0 capsule.
-        let _ = (max_version, kwargs);
-        crate::tensor::dlpack::dlpack(py, &self.inner, stream)
-    }
-
-    /// `(device_type, device_id)` of this tensor's device, as the array API
-    /// defines it (`__cuda_array_interface__`'s DLPack counterpart).
-    fn __dlpack_device__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        crate::tensor::dlpack::dlpack_device_tuple(py, &self.inner)
-    }
-
     /// The address of the first element in the device's address space
     /// (PyTorch: `Tensor.data_ptr`).
     ///
@@ -649,15 +620,28 @@ impl PyTensor {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(_to_dlpack, m)?)?;
+    m.add_function(wrap_pyfunction!(_to_dlpack_versioned, m)?)?;
     m.add_function(wrap_pyfunction!(_from_dlpack, m)?)
 }
 
-/// `lumen._C._from_dlpack(capsule)` — build a tensor over a DLPack capsule
-/// from another framework, taking ownership of its buffer (no copy).
-/// Backs ``lumen.from_dlpack``.
+/// `t` as an unversioned DLPack capsule (PyTorch: `torch._C._to_dlpack`).
+/// Backs `Tensor.__dlpack__`.
 #[pyfunction]
-fn _from_dlpack(py: Python<'_>, capsule: &Bound<'_, PyCapsule>) -> PyResult<PyTensor> {
-    Ok(PyTensor::wrap(crate::tensor::dlpack::from_dlpack(
-        py, capsule,
-    )?))
+fn _to_dlpack<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack(py, &t.inner)
+}
+
+/// `t` as a versioned DLPack capsule (PyTorch:
+/// `torch._C._to_dlpack_versioned`). Backs `Tensor.__dlpack__`.
+#[pyfunction]
+fn _to_dlpack_versioned<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack_versioned(py, &t.inner)
+}
+
+/// A tensor over the buffer of a DLPack capsule, which it consumes
+/// (PyTorch: `torch._C._from_dlpack`). Backs `lumen.from_dlpack`.
+#[pyfunction]
+fn _from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<PyTensor> {
+    Ok(PyTensor::wrap(crate::tensor::dlpack::from_dlpack(capsule)?))
 }

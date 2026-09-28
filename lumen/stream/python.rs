@@ -42,7 +42,29 @@ fn _cuda_synchronize(py: Python<'_>, device: Option<&Bound<'_, PyAny>>) -> PyRes
     Ok(())
 }
 
+/// Whether a CUDA device can hold tensors in this build
+/// (`torch.cuda.is_available()`).
+#[pyfunction]
+fn _cuda_is_available() -> bool {
+    core::allocator::cuda::is_available()
+}
+
+/// Make the CUDA stream `stream` (a `cudaStream_t` as an int) wait for the
+/// work queued so far on lumen's stream on device `index`, without blocking
+/// the host. Backs `Tensor.__dlpack__(stream=...)`.
+#[pyfunction]
+fn _cuda_stream_wait(index: usize, stream: usize) -> PyResult<()> {
+    core::allocator::allocator_for(core::Device::Cuda(index)).map_err(PyRuntimeError::new_err)?;
+    #[cfg(lumen_cuda_linked)]
+    core::stream::cuda::wait(index, stream as *mut std::ffi::c_void);
+    #[cfg(not(lumen_cuda_linked))]
+    let _ = stream;
+    Ok(())
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_mps_synchronize, m)?)?;
-    m.add_function(wrap_pyfunction!(_cuda_synchronize, m)?)
+    m.add_function(wrap_pyfunction!(_cuda_synchronize, m)?)?;
+    m.add_function(wrap_pyfunction!(_cuda_is_available, m)?)?;
+    m.add_function(wrap_pyfunction!(_cuda_stream_wait, m)?)
 }

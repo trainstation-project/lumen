@@ -1,11 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "python")]
-use std::alloc::Layout;
-#[cfg(feature = "python")]
-use std::ptr::NonNull;
-
 use crate::allocator::{Allocator, DataPtr, allocator_for};
 use crate::device::Device;
 
@@ -76,19 +71,20 @@ impl Storage {
         &self.allocator
     }
 
-    /// A storage whose buffer already exists at `addr`, owned by `allocator`
-    /// (DLPack: a foreign buffer adopted through the capsule that owns it).
-    ///
-    /// The address is not freed by this storage: releasing `allocator` is
-    /// what releases the buffer, so the allocator must own it.
+    /// A storage over an existing buffer of `nbytes`, freed by `data`'s
+    /// deleter (PyTorch: `at::from_blob`'s storage, e.g. a DLPack import).
+    /// `allocator` is the device's, for tensors derived from this one.
     #[cfg(feature = "python")]
-    pub(crate) fn from_raw_parts(addr: NonNull<u8>, nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
-        let device = allocator.device();
+    pub(crate) fn from_data_ptr(
+        data: DataPtr,
+        nbytes: usize,
+        allocator: Arc<dyn Allocator>,
+    ) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
-            data: DataPtr::with_deleter(addr, Layout::from_size_align(nbytes, 1).unwrap(), |_| {}),
+            data,
             nbytes,
-            device,
+            device: allocator.device(),
             allocator,
         }
     }
@@ -112,7 +108,7 @@ impl Storage {
 
 /// View elements as their bytes. Sound for [`super::dtype::Element`] types, which are
 /// plain-old-data without padding.
-#[cfg(any(lumen_cuda_linked, lumen_mps_linked))]
+#[cfg(lumen_mps_linked)]
 pub(crate) fn as_bytes<T: super::dtype::Element>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), size_of_val(data)) }
 }

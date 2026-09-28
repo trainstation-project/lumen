@@ -628,7 +628,7 @@ mod cuda {
     use crate::allocator::cuda;
 
     #[test]
-    fn cuda_copies_and_fills_are_timed_on_the_gpu() {
+    fn cuda_copies_are_timed_on_the_gpu() {
         if !cuda::is_available() {
             return eprintln!("no CUDA device, skipping");
         }
@@ -643,15 +643,12 @@ mod cuda {
         let p = profile(config, || {
             let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], on_gpu); // HtoD
             assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0]); // DtoH
-            t.zero_(); // cudaMemset
         });
         let htod = one(&p, "Memcpy HtoD");
         within(htod, one(&p, "lumen::from_slice"), 1_000_000);
         let dtoh = one(&p, "Memcpy DtoH");
         assert_eq!(dtoh.parent, Some(one(&p, "lumen::to_vec").id));
-        let memset = one(&p, "Memset");
-        assert_eq!(memset.parent, Some(one(&p, "lumen::fill_").id));
-        for e in [htod, dtoh, memset] {
+        for e in [htod, dtoh] {
             assert_eq!((e.kind, e.device), (EventKind::Gpu, Device::Cuda(0)));
         }
         let table = p.table(Some(SortBy::SelfDeviceTimeTotal), None);
@@ -662,23 +659,6 @@ mod cuda {
     }
 
     #[test]
-    fn cuda_ones_is_a_device_memset_not_a_host_copy() {
-        if !cuda::is_available() {
-            return eprintln!("no CUDA device, skipping");
-        }
-        let config = ProfilerConfig {
-            activities: vec![Activity::Cpu, Activity::Cuda],
-            ..cpu()
-        };
-        let on_gpu = TensorOptions::new()
-            .dtype(DType::F32)
-            .device(Device::Cuda(0));
-        let p = profile(config, || drop(Tensor::ones(&[1 << 20], on_gpu)));
-        assert_eq!(named(&p, "Memset").len(), 1);
-        assert!(named(&p, "Memcpy HtoD").is_empty(), "{:#?}", p.events());
-    }
-
-    #[test]
     fn cuda_work_is_not_timed_without_the_cuda_activity() {
         if !cuda::is_available() {
             return eprintln!("no CUDA device, skipping");
@@ -686,7 +666,7 @@ mod cuda {
         let on_gpu = TensorOptions::new()
             .dtype(DType::U8)
             .device(Device::Cuda(0));
-        let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_gpu)));
-        assert!(named(&p, "Memset").is_empty());
+        let p = profile(cpu(), || drop(Tensor::from_slice(&[1u8; 16], on_gpu)));
+        assert!(named(&p, "Memcpy HtoD").is_empty());
     }
 }

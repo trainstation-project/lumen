@@ -16,6 +16,8 @@ Python instead — for a CUDA kernel authored with
 
 The registered kernel is called *before* the built-in one for that device,
 so a built-in remains the fallback when no Python kernel is registered.
+CUDA's ``fill_`` has no built-in: it is ``lumen/ops/fill/cute_fill.py``,
+registered when lumen is imported on a machine with a CUDA device.
 Registering for the CPU is refused: every tensor op would then go through
 Python.
 
@@ -61,3 +63,9 @@ def unregister(op, device):
 def signature(op):
     """The call signature for ``op``, or ``None`` if it takes none."""
     return registered_ops().get(op)
+
+
+from lumen.stream import cuda as _cuda  # noqa: E402
+
+if _cuda.is_available():
+    from lumen.ops.fill import cute_fill  # noqa: E402, F401  (registers CUDA's fill_)

@@ -7,7 +7,6 @@ import this package's names from ``lumen`` (or ``from lumen.tensor import
 ...``).
 """
 
-from lumen import _C
 from lumen._C import Tensor
 
 __all__ = [
@@ -109,21 +108,6 @@ def from_numpy(a):
     return Tensor(a.ravel().tolist(), shape=list(a.shape), dtype=str(a.dtype))
 
 
-def from_dlpack(obj):
-    """Adopt the buffer of ``obj`` as a lumen.Tensor, without copying.
-
-    ``obj`` is anything exporting DLPack — a CuTe DSL tensor, a PyTorch
-    tensor, or a lumen.Tensor, whose ``__dlpack__`` is used directly. The
-    returned tensor aliases the same memory; ownership transfers to lumen,
-    and ``obj`` must not be used again (DLPack: a capsule is consumed once).
-    """
-    if hasattr(obj, "__dlpack__"):
-        capsule = obj.__dlpack__()
-    else:
-        raise TypeError(f"expected an object exporting DLPack, got {type(obj).__name__}")
-    return _C._from_dlpack(capsule)
-
-
 def _tensor__array__(self, dtype=None, copy=None):
     arr = to_numpy(self)
     if dtype is not None:
@@ -133,5 +117,7 @@ def _tensor__array__(self, dtype=None, copy=None):
 
 try:  # native classes are heap types, so this usually sticks; harmless if not
     Tensor.__array__ = _tensor__array__
+    Tensor.__dlpack__ = dlpack.__dlpack__
+    Tensor.__dlpack_device__ = dlpack.__dlpack_device__
 except (AttributeError, TypeError):  # pragma: no cover
     pass

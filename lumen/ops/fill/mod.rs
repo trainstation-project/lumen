@@ -1,9 +1,8 @@
 //! `fill_`, dispatched to a kernel per backend (PyTorch: `aten::fill_`):
-//! `cpu.rs`, `mps.rs` and `cuda.rs`.
+//! `cpu.rs` and `mps/` in Rust; CUDA's is `cute_fill.py`, a CuTe DSL kernel
+//! registered from Python (see [`crate::ops::python`]).
 
 mod cpu;
-#[cfg(lumen_cuda_linked)]
-mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
 
@@ -35,11 +34,6 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
         ),
         #[cfg(not(lumen_mps_linked))]
         DispatchKey::Mps => None,
-        #[cfg(lumen_cuda_linked)]
-        DispatchKey::Cuda => {
-            Some(|t, value| dispatch_dtype!(t.dtype(), T => cuda::fill(t, T::from_scalar(value))))
-        }
-        #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
     }
 }
