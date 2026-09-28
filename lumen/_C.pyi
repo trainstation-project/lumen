@@ -103,3 +103,6 @@ class Config:
     memory_caching: bool
 
 config: Config
+
+def _mps_synchronize() -> None: ...
+def _cuda_synchronize(device: Optional[Union[int, str, device]] = None) -> None: ...

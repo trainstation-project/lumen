@@ -5,3 +5,5 @@
 pub mod cuda;
 #[cfg(lumen_mps_linked)]
 pub mod mps;
+#[cfg(feature = "python")]
+pub(crate) mod python;
