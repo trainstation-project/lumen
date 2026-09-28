@@ -1,14 +1,3 @@
-// The MPS fill_ kernel's GPU side: a Metal compute shader writing 2-, 4- or
-// 8-byte elements (PyTorch's MPS fill_ is a compute kernel too; Metal's blit
-// fillBuffer only sets bytes). The shader is compiled from source at run
-// time, so no offline Metal compiler is needed. build.rs compiles this file;
-// ops/fill/mps.rs calls lumen_mps_fill.
-//
-// The kernel binds a no-copy MTLBuffer view over the tensor's pages rather
-// than the allocator's buffer: lumen's MPS segments are page-aligned and a
-// whole number of pages, so rounding the range out to pages stays inside
-// its segment.
-
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -17,6 +6,8 @@
 #include <mach/vm_page_size.h>
 
 #include <algorithm>
+
+extern "C" void *lumen_mps_stream_queue(void);
 
 static NSString *const kSource = @R"(
 #include <metal_stdlib>
@@ -39,7 +30,6 @@ FILL(fill_u64, ulong)
 
 struct Pipelines {
   id<MTLDevice> device = nil;
-  id<MTLCommandQueue> queue = nil;
   id<MTLComputePipelineState> u16 = nil, u32 = nil, u64 = nil;
 };
 
@@ -48,10 +38,11 @@ static const Pipelines &pipelines(void) {
   static Pipelines p;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    if (device == nil) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil) {
       return;
     }
+    id<MTLDevice> device = queue.device;
     NSError *error = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:kSource options:nil error:&error];
     if (library == nil) {
@@ -63,7 +54,6 @@ static const Pipelines &pipelines(void) {
       return fn == nil ? nil : [device newComputePipelineStateWithFunction:fn error:nil];
     };
     p.device = device;
-    p.queue = [device newCommandQueue];
     p.u16 = pipeline(@"fill_u16");
     p.u32 = pipeline(@"fill_u32");
     p.u64 = pipeline(@"fill_u64");
@@ -84,23 +74,28 @@ static bool mapped(mach_vm_address_t start, mach_vm_address_t end) {
 }
 
 extern "C" {
-// Set count elements of elem_size bytes (2, 4 or 8) at ptr, inside a lumen
-// MPS segment, to the element at pattern; wait for the GPU. Its start/end
-// times (host-clock seconds) go to gpu_start and gpu_end, which may be null.
-// Returns 0 on success, -1 if the memory is not mapped (e.g. a custom
-// allocator's), -2 for an unsupported element size or no kernels, -3 if
-// the GPU work failed.
+typedef void (*lumen_mps_completion)(void *context, double gpu_start, double gpu_end, int ok);
+
+// Set count elements of elem_size bytes (1 to 8) at ptr, inside a lumen MPS
+// segment, to the element at pattern: fillBuffer if its bytes are all the
+// same, else the compute shader (2, 4 or 8 bytes). Submitted to the MPS
+// stream without waiting; once the GPU finishes, done(context, GPU start,
+// GPU end in host-clock seconds, ok) is called on a Metal thread.
+//
+// Returns 0 if submitted (done will be called), or without calling done:
+// -1 if the memory is not mapped (e.g. a custom allocator's), -2 for an
+// unsupported element size or no kernels.
 int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t count,
-                   double *gpu_start, double *gpu_end) {
-  if (count == 0) {
-    return 0;
-  }
+                   lumen_mps_completion done, void *context) {
   const Pipelines &p = pipelines();
+  id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+  const uint8_t *bytes = static_cast<const uint8_t *>(pattern);
+  bool one_byte = std::all_of(bytes, bytes + elem_size, [&](uint8_t b) { return b == bytes[0]; });
   id<MTLComputePipelineState> pso = elem_size == 2 ? p.u16 : elem_size == 4 ? p.u32 : elem_size == 8 ? p.u64 : nil;
-  if (pso == nil || p.queue == nil) {
+  if (queue == nil || count == 0 || (!one_byte && pso == nil)) {
     return -2;
   }
-  // The pages covering the elements.
+  // A no-copy view over the pages covering the elements.
   uintptr_t first = reinterpret_cast<uintptr_t>(ptr);
   uintptr_t pages = first & ~(uintptr_t)(vm_page_size - 1);
   uintptr_t end = first + elem_size * count;
@@ -115,26 +110,28 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
   if (buffer == nil) {
     return -1;
   }
-  uint64_t start = (first - pages) / elem_size;
   @autoreleasepool {
-    id<MTLCommandBuffer> commands = [p.queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
-    [encoder setComputePipelineState:pso];
-    [encoder setBuffer:buffer offset:0 atIndex:0];
-    [encoder setBytes:pattern length:elem_size atIndex:1];
-    [encoder setBytes:&start length:sizeof(start) atIndex:2];
-    NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, count);
-    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-    [encoder endEncoding];
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    if (one_byte) {
+      id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+      [blit fillBuffer:buffer range:NSMakeRange(first - pages, elem_size * count) value:bytes[0]];
+      [blit endEncoding];
+    } else {
+      uint64_t start = (first - pages) / elem_size;
+      id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+      [encoder setComputePipelineState:pso];
+      [encoder setBuffer:buffer offset:0 atIndex:0];
+      [encoder setBytes:pattern length:elem_size atIndex:1];
+      [encoder setBytes:&start length:sizeof(start) atIndex:2];
+      NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, count);
+      [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+      [encoder endEncoding];
+    }
+    [commands addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      done(context, cb.GPUStartTime, cb.GPUEndTime, cb.status == MTLCommandBufferStatusCompleted);
+    }];
     [commands commit];
-    [commands waitUntilCompleted];
-    if (gpu_start != nullptr) {
-      *gpu_start = commands.GPUStartTime;
-    }
-    if (gpu_end != nullptr) {
-      *gpu_end = commands.GPUEndTime;
-    }
-    return commands.status == MTLCommandBufferStatusCompleted ? 0 : -3;
   }
+  return 0;
 }
 }

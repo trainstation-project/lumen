@@ -102,6 +102,7 @@ impl Storage {
         if out.is_empty() {
             return;
         }
+        self.synchronize();
         // SAFETY: the range is in bounds of this allocator's buffer, and
         // `out` is a distinct host buffer of the same length.
         unsafe {
@@ -125,6 +126,7 @@ impl Storage {
         if bytes.is_empty() {
             return;
         }
+        self.synchronize();
         // SAFETY: as in `read_bytes`.
         unsafe {
             self.allocator
@@ -143,6 +145,7 @@ impl Storage {
         if nbytes == 0 {
             return;
         }
+        self.synchronize();
         // SAFETY: the range is in bounds of this allocator's buffer.
         unsafe {
             self.allocator.memset(self.ptr_at(offset), value, nbytes);
@@ -161,6 +164,16 @@ impl Storage {
     /// caveats as [`write_bytes`](Self::write_bytes).
     pub(crate) fn write<T: Element>(&self, offset: usize, data: &[T]) {
         self.write_bytes(offset * size_of::<T>(), as_bytes(data));
+    }
+
+    /// Wait for device work in flight before the host touches the buffer:
+    /// MPS ops run asynchronously on the MPS stream (PyTorch syncs its
+    /// stream before host copies too).
+    fn synchronize(&self) {
+        #[cfg(lumen_mps_linked)]
+        if self.device == Device::Mps {
+            crate::stream::mps::synchronize();
+        }
     }
 
     /// The buffer's address `offset` bytes in, in the device's address

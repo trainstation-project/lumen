@@ -218,6 +218,10 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
 
 /// Stop the running session and return what it recorded.
 pub fn stop() -> Result<Profile, String> {
+    // Let in-flight GPU work finish, so its events are recorded (PyTorch's
+    // profiler synchronizes its MPS streams too).
+    #[cfg(lumen_mps_linked)]
+    crate::stream::mps::synchronize();
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
@@ -390,24 +394,50 @@ pub(crate) fn report_memory(
 // Called by the Metal and CUDA backends, which are compiled only when linked.
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
 pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_ns: u64) {
-    if !device_enabled(device) {
-        return;
+    if let Some(context) = gpu_context(device) {
+        record_gpu_in(context, name, device, start_ns, end_ns);
     }
-    let (session, parent, thread) = (
-        SESSION.load(Ordering::Relaxed),
-        current_parent(),
-        thread_id(),
-    );
+}
+
+/// Who submitted device work, captured at submission, for work whose times
+/// arrive later on another thread (asynchronous MPS work).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuContext {
+    session: u64,
+    parent: Option<u64>,
+    thread: u64,
+}
+
+/// The current op's context for device work on `device`, if the session
+/// times it.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
+    device_enabled(device).then(|| GpuContext {
+        session: SESSION.load(Ordering::Relaxed),
+        parent: current_parent(),
+        thread: thread_id(),
+    })
+}
+
+/// Record device work captured in `context`.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+pub(crate) fn record_gpu_in(
+    context: GpuContext,
+    name: &'static str,
+    device: Device,
+    start_ns: u64,
+    end_ns: u64,
+) {
     push(
-        session,
+        context.session,
         Event {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             name: name.to_owned(),
             kind: EventKind::Gpu,
             start_ns,
             end_ns: end_ns.max(start_ns),
-            thread,
-            parent,
+            thread: context.thread,
+            parent: context.parent,
             device,
             shapes: Vec::new(),
             bytes: 0,

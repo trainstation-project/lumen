@@ -4,6 +4,7 @@ pub mod ops;
 pub mod profiler;
 #[cfg(feature = "python")]
 mod python;
+pub mod stream;
 pub mod tensor;
 
 pub use allocator::caching::CachingAllocator;

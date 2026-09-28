@@ -482,7 +482,7 @@ fn json_strings_escape_control_characters() {
 
 /// Assert `gpu` ran inside its op's CPU range, give or take `slack_ns` for
 /// the two clocks' alignment.
-#[cfg(any(lumen_mps_linked, lumen_cuda_linked))]
+#[cfg(lumen_cuda_linked)]
 fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(
         gpu.start_ns + slack_ns >= op.start_ns,
@@ -514,13 +514,21 @@ mod mps {
         };
         let p = profile(config, || {
             let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fillBuffer
+            // The fill is asynchronous: wait for it, so the tensor is freed
+            // here rather than on the Metal thread that completes it.
+            crate::stream::mps::synchronize();
             drop(t);
         });
         let memset = one(&p, "Memset");
         assert_eq!((memset.kind, memset.device), (EventKind::Gpu, Device::Mps));
         let zeros = one(&p, "lumen::zeros");
         assert_eq!(memset.parent, Some(zeros.id));
-        within(memset, zeros, 1_000_000);
+        // Submitted by zeros, but may finish after it returns.
+        assert!(
+            memset.start_ns + 1_000_000 >= zeros.start_ns,
+            "{memset:?} before {zeros:?}"
+        );
+        assert!(memset.end_ns >= memset.start_ns);
         let memory: Vec<&Event> = named(&p, "[memory]")
             .into_iter()
             .filter(|e| e.device == Device::Mps)
