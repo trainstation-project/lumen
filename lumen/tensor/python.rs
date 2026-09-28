@@ -520,12 +520,17 @@ impl PyTensor {
     ///
     /// `stream` is accepted to match the signature but ignored: lumen runs
     /// ops on the default stream.
-    #[pyo3(signature = (stream=None))]
+    #[pyo3(signature = (stream=None, max_version=None, **kwargs))]
     fn __dlpack__<'py>(
         &self,
         py: Python<'py>,
         stream: Option<&Bound<'py, PyAny>>,
+        max_version: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
+        // Consumed for array-API signature compatibility (NumPy passes
+        // `max_version`); lumen always produces a v1.0 capsule.
+        let _ = (max_version, kwargs);
         crate::tensor::dlpack::dlpack(py, &self.inner, stream)
     }
 

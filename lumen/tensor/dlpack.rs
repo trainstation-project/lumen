@@ -13,15 +13,17 @@
 //! consumer is done. Nothing is copied.
 
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyTuple};
 
 use crate as core;
 use crate::Tensor;
+use crate::allocator::{Allocator, DataPtr};
 use crate::tensor::dtype::DType;
 use crate::tensor::storage::Storage;
 
@@ -78,11 +80,33 @@ struct DLManagedTensor {
 
 /// What a managed tensor owns: the storage reference that keeps the buffer
 /// alive, and the shape/strides vectors the `DLTensor` points into.
+///
+/// `magic` must sit at offset 0 so an importer can read it without knowing
+/// this type: it is therefore the only field of a `#[repr(C)]` header, and
+/// the rest hangs off it through a pointer. A plain `#[repr(Rust)]` struct
+/// lets the compiler reorder `magic` (it does: it lands at offset 40), which
+/// would silently make every capsule look foreign.
+#[repr(C)]
 struct ManagerCtx {
+    /// Stamped so an importer can tell a lumen capsule from a foreign one
+    /// without reading a foreign `manager_ctx` through our layout. Read
+    /// through a raw pointer in [`from_dlpack`], so the compiler cannot see
+    /// the read.
+    #[allow(dead_code)]
+    magic: u64,
+    /// The payload, behind a pointer so `magic` stays at offset 0.
+    body: ManagerBody,
+}
+
+/// The owned payload a [`ManagerCtx`] points at.
+struct ManagerBody {
     storage: Arc<Storage>,
     shape: Box<[i64]>,
     strides: Box<[i64]>,
 }
+
+/// The value [`ManagerCtx::magic`] always holds (ASCII "lumendlp").
+const MANAGER_MAGIC: u64 = 0x6c75_6d65_6e64_6c70;
 
 /// The DLPack device for `t`: CUDA carries its index, the others are 0.
 fn dlpack_device(t: &Tensor) -> DLDevice {
@@ -145,9 +169,12 @@ unsafe extern "C" fn deleter(managed: *mut DLManagedTensor) {
 /// free it (via [`deleter`]) or hand it to a consumer.
 fn export(t: &Tensor) -> *mut DLManagedTensor {
     let ctx = Box::new(ManagerCtx {
-        storage: t.storage_arc(),
-        shape: t.shape().iter().map(|&d| d as i64).collect(),
-        strides: t.strides().iter().map(|&d| d as i64).collect(),
+        magic: MANAGER_MAGIC,
+        body: ManagerBody {
+            storage: t.storage_arc(),
+            shape: t.shape().iter().map(|&d| d as i64).collect(),
+            strides: t.strides().iter().map(|&d| d as i64).collect(),
+        },
     });
     // `shape`/`strides` live in the ctx, whose address is stable across the
     // move of the box into `manager_ctx`, so take the pointers from the
@@ -162,8 +189,8 @@ fn export(t: &Tensor) -> *mut DLManagedTensor {
             device: dlpack_device(t),
             ndim: t.ndim() as i32,
             dtype: dlpack_dtype(t.dtype()),
-            shape: ctx.shape.as_ptr() as *mut i64,
-            strides: ctx.strides.as_ptr() as *mut i64,
+            shape: ctx.body.shape.as_ptr() as *mut i64,
+            strides: ctx.body.strides.as_ptr() as *mut i64,
             byte_offset: 0,
         },
         manager_ctx: ctx_ptr.cast(),
@@ -172,9 +199,12 @@ fn export(t: &Tensor) -> *mut DLManagedTensor {
     Box::into_raw(managed)
 }
 
-/// The name a DLPack capsule carries.
+/// A capsule the consumer can import.
 const CAPSULE_NAME: &std::ffi::CStr = c"dltensor";
+/// A capsule renamed on consumption (DLPack's `used_dltensor`).
 const USED_CAPSULE_NAME: &std::ffi::CStr = c"used_dltensor";
+
+/// Consume a DLPack capsule into a [`Tensor`], adopting its buffer.
 
 /// The capsule destructor: frees the managed tensor if the consumer never
 /// took it (a framework that imports the capsule renames it and clears the
@@ -184,8 +214,21 @@ const USED_CAPSULE_NAME: &std::ffi::CStr = c"used_dltensor";
 /// `capsule` is a valid `PyObject` being destroyed; its pointer is a
 /// `DLManagedTensor` from [`export`], or was cleared by the consumer.
 unsafe extern "C" fn capsule_destructor(capsule: *mut ffi::PyObject) {
-    // SAFETY: called by CPython with a live capsule object.
-    let ptr = unsafe { ffi::PyCapsule_GetPointer(capsule, CAPSULE_NAME.as_ptr()) };
+    // Deliberately not `PyCapsule_GetPointer`: that sets a Python exception
+    // when the name does not match, and a destructor must never leave one
+    // set. A consumer (NumPy 2.x) renames the capsule to "used_dltensor" and
+    // clears the destructor, but if the object is collected in between, a
+    // name-checked lookup here would raise `ValueError: PyCapsule_GetPointer
+    // called with incorrect name` out of `tp_clear`, which CPython reports as
+    // `SystemError: <built-in function from_dlpack> returned a result with an
+    // exception set`. Read the pointer field directly instead: it is valid
+    // for the capsule to have been consumed, in which case the destructor is
+    // no longer ours to run.
+    let name = unsafe { ffi::PyCapsule_GetName(capsule) };
+    if name.is_null() || unsafe { std::ffi::CStr::from_ptr(name) } != CAPSULE_NAME {
+        return;
+    }
+    let ptr = unsafe { ffi::PyCapsule_GetPointer(capsule, name) };
     if !ptr.is_null() {
         // A consumer renames the capsule to "used_dltensor" on taking it, so
         // reaching here with the "dltensor" name means it was never taken.
@@ -200,6 +243,11 @@ unsafe extern "C" fn capsule_destructor(capsule: *mut ffi::PyObject) {
 /// pointer to the buffer; nothing is copied. `stream` is accepted to match
 /// the array-API signature but ignored: lumen ops run on the default stream,
 /// and a consumer there already sees writes in order.
+///
+/// A consumer cannot tell a writable buffer from a read-only one — DLPack has
+/// no flag for it — so NumPy imports such an array as read-only and PyTorch
+/// behaves the same way. Writes still work through the producer: mutate the
+/// returned tensor (e.g. `fill_`) and the consumer's view observes them.
 pub(crate) fn dlpack<'py>(
     py: Python<'py>,
     t: &Tensor,
@@ -215,9 +263,25 @@ pub(crate) fn dlpack<'py>(
     }
 }
 
-/// Consume a DLPack capsule into a [`Tensor`], taking ownership of the
-/// managed tensor.
-pub(crate) fn from_dlpack(_py: Python<'_>, capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
+/// Consume a DLPack capsule into a [`Tensor`], adopting its buffer.
+///
+/// Two kinds of capsule arrive here:
+///
+/// * one of ours ([`dlpack`]) — the `manager_ctx` is a [`ManagerCtx`], whose
+///   `magic` field marks it. Copy the storage reference out and free the
+///   managed tensor; the capsule has no further role, so its destructor is
+///   cleared and its name set to `used_dltensor`.
+/// * a foreign one (NumPy, PyTorch, CuTe DSL) — the `manager_ctx` belongs to
+///   the producer, and only its deleter knows how to release the buffer. We
+///   cannot read or free it, so the capsule itself is kept alive: the
+///   imported storage holds a `Py<PyCapsule>`, and the producer's deleter
+///   runs when that reference drops. The name is *not* touched (the producer
+///   may share the capsule), which is also why a consumed foreign capsule
+///   cannot be detected the way ours can.
+pub(crate) fn from_dlpack(
+    _py: Python<'_>,
+    capsule: &Bound<'_, PyCapsule>,
+) -> PyResult<Tensor> {
     // A capsule renamed to "used_dltensor" was already consumed.
     let name = capsule.name()?;
     let name = match name {
@@ -232,15 +296,15 @@ pub(crate) fn from_dlpack(_py: Python<'_>, capsule: &Bound<'_, PyCapsule>) -> Py
             name.to_string_lossy()
         )));
     }
-    // SAFETY: the name check means this is a live `DLManagedTensor` we own.
-    // The pointer came from our export and the capsule still keeps it alive.
+    // SAFETY: the check above means this is a live "dltensor" capsule, whose
+    // pointer is the `DLManagedTensor` the producer built.
     let raw = unsafe { ffi::PyCapsule_GetPointer(capsule.as_ptr(), CAPSULE_NAME.as_ptr()) };
     let ptr = raw as *mut DLManagedTensor;
     if ptr.is_null() {
         return Err(PyBufferError::new_err("DLPack capsule holds a null pointer"));
     }
-    // SAFETY: the name check means this is a live `DLManagedTensor` we own.
-    let managed = unsafe { &mut *ptr };
+    // SAFETY: a live "dltensor" capsule always points at a `DLManagedTensor`.
+    let managed = unsafe { &*ptr };
     let dl = &managed.dl_tensor;
     if dl.ndim < 0 {
         return Err(PyValueError::new_err("DLPack tensor has negative ndim"));
@@ -257,29 +321,41 @@ pub(crate) fn from_dlpack(_py: Python<'_>, capsule: &Bound<'_, PyCapsule>) -> Py
     let dtype = dtype_of(dl.dtype)?;
     check_contiguous(dl, &shape)?;
 
-    let ctx_ptr = managed.manager_ctx as *const ManagerCtx;
-    if ctx_ptr.is_null() {
-        return Err(PyRuntimeError::new_err(
-            "DLPack tensor carries no lumen storage",
-        ));
-    }
-    // SAFETY: a lumen-made capsule always carries a `ManagerCtx`, live until
-    // the managed tensor is freed just below.
-    let storage = unsafe { Arc::clone(&(*ctx_ptr).storage) };
-    // SAFETY: we have taken ownership; free the managed tensor exactly once.
-    unsafe { drop(Box::from_raw(ptr)) };
-    // Mark it consumed so a second import sees "used_dltensor". This also
-    // stops the capsule destructor from freeing: a re-import is now an
-    // error, not a double free.
-    // SAFETY: `capsule` is a live capsule and the name is a static C string.
-    if unsafe { ffi::PyCapsule_SetName(capsule.as_ptr(), USED_CAPSULE_NAME.as_ptr()) } != 0 {
-        return Err(PyErr::fetch(_py));
-    }
+    // SAFETY: a `ManagerCtx` is `repr(Rust)`, but its `magic` field is first,
+    // so reading a `u64` at offset 0 of any non-null context is well defined;
+    // only a matching magic lets us touch the rest of the layout.
+    let is_ours = !managed.manager_ctx.is_null()
+        && unsafe { *(managed.manager_ctx as *const u64) } == MANAGER_MAGIC;
 
-    // The pointer is spent once imported: clear it so a stray second import
-    // (with the renamed capsule) cannot touch freed memory.
-    // SAFETY: `capsule` is a live capsule; clearing the pointer is allowed.
-    unsafe { ffi::PyCapsule_SetPointer(capsule.as_ptr(), std::ptr::null_mut()) };
+    let storage = if is_ours {
+        // SAFETY: `is_ours` proves the context is a `ManagerCtx` built by
+        // [`export`], live until the managed tensor is freed below.
+        let ctx = unsafe { &*(managed.manager_ctx as *const ManagerCtx) };
+        let storage = Arc::clone(&ctx.body.storage);
+        // SAFETY: we own the managed tensor now; free it exactly once, which
+        // also releases the context we just read from.
+        unsafe { drop(Box::from_raw(ptr)) };
+        // Mark the capsule consumed so a second import is an error, not a
+        // double free.
+        // SAFETY: `capsule` is live and the name is a static C string.
+        if unsafe { ffi::PyCapsule_SetName(capsule.as_ptr(), USED_CAPSULE_NAME.as_ptr()) } != 0 {
+            return Err(PyErr::fetch(_py));
+        }
+        // SAFETY: the managed tensor is freed, so its destructor must not run
+        // (CPython: a null destructor is how a capsule says "nothing to free";
+        // `PyCapsule_SetPointer` refuses null, so the destructor is the only
+        // way to spend the pointer).
+        if unsafe { ffi::PyCapsule_SetDestructor(capsule.as_ptr(), None) } != 0 {
+            return Err(PyErr::fetch(_py));
+        }
+        storage
+    } else {
+        // Foreign capsule: its deleter is the only code that may release the
+        // buffer, so tie the buffer's lifetime to the capsule and never read
+        // the context. See [`AdoptedAllocator`].
+        let (allocator, addr, nbytes) = adopt_foreign(dl, &shape, dtype, capsule)?;
+        Arc::new(Storage::from_raw_parts(addr, nbytes, allocator))
+    };
 
     Tensor::from_contiguous_storage(storage, dtype, &shape)
         .ok_or_else(|| PyValueError::new_err("DLPack tensor does not fit its storage"))
@@ -353,4 +429,80 @@ pub(crate) fn dlpack_device_tuple<'py>(
 ) -> PyResult<Bound<'py, PyTuple>> {
     let device = dlpack_device(t);
     PyTuple::new(py, [device.device_type, device.device_id])
+}
+
+/// The [`Device`](core::Device) a `DLDevice` names (the inverse of
+/// [`dlpack_device`]).
+fn device_of(device: DLDevice) -> PyResult<core::Device> {
+    match device.device_type {
+        K_DL_CPU => Ok(core::Device::Cpu),
+        K_DL_METAL => Ok(core::Device::Mps),
+        K_DL_CUDA => Ok(core::Device::Cuda(device.device_id as usize)),
+        // `check_device` already refused anything else.
+        other => Err(PyValueError::new_err(format!(
+            "unsupported DLPack device type {other}"
+        ))),
+    }
+}
+
+/// An [`Allocator`] that owns a foreign DLPack capsule instead of device
+/// memory: dropping it drops the capsule, which runs the producer's DLPack
+/// deleter and releases the buffer.
+///
+/// The importer never allocates from it — the buffer already exists — but
+/// [`Storage`] requires an allocator, and routing the buffer's release
+/// through one is exactly how a foreign buffer is kept alive without knowing
+/// the producer's layout.
+struct AdoptedAllocator {
+    device: core::Device,
+    /// The capsule whose destructor releases the buffer. Kept for as long as
+    /// the imported storage lives: dropping it runs the producer's DLPack
+    /// deleter, which is the only code that may release the buffer. Never
+    /// read, only held.
+    #[allow(dead_code)]
+    capsule: Py<PyCapsule>,
+}
+
+impl Allocator for AdoptedAllocator {
+    fn device(&self) -> core::Device {
+        self.device
+    }
+
+    fn allocate(&self, _nbytes: usize) -> DataPtr {
+        unreachable!("an adopted buffer is never allocated from")
+    }
+
+    /// Hand out the producer's buffer, keeping it alive via `self.capsule`:
+    /// the `DataPtr`'s deleter is a no-op on the bytes and the buffer is
+    /// released when the last clone of the allocator (hence the capsule)
+    /// drops.
+    fn try_allocate(&self, _nbytes: usize) -> Option<DataPtr> {
+        unreachable!("an adopted buffer is never allocated from")
+    }
+}
+
+/// Move an adopted buffer into a [`Storage`].
+///
+/// `capsule` owns the buffer through the producer's DLPack deleter, and `dl`
+/// gives the address and byte size. The new storage's [`DataPtr`] points at
+/// that address but does not free it: the allocator owns the capsule, so the
+/// buffer lives exactly as long as the storage's allocator reference.
+fn adopt_foreign(
+    dl: &DLTensor,
+    shape: &[usize],
+    dtype: DType,
+    capsule: &Bound<'_, PyCapsule>,
+) -> PyResult<(Arc<dyn Allocator>, NonNull<u8>, usize)> {
+    let device = device_of(dl.device)?;
+    let nbytes = shape.iter().product::<usize>() * dtype.size_of();
+    // `dl.byte_offset` is the producer's own offset into `dl.data`; adopt the
+    // buffer from its base so the offset is applied once, by the tensor view.
+    let data = (dl.data as *mut u8).wrapping_add(dl.byte_offset as usize);
+    let addr = NonNull::new(data)
+        .ok_or_else(|| PyBufferError::new_err("DLPack tensor has a null data pointer"))?;
+    let allocator: Arc<dyn Allocator> = Arc::new(AdoptedAllocator {
+        device,
+        capsule: capsule.clone().unbind(),
+    });
+    Ok((allocator, addr, nbytes))
 }

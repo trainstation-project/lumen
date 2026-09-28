@@ -1,6 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "python")]
+use std::alloc::Layout;
+#[cfg(feature = "python")]
+use std::ptr::NonNull;
+
 use crate::allocator::{Allocator, DataPtr, allocator_for};
 use crate::device::Device;
 
@@ -69,6 +74,23 @@ impl Storage {
 
     pub fn allocator(&self) -> &Arc<dyn Allocator> {
         &self.allocator
+    }
+
+    /// A storage whose buffer already exists at `addr`, owned by `allocator`
+    /// (DLPack: a foreign buffer adopted through the capsule that owns it).
+    ///
+    /// The address is not freed by this storage: releasing `allocator` is
+    /// what releases the buffer, so the allocator must own it.
+    #[cfg(feature = "python")]
+    pub(crate) fn from_raw_parts(addr: NonNull<u8>, nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
+        let device = allocator.device();
+        Storage {
+            id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
+            data: DataPtr::with_deleter(addr, Layout::from_size_align(nbytes, 1).unwrap(), |_| {}),
+            nbytes,
+            device,
+            allocator,
+        }
     }
 
     /// Raw pointer to the start of the buffer, in the device's address

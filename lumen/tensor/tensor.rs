@@ -203,6 +203,7 @@ impl Tensor {
     /// An owning handle to the storage, for interop that must keep the
     /// buffer alive past the tensor (e.g. a DLPack export, whose consumer
     /// may outlive this view).
+    #[cfg(feature = "python")]
     pub(crate) fn storage_arc(&self) -> Arc<Storage> {
         Arc::clone(&self.storage)
     }
@@ -261,6 +262,7 @@ impl Tensor {
     /// A contiguous tensor over `storage` (offset 0). Used to ingest a
     /// buffer from another framework (a DLPack import), which arrives as
     /// storage plus shape and no lumen-side view.
+    #[cfg(feature = "python")]
     pub(crate) fn from_contiguous_storage(
         storage: Arc<Storage>,
         dtype: DType,
