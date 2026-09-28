@@ -81,10 +81,6 @@ pub(crate) mod ffi {
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
         pub fn cudaMemcpy(dst: *mut c_void, src: *const c_void, count: usize, kind: i32) -> i32;
     }
-
-    // `cudaMemcpyKind` values.
-    pub const HOST_TO_DEVICE: i32 = 1;
-    pub const DEVICE_TO_HOST: i32 = 2;
 }
 
 /// Number of visible CUDA devices (`torch.cuda.device_count()`); 0 when
@@ -161,39 +157,6 @@ impl Allocator for CudaBackend {
                 ffi::cudaFree(p.as_ptr().cast());
             },
         ))
-    }
-
-    // Device memory is not host-addressable: go through cudaMemcpy (which
-    // synchronizes with the device, like PyTorch's blocking `copy_`).
-    unsafe fn copy_from_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        self.memcpy(dst, src, nbytes, ffi::HOST_TO_DEVICE);
-    }
-
-    unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        self.memcpy(dst, src, nbytes, ffi::DEVICE_TO_HOST);
-    }
-}
-
-#[cfg(lumen_cuda_linked)]
-impl CudaBackend {
-    fn memcpy(&self, dst: *mut u8, src: *const u8, nbytes: usize, kind: i32) {
-        if nbytes == 0 {
-            return;
-        }
-
-        let mut err = 0;
-        self.timed(|| {
-            err = unsafe {
-                ffi::cudaSetDevice(self.device_index);
-                ffi::cudaMemcpy(dst.cast(), src.cast(), nbytes, kind)
-            };
-        });
-
-        assert_eq!(
-            err, 0,
-            "cudaMemcpy of {nbytes} bytes on cuda:{} failed (error {err})",
-            self.device_index
-        );
     }
 }
 

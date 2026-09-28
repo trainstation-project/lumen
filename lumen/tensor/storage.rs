@@ -10,8 +10,8 @@ static NEXT_STORAGE_ID: AtomicUsize = AtomicUsize::new(1);
 /// An owning byte buffer on some device (PyTorch: `c10::StorageImpl`).
 ///
 /// The buffer may not be host-addressable (CUDA), so data moves in and out
-/// only through the allocator's host copies ([`Allocator::copy_to_host`] /
-/// [`Allocator::copy_from_host`]), never by dereferencing the pointer.
+/// only through the copy ops ([`crate::ops::copy::copy_h2d`] /
+/// [`crate::ops::copy::copy_d2h`]), never by dereferencing the pointer.
 pub struct Storage {
     /// Unique id, handy for checking aliasing (PyTorch: object identity of
     /// `StorageImpl`; exposed in python as `tensor.untyped_storage()._cdata`).
@@ -103,11 +103,15 @@ impl Storage {
             return;
         }
         self.synchronize();
-        // SAFETY: the range is in bounds of this allocator's buffer, and
-        // `out` is a distinct host buffer of the same length.
+        // SAFETY: the range is in bounds of this storage's buffer, and `out`
+        // is a distinct host buffer of the same length.
         unsafe {
-            self.allocator
-                .copy_to_host(out.as_mut_ptr(), self.ptr_at(offset), out.len());
+            crate::ops::copy::copy_d2h(
+                self.device,
+                out.as_mut_ptr(),
+                self.ptr_at(offset),
+                out.len(),
+            );
         }
     }
 
@@ -129,8 +133,12 @@ impl Storage {
         self.synchronize();
         // SAFETY: as in `read_bytes`.
         unsafe {
-            self.allocator
-                .copy_from_host(self.ptr_at(offset), bytes.as_ptr(), bytes.len());
+            crate::ops::copy::copy_h2d(
+                self.device,
+                self.ptr_at(offset),
+                bytes.as_ptr(),
+                bytes.len(),
+            );
         }
     }
 

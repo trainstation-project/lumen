@@ -416,6 +416,38 @@ mod opaque_device {
             let start = addr - base;
             f(&mut buf[start..start + n])
         }
+
+        /// Read `n` bytes at `addr`, the way a copy op would.
+        fn read_region(&self, addr: usize, n: usize) -> Vec<u8> {
+            self.with_region(addr, n, |region| region.to_vec())
+        }
+
+        /// Write `bytes` at `addr`, the way a copy op would.
+        fn write_region(&self, addr: usize, bytes: &[u8]) {
+            self.with_region(addr, bytes.len(), |region| region.copy_from_slice(bytes));
+        }
+
+        /// Whether this device allocated the range containing `addr`.
+        fn contains(&self, addr: usize) -> bool {
+            let memory = self.memory.lock().unwrap();
+            memory.range(..=addr).next_back().is_some_and(|(&base, buf)| {
+                addr < base + buf.len()
+            })
+        }
+    }
+
+    // A device whose memory the host cannot address. The copy ops reach its
+    // buffers only through the allocator, so a host dereference of one of its
+    // pointers crashes here exactly as it would on CUDA.
+    unsafe fn copy_h2d(dst: *mut u8, src: *const u8, nbytes: usize) {
+        let bytes = unsafe { std::slice::from_raw_parts(src, nbytes) };
+        device_holding(dst.addr()).write_region(dst.addr(), bytes);
+    }
+
+    unsafe fn copy_d2h(dst: *mut u8, src: *const u8, nbytes: usize) {
+        let bytes = device_holding(src.addr()).read_region(src.addr(), nbytes);
+        // SAFETY: the caller guarantees `dst` is a host buffer of `nbytes`.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, nbytes) };
     }
 
     impl Allocator for OpaqueDevice {
@@ -437,33 +469,50 @@ mod opaque_device {
                 },
             )
         }
-
-        unsafe fn copy_from_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-            let src = unsafe { std::slice::from_raw_parts(src, nbytes) };
-            self.with_region(dst.addr(), nbytes, |region| region.copy_from_slice(src));
-        }
-
-        unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-            let dst = unsafe { std::slice::from_raw_parts_mut(dst, nbytes) };
-            self.with_region(src.addr(), nbytes, |region| dst.copy_from_slice(region));
-        }
     }
 
     /// An uninitialized `numel`-element f32 tensor on `device`.
     fn uninit_tensor(device: &OpaqueDevice, numel: usize) -> Tensor {
-        register_fill();
+        register_kernels(device);
         let storage = Storage::with_allocator(numel * 4, Arc::new(device.clone()));
         // Callers write every element before reading.
         Tensor::wrap(Arc::new(storage), DType::F32, &[numel])
     }
 
-    /// The device claims MPS; without Metal, `fill_` has no static MPS
-    /// kernel, so register the CPU one (it only goes through the allocator).
-    /// With Metal the static kernel wins and this is a no-op.
-    fn register_fill() {
+    // Every `OpaqueDevice` the copy-op kernels below may be asked about, so
+    // they can find whose side table holds an address. The kernels are plain
+    // `fn`s with no state of their own, and a test may hold tensors on
+    // several devices at once.
+    thread_local! {
+        static OPAQUE: std::cell::RefCell<Vec<OpaqueDevice>> =
+            std::cell::RefCell::new(Vec::new());
+    }
+
+    /// The device whose memory contains `addr`.
+    fn device_holding(addr: usize) -> OpaqueDevice {
+        OPAQUE.with(|devices| {
+            devices
+                .borrow()
+                .iter()
+                .find(|d| d.contains(addr))
+                .expect("no OpaqueDevice holds that address")
+                .clone()
+        })
+    }
+
+    /// The device claims MPS, so ops dispatch there. Without Metal their MPS
+    /// kernels are missing, so register versions that go through the
+    /// allocator: on this device the ops reach the bytes only that way, which
+    /// is what the tests below are about. With Metal the static kernels win
+    /// and this is a no-op.
+    fn register_kernels(device: &OpaqueDevice) {
+        use crate::ops::copy::{COPY_D2H, COPY_H2D};
         use crate::ops::{DispatchKey, fill::FILL};
-        let cpu = FILL.kernel(DispatchKey::Cpu).unwrap();
-        let _ = FILL.register(DispatchKey::Mps, cpu);
+        OPAQUE.with(|devices| devices.borrow_mut().push(device.clone()));
+        let fill = FILL.kernel(DispatchKey::Cpu).unwrap();
+        let _ = FILL.register(DispatchKey::Mps, fill);
+        let _ = COPY_H2D.register(DispatchKey::Mps, copy_h2d);
+        let _ = COPY_D2H.register(DispatchKey::Mps, copy_d2h);
     }
 
     /// A tensor on `device` holding `values`, reshaped to `shape`.

@@ -360,14 +360,4 @@ impl<B: Allocator + 'static, P: CachePolicy> Allocator for CachingAllocator<B, P
     fn allocate(&self, nbytes: usize) -> DataPtr {
         CachingAllocator::allocate(self, nbytes)
     }
-
-    // Blocks are slices of backend memory, so the backend knows how to
-    // reach them.
-    unsafe fn copy_from_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        unsafe { self.inner.backend.copy_from_host(dst, src, nbytes) }
-    }
-
-    unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        unsafe { self.inner.backend.copy_to_host(dst, src, nbytes) }
-    }
 }

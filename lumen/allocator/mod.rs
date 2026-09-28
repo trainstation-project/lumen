@@ -109,31 +109,6 @@ pub trait Allocator: Send + Sync {
     fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         Some(self.allocate(nbytes))
     }
-
-    /// Copy `nbytes` from host memory at `src` into this allocator's
-    /// memory at `dst` (PyTorch: the host-to-device branch of `copy_`).
-    ///
-    /// The default is a plain `memcpy`, right for host-accessible memory
-    /// (CPU, and MPS's shared-storage buffers on unified memory); device
-    /// allocators whose memory the host cannot touch (CUDA) override it.
-    ///
-    /// # Safety
-    /// `src` must be valid for reading and `dst` (memory from this
-    /// allocator) for writing `nbytes`, and the two must not overlap.
-    unsafe fn copy_from_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        unsafe { std::ptr::copy_nonoverlapping(src, dst, nbytes) }
-    }
-
-    /// Copy `nbytes` from this allocator's memory at `src` into host memory
-    /// at `dst` (PyTorch: the device-to-host branch of `copy_`). Same
-    /// default and contract as [`copy_from_host`](Self::copy_from_host).
-    ///
-    /// # Safety
-    /// `src` (memory from this allocator) must be valid for reading and
-    /// `dst` for writing `nbytes`, and the two must not overlap.
-    unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
-        unsafe { std::ptr::copy_nonoverlapping(src, dst, nbytes) }
-    }
 }
 
 /// The allocator for `device` (PyTorch: `c10::GetAllocator`): the CPU

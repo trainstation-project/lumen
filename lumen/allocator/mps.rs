@@ -171,8 +171,8 @@ impl Allocator for MpsBackend {
         ))
     }
 
-    // Shared buffers are host-addressable, so the default memcpy host
-    // copies apply.
+    // Shared buffers are host-addressable: the copy ops reach them with a
+    // plain memcpy.
 }
 
 /// MPS defaults for the watermark ratios (`default_low_watermark_ratio`,
