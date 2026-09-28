@@ -3,21 +3,22 @@ CUDA when lumen is imported (see ``lumen.ops``).
 
 Only the kernel and its compilation live here. Rust calls :func:`compile`
 once per dtype and layout (the view's dimensions in stride order) and
-caches the launcher it returns, which it then calls with the data pointer
-and the value.
+caches the function it returns, compiled with TVM-FFI, which it then calls
+through TVM-FFI's C ABI with the data pointer and the value: a launch runs
+no Python.
 """
 
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.runtime import make_ptr
 
 from lumen.ops import register
 
 THREADS = 256
 
 _ELEMENT = {
-    "bool": cutlass.Boolean,
+    # lumen stores bool as one byte, which CuTe's Boolean is not.
+    "bool": cutlass.Uint8,
     "uint8": cutlass.Uint8,
     "int8": cutlass.Int8,
     "uint16": cutlass.Uint16,
@@ -43,28 +44,21 @@ def _kernel(t: cute.Tensor, value):
 
 
 def compile(dtype, shape, strides):
-    """A launcher for fills of one layout, ``launch(address, value,
+    """The fill of one layout, as a TVM-FFI function ``(address, value,
     stream)``. The layout is baked into the kernel, and each thread fills
     one element; the first dimension has the smallest stride, so
     neighboring threads store to neighboring addresses."""
     element = _ELEMENT[dtype]
-    align = max(1, element.width // 8)
 
     @cute.jit
-    def fill(ptr: cute.Pointer, value, stream: cuda.CUstream):
+    def fill(ptr: cute.Pointer, value: element, stream: cuda.CUstream):
         t = cute.make_tensor(ptr, cute.make_layout(shape, stride=strides))
         blocks = (cute.size(t) + THREADS - 1) // THREADS
         _kernel(t, value).launch(grid=(blocks, 1, 1), block=(THREADS, 1, 1), stream=stream)
 
-    def pointer(address):
-        return make_ptr(element, address, cute.AddressSpace.gmem, assumed_align=align)
-
-    compiled = cute.compile(fill, pointer(0), element(0), cuda.CUstream(0))
-
-    def launch(address, value, stream):
-        compiled(pointer(address), element(value), cuda.CUstream(stream))
-
-    return launch
+    # A null example pointer lets calls pass the address as an integer.
+    ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=max(1, element.width // 8))
+    return cute.compile(fill, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
 
 register("lumen::fill_", "cuda", compile)

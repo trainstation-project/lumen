@@ -15,6 +15,8 @@ pub mod fill;
 pub mod python;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "python")]
+pub(crate) mod tvm_ffi;
 
 use std::any::Any;
 use std::collections::HashMap;

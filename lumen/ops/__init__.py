@@ -23,7 +23,10 @@ Only the kernel is Python. A registered kernel is a compile hook: Rust
 calls it once per dtype and layout (``shape`` and ``strides`` in elements;
 ``fill_`` hands over the dimensions in stride order), caches the launcher
 it returns, and calls that with the data pointer, the value in the tensor's
-dtype, and the CUDA stream (0, the legacy default).
+dtype, and the CUDA stream (0, the legacy default). A launcher that is a
+TVM-FFI function (``apache-tvm-ffi``; the CuTe DSL compiles one with
+``--enable-tvm-ffi``) is called from Rust through its C ABI, so a launch
+runs no Python; any other callable is called through Python.
 
 The registered kernel is called *before* the built-in one for that device,
 so a built-in remains the fallback when no Python kernel is registered.

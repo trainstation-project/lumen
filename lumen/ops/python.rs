@@ -6,7 +6,10 @@
 //! `compile(dtype, shape, strides)`, returning a `launch(address, value,
 //! stream)` for that one layout; everything around it is Rust: dispatch,
 //! the layout, a cache of launchers (so a layout compiles once), the data
-//! pointer and the value. A launch is then one Python call.
+//! pointer and the value. A launcher that is a TVM-FFI function (what the
+//! CuTe DSL compiles with `--enable-tvm-ffi`) is called through its C ABI
+//! ([`crate::ops::tvm_ffi`]), so a cached launch runs no Python at all; any
+//! other callable is called through Python.
 //!
 //! Rust cannot hold a Python callable inside an [`Op`](crate::ops::Op): the
 //! dispatcher requires `K: Copy + Send + Sync`, and a `Py<PyAny>` is none
@@ -61,8 +64,50 @@ const OP_SIGNATURES: &[(&str, &str)] = &[
 const LAUNCHER_SIGNATURE: &str = "(dtype, shape, strides) -> launch(address, value, stream)";
 
 /// Launchers a kernel's compile hook returned, by kernel, dtype and layout.
+/// Never evicted, so a cached TVM-FFI handle stays valid.
 type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>);
-static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Py<PyAny>>>> = Mutex::new(None);
+static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Launcher>>> = Mutex::new(None);
+
+/// A cached launcher.
+enum Launcher {
+    /// A TVM-FFI function, called through its C ABI by its handle. `owner`
+    /// is what the compile hook returned, which owns the compiled code.
+    TvmFfi {
+        handle: usize,
+        _owner: Py<PyAny>,
+        _function: Py<PyAny>,
+    },
+    /// Any other Python callable.
+    Python(Py<PyAny>),
+}
+
+impl Launcher {
+    /// The launcher for what a compile hook returned: its TVM-FFI function
+    /// if it is one or wraps one (`__tvm_ffi_object__`), else the callable.
+    fn new(py: Python<'_>, launcher: Bound<'_, PyAny>) -> PyResult<Self> {
+        let function = if launcher.hasattr("__tvm_ffi_object__")? {
+            launcher.call_method0("__tvm_ffi_object__")?
+        } else {
+            launcher.clone()
+        };
+        if function.is_none() || !function.hasattr("__chandle__")? {
+            return Ok(Launcher::Python(launcher.unbind()));
+        }
+        let path: String = py
+            .import("tvm_ffi.libinfo")?
+            .call_method0("find_libtvm_ffi")?
+            .extract()?;
+        core::ops::tvm_ffi::load(&path).map_err(PyRuntimeError::new_err)?;
+        Ok(Launcher::TvmFfi {
+            handle: function.call_method0("__chandle__")?.extract()?,
+            _owner: launcher.unbind(),
+            _function: function.unbind(),
+        })
+    }
+}
+
+/// lumen's CUDA work runs on the legacy default stream.
+const STREAM: usize = 0;
 
 /// The registry holding op `name`'s Python kernels; `name` is one of
 /// [`OP_SIGNATURES`] (see [`check_op`]).
@@ -108,9 +153,34 @@ impl KernelHandle {
         address: usize,
         value: Scalar,
     ) -> bool {
+        // The value as the tensor's dtype holds it, as the built-in kernels
+        // convert it.
+        let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
         let run = || {
-            Python::attach(|py| self.launch_in(py, op, dtype, shape, strides, address, value))
-                .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
+            let key = (self.0, dtype, shape.to_vec(), strides.to_vec());
+            let cached = LAUNCHERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|launchers| launchers.get(&key))
+                .map(|launcher| match launcher {
+                    Launcher::TvmFfi { handle, .. } => Some(*handle),
+                    Launcher::Python(_) => None,
+                });
+            let step = match cached {
+                Some(Some(handle)) => Ok(Step::TvmFfi(handle)),
+                _ => Python::attach(|py| self.launch_python(py, op, key, address, value))
+                    .map_err(|e| e.to_string()),
+            };
+            let launched = match step {
+                // No Python: the C ABI directly.
+                Ok(Step::TvmFfi(handle)) => {
+                    core::ops::tvm_ffi::launch(handle, address, value, STREAM).map(|()| true)
+                }
+                Ok(Step::Done(launched)) => Ok(launched),
+                Err(e) => Err(e),
+            };
+            launched.unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
         };
         // What a CUDA kernel launches is the op's GPU work in a profile.
         #[cfg(lumen_cupti_linked)]
@@ -121,61 +191,72 @@ impl KernelHandle {
         run()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn launch_in(
+    /// Launch through a cached Python launcher, or compile a launcher first;
+    /// a TVM-FFI one is returned for the caller to launch.
+    fn launch_python(
         self,
         py: Python<'_>,
         op: &str,
-        dtype: DType,
-        shape: &[usize],
-        strides: &[usize],
+        key: LauncherKey,
         address: usize,
         value: Scalar,
-    ) -> PyResult<bool> {
-        let key = (self.0, dtype, shape.to_vec(), strides.to_vec());
+    ) -> PyResult<Step> {
         let cached = LAUNCHERS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .and_then(|launchers| launchers.get(&key))
-            .map(|launcher| launcher.clone_ref(py));
-        let launcher = match cached {
-            Some(launcher) => launcher,
-            None => {
-                let compile = KERNELS
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(self.0)
-                    .filter(|(name, _)| *name == op)
-                    .map(|(_, compile)| compile.clone_ref(py));
-                let Some(compile) = compile else {
-                    return Ok(false);
-                };
-                // Compiled without holding the cache's lock.
-                let launcher = compile
-                    .bind(py)
-                    .call1((
-                        dtype_name(dtype),
-                        PyTuple::new(py, shape)?,
-                        PyTuple::new(py, strides)?,
-                    ))?
-                    .unbind();
-                LAUNCHERS
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_or_insert_with(HashMap::new)
-                    .insert(key, launcher.clone_ref(py));
+            .map(|launcher| match launcher {
+                Launcher::Python(launcher) => launcher.clone_ref(py),
+                Launcher::TvmFfi { _owner, .. } => _owner.clone_ref(py),
+            });
+        if let Some(launcher) = cached {
+            launcher
+                .bind(py)
+                .call1((address, scalar_to_py(py, value)?, STREAM))?;
+            return Ok(Step::Done(true));
+        }
+        let compile = KERNELS
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(self.0)
+            .filter(|(name, _)| *name == op)
+            .map(|(_, compile)| compile.clone_ref(py));
+        let Some(compile) = compile else {
+            return Ok(Step::Done(false));
+        };
+        // Compiled without holding the cache's lock.
+        let (dtype, shape, strides) = (key.1, &key.2, &key.3);
+        let compiled = compile.bind(py).call1((
+            dtype_name(dtype),
+            PyTuple::new(py, shape)?,
+            PyTuple::new(py, strides)?,
+        ))?;
+        let launcher = Launcher::new(py, compiled)?;
+        let step = match &launcher {
+            Launcher::TvmFfi { handle, .. } => Step::TvmFfi(*handle),
+            Launcher::Python(launcher) => {
                 launcher
+                    .bind(py)
+                    .call1((address, scalar_to_py(py, value)?, STREAM))?;
+                Step::Done(true)
             }
         };
-        // The value as the tensor's dtype holds it, as the built-in kernels
-        // convert it; lumen's CUDA work runs on the legacy default stream, 0.
-        let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
-        launcher
-            .bind(py)
-            .call1((address, scalar_to_py(py, value)?, 0usize))?;
-        Ok(true)
+        LAUNCHERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(key, launcher);
+        Ok(step)
     }
+}
+
+/// What [`KernelHandle::launch_python`] did.
+enum Step {
+    /// Launched (or not: `false` if the handle is not the op's kernel).
+    Done(bool),
+    /// Found or compiled a TVM-FFI launcher, for the caller to launch.
+    TvmFfi(usize),
 }
 
 /// The value as a Python object: a bool, an int, or a float, matching the

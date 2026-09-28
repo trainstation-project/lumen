@@ -86,7 +86,7 @@ def test_registering_for_the_cpu_is_refused():
 
 def test_registering_for_an_unavailable_device_raises():
     with pytest.raises(RuntimeError):
-        lumen.ops.register(OP, "cuda:7", lambda dtype, shape, strides: None)
+        lumen.ops.register(OP, "cuda:1024", lambda dtype, shape, strides: None)
 
 
 def test_registering_rejects_a_bad_device():
@@ -229,6 +229,47 @@ def test_a_raising_launch_propagates(device):
     try:
         with pytest.raises(BaseException, match="launch exploded"):
             _C._dummy_op(lumen.zeros([3], device=device), 1.0)
+    finally:
+        lumen.ops.unregister(OP, device)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA], indirect=True)
+def test_a_tvm_ffi_launcher_is_called_through_its_c_abi(device):
+    tvm_ffi = pytest.importorskip("tvm_ffi")
+    compiles, launches = [], []
+
+    def compile(dtype, shape, strides):
+        compiles.append((dtype, shape, strides))
+        # A TVM-FFI function, as the CuTe DSL compiles with --enable-tvm-ffi;
+        # the address and stream arrive as opaque pointers.
+        return tvm_ffi.convert(lambda address, value, stream: launches.append((address.value, value, stream.value)))
+
+    lumen.ops.register(OP, device, compile)
+    try:
+        t = lumen.zeros([3], device=device)
+        _C._dummy_op(t, 1.5)
+        _C._dummy_op(t, 2.5)
+        _C._dummy_op(lumen.zeros([2], dtype="int64", device=device), 7.9)
+        assert compiles == [("float32", (3,), (1,)), ("int64", (2,), (1,))]
+        assert launches[:2] == [(t.data_ptr(), 1.5, None), (t.data_ptr(), 2.5, None)]
+        assert launches[2][1:] == (7, None)
+    finally:
+        lumen.ops.unregister(OP, device)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA], indirect=True)
+def test_a_raising_tvm_ffi_launcher_propagates(device):
+    tvm_ffi = pytest.importorskip("tvm_ffi")
+
+    def boom(address, value, stream):
+        raise RuntimeError("ffi exploded")
+
+    lumen.ops.register(OP, device, lambda dtype, shape, strides: tvm_ffi.convert(boom))
+    try:
+        t = lumen.zeros([2], device=device)
+        for _ in range(2):  # the compiling launch, then a cached one
+            with pytest.raises(BaseException, match="failed: RuntimeError: ffi exploded$"):
+                _C._dummy_op(t, 1.0)
     finally:
         lumen.ops.unregister(OP, device)
 
