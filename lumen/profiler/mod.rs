@@ -19,6 +19,8 @@
 //! a single relaxed atomic load.
 
 mod chrome;
+#[cfg(lumen_cupti_linked)]
+pub(crate) mod cupti;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 mod summary;
@@ -162,8 +164,8 @@ pub(crate) fn memory_enabled() -> bool {
 }
 
 /// Whether the session times device work on `device`.
-// Called by the Metal and CUDA backends, which are compiled only when linked.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+// Called by the Metal and CUDA (CUPTI) backends, compiled only when linked.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn device_enabled(device: Device) -> bool {
     let bit = match device {
         Device::Cpu => return false,
@@ -175,7 +177,7 @@ pub(crate) fn device_enabled(device: Device) -> bool {
 
 /// The running session's id (0 when none): device timers use it to know
 /// when their clock alignment is stale.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn session_id() -> u64 {
     if is_enabled() {
         SESSION.load(Ordering::Relaxed)
@@ -205,6 +207,10 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
     if config.record_shapes {
         bits |= SHAPES;
     }
+    #[cfg(lumen_cupti_linked)]
+    if bits & CUDA != 0 {
+        cupti::start();
+    }
     let id = SESSION.fetch_add(1, Ordering::Relaxed) + 1;
     *state = Some(Session {
         id,
@@ -218,6 +224,12 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
 
 /// Stop the running session and return what it recorded.
 pub fn stop() -> Result<Profile, String> {
+    // Let in-flight GPU work finish, so its events are recorded (PyTorch's
+    // profiler synchronizes its MPS streams too).
+    #[cfg(lumen_mps_linked)]
+    crate::stream::mps::synchronize();
+    #[cfg(lumen_cupti_linked)]
+    cupti::stop();
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
@@ -387,27 +399,53 @@ pub(crate) fn report_memory(
 
 /// Record device work on `device` that ran from `start_ns` to `end_ns` on
 /// the profiler clock ([`now_ns`]), issued by the current op.
-// Called by the Metal and CUDA backends, which are compiled only when linked.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+// Called by the Metal allocator, compiled only when Metal is linked.
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_ns: u64) {
-    if !device_enabled(device) {
-        return;
+    if let Some(context) = gpu_context(device) {
+        record_gpu_in(context, name, device, start_ns, end_ns);
     }
-    let (session, parent, thread) = (
-        SESSION.load(Ordering::Relaxed),
-        current_parent(),
-        thread_id(),
-    );
+}
+
+/// Who submitted device work, captured at submission, for work whose times
+/// arrive later (asynchronous MPS and CUDA work).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GpuContext {
+    session: u64,
+    parent: Option<u64>,
+    thread: u64,
+}
+
+/// The current op's context for device work on `device`, if the session
+/// times it.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
+    device_enabled(device).then(|| GpuContext {
+        session: SESSION.load(Ordering::Relaxed),
+        parent: current_parent(),
+        thread: thread_id(),
+    })
+}
+
+/// Record device work captured in `context`.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+pub(crate) fn record_gpu_in(
+    context: GpuContext,
+    name: &'static str,
+    device: Device,
+    start_ns: u64,
+    end_ns: u64,
+) {
     push(
-        session,
+        context.session,
         Event {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             name: name.to_owned(),
             kind: EventKind::Gpu,
             start_ns,
             end_ns: end_ns.max(start_ns),
-            thread,
-            parent,
+            thread: context.thread,
+            parent: context.parent,
             device,
             shapes: Vec::new(),
             bytes: 0,

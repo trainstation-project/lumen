@@ -14,6 +14,8 @@ wraps:
 * ``lumen.device`` — a device, modeled on ``torch.device``.
 * ``lumen.profiler`` (``lumen/profiler/``) — the profiler, modeled on
   ``torch.profiler``.
+* ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
+  ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``.
 
 Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
@@ -21,6 +23,7 @@ factory function, which takes precedence over the package of that name.
 
 from lumen._C import __version__, device
 from lumen import profiler
+from lumen.stream import cuda, mps
 from lumen.allocator import config
 from lumen.tensor import (
     Tensor,
@@ -53,7 +56,9 @@ __all__ = [
     "Tensor",
     "__version__",
     "config",
+    "cuda",
     "device",
+    "mps",
     "profiler",
     # dtypes
     "float16", "bfloat16", "float32", "float64",

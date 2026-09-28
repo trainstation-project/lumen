@@ -1,11 +1,12 @@
-//! The MPS `fill_` kernel. A byte pattern uses Metal's blit `fillBuffer`
-//! (the allocator's memset); a 2-, 4- or 8-byte element is written on the GPU
-//! by a compute shader (`mps_fill.mm`), as in PyTorch. Strided views, and
-//! memory that is not mapped (a custom allocator's), take the CPU kernel:
-//! MPS memory is unified.
+//! The MPS `fill_` kernel: compute shaders for dense and strided fills
+//! (`mps_fill.mm`), as in PyTorch, encoded into the MPS stream without
+//! waiting (see [`crate::stream::mps`]). Memory outside lumen's MPS segments
+//! (a custom allocator's) takes the CPU kernel: MPS memory is unified.
+
+use std::ffi::c_void;
 
 use crate::Tensor;
-use crate::device::Device;
+use crate::stream::mps::{self, Completion};
 use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
 
@@ -16,60 +17,63 @@ unsafe extern "C" {
         pattern: *const u8,
         elem_size: usize,
         count: usize,
-        gpu_start: *mut f64,
-        gpu_end: *mut f64,
+        sizes: *const usize,
+        strides: *const usize,
+        ndim: usize,
+        timed: i32,
+        done: Completion,
+        context: *mut c_void,
     ) -> i32;
 }
 
 pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     let numel = t.numel();
-    let pattern = as_bytes(std::slice::from_ref(&value));
-    let one_byte = pattern.iter().all(|&b| b == pattern[0]);
-    if numel == 0 || one_byte || !t.is_contiguous() {
-        return super::cpu::fill(t, value);
+    if numel == 0 {
+        return;
     }
 
+    let pattern = as_bytes(std::slice::from_ref(&value));
+    // Contiguous elements are passed without strides.
+    let contiguous = t.is_contiguous();
+    let strides = if contiguous {
+        std::ptr::null()
+    } else {
+        t.strides().as_ptr()
+    };
     let dst = t
         .storage()
         .data_ptr()
         .wrapping_add(t.storage_offset() * pattern.len());
 
-    // GPU start/end times, asked for only while profiling MPS.
-    let mut times = crate::profiler::device_enabled(Device::Mps).then_some((0.0, 0.0));
-    let (start_out, end_out): (*mut f64, *mut f64) = match &mut times {
-        Some((start, end)) => (start, end),
-        None => (std::ptr::null_mut(), std::ptr::null_mut()),
-    };
-
+    let (context, done, timed) = mps::submit(t, "Fill");
     let status = unsafe {
         lumen_mps_fill(
             dst,
             pattern.as_ptr(),
             pattern.len(),
             numel,
-            start_out,
-            end_out,
+            t.shape().as_ptr(),
+            strides,
+            t.ndim(),
+            timed.into(),
+            done,
+            context,
         )
     };
 
     match status {
         0 => {}
-        -1 => return super::cpu::fill(t, value), // not mapped memory
-        err => panic!(
-            "Metal fill of {numel} {}-byte elements failed ({err})",
-            pattern.len()
-        ),
-    }
-
-    if let Some((start, end)) = times {
-        // The GPU duration, ending when the host saw it finish.
-        let end_ns = crate::profiler::now_ns();
-        let duration_ns = ((end - start) * 1e9).max(0.0) as u64;
-        crate::profiler::record_gpu(
-            "Fill",
-            Device::Mps,
-            end_ns.saturating_sub(duration_ns),
-            end_ns,
-        );
+        -1 => {
+            // Not in a lumen MPS segment: not submitted.
+            mps::cancel(context);
+            super::cpu::fill(t, value);
+        }
+        err => {
+            mps::cancel(context);
+            panic!(
+                "Metal fill of {numel} {}-byte elements failed ({err})",
+                pattern.len()
+            );
+        }
     }
 }

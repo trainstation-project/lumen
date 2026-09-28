@@ -6,8 +6,8 @@
 //!
 //! Like `torch/csrc`, the bindings sit next to the code they expose: this
 //! file holds `lumen.device` (for [`crate::Device`]) and assembles the
-//! module; [`crate::tensor`] and [`crate::allocator`] each add their own
-//! (`python.rs` in those folders).
+//! module; [`crate::tensor`], [`crate::allocator`], [`crate::profiler`] and
+//! [`crate::stream`] each add their own (`python.rs` in those folders).
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -219,6 +219,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::tensor::python::register(m)?;
     crate::allocator::python::register(m)?;
     crate::profiler::python::register(m)?;
+    crate::stream::python::register(m)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

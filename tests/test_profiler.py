@@ -142,7 +142,9 @@ def test_device_fills_are_timed_on_the_gpu(activity):
     with profile(activities=[ProfilerActivity.CPU, activity], profile_memory=True) as prof:
         lumen.zeros([1 << 16], device=activity.value)
     gpu = [e for e in prof.events() if e["kind"] == "gpu"]
-    assert [e["name"] for e in gpu] == ["Memset"]
+    # MPS fills with a compute kernel (as PyTorch does), CUDA with a memset.
+    kernel = "Fill" if activity == ProfilerActivity.MPS else "Memset"
+    assert [e["name"] for e in gpu] == [kernel]
     assert gpu[0]["device"].startswith(activity.value)
     zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
     assert gpu[0]["parent"] == zeros["id"]
@@ -150,7 +152,8 @@ def test_device_fills_are_timed_on_the_gpu(activity):
     table = prof.key_averages().table(sort_by="self_device_time_total")
     assert f"Self {name}" in table and f"{name} Mem" in table
     trace = json.loads(_trace(prof))
-    assert any(e.get("cat") == "gpu_memset" for e in trace["traceEvents"])
+    category = "kernel" if activity == ProfilerActivity.MPS else "gpu_memset"
+    assert any(e.get("cat") == category for e in trace["traceEvents"])
     assert any(e.get("cat") == "ac2g" for e in trace["traceEvents"])
 
 

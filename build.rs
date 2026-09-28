@@ -14,11 +14,13 @@ fn main() {
     // Makefile/CI) doesn't reject them as unexpected conditions.
     println!("cargo:rustc-check-cfg=cfg(lumen_cuda_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_mps_linked)");
+    println!("cargo:rustc-check-cfg=cfg(lumen_cupti_linked)");
 
     // Re-run only when the relevant configuration changes.
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDART_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=CUPTI_LIB_DIR");
     println!("cargo:rerun-if-changed=build.rs");
 
     if env::var_os("CARGO_FEATURE_CUDA").is_some() {
@@ -51,6 +53,48 @@ fn detect_cuda() {
     );
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-cfg=lumen_cuda_linked");
+
+    // CUPTI, for the profiler's CUDA timing (PyTorch's kineto uses it too).
+    // It ships with the toolkit, often outside the loader's default paths,
+    // so the library records where it was found (rpath).
+    let Some(cupti_dir) = find_cupti(&lib_dir) else {
+        println!(
+            "cargo:warning=cudart was found but not CUPTI; the profiler will not \
+             time CUDA work (set CUPTI_LIB_DIR to enable it)"
+        );
+        return;
+    };
+    println!("cargo:rustc-link-search=native={}", cupti_dir.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", cupti_dir.display());
+    println!("cargo:rustc-link-lib=cupti");
+    println!("cargo:rustc-cfg=lumen_cupti_linked");
+}
+
+/// The directory holding `libcupti`: `CUPTI_LIB_DIR`, next to cudart, or
+/// the toolkit's `extras/CUPTI`.
+fn find_cupti(cudart_dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = env::var_os("CUPTI_LIB_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    candidates.push(cudart_dir.to_path_buf());
+    for home in ["CUDA_HOME", "CUDA_PATH"].iter().filter_map(env::var_os) {
+        candidates.push(PathBuf::from(home).join("extras/CUPTI/lib64"));
+    }
+    // cudart_dir is usually <toolkit>/lib64 or <toolkit>/targets/<arch>/lib.
+    for up in cudart_dir.ancestors().skip(1).take(3) {
+        candidates.push(up.join("extras/CUPTI/lib64"));
+    }
+    candidates.push(PathBuf::from("/usr/local/cuda/extras/CUPTI/lib64"));
+    candidates.into_iter().find(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("libcupti.so") || name == "cupti.lib"
+            })
+        })
+    })
 }
 
 /// Compile the Objective-C++ Metal shim (macOS only), mirroring how PyTorch
@@ -64,10 +108,13 @@ fn build_mps_shim() {
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
     println!("cargo:rerun-if-changed=lumen/ops/fill/mps_fill.mm");
+    println!("cargo:rerun-if-changed=lumen/stream/mps.mm");
+    println!("cargo:rerun-if-changed=lumen/stream/mps.h");
 
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
         .file("lumen/ops/fill/mps_fill.mm")
+        .file("lumen/stream/mps.mm")
         .cpp(true)
         .flag("-std=c++17")
         .flag("-fobjc-arc")

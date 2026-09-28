@@ -46,6 +46,24 @@ static id<MTLCommandQueue> lumen_command_queue(void) {
 static std::map<char *, id<MTLBuffer> __strong> g_buffers;
 static std::mutex g_buffers_mu;
 
+// The MTLBuffer of the segment holding ptr, and ptr's byte offset in it, or
+// nil if ptr is not in one (for ops to bind tensor memory, like PyTorch's
+// getMTLBufferStorage).
+id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset) {
+  char *p = static_cast<char *>(const_cast<void *>(ptr));
+  std::lock_guard<std::mutex> lock(g_buffers_mu);
+  auto it = g_buffers.upper_bound(p);
+  if (it == g_buffers.begin()) {
+    return nil;
+  }
+  --it;
+  if (p >= it->first + it->second.length) {
+    return nil;
+  }
+  *offset = static_cast<size_t>(p - it->first);
+  return it->second;
+}
+
 extern "C" {
 int lumen_mps_available(void) { return lumen_default_device() != nil ? 1 : 0; }
 

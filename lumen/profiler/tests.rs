@@ -482,7 +482,7 @@ fn json_strings_escape_control_characters() {
 
 /// Assert `gpu` ran inside its op's CPU range, give or take `slack_ns` for
 /// the two clocks' alignment.
-#[cfg(any(lumen_mps_linked, lumen_cuda_linked))]
+#[cfg(lumen_cupti_linked)]
 fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(
         gpu.start_ns + slack_ns >= op.start_ns,
@@ -513,14 +513,22 @@ mod mps {
             record_shapes: false,
         };
         let p = profile(config, || {
-            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fillBuffer
+            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fill kernel
+            // The fill is asynchronous: wait for it, so the tensor is freed
+            // here rather than on the Metal thread that completes it.
+            crate::stream::mps::synchronize();
             drop(t);
         });
-        let memset = one(&p, "Memset");
-        assert_eq!((memset.kind, memset.device), (EventKind::Gpu, Device::Mps));
+        let fill = one(&p, "Fill");
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
         let zeros = one(&p, "lumen::zeros");
-        assert_eq!(memset.parent, Some(zeros.id));
-        within(memset, zeros, 1_000_000);
+        assert_eq!(fill.parent, Some(zeros.id));
+        // Submitted by zeros, but may finish after it returns.
+        assert!(
+            fill.start_ns + 1_000_000 >= zeros.start_ns,
+            "{fill:?} before {zeros:?}"
+        );
+        assert!(fill.end_ns >= fill.start_ns);
         let memory: Vec<&Event> = named(&p, "[memory]")
             .into_iter()
             .filter(|e| e.device == Device::Mps)
@@ -532,6 +540,36 @@ mod mps {
             table.contains("Self MPS") && table.contains("MPS Mem"),
             "{table}"
         );
+    }
+
+    #[test]
+    fn metal_stream_work_runs_in_order() {
+        if !mps::is_available() {
+            return eprintln!("Metal unavailable, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Mps],
+            ..cpu()
+        };
+        let t = Tensor::zeros(&[1 << 24], on_mps(DType::F32));
+        let p = profile(config, || {
+            for _ in 0..8 {
+                t.zero_(); // Metal fills of one tensor, not waited on
+                t.fill_(2.0f32);
+            }
+        });
+        // One after another on the GPU, give or take the clocks' alignment.
+        let mut work: Vec<&Event> = p
+            .events()
+            .iter()
+            .filter(|e| e.kind == EventKind::Gpu)
+            .collect();
+        work.sort_by_key(|e| e.start_ns);
+        assert_eq!(work.len(), 16);
+        for pair in work.windows(2) {
+            assert!(pair[1].start_ns + 50_000 >= pair[0].end_ns, "{pair:#?}");
+        }
+        assert_eq!(t.to_vec::<f32>(), vec![2.0; 1 << 24]);
     }
 
     #[test]
@@ -550,13 +588,26 @@ mod mps {
         assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
         assert_eq!(fill.parent, Some(one(&p, "lumen::ones").id));
         assert!(
-            named(&p, "Memset").is_empty(),
-            "1.0f32 is not a byte pattern"
-        );
-        assert!(
             p.chrome_trace()
                 .contains("\"cat\":\"kernel\",\"name\":\"Fill\"")
         );
+    }
+
+    #[test]
+    fn metal_strided_fills_run_on_the_gpu() {
+        if !mps::is_available() {
+            return eprintln!("Metal unavailable, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Mps],
+            ..cpu()
+        };
+        let t = Tensor::ones(&[64, 64], on_mps(DType::F32));
+        let p = profile(config, || {
+            t.transpose(0, 1).narrow(1, 0, 32).zero_();
+        });
+        let fill = one(&p, "Fill"); // the strided kernel
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
     }
 
     #[test]
@@ -565,12 +616,12 @@ mod mps {
             return eprintln!("Metal unavailable, skipping");
         }
         let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_mps(DType::U8))));
-        assert!(named(&p, "Memset").is_empty());
+        assert!(named(&p, "Fill").is_empty());
         assert_eq!(named(&p, "lumen::zeros").len(), 1);
     }
 }
 
-#[cfg(lumen_cuda_linked)] // needs cudart and a GPU
+#[cfg(lumen_cupti_linked)] // needs cudart, CUPTI and a GPU
 mod cuda {
     use super::*;
     use crate::TensorOptions;
