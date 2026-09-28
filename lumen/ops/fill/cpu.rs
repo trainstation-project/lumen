@@ -1,5 +1,4 @@
 use crate::Tensor;
-use crate::ops::copy::data_ptr;
 use crate::tensor::dtype::Element;
 use crate::tensor::{flat_offset, for_each_index};
 
@@ -10,7 +9,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     }
 
     t.storage().synchronize();
-    let base = data_ptr(t).cast::<T>();
+    let base = t.data_ptr().cast::<T>();
     if t.is_contiguous() {
         for i in 0..numel {
             unsafe { base.add(i).write_unaligned(value) };

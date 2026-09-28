@@ -1,6 +1,5 @@
 use std::ffi::c_void;
 
-use super::{data_ptr, nbytes};
 use crate::Tensor;
 use crate::device::Device;
 
@@ -24,10 +23,10 @@ fn copy(device: Device, dst: &Tensor, src: &Tensor, kind: i32) {
     let Device::Cuda(index) = device else {
         unreachable!("the CUDA copy kernel runs on CUDA tensors")
     };
-    let nbytes = nbytes(dst);
+    let nbytes = dst.nbytes();
     let mut err = 0;
     crate::profiler::cupti::correlated(Device::Cuda(index), || {
-        err = unsafe { cudaMemcpy(data_ptr(dst).cast(), data_ptr(src).cast(), nbytes, kind) };
+        err = unsafe { cudaMemcpy(dst.data_ptr().cast(), src.data_ptr().cast(), nbytes, kind) };
     });
     assert_eq!(
         err, 0,

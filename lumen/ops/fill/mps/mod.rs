@@ -6,7 +6,6 @@
 use std::ffi::c_void;
 
 use crate::Tensor;
-use crate::ops::copy::data_ptr;
 use crate::stream::mps::{self, Completion};
 use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
@@ -41,7 +40,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     } else {
         t.strides().as_ptr()
     };
-    let dst = data_ptr(t);
+    let dst = t.data_ptr();
 
     let (context, done, timed) = mps::submit(t, "Fill");
     let status = unsafe {

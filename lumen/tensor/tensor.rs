@@ -8,7 +8,7 @@ use super::scalar::Scalar;
 use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
-use crate::ops::copy::{copy_d2h, copy_h2d, data_ptr};
+use crate::ops::copy::{copy_d2h, copy_h2d};
 
 /// The device `options` name, CPU if unset.
 fn device_of(options: &TensorOptions) -> Device {
@@ -69,8 +69,7 @@ impl Tensor {
     /// # Safety
     /// As for [`empty`](Self::empty).
     unsafe fn empty_like(&self) -> Self {
-        let nbytes = self.numel() * self.dtype.size_of();
-        let storage = Storage::with_allocator(nbytes, Arc::clone(self.storage.allocator()));
+        let storage = Storage::with_allocator(self.nbytes(), Arc::clone(self.storage.allocator()));
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 
@@ -184,7 +183,7 @@ impl Tensor {
         // SAFETY: CPU storage is host memory, and the view's elements are in
         // bounds of it; `data` is a distinct host buffer.
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr().cast(), data_ptr(self), size_of_val(data))
+            std::ptr::copy_nonoverlapping(data.as_ptr().cast(), self.data_ptr(), size_of_val(data))
         }
     }
 
@@ -205,6 +204,16 @@ impl Tensor {
         self.storage.device()
     }
 
+    /// The address of the first element, in the device's address space
+    /// (PyTorch: `Tensor::data_ptr`). `wrapping_add`, not `add`: device
+    /// memory is not an allocation Rust knows about, and `add` is undefined
+    /// behavior outside one.
+    pub(crate) fn data_ptr(&self) -> *mut u8 {
+        self.storage
+            .data_ptr()
+            .wrapping_add(self.offset * self.dtype.size_of())
+    }
+
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -219,6 +228,11 @@ impl Tensor {
 
     pub fn numel(&self) -> usize {
         self.shape.iter().product()
+    }
+
+    /// Bytes the view's elements take (PyTorch: `Tensor::nbytes`).
+    pub(crate) fn nbytes(&self) -> usize {
+        self.numel() * self.dtype.size_of()
     }
 
     pub fn storage_offset(&self) -> usize {

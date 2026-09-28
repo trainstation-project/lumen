@@ -1,6 +1,6 @@
 use crate::Tensor;
 use crate::device::Device;
-use crate::ops::copy::{copy_h2d, data_ptr};
+use crate::ops::copy::copy_h2d;
 use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
 
@@ -25,7 +25,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
         unreachable!("the CUDA kernel runs on CUDA tensors")
     };
 
-    let dst = data_ptr(t);
+    let dst = t.data_ptr();
     let pattern = as_bytes(std::slice::from_ref(&value));
     memset_elements(index, dst, pattern, numel);
 }

@@ -91,17 +91,3 @@ fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
     );
     assert!(!dst.shares_storage_with(src), "copy within one storage");
 }
-
-/// The address of `t`'s first element, in its device's address space.
-/// `wrapping_add`, not `add`: device memory is not an allocation Rust knows
-/// about, and `add` is undefined behavior outside one.
-pub(crate) fn data_ptr(t: &Tensor) -> *mut u8 {
-    t.storage()
-        .data_ptr()
-        .wrapping_add(t.storage_offset() * t.dtype().size_of())
-}
-
-/// The bytes a copy of `t` moves.
-fn nbytes(t: &Tensor) -> usize {
-    t.numel() * t.dtype().size_of()
-}
