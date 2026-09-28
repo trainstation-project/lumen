@@ -12,7 +12,6 @@ pub mod copy;
 pub mod fill;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod test_op;
 #[cfg(test)]
 mod tests;
 

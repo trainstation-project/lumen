@@ -43,17 +43,13 @@ static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new())
 /// A closed set rather than free-form strings: an entry here is a promise
 /// that Rust will actually call kernels of that name, with that signature.
 /// Registering anything else would silently do nothing.
-const OP_SIGNATURES: &[(&str, &str)] = &[
-    ("lumen::fill_", "(tensor, value)"),
-    ("lumen::test_op", "(tensor)"),
-];
+const OP_SIGNATURES: &[(&str, &str)] = &[("lumen::fill_", "(tensor, value)")];
 
 /// The registry holding op `name`'s Python kernels; `name` is one of
 /// [`OP_SIGNATURES`] (see [`check_op`]).
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
         "lumen::fill_" => &core::ops::fill::FILL_PY,
-        "lumen::test_op" => &core::ops::test_op::TEST_OP_PY,
         _ => unreachable!("{name} is not in OP_SIGNATURES"),
     }
 }
@@ -83,17 +79,6 @@ impl KernelHandle {
     /// # Panics
     /// If the kernel raises, which the op layer cannot recover from.
     pub(crate) fn call_fill(self, op: &str, t: &core::Tensor, value: Scalar) -> bool {
-        self.call(op, t, Some(value))
-    }
-
-    /// Run the Python kernel for op `op` on `t`, as
-    /// [`call_fill`](Self::call_fill) does.
-    pub(crate) fn call_test_op(self, op: &str, t: &core::Tensor) -> bool {
-        self.call(op, t, None)
-    }
-
-    /// Call the kernel with `t`, and `value` if the op takes one.
-    fn call(self, op: &str, t: &core::Tensor, value: Option<Scalar>) -> bool {
         let kernel = Python::attach(|py| {
             KERNELS
                 .read()
@@ -107,10 +92,7 @@ impl KernelHandle {
         };
         Python::attach(|py| -> PyResult<()> {
             let tensor = Py::new(py, PyTensor::wrap(t.clone()))?;
-            match value {
-                Some(value) => kernel.bind(py).call1((tensor, scalar_to_py(py, value)?))?,
-                None => kernel.bind(py).call1((tensor,))?,
-            };
+            kernel.bind(py).call1((tensor, scalar_to_py(py, value)?))?;
             Ok(())
         })
         .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"));
@@ -200,14 +182,7 @@ fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Run `lumen::test_op` on `t`, for the tests of `lumen.ops`.
-#[pyfunction]
-fn _test_op(t: &PyTensor) {
-    core::ops::test_op::test_op(&t.inner);
-}
-
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(_test_op, m)?)?;
     m.add_function(wrap_pyfunction!(_register_kernel, m)?)?;
     m.add_function(wrap_pyfunction!(_unregister_kernel, m)?)?;
     m.add_function(wrap_pyfunction!(_registered_ops, m)?)

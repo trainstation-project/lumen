@@ -262,7 +262,7 @@ fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 /// one view are visible through all aliases of the same storage.
 #[pyclass(name = "Tensor", module = "lumen")] // reports as lumen.Tensor, though defined in lumen._C
 pub(crate) struct PyTensor {
-    pub(crate) inner: Tensor,
+    inner: Tensor,
 }
 
 impl PyTensor {
