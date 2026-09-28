@@ -26,13 +26,27 @@ fn start(activities: Vec<String>, profile_memory: bool, record_shapes: bool) -> 
                 "unknown profiler activity {other:?}; expected cpu, cuda or mps"
             ))),
         })
-        .collect::<PyResult<_>>()?;
+        .collect::<PyResult<Vec<_>>>()?;
+    if activities.contains(&Activity::Cuda) && !cuda_timing() {
+        return Err(PyRuntimeError::new_err(CUDA_TIMING_MISSING));
+    }
     super::start(ProfilerConfig {
         activities,
         profile_memory,
         record_shapes,
     })
     .map_err(PyRuntimeError::new_err)
+}
+
+/// Why the CUDA activity is refused without CUPTI, and the way out.
+const CUDA_TIMING_MISSING: &str = "this build of lumen cannot time CUDA: build.rs did not find \
+     CUPTI (libcupti). Set CUPTI_LIB_DIR to its directory and rebuild.";
+
+/// Whether this build times CUDA work: CUPTI was linked.
+#[pyfunction]
+#[pyo3(name = "_profiler_cuda_timing")]
+fn cuda_timing() -> bool {
+    cfg!(lumen_cupti_linked)
 }
 
 #[pyfunction]
@@ -159,6 +173,7 @@ impl PyProfile {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_timing, m)?)?;
     m.add_function(wrap_pyfunction!(stop, m)?)?;
     m.add_function(wrap_pyfunction!(enabled, m)?)?;
     m.add_function(wrap_pyfunction!(record_function_enter, m)?)?;
