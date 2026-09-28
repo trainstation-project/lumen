@@ -68,4 +68,10 @@ def signature(op):
 from lumen.stream import cuda as _cuda  # noqa: E402
 
 if _cuda.is_available():
-    from lumen.ops.fill import cute_fill  # noqa: E402, F401  (registers CUDA's fill_)
+    try:
+        from lumen.ops.fill import cute_fill  # noqa: F401  (registers CUDA's fill_)
+    except ImportError as e:
+        raise ImportError(
+            f"lumen needs the CuTe DSL for CUDA tensors ({e}); install it with "
+            "`pip install 'lumen[cuda]'`"
+        ) from e
