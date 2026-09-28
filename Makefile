@@ -37,7 +37,7 @@ test-cpu:
 ## (skipped when none is visible). The Python wheel is rebuilt with CUDA.
 test-cuda:
 	cargo test --lib $(NO_METAL_FEATURES) -- --format=terse ::tests::cuda::
-	maturin develop --features python,cuda && python -m pytest tests -q -rs -m cuda
+	maturin develop --features python,cuda --extras cuda && python -m pytest tests -q -rs -m cuda
 
 ## test-mps: the `mps` test modules and the Python tests marked `mps`,
 ## against the real Metal device (macOS; elsewhere the Rust modules compile

@@ -40,10 +40,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     } else {
         t.strides().as_ptr()
     };
-    let dst = t
-        .storage()
-        .data_ptr()
-        .wrapping_add(t.storage_offset() * pattern.len());
+    let dst = t.data_ptr();
 
     let (context, done, timed) = mps::submit(t, "Fill");
     let status = unsafe {

@@ -8,6 +8,17 @@ version = "0.1.0"
 description = "A minimal tensor library prototype with a Rust core"
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+# CUDA's fill_ is a CuTe DSL kernel (lumen/ops/fill/cute_fill.py), imported
+# with lumen on a machine with a CUDA device. The CuTe DSL ships only for
+# Linux, so elsewhere the extra installs nothing.
+cuda = [
+    "nvidia-cutlass-dsl; sys_platform == 'linux'",
+    "cuda-python; sys_platform == 'linux'",
+    # Its compiled kernels are called from Rust through TVM-FFI's C ABI.
+    "apache-tvm-ffi; sys_platform == 'linux'",
+]
+
 [tool.maturin]
 # Mixed Rust/Python project in one folder: the crate, built with the
 # `python` feature, is installed as the native submodule `lumen._C`; the

@@ -1,3 +1,5 @@
+#[cfg(feature = "python")]
+pub(crate) mod dlpack;
 pub mod dtype;
 #[cfg(feature = "python")]
 pub(crate) mod python;

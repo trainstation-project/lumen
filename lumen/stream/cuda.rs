@@ -13,10 +13,16 @@ use std::ffi::c_void;
 use crate::allocator::cuda::ffi as cudart;
 
 mod ffi {
+    use std::ffi::c_void;
+
     #[link(name = "cudart")]
     unsafe extern "C" {
         pub fn cudaDeviceSynchronize() -> i32;
         pub fn cudaGetDevice(device: *mut i32) -> i32;
+        pub fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
+        pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
+        pub fn cudaStreamWaitEvent(stream: *mut c_void, event: *mut c_void, flags: u32) -> i32;
+        pub fn cudaEventDestroy(event: *mut c_void) -> i32;
     }
 
     #[link(name = "cuda")]
@@ -50,18 +56,34 @@ pub fn synchronize(device_index: usize) {
     unsafe { ffi::cudaDeviceSynchronize() };
 }
 
-/// Run `work` on CUDA device `device_index`, passing it the stream to
-/// launch on, without waiting for it. When the profiler times CUDA, CUPTI
-/// records the work, tagged with the current op.
-pub(crate) fn launch(device_index: usize, work: impl FnOnce(*mut c_void)) {
+/// `cudaEventDisableTiming`: the event only orders work.
+const EVENT_DISABLE_TIMING: u32 = 2;
+
+/// Make `stream` (a `cudaStream_t` handle) wait for the work queued so far
+/// on lumen's stream on CUDA device `device_index`, without blocking the
+/// host (PyTorch: an event recorded on the current stream, then
+/// `stream.wait_event(event)`).
+pub fn wait(device_index: usize, stream: usize) {
     set_device(device_index);
-    // The legacy default stream, which cudaMemcpy runs on too.
-    let stream = std::ptr::null_mut();
-    #[cfg(lumen_cupti_linked)]
-    return {
-        let device = crate::device::Device::Cuda(device_index);
-        crate::profiler::cupti::correlated(device, || work(stream))
+    let mut event = std::ptr::null_mut();
+    let check = |err: i32, call: &str| {
+        assert_eq!(err, 0, "{call} on cuda:{device_index} failed (error {err})");
     };
-    #[cfg(not(lumen_cupti_linked))]
-    work(stream)
+    unsafe {
+        check(
+            ffi::cudaEventCreateWithFlags(&mut event, EVENT_DISABLE_TIMING),
+            "cudaEventCreateWithFlags",
+        );
+        // lumen's work runs on the legacy default stream.
+        check(
+            ffi::cudaEventRecord(event, std::ptr::null_mut()),
+            "cudaEventRecord",
+        );
+        check(
+            ffi::cudaStreamWaitEvent(stream as *mut c_void, event, 0),
+            "cudaStreamWaitEvent",
+        );
+        // An event destroyed while pending is released once it completes.
+        ffi::cudaEventDestroy(event);
+    }
 }

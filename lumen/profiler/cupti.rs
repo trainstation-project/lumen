@@ -1,18 +1,20 @@
 //! CUDA device timing with CUPTI's activity API, as PyTorch's profiler does
 //! through kineto: while a session times CUDA, the driver itself records
-//! each memset's and copy's GPU start and end into buffers CUPTI hands back,
+//! each kernel's, memset's and copy's GPU start and end into buffers CUPTI
+//! hands back,
 //! so nothing is added to the stream and a launch costs only a correlation
 //! push and pop. Compiled only when build.rs finds `libcupti` (cfg
 //! `lumen_cupti_linked`).
 //!
 //! Records are tied to the op that launched them like kineto does: each
 //! launch pushes an external correlation id, and CUPTI emits a record
-//! mapping it to the launch's own correlation id, which its memset or copy
-//! record carries. They are read when the session stops ([`stop`]).
+//! mapping it to the launch's own correlation id, which its kernel, memset
+//! or copy record carries. Python kernels (CUDA's CuTe `fill_`) launch
+//! under one too (`ops::python`). They are read when the session stops ([`stop`]).
 
 use std::alloc::Layout;
 use std::collections::HashMap;
-use std::ffi::c_void;
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once};
 
@@ -50,6 +52,7 @@ mod ffi {
     pub const KIND_MEMSET: u32 = 2;
     pub const KIND_RUNTIME: u32 = 4;
     pub const KIND_DRIVER: u32 = 5;
+    pub const KIND_CONCURRENT_KERNEL: u32 = 10;
     pub const KIND_EXTERNAL_CORRELATION: u32 = 39;
     // `CUpti_ExternalCorrelationKind`.
     pub const EXTERNAL_CUSTOM0: u32 = 3;
@@ -59,9 +62,10 @@ mod ffi {
 
 /// The activities recorded while a session times CUDA. CUPTI emits an
 /// external correlation record only for an API call it records, so the
-/// runtime (`cudaMemcpy`) and driver (`cuMemset*`) APIs are recorded too
-/// (kineto enables them as well); their records are dropped.
-const KINDS: [u32; 5] = [
+/// runtime (`cudaMemcpy`) and driver (`cuLaunchKernel`) APIs are recorded
+/// too (kineto enables them as well); their records are dropped.
+const KINDS: [u32; 6] = [
+    ffi::KIND_CONCURRENT_KERNEL,
     ffi::KIND_MEMCPY,
     ffi::KIND_MEMSET,
     ffi::KIND_RUNTIME,
@@ -71,11 +75,10 @@ const KINDS: [u32; 5] = [
 
 /// What is kept of a CUPTI activity record.
 enum Record {
-    /// A memset or copy: its CUPTI kind and copy kind, GPU times (CUPTI
-    /// ns), device and correlation id.
+    /// A kernel, memset or copy: its name, GPU times (CUPTI ns), device and
+    /// correlation id.
     Work {
-        kind: u32,
-        copy_kind: u8,
+        name: String,
         start: u64,
         end: u64,
         device: u32,
@@ -89,15 +92,32 @@ impl Record {
     /// Read the fields used from a record CUPTI returned. `CUpti_ActivityMemset4`
     /// and `CUpti_ActivityMemcpy6` (and their earlier versions) share the
     /// offsets of start, end, deviceId and correlationId; the copy kind is
-    /// the memcpy record's fifth byte.
+    /// the memcpy record's fifth byte. `CUpti_ActivityKernel4` and later
+    /// share a prefix with start, end, deviceId, correlationId and the name,
+    /// a string CUPTI owns, so it is copied here.
     unsafe fn read(record: *const u8) -> Option<Record> {
         let at = |offset: usize| unsafe { record.add(offset) };
         let u32_at = |offset| unsafe { at(offset).cast::<u32>().read_unaligned() };
         let u64_at = |offset| unsafe { at(offset).cast::<u64>().read_unaligned() };
         match u32_at(0) {
+            ffi::KIND_CONCURRENT_KERNEL => {
+                let name = unsafe { at(104).cast::<*const c_char>().read_unaligned() };
+                Some(Record::Work {
+                    name: if name.is_null() {
+                        "kernel".to_owned()
+                    } else {
+                        unsafe { CStr::from_ptr(name) }
+                            .to_string_lossy()
+                            .into_owned()
+                    },
+                    start: u64_at(16),
+                    end: u64_at(24),
+                    device: u32_at(40),
+                    correlation: u32_at(92),
+                })
+            }
             kind @ (ffi::KIND_MEMCPY | ffi::KIND_MEMSET) => Some(Record::Work {
-                kind,
-                copy_kind: unsafe { at(4).read() },
+                name: Record::name(kind, unsafe { at(4).read() }).to_owned(),
                 start: u64_at(16),
                 end: u64_at(24),
                 device: u32_at(32),
@@ -236,8 +256,7 @@ pub(crate) fn stop() {
     let to_ns = |t: u64| (profiler_ns + t).saturating_sub(cupti_ns);
     for record in records {
         let Record::Work {
-            kind,
-            copy_kind,
+            name,
             start,
             end,
             device,
@@ -249,8 +268,7 @@ pub(crate) fn stop() {
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
         if let Some(&context) = context {
             let device = Device::Cuda(device as usize);
-            let name = Record::name(kind, copy_kind);
-            super::record_gpu_in(context, name, device, to_ns(start), to_ns(end));
+            super::record_gpu_in(context, &name, device, to_ns(start), to_ns(end));
         }
     }
 }

@@ -8,6 +8,8 @@ import this package's names from ``lumen`` (or ``from lumen.tensor import
 """
 
 from lumen._C import Tensor
+from lumen.tensor import dlpack
+from lumen.tensor.dlpack import from_dlpack
 
 __all__ = [
     "Tensor",
@@ -21,7 +23,7 @@ __all__ = [
     # factories
     "tensor", "empty", "zeros", "ones", "full", "arange",
     # numpy interop
-    "to_numpy", "from_numpy",
+    "to_numpy", "from_numpy", "from_dlpack",
 ]
 
 # ---------------------------------------------------------------------
@@ -117,5 +119,7 @@ def _tensor__array__(self, dtype=None, copy=None):
 
 try:  # native classes are heap types, so this usually sticks; harmless if not
     Tensor.__array__ = _tensor__array__
+    Tensor.__dlpack__ = dlpack.__dlpack__
+    Tensor.__dlpack_device__ = dlpack.__dlpack_device__
 except (AttributeError, TypeError):  # pragma: no cover
     pass

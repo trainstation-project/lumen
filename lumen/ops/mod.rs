@@ -8,9 +8,15 @@
 //! - **dynamic**: kernels added at runtime with [`Op::register`] (PyTorch:
 //!   `TORCH_LIBRARY_IMPL`), for keys the op has no built-in kernel for.
 
+pub mod copy;
+pub mod dummy_op;
 pub mod fill;
+#[cfg(feature = "python")]
+pub mod python;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "python")]
+pub(crate) mod tvm_ffi;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -89,6 +95,16 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
             .get(&(self.name, key))
             .and_then(|k| k.downcast_ref::<K>())
             .copied()
+    }
+
+    /// Remove the kernel registered for `key`, leaving the op without one
+    /// (its built-in, if any, is untouched). `false` if none was
+    /// registered.
+    pub fn unregister(&self, key: DispatchKey) -> bool {
+        let mut dynamic = DYNAMIC.write().unwrap_or_else(|e| e.into_inner());
+        dynamic
+            .as_mut()
+            .is_some_and(|map| map.remove(&(self.name, key)).is_some())
     }
 
     /// The kernel for tensors on `device`.

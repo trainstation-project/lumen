@@ -4,7 +4,13 @@ from typing import Optional, Union
 
 from lumen import _C
 
-__all__ = ["synchronize"]
+__all__ = ["is_available", "synchronize"]
+
+
+def is_available() -> bool:
+    """Whether a CUDA device can hold tensors in this build
+    (``torch.cuda.is_available()``)."""
+    return _C._cuda_is_available()
 
 
 def synchronize(device: Optional[Union[int, str, "_C.device"]] = None) -> None:

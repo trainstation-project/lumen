@@ -4,7 +4,7 @@
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyTuple};
+use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
 use crate as core;
 use crate::python::resolve_device;
@@ -37,7 +37,7 @@ fn parse_dtype(s: &str) -> PyResult<DType> {
     }
 }
 
-fn dtype_name(dtype: DType) -> &'static str {
+pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
         DType::F32 => "float32",
         DType::F64 => "float64",
@@ -239,7 +239,7 @@ fn options(dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<T
 }
 
 /// A Python bool/int/float as a [`Scalar`].
-fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if value.is_instance_of::<PyBool>() {
         Ok(Scalar::Bool(value.extract()?))
     } else if value.is_instance_of::<PyInt>() {
@@ -261,12 +261,12 @@ fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 /// A strided view over a shared storage. Views never copy; writes through
 /// one view are visible through all aliases of the same storage.
 #[pyclass(name = "Tensor", module = "lumen")] // reports as lumen.Tensor, though defined in lumen._C
-struct PyTensor {
-    inner: Tensor,
+pub(crate) struct PyTensor {
+    pub(crate) inner: Tensor,
 }
 
 impl PyTensor {
-    fn wrap(inner: Tensor) -> Self {
+    pub(crate) fn wrap(inner: Tensor) -> Self {
         PyTensor { inner }
     }
 
@@ -511,6 +511,16 @@ impl PyTensor {
         slf
     }
 
+    /// The address of the first element in the device's address space
+    /// (PyTorch: `Tensor.data_ptr`).
+    ///
+    /// A raw escape hatch for interop that cannot use DLPack; unlike
+    /// `__dlpack__`, the caller must keep this tensor alive and honor the
+    /// shape/strides/dtype itself, or it writes to freed or wrong memory.
+    fn data_ptr(&self) -> usize {
+        self.inner.data_ptr() as usize
+    }
+
     // ----------------------------- element access -----------------------------
 
     fn get(&self, py: Python<'_>, index: Vec<isize>) -> PyResult<Py<PyAny>> {
@@ -609,5 +619,29 @@ impl PyTensor {
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyTensor>()
+    m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(_to_dlpack, m)?)?;
+    m.add_function(wrap_pyfunction!(_to_dlpack_versioned, m)?)?;
+    m.add_function(wrap_pyfunction!(_from_dlpack, m)?)
+}
+
+/// `t` as an unversioned DLPack capsule (PyTorch: `torch._C._to_dlpack`).
+/// Backs `Tensor.__dlpack__`.
+#[pyfunction]
+fn _to_dlpack<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack(py, &t.inner)
+}
+
+/// `t` as a versioned DLPack capsule (PyTorch:
+/// `torch._C._to_dlpack_versioned`). Backs `Tensor.__dlpack__`.
+#[pyfunction]
+fn _to_dlpack_versioned<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack_versioned(py, &t.inner)
+}
+
+/// A tensor over the buffer of a DLPack capsule, which it consumes
+/// (PyTorch: `torch._C._from_dlpack`). Backs `lumen.from_dlpack`.
+#[pyfunction]
+fn _from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<PyTensor> {
+    Ok(PyTensor::wrap(crate::tensor::dlpack::from_dlpack(capsule)?))
 }

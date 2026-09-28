@@ -936,36 +936,6 @@ mod cuda {
         }
 
         #[test]
-        fn host_copies_roundtrip_through_a_block_inside_a_segment() {
-            require_cuda!();
-            let alloc = fresh();
-            let _first = alloc.allocate(4096);
-            let second = alloc.allocate(4096); // same 2 MiB segment, at an offset
-            assert_eq!(alloc.stats().num_device_alloc, 1);
-            let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
-            let mut out = vec![0u8; 4096];
-            unsafe {
-                alloc.copy_from_host(second.as_ptr(), data.as_ptr(), data.len());
-                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
-            }
-            assert_eq!(out, data);
-        }
-
-        #[test]
-        fn cuda_memset_fills_a_block_inside_a_segment() {
-            require_cuda!();
-            let alloc = fresh();
-            let _first = alloc.allocate(4096);
-            let second = alloc.allocate(4096);
-            let mut out = vec![0u8; 4096];
-            unsafe {
-                alloc.memset(second.as_ptr(), 0x5A, 4096);
-                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
-            }
-            assert!(out.iter().all(|&b| b == 0x5A));
-        }
-
-        #[test]
         fn freed_blocks_are_reused_without_another_cuda_malloc() {
             require_cuda!();
             let alloc = fresh();
@@ -1145,32 +1115,5 @@ mod mps {
             alloc.stats().allocated_bytes,
             MpsPolicy::from_device().alignment
         );
-    }
-
-    #[test]
-    fn metal_memset_reaches_blocks_inside_a_segment() {
-        require_mps!();
-        // Two blocks carved from one 8 MiB segment: the second starts inside the
-        // segment's MTLBuffer, so the shim must find the buffer containing it.
-        let alloc = fresh();
-        let _first = alloc.allocate(4096);
-        let second = alloc.allocate(4096);
-        unsafe { alloc.memset(second.as_ptr(), 0x5A, 4096) };
-        let mut out = vec![0u8; 4096];
-        unsafe { alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), 4096) };
-        assert!(out.iter().all(|&b| b == 0x5A));
-        assert_eq!(
-            alloc.stats().num_device_alloc,
-            1,
-            "both blocks in one segment"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "fillBuffer")]
-    fn metal_memset_rejects_pointers_outside_its_buffers() {
-        require_mps!();
-        let mut host = [0u8; 16];
-        unsafe { mps::MpsBackend.memset(host.as_mut_ptr(), 0, 16) };
     }
 }

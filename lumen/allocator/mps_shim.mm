@@ -12,7 +12,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <mach/mach_time.h>
 #include <mach/vm_page_size.h>
 
 #include <map>
@@ -27,16 +26,6 @@ static id<MTLDevice> lumen_default_device(void) {
         device = MTLCreateSystemDefaultDevice();
     });
     return device;
-}
-
-// A command queue for blit work (fills), created with the device.
-static id<MTLCommandQueue> lumen_command_queue(void) {
-    static id<MTLCommandQueue> queue = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = [lumen_default_device() newCommandQueue];
-    });
-    return queue;
 }
 
 // contents pointer -> backing MTLBuffer, so lumen_mps_free can release the
@@ -115,58 +104,5 @@ void lumen_mps_free(void *contents) {
     }
     std::lock_guard<std::mutex> lock(g_buffers_mu);
     g_buffers.erase(static_cast<char *>(contents)); // releases the MTLBuffer
-}
-
-// The host clock Metal's GPUStartTime/GPUEndTime are in (mach_absolute_time,
-// as seconds), so the profiler can map GPU timestamps onto its own clock.
-double lumen_mps_host_time(void) {
-    static mach_timebase_info_data_t timebase;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        mach_timebase_info(&timebase);
-    });
-    return (double)mach_absolute_time() * timebase.numer / timebase.denom / 1e9;
-}
-
-// Set nbytes at ptr (anywhere inside a buffer from lumen_mps_alloc) to value,
-// with a blit encoder's fillBuffer — Metal's memset — and wait for it. The
-// command buffer's GPU start/end times (host-clock seconds) go to gpu_start
-// and gpu_end, which may be null. Returns 0 on success, -1 if
-// ptr..ptr+nbytes is not inside one buffer.
-int lumen_mps_memset(void *ptr, uint8_t value, size_t nbytes, double *gpu_start, double *gpu_end) {
-    if (nbytes == 0) {
-        return 0;
-    }
-    char *p = static_cast<char *>(ptr);
-    id<MTLBuffer> buffer = nil;
-    NSUInteger offset = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_buffers_mu);
-        auto it = g_buffers.upper_bound(p); // first buffer starting after p
-        if (it == g_buffers.begin()) {
-            return -1;
-        }
-        --it;
-        offset = static_cast<NSUInteger>(p - it->first);
-        if (offset + nbytes > it->second.length) {
-            return -1;
-        }
-        buffer = it->second; // retained for the blit below
-    }
-    @autoreleasepool {
-        id<MTLCommandBuffer> commands = [lumen_command_queue() commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
-        [blit fillBuffer:buffer range:NSMakeRange(offset, nbytes) value:value];
-        [blit endEncoding];
-        [commands commit];
-        [commands waitUntilCompleted];
-        if (gpu_start != nullptr) {
-            *gpu_start = commands.GPUStartTime;
-        }
-        if (gpu_end != nullptr) {
-            *gpu_end = commands.GPUEndTime;
-        }
-        return commands.status == MTLCommandBufferStatusCompleted ? 0 : -1;
-    }
 }
 }

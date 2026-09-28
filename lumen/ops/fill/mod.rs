@@ -1,9 +1,8 @@
 //! `fill_`, dispatched to a kernel per backend (PyTorch: `aten::fill_`):
-//! `cpu.rs`, `mps.rs` and `cuda.rs`.
+//! `cpu.rs` and `mps/` in Rust; CUDA's is `cute_fill.py`, a CuTe DSL kernel
+//! registered from Python (see [`crate::ops::python`]).
 
 mod cpu;
-#[cfg(lumen_cuda_linked)]
-mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
 
@@ -18,6 +17,11 @@ pub type FillKernel = fn(&Tensor, Scalar);
 /// `fill_`, dispatched on the tensor's device.
 pub static FILL: Op<FillKernel> = Op::new("lumen::fill_", fill_kernels);
 
+/// Python `fill_` kernels, by device key (see [`crate::ops::python`]).
+#[cfg(feature = "python")]
+pub static FILL_PY: Op<crate::ops::python::KernelHandle> =
+    Op::new("lumen::fill___python", |_| None);
+
 /// `fill_`'s static registry.
 fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
     match key {
@@ -30,16 +34,51 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
         ),
         #[cfg(not(lumen_mps_linked))]
         DispatchKey::Mps => None,
-        #[cfg(lumen_cuda_linked)]
-        DispatchKey::Cuda => {
-            Some(|t, value| dispatch_dtype!(t.dtype(), T => cuda::fill(t, T::from_scalar(value))))
-        }
-        #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
     }
 }
 
 /// Set every element of `t` to `value` with the kernel for its device.
 pub fn fill_op(t: &Tensor, value: Scalar) {
+    if t.numel() == 0 {
+        return;
+    }
+
+    #[cfg(feature = "python")]
+    if let Some(handle) =
+        crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
+    {
+        let (shape, strides) = stride_order(t.shape(), t.strides());
+        let address = t.data_ptr() as usize;
+        if handle.launch(
+            "lumen::fill_",
+            t.device(),
+            t.dtype(),
+            &shape,
+            &strides,
+            address,
+            value,
+        ) {
+            return;
+        }
+    }
+
     FILL.dispatch(t.device())(t, value);
+}
+
+/// The dimensions of a view in stride order, smallest stride first, as a
+/// Python `fill_` kernel is handed them: a fill's order does not matter, and
+/// a kernel walking its first dimension fastest then touches memory in
+/// order. A 0-d tensor is one element of a 1-d layout.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn stride_order(shape: &[usize], strides: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    if shape.is_empty() {
+        return (vec![1], vec![1]);
+    }
+    let mut dims: Vec<usize> = (0..shape.len()).collect();
+    dims.sort_by_key(|&d| strides[d]);
+    (
+        dims.iter().map(|&d| shape[d]).collect(),
+        dims.iter().map(|&d| strides[d]).collect(),
+    )
 }
