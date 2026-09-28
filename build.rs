@@ -107,8 +107,8 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps_fill.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/fill.metal");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/mps_fill.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/fill.metal");
     println!("cargo:rerun-if-changed=lumen/stream/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps.h");
 
@@ -120,7 +120,7 @@ fn build_mps_shim() {
 
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
-        .file("lumen/ops/fill/mps_fill.mm")
+        .file("lumen/ops/fill/mps/mps_fill.mm")
         .file("lumen/stream/mps.mm")
         .include(PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR not set")))
         .cpp(true)
@@ -132,12 +132,13 @@ fn build_mps_shim() {
     println!("cargo:rustc-cfg=lumen_mps_linked");
 }
 
-/// Write the text of `lumen/ops/fill/fill.metal` into a header in `OUT_DIR`
-/// as a C++ raw string literal (`kMpsFillSource`), which `mps_fill.mm`
-/// includes. Keeps the kernels in a real `.metal` file while still compiling
-/// them at runtime, so no Xcode `metal`/`metallib` tools are needed to build.
+/// Write the text of `lumen/ops/fill/mps/fill.metal` into a header in
+/// `OUT_DIR` as a C++ raw string literal (`kMpsFillSource`), which
+/// `mps_fill.mm` includes. Keeps the kernels in a real `.metal` file while
+/// still compiling them at runtime, so no Xcode `metal`/`metallib` tools are
+/// needed to build.
 fn embed_metal_source() {
-    const SOURCE: &str = "lumen/ops/fill/fill.metal";
+    const SOURCE: &str = "lumen/ops/fill/mps/fill.metal";
     let text = std::fs::read_to_string(SOURCE)
         .unwrap_or_else(|e| panic!("cannot read {SOURCE}: {e}"));
     // A delimiter that cannot occur in the source, so the raw string is safe.

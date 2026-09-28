@@ -3,7 +3,7 @@
 
 #include <algorithm>
 
-#include "../../stream/mps.h"
+#include "../../../stream/mps.h"
 
 // The fill kernels live in fill.metal; build.rs embeds its text here as the
 // C++ raw string `kMpsFillSource` (compiled at runtime by Metal below).
