@@ -220,6 +220,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::allocator::python::register(m)?;
     crate::profiler::python::register(m)?;
     crate::stream::python::register(m)?;
+    crate::ops::python::register(m)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

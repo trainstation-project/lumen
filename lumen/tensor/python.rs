@@ -261,12 +261,12 @@ fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 /// A strided view over a shared storage. Views never copy; writes through
 /// one view are visible through all aliases of the same storage.
 #[pyclass(name = "Tensor", module = "lumen")] // reports as lumen.Tensor, though defined in lumen._C
-struct PyTensor {
-    inner: Tensor,
+pub(crate) struct PyTensor {
+    pub(crate) inner: Tensor,
 }
 
 impl PyTensor {
-    fn wrap(inner: Tensor) -> Self {
+    pub(crate) fn wrap(inner: Tensor) -> Self {
         PyTensor { inner }
     }
 

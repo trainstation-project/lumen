@@ -10,8 +10,9 @@
 
 pub mod copy;
 pub mod fill;
-#[cfg(all(feature = "python", not(test)))]
+#[cfg(feature = "python")]
 pub mod python;
+pub mod test_op;
 #[cfg(test)]
 mod tests;
 

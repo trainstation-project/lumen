@@ -18,6 +18,11 @@ pub type FillKernel = fn(&Tensor, Scalar);
 /// `fill_`, dispatched on the tensor's device.
 pub static FILL: Op<FillKernel> = Op::new("lumen::fill_", fill_kernels);
 
+/// Python `fill_` kernels, by device key (see [`crate::ops::python`]).
+#[cfg(feature = "python")]
+pub static FILL_PY: Op<crate::ops::python::KernelHandle> =
+    Op::new("lumen::fill___python", |_| None);
+
 /// `fill_`'s static registry.
 fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
     match key {
@@ -41,5 +46,12 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
 
 /// Set every element of `t` to `value` with the kernel for its device.
 pub fn fill_op(t: &Tensor, value: Scalar) {
+    #[cfg(feature = "python")]
+    if let Some(handle) =
+        crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
+        && handle.call_fill("lumen::fill_", t, value)
+    {
+        return;
+    }
     FILL.dispatch(t.device())(t, value);
 }

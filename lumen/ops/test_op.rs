@@ -17,13 +17,7 @@ pub static TEST_OP: Op<TestOpKernel> = Op::new("lumen::test_op", no_kernels);
 /// Python `test_op` kernels, by device key (see [`crate::ops::python`]).
 #[cfg(feature = "python")]
 pub static TEST_OP_PY: Op<crate::ops::python::KernelHandle> =
-    Op::new("lumen::test_op__python", no_python_kernels);
-
-/// `TEST_OP_PY`'s static registry: no built-in Python kernels, ever used.
-#[cfg(feature = "python")]
-fn no_python_kernels(_: DispatchKey) -> Option<crate::ops::python::KernelHandle> {
-    None
-}
+    Op::new("lumen::test_op__python", |_| None);
 
 /// `TEST_OP`'s static registry: empty by design, so every device's kernel
 /// comes from the dynamic registry.
@@ -41,10 +35,9 @@ pub fn test_op(t: &Tensor) {
     #[cfg(feature = "python")]
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::test_op", DispatchKey::of(t.device()))
+        && handle.call_test_op("lumen::test_op", t)
     {
-        if handle.call_test_op("lumen::test_op", t) {
-            return;
-        }
+        return;
     }
 
     TEST_OP.dispatch(t.device())(t);
