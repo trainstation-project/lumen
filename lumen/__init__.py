@@ -14,6 +14,8 @@ wraps:
 * ``lumen.device`` — a device, modeled on ``torch.device``.
 * ``lumen.profiler`` (``lumen/profiler/``) — the profiler, modeled on
   ``torch.profiler``.
+* ``lumen.ops`` (``lumen/ops.py``) — registering device kernels written in
+  Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
 * ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
   ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``.
 
@@ -22,7 +24,7 @@ factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
-from lumen import profiler
+from lumen import ops, profiler
 from lumen.stream import cuda, mps
 from lumen.allocator import config
 from lumen.tensor import (
@@ -59,6 +61,7 @@ __all__ = [
     "cuda",
     "device",
     "mps",
+    "ops",
     "profiler",
     # dtypes
     "float16", "bfloat16", "float32", "float64",
