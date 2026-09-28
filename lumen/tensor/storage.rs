@@ -134,30 +134,6 @@ impl Storage {
         }
     }
 
-    /// Set `nbytes` starting at byte `offset` to `value`, writing the bytes
-    /// from a host block. Crate-private for the same reason as
-    /// [`write_bytes`](Self::write_bytes).
-    ///
-    /// # Panics
-    /// If the range is out of bounds.
-    pub(crate) fn fill_bytes(&self, offset: usize, value: u8, nbytes: usize) {
-        self.check_range(offset, nbytes);
-        if nbytes == 0 {
-            return;
-        }
-        // A block of the byte, written in one host copy: the allocator owns
-        // no memset, so a repeated-byte fill is a host buffer like any other
-        // write.
-        const BLOCK: usize = 4096;
-        let block = [value; BLOCK];
-        let mut written = 0;
-        while written < nbytes {
-            let chunk = BLOCK.min(nbytes - written);
-            self.write_bytes(offset + written, &block[..chunk]);
-            written += chunk;
-        }
-    }
-
     /// Copy `len` elements of type `T`, starting at element `offset`, to
     /// the host. Crate-private: the bytes must have been written as `T`.
     pub(crate) fn read<T: Element>(&self, offset: usize, len: usize) -> Vec<T> {
