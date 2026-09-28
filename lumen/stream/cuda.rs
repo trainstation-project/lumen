@@ -8,7 +8,7 @@
 //! are read only when the profiler stops ([`flush`]), not after each kernel.
 
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::allocator::cuda::ffi as cudart;
 use crate::device::Device;
@@ -32,11 +32,11 @@ pub fn synchronize(device_index: usize) {
 
 /// A CUDA event, kept as an address so it can live in a `static`.
 #[derive(Clone, Copy)]
-struct Event(usize);
+pub(crate) struct Event(usize);
 
 impl Event {
     /// A new event on the current device.
-    fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         let mut event = std::ptr::null_mut();
         (unsafe { cudart::cudaEventCreate(&mut event) } == 0).then(|| Event(event.addr()))
     }
@@ -45,22 +45,22 @@ impl Event {
         std::ptr::without_provenance_mut(self.0)
     }
 
-    fn record(self, stream: *mut c_void) -> bool {
+    pub(crate) fn record(self, stream: *mut c_void) -> bool {
         unsafe { cudart::cudaEventRecord(self.raw(), stream) == 0 }
     }
 
-    fn synchronize(self) -> bool {
+    pub(crate) fn synchronize(self) -> bool {
         unsafe { cudart::cudaEventSynchronize(self.raw()) == 0 }
     }
 
     /// Nanoseconds from `self` to `later`, both completed.
-    fn ns_until(self, later: Event) -> Option<u64> {
+    pub(crate) fn ns_until(self, later: Event) -> Option<u64> {
         let mut ms = 0.0f32;
         let ok = unsafe { cudart::cudaEventElapsedTime(&mut ms, self.raw(), later.raw()) } == 0;
         ok.then(|| (f64::from(ms) * 1e6).max(0.0) as u64)
     }
 
-    fn destroy(self) {
+    pub(crate) fn destroy(self) {
         unsafe { cudart::cudaEventDestroy(self.raw()) };
     }
 }
@@ -70,8 +70,8 @@ struct Timed {
     context: GpuContext,
     name: &'static str,
     device_index: usize,
-    /// The session's reference event on the device and its profiler time.
-    reference: (Event, u64),
+    /// The session's reference event on the device.
+    reference: Arc<Reference>,
     start: Event,
     stop: Event,
 }
@@ -116,36 +116,61 @@ pub(crate) fn flush() {
     let pending = std::mem::take(&mut *PENDING.lock().unwrap_or_else(|e| e.into_inner()));
     for t in pending {
         unsafe { cudart::cudaSetDevice(t.device_index as i32) };
-        let (reference, reference_ns) = t.reference;
-        let times = reference
+        // Wait for the stop event first: elapsed times need both completed.
+        let finished = t.stop.synchronize();
+        let times = t
+            .reference
             .ns_until(t.start)
-            .zip(reference.ns_until(t.stop))
-            .filter(|_| t.stop.synchronize());
+            .zip(t.reference.ns_until(t.stop));
+        let times = times.filter(|_| finished);
         t.start.destroy();
         t.stop.destroy();
         if let Some((start, stop)) = times {
             let device = Device::Cuda(t.device_index);
-            let (start, stop) = (reference_ns + start, reference_ns + stop);
+            let (start, stop) = (t.reference.ns + start, t.reference.ns + stop);
             crate::profiler::record_gpu_in(t.context, t.name, device, start, stop);
         }
     }
 }
 
-/// An event recorded once per profiler session on the device, with the
+/// An event recorded once per profiler session on a device, with the
 /// profiler time it completed at: GPU times are measured from it, which puts
-/// them on the profiler clock. Recording it is the one wait per session.
-fn reference(device_index: usize) -> Option<(Event, u64)> {
-    /// (device index, session, event, profiler ns).
-    static REFERENCES: Mutex<Vec<(usize, u64, Event, u64)>> = Mutex::new(Vec::new());
+/// them on the profiler clock.
+///
+/// Shared: work timed on another thread may still read it after a new
+/// session has replaced it (the profiler is global, and work is timed until
+/// its events are read), so the event is destroyed only with its last user.
+pub(crate) struct Reference {
+    event: Event,
+    pub(crate) ns: u64,
+}
+
+impl Reference {
+    /// Nanoseconds from the reference to `later`, both completed.
+    pub(crate) fn ns_until(&self, later: Event) -> Option<u64> {
+        self.event.ns_until(later)
+    }
+}
+
+impl Drop for Reference {
+    fn drop(&mut self) {
+        self.event.destroy();
+    }
+}
+
+/// The running session's [`Reference`] on CUDA device `device_index`,
+/// recorded (the one wait per session) on first use. The device must be
+/// current.
+pub(crate) fn reference(device_index: usize) -> Option<Arc<Reference>> {
+    /// (device index, session, reference).
+    static REFERENCES: Mutex<Vec<(usize, u64, Arc<Reference>)>> = Mutex::new(Vec::new());
     let session = crate::profiler::session_id();
     let mut references = REFERENCES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(i) = references.iter().position(|r| r.0 == device_index) {
-        let (_, s, event, ns) = references[i];
-        if s == session {
-            return Some((event, ns));
+        if references[i].1 == session {
+            return Some(references[i].2.clone());
         }
-        event.destroy(); // from an earlier session
-        references.swap_remove(i);
+        references.swap_remove(i); // from an earlier session
     }
     let event = Event::new()?;
     if !(event.record(std::ptr::null_mut()) && event.synchronize()) {
@@ -153,6 +178,7 @@ fn reference(device_index: usize) -> Option<(Event, u64)> {
         return None;
     }
     let ns = crate::profiler::now_ns();
-    references.push((device_index, session, event, ns));
-    Some((event, ns))
+    let reference = Arc::new(Reference { event, ns });
+    references.push((device_index, session, reference.clone()));
+    Some(reference)
 }

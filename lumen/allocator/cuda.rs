@@ -230,45 +230,6 @@ impl CudaBackend {
 
 // ---------------- profiler timing ----------------
 
-/// A CUDA event, kept as an address so it can live in a `static`.
-#[cfg(lumen_cuda_linked)]
-#[derive(Clone, Copy)]
-struct CudaEvent(usize);
-
-#[cfg(lumen_cuda_linked)]
-impl CudaEvent {
-    /// A new event on the current device.
-    fn new() -> Option<Self> {
-        let mut event = std::ptr::null_mut();
-        (unsafe { ffi::cudaEventCreate(&mut event) } == 0).then(|| CudaEvent(event.addr()))
-    }
-
-    fn raw(self) -> *mut std::ffi::c_void {
-        std::ptr::without_provenance_mut(self.0)
-    }
-
-    /// Record on the legacy default stream, which `cudaMemcpy` and
-    /// `cudaMemset` run on, so the event orders with them.
-    fn record(self) -> bool {
-        unsafe { ffi::cudaEventRecord(self.raw(), std::ptr::null_mut()) == 0 }
-    }
-
-    fn synchronize(self) -> bool {
-        unsafe { ffi::cudaEventSynchronize(self.raw()) == 0 }
-    }
-
-    /// Nanoseconds from `self` to `later`, both completed.
-    fn ns_until(self, later: CudaEvent) -> Option<u64> {
-        let mut ms = 0.0f32;
-        let ok = unsafe { ffi::cudaEventElapsedTime(&mut ms, self.raw(), later.raw()) } == 0;
-        ok.then(|| (f64::from(ms) * 1e6).max(0.0) as u64)
-    }
-
-    fn destroy(self) {
-        unsafe { ffi::cudaEventDestroy(self.raw()) };
-    }
-}
-
 #[cfg(lumen_cuda_linked)]
 impl CudaBackend {
     /// Run `work` (device work on the default stream). When the profiler
@@ -279,60 +240,32 @@ impl CudaBackend {
         if !crate::profiler::device_enabled(device) {
             return work();
         }
+        use crate::stream::cuda::{Event, reference};
         unsafe { ffi::cudaSetDevice(self.device_index) };
-        let events = self
-            .reference_event()
-            .zip(CudaEvent::new())
-            .zip(CudaEvent::new());
+        let events = reference(self.device_index as usize)
+            .zip(Event::new())
+            .zip(Event::new());
         let Some(((reference, start), stop)) = events else {
             return work();
         };
-        start.record();
+        // The legacy default stream, which `cudaMemcpy` runs on, so the
+        // events order with it.
+        let stream = std::ptr::null_mut();
+        start.record(stream);
         work();
-        let finished = stop.record() && stop.synchronize();
-        let (reference_event, reference_ns) = reference;
-        let times = reference_event
-            .ns_until(start)
-            .zip(reference_event.ns_until(stop))
-            .filter(|_| finished);
+        let finished = stop.record(stream) && stop.synchronize();
+        let times = reference.ns_until(start).zip(reference.ns_until(stop));
+        let times = times.filter(|_| finished);
         start.destroy();
         stop.destroy();
         if let Some((from_reference_to_start, from_reference_to_stop)) = times {
             crate::profiler::record_gpu(
                 name,
                 device,
-                reference_ns + from_reference_to_start,
-                reference_ns + from_reference_to_stop,
+                reference.ns + from_reference_to_start,
+                reference.ns + from_reference_to_stop,
             );
         }
-    }
-
-    /// An event recorded once per profiler session on this device, with the
-    /// profiler time it completed at: GPU times are measured from it, which
-    /// puts them on the profiler clock.
-    fn reference_event(&self) -> Option<(CudaEvent, u64)> {
-        use std::collections::HashMap;
-        /// Device index -> (session, event, profiler ns).
-        type References = HashMap<i32, (u64, CudaEvent, u64)>;
-        static REFERENCES: Mutex<Option<References>> = Mutex::new(None);
-        let session = crate::profiler::session_id();
-        let mut references = REFERENCES.lock().unwrap_or_else(|e| e.into_inner());
-        let references = references.get_or_insert_with(HashMap::new);
-        if let Some(&(s, event, ns)) = references.get(&self.device_index) {
-            if s == session {
-                return Some((event, ns));
-            }
-            event.destroy(); // from an earlier session
-            references.remove(&self.device_index);
-        }
-        let event = CudaEvent::new()?;
-        if !(event.record() && event.synchronize()) {
-            event.destroy();
-            return None;
-        }
-        let ns = crate::profiler::now_ns();
-        references.insert(self.device_index, (session, event, ns));
-        Some((event, ns))
     }
 }
 
