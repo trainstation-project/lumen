@@ -44,43 +44,64 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     }
 }
 
-/// Copy `nbytes` from host memory at `src` into `allocator`'s memory on
-/// `device` at `dst`.
+/// Copy the host tensor `src` into `dst`, on any device.
 ///
-/// # Safety
-/// `dst` must be memory from `allocator` on `device` valid for writing
-/// `nbytes`, `src` must be valid for reading `nbytes`, and the two must not
-/// overlap. The caller also waits for device work in flight
-/// (`Storage::synchronize`) first.
-pub unsafe fn copy_h2d(
-    allocator: &dyn Allocator,
-    device: Device,
-    dst: *mut u8,
-    src: *const u8,
-    nbytes: usize,
-) {
-    if nbytes == 0 {
+/// Like [`Tensor::set`], this writes shared data through a shared
+/// reference; the caller must ensure no data races.
+///
+/// # Panics
+/// If `src` is not on the CPU, the two differ in dtype or size, either is
+/// not contiguous, or they share storage.
+pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
+    check(dst, src, src);
+    if dst.numel() == 0 {
         return;
     }
-    // SAFETY: the caller's contract.
-    unsafe { COPY_H2D.dispatch(device)(allocator, device, dst, src, nbytes) }
+    dst.storage().synchronize();
+    COPY_H2D.dispatch(dst.device())(dst, src);
 }
 
-/// Copy `nbytes` from `allocator`'s memory on `device` at `src` into host
-/// memory at `dst`.
+/// Copy `src`, on any device, into the host tensor `dst`.
 ///
-/// # Safety
-/// As [`copy_h2d`], with the roles of source and destination swapped.
-pub unsafe fn copy_d2h(
-    allocator: &dyn Allocator,
-    device: Device,
-    dst: *mut u8,
-    src: *const u8,
-    nbytes: usize,
-) {
-    if nbytes == 0 {
+/// # Panics
+/// As [`copy_h2d`], with `dst` the one that must be on the CPU.
+pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
+    check(dst, src, dst);
+    if src.numel() == 0 {
         return;
     }
-    // SAFETY: the caller's contract.
-    unsafe { COPY_D2H.dispatch(device)(allocator, device, dst, src, nbytes) }
+    src.storage().synchronize();
+    COPY_D2H.dispatch(src.device())(dst, src);
+}
+
+/// What every kernel relies on: `host` is on the CPU, and `dst` and `src`
+/// are distinct contiguous buffers of the same dtype and size, so a kernel
+/// copies `numel * size_of` bytes between their data pointers.
+fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
+    assert_eq!(
+        host.device(),
+        Device::Cpu,
+        "the host side of a copy must be a CPU tensor"
+    );
+    assert_eq!(dst.dtype(), src.dtype(), "copy between dtypes");
+    assert_eq!(dst.numel(), src.numel(), "copy between sizes");
+    assert!(
+        dst.is_contiguous() && src.is_contiguous(),
+        "copy of a non-contiguous tensor"
+    );
+    assert!(!dst.shares_storage_with(src), "copy within one storage");
+}
+
+/// The address of `t`'s first element, in its device's address space.
+/// `wrapping_add`, not `add`: device memory is not an allocation Rust knows
+/// about, and `add` is undefined behavior outside one.
+pub(crate) fn data_ptr(t: &Tensor) -> *mut u8 {
+    t.storage()
+        .data_ptr()
+        .wrapping_add(t.storage_offset() * t.dtype().size_of())
+}
+
+/// The bytes a copy of `t` moves.
+fn nbytes(t: &Tensor) -> usize {
+    t.numel() * t.dtype().size_of()
 }

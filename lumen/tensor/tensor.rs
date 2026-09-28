@@ -8,6 +8,7 @@ use super::scalar::Scalar;
 use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
+use crate::ops::copy::{copy_d2h, copy_h2d, data_ptr};
 
 /// The device `options` name, CPU if unset.
 fn device_of(options: &TensorOptions) -> Device {
@@ -158,8 +159,33 @@ impl Tensor {
         let options = TensorOptions::new().dtype(T::DTYPE).device(device);
         // SAFETY: the write below covers every element.
         let t = unsafe { Self::empty(&[data.len()], options) };
-        t.storage.write(0, data);
+        t.write(data);
         t
+    }
+
+    /// A 1-D CPU tensor holding a copy of `data`: the host side of a copy
+    /// into a device tensor.
+    fn host<T: Element>(data: &[T]) -> Self {
+        // SAFETY: the write below covers every element.
+        let t = unsafe { Self::empty(&[data.len()], T::DTYPE) };
+        t.write(data);
+        t
+    }
+
+    /// Copy `data` into this contiguous tensor of as many elements: straight
+    /// into host memory on the CPU, else from a host tensor with
+    /// [`copy_h2d`]. Same data-race caveat as [`set`](Self::set).
+    fn write<T: Element>(&self, data: &[T]) {
+        self.check_dtype::<T>();
+        if self.device() != Device::Cpu {
+            return copy_h2d(self, &Self::host(data));
+        }
+        assert!(self.is_contiguous() && self.numel() == data.len());
+        // SAFETY: CPU storage is host memory, and the view's elements are in
+        // bounds of it; `data` is a distinct host buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().cast(), data_ptr(self), size_of_val(data))
+        }
     }
 
     // ------------------------------------------------------------------
@@ -333,7 +359,7 @@ impl Tensor {
         let values = self.to_vec::<T>();
         // SAFETY: the write below covers every element.
         let t = unsafe { self.empty_like() };
-        t.storage.write(0, &values);
+        t.write(&values);
         t
     }
 
@@ -346,26 +372,34 @@ impl Tensor {
     /// If `device` is not available.
     pub fn to(&self, device: Device) -> Self {
         let _op = crate::profiler::record_op("lumen::to", || vec![self.shape.clone()]);
+        self.copy_to(device)
+    }
+
+    /// [`to`](Self::to) without the profiler record: the storage range the
+    /// view covers, copied to fresh storage on `device` with the copy ops
+    /// (through the host between two devices).
+    pub(crate) fn copy_to(&self, device: Device) -> Self {
         if device == self.device() {
             return self.clone();
         }
-        let (start, len) = self.span();
-        let size = self.dtype.size_of();
-        let mut bytes = vec![0; len * size];
-        self.storage.read_bytes(start * size, &mut bytes);
-        // Allocate the span as a flat tensor, fill it with the bytes (values
-        // of this tensor's dtype, read back from its own storage), then lay
-        // the view's shape and strides over it.
+        if device != Device::Cpu && self.device() != Device::Cpu {
+            return self.copy_to(Device::Cpu).copy_to(device);
+        }
+        let span = self.span();
+        // SAFETY: the copy below covers every element of the span.
         let options = TensorOptions::new().dtype(self.dtype).device(device);
-        // SAFETY: the write below covers every element of the span.
-        let span = unsafe { Self::empty(&[len], options) };
-        span.storage.write_bytes(0, &bytes);
+        let out = unsafe { Self::empty(&span.shape, options) };
+        if device == Device::Cpu {
+            copy_d2h(&out, &span);
+        } else {
+            copy_h2d(&out, &span);
+        }
         Tensor {
-            storage: span.storage,
+            storage: out.storage,
             dtype: self.dtype,
             shape: self.shape.clone(),
             strides: self.strides.clone(),
-            offset: self.offset - start,
+            offset: self.offset - span.offset,
         }
     }
 
@@ -373,32 +407,60 @@ impl Tensor {
     pub fn to_vec<T: Element>(&self) -> Vec<T> {
         let _op = crate::profiler::record_op("lumen::to_vec", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
-        // One copy of the storage range the view covers, then a host-side
-        // gather: a per-element copy would be a device round trip each.
-        let (start, len) = self.span();
-        let base = self.storage.read::<T>(start, len);
+        self.values()
+    }
+
+    /// [`to_vec`](Self::to_vec) without the profiler record or dtype check.
+    fn values<T: Element>(&self) -> Vec<T> {
         let mut out = Vec::with_capacity(self.numel());
         if self.numel() == 0 {
             return out;
         }
+        // One copy of the storage range the view covers to the host, then a
+        // host-side gather: a per-element copy would be a device round trip
+        // each.
+        let host = self.copy_to(Device::Cpu);
+        let base = host.storage.data_ptr().cast_const().cast::<T>();
         for_each_index(&self.shape, |idx| {
-            out.push(base[self.offset - start + flat_offset(&idx, &self.strides)]);
+            let off = host.offset + flat_offset(&idx, &host.strides);
+            // SAFETY: CPU storage is host memory, and the element is in
+            // bounds of it and was written as a `T`.
+            out.push(unsafe { base.add(off).read_unaligned() });
         });
         out
     }
 
-    /// The storage elements this view can touch, as `(first, count)`.
-    pub(crate) fn span(&self) -> (usize, usize) {
-        if self.numel() == 0 {
-            return (self.offset, 0);
+    /// The storage range this view can touch, as a flat contiguous view.
+    pub(crate) fn span(&self) -> Self {
+        let len = if self.numel() == 0 {
+            0
+        } else {
+            let last: usize = self
+                .shape
+                .iter()
+                .zip(&self.strides)
+                .map(|(&n, &s)| (n - 1) * s)
+                .sum();
+            last + 1
+        };
+        Tensor {
+            storage: Arc::clone(&self.storage),
+            dtype: self.dtype,
+            shape: vec![len],
+            strides: vec![1],
+            offset: self.offset,
         }
-        let last: usize = self
-            .shape
-            .iter()
-            .zip(&self.strides)
-            .map(|(&n, &s)| (n - 1) * s)
-            .sum();
-        (self.offset, last + 1)
+    }
+
+    /// The element at storage offset `offset`, as a 0-d view.
+    fn element(&self, offset: usize) -> Self {
+        Tensor {
+            storage: Arc::clone(&self.storage),
+            dtype: self.dtype,
+            shape: Vec::new(),
+            strides: Vec::new(),
+            offset,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -415,7 +477,7 @@ impl Tensor {
         );
     }
 
-    /// Byte offset of `index` within the storage.
+    /// Element offset of `index` within the storage.
     fn physical_offset(&self, index: &[usize]) -> usize {
         assert_eq!(index.len(), self.ndim(), "expected {} indices", self.ndim());
         for (d, &i) in index.iter().enumerate() {
@@ -428,7 +490,7 @@ impl Tensor {
         let _op = crate::profiler::record_op("lumen::get", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
-        self.storage.read::<T>(off, 1)[0]
+        self.element(off).values::<T>()[0]
     }
 
     /// Write through the view; aliases sharing this storage see the change
@@ -442,7 +504,7 @@ impl Tensor {
         let _op = crate::profiler::record_op("lumen::set", || vec![self.shape.clone()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
-        self.storage.write::<T>(off, &[value]);
+        self.element(off).write(&[value]);
     }
 
     /// Set every element of the view to `value`, converted to the tensor's

@@ -1,11 +1,12 @@
 use crate::Tensor;
 use crate::device::Device;
+use crate::ops::copy::{copy_h2d, data_ptr};
 use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
 
 /// CUDA `fill_`: the element's bytes written on the device with the driver
-/// API's memsets, so no host buffer is copied over. Strided views take the
-/// host read-modify-write of [`super::cpu::fill`].
+/// API's memsets, so no host buffer is copied over. Strided views are a
+/// read-modify-write through the host.
 pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     let numel = t.numel();
     if numel == 0 {
@@ -13,17 +14,18 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     }
 
     if !t.is_contiguous() {
-        return super::cpu::fill(t, value);
+        // Fill a host copy of the storage range the view covers and copy it
+        // back, so storage elements the view skips over keep their values.
+        let host = t.copy_to(Device::Cpu);
+        super::cpu::fill(&host, value);
+        return copy_h2d(&t.span(), &host.span());
     }
 
     let Device::Cuda(index) = t.device() else {
         unreachable!("the CUDA kernel runs on CUDA tensors")
     };
 
-    let dst = t
-        .storage()
-        .data_ptr()
-        .wrapping_add(t.storage_offset() * size_of::<T>());
+    let dst = data_ptr(t);
     let pattern = as_bytes(std::slice::from_ref(&value));
     memset_elements(index, dst, pattern, numel);
 }
