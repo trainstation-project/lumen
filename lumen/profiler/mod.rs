@@ -222,6 +222,8 @@ pub fn stop() -> Result<Profile, String> {
     // profiler synchronizes its MPS streams too).
     #[cfg(lumen_mps_linked)]
     crate::stream::mps::synchronize();
+    #[cfg(lumen_cuda_linked)]
+    crate::stream::cuda::flush();
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
@@ -400,7 +402,7 @@ pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_
 }
 
 /// Who submitted device work, captured at submission, for work whose times
-/// arrive later on another thread (asynchronous MPS work).
+/// arrive later (asynchronous MPS and CUDA work).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GpuContext {
     session: u64,
