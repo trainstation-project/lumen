@@ -5,7 +5,8 @@
 //! needs to wait after a kernel.
 //!
 //! When the profiler times CUDA, a launch is bracketed with CUDA events that
-//! are read only when the profiler stops ([`flush`]), not after each kernel.
+//! are read only when the profiler stops ([`flush`]), not after each kernel,
+//! and then reused.
 
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
@@ -18,16 +19,26 @@ mod ffi {
     #[link(name = "cudart")]
     unsafe extern "C" {
         pub fn cudaDeviceSynchronize() -> i32;
+        pub fn cudaGetDevice(device: *mut i32) -> i32;
+    }
+}
+
+/// Make `device_index` the current device, skipping the call if it already
+/// is (PyTorch: `c10::cuda::SetDevice`).
+fn set_device(device_index: usize) {
+    let mut current = -1;
+    unsafe {
+        if ffi::cudaGetDevice(&mut current) != 0 || current != device_index as i32 {
+            cudart::cudaSetDevice(device_index as i32);
+        }
     }
 }
 
 /// Wait until all work on CUDA device `device_index` has finished (PyTorch:
 /// `torch.cuda.synchronize()`).
 pub fn synchronize(device_index: usize) {
-    unsafe {
-        cudart::cudaSetDevice(device_index as i32);
-        ffi::cudaDeviceSynchronize();
-    }
+    set_device(device_index);
+    unsafe { ffi::cudaDeviceSynchronize() };
 }
 
 /// A CUDA event, kept as an address so it can live in a `static`.
@@ -78,18 +89,31 @@ struct Timed {
 
 static PENDING: Mutex<Vec<Timed>> = Mutex::new(Vec::new());
 
+/// Events [`flush`] has read, by device, for later launches to reuse:
+/// creating events costs more than launching a memset.
+static FREE: Mutex<Vec<(usize, Event)>> = Mutex::new(Vec::new());
+
+/// A free event on the current device `device_index`, or a new one.
+fn event(device_index: usize) -> Option<Event> {
+    let mut free = FREE.lock().unwrap_or_else(|e| e.into_inner());
+    match free.iter().rposition(|&(d, _)| d == device_index) {
+        Some(i) => Some(free.swap_remove(i).1),
+        None => Event::new(),
+    }
+}
+
 /// Run `work` on CUDA device `device_index`, passing it the stream to
 /// launch on, without waiting for it. When the profiler times CUDA, the
 /// work is recorded as `name` once [`flush`] reads its events.
 pub(crate) fn launch(device_index: usize, name: &'static str, work: impl FnOnce(*mut c_void)) {
-    unsafe { cudart::cudaSetDevice(device_index as i32) };
+    set_device(device_index);
     // The legacy default stream, which cudaMemcpy runs on too.
     let stream = std::ptr::null_mut();
     let context = crate::profiler::gpu_context(Device::Cuda(device_index));
     let events = context
         .zip(reference(device_index))
-        .zip(Event::new())
-        .zip(Event::new());
+        .zip(event(device_index))
+        .zip(event(device_index));
     let Some((((context, reference), start), stop)) = events else {
         return work(stream);
     };
@@ -114,8 +138,9 @@ pub(crate) fn launch(device_index: usize, name: &'static str, work: impl FnOnce(
 /// profiler stops).
 pub(crate) fn flush() {
     let pending = std::mem::take(&mut *PENDING.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut read = Vec::with_capacity(2 * pending.len());
     for t in pending {
-        unsafe { cudart::cudaSetDevice(t.device_index as i32) };
+        set_device(t.device_index);
         // Wait for the stop event first: elapsed times need both completed.
         let finished = t.stop.synchronize();
         let times = t
@@ -123,14 +148,14 @@ pub(crate) fn flush() {
             .ns_until(t.start)
             .zip(t.reference.ns_until(t.stop));
         let times = times.filter(|_| finished);
-        t.start.destroy();
-        t.stop.destroy();
+        read.extend([(t.device_index, t.start), (t.device_index, t.stop)]);
         if let Some((start, stop)) = times {
             let device = Device::Cuda(t.device_index);
             let (start, stop) = (t.reference.ns + start, t.reference.ns + stop);
             crate::profiler::record_gpu_in(t.context, t.name, device, start, stop);
         }
     }
+    FREE.lock().unwrap_or_else(|e| e.into_inner()).extend(read);
 }
 
 /// An event recorded once per profiler session on a device, with the
