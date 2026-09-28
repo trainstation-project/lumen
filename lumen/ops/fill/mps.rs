@@ -1,8 +1,8 @@
 //! The MPS `fill_` kernel: Metal's blit `fillBuffer` for byte patterns, a
-//! compute shader for 2-, 4- or 8-byte elements (`mps_fill.mm`), as in
-//! PyTorch, submitted to the MPS stream without waiting (see
-//! [`crate::stream::mps`]). Strided views, and memory that is not mapped (a
-//! custom allocator's), take the CPU kernel: MPS memory is unified.
+//! compute shader for 2-, 4- or 8-byte elements, and a strided one for
+//! views (`mps_fill.mm`), as in PyTorch, submitted to the MPS stream without
+//! waiting (see [`crate::stream::mps`]). Memory that is not mapped (a custom
+//! allocator's) takes the CPU kernel: MPS memory is unified.
 
 use std::ffi::c_void;
 
@@ -18,6 +18,9 @@ unsafe extern "C" {
         pattern: *const u8,
         elem_size: usize,
         count: usize,
+        sizes: *const usize,
+        strides: *const usize,
+        ndim: usize,
         done: Completion,
         context: *mut c_void,
     ) -> i32;
@@ -25,12 +28,19 @@ unsafe extern "C" {
 
 pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     let numel = t.numel();
-    if numel == 0 || !t.is_contiguous() {
-        return super::cpu::fill(t, value);
+    if numel == 0 {
+        return;
     }
 
     let pattern = as_bytes(std::slice::from_ref(&value));
-    let one_byte = pattern.iter().all(|&b| b == pattern[0]);
+    // Contiguous elements are passed without strides.
+    let contiguous = t.is_contiguous();
+    let strides = if contiguous {
+        std::ptr::null()
+    } else {
+        t.strides().as_ptr()
+    };
+    let one_byte = contiguous && pattern.iter().all(|&b| b == pattern[0]);
     let dst = t
         .storage()
         .data_ptr()
@@ -38,8 +48,19 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
 
     let name = if one_byte { "Memset" } else { "Fill" };
     let (context, done) = mps::submit(t, name);
-    let status =
-        unsafe { lumen_mps_fill(dst, pattern.as_ptr(), pattern.len(), numel, done, context) };
+    let status = unsafe {
+        lumen_mps_fill(
+            dst,
+            pattern.as_ptr(),
+            pattern.len(),
+            numel,
+            t.shape().as_ptr(),
+            strides,
+            t.ndim(),
+            done,
+            context,
+        )
+    };
 
     match status {
         0 => {}

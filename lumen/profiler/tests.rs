@@ -598,6 +598,24 @@ mod mps {
     }
 
     #[test]
+    fn metal_strided_fills_run_on_the_gpu() {
+        if !mps::is_available() {
+            return eprintln!("Metal unavailable, skipping");
+        }
+        let config = ProfilerConfig {
+            activities: vec![Activity::Cpu, Activity::Mps],
+            ..cpu()
+        };
+        let t = Tensor::ones(&[64, 64], on_mps(DType::F32));
+        let p = profile(config, || {
+            t.transpose(0, 1).narrow(1, 0, 32).zero_();
+        });
+        let fill = one(&p, "Fill"); // the strided kernel, not fillBuffer
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
+        assert!(named(&p, "Memset").is_empty());
+    }
+
+    #[test]
     fn metal_fills_are_not_timed_without_the_mps_activity() {
         if !mps::is_available() {
             return eprintln!("Metal unavailable, skipping");
