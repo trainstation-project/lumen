@@ -1,7 +1,8 @@
-//! lumen's MPS stream (PyTorch: `MPSStream`). MPS ops submit GPU work to one
-//! command queue (`mps.mm`) and return without waiting; the host waits
-//! only in [`synchronize`], which `Storage` calls before it touches MPS
-//! memory (PyTorch likewise syncs its stream before host copies).
+//! lumen's MPS stream (PyTorch: `MPSStream`). MPS ops encode GPU work into
+//! the stream's open command buffer (`mps.mm`) and return without waiting;
+//! it is committed every few ops, and the host waits only in
+//! [`synchronize`], which `Storage` calls before it touches MPS memory
+//! (PyTorch likewise syncs its stream before host copies).
 //!
 //! Submitted work keeps its tensor, and so its memory, alive until the GPU
 //! is done with it: a block cannot go back to the cache, nor its segment to
@@ -18,6 +19,7 @@ use crate::profiler::GpuContext;
 
 unsafe extern "C" {
     // In mps.mm (which also holds the queue the shims submit to).
+    fn lumen_mps_stream_flush();
     fn lumen_mps_stream_host_time() -> f64;
 }
 
@@ -28,6 +30,7 @@ static COMPLETED: Condvar = Condvar::new();
 /// Wait until all submitted MPS work has finished (PyTorch:
 /// `torch.mps.synchronize()`).
 pub fn synchronize() {
+    unsafe { lumen_mps_stream_flush() };
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     while *pending > 0 {
         pending = COMPLETED.wait(pending).unwrap_or_else(|e| e.into_inner());
@@ -57,19 +60,22 @@ pub(crate) type Completion = unsafe extern "C" fn(*mut c_void, f64, f64, i32);
 /// Register work on `tensor` about to be submitted, recorded in the profiler
 /// as `name`. Pass the returned context and [`completed`] to the shim, which
 /// must call it exactly once; if the shim does not submit, call [`cancel`].
-pub(crate) fn submit(tensor: &Tensor, name: &'static str) -> (*mut c_void, Completion) {
+/// The flag is whether the profiler times it (the shim samples its GPU
+/// start and end).
+pub(crate) fn submit(tensor: &Tensor, name: &'static str) -> (*mut c_void, Completion, bool) {
     let profile = crate::profiler::gpu_context(Device::Mps).map(|context| Profiled {
         context,
         name,
         profiler_ns: crate::profiler::now_ns(),
         host_seconds: unsafe { lumen_mps_stream_host_time() },
     });
+    let timed = profile.is_some();
     *PENDING.lock().unwrap_or_else(|e| e.into_inner()) += 1;
     let submission = Box::new(Submission {
         _tensor: tensor.clone(),
         profile,
     });
-    (Box::into_raw(submission).cast(), completed)
+    (Box::into_raw(submission).cast(), completed, timed)
 }
 
 /// Undo a [`submit`] whose work was not submitted.

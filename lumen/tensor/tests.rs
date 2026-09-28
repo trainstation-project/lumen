@@ -697,7 +697,7 @@ mod mps {
         require_mps!();
         let opts = TensorOptions::new().dtype(DType::F32).device(Device::Mps);
         let t = crate::Tensor::arange(12, opts).reshape(&[3, 4]);
-        t.select(0, 1).zero_(); // contiguous: Metal fillBuffer at an offset
+        t.select(0, 1).zero_(); // contiguous: the dense Metal kernel at an offset
         t.select(1, 3).fill_(2.5); // strided: the strided Metal kernel
         assert_eq!(
             t.to_vec::<f32>(),
@@ -713,6 +713,24 @@ mod mps {
             TensorOptions::new().dtype(DType::Bool).device(Device::Mps),
         );
         assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
+    }
+
+    #[test]
+    fn fills_on_mps_run_in_order() {
+        require_mps!();
+        // Many fills of one tensor, encoded without waiting (and committed
+        // in batches): the last one wins.
+        let t = crate::Tensor::zeros(
+            &[1 << 20],
+            TensorOptions::new().dtype(DType::F32).device(Device::Mps),
+        );
+        for i in 0..100 {
+            t.fill_(i as f32);
+            t.narrow(0, 0, 1 << 19).zero_();
+        }
+        let mut expected = vec![99.0f32; 1 << 20];
+        expected[..1 << 19].fill(0.0);
+        assert_eq!(t.to_vec::<f32>(), expected);
     }
 
     #[test]
@@ -739,7 +757,7 @@ mod mps {
             .collect();
         assert_eq!(halves.to_vec::<f16>(), want);
         let floats = crate::Tensor::ones(&[4, 3, 5], on_mps(DType::F32));
-        view(&floats).zero_(); // a byte pattern, but strided: not fillBuffer
+        view(&floats).zero_(); // strided zeros
         let want: Vec<f32> = expected(-1.0).iter().map(|&x| (x + 1.0) as f32).collect();
         assert_eq!(floats.to_vec::<f32>(), want);
         let doubles = crate::Tensor::zeros(&[4, 3, 5], on_mps(DType::F64));

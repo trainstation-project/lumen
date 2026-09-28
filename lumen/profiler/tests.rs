@@ -513,22 +513,22 @@ mod mps {
             record_shapes: false,
         };
         let p = profile(config, || {
-            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fillBuffer
+            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fill kernel
             // The fill is asynchronous: wait for it, so the tensor is freed
             // here rather than on the Metal thread that completes it.
             crate::stream::mps::synchronize();
             drop(t);
         });
-        let memset = one(&p, "Memset");
-        assert_eq!((memset.kind, memset.device), (EventKind::Gpu, Device::Mps));
+        let fill = one(&p, "Fill");
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
         let zeros = one(&p, "lumen::zeros");
-        assert_eq!(memset.parent, Some(zeros.id));
+        assert_eq!(fill.parent, Some(zeros.id));
         // Submitted by zeros, but may finish after it returns.
         assert!(
-            memset.start_ns + 1_000_000 >= zeros.start_ns,
-            "{memset:?} before {zeros:?}"
+            fill.start_ns + 1_000_000 >= zeros.start_ns,
+            "{fill:?} before {zeros:?}"
         );
-        assert!(memset.end_ns >= memset.start_ns);
+        assert!(fill.end_ns >= fill.start_ns);
         let memory: Vec<&Event> = named(&p, "[memory]")
             .into_iter()
             .filter(|e| e.device == Device::Mps)
@@ -554,7 +554,7 @@ mod mps {
         let t = Tensor::zeros(&[1 << 24], on_mps(DType::F32));
         let p = profile(config, || {
             for _ in 0..8 {
-                t.zero_(); // Metal fillBuffers of one tensor, not waited on
+                t.zero_(); // Metal fills of one tensor, not waited on
                 t.fill_(2.0f32);
             }
         });
@@ -588,10 +588,6 @@ mod mps {
         assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
         assert_eq!(fill.parent, Some(one(&p, "lumen::ones").id));
         assert!(
-            named(&p, "Memset").is_empty(),
-            "1.0f32 is not a byte pattern"
-        );
-        assert!(
             p.chrome_trace()
                 .contains("\"cat\":\"kernel\",\"name\":\"Fill\"")
         );
@@ -610,9 +606,8 @@ mod mps {
         let p = profile(config, || {
             t.transpose(0, 1).narrow(1, 0, 32).zero_();
         });
-        let fill = one(&p, "Fill"); // the strided kernel, not fillBuffer
+        let fill = one(&p, "Fill"); // the strided kernel
         assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
-        assert!(named(&p, "Memset").is_empty());
     }
 
     #[test]
@@ -621,7 +616,7 @@ mod mps {
             return eprintln!("Metal unavailable, skipping");
         }
         let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_mps(DType::U8))));
-        assert!(named(&p, "Memset").is_empty());
+        assert!(named(&p, "Fill").is_empty());
         assert_eq!(named(&p, "lumen::zeros").len(), 1);
     }
 }

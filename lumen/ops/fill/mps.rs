@@ -1,8 +1,7 @@
-//! The MPS `fill_` kernel: Metal's blit `fillBuffer` for byte patterns, a
-//! compute shader for 2-, 4- or 8-byte elements, and a strided one for
-//! views (`mps_fill.mm`), as in PyTorch, submitted to the MPS stream without
-//! waiting (see [`crate::stream::mps`]). Memory that is not mapped (a custom
-//! allocator's) takes the CPU kernel: MPS memory is unified.
+//! The MPS `fill_` kernel: compute shaders for dense and strided fills
+//! (`mps_fill.mm`), as in PyTorch, encoded into the MPS stream without
+//! waiting (see [`crate::stream::mps`]). Memory outside lumen's MPS segments
+//! (a custom allocator's) takes the CPU kernel: MPS memory is unified.
 
 use std::ffi::c_void;
 
@@ -21,6 +20,7 @@ unsafe extern "C" {
         sizes: *const usize,
         strides: *const usize,
         ndim: usize,
+        timed: i32,
         done: Completion,
         context: *mut c_void,
     ) -> i32;
@@ -40,14 +40,12 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     } else {
         t.strides().as_ptr()
     };
-    let one_byte = contiguous && pattern.iter().all(|&b| b == pattern[0]);
     let dst = t
         .storage()
         .data_ptr()
         .wrapping_add(t.storage_offset() * pattern.len());
 
-    let name = if one_byte { "Memset" } else { "Fill" };
-    let (context, done) = mps::submit(t, name);
+    let (context, done, timed) = mps::submit(t, "Fill");
     let status = unsafe {
         lumen_mps_fill(
             dst,
@@ -57,6 +55,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
             t.shape().as_ptr(),
             strides,
             t.ndim(),
+            timed.into(),
             done,
             context,
         )
@@ -65,7 +64,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     match status {
         0 => {}
         -1 => {
-            // Not mapped memory: not submitted.
+            // Not in a lumen MPS segment: not submitted.
             mps::cancel(context);
             super::cpu::fill(t, value);
         }
