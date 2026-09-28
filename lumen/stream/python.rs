@@ -56,7 +56,7 @@ fn _cuda_is_available() -> bool {
 fn _cuda_stream_wait(index: usize, stream: usize) -> PyResult<()> {
     core::allocator::allocator_for(core::Device::Cuda(index)).map_err(PyRuntimeError::new_err)?;
     #[cfg(lumen_cuda_linked)]
-    core::stream::cuda::wait(index, stream as *mut std::ffi::c_void);
+    core::stream::cuda::wait(index, stream);
     #[cfg(not(lumen_cuda_linked))]
     let _ = stream;
     Ok(())

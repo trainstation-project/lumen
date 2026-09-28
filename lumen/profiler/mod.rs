@@ -422,7 +422,7 @@ pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn record_gpu_in(
     context: GpuContext,
-    name: &'static str,
+    name: &str,
     device: Device,
     start_ns: u64,
     end_ns: u64,

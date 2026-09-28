@@ -59,10 +59,11 @@ pub fn synchronize(device_index: usize) {
 /// `cudaEventDisableTiming`: the event only orders work.
 const EVENT_DISABLE_TIMING: u32 = 2;
 
-/// Make `stream` wait for the work queued so far on lumen's stream on CUDA
-/// device `device_index`, without blocking the host (PyTorch: an event
-/// recorded on the current stream, then `stream.wait_event(event)`).
-pub fn wait(device_index: usize, stream: *mut c_void) {
+/// Make `stream` (a `cudaStream_t` handle) wait for the work queued so far
+/// on lumen's stream on CUDA device `device_index`, without blocking the
+/// host (PyTorch: an event recorded on the current stream, then
+/// `stream.wait_event(event)`).
+pub fn wait(device_index: usize, stream: usize) {
     set_device(device_index);
     let mut event = std::ptr::null_mut();
     let check = |err: i32, call: &str| {
@@ -79,7 +80,7 @@ pub fn wait(device_index: usize, stream: *mut c_void) {
             "cudaEventRecord",
         );
         check(
-            ffi::cudaStreamWaitEvent(stream, event, 0),
+            ffi::cudaStreamWaitEvent(stream as *mut c_void, event, 0),
             "cudaStreamWaitEvent",
         );
         // An event destroyed while pending is released once it completes.

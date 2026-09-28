@@ -94,12 +94,21 @@ impl KernelHandle {
         let Some(kernel) = kernel else {
             return false;
         };
-        Python::attach(|py| -> PyResult<()> {
-            let tensor = Py::new(py, PyTensor::wrap(t.clone()))?;
-            kernel.bind(py).call1((tensor, scalar_to_py(py, value)?))?;
-            Ok(())
-        })
-        .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"));
+        let run = || {
+            Python::attach(|py| -> PyResult<()> {
+                let tensor = Py::new(py, PyTensor::wrap(t.clone()))?;
+                kernel.bind(py).call1((tensor, scalar_to_py(py, value)?))?;
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
+        };
+        // What a CUDA kernel launches is the op's GPU work in a profile.
+        #[cfg(lumen_cupti_linked)]
+        if let core::Device::Cuda(_) = t.device() {
+            crate::profiler::cupti::correlated(t.device(), run);
+            return true;
+        }
+        run();
         true
     }
 }
