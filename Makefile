@@ -3,11 +3,12 @@
 
 export RUSTFLAGS := -D warnings
 
-.PHONY: all ci test test-cpu test-cuda test-mps fmt fmt-check clippy miri clean
+.PHONY: all ci test test-cpu test-cuda test-mps fmt fmt-check clang-format clang-format-check clippy miri clean
 
-## ci: every CI job (rustfmt, clippy, tests, miri), in that order; runs
-## all tests (CPU, CUDA, MPS), where GitHub CI runs only the CPU ones.
-ci: fmt-check clippy test miri
+## ci: every CI job (rustfmt, clang-format, clippy, tests, miri), in that
+## order; runs all tests (CPU, CUDA, MPS), where GitHub CI runs only the
+## CPU ones.
+ci: fmt-check clang-format-check clippy test miri
 
 # Each test runs in exactly one of the targets below. The Rust tests are
 # unit tests inside the crate (a `tests.rs` per module folder), picked by
@@ -50,6 +51,17 @@ fmt:
 
 fmt-check:
 	cargo fmt --all -- --check
+
+# The C++/Objective-C++/Metal sources (the .mm shims and .metal kernels);
+# style is the shared .clang-format (from lm-engine). Needs clang-format
+# 21.1.6 on PATH (`pip install clang-format==21.1.6`).
+CPP_SOURCES := $(shell find lumen -name '*.mm' -o -name '*.metal' -o -name '*.h')
+
+clang-format:
+	clang-format -i --style=file:.clang-format $(CPP_SOURCES)
+
+clang-format-check:
+	clang-format --dry-run --Werror --style=file:.clang-format $(CPP_SOURCES)
 
 clippy:
 	cargo clippy --all-targets --all-features

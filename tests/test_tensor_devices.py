@@ -102,6 +102,35 @@ def test_fill_and_zero_in_place(device):
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
+def test_fill_strided_higher_rank(device):
+    # The strided kernels decode the inner dims per thread; exercise 3-D and
+    # 4-D views (permuted, so non-contiguous on every axis but one) rather
+    # than only the 2-D transpose above.
+    _require(device)
+    for shape, perm, value in [
+        ([2, 3, 4], [2, 0, 1], -1.5),
+        ([2, 3, 4, 5], [3, 1, 0, 2], 7.0),
+    ]:
+        n = 1
+        for s in shape:
+            n *= s
+        t = lumen.arange(n, dtype=lumen.float32, device=device).reshape(shape)
+        view = t.permute(perm)
+        assert not view.is_contiguous()
+        view.fill_(value)
+        flat = view.to("cpu").tolist()
+
+        def flatten(xs):
+            for x in xs:
+                if isinstance(x, list):
+                    yield from flatten(x)
+                else:
+                    yield x
+
+        assert list(flatten(flat)) == [value] * n
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
 def test_empty_and_ones_on_device(device):
     _require(device)
     e = lumen.empty([2, 2], dtype=lumen.int64, device=device)
