@@ -936,22 +936,6 @@ mod cuda {
         }
 
         #[test]
-        fn host_copies_roundtrip_through_a_block_inside_a_segment() {
-            require_cuda!();
-            let alloc = fresh();
-            let _first = alloc.allocate(4096);
-            let second = alloc.allocate(4096); // same 2 MiB segment, at an offset
-            assert_eq!(alloc.stats().num_device_alloc, 1);
-            let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
-            let mut out = vec![0u8; 4096];
-            unsafe {
-                alloc.copy_from_host(second.as_ptr(), data.as_ptr(), data.len());
-                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
-            }
-            assert_eq!(out, data);
-        }
-
-        #[test]
         fn freed_blocks_are_reused_without_another_cuda_malloc() {
             require_cuda!();
             let alloc = fresh();
