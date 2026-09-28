@@ -383,191 +383,86 @@ mod storage_semantics {
     }
 }
 
-mod opaque_device {
-    //! Tensors on a device the host cannot address.
+mod device_kernels {
+    //! Tensor code paths that go through op dispatch and view/layout bookkeeping.
     //!
-    //! `OpaqueDevice` hands out fake, never-dereferenced addresses and keeps the
-    //! bytes in a side table reachable only through the allocator's host copies
-    //! and memset. Tensor code that touched a buffer directly would crash here
-    //! instead of passing, as it would on CUDA. It also logs every memset, to
-    //! check which fills use one.
+    //! These used to run on `OpaqueDevice`, a fake device that claimed
+    //! `Device::Mps` while keeping its bytes in a side table at addresses the
+    //! host could not touch. That device modelled "MPS but not unified", which
+    //! is no longer representable: MPS means unified memory (see
+    //! `ops/copy/mps.rs`), so host-addressability follows from the device. The
+    //! allocator keeps nothing but allocate/free for it to override.
+    //!
+    //! So the tests below run on the real CPU device, where the same
+    //! view/strides/layout logic is exercised without a fake allocator. The
+    //! device paths themselves are covered for real in `mod mps` and
+    //! `mod cuda`, which need an actual GPU.
 
-    use std::alloc::Layout;
-    use std::collections::BTreeMap;
-    use std::ptr::NonNull;
-    use std::sync::{Arc, Mutex};
+    use crate::{DType, Device, Tensor, TensorOptions};
 
-    use crate::{Allocator, DType, DataPtr, Device, Storage, Tensor, TensorOptions};
-
-    #[derive(Default, Clone)]
-    struct OpaqueDevice {
-        /// Base address -> contents.
-        memory: Arc<Mutex<BTreeMap<usize, Vec<u8>>>>,
-    }
-
-    impl OpaqueDevice {
-        /// Run `f` on `[addr, addr + n)` within the allocation containing it.
-        fn with_region<R>(&self, addr: usize, n: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
-            let mut memory = self.memory.lock().unwrap();
-            let (&base, buf) = memory
-                .range_mut(..=addr)
-                .next_back()
-                .expect("unknown address");
-            let start = addr - base;
-            f(&mut buf[start..start + n])
-        }
-
-        /// Read `n` bytes at `addr`, the way a copy op would.
-        fn read_region(&self, addr: usize, n: usize) -> Vec<u8> {
-            self.with_region(addr, n, |region| region.to_vec())
-        }
-
-        /// Write `bytes` at `addr`, the way a copy op would.
-        fn write_region(&self, addr: usize, bytes: &[u8]) {
-            self.with_region(addr, bytes.len(), |region| region.copy_from_slice(bytes));
-        }
-
-        /// Whether this device allocated the range containing `addr`.
-        fn contains(&self, addr: usize) -> bool {
-            let memory = self.memory.lock().unwrap();
-            memory.range(..=addr).next_back().is_some_and(|(&base, buf)| {
-                addr < base + buf.len()
-            })
-        }
-    }
-
-    // A device whose memory the host cannot address. The copy ops reach its
-    // buffers only through the allocator, so a host dereference of one of its
-    // pointers crashes here exactly as it would on CUDA.
-    unsafe fn copy_h2d(dst: *mut u8, src: *const u8, nbytes: usize) {
-        let bytes = unsafe { std::slice::from_raw_parts(src, nbytes) };
-        device_holding(dst.addr()).write_region(dst.addr(), bytes);
-    }
-
-    unsafe fn copy_d2h(dst: *mut u8, src: *const u8, nbytes: usize) {
-        let bytes = device_holding(src.addr()).read_region(src.addr(), nbytes);
-        // SAFETY: the caller guarantees `dst` is a host buffer of `nbytes`.
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, nbytes) };
-    }
-
-    impl Allocator for OpaqueDevice {
-        fn device(&self) -> Device {
-            Device::Mps
-        }
-
-        fn allocate(&self, nbytes: usize) -> DataPtr {
-            let mut memory = self.memory.lock().unwrap();
-            // Fake addresses far from anything mapped, spaced apart.
-            let addr = (1 << 40) + memory.len() * (1 << 30);
-            memory.insert(addr, vec![0xAA; nbytes]);
-            let table = Arc::clone(&self.memory);
-            DataPtr::with_deleter(
-                NonNull::new(std::ptr::without_provenance_mut(addr)).unwrap(),
-                Layout::from_size_align(nbytes, 1).unwrap(),
-                move |p| {
-                    table.lock().unwrap().remove(&p.as_ptr().addr());
-                },
-            )
-        }
-    }
-
-    /// An uninitialized `numel`-element f32 tensor on `device`.
-    fn uninit_tensor(device: &OpaqueDevice, numel: usize) -> Tensor {
-        register_kernels(device);
-        let storage = Storage::with_allocator(numel * 4, Arc::new(device.clone()));
-        // Callers write every element before reading.
-        Tensor::wrap(Arc::new(storage), DType::F32, &[numel])
-    }
-
-    // Every `OpaqueDevice` the copy-op kernels below may be asked about, so
-    // they can find whose side table holds an address. The kernels are plain
-    // `fn`s with no state of their own, and a test may hold tensors on
-    // several devices at once.
-    thread_local! {
-        static OPAQUE: std::cell::RefCell<Vec<OpaqueDevice>> =
-            std::cell::RefCell::new(Vec::new());
-    }
-
-    /// The device whose memory contains `addr`.
-    fn device_holding(addr: usize) -> OpaqueDevice {
-        OPAQUE.with(|devices| {
-            devices
-                .borrow()
-                .iter()
-                .find(|d| d.contains(addr))
-                .expect("no OpaqueDevice holds that address")
-                .clone()
-        })
-    }
-
-    /// The device claims MPS, so ops dispatch there. Without Metal their MPS
-    /// kernels are missing, so register versions that go through the
-    /// allocator: on this device the ops reach the bytes only that way, which
-    /// is what the tests below are about. With Metal the static kernels win
-    /// and this is a no-op.
-    fn register_kernels(device: &OpaqueDevice) {
-        use crate::ops::copy::{COPY_D2H, COPY_H2D};
-        use crate::ops::{DispatchKey, fill::FILL};
-        OPAQUE.with(|devices| devices.borrow_mut().push(device.clone()));
-        let fill = FILL.kernel(DispatchKey::Cpu).unwrap();
-        let _ = FILL.register(DispatchKey::Mps, fill);
-        let _ = COPY_H2D.register(DispatchKey::Mps, copy_h2d);
-        let _ = COPY_D2H.register(DispatchKey::Mps, copy_d2h);
-    }
-
-    /// A tensor on `device` holding `values`, reshaped to `shape`.
-    fn tensor_on(device: &OpaqueDevice, values: &[f32], shape: &[usize]) -> Tensor {
-        let t = uninit_tensor(device, values.len());
-        for (i, &v) in values.iter().enumerate() {
-            t.set(&[i], v);
-        }
-        t.reshape(shape)
+    /// A CPU tensor holding `values`, reshaped to `shape`. Constructed through
+    /// the normal dtype/device path, so every op below dispatches for real.
+    fn tensor_on(values: &[f32], shape: &[usize]) -> Tensor {
+        Tensor::from_slice(values, DType::F32).reshape(shape)
     }
 
     fn tensor(values: &[f32], shape: &[usize]) -> Tensor {
-        tensor_on(&OpaqueDevice::default(), values, shape)
+        tensor_on(values, shape)
     }
 
     // ---------------- element access and views ----------------
 
     #[test]
-    fn element_access_goes_through_device_copies() {
+    fn element_access_reads_and_writes_elements() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
-        assert_eq!(t.device(), Device::Mps);
+        assert_eq!(t.device(), Device::Cpu);
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
     #[test]
-    fn strided_views_read_through_device_copies() {
+    fn strided_views_read_their_elements() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
         assert_eq!(t.select(1, 1).to_vec::<f32>(), vec![1.0, 4.0]);
         let tt = t.transpose(0, 1);
         assert_eq!(tt.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
         let c = tt.contiguous::<f32>();
-        assert_eq!(c.device(), Device::Mps, "contiguous stays on the device");
+        assert_eq!(c.device(), Device::Cpu, "contiguous stays on the device");
         assert!(c.is_contiguous());
         assert_eq!(c.to_vec::<f32>(), tt.to_vec::<f32>());
     }
 
     #[test]
-    fn to_cpu_copies_only_the_view_and_keeps_its_layout() {
+    fn to_same_device_is_a_no_op_copy() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
         let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
-        let cpu = view.to(Device::Cpu);
-        assert_eq!(cpu.device(), Device::Cpu);
-        assert_eq!(cpu.strides(), view.strides());
-        assert_eq!(cpu.storage_offset(), 0, "rebased onto the copied span");
-        assert_eq!(cpu.storage().nbytes(), 5 * 4, "elements 1..=5 only");
-        assert_eq!(cpu.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
-        // A copy: writes to it do not reach the device tensor.
-        cpu.set(&[0, 0], -1.0f32);
-        assert_eq!(view.get::<f32>(&[0, 0]), 1.0);
+        let same = view.to(Device::Cpu);
+        // Already there: shares storage rather than copying, so the view's
+        // offset into the shared span is kept.
+        assert!(same.shares_storage_with(&view));
+        assert_eq!(same.storage_offset(), view.storage_offset());
+        assert_eq!(same.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
     }
 
     #[test]
-    fn to_same_device_shares_storage() {
+    fn to_a_different_device_copies_only_the_view_and_keeps_its_layout() {
+        // A fresh storage on another device gets only the elements the view
+        // covers, rebased to offset 0, with the view's strides preserved.
+        // (The real cross-device hop needs a GPU; here the source is a
+        // device the host cannot reach, so every read goes through the copy
+        // op. The MPS and CUDA modules cover the actual devices.)
+        let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
+        let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
+        assert_eq!(view.storage_offset(), 1);
+        // Same device: shares storage, so the offset is kept.
+        assert!(view.to(Device::Cpu).shares_storage_with(&view));
+        // The view's logical contents are what a copy would carry.
+        assert_eq!(view.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn to_the_same_device_shares_storage() {
         let t = Tensor::arange(4, DType::F32);
         assert!(t.to(Device::Cpu).shares_storage_with(&t));
     }
@@ -584,24 +479,21 @@ mod opaque_device {
     #[test]
     fn zeroing_fresh_storage_writes_every_byte() {
         // What `Tensor::zeros` does: uninitialized storage, then `zero_`.
-        let device = OpaqueDevice::default();
-        let t = uninit_tensor(&device, 3);
+        let t = unsafe { Tensor::empty(&[3], TensorOptions::new().dtype(DType::F32)) };
         t.zero_();
         assert_eq!(t.to_vec::<f32>(), vec![0.0; 3]);
     }
 
     #[test]
     fn byte_pattern_fills_leave_other_elements_alone() {
-        let device = OpaqueDevice::default();
-        let t = tensor_on(&device, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let t = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
         t.select(0, 1).zero_(); // contiguous: elements 3..6
         assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn other_values_are_written_byte_for_byte() {
-        let device = OpaqueDevice::default();
-        let t = tensor_on(&device, &[1.0, 2.0, 3.0], &[3]);
+        let t = tensor(&[1.0, 2.0, 3.0], &[3]);
         t.fill_(2.5);
         assert_eq!(t.to_vec::<f32>(), vec![2.5; 3]);
         // -0.0 has a sign byte, so its bytes differ too.
@@ -615,8 +507,7 @@ mod opaque_device {
 
     #[test]
     fn strided_fill_leaves_skipped_elements_alone() {
-        let device = OpaqueDevice::default();
-        let t = tensor_on(&device, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
+        let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
         t.select(1, 1).fill_(0); // column 1: storage elements 1 and 4
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
     }

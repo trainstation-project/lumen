@@ -107,6 +107,7 @@ impl Storage {
         // is a distinct host buffer of the same length.
         unsafe {
             crate::ops::copy::copy_d2h(
+                &*self.allocator,
                 self.device,
                 out.as_mut_ptr(),
                 self.ptr_at(offset),
@@ -134,6 +135,7 @@ impl Storage {
         // SAFETY: as in `read_bytes`.
         unsafe {
             crate::ops::copy::copy_h2d(
+                &*self.allocator,
                 self.device,
                 self.ptr_at(offset),
                 bytes.as_ptr(),
