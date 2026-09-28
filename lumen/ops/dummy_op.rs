@@ -27,7 +27,15 @@ pub fn dummy_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::dummy_op", crate::ops::DispatchKey::of(t.device()))
-        && handle.call("lumen::dummy_op", t, value)
+        && handle.launch(
+            "lumen::dummy_op",
+            t.device(),
+            t.dtype(),
+            t.shape(),
+            t.strides(),
+            t.data_ptr() as usize,
+            value,
+        )
     {
         return;
     }

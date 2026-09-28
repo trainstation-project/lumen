@@ -47,10 +47,38 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
-        && handle.call("lumen::fill_", t, value)
     {
-        return;
+        let (shape, strides) = stride_order(t.shape(), t.strides());
+        let address = t.data_ptr() as usize;
+        if handle.launch(
+            "lumen::fill_",
+            t.device(),
+            t.dtype(),
+            &shape,
+            &strides,
+            address,
+            value,
+        ) {
+            return;
+        }
     }
 
     FILL.dispatch(t.device())(t, value);
+}
+
+/// The dimensions of a view in stride order, smallest stride first, as a
+/// Python `fill_` kernel is handed them: a fill's order does not matter, and
+/// a kernel walking its first dimension fastest then touches memory in
+/// order. A 0-d tensor is one element of a 1-d layout.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn stride_order(shape: &[usize], strides: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    if shape.is_empty() {
+        return (vec![1], vec![1]);
+    }
+    let mut dims: Vec<usize> = (0..shape.len()).collect();
+    dims.sort_by_key(|&d| strides[d]);
+    (
+        dims.iter().map(|&d| shape[d]).collect(),
+        dims.iter().map(|&d| strides[d]).collect(),
+    )
 }

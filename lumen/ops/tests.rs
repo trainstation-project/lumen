@@ -86,3 +86,18 @@ fn fill_has_built_in_host_kernels() {
         "the CUDA kernel exists where cudart is linked"
     );
 }
+
+#[test]
+fn a_fill_layout_is_in_stride_order() {
+    use super::fill::stride_order;
+    // Contiguous: reversed, so the unit stride comes first.
+    assert_eq!(
+        stride_order(&[2, 3, 4], &[12, 4, 1]),
+        (vec![4, 3, 2], vec![1, 4, 12])
+    );
+    // A transpose and a column view.
+    assert_eq!(stride_order(&[4, 3], &[1, 4]), (vec![4, 3], vec![1, 4]));
+    assert_eq!(stride_order(&[4], &[4]), (vec![4], vec![4]));
+    // 0-d: one element.
+    assert_eq!(stride_order(&[], &[]), (vec![1], vec![1]));
+}

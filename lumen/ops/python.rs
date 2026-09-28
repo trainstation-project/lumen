@@ -2,6 +2,12 @@
 //! now), registered into the dispatcher at runtime with
 //! `lumen.ops.register`.
 //!
+//! Only the kernel is Python. A registered kernel is a compile hook,
+//! `compile(dtype, shape, strides)`, returning a `launch(address, value,
+//! stream)` for that one layout; everything around it is Rust: dispatch,
+//! the layout, a cache of launchers (so a layout compiles once), the data
+//! pointer and the value. A launch is then one Python call.
+//!
 //! Rust cannot hold a Python callable inside an [`Op`](crate::ops::Op): the
 //! dispatcher requires `K: Copy + Send + Sync`, and a `Py<PyAny>` is none
 //! of those. So a Python kernel is represented by a small `Copy` handle —
@@ -14,15 +20,18 @@
 //! asked *before* the built-in one for its device, so the built-in stays
 //! reachable as the fallback.
 
-use std::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, RwLock};
 
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 use crate as core;
 use crate::ops::{DispatchKey, Op};
 use crate::python::resolve_device;
-use crate::tensor::python::PyTensor;
+use crate::tensor::dtype::{DType, Element, dispatch_dtype};
+use crate::tensor::python::{PyTensor, dtype_name};
 use crate::tensor::scalar::Scalar;
 
 /// Index into [`KERNELS`], a `Copy` stand-in for a Python callable.
@@ -44,9 +53,16 @@ static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new())
 /// that Rust will actually call kernels of that name, with that signature.
 /// Registering anything else would silently do nothing.
 const OP_SIGNATURES: &[(&str, &str)] = &[
-    ("lumen::fill_", "(tensor, value)"),
-    ("lumen::dummy_op", "(tensor, value)"),
+    ("lumen::fill_", LAUNCHER_SIGNATURE),
+    ("lumen::dummy_op", LAUNCHER_SIGNATURE),
 ];
+
+/// The compile hook's signature, and the launcher's it returns.
+const LAUNCHER_SIGNATURE: &str = "(dtype, shape, strides) -> launch(address, value, stream)";
+
+/// Launchers a kernel's compile hook returned, by kernel, dtype and layout.
+type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>);
+static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Py<PyAny>>>> = Mutex::new(None);
 
 /// The registry holding op `name`'s Python kernels; `name` is one of
 /// [`OP_SIGNATURES`] (see [`check_op`]).
@@ -74,49 +90,96 @@ fn check_op(name: &str) -> PyResult<&'static str> {
 }
 
 impl KernelHandle {
-    /// Run the Python kernel for op `op` on `t` with `value`.
-    ///
-    /// Takes the GIL, so the caller must not hold it. Returns `true` if a
-    /// kernel ran and `false` if none is registered (the caller then uses
-    /// its built-in kernel).
+    /// Launch the Python kernel for op `op` over `shape`/`strides` (in
+    /// elements) of `dtype` at `address` on `device`, with `value`,
+    /// compiling it for that layout on its first launch. Returns `false` if
+    /// the handle is not `op`'s kernel.
     ///
     /// # Panics
     /// If the kernel raises, which the op layer cannot recover from.
-    pub(crate) fn call(self, op: &str, t: &core::Tensor, value: Scalar) -> bool {
-        let kernel = Python::attach(|py| {
-            KERNELS
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(self.0)
-                .filter(|(name, _)| *name == op)
-                .map(|(_, k)| k.clone_ref(py))
-        });
-        let Some(kernel) = kernel else {
-            return false;
-        };
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch(
+        self,
+        op: &str,
+        device: core::Device,
+        dtype: DType,
+        shape: &[usize],
+        strides: &[usize],
+        address: usize,
+        value: Scalar,
+    ) -> bool {
         let run = || {
-            Python::attach(|py| -> PyResult<()> {
-                let tensor = Py::new(py, PyTensor::wrap(t.clone()))?;
-                kernel.bind(py).call1((tensor, scalar_to_py(py, value)?))?;
-                Ok(())
-            })
-            .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
+            Python::attach(|py| self.launch_in(py, op, dtype, shape, strides, address, value))
+                .unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
         };
         // What a CUDA kernel launches is the op's GPU work in a profile.
         #[cfg(lumen_cupti_linked)]
-        if let core::Device::Cuda(_) = t.device() {
-            crate::profiler::cupti::correlated(t.device(), run);
-            return true;
+        if let core::Device::Cuda(_) = device {
+            return crate::profiler::cupti::correlated(device, run);
         }
-        run();
-        true
+        let _ = device;
+        run()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_in(
+        self,
+        py: Python<'_>,
+        op: &str,
+        dtype: DType,
+        shape: &[usize],
+        strides: &[usize],
+        address: usize,
+        value: Scalar,
+    ) -> PyResult<bool> {
+        let key = (self.0, dtype, shape.to_vec(), strides.to_vec());
+        let cached = LAUNCHERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|launchers| launchers.get(&key))
+            .map(|launcher| launcher.clone_ref(py));
+        let launcher = match cached {
+            Some(launcher) => launcher,
+            None => {
+                let compile = KERNELS
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(self.0)
+                    .filter(|(name, _)| *name == op)
+                    .map(|(_, compile)| compile.clone_ref(py));
+                let Some(compile) = compile else {
+                    return Ok(false);
+                };
+                // Compiled without holding the cache's lock.
+                let launcher = compile
+                    .bind(py)
+                    .call1((
+                        dtype_name(dtype),
+                        PyTuple::new(py, shape)?,
+                        PyTuple::new(py, strides)?,
+                    ))?
+                    .unbind();
+                LAUNCHERS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(HashMap::new)
+                    .insert(key, launcher.clone_ref(py));
+                launcher
+            }
+        };
+        // The value as the tensor's dtype holds it, as the built-in kernels
+        // convert it; lumen's CUDA work runs on the legacy default stream, 0.
+        let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
+        launcher
+            .bind(py)
+            .call1((address, scalar_to_py(py, value)?, 0usize))?;
+        Ok(true)
     }
 }
 
 /// The value as a Python object: a bool, an int, or a float, matching the
-/// three shapes [`Scalar`] has (the tensor's dtype says how it is meant,
-/// e.g. a float scalar on an `int32` tensor is truncated by the kernel's
-/// own dtype dispatch).
+/// three shapes [`Scalar`] has.
 fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;
     match value {
@@ -150,11 +213,11 @@ fn _unregister_kernel(py: Python<'_>, name: &str, device: &Bound<'_, PyAny>) -> 
 // lumen.ops.register
 // ---------------------------------------------------------------------
 
-/// Register `kernel` as the kernel for op `name` on `device`.
+/// Register `kernel`, a compile hook, as the kernel for op `name` on
+/// `device` (see the module docs).
 ///
-/// `name` is a dispatcher op name (e.g. `"lumen::fill_"`); `kernel` is
-/// called with the signature that op declares. Registering for the CPU
-/// would put every tensor op through Python, so it is refused.
+/// `name` is a dispatcher op name (e.g. `"lumen::fill_"`). Registering for
+/// the CPU would put every tensor op through Python, so it is refused.
 #[pyfunction]
 #[pyo3(signature = (name, device, kernel))]
 fn _register_kernel(

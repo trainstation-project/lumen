@@ -7,12 +7,23 @@ Python instead — for a CUDA kernel authored with
 
     import lumen
 
-    def fill(t, value):
-        ...  # launch the CuTe DSL kernel
+    def compile(dtype, shape, strides):
+        ...  # compile the CuTe DSL kernel for this layout
 
-    lumen.ops.register("lumen::fill_", "cuda", fill)
+        def launch(address, value, stream):
+            ...  # launch it on the tensor at `address`
+
+        return launch
+
+    lumen.ops.register("lumen::fill_", "cuda", compile)
     t = lumen.zeros((4,), device="cuda")
-    t.fill_(1.0)  # runs `fill`
+    t.fill_(1.0)  # compiles once for this layout, then launches
+
+Only the kernel is Python. A registered kernel is a compile hook: Rust
+calls it once per dtype and layout (``shape`` and ``strides`` in elements;
+``fill_`` hands over the dimensions in stride order), caches the launcher
+it returns, and calls that with the data pointer, the value in the tensor's
+dtype, and the CUDA stream (0, the legacy default).
 
 The registered kernel is called *before* the built-in one for that device,
 so a built-in remains the fallback when no Python kernel is registered.
@@ -23,7 +34,7 @@ Python.
 
 Registering by op *name* keeps this frontend general — it does not import
 one binding per op. ``lumen.ops.registered_ops()`` lists the names that are
-actually consulted by Rust, and the signature each callable receives;
+actually consulted by Rust, and the signatures of the hook and launcher;
 registering anything else raises ``KeyError``.
 """
 
@@ -37,8 +48,8 @@ def register(op, device, kernel):
 
     ``op`` is a dispatcher op name (see :func:`registered_ops`), ``device``
     is anything a tensor's ``device=`` accepts (``"cuda"``, ``"cuda:1"``,
-    ``lumen.device(...)``), and ``kernel`` is called with that op's
-    signature — for ``"lumen::fill_"``, ``kernel(tensor, value)``.
+    ``lumen.device(...)``), and ``kernel`` is a compile hook,
+    ``kernel(dtype, shape, strides) -> launch(address, value, stream)``.
 
     Raises ``KeyError`` for an op that takes no Python kernels,
     ``ValueError`` if ``kernel`` is not callable, and ``RuntimeError`` if

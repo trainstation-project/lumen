@@ -37,7 +37,7 @@ fn parse_dtype(s: &str) -> PyResult<DType> {
     }
 }
 
-fn dtype_name(dtype: DType) -> &'static str {
+pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
         DType::F32 => "float32",
         DType::F64 => "float64",
