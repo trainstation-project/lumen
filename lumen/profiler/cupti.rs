@@ -48,6 +48,8 @@ mod ffi {
     // `CUpti_ActivityKind`.
     pub const KIND_MEMCPY: u32 = 1;
     pub const KIND_MEMSET: u32 = 2;
+    pub const KIND_RUNTIME: u32 = 4;
+    pub const KIND_DRIVER: u32 = 5;
     pub const KIND_EXTERNAL_CORRELATION: u32 = 39;
     // `CUpti_ExternalCorrelationKind`.
     pub const EXTERNAL_CUSTOM0: u32 = 3;
@@ -55,10 +57,15 @@ mod ffi {
     pub const FLUSH_FORCED: u32 = 1;
 }
 
-/// The activities recorded while a session times CUDA.
-const KINDS: [u32; 3] = [
+/// The activities recorded while a session times CUDA. CUPTI emits an
+/// external correlation record only for an API call it records, so the
+/// runtime (`cudaMemcpy`) and driver (`cuMemset*`) APIs are recorded too
+/// (kineto enables them as well); their records are dropped.
+const KINDS: [u32; 5] = [
     ffi::KIND_MEMCPY,
     ffi::KIND_MEMSET,
+    ffi::KIND_RUNTIME,
+    ffi::KIND_DRIVER,
     ffi::KIND_EXTERNAL_CORRELATION,
 ];
 
