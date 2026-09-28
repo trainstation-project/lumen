@@ -239,7 +239,7 @@ fn options(dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<T
 }
 
 /// A Python bool/int/float as a [`Scalar`].
-fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if value.is_instance_of::<PyBool>() {
         Ok(Scalar::Bool(value.extract()?))
     } else if value.is_instance_of::<PyInt>() {
@@ -262,7 +262,7 @@ fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 /// one view are visible through all aliases of the same storage.
 #[pyclass(name = "Tensor", module = "lumen")] // reports as lumen.Tensor, though defined in lumen._C
 pub(crate) struct PyTensor {
-    inner: Tensor,
+    pub(crate) inner: Tensor,
 }
 
 impl PyTensor {

@@ -47,7 +47,7 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
-        && handle.call_fill("lumen::fill_", t, value)
+        && handle.call("lumen::fill_", t, value)
     {
         return;
     }

@@ -9,6 +9,7 @@
 //!   `TORCH_LIBRARY_IMPL`), for keys the op has no built-in kernel for.
 
 pub mod copy;
+pub mod dummy_op;
 pub mod fill;
 #[cfg(feature = "python")]
 pub mod python;
