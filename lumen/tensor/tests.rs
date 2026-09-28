@@ -403,8 +403,6 @@ mod opaque_device {
     struct OpaqueDevice {
         /// Base address -> contents.
         memory: Arc<Mutex<BTreeMap<usize, Vec<u8>>>>,
-        /// `(address, value, nbytes)` of every memset, in call order.
-        memsets: Arc<Mutex<Vec<(usize, u8, usize)>>>,
     }
 
     impl OpaqueDevice {
@@ -417,10 +415,6 @@ mod opaque_device {
                 .expect("unknown address");
             let start = addr - base;
             f(&mut buf[start..start + n])
-        }
-
-        fn memsets(&self) -> Vec<(usize, u8, usize)> {
-            self.memsets.lock().unwrap().clone()
         }
     }
 
@@ -452,14 +446,6 @@ mod opaque_device {
         unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
             let dst = unsafe { std::slice::from_raw_parts_mut(dst, nbytes) };
             self.with_region(src.addr(), nbytes, |region| dst.copy_from_slice(region));
-        }
-
-        unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
-            self.memsets
-                .lock()
-                .unwrap()
-                .push((dst.addr(), value, nbytes));
-            self.with_region(dst.addr(), nbytes, |region| region.fill(value));
         }
     }
 
@@ -547,28 +533,24 @@ mod opaque_device {
     // ---------------- fills ----------------
 
     #[test]
-    fn zeroing_fresh_storage_is_one_device_memset() {
+    fn zeroing_fresh_storage_writes_every_byte() {
         // What `Tensor::zeros` does: uninitialized storage, then `zero_`.
         let device = OpaqueDevice::default();
         let t = uninit_tensor(&device, 3);
         t.zero_();
-        let base = t.storage().data_ptr().addr();
-        assert_eq!(device.memsets(), vec![(base, 0, 12)]);
         assert_eq!(t.to_vec::<f32>(), vec![0.0; 3]);
     }
 
     #[test]
-    fn byte_pattern_fills_use_memset_on_the_view_range() {
+    fn byte_pattern_fills_leave_other_elements_alone() {
         let device = OpaqueDevice::default();
         let t = tensor_on(&device, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
         t.select(0, 1).zero_(); // contiguous: elements 3..6
-        let base = t.storage().data_ptr().addr();
-        assert_eq!(device.memsets(), vec![(base + 12, 0, 12)]);
         assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn other_values_are_copied_not_memset() {
+    fn other_values_are_written_byte_for_byte() {
         let device = OpaqueDevice::default();
         let t = tensor_on(&device, &[1.0, 2.0, 3.0], &[3]);
         t.fill_(2.5);
@@ -580,7 +562,6 @@ mod opaque_device {
                 .iter()
                 .all(|v| *v == 0.0 && v.is_sign_negative())
         );
-        assert!(device.memsets().is_empty());
     }
 
     #[test]
@@ -589,7 +570,6 @@ mod opaque_device {
         let t = tensor_on(&device, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
         t.select(1, 1).fill_(0); // column 1: storage elements 1 and 4
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
-        assert!(device.memsets().is_empty());
     }
 
     // ---------------- empty ----------------

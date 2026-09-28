@@ -370,8 +370,4 @@ impl<B: Allocator + 'static, P: CachePolicy> Allocator for CachingAllocator<B, P
     unsafe fn copy_to_host(&self, dst: *mut u8, src: *const u8, nbytes: usize) {
         unsafe { self.inner.backend.copy_to_host(dst, src, nbytes) }
     }
-
-    unsafe fn memset(&self, dst: *mut u8, value: u8, nbytes: usize) {
-        unsafe { self.inner.backend.memset(dst, value, nbytes) }
-    }
 }

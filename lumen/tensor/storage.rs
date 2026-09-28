@@ -134,8 +134,8 @@ impl Storage {
         }
     }
 
-    /// Set `nbytes` starting at byte `offset` to `value` with the device's
-    /// memset. Crate-private for the same reason as
+    /// Set `nbytes` starting at byte `offset` to `value`, writing the bytes
+    /// from a host block. Crate-private for the same reason as
     /// [`write_bytes`](Self::write_bytes).
     ///
     /// # Panics
@@ -145,10 +145,16 @@ impl Storage {
         if nbytes == 0 {
             return;
         }
-        self.synchronize();
-        // SAFETY: the range is in bounds of this allocator's buffer.
-        unsafe {
-            self.allocator.memset(self.ptr_at(offset), value, nbytes);
+        // A block of the byte, written in one host copy: the allocator owns
+        // no memset, so a repeated-byte fill is a host buffer like any other
+        // write.
+        const BLOCK: usize = 4096;
+        let block = [value; BLOCK];
+        let mut written = 0;
+        while written < nbytes {
+            let chunk = BLOCK.min(nbytes - written);
+            self.write_bytes(offset + written, &block[..chunk]);
+            written += chunk;
         }
     }
 

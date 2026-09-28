@@ -952,20 +952,6 @@ mod cuda {
         }
 
         #[test]
-        fn cuda_memset_fills_a_block_inside_a_segment() {
-            require_cuda!();
-            let alloc = fresh();
-            let _first = alloc.allocate(4096);
-            let second = alloc.allocate(4096);
-            let mut out = vec![0u8; 4096];
-            unsafe {
-                alloc.memset(second.as_ptr(), 0x5A, 4096);
-                alloc.copy_to_host(out.as_mut_ptr(), second.as_ptr(), out.len());
-            }
-            assert!(out.iter().all(|&b| b == 0x5A));
-        }
-
-        #[test]
         fn freed_blocks_are_reused_without_another_cuda_malloc() {
             require_cuda!();
             let alloc = fresh();
