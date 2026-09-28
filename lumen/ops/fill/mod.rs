@@ -46,6 +46,10 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
 
 /// Set every element of `t` to `value` with the kernel for its device.
 pub fn fill_op(t: &Tensor, value: Scalar) {
+    if t.numel() == 0 {
+        return;
+    }
+
     #[cfg(feature = "python")]
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
@@ -53,5 +57,6 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     {
         return;
     }
+
     FILL.dispatch(t.device())(t, value);
 }

@@ -227,21 +227,9 @@ def _check(t, value: Any = None) -> None:
 
 
 def fill(t, value: Any) -> None:
-    """Set every element of ``t`` to ``value`` (the ``lumen::fill_`` kernel).
-
-    Called by the Rust dispatcher as ``fill(tensor, value)`` -- see
-    ``lumen/ops/python.rs`` -- with ``tensor`` a :class:`lumen.Tensor` and
-    ``value`` a ``bool``/``int``/``float``. Returns nothing: the write
-    lands in ``t`` through the aliasing DLPack view.
-
-    Refuses anything :data:`_PRECONDITIONS` rules out rather than filling
-    it wrongly; see :func:`_check` for what those are and why.
-    """
     _check(t, value)
 
     numel = _numel(t)
-    if numel == 0:
-        return
 
     dtype = str(t.dtype)
     key = (DEFAULT_BLOCK_SIZE, DEFAULT_M)
