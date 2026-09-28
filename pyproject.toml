@@ -9,7 +9,7 @@ description = "A minimal tensor library prototype with a Rust core"
 requires-python = ">=3.9"
 
 [project.optional-dependencies]
-# CUDA's fill_ is a CuTe DSL kernel (lumen/ops/fill/cute_fill.py), imported
+# CUDA's fill_ is a CuTe DSL kernel (lumen/ops/fill/cuda.py), imported
 # with lumen on a machine with a CUDA device. The CuTe DSL ships only for
 # Linux, so elsewhere the extra installs nothing.
 cuda = [

@@ -1,5 +1,5 @@
 //! `fill_`, dispatched to a kernel per backend (PyTorch: `aten::fill_`):
-//! `cpu.rs` and `mps/` in Rust; CUDA's is `cute_fill.py`, a CuTe DSL kernel
+//! `cpu.rs` and `mps/` in Rust; CUDA's is `cuda.py`, a CuTe DSL kernel
 //! registered from Python (see [`crate::ops::python`]).
 
 mod cpu;

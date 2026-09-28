@@ -30,7 +30,7 @@ runs no Python; any other callable is called through Python.
 
 The registered kernel is called *before* the built-in one for that device,
 so a built-in remains the fallback when no Python kernel is registered.
-CUDA's ``fill_`` has no built-in: it is ``lumen/ops/fill/cute_fill.py``,
+CUDA's ``fill_`` has no built-in: it is ``lumen/ops/fill/cuda.py``,
 registered when lumen is imported on a machine with a CUDA device.
 Registering for the CPU is refused: every tensor op would then go through
 Python.
@@ -79,13 +79,7 @@ def signature(op):
     return registered_ops().get(op)
 
 
-from lumen.stream import cuda as _cuda  # noqa: E402
+from lumen.stream import cuda as _cuda
 
 if _cuda.is_available():
-    try:
-        from lumen.ops.fill import cute_fill  # noqa: F401  (registers CUDA's fill_)
-    except ImportError as e:
-        raise ImportError(
-            f"lumen needs the CuTe DSL for CUDA tensors ({e}); install it with "
-            "`pip install 'lumen[cuda]'`"
-        ) from e
+    from lumen.ops.fill import cuda
