@@ -12,23 +12,31 @@ static NSString *const kSource = @R"(
 #include <metal_stdlib>
 using namespace metal;
 
-// buf[start + i] = value for every thread i. The buffer is bound at offset 0
-// and the start passed in elements, so element-aligned starts need no
-// binding alignment.
-#define FILL(NAME, T)                                                  \
+#define FILL(NAME, T, V)                                               \
   kernel void NAME(device T *buf [[buffer(0)]],                        \
                    constant T &value [[buffer(1)]],                    \
                    constant ulong &start [[buffer(2)]],                \
-                   uint i [[thread_position_in_grid]]) {               \
-    buf[start + i] = value;                                            \
+                   constant ulong &count [[buffer(3)]],                \
+                   uint i [[thread_position_in_grid]],                 \
+                   uint nthreads [[threads_per_grid]]) {               \
+    constexpr uint vec = sizeof(V) / sizeof(T);                        \
+    const ulong vec_count = count / vec;                              \
+    device V *wide = reinterpret_cast<device V *>(buf + start);        \
+    V pattern = V(value);                                              \
+    for (ulong j = i; j < vec_count; j += nthreads) {                  \
+      wide[j] = pattern;                                              \
+    }                                                                  \
+    if (i == 0) {                                                      \
+      for (ulong j = vec_count * vec; j < count; ++j) {                \
+        buf[start + j] = value;                                        \
+      }                                                                \
+    }                                                                  \
   }
-FILL(fill_u8, uchar)
-FILL(fill_u16, ushort)
-FILL(fill_u32, uint)
-FILL(fill_u64, ulong)
+FILL(fill_u8, uchar, uchar4)
+FILL(fill_u16, ushort, ushort4)
+FILL(fill_u32, uint, uint4)
+FILL(fill_u64, ulong, ulong2)
 
-// A strided view (PyTorch: fill_scalar_strided): thread i writes the view's
-// i-th element in row-major order, at start + sum(index[d] * strides[d]).
 #define FILL_STRIDED(NAME, T)                                          \
   kernel void NAME(device T *buf [[buffer(0)]],                        \
                    constant T &value [[buffer(1)]],                    \
@@ -110,8 +118,10 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
     return elem_size == 1 ? b1 : elem_size == 2 ? b2 : elem_size == 4 ? b4 : elem_size == 8 ? b8 : nil;
   };
   id<MTLComputePipelineState> pso = strided ? pick(p.s8, p.s16, p.s32, p.s64) : pick(p.u8, p.u16, p.u32, p.u64);
-  // Thread indices are 32-bit.
-  if (pso == nil || count == 0 || count > UINT32_MAX) {
+  // Thread indices are 32-bit; the strided kernels index one element per
+  // thread, so they cap out there. Contiguous kernels loop with a grid
+  // stride and only need the count to fit in 64 bits.
+  if (pso == nil || count == 0 || (strided && count > UINT32_MAX)) {
     return -2;
   }
   size_t offset = 0;
@@ -127,6 +137,19 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
     // Bound at offset 0, with the start in elements (blocks are element
     // aligned in their segment).
     uint64_t start = offset / elem_size;
+    uint64_t n = count;
+    NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
+    // Contiguous kernels loop with a grid stride over vectorized stores, so
+    // the grid is sized to a few waves rather than one thread per element;
+    // strided kernels do one element per thread and cover their grid exactly.
+    NSUInteger grid_threads;
+    if (strided) {
+      grid_threads = ((count + width - 1) / width) * width;
+    } else {
+      NSUInteger waves = 32;
+      grid_threads = std::min<NSUInteger>(width * waves, ((count + width - 1) / width) * width);
+      grid_threads = std::max<NSUInteger>(grid_threads, width);
+    }
     [encoder setComputePipelineState:pso];
     [encoder setBuffer:buffer offset:0 atIndex:0];
     [encoder setBytes:pattern length:elem_size atIndex:1];
@@ -136,9 +159,12 @@ int lumen_mps_fill(void *ptr, const void *pattern, size_t elem_size, size_t coun
       [encoder setBytes:sizes length:ndim * sizeof(size_t) atIndex:3];
       [encoder setBytes:strides length:ndim * sizeof(size_t) atIndex:4];
       [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    } else {
+      // The contiguous kernels need the element count for the tail loop.
+      [encoder setBytes:&n length:sizeof(n) atIndex:3];
     }
-    NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, count);
-    [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    [encoder dispatchThreads:MTLSizeMake(grid_threads, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     lumen_mps_stream_encoded(done, context);
   }
   return 0;
