@@ -25,6 +25,17 @@ jobs:
           components: rustfmt
       - run: make fmt-check
 
+  clang-format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install clang-format==21.1.6
+      - run: make clang-format-check
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
