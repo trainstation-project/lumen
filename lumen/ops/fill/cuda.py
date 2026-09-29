@@ -1,3 +1,4 @@
+import math
 from typing import Callable
 
 import cuda.bindings.driver as cuda
@@ -31,17 +32,20 @@ class FillCUDAKernel:
         self.BLOCK_SIZE = BLOCK_SIZE
         self.shape = (vector_size, (shape[0] // vector_size, *shape[1:]))
         self.strides = (1, (vector_size * strides[0], *strides[1:]))
+        self.num_vectors = math.prod(self.shape[1])
 
     @cute.kernel
-    def kernel(self, gT: cute.Tensor, value: cutlass.Numeric, copy_atom: cute.CopyAtom) -> None:
+    def kernel(
+        self, gX: cute.Tensor, value: cutlass.Numeric, copy_atom: cute.CopyAtom
+    ) -> None:
         BLOCK_ID, _, _ = cute.arch.block_idx()
         THREAD_ID, _, _ = cute.arch.thread_idx()
 
         i = BLOCK_ID * self.BLOCK_SIZE + THREAD_ID
-        if i < cute.size(gT, mode=[1]):
-            rT = cute.make_rmem_tensor(self.vector_size, gT.element_type)
-            rT.fill(value)
-            cute.copy(copy_atom, rT, gT[(None, i)])
+        if i < self.num_vectors:
+            rX = cute.make_rmem_tensor(self.vector_size, gX.element_type)
+            rX.fill(value)
+            cute.copy(copy_atom, rX, gX[(None, i)])
 
     @cute.jit
     def __call__(self, ptr: cute.Pointer, value: cutlass.Numeric, stream: cuda.CUstream) -> None:
@@ -50,8 +54,8 @@ class FillCUDAKernel:
             cute.nvgpu.CopyUniversalOp(), mX.element_type, num_bits_per_copy=self.vector_size * mX.element_type.width
         )
 
-        NUM_BLOCKS = (cute.size(mX, mode=[1]) + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
-        self.kernel(gT=gT, value=value, copy_atom=copy_atom).launch(
+        NUM_BLOCKS = (self.num_vectors + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+        self.kernel(gX=mX, value=value, copy_atom=copy_atom).launch(
             grid=(NUM_BLOCKS, 1, 1), block=(self.BLOCK_SIZE, 1, 1), stream=stream
         )
 
