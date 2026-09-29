@@ -161,6 +161,11 @@ impl KernelHandle {
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
         let vector_size = core::ops::vector_size(shape, strides, dtype.size_of(), address);
         let run = || {
+            // A launcher launches on the current device: make it the tensor's.
+            #[cfg(lumen_cuda_linked)]
+            if let core::Device::Cuda(index) = device {
+                crate::stream::cuda::set_device(index);
+            }
             let key = (self.0, dtype, shape.to_vec(), strides.to_vec(), vector_size);
             let cached = LAUNCHERS
                 .lock()

@@ -35,7 +35,7 @@ mod ffi {
 /// is (PyTorch: `c10::cuda::SetDevice`). On a fresh thread `cudaGetDevice`
 /// reports device 0 with no context current, which the driver API calls
 /// launched here need, so the call is skipped only once one is.
-fn set_device(device_index: usize) {
+pub(crate) fn set_device(device_index: usize) {
     let mut current = -1;
     let mut context = std::ptr::null_mut();
     unsafe {
