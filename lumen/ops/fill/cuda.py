@@ -1,3 +1,5 @@
+from typing import Callable
+
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
@@ -5,7 +7,6 @@ import cutlass.cute as cute
 from lumen.ops import register
 
 _ELEMENT = {
-    # lumen stores bool as one byte, which CuTe's Boolean is not.
     "bool": cutlass.Uint8,
     "uint8": cutlass.Uint8,
     "int8": cutlass.Int8,
@@ -37,25 +38,32 @@ class FillCUDAKernel:
         THREAD_ID, _, _ = cute.arch.thread_idx()
 
         i = BLOCK_ID * self.BLOCK_SIZE + THREAD_ID
-        if i < cute.size(gT):
-            gT[i] = value
+        if i < cute.size(gT, mode=[1]):
+            rT = cute.make_rmem_tensor(self.vector_size, gT.element_type)
+            rT.fill(value)
+            cute.copy(copy_atom, rT, gT[(None, i)])
 
     @cute.jit
     def __call__(self, ptr: cute.Pointer, value: cutlass.Numeric, stream: cuda.CUstream) -> None:
-        mT = cute.make_tensor(ptr, cute.make_layout(self.shape, stride=self.strides))
+        mX = cute.make_tensor(ptr, cute.make_layout(self.shape, stride=self.strides))
+        copy_atom = cute.make_copy_atom(
+            cute.nvgpu.CopyUniversalOp(), mX.element_type, num_bits_per_copy=self.vector_size * mX.element_type.width
+        )
 
-        NUM_BLOCKS = (cute.size(mT) + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
-        self.kernel(gT=mT, value=value).launch(grid=(NUM_BLOCKS, 1, 1), block=(self.BLOCK_SIZE, 1, 1), stream=stream)
+        NUM_BLOCKS = (cute.size(mX, mode=[1]) + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
+        self.kernel(gT=gT, value=value, copy_atom=copy_atom).launch(
+            grid=(NUM_BLOCKS, 1, 1), block=(self.BLOCK_SIZE, 1, 1), stream=stream
+        )
 
 
-def _compile(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...]):
-    """``fill_``'s compile hook: :class:`FillCUDAKernel` for one layout, as a
-    TVM-FFI function ``(address, value, stream)``."""
+def _op(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_size: int) -> Callable:
     element = _ELEMENT[dtype]
+    itemsize = max(1, element.width // 8)
 
-    # A null example pointer lets calls pass the address as an integer.
-    ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=max(1, element.width // 8))
-    return cute.compile(FillCUDAKernel(shape, strides), ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
+    ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=vector_size * itemsize)
+    kernel = FillCUDAKernel(shape, strides, vector_size)
+
+    return cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
 
-register("lumen::fill_", "cuda", _compile)
+register("lumen::fill_", "cuda", _op)
