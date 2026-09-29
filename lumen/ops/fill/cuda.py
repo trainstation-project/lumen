@@ -24,7 +24,7 @@ _ELEMENT = {
 }
 
 
-class FillCUDAKernel:
+class _FillCUDAKernel:
     def __init__(
         self,
         dtype: type[cutlass.Numeric],
@@ -70,7 +70,7 @@ def _op(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_siz
     element = _ELEMENT[dtype]
 
     ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=vector_size * element.width // 8)
-    kernel = FillCUDAKernel(element, shape, strides, vector_size)
+    kernel = _FillCUDAKernel(element, shape, strides, vector_size)
 
     return cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
