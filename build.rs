@@ -109,8 +109,8 @@ fn build_mps_shim() {
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
     println!("cargo:rerun-if-changed=lumen/ops/fill/mps/mps_fill.mm");
     println!("cargo:rerun-if-changed=lumen/ops/fill/mps/fill.metal");
-    println!("cargo:rerun-if-changed=lumen/stream/mps.mm");
-    println!("cargo:rerun-if-changed=lumen/stream/mps.h");
+    println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
+    println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
 
     // The compute kernels live in fill.metal (an actual Metal source file,
     // not a string literal). Embed its text as a C++ raw string so
@@ -121,7 +121,7 @@ fn build_mps_shim() {
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
         .file("lumen/ops/fill/mps/mps_fill.mm")
-        .file("lumen/stream/mps.mm")
+        .file("lumen/stream/mps/mps.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
         ))

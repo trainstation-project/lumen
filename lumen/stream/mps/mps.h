@@ -1,4 +1,4 @@
-// lumen's MPS stream, for ops' Objective-C++ shims (stream/mps.mm).
+// lumen's MPS stream, for ops' Objective-C++ shims (stream/mps/mps.mm).
 
 #import <Metal/Metal.h>
 
