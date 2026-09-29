@@ -164,7 +164,7 @@ impl KernelHandle {
             // A launcher launches on the current device: make it the tensor's.
             #[cfg(lumen_cuda_linked)]
             if let core::Device::Cuda(index) = device {
-                crate::stream::cuda::set_device(index);
+                crate::device::cuda::set_device(index);
             }
             let key = (self.0, dtype, shape.to_vec(), strides.to_vec(), vector_size);
             let cached = LAUNCHERS

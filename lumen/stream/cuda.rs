@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 
-use crate::allocator::cuda::ffi as cudart;
+use crate::device::cuda::set_device;
 
 mod ffi {
     use std::ffi::c_void;
@@ -18,34 +18,10 @@ mod ffi {
     #[link(name = "cudart")]
     unsafe extern "C" {
         pub fn cudaDeviceSynchronize() -> i32;
-        pub fn cudaGetDevice(device: *mut i32) -> i32;
         pub fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
         pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
         pub fn cudaStreamWaitEvent(stream: *mut c_void, event: *mut c_void, flags: u32) -> i32;
         pub fn cudaEventDestroy(event: *mut c_void) -> i32;
-    }
-
-    #[link(name = "cuda")]
-    unsafe extern "C" {
-        pub fn cuCtxGetCurrent(ctx: *mut *mut std::ffi::c_void) -> i32;
-    }
-}
-
-/// Make `device_index` the current device, skipping the call if it already
-/// is (PyTorch: `c10::cuda::SetDevice`). On a fresh thread `cudaGetDevice`
-/// reports device 0 with no context current, which the driver API calls
-/// launched here need, so the call is skipped only once one is.
-pub(crate) fn set_device(device_index: usize) {
-    let mut current = -1;
-    let mut context = std::ptr::null_mut();
-    unsafe {
-        if ffi::cudaGetDevice(&mut current) != 0
-            || current != device_index as i32
-            || ffi::cuCtxGetCurrent(&mut context) != 0
-            || context.is_null()
-        {
-            cudart::cudaSetDevice(device_index as i32);
-        }
     }
 }
 

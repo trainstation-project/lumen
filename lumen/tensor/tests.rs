@@ -534,7 +534,7 @@ mod device_kernels {
 mod mps {
     //! Tensors on the real Metal device (Apple Silicon).
 
-    use crate::allocator::mps;
+    use crate::device::mps;
     use crate::{DType, Device, TensorOptions};
 
     /// Skip guard: returns early from a test when Metal is unavailable.
@@ -690,7 +690,7 @@ mod mps {
 mod cuda {
     //! Tensors on real CUDA devices. Each test skips when no GPU is visible.
 
-    use crate::allocator::cuda;
+    use crate::device::cuda;
     use crate::{DType, Device, Tensor, TensorOptions};
 
     /// Skip guard: returns early from a test when there is no GPU.

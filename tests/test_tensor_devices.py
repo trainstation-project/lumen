@@ -130,6 +130,20 @@ def test_fill_strided_higher_rank(device):
         assert list(flatten(flat)) == [value] * n
 
 
+@pytest.mark.cuda
+def test_cuda_fill_launches_on_the_tensors_device():
+    _require("cuda")
+    try:
+        lumen.zeros([1], device="cuda:1")
+    except RuntimeError:
+        pytest.skip("needs two CUDA devices")
+    for device, other in (("cuda:0", "cuda:1"), ("cuda:1", "cuda:0")):
+        t = lumen.zeros([1 << 16], device=device)
+        lumen.cuda.synchronize(other)  # makes `other` the current device
+        t.fill_(5.0)
+        assert t.tolist() == [5.0] * (1 << 16)
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_empty_and_ones_on_device(device):
     _require(device)

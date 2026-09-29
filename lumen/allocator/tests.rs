@@ -439,7 +439,7 @@ mod config {
 mod devices {
     //! Device selection for tensors and storage, on any machine.
 
-    use crate::allocator::{allocator_for, cuda, mps};
+    use crate::allocator::allocator_for;
     use crate::{Device, Storage, Tensor};
 
     #[test]
@@ -452,13 +452,13 @@ mod devices {
 
     #[test]
     fn unavailable_devices_are_reported() {
-        if !cuda::is_available() {
+        if !crate::device::cuda::is_available() {
             let err = allocator_for(Device::Cuda(0)).err().unwrap();
             assert!(err.contains("CUDA device 0 is not available"), "{err}");
         }
-        let past_last = Device::Cuda(cuda::device_count());
+        let past_last = Device::Cuda(crate::device::cuda::device_count());
         assert!(allocator_for(past_last).is_err());
-        if !mps::is_available() {
+        if !crate::device::mps::is_available() {
             assert!(allocator_for(Device::Mps).is_err());
         }
     }
@@ -466,7 +466,7 @@ mod devices {
     #[test]
     #[should_panic(expected = "is not available")]
     fn tensor_on_unavailable_device_panics() {
-        Tensor::zeros(&[1], Device::Cuda(cuda::device_count()));
+        Tensor::zeros(&[1], Device::Cuda(crate::device::cuda::device_count()));
     }
 }
 
@@ -905,7 +905,7 @@ mod cuda {
         /// Skip guard: returns early from a test when there is no GPU.
         macro_rules! require_cuda {
             () => {
-                if !cuda::is_available() {
+                if !crate::device::cuda::is_available() {
                     eprintln!("no CUDA device, skipping");
                     return;
                 }
@@ -919,15 +919,18 @@ mod cuda {
 
         #[test]
         fn availability_matches_the_device_count() {
-            assert_eq!(cuda::is_available(), cuda::device_count() > 0);
-            assert!(allocator_for(Device::Cuda(cuda::device_count())).is_err());
+            assert_eq!(
+                crate::device::cuda::is_available(),
+                crate::device::cuda::device_count() > 0
+            );
+            assert!(allocator_for(Device::Cuda(crate::device::cuda::device_count())).is_err());
         }
 
         #[test]
         fn reports_cuda_devices() {
             require_cuda!();
             assert_eq!(fresh().device(), Device::Cuda(0));
-            let last = cuda::device_count() - 1;
+            let last = crate::device::cuda::device_count() - 1;
             assert_eq!(cuda::get(last).device(), Device::Cuda(last));
             assert_eq!(
                 allocator_for(Device::Cuda(last)).unwrap().device(),
@@ -996,7 +999,7 @@ mod mps {
     /// Skip guard: returns early from a test when Metal is unavailable.
     macro_rules! require_mps {
         () => {
-            if !mps::is_available() {
+            if !crate::device::mps::is_available() {
                 eprintln!("Metal unavailable, skipping");
                 return;
             }

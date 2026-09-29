@@ -233,7 +233,7 @@ pub(crate) fn stop() {
     else {
         return;
     };
-    for device_index in 0..crate::allocator::cuda::device_count() {
+    for device_index in 0..crate::device::cuda::device_count() {
         crate::stream::cuda::synchronize(device_index);
     }
     unsafe { ffi::cuptiActivityFlushAll(ffi::FLUSH_FORCED) };
