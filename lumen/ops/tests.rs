@@ -88,16 +88,41 @@ fn fill_has_built_in_host_kernels() {
 }
 
 #[test]
-fn a_fill_layout_is_in_stride_order() {
-    use super::fill::stride_order;
-    // Contiguous: reversed, so the unit stride comes first.
-    assert_eq!(
-        stride_order(&[2, 3, 4], &[12, 4, 1]),
-        (vec![4, 3, 2], vec![1, 4, 12])
-    );
-    // A transpose and a column view.
-    assert_eq!(stride_order(&[4, 3], &[1, 4]), (vec![4, 3], vec![1, 4]));
-    assert_eq!(stride_order(&[4], &[4]), (vec![4], vec![4]));
-    // 0-d: one element.
-    assert_eq!(stride_order(&[], &[]), (vec![1], vec![1]));
+fn a_fill_layout_is_sorted_by_stride_and_merged() {
+    use super::fill::fill_layout;
+    // Contiguous, of any rank: one dimension of stride 1.
+    assert_eq!(fill_layout(&[2, 3, 4], &[12, 4, 1]), (vec![24], vec![1]));
+    assert_eq!(fill_layout(&[4, 3], &[1, 4]), (vec![12], vec![1]));
+    // Size-1 dimensions are dropped, whatever their stride.
+    assert_eq!(fill_layout(&[1, 5, 1], &[99, 1, 7]), (vec![5], vec![1]));
+    // Gaps stay separate dimensions, smallest stride first.
+    assert_eq!(fill_layout(&[4, 4], &[8, 1]), (vec![4, 4], vec![1, 8]));
+    assert_eq!(fill_layout(&[4], &[4]), (vec![4], vec![4]));
+    // A permuted 3-d tensor merges back into its contiguous pieces.
+    assert_eq!(fill_layout(&[4, 2, 3], &[1, 12, 4]), (vec![24], vec![1]));
+    // 0-d, or all size-1: one element.
+    assert_eq!(fill_layout(&[], &[]), (vec![1], vec![1]));
+    assert_eq!(fill_layout(&[1, 1], &[1, 1]), (vec![1], vec![1]));
+}
+
+#[test]
+fn the_vector_size_is_the_widest_aligned_store() {
+    // 16 bytes: 4 float32s, 8 float16s, 16 bytes, 2 float64s.
+    assert_eq!(vector_size(&[1024], &[1], 4, 256), 4);
+    assert_eq!(vector_size(&[1024], &[1], 2, 256), 8);
+    assert_eq!(vector_size(&[1024], &[1], 1, 256), 16);
+    assert_eq!(vector_size(&[1024], &[1], 8, 256), 2);
+    // The data pointer limits it: 8 bytes in, then 4.
+    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 8), 2);
+    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 4), 1);
+    // So does the first dimension: its length, and its stride.
+    assert_eq!(vector_size(&[6], &[1], 4, 256), 2);
+    assert_eq!(vector_size(&[1001], &[1], 4, 256), 1);
+    assert_eq!(vector_size(&[1024], &[2], 4, 256), 1);
+    // And every other stride: rows 8 apart keep 4-wide vectors aligned,
+    // rows 6 apart only 2-wide ones.
+    assert_eq!(vector_size(&[4, 16], &[1, 8], 4, 256), 4);
+    assert_eq!(vector_size(&[4, 16], &[1, 6], 4, 256), 2);
+    // No dimensions: one element.
+    assert_eq!(vector_size(&[], &[], 4, 256), 1);
 }

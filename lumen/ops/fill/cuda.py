@@ -23,13 +23,16 @@ _ELEMENT = {
 
 
 class FillCUDAKernel:
-    def __init__(self, shape: tuple[int, ...], strides: tuple[int, ...], BLOCK_SIZE: int = 256) -> None:
-        self.shape = shape
-        self.strides = strides
+    def __init__(
+        self, shape: tuple[int, ...], strides: tuple[int, ...], vector_size: int, BLOCK_SIZE: int = 256
+    ) -> None:
+        self.vector_size = vector_size
         self.BLOCK_SIZE = BLOCK_SIZE
+        self.shape = (vector_size, (shape[0] // vector_size, *shape[1:]))
+        self.strides = (1, (vector_size * strides[0], *strides[1:]))
 
     @cute.kernel
-    def kernel(self, gT: cute.Tensor, value: cutlass.Numeric) -> None:
+    def kernel(self, gT: cute.Tensor, value: cutlass.Numeric, copy_atom: cute.CopyAtom) -> None:
         BLOCK_ID, _, _ = cute.arch.block_idx()
         THREAD_ID, _, _ = cute.arch.thread_idx()
 

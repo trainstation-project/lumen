@@ -56,12 +56,12 @@ def test_ops_is_exported_from_the_package():
 
 
 def test_registered_ops_lists_the_ops_that_take_python_kernels():
-    signature = "(dtype, shape, strides) -> launch(address, value, stream)"
+    signature = "(dtype, shape, strides, vector_size) -> launch(address, value, stream)"
     assert lumen.ops.registered_ops() == {"lumen::fill_": signature, "lumen::dummy_op": signature}
 
 
 def test_signature_of_a_known_op():
-    assert lumen.ops.signature(OP) == "(dtype, shape, strides) -> launch(address, value, stream)"
+    assert lumen.ops.signature(OP) == "(dtype, shape, strides, vector_size) -> launch(address, value, stream)"
 
 
 def test_signature_of_an_unknown_op_is_none():
@@ -70,7 +70,7 @@ def test_signature_of_an_unknown_op_is_none():
 
 def test_registering_an_unknown_op_raises_key_error():
     with pytest.raises(KeyError, match="lumen::nope"):
-        lumen.ops.register("lumen::nope", "cpu", lambda dtype, shape, strides: None)
+        lumen.ops.register("lumen::nope", "cpu", lambda dtype, shape, strides, vector_size: None)
 
 
 def test_registering_a_non_callable_raises_value_error():
@@ -81,17 +81,17 @@ def test_registering_a_non_callable_raises_value_error():
 def test_registering_for_the_cpu_is_refused():
     # Every tensor op would go through Python.
     with pytest.raises(RuntimeError, match="CPU"):
-        lumen.ops.register(OP, "cpu", lambda dtype, shape, strides: None)
+        lumen.ops.register(OP, "cpu", lambda dtype, shape, strides, vector_size: None)
 
 
 def test_registering_for_an_unavailable_device_raises():
     with pytest.raises(RuntimeError):
-        lumen.ops.register(OP, "cuda:1024", lambda dtype, shape, strides: None)
+        lumen.ops.register(OP, "cuda:1024", lambda dtype, shape, strides, vector_size: None)
 
 
 def test_registering_rejects_a_bad_device():
     with pytest.raises((ValueError, TypeError)):
-        lumen.ops.register(OP, "not-a-device", lambda dtype, shape, strides: None)
+        lumen.ops.register(OP, "not-a-device", lambda dtype, shape, strides, vector_size: None)
 
 
 def test_unregistering_an_unknown_op_raises_key_error():
@@ -116,8 +116,8 @@ class Recorder:
         self.launches = []
         self._launch = launch
 
-    def __call__(self, dtype, shape, strides):
-        self.compiles.append((dtype, shape, strides))
+    def __call__(self, dtype, shape, strides, vector_size):
+        self.compiles.append((dtype, shape, strides, vector_size))
 
         def launch(address, value, stream):
             self.launches.append((address, value, stream))
@@ -134,7 +134,9 @@ def test_the_kernel_compiles_for_the_layout_and_launches_on_the_data(device):
     try:
         t = lumen.zeros([2, 3], device=device)
         _C._dummy_op(t, 2.5)
-        assert kernel.compiles == [("float32", (2, 3), (3, 1))]
+        # dummy_op hands over its layout as is: the first dimension has
+        # stride 3, so a thread stores one element at a time.
+        assert kernel.compiles == [("float32", (2, 3), (3, 1), 1)]
         # lumen's CUDA work runs on the legacy default stream, 0.
         assert kernel.launches == [(t.data_ptr(), 2.5, 0)]
     finally:
@@ -169,7 +171,21 @@ def test_a_layout_compiles_once(device):
         assert len(kernel.launches) == 3
         _C._dummy_op(t.transpose(0, 1), 4.0)  # a new layout
         _C._dummy_op(lumen.zeros([2, 3], dtype="int64", device=device), 5)  # a new dtype
-        assert kernel.compiles[1:] == [("float32", (3, 2), (1, 3)), ("int64", (2, 3), (3, 1))]
+        assert kernel.compiles[1:] == [("float32", (3, 2), (1, 3), 1), ("int64", (2, 3), (3, 1), 1)]
+    finally:
+        lumen.ops.unregister(OP, device)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA], indirect=True)
+def test_the_vector_size_follows_the_data_pointer(device):
+    kernel = Recorder()
+    lumen.ops.register(OP, device, kernel)
+    try:
+        t = lumen.zeros([16], device=device)
+        _C._dummy_op(t, 1.0)  # 16-byte aligned: 4 float32s at once
+        _C._dummy_op(t.narrow(0, 2, 8), 1.0)  # 8 bytes in: 2
+        _C._dummy_op(t.narrow(0, 1, 8), 1.0)  # 4 bytes in: 1
+        assert [vector_size for *_, vector_size in kernel.compiles] == [4, 2, 1]
     finally:
         lumen.ops.unregister(OP, device)
 
@@ -182,7 +198,7 @@ def test_the_kernel_receives_the_window_a_view_covers(device):
         t = lumen.zeros([4, 4], device=device)
         view = t.select(1, 2)  # a strided view: shape [4], strides [4]
         _C._dummy_op(view, 1.0)
-        assert kernel.compiles == [("float32", (4,), (4,))]
+        assert kernel.compiles == [("float32", (4,), (4,), 1)]
         assert kernel.launches[0][0] == view.data_ptr() == t.data_ptr() + 2 * 4
     finally:
         lumen.ops.unregister(OP, device)
@@ -207,7 +223,7 @@ def test_the_launcher_can_write_through_the_address(device):
 
 @pytest.mark.parametrize("device", [MPS, CUDA], indirect=True)
 def test_a_raising_compile_propagates(device):
-    def boom(dtype, shape, strides):
+    def boom(dtype, shape, strides, vector_size):
         raise RuntimeError("compile exploded")
 
     lumen.ops.register(OP, device, boom)
@@ -238,7 +254,7 @@ def test_a_tvm_ffi_launcher_is_called_through_its_c_abi(device):
     tvm_ffi = pytest.importorskip("tvm_ffi")
     compiles, launches = [], []
 
-    def compile(dtype, shape, strides):
+    def compile(dtype, shape, strides, vector_size):
         compiles.append((dtype, shape, strides))
         # A TVM-FFI function, as the CuTe DSL compiles with --enable-tvm-ffi;
         # the address and stream arrive as opaque pointers.
@@ -264,7 +280,7 @@ def test_a_raising_tvm_ffi_launcher_propagates(device):
     def boom(address, value, stream):
         raise RuntimeError("ffi exploded")
 
-    lumen.ops.register(OP, device, lambda dtype, shape, strides: tvm_ffi.convert(boom))
+    lumen.ops.register(OP, device, lambda dtype, shape, strides, vector_size: tvm_ffi.convert(boom))
     try:
         t = lumen.zeros([2], device=device)
         for _ in range(2):  # the compiling launch, then a cached one

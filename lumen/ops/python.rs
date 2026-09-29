@@ -3,10 +3,12 @@
 //! `lumen.ops.register`.
 //!
 //! Only the kernel is Python. A registered kernel is a compile hook,
-//! `compile(dtype, shape, strides)`, returning a `launch(address, value,
-//! stream)` for that one layout; everything around it is Rust: dispatch,
-//! the layout, a cache of launchers (so a layout compiles once), the data
-//! pointer and the value. A launcher that is a TVM-FFI function (what the
+//! `compile(dtype, shape, strides, vector_size)`, returning a
+//! `launch(address, value, stream)` for that one layout and vector size
+//! (how many elements, contiguous along the first dimension, a thread may
+//! store at once: [`crate::ops::vector_size`]); everything around it is
+//! Rust: dispatch, the layout, the vector size, a cache of launchers (so
+//! each compiles once), the data pointer and the value. A launcher that is a TVM-FFI function (what the
 //! CuTe DSL compiles with `--enable-tvm-ffi`) is called through its C ABI
 //! ([`crate::ops::tvm_ffi`]), so a cached launch runs no Python at all; any
 //! other callable is called through Python.
@@ -61,11 +63,12 @@ const OP_SIGNATURES: &[(&str, &str)] = &[
 ];
 
 /// The compile hook's signature, and the launcher's it returns.
-const LAUNCHER_SIGNATURE: &str = "(dtype, shape, strides) -> launch(address, value, stream)";
+const LAUNCHER_SIGNATURE: &str =
+    "(dtype, shape, strides, vector_size) -> launch(address, value, stream)";
 
-/// Launchers a kernel's compile hook returned, by kernel, dtype and layout.
-/// Never evicted, so a cached TVM-FFI handle stays valid.
-type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>);
+/// Launchers a kernel's compile hook returned, by kernel, dtype, layout and
+/// vector size. Never evicted, so a cached TVM-FFI handle stays valid.
+type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>, usize);
 static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Launcher>>> = Mutex::new(None);
 
 /// A cached launcher.
@@ -156,8 +159,9 @@ impl KernelHandle {
         // The value as the tensor's dtype holds it, as the built-in kernels
         // convert it.
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
+        let vector_size = core::ops::vector_size(shape, strides, dtype.size_of(), address);
         let run = || {
-            let key = (self.0, dtype, shape.to_vec(), strides.to_vec());
+            let key = (self.0, dtype, shape.to_vec(), strides.to_vec(), vector_size);
             let cached = LAUNCHERS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -226,11 +230,12 @@ impl KernelHandle {
             return Ok(Step::Done(false));
         };
         // Compiled without holding the cache's lock.
-        let (dtype, shape, strides) = (key.1, &key.2, &key.3);
+        let (dtype, shape, strides, vector_size) = (key.1, &key.2, &key.3, key.4);
         let compiled = compile.bind(py).call1((
             dtype_name(dtype),
             PyTuple::new(py, shape)?,
             PyTuple::new(py, strides)?,
+            vector_size,
         ))?;
         let launcher = Launcher::new(py, compiled)?;
         let step = match &launcher {

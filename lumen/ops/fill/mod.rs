@@ -48,7 +48,7 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     if let Some(handle) =
         crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
     {
-        let (shape, strides) = stride_order(t.shape(), t.strides());
+        let (shape, strides) = fill_layout(t.shape(), t.strides());
         let address = t.data_ptr() as usize;
         if handle.launch(
             "lumen::fill_",
@@ -66,19 +66,30 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     FILL.dispatch(t.device())(t, value);
 }
 
-/// The dimensions of a view in stride order, smallest stride first, as a
-/// Python `fill_` kernel is handed them: a fill's order does not matter, and
-/// a kernel walking its first dimension fastest then touches memory in
-/// order. A 0-d tensor is one element of a 1-d layout.
+/// A view's layout as a Python `fill_` kernel is handed it: a fill's order
+/// does not matter, so the dimensions are sorted by stride, smallest first
+/// (a kernel walking its first dimension fastest then touches memory in
+/// order), size-1 dimensions are dropped, and dimensions contiguous with
+/// each other are merged. A contiguous tensor becomes one dimension of
+/// stride 1, the layout a kernel vectorizes best; a 0-d tensor is `[1]`.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub(crate) fn stride_order(shape: &[usize], strides: &[usize]) -> (Vec<usize>, Vec<usize>) {
-    if shape.is_empty() {
+pub(crate) fn fill_layout(shape: &[usize], strides: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let mut dims: Vec<(usize, usize)> = shape
+        .iter()
+        .zip(strides)
+        .filter(|&(&n, _)| n != 1)
+        .map(|(&n, &s)| (n, s))
+        .collect();
+    dims.sort_by_key(|&(_, s)| s);
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(dims.len());
+    for (n, s) in dims {
+        match merged.last_mut() {
+            Some((last_n, last_s)) if *last_s * *last_n == s => *last_n *= n,
+            _ => merged.push((n, s)),
+        }
+    }
+    if merged.is_empty() {
         return (vec![1], vec![1]);
     }
-    let mut dims: Vec<usize> = (0..shape.len()).collect();
-    dims.sort_by_key(|&d| strides[d]);
-    (
-        dims.iter().map(|&d| shape[d]).collect(),
-        dims.iter().map(|&d| strides[d]).collect(),
-    )
+    merged.into_iter().unzip()
 }
