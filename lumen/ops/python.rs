@@ -58,8 +58,8 @@ static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new())
 /// that Rust will actually call kernels of that name, with that signature.
 /// Registering anything else would silently do nothing.
 const OP_SIGNATURES: &[(&str, &str)] = &[
-    ("lumen::fill_", LAUNCHER_SIGNATURE),
-    ("lumen::dummy_op", LAUNCHER_SIGNATURE),
+    (op_name!("fill_"), LAUNCHER_SIGNATURE),
+    (op_name!("dummy_op"), LAUNCHER_SIGNATURE),
 ];
 
 /// The compile hook's signature, and the launcher's it returns.
@@ -116,8 +116,8 @@ const STREAM: usize = 0;
 /// [`OP_SIGNATURES`] (see [`check_op`]).
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
-        "lumen::fill_" => &core::ops::fill::FILL_PY,
-        "lumen::dummy_op" => &core::ops::dummy_op::DUMMY_OP_PY,
+        n if n == core::ops::fill::FILL.name() => &core::ops::fill::FILL_PY,
+        n if n == core::ops::dummy_op::DUMMY_OP.name() => &core::ops::dummy_op::DUMMY_OP_PY,
         _ => unreachable!("{name} is not in OP_SIGNATURES"),
     }
 }

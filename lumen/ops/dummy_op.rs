@@ -12,12 +12,12 @@ pub type DummyOpKernel = fn(&Tensor, Scalar);
 
 /// `lumen::dummy_op`, dispatched on the tensor's device. It has no built-in
 /// kernels, so it only runs a registered one.
-pub static DUMMY_OP: Op<DummyOpKernel> = Op::new("lumen::dummy_op", |_| None);
+pub static DUMMY_OP: Op<DummyOpKernel> = Op::new(op_name!("dummy_op"), |_| None);
 
 /// Python `dummy_op` kernels, by device key (see [`crate::ops::python`]).
 #[cfg(feature = "python")]
 pub static DUMMY_OP_PY: Op<crate::ops::python::KernelHandle> =
-    Op::new("lumen::dummy_op__python", |_| None);
+    Op::new(op_name!("dummy_op__python"), |_| None);
 
 /// Run the Python kernel registered for `t`'s device.
 ///
@@ -26,9 +26,9 @@ pub static DUMMY_OP_PY: Op<crate::ops::python::KernelHandle> =
 pub fn dummy_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
     if let Some(handle) =
-        crate::ops::python::handle_for("lumen::dummy_op", crate::ops::DispatchKey::of(t.device()))
+        crate::ops::python::handle_for(DUMMY_OP.name(), crate::ops::DispatchKey::of(t.device()))
         && handle.launch(
-            "lumen::dummy_op",
+            DUMMY_OP.name(),
             t.device(),
             t.dtype(),
             t.shape(),

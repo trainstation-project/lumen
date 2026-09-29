@@ -15,12 +15,12 @@ use crate::tensor::scalar::Scalar;
 pub type FillKernel = fn(&Tensor, Scalar);
 
 /// `fill_`, dispatched on the tensor's device.
-pub static FILL: Op<FillKernel> = Op::new("lumen::fill_", fill_kernels);
+pub static FILL: Op<FillKernel> = Op::new(op_name!("fill_"), fill_kernels);
 
 /// Python `fill_` kernels, by device key (see [`crate::ops::python`]).
 #[cfg(feature = "python")]
 pub static FILL_PY: Op<crate::ops::python::KernelHandle> =
-    Op::new("lumen::fill___python", |_| None);
+    Op::new(op_name!("fill___python"), |_| None);
 
 /// `fill_`'s static registry.
 fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
@@ -45,13 +45,11 @@ pub fn fill_op(t: &Tensor, value: Scalar) {
     }
 
     #[cfg(feature = "python")]
-    if let Some(handle) =
-        crate::ops::python::handle_for("lumen::fill_", DispatchKey::of(t.device()))
-    {
+    if let Some(handle) = crate::ops::python::handle_for(FILL.name(), DispatchKey::of(t.device())) {
         let (shape, strides) = fill_layout(t.shape(), t.strides());
         let address = t.data_ptr() as usize;
         if handle.launch(
-            "lumen::fill_",
+            FILL.name(),
             t.device(),
             t.dtype(),
             &shape,

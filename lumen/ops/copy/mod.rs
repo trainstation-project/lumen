@@ -9,10 +9,10 @@ use crate::ops::{DispatchKey, Op};
 pub type CopyKernel = fn(dst: &Tensor, src: &Tensor);
 
 /// Host-to-device copy, dispatched on the destination's device.
-pub static COPY_H2D: Op<CopyKernel> = Op::new("lumen::copy_h2d", h2d_kernels);
+pub static COPY_H2D: Op<CopyKernel> = Op::new(op_name!("copy_h2d"), h2d_kernels);
 
 /// Device-to-host copy, dispatched on the source's device.
-pub static COPY_D2H: Op<CopyKernel> = Op::new("lumen::copy_d2h", d2h_kernels);
+pub static COPY_D2H: Op<CopyKernel> = Op::new(op_name!("copy_d2h"), d2h_kernels);
 
 /// `copy_h2d`'s static registry.
 fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {

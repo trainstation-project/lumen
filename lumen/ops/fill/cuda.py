@@ -6,6 +6,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 
+from lumen._C import LIBRARY_NAME
 from lumen.ops import register
 
 _ELEMENT = {
@@ -93,4 +94,4 @@ def _op(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_siz
     return cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
 
-register("lumen::fill_", "cuda", _op)
+register(f"{LIBRARY_NAME}::fill_", "cuda", _op)

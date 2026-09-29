@@ -87,7 +87,7 @@ pub(crate) fn cancel(context: *mut c_void) {
 unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f64, ok: i32) {
     let submission = unsafe { Box::from_raw(context.cast::<Submission>()) };
     if ok == 0 {
-        eprintln!("lumen: an MPS command buffer failed");
+        eprintln!("{}: an MPS command buffer failed", crate::LIBRARY_NAME);
     }
     if let Some(p) = &submission.profile {
         let to_ns = |t: f64| (p.profiler_ns as f64 + (t - p.host_seconds) * 1e9).max(0.0) as u64;
