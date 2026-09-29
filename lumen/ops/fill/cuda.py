@@ -26,8 +26,14 @@ _ELEMENT = {
 
 class FillCUDAKernel:
     def __init__(
-        self, shape: tuple[int, ...], strides: tuple[int, ...], vector_size: int, BLOCK_SIZE: int = 256
+        self,
+        dtype: type[cutlass.Numeric],
+        shape: tuple[int, ...],
+        strides: tuple[int, ...],
+        vector_size: int,
+        BLOCK_SIZE: int = 256,
     ) -> None:
+        self.dtype = dtype
         self.vector_size = vector_size
         self.BLOCK_SIZE = BLOCK_SIZE
         self.shape = (vector_size, (shape[0] // vector_size, *shape[1:]))
@@ -43,7 +49,7 @@ class FillCUDAKernel:
 
         i = BLOCK_ID * self.BLOCK_SIZE + THREAD_ID
         if i < self.num_vectors:
-            rX = cute.make_rmem_tensor(self.vector_size, gX.element_type)
+            rX = cute.make_rmem_tensor(self.vector_size, self.dtype)
             rX.fill(value)
             cute.copy(copy_atom, rX, gX[(None, i)])
 
@@ -51,7 +57,7 @@ class FillCUDAKernel:
     def __call__(self, ptr: cute.Pointer, value: cutlass.Numeric, stream: cuda.CUstream) -> None:
         mX = cute.make_tensor(ptr, cute.make_layout(self.shape, stride=self.strides))
         copy_atom = cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(), mX.element_type, num_bits_per_copy=self.vector_size * mX.element_type.width
+            cute.nvgpu.CopyUniversalOp(), self.dtype, num_bits_per_copy=self.vector_size * self.dtype.width
         )
 
         NUM_BLOCKS = (self.num_vectors + self.BLOCK_SIZE - 1) // self.BLOCK_SIZE
@@ -62,10 +68,9 @@ class FillCUDAKernel:
 
 def _op(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_size: int) -> Callable:
     element = _ELEMENT[dtype]
-    itemsize = max(1, element.width // 8)
 
-    ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=vector_size * itemsize)
-    kernel = FillCUDAKernel(shape, strides, vector_size)
+    ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=vector_size * element.width // 8)
+    kernel = FillCUDAKernel(element, shape, strides, vector_size)
 
     return cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
