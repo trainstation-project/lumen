@@ -225,6 +225,31 @@ def test_results_on_input_device(device):
     assert lumen.to_numpy(y).tolist() == [[8.0, 11.0], [16.0, 23.0]]
 
 
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
+def test_mps_kernels_match_cpu(dtype):
+    """Compiled functions on MPS (Metal kernels) agree with the CPU."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def block(x, wq, wk, w1):
+        scores = (x @ wq) @ (x @ wk).t() * 0.25
+        h = x + scores.softmax(-1) @ x
+        return (h @ w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
+
+    arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
+    cpu = [lumen.from_numpy(a) for a in arrays]
+    fn = lumen.compile(lambda *xs: tuple(o.float() for o in block(*(x.to(dtype) for x in xs))))
+    expected = [lumen.to_numpy(o) for o in fn(*cpu)]
+    actual = fn(*(t.to("mps") for t in cpu))
+    tol = {"float32": 1e-4, "float16": 1e-2, "bfloat16": 5e-2}[dtype]
+    for e, a in zip(expected, actual):
+        assert a.device == "mps"
+        np.testing.assert_allclose(lumen.to_numpy(a), e, rtol=tol, atol=tol)
+
+
 def test_plan():
     graph = lumen.make_graph(lambda x: (x.exp() + 1).reshape(-1).tanh())(lumen.zeros([16, 16]))
     plan = lumen.graph.Plan(graph)

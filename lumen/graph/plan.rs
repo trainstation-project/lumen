@@ -1,34 +1,9 @@
-//! Static execution plans: a [`Graph`] compiled once into a fixed list of
-//! kernel launches ([`Step`]s) over buffers assigned ahead of time. Running
-//! a plan binds the input pointers, allocates the outputs and one
-//! workspace, and replays the steps: no tracing, dispatch or per-op
-//! allocation.
-//!
-//! Compiling a plan:
-//!
-//! * **Aliasing.** Graph values are immutable and contiguous, so a
-//!   `reshape` is its operand's bytes under another shape: it gets no step
-//!   and shares its operand's buffer.
-//! * **Dead code.** Nodes no output depends on get no step.
-//! * **Outputs.** A computed output is written straight into its output
-//!   buffer. An output that is an input, or whose bytes another output
-//!   already holds, is copied there by a final step.
-//! * **Memory planning.** Every other value lives in the workspace, from
-//!   the step that writes it to the last step that reads it. Offsets are
-//!   assigned greedily by size (largest first, lowest offset that no value
-//!   with an overlapping lifetime uses), so values that are never live at
-//!   the same time share bytes.
-//!
-//! Steps run on the host for now, each one a
-//! [`reference`](super::reference) kernel over raw buffers, which checks
-//! the planning against the reference executor; device kernels come next.
-
 use std::cmp::Reverse;
 use std::fmt;
 
 use super::{Graph, Primitive, TensorType, Var, reference};
 use crate::tensor::dtype::dispatch_dtype;
-use crate::{DType, Device, Tensor};
+use crate::{DType, Device, Tensor, TensorOptions};
 
 /// Workspace offsets are multiples of this: the device allocators'
 /// alignment (`cudaMalloc`'s 256 bytes).
@@ -196,9 +171,10 @@ impl Plan {
         self.workspace_bytes
     }
 
-    /// Run the plan on `inputs`, returning its outputs on the first
-    /// input's device (the CPU if it has none). The steps run on the host:
-    /// device inputs are copied there and the outputs back.
+    /// Run the plan on `inputs`, which must be on one device, returning
+    /// its outputs on that device (the CPU if there are no inputs). On MPS
+    /// the steps are Metal kernels ([`super::mps`]); elsewhere they run on
+    /// the host, with device inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         if inputs.len() != self.inputs.len() {
             return Err(format!(
@@ -215,25 +191,59 @@ impl Plan {
                 ));
             }
         }
+        let device = inputs.first().map_or(Device::Cpu, Tensor::device);
+        if let Some(t) = inputs.iter().find(|t| t.device() != device) {
+            return Err(format!(
+                "inputs must be on one device, got {device} and {}",
+                t.device()
+            ));
+        }
+        // Where the steps run.
+        let executor = if cfg!(lumen_mps_linked) && device == Device::Mps {
+            Device::Mps
+        } else {
+            Device::Cpu
+        };
+        if executor == Device::Mps {
+            let f64_step = self.steps.iter().find(|s| {
+                s.inputs
+                    .iter()
+                    .chain([&s.output])
+                    .any(|(_, ty)| ty.dtype == DType::F64)
+            });
+            if let Some(step) = f64_step {
+                return Err(format!(
+                    "{}: float64 is not supported on MPS",
+                    step.primitive.name()
+                ));
+            }
+        }
         let _run = crate::profiler::record_op(op_name!("plan"), || {
             self.inputs.iter().map(|ty| ty.shape.clone()).collect()
         });
-        let host: Vec<Tensor> = inputs
+        let inputs: Vec<Tensor> = inputs
             .iter()
-            .map(|t| dispatch_dtype!(t.dtype(), T => t.to(Device::Cpu).contiguous::<T>()))
+            .map(|t| dispatch_dtype!(t.dtype(), T => t.to(executor).contiguous::<T>()))
             .collect();
+        let options = |dtype| TensorOptions::new().dtype(dtype).device(executor);
         // SAFETY: every output and workspace byte a step reads was written
         // by an earlier step, and every output is written by one.
-        let workspace = unsafe { Tensor::empty(&[self.workspace_bytes], DType::U8) };
+        let workspace = unsafe { Tensor::empty(&[self.workspace_bytes], options(DType::U8)) };
         let outputs: Vec<Tensor> = self
             .outputs
             .iter()
-            .map(|ty| unsafe { Tensor::empty(&ty.shape, ty.dtype) })
+            .map(|ty| unsafe { Tensor::empty(&ty.shape, options(ty.dtype)) })
             .collect();
-        let pointer = |buffer: Buffer| match buffer {
-            Buffer::Input(i) => host[i].data_ptr(),
-            Buffer::Output(i) => outputs[i].data_ptr(),
+        let tensor = |buffer: Buffer| match buffer {
+            Buffer::Input(i) => &inputs[i],
+            Buffer::Output(i) => &outputs[i],
+            Buffer::Workspace(_) => &workspace,
+        };
+        // Null for a value with no elements, which no kernel touches.
+        let pointer = |&(buffer, ref ty): &(Buffer, TensorType)| match buffer {
+            _ if ty.numel() == 0 => std::ptr::null_mut(),
             Buffer::Workspace(offset) => workspace.data_ptr().wrapping_add(offset),
+            _ => tensor(buffer).data_ptr(),
         };
         for step in &self.steps {
             let _step = crate::profiler::record_op(step.primitive.name(), || {
@@ -242,15 +252,31 @@ impl Plan {
             let args: Vec<*const u8> = step
                 .inputs
                 .iter()
-                .map(|&(b, _)| pointer(b).cast_const())
+                .map(|s| pointer(s).cast_const())
                 .collect();
-            let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
-            let (out, ty) = &step.output;
-            // SAFETY: all buffers are host memory of their step types'
-            // sizes, and the inputs were written before this step.
-            unsafe { reference::eval_raw(&step.primitive, &args, &types, pointer(*out), ty) };
+            let out = pointer(&step.output);
+            match executor {
+                #[cfg(lumen_mps_linked)]
+                Device::Mps => {
+                    let keep = step
+                        .inputs
+                        .iter()
+                        .chain([&step.output])
+                        .map(|&(b, _)| tensor(b).clone())
+                        .collect();
+                    super::mps::encode(step, &args, out, keep)?;
+                }
+                _ => {
+                    let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
+                    // SAFETY: all buffers are host memory of their step
+                    // types' sizes, and the inputs were written before
+                    // this step.
+                    unsafe {
+                        reference::eval_raw(&step.primitive, &args, &types, out, &step.output.1)
+                    };
+                }
+            }
         }
-        let device = inputs.first().map_or(Device::Cpu, Tensor::device);
         Ok(outputs.into_iter().map(|t| t.to(device)).collect())
     }
 }

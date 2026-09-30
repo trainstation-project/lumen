@@ -42,7 +42,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     };
     let dst = t.data_ptr();
 
-    let (context, done, timed) = mps::submit(t, "Fill");
+    let (context, done, timed) = mps::submit(vec![t.clone()], "Fill");
     let status = unsafe {
         lumen_mps_fill(
             dst,

@@ -347,3 +347,291 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     assert_eq!(ops, ["exp", "reshape", "reshape"]);
     assert_eq!(plan.workspace_bytes(), 0);
 }
+
+/// Plans on MPS, whose steps are Metal kernels, against the reference
+/// executor, for every primitive and dtype (MPS has no float64).
+#[cfg(lumen_mps_linked)]
+mod mps {
+    use super::super::{Graph, Plan, Primitive, TensorType, reference};
+    use super::Primitive::*;
+    use super::{data, mlp};
+    use crate::tensor::dtype::dispatch_dtype;
+    use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
+
+    const DTYPES: [DType; 12] = [
+        DType::Bool,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::F16,
+        DType::BF16,
+        DType::F32,
+    ];
+
+    fn available() -> bool {
+        crate::device::mps::is_available()
+    }
+
+    /// `shape` of `dtype` from a fixed seed: floats in [-4, 4), integers in
+    /// [-100, 100) (wrapped for unsigned dtypes), bools alternating.
+    fn values(dtype: DType, shape: &[usize], seed: u64) -> Tensor {
+        let x = data(shape, seed).to_vec::<f32>();
+        dispatch_dtype!(dtype, T => {
+            let v: Vec<T> = x
+                .iter()
+                .map(|&f| {
+                    T::from_scalar(if dtype.is_float() {
+                        Scalar::Float(f as f64 * 2.0)
+                    } else {
+                        Scalar::Int((f * 50.0) as i64)
+                    })
+                })
+                .collect();
+            Tensor::from_slice(&v, dtype).reshape(shape)
+        })
+    }
+
+    fn as_f64(t: &Tensor) -> Vec<f64> {
+        dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
+    }
+
+    /// The graph's plan on MPS agrees with the reference on the CPU:
+    /// exactly for integers and bools, within the dtype's rounding for
+    /// floats (Metal computes in float, the reference in double).
+    fn check(g: &Graph, inputs: &[Tensor]) {
+        let expected = reference::run(g, inputs).unwrap();
+        let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
+        let actual = Plan::compile(g).run(&on_mps).unwrap();
+        for (e, a) in expected.iter().zip(&actual) {
+            assert_eq!(a.device(), Device::Mps);
+            assert_eq!((e.dtype(), e.shape()), (a.dtype(), a.shape()));
+            let tol = match e.dtype() {
+                DType::F32 => 1e-5,
+                DType::F16 => 2e-3,
+                DType::BF16 => 1e-2,
+                _ => 0.0,
+            };
+            for (x, y) in as_f64(e).into_iter().zip(as_f64(a)) {
+                let close =
+                    x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= tol * (1.0 + x.abs());
+                assert!(close, "{g}\nexpected {x}, got {y}");
+            }
+        }
+    }
+
+    /// Check the one-node graph `p` on inputs of `types`.
+    fn check_node(p: Primitive, types: &[TensorType]) {
+        let mut g = Graph::new();
+        let vars: Vec<_> = types.iter().map(|ty| g.input(ty.clone())).collect();
+        let out = g.apply(p, &vars).unwrap();
+        g.set_outputs(&[out]).unwrap();
+        let inputs: Vec<Tensor> = types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| values(ty.dtype, &ty.shape, i as u64 + 1))
+            .collect();
+        check(&g, &inputs);
+    }
+
+    fn ty(dtype: DType, shape: &[usize]) -> TensorType {
+        TensorType::new(dtype, shape)
+    }
+
+    /// Check constant `p` (`full` or `iota`), with an input of its type so
+    /// the plan runs on MPS: outputs the constant and `max(constant, x)`.
+    fn check_constant(p: Primitive) {
+        let out = p.infer(&[]).unwrap();
+        let mut g = Graph::new();
+        let x = g.input(out.clone());
+        let c = g.apply(p, &[]).unwrap();
+        let m = g.apply(Max, &[c, x]).unwrap();
+        g.set_outputs(&[c, m]).unwrap();
+        check(&g, &[values(out.dtype, &out.shape, 7)]);
+    }
+
+    #[test]
+    fn elementwise() {
+        if !available() {
+            return;
+        }
+        for dtype in DTYPES {
+            let x = ty(dtype, &[5, 7]);
+            let two = [x.clone(), x.clone()];
+            for p in [Max, Eq, Lt] {
+                check_node(p, &two);
+            }
+            check_node(Select, &[ty(DType::Bool, &[5, 7]), x.clone(), x.clone()]);
+            if dtype == DType::Bool {
+                continue;
+            }
+            for p in [Add, Sub, Mul, Div] {
+                check_node(p, &two);
+            }
+            check_node(Neg, std::slice::from_ref(&x));
+            if dtype.is_float() {
+                for p in [Exp, Log, Rsqrt, Tanh, Logistic] {
+                    check_node(p, std::slice::from_ref(&x));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conversions() {
+        if !available() {
+            return;
+        }
+        for from in DTYPES {
+            for to in DTYPES {
+                check_node(ConvertElementType { new_dtype: to }, &[ty(from, &[64])]);
+            }
+        }
+        // Saturation and NaN.
+        let f = Tensor::from_slice(&[300.0f32, -1e10, f32::NAN, 2.9], DType::F32);
+        for to in [DType::I8, DType::U8, DType::I32, DType::U64, DType::Bool] {
+            let mut g = Graph::new();
+            let x = g.input(ty(DType::F32, &[4]));
+            let y = g.apply(ConvertElementType { new_dtype: to }, &[x]).unwrap();
+            g.set_outputs(&[y]).unwrap();
+            check(&g, std::slice::from_ref(&f));
+        }
+    }
+
+    #[test]
+    fn reductions_and_contractions() {
+        if !available() {
+            return;
+        }
+        for dtype in DTYPES {
+            let x = ty(dtype, &[2, 3, 4]);
+            for axes in [vec![1], vec![0, 2], vec![0, 1, 2], vec![]] {
+                check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
+                if dtype != DType::Bool {
+                    check_node(ReduceSum { axes }, std::slice::from_ref(&x));
+                }
+            }
+            if dtype == DType::Bool {
+                continue;
+            }
+            // [b, m, k] x [b, k, n] and a contraction over two dimensions.
+            let batched = DotGeneral {
+                lhs_contracting: vec![2],
+                rhs_contracting: vec![1],
+                lhs_batch: vec![0],
+                rhs_batch: vec![0],
+            };
+            check_node(batched, &[ty(dtype, &[3, 2, 5]), ty(dtype, &[3, 5, 4])]);
+            let two = DotGeneral {
+                lhs_contracting: vec![0, 2],
+                rhs_contracting: vec![2, 0],
+                lhs_batch: vec![],
+                rhs_batch: vec![],
+            };
+            check_node(two, &[ty(dtype, &[3, 2, 4]), ty(dtype, &[4, 5, 3])]);
+            // The tiled kernel: sizes that are not multiples of its tiles,
+            // transposed operands, and two batch dimensions.
+            let dot = |lc: usize, rc: usize, batch: Vec<usize>| DotGeneral {
+                lhs_contracting: vec![lc],
+                rhs_contracting: vec![rc],
+                lhs_batch: batch.clone(),
+                rhs_batch: batch,
+            };
+            check_node(
+                dot(1, 0, vec![]),
+                &[ty(dtype, &[37, 45]), ty(dtype, &[45, 29])],
+            );
+            check_node(
+                dot(0, 1, vec![]),
+                &[ty(dtype, &[45, 37]), ty(dtype, &[29, 45])],
+            );
+            check_node(
+                dot(2, 2, vec![0]),
+                &[ty(dtype, &[2, 33, 17]), ty(dtype, &[2, 40, 17])],
+            );
+            check_node(
+                dot(3, 2, vec![0, 1]),
+                &[ty(dtype, &[2, 3, 5, 7]), ty(dtype, &[2, 3, 7, 4])],
+            );
+        }
+    }
+
+    #[test]
+    fn layout_and_constants() {
+        if !available() {
+            return;
+        }
+        for dtype in DTYPES {
+            let bcast = BroadcastInDim {
+                shape: vec![2, 3, 4],
+                broadcast_dimensions: vec![0, 2],
+            };
+            check_node(bcast, &[ty(dtype, &[2, 1])]);
+            let t = Transpose {
+                permutation: vec![2, 0, 1],
+            };
+            check_node(t, &[ty(dtype, &[2, 3, 4])]);
+            let full = Full {
+                shape: vec![3, 2],
+                fill_value: Scalar::Float(-2.5),
+                dtype,
+            };
+            check_constant(full);
+            if dtype != DType::Bool {
+                let iota = Iota {
+                    dtype,
+                    shape: vec![3, 4],
+                    dimension: 0,
+                };
+                check_constant(iota);
+            }
+            // Outputs that alias an input are copied (a reshape step).
+            let mut g = Graph::new();
+            let x = g.input(ty(dtype, &[2, 3]));
+            let flat = g.apply(Reshape { new_sizes: vec![6] }, &[x]).unwrap();
+            g.set_outputs(&[flat, x]).unwrap();
+            check(&g, &[values(dtype, &[2, 3], 9)]);
+        }
+    }
+
+    #[test]
+    fn mlp_plan() {
+        if !available() {
+            return;
+        }
+        let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
+        check(&mlp(), &inputs);
+    }
+
+    #[test]
+    fn rejects_float64_and_mixed_devices() {
+        if !available() {
+            return;
+        }
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F64, &[2]));
+        let y = g.apply(Neg, &[x]).unwrap();
+        g.set_outputs(&[y]).unwrap();
+        let x = Tensor::zeros(
+            &[2],
+            TensorOptions::new().dtype(DType::F64).device(Device::Mps),
+        );
+        let err = Plan::compile(&g).run(&[x]).unwrap_err();
+        assert!(err.contains("float64"), "{err}");
+
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::F32, &[2]));
+        let b = g.input(ty(DType::F32, &[2]));
+        let c = g.apply(Add, &[a, b]).unwrap();
+        g.set_outputs(&[c]).unwrap();
+        let (a, b) = (
+            Tensor::zeros(&[2], Device::Mps),
+            Tensor::zeros(&[2], DType::F32),
+        );
+        assert!(Plan::compile(&g).run(&[a, b]).is_err());
+    }
+}
