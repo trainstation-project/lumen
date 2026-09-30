@@ -3,12 +3,14 @@ primitive ops (bindings in ``lumen/graph/python.rs``) and runs the graph.
 
 * ``lumen.graph.prims`` (re-exported as ``lumen.prims``): the strict
   primitives, modeled on ``jax.lax``.
+* ``Plan(graph)``: the graph compiled for execution (memory planned,
+  ``print`` it to read it); ``lumen.compile`` builds and caches these.
 * ``lumen.graph.tracer``: tracing, and the torch-like API traced tensors
   have (``x @ w``, ``x.softmax(-1)``, ``lumen.where``, ...), written on the
   primitives.
 """
 
-from lumen._C import Graph
+from lumen._C import Graph, Plan
 
 # The tracer first: it imports prims, whose functions its class body uses.
 from lumen.graph.tracer import (
@@ -31,6 +33,6 @@ from lumen.graph.tracer import (
 from lumen.graph import prims
 
 __all__ = [
-    "Graph", "TracedTensor", "compile", "make_graph", "prims", "promote_types", "result_type",
+    "Graph", "Plan", "TracedTensor", "compile", "make_graph", "prims", "promote_types", "result_type",
     "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
 ]

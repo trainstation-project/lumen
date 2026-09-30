@@ -1,9 +1,10 @@
 //! Graphs of [`Primitive`]s, the program representation of compiled
 //! execution (JAX: a jaxpr). `lumen.compile` traces a Python function once
 //! per input signature into a [`Graph`]; the graph is then run as a whole.
-//! The only executor so far is [`reference`], a CPU interpreter that
-//! defines what each primitive computes.
+//! [`plan`] compiles a graph into a static [`Plan`] for execution;
+//! [`reference`], a CPU interpreter, defines what each primitive computes.
 
+pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
@@ -13,6 +14,7 @@ mod tests;
 
 use std::fmt;
 
+pub use plan::Plan;
 pub use primitive::Primitive;
 
 use crate::DType;

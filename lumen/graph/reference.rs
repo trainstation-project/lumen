@@ -67,28 +67,74 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
 
 fn load(t: &Tensor) -> Values {
     let dtype = t.dtype();
-    dispatch_dtype!(dtype, T => {
-        let scalars = t.to_vec::<T>().into_iter().map(Element::to_scalar);
-        if dtype.is_float() {
-            Values::Float(scalars.map(Scalar::to_f64).collect())
-        } else {
-            Values::Int(scalars.map(|s| match s {
-                Scalar::Bool(b) => b as i128,
-                // u64 comes back as the i64 with the same bits.
-                Scalar::Int(i) => wrap(i as i128, dtype),
-                Scalar::Float(_) => unreachable!("integer dtype"),
-            }).collect())
+    dispatch_dtype!(dtype, T => from_scalars(t.to_vec::<T>().into_iter().map(Element::to_scalar), dtype))
+}
+
+fn from_scalars(scalars: impl Iterator<Item = Scalar>, dtype: DType) -> Values {
+    if dtype.is_float() {
+        Values::Float(scalars.map(Scalar::to_f64).collect())
+    } else {
+        Values::Int(
+            scalars
+                .map(|s| match s {
+                    Scalar::Bool(b) => b as i128,
+                    // u64 comes back as the i64 with the same bits.
+                    Scalar::Int(i) => wrap(i as i128, dtype),
+                    Scalar::Float(_) => unreachable!("integer dtype"),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Primitive `p` as a host kernel over raw row-major buffers, the way a
+/// CPU [`Plan`](super::plan::Plan) runs each step: reads `inputs` (of
+/// `types`) and writes `output` (of `out`).
+///
+/// # Safety
+/// Each input must point to host memory holding its type's elements, all
+/// initialized, and `output` to writable host memory for `out`'s elements.
+pub(crate) unsafe fn eval_raw(
+    p: &Primitive,
+    inputs: &[*const u8],
+    types: &[&TensorType],
+    output: *mut u8,
+    out: &TensorType,
+) {
+    let args: Vec<Values> = inputs
+        .iter()
+        .zip(types)
+        .map(|(&ptr, ty)| {
+            dispatch_dtype!(ty.dtype, T => {
+                let ptr = ptr.cast::<T>();
+                // SAFETY: the caller guarantees `numel` initialized elements.
+                let scalars = (0..ty.numel()).map(|i| unsafe { ptr.add(i).read_unaligned() }.to_scalar());
+                from_scalars(scalars, ty.dtype)
+            })
+        })
+        .collect();
+    let values = eval(p, &args.iter().collect::<Vec<_>>(), types, out);
+    dispatch_dtype!(out.dtype, T => {
+        let ptr = output.cast::<T>();
+        for (i, x) in to_elements::<T>(&values).enumerate() {
+            // SAFETY: the caller guarantees room for `numel` elements.
+            unsafe { ptr.add(i).write_unaligned(x) };
         }
     })
 }
 
+/// `values` as elements of type `T`.
+fn to_elements<T: Element>(values: &Values) -> Box<dyn Iterator<Item = T> + '_> {
+    match values {
+        // Wrapped to the dtype already, so the i64 cast keeps the bits.
+        Values::Int(v) => Box::new(v.iter().map(|&x| T::from_scalar(Scalar::Int(x as i64)))),
+        Values::Float(v) => Box::new(v.iter().map(|&x| T::from_scalar(Scalar::Float(x)))),
+    }
+}
+
 fn store(values: &Values, ty: &TensorType, device: Device) -> Tensor {
     dispatch_dtype!(ty.dtype, T => {
-        let data: Vec<T> = match values {
-            // Wrapped to the dtype already, so the i64 cast keeps the bits.
-            Values::Int(v) => v.iter().map(|&x| T::from_scalar(Scalar::Int(x as i64))).collect(),
-            Values::Float(v) => v.iter().map(|&x| T::from_scalar(Scalar::Float(x))).collect(),
-        };
+        let data: Vec<T> = to_elements(values).collect();
         Tensor::from_slice(&data, TensorOptions::new().device(device)).reshape(&ty.shape)
     })
 }

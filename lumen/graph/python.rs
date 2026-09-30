@@ -5,7 +5,7 @@ use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::graph::{Graph, Plan, Primitive, TensorType, Var};
 use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 
 #[pyclass(name = "Graph", module = "lumen")]
@@ -150,6 +150,42 @@ impl PyGraph {
     }
 }
 
+/// `lumen._C.Plan`: a graph compiled for execution ([`Plan`]).
+#[pyclass(name = "Plan", module = "lumen", frozen)]
+struct PyPlan {
+    inner: Plan,
+}
+
+#[pymethods]
+impl PyPlan {
+    #[new]
+    fn new(graph: PyRef<'_, PyGraph>) -> Self {
+        PyPlan {
+            inner: Plan::compile(&graph.inner),
+        }
+    }
+
+    #[getter]
+    fn workspace_bytes(&self) -> usize {
+        self.inner.workspace_bytes()
+    }
+
+    fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
+        let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
+        let outputs = self.inner.run(&inputs).map_err(PyValueError::new_err)?;
+        Ok(outputs.into_iter().map(PyTensor::wrap).collect())
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        self.inner.to_string()
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyGraph>()
+    m.add_class::<PyGraph>()?;
+    m.add_class::<PyPlan>()
 }

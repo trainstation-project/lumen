@@ -15,7 +15,7 @@ import builtins
 import functools
 import math
 
-from lumen._C import Graph, Tensor
+from lumen._C import Graph, Plan, Tensor
 from lumen.graph import prims
 from lumen.tensor import default_dtype
 
@@ -66,18 +66,20 @@ def _signature(args):
 
 def compile(fn):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
-    on its first call with each input signature (the tensor arguments'
-    dtypes and shapes, and the values of the other arguments), which every
-    call then runs. Results are on the first tensor argument's device."""
-    graphs = {}
+    and compiled into a static plan on its first call with each input
+    signature (the tensor arguments' dtypes and shapes, and the values of
+    the other arguments), which every call then runs. Results are on the
+    first tensor argument's device."""
+    plans = {}
 
     @functools.wraps(fn)
     def compiled(*args):
         key = _signature(args)
-        if key not in graphs:
-            graphs[key] = _trace(fn, args)
-        graph, single = graphs[key]
-        outputs = graph.run([a for a in args if isinstance(a, Tensor)])
+        if key not in plans:
+            graph, single = _trace(fn, args)
+            plans[key] = Plan(graph), single
+        plan, single = plans[key]
+        outputs = plan.run([a for a in args if isinstance(a, Tensor)])
         return outputs[0] if single else tuple(outputs)
 
     return compiled

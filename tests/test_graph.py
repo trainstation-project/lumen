@@ -223,3 +223,16 @@ def test_results_on_input_device(device):
     y = lumen.compile(lambda x: x @ x + 1)(x)
     assert y.device == str(x.device)
     assert lumen.to_numpy(y).tolist() == [[8.0, 11.0], [16.0, 23.0]]
+
+
+def test_plan():
+    graph = lumen.make_graph(lambda x: (x.exp() + 1).reshape(-1).tanh())(lumen.zeros([16, 16]))
+    plan = lumen.graph.Plan(graph)
+    # add reads exp and the broadcast 1 and writes a third 1 KiB buffer; the
+    # 0-d constant fits in exp's gap, and the reshape costs nothing.
+    assert "reshape" not in str(plan)
+    assert plan.workspace_bytes == 3 * 1024
+    x = rand(16, 16)
+    np.testing.assert_allclose(lumen.to_numpy(plan.run([lumen.from_numpy(x)])[0]), np.tanh(np.exp(x) + 1).ravel(), rtol=1e-6)
+    with pytest.raises(ValueError, match="must be f32"):
+        plan.run([lumen.zeros([16, 16], dtype="float64")])
