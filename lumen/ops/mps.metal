@@ -103,10 +103,13 @@ template <typename A> inline A max_op(A x, A y) { return x > y ? x : y; }
 // Binary ops shared by elementwise and reduce, as functors.
 struct Add {
     template <typename A> static A apply(A x, A y) { return x + y; }
+    template <typename A> static A identity() { return A(0); }
 };
 
 struct Max {
     template <typename A> static A apply(A x, A y) { return max_op(x, y); }
+    // -inf for floats, the lowest value for integers (saturated), false.
+    template <typename A> static A identity() { return is_bool_t<A>() ? A(false) : from_float<A>(-INFINITY); }
 };
 
 // Elementwise kernels take PER_THREAD elements a thread, spaced a grid
@@ -127,6 +130,18 @@ inline ulong offset_of(ulong idx, uint ndim, constant ulong *sizes, constant ulo
         idx /= sizes[d];
     }
     return offset;
+}
+
+// offset_of in 32-bit arithmetic, for kernels whose tensors have fewer than
+// 2^32 elements: GPUs divide 64-bit integers slowly. What is left of the
+// index at the outermost dimension is its coordinate, with no division.
+inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint *strides) {
+    uint offset = 0;
+    for (int d = int(ndim) - 1; d > 0; --d) {
+        offset += (idx % sizes[d]) * strides[d];
+        idx /= sizes[d];
+    }
+    return ndim > 0 ? offset + idx * strides[0] : offset;
 }
 
 #define FOR_NUMERIC(X) \

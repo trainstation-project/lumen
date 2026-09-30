@@ -404,6 +404,12 @@ mod mps {
     /// exactly for integers and bools, within the dtype's rounding for
     /// floats (Metal computes in float, the reference in double).
     fn check(g: &Graph, inputs: &[Tensor]) {
+        check_within(g, inputs, 0.0);
+    }
+
+    /// [`check`], allowing floats a further `slack` of absolute error: the
+    /// float accumulation error of a large sum.
+    fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
         let actual = Plan::compile(g).run(&on_mps).unwrap();
@@ -417,8 +423,8 @@ mod mps {
                 _ => 0.0,
             };
             for (x, y) in as_f64(e).into_iter().zip(as_f64(a)) {
-                let close =
-                    x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= tol * (1.0 + x.abs());
+                let bound = tol * (1.0 + x.abs()) + if tol > 0.0 { slack } else { 0.0 };
+                let close = x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= bound;
                 assert!(close, "{g}\nexpected {x}, got {y}");
             }
         }
@@ -426,6 +432,10 @@ mod mps {
 
     /// Check the one-node graph `p` on inputs of `types`.
     fn check_node(p: Primitive, types: &[TensorType]) {
+        check_node_within(p, types, 0.0);
+    }
+
+    fn check_node_within(p: Primitive, types: &[TensorType], slack: f64) {
         let mut g = Graph::new();
         let vars: Vec<_> = types.iter().map(|ty| g.input(ty.clone())).collect();
         let out = g.apply(p, &vars).unwrap();
@@ -435,7 +445,7 @@ mod mps {
             .enumerate()
             .map(|(i, ty)| values(ty.dtype, &ty.shape, i as u64 + 1))
             .collect();
-        check(&g, &inputs);
+        check_within(&g, &inputs, slack);
     }
 
     fn ty(dtype: DType, shape: &[usize]) -> TensorType {
@@ -499,6 +509,44 @@ mod mps {
             let y = g.apply(ConvertElementType { new_dtype: to }, &[x]).unwrap();
             g.set_outputs(&[y]).unwrap();
             check(&g, std::slice::from_ref(&f));
+        }
+    }
+
+    #[test]
+    fn large_reductions() {
+        if !available() {
+            return;
+        }
+        // Rows and columns, split into chunks and not, and a middle axis.
+        let cases: [(&[usize], Vec<usize>); 6] = [
+            (&[3, 50_000], vec![1]),
+            (&[50_000, 3], vec![0]),
+            (&[300, 700], vec![0, 1]),
+            (&[4, 5_000, 3], vec![1]),
+            (&[2_000, 300], vec![1]),
+            (&[300, 2_000], vec![0]),
+        ];
+        for dtype in [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I32,
+            DType::U8,
+            DType::I64,
+            DType::Bool,
+        ] {
+            for (shape, axes) in &cases {
+                let x = ty(dtype, shape);
+                check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
+                if dtype != DType::Bool {
+                    // float32 accumulation error: about 1e-7 of the sum of
+                    // |x|, at most 4 an element.
+                    let count: usize = axes.iter().map(|&d| shape[d]).product();
+                    let slack = 1e-6 * 4.0 * count as f64;
+                    let sum = ReduceSum { axes: axes.clone() };
+                    check_node_within(sum, std::slice::from_ref(&x), slack);
+                }
+            }
         }
     }
 
@@ -575,6 +623,25 @@ mod mps {
                 permutation: vec![2, 0, 1],
             };
             check_node(t, &[ty(dtype, &[2, 3, 4])]);
+            // Tiled (block swaps, sizes that are not multiples of the tile)
+            // and gathered (other permutations) transposes.
+            for (shape, permutation) in [
+                (vec![3, 37, 45], vec![0, 2, 1]),
+                (vec![70, 33], vec![1, 0]),
+                (vec![4, 5, 6, 7], vec![0, 1, 3, 2]),
+                (vec![4, 5, 6], vec![1, 0, 2]),
+            ] {
+                check_node(Transpose { permutation }, &[ty(dtype, &shape)]);
+            }
+            if dtype != DType::Bool {
+                for dimension in 0..3 {
+                    check_constant(Iota {
+                        dtype,
+                        shape: vec![5, 6, 7],
+                        dimension,
+                    });
+                }
+            }
             let full = Full {
                 shape: vec![3, 2],
                 fill_value: Scalar::Float(-2.5),

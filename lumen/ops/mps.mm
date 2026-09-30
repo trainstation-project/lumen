@@ -67,14 +67,18 @@ int lumen_mps_launch_kernel(const char *name,
                             const void *const *args,
                             const size_t *arg_lens,
                             size_t nargs,
-                            size_t threads,
-                            const size_t *groups,
-                            const size_t *group,
+                            const size_t *grid,
+                            int groups,
                             int timed,
                             lumen_mps_completion done,
                             void *context) {
     id<MTLComputePipelineState> pso = pipeline(name);
-    if (pso == nil || threads == 0 || threads > UINT32_MAX) {
+    for (int d = 0; d < 3; ++d) {
+        if (grid[d] == 0 || grid[d] > UINT32_MAX) {
+            return -2;
+        }
+    }
+    if (pso == nil) {
         return -2;
     }
     @autoreleasepool {
@@ -99,12 +103,16 @@ int lumen_mps_launch_kernel(const char *name,
         for (size_t j = 0; j < nargs; ++j) {
             [encoder setBytes:args[j] length:arg_lens[j] atIndex:nbuffers + j];
         }
-        if (groups != nullptr) {
-            [encoder dispatchThreadgroups:MTLSizeMake(groups[0], groups[1], groups[2])
-                    threadsPerThreadgroup:MTLSizeMake(group[0], group[1], group[2])];
+        MTLSize size = MTLSizeMake(grid[0], grid[1], grid[2]);
+        if (groups) {
+            [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         } else {
-            NSUInteger width = std::min<NSUInteger>({pso.maxTotalThreadsPerThreadgroup, 256, threads});
-            [encoder dispatchThreads:MTLSizeMake(threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+            // Up to 256 threads a threadgroup, filling x first.
+            NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
+            NSUInteger x = std::min<NSUInteger>(grid[0], total);
+            NSUInteger y = std::min<NSUInteger>(grid[1], total / x);
+            NSUInteger z = std::min<NSUInteger>(grid[2], total / (x * y));
+            [encoder dispatchThreads:size threadsPerThreadgroup:MTLSizeMake(x, y, z)];
         }
         lumen_mps_stream_encoded(done, context);
     }

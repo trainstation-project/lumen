@@ -15,7 +15,7 @@ use crate::stream::mps::{self, Completion};
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
-use crate::{DType, Element, Scalar, Tensor};
+use crate::{DType, Element, Scalar, Tensor, TensorOptions};
 
 unsafe extern "C" {
     // In lumen/ops/mps.mm.
@@ -26,9 +26,8 @@ unsafe extern "C" {
         args: *const *const u8,
         arg_lens: *const usize,
         nargs: usize,
-        threads: usize,
-        groups: *const usize,
-        group: *const usize,
+        grid: *const usize,
+        groups: i32,
         timed: i32,
         done: Completion,
         context: *mut c_void,
@@ -47,6 +46,16 @@ fn u64_arg(v: usize) -> Vec<u8> {
 /// bytes, and the kernels read only the first `ndim`).
 fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u64> = v.into_iter().map(|d| d as u64).collect();
+    if v.is_empty() {
+        v.push(0);
+    }
+    as_bytes(&v).to_vec()
+}
+
+/// [`dims_arg`] as `constant uint *`, for kernels indexing in 32 bits
+/// (their tensors have fewer than 2^32 elements).
+fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
+    let mut v: Vec<u32> = v.into_iter().map(|d| d as u32).collect();
     if v.is_empty() {
         v.push(0);
     }
@@ -98,22 +107,32 @@ pub(crate) fn encode(
     use Primitive::*;
     let args: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
     let out = &step.output.1;
+    // A gather of `shape` from the input at `strides`: a thread per element,
+    // on a grid of (innermost dimension, rows).
     let gather = |shape: &[usize], strides: Vec<usize>| {
+        let (inner, inner_stride) = (
+            shape.last().copied().unwrap_or(1),
+            strides.last().copied().unwrap_or(0),
+        );
+        let outer = &shape[..shape.len().saturating_sub(1)];
+        let args = vec![
+            u32_arg(outer.len() as u32),
+            dims32_arg(outer.iter().copied()),
+            dims32_arg(strides[..outer.len()].iter().copied()),
+            u32_arg(inner_stride as u32),
+        ];
+        let rows = outer.iter().product();
         (
             format!("gather_{}", out.dtype.size_of()),
-            vec![
-                u32_arg(shape.len() as u32),
-                dims_arg(shape.iter().copied()),
-                dims_arg(strides),
-            ],
+            args,
+            Grid::Threads([inner, rows, 1]),
         )
     };
     // Threadgroups for kernels that tile their output; others run a thread
     // per output element, or per PER_THREAD elements for elementwise ones.
     let n = out.numel();
-    let mut groups = None;
-    let mut threads = n;
-    let elementwise = n.div_ceil(PER_THREAD);
+    let mut grid = Grid::Threads([n, 1, 1]);
+    let elementwise = Grid::Threads([n.div_ceil(PER_THREAD), 1, 1]);
     if n > u32::MAX as usize {
         return Err(format!(
             "{}: {n} elements are more than MPS kernels index",
@@ -123,21 +142,21 @@ pub(crate) fn encode(
     let (kernel, bytes) = match &step.primitive {
         // One kernel per op and dtype, named after the primitive.
         p @ (Add | Sub | Mul | Div | Max | Eq | Lt | Neg | Exp | Log | Rsqrt | Tanh | Logistic) => {
-            threads = elementwise;
+            grid = elementwise;
             (
                 format!("{}_{}", p.name(), args[0].dtype),
                 vec![u32_arg(n as u32)],
             )
         }
         ConvertElementType { .. } => {
-            threads = elementwise;
+            grid = elementwise;
             (
                 format!("convert_{}_{}", args[0].dtype, out.dtype),
                 vec![u32_arg(n as u32)],
             )
         }
         Select => {
-            threads = elementwise;
+            grid = elementwise;
             (
                 format!("select_{}", out.dtype.size_of()),
                 vec![u32_arg(n as u32)],
@@ -146,10 +165,13 @@ pub(crate) fn encode(
         ReduceSum { axes } | ReduceMax { axes } => {
             let x = args[0];
             let strides = contiguous_strides(&x.shape);
-            // In increasing order, so each output sums in the reference's
-            // (row-major) order.
             let mut reduced = axes.clone();
             reduced.sort_unstable();
+            if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
+                return reduce_consecutive(step, x, &reduced, inputs[0], output, keep);
+            }
+            // Other axes: a thread per output, summing in the reference's
+            // (row-major) order.
             let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
             let init = match step.primitive {
                 ReduceSum { .. } => Scalar::Int(0),
@@ -213,7 +235,7 @@ pub(crate) fn encode(
                 Some((b, [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn]))
             })();
             if let Some((b, p)) = matmul {
-                groups = Some([p[1].div_ceil(32), p[0].div_ceil(32), b]);
+                grid = Grid::Groups([p[1].div_ceil(32), p[0].div_ceil(32), b]);
                 (format!("matmul_{}", out.dtype), vec![dims_arg(p)])
             } else {
                 (
@@ -233,7 +255,11 @@ pub(crate) fn encode(
             }
         }
         // A plan's reshapes are copies (the others alias their operand).
-        Reshape { .. } => gather(&[out.numel()], vec![1]),
+        Reshape { .. } => {
+            let (kernel, bytes, g) = gather(&[out.numel()], vec![1]);
+            grid = g;
+            (kernel, bytes)
+        }
         BroadcastInDim {
             broadcast_dimensions,
             ..
@@ -246,52 +272,181 @@ pub(crate) fn encode(
                     strides[d] = xs[k];
                 }
             }
-            gather(&out.shape, strides)
+            let (kernel, bytes, g) = gather(&out.shape, strides);
+            grid = g;
+            (kernel, bytes)
         }
         Transpose { permutation } => {
-            let xs = contiguous_strides(&args[0].shape);
-            gather(&out.shape, permutation.iter().map(|&d| xs[d]).collect())
+            let x = args[0];
+            if let Some((batch, rows, cols)) = swapped_blocks(&x.shape, permutation) {
+                grid = Grid::Groups([cols.div_ceil(32), rows.div_ceil(32), batch]);
+                let bytes = vec![u32_arg(rows as u32), u32_arg(cols as u32)];
+                (format!("transpose_{}", out.dtype.size_of()), bytes)
+            } else {
+                let xs = contiguous_strides(&x.shape);
+                let (kernel, bytes, g) =
+                    gather(&out.shape, permutation.iter().map(|&d| xs[d]).collect());
+                grid = g;
+                (kernel, bytes)
+            }
         }
         Full { fill_value, .. } => {
-            threads = elementwise;
+            grid = elementwise;
             (
                 format!("fill_{}", out.dtype.size_of()),
                 vec![element_arg(out.dtype, *fill_value), u32_arg(n as u32)],
             )
         }
-        Iota { dimension, .. } => (
-            format!("iota_{}", out.dtype),
-            vec![
-                u64_arg(out.shape[*dimension]),
-                u64_arg(out.shape[dimension + 1..].iter().product()),
-            ],
-        ),
+        Iota { dimension, .. } => {
+            let (outer, inner) = (&out.shape[..*dimension], &out.shape[dimension + 1..]);
+            let size = out.shape[*dimension];
+            grid = Grid::Threads([inner.iter().product(), size, outer.iter().product()]);
+            (format!("iota_{}", out.dtype), vec![])
+        }
     };
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
-    launch(
-        &kernel,
-        &buffers,
-        &bytes,
-        threads,
-        groups,
+    launch(&kernel, &buffers, &bytes, grid, keep, step.primitive.name())
+}
+
+/// A transpose by `permutation` as a swap of two blocks of dimensions after
+/// some unchanged ones: `(batch, rows, cols)` for viewing the input as
+/// [batch, rows, cols] and the output as [batch, cols, rows], if it is one
+/// (any transpose of the last two dimensions, `(2, 0, 1)`, ...).
+fn swapped_blocks(shape: &[usize], permutation: &[usize]) -> Option<(usize, usize, usize)> {
+    let k = permutation
+        .iter()
+        .enumerate()
+        .take_while(|&(i, &d)| i == d)
+        .count();
+    let rest = &permutation[k..];
+    // rest = (j, j + 1, ..., n - 1, k, ..., j - 1), with j = rest[0].
+    let j = *rest.first()?;
+    let swapped = (j..shape.len()).chain(k..j);
+    if !rest.iter().copied().eq(swapped) {
+        return None;
+    }
+    let size = |dims: &[usize]| dims.iter().product::<usize>();
+    Some((size(&shape[..k]), size(&shape[k..j]), size(&shape[j..])))
+}
+
+/// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]
+/// (`lumen/ops/reduce/mps.metal`): rows when b = 1, columns otherwise. One
+/// launch, or, with too few outputs to fill the GPU, two: `count` split
+/// into chunks reduced in parallel into partials, then the partials.
+fn reduce_consecutive(
+    step: &Step,
+    x: &TensorType,
+    reduced: &[usize],
+    input: *const u8,
+    output: *mut u8,
+    mut keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let first = reduced.first().copied().unwrap_or(x.shape.len());
+    let end = reduced.last().map_or(first, |last| last + 1);
+    let a: usize = x.shape[..first].iter().product();
+    let count: usize = x.shape[first..end].iter().product();
+    let b: usize = x.shape[end..].iter().product();
+    let (name, dtype, rows) = (step.primitive.name(), x.dtype, b == 1);
+    if a * b == 0 {
+        return Ok(());
+    }
+    // Chunks per output, so enough run at once: rows take a threadgroup of
+    // 256 threads per chunk, columns a thread.
+    let chunks = if rows {
+        if a >= 256 {
+            1
+        } else {
+            256usize.div_ceil(a).min(count.div_ceil(4096))
+        }
+    } else if a * b >= 1 << 16 {
+        1
+    } else {
+        (1usize << 16).div_ceil(a * b).min(count.div_ceil(64))
+    };
+    let chunk = count.div_ceil(chunks.max(1));
+    let chunks = if chunk == 0 { 1 } else { count.div_ceil(chunk) };
+    let layout = if rows { "rows" } else { "cols" };
+    let pass =
+        |kernel: String, src: *const u8, dst: *const u8, count, chunk, chunks: usize, keep| {
+            if rows {
+                let args = [u64_arg(count), u64_arg(chunk)];
+                launch(
+                    &kernel,
+                    &[src, dst],
+                    &args,
+                    Grid::Groups([chunks, a, 1]),
+                    keep,
+                    name,
+                )
+            } else {
+                let args = [
+                    u32_arg(b as u32),
+                    u64_arg(count),
+                    u64_arg(chunk),
+                    u32_arg(chunks as u32),
+                ];
+                launch(
+                    &kernel,
+                    &[src, dst],
+                    &args,
+                    Grid::Threads([a * chunks * b, 1, 1]),
+                    keep,
+                    name,
+                )
+            }
+        };
+    if chunks == 1 {
+        let kernel = format!("{name}_{layout}_{dtype}");
+        return pass(kernel, input, output, count, count, 1, keep);
+    }
+    // Partials accumulate in float for the 16-bit floats, as the kernels do.
+    let acc = if matches!(dtype, DType::F16 | DType::BF16) {
+        DType::F32
+    } else {
+        dtype
+    };
+    let options = TensorOptions::new().dtype(acc).device(crate::Device::Mps);
+    // SAFETY: the first launch writes every partial before the second reads.
+    let partials = unsafe { Tensor::empty(&[a * chunks * b], options) };
+    keep.push(partials.clone());
+    let p = partials.data_ptr().cast_const();
+    let kernel = format!("{name}_{layout}_partial_{dtype}");
+    pass(kernel, input, p, count, chunk, chunks, keep.clone())?;
+    pass(
+        format!("{name}_{layout}_final_{dtype}"),
+        p,
+        output,
+        chunks,
+        chunks,
+        1,
         keep,
-        step.primitive.name(),
     )
 }
 
-/// Launch `kernel` over `threads` threads (one per output element), or
-/// over `groups` of 16x16 threads.
+/// How a kernel's threads are laid out.
+#[derive(Debug, Clone, Copy)]
+enum Grid {
+    /// A thread per index of an x-by-y-by-z grid (x varying fastest).
+    Threads([usize; 3]),
+    /// That many threadgroups of 16x16 threads.
+    Groups([usize; 3]),
+}
+
+/// Launch `kernel` over `grid`.
 fn launch(
     kernel: &str,
     buffers: &[*const u8],
     args: &[Vec<u8>],
-    threads: usize,
-    groups: Option<[usize; 3]>,
+    grid: Grid,
     keep: Vec<Tensor>,
     name: &'static str,
 ) -> Result<(), String> {
-    if threads == 0 {
+    let (sizes, groups) = match grid {
+        Grid::Threads(sizes) => (sizes, false),
+        Grid::Groups(sizes) => (sizes, true),
+    };
+    if sizes.contains(&0) {
         return Ok(());
     }
     let c_name = CString::new(kernel).expect("kernel names have no NUL");
@@ -306,9 +461,8 @@ fn launch(
             pointers.as_ptr(),
             lens.as_ptr(),
             args.len(),
-            threads,
-            groups.as_ref().map_or(std::ptr::null(), |g| g.as_ptr()),
-            [16, 16, 1].as_ptr(),
+            sizes.as_ptr(),
+            groups.into(),
             timed.into(),
             done,
             context,

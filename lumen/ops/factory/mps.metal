@@ -11,12 +11,11 @@
 
 FOR_BYTES(FULL)
 
-#define IOTA(NAME, T)                                             \
-    kernel void iota_##NAME(device T *out [[buffer(0)]],          \
-                            constant ulong &size [[buffer(1)]],   \
-                            constant ulong &inner [[buffer(2)]],  \
-                            uint i [[thread_position_in_grid]]) { \
-        out[i] = from_int<T>((ulong(i) / inner) % size);          \
+// Over an inner x size x outer grid: the value is the y coordinate.
+#define IOTA(NAME, T)                                                                                          \
+    kernel void iota_##NAME(                                                                                   \
+        device T *out [[buffer(0)]], uint3 gid [[thread_position_in_grid]], uint3 grid [[threads_per_grid]]) { \
+        out[(gid.z * grid.y + gid.y) * grid.x + gid.x] = from_int<T>(gid.y);                                   \
     }
 
 FOR_NUMERIC(IOTA)
