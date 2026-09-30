@@ -7,6 +7,8 @@ import this package's names from ``lumen`` (or ``from lumen.tensor import
 ...``).
 """
 
+import builtins
+
 from lumen._C import Tensor
 from lumen.tensor import dlpack
 from lumen.tensor.dlpack import from_dlpack
@@ -62,6 +64,18 @@ default_dtype = float32
 
 # `device` is a string ("cpu", "mps", "cuda:0") or a `lumen.device`;
 # None means the CPU, as in PyTorch.
+#
+# Inside a function traced by `lumen.compile`, zeros/ones/full/arange
+# record a `full` or `iota` primitive instead of allocating (as
+# `torch.compile` does with `torch.zeros`). Graph values have no device,
+# so `device` is ignored there: results land on the inputs' device.
+
+
+def _prims():
+    """`lumen.prims` while a function is being traced, else None."""
+    from lumen.graph import prims, tracer  # lazily: lumen.graph imports this package
+
+    return prims if tracer._TRACES else None
 
 def tensor(data, dtype=None, device=None):
     """Build a tensor from (nested) lists. Dtype is inferred unless given."""
@@ -76,18 +90,27 @@ def empty(shape, dtype=None, device=None):
 
 
 def zeros(shape, dtype=None, device=None):
+    if prims := _prims():
+        return prims.full(shape, 0, dtype or default_dtype)
     return Tensor.zeros(list(shape), dtype, device)
 
 
 def ones(shape, dtype=None, device=None):
+    if prims := _prims():
+        return prims.full(shape, 1, dtype or default_dtype)
     return Tensor.ones(list(shape), dtype, device)
 
 
 def full(shape, value, dtype=None, device=None):
+    if prims := _prims():
+        inferred = "bool" if isinstance(value, builtins.bool) else "int64" if isinstance(value, int) else default_dtype
+        return prims.full(shape, value, dtype or inferred)
     return Tensor.full(list(shape), value, dtype, device)
 
 
 def arange(n, dtype=None, device=None):
+    if prims := _prims():
+        return prims.iota(dtype or default_dtype, (n,), 0)
     return Tensor.arange(n, dtype, device)
 
 

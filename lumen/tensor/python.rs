@@ -15,7 +15,7 @@ use crate::{DType, Scalar, Tensor, TensorOptions};
 // dtype helpers
 // ---------------------------------------------------------------------
 
-fn parse_dtype(s: &str) -> PyResult<DType> {
+pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
     match s {
         "float32" | "f32" => Ok(DType::F32),
         "float64" | "f64" => Ok(DType::F64),
