@@ -1,7 +1,8 @@
-//! Plan steps as Metal kernels on MPS: [`encode`] picks a step's kernel in
-//! `kernels.metal` and computes its arguments (shapes, strides, op codes),
-//! and `launch.mm` launches it into lumen's MPS stream without waiting
-//! (see [`crate::stream::mps`]). Values are contiguous, so a kernel only
+//! Plan steps as Metal kernels on MPS: [`encode`] picks a step's kernel
+//! (in `lumen/ops/<op>/mps/<op>.metal`: elementwise, reduce, dot_general,
+//! layout, factory) and computes its arguments (shapes, strides, op codes),
+//! and `lumen/ops/mps/launch.mm` launches it into lumen's MPS stream without
+//! waiting (see [`crate::stream::mps`]). Values are contiguous, so a kernel only
 //! needs strides where it reads in another order (broadcast, transpose,
 //! reductions and contractions).
 
@@ -17,7 +18,7 @@ use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar, Tensor};
 
 unsafe extern "C" {
-    // In launch.mm.
+    // In lumen/ops/mps/launch.mm.
     fn lumen_mps_launch_kernel(
         name: *const c_char,
         buffers: *const *const u8,
@@ -107,33 +108,11 @@ pub(crate) fn encode(
     // per output element.
     let mut groups = None;
     let (kernel, bytes) = match &step.primitive {
-        p @ (Add | Sub | Mul | Div | Max) => {
-            let op = [Add, Sub, Mul, Div, Max]
-                .iter()
-                .position(|q| q == p)
-                .unwrap();
-            (
-                format!("binary_{}", args[0].dtype),
-                vec![u32_arg(op as u32)],
-            )
+        // One kernel per op and dtype, named after the primitive.
+        p @ (Add | Sub | Mul | Div | Max | Eq | Lt | Neg | Exp | Log | Rsqrt | Tanh | Logistic) => {
+            (format!("{}_{}", p.name(), args[0].dtype), vec![])
         }
-        p @ (Eq | Lt) => (
-            format!("compare_{}", args[0].dtype),
-            vec![u32_arg((*p == Lt) as u32)],
-        ),
-        Neg => (format!("neg_{}", out.dtype), vec![]),
-        p @ (Exp | Log | Rsqrt | Tanh | Logistic) => {
-            let op = [Exp, Log, Rsqrt, Tanh, Logistic]
-                .iter()
-                .position(|q| q == p)
-                .unwrap();
-            (format!("unary_{}", out.dtype), vec![u32_arg(op as u32)])
-        }
-        // The source dtype by its number in DType, as the kernel's switch.
-        ConvertElementType { .. } => (
-            format!("convert_{}", out.dtype),
-            vec![u32_arg(args[0].dtype as u32)],
-        ),
+        ConvertElementType { .. } => (format!("convert_{}_{}", args[0].dtype, out.dtype), vec![]),
         Select => (format!("select_{}", out.dtype.size_of()), vec![]),
         ReduceSum { axes } | ReduceMax { axes } => {
             let x = args[0];
@@ -143,15 +122,14 @@ pub(crate) fn encode(
             let mut reduced = axes.clone();
             reduced.sort_unstable();
             let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
-            let (op, init) = match step.primitive {
-                ReduceSum { .. } => (0, Scalar::Int(0)),
-                _ => (1, lowest(x.dtype)),
+            let init = match step.primitive {
+                ReduceSum { .. } => Scalar::Int(0),
+                _ => lowest(x.dtype),
             };
             (
-                format!("reduce_{}", x.dtype),
+                format!("{}_{}", step.primitive.name(), x.dtype),
                 vec![
                     element_arg(x.dtype, init),
-                    u32_arg(op),
                     u32_arg(kept.len() as u32),
                     dims_arg(kept.iter().map(|&d| x.shape[d])),
                     dims_arg(kept.iter().map(|&d| strides[d])),

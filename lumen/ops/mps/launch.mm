@@ -1,6 +1,7 @@
-// Launches the graph primitives' Metal kernels (kernels.metal) into lumen's
-// MPS stream. Generic: Rust (lumen/graph/mps/mod.rs) names the kernel and
-// passes its buffers and argument bytes, bound in that order.
+// Launches the graph primitives' Metal kernels (lumen/ops/*/mps/*.metal,
+// compiled as one library) into lumen's MPS stream. Generic: Rust
+// (lumen/graph/mps/mod.rs) names the kernel and passes its buffers and
+// argument bytes, bound in that order.
 
 #include "../../stream/mps/mps.h"
 #include "primitive_kernels.h"
