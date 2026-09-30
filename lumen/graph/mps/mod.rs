@@ -58,6 +58,10 @@ fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
     dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec())
 }
 
+/// Elements an elementwise kernel's thread takes (`PER_THREAD` in
+/// `lumen/ops/mps.metal`).
+const PER_THREAD: usize = 4;
+
 /// `dims` (each a size and stride, outermost first) as one dimension of
 /// the same elements, if they are laid out as one: its size and stride.
 fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, usize)> {
@@ -105,15 +109,40 @@ pub(crate) fn encode(
         )
     };
     // Threadgroups for kernels that tile their output; others run a thread
-    // per output element.
+    // per output element, or per PER_THREAD elements for elementwise ones.
+    let n = out.numel();
     let mut groups = None;
+    let mut threads = n;
+    let elementwise = n.div_ceil(PER_THREAD);
+    if n > u32::MAX as usize {
+        return Err(format!(
+            "{}: {n} elements are more than MPS kernels index",
+            step.primitive.name()
+        ));
+    }
     let (kernel, bytes) = match &step.primitive {
         // One kernel per op and dtype, named after the primitive.
         p @ (Add | Sub | Mul | Div | Max | Eq | Lt | Neg | Exp | Log | Rsqrt | Tanh | Logistic) => {
-            (format!("{}_{}", p.name(), args[0].dtype), vec![])
+            threads = elementwise;
+            (
+                format!("{}_{}", p.name(), args[0].dtype),
+                vec![u32_arg(n as u32)],
+            )
         }
-        ConvertElementType { .. } => (format!("convert_{}_{}", args[0].dtype, out.dtype), vec![]),
-        Select => (format!("select_{}", out.dtype.size_of()), vec![]),
+        ConvertElementType { .. } => {
+            threads = elementwise;
+            (
+                format!("convert_{}_{}", args[0].dtype, out.dtype),
+                vec![u32_arg(n as u32)],
+            )
+        }
+        Select => {
+            threads = elementwise;
+            (
+                format!("select_{}", out.dtype.size_of()),
+                vec![u32_arg(n as u32)],
+            )
+        }
         ReduceSum { axes } | ReduceMax { axes } => {
             let x = args[0];
             let strides = contiguous_strides(&x.shape);
@@ -223,10 +252,13 @@ pub(crate) fn encode(
             let xs = contiguous_strides(&args[0].shape);
             gather(&out.shape, permutation.iter().map(|&d| xs[d]).collect())
         }
-        Full { fill_value, .. } => (
-            format!("fill_{}", out.dtype.size_of()),
-            vec![element_arg(out.dtype, *fill_value)],
-        ),
+        Full { fill_value, .. } => {
+            threads = elementwise;
+            (
+                format!("fill_{}", out.dtype.size_of()),
+                vec![element_arg(out.dtype, *fill_value), u32_arg(n as u32)],
+            )
+        }
         Iota { dimension, .. } => (
             format!("iota_{}", out.dtype),
             vec![
@@ -241,7 +273,7 @@ pub(crate) fn encode(
         &kernel,
         &buffers,
         &bytes,
-        out.numel(),
+        threads,
         groups,
         keep,
         step.primitive.name(),

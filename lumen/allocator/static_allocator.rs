@@ -1,23 +1,25 @@
 //! The static allocator: one region per device, reserved once from its
 //! backend (one `cudaMalloc`, one `MTLBuffer`), handing out aligned offsets
-//! from a bump pointer. An allocation is pointer arithmetic, with no driver
-//! call, which is what compiled execution needs: its buffers are laid out
-//! up front and reused run after run.
+//! into it. An allocation is bookkeeping on the host, with no driver call,
+//! which is what compiled execution needs: its buffers are laid out up
+//! front and reused run after run.
 //!
-//! Freeing one allocation gives nothing back by itself; when the last live
-//! allocation is freed, the bump pointer rewinds to the start, so each run
-//! starts from an empty region. Nothing can point into the region then, so
-//! the rewind is always safe.
+//! Free bytes are kept as a list of blocks, by offset. An allocation takes
+//! the lowest block that fits (first fit) and splits off the rest; freeing
+//! returns its block and merges it with free neighbours, so memory comes
+//! back whatever order allocations are freed in: a loop that keeps its
+//! inputs alive reuses the same bytes every iteration.
 
 use std::alloc::Layout;
+use std::collections::BTreeMap;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use super::{Allocator, DataPtr};
 use crate::device::Device;
 
-/// A bump allocator over one region of `backend`'s memory. Cheap to clone:
-/// clones share the region.
+/// A first-fit allocator over one region of `backend`'s memory. Cheap to
+/// clone: clones share the region.
 pub struct StaticAllocator<B: Allocator> {
     inner: Arc<Inner<B>>,
 }
@@ -38,14 +40,15 @@ struct Inner<B> {
     state: Mutex<State>,
 }
 
-#[derive(Default)]
 struct State {
     /// The region, reserved on the first allocation.
     region: Option<DataPtr>,
-    /// The bump pointer: bytes from the region's start handed out so far.
-    top: usize,
-    /// Allocations not yet freed, and their bytes.
-    live: usize,
+    /// Free blocks, offset to length; offsets and lengths are multiples of
+    /// the alignment, and no two blocks touch (they are merged).
+    free: BTreeMap<usize, usize>,
+    /// Allocations not yet freed, offset to requested bytes, and the sum of
+    /// their bytes.
+    live: BTreeMap<usize, usize>,
     live_bytes: usize,
 }
 
@@ -64,7 +67,12 @@ impl<B: Allocator> StaticAllocator<B> {
                 backend,
                 alignment,
                 capacity,
-                state: Mutex::new(State::default()),
+                state: Mutex::new(State {
+                    region: None,
+                    free: BTreeMap::from([(0, capacity - capacity % alignment)]),
+                    live: BTreeMap::new(),
+                    live_bytes: 0,
+                }),
             }),
         }
     }
@@ -74,10 +82,14 @@ impl<B: Allocator> StaticAllocator<B> {
         self.inner.capacity
     }
 
-    /// Bytes handed out since the allocator was last empty (the bump
-    /// pointer).
+    /// Bytes from the region's start to the end of its highest live
+    /// allocation.
     pub fn used(&self) -> usize {
-        self.inner.lock().top
+        self.inner
+            .lock()
+            .live
+            .last_key_value()
+            .map_or(0, |(offset, nbytes)| offset + nbytes)
     }
 
     /// Bytes of allocations not yet freed.
@@ -87,19 +99,36 @@ impl<B: Allocator> StaticAllocator<B> {
 }
 
 impl<B> Inner<B> {
+    /// The block an allocation of `nbytes` takes: rounded up to the
+    /// alignment, so every block starts aligned.
+    fn block(&self, nbytes: usize) -> usize {
+        nbytes.next_multiple_of(self.alignment)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Return an allocation of `nbytes` at `addr`, rewinding the region if it
-    /// was the last one.
-    fn free(&self, addr: usize, nbytes: usize) {
+    /// Return the allocation of `nbytes` at `offset` (address `addr`),
+    /// merging its block with free neighbours.
+    fn free(&self, addr: usize, offset: usize, nbytes: usize) {
         let mut state = self.lock();
-        state.live -= 1;
-        state.live_bytes -= nbytes;
-        if state.live == 0 {
-            state.top = 0;
+        if nbytes == 0 {
+            return; // took no block
         }
+        state.live.remove(&offset);
+        state.live_bytes -= nbytes;
+        let (mut start, mut len) = (offset, self.block(nbytes));
+        if let Some((&prev, &prev_len)) = state.free.range(..start).next_back()
+            && prev + prev_len == start
+        {
+            state.free.remove(&prev);
+            (start, len) = (prev, prev_len + len);
+        }
+        if let Some(next_len) = state.free.remove(&(start + len)) {
+            len += next_len;
+        }
+        state.free.insert(start, len);
         let live_bytes = state.live_bytes;
         drop(state);
         crate::profiler::report_memory(
@@ -118,14 +147,21 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
     }
 
     fn allocate(&self, nbytes: usize) -> DataPtr {
-        self.try_allocate(nbytes).unwrap_or_else(|| {
+        // Out of room: memory freed but held by device work in flight comes
+        // back once that work is done.
+        let data = self.try_allocate(nbytes).or_else(|| {
+            self.inner.backend.reclaim();
+            self.try_allocate(nbytes)
+        });
+        data.unwrap_or_else(|| {
             let state = self.inner.lock();
             panic!(
-                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free; raise \
-                 {}.config.static_allocator_bytes",
+                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
+                 (largest block {}); raise {}.config.static_allocator_bytes",
                 self.inner.device,
-                self.inner.capacity - state.top.min(self.inner.capacity),
+                state.free.values().sum::<usize>(),
                 self.inner.capacity,
+                state.free.values().max().unwrap_or(&0),
                 crate::LIBRARY_NAME,
             )
         })
@@ -138,18 +174,24 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
         if state.region.is_none() {
             state.region = Some(inner.backend.try_allocate(inner.capacity)?);
         }
-        let offset = state.top.next_multiple_of(inner.alignment);
-        let end = offset.checked_add(nbytes)?;
-        if end > inner.capacity {
-            return None;
-        }
+        let block = inner.block(nbytes);
+        // An empty allocation takes no block: any aligned offset will do.
+        let (&offset, &len) = match nbytes {
+            0 => state.free.iter().next().unwrap_or((&0, &0)),
+            _ => state.free.iter().find(|&(_, &len)| len >= block)?,
+        };
         let base = state.region.as_ref().expect("reserved above").as_ptr();
         // In the device's address space: the backend's memory is not a Rust
         // allocation, so no `add`.
         let ptr = NonNull::new(base.wrapping_add(offset))?;
-        state.top = end;
-        state.live += 1;
-        state.live_bytes += nbytes;
+        if nbytes > 0 {
+            state.free.remove(&offset);
+            if len > block {
+                state.free.insert(offset + block, len - block);
+            }
+            state.live.insert(offset, nbytes);
+            state.live_bytes += nbytes;
+        }
         let live_bytes = state.live_bytes;
         drop(state);
 
@@ -165,7 +207,7 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
         Some(DataPtr::with_deleter(
             ptr,
             Layout::from_size_align(nbytes, inner.alignment).expect("valid layout"),
-            move |_| owner.free(addr, nbytes),
+            move |_| owner.free(addr, offset, nbytes),
         ))
     }
 }

@@ -51,6 +51,11 @@ impl Allocator for MpsBackend {
         ))
     }
 
+    /// Submitted MPS work keeps its tensors alive until the GPU has run it.
+    fn reclaim(&self) {
+        crate::stream::mps::synchronize();
+    }
+
     // Shared buffers are host-addressable: the copy ops reach them with a
     // plain memcpy.
 }

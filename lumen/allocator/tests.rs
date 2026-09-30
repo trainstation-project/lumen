@@ -146,18 +146,48 @@ mod static_allocator {
     }
 
     #[test]
-    fn memory_comes_back_when_the_allocator_is_empty() {
+    fn freed_memory_is_reused_while_others_are_live() {
         let (allocator, _) = allocator(1 << 20);
         let a = allocator.allocate(100);
         let first = a.as_ptr();
         let b = allocator.allocate(100);
         drop(a);
-        // One allocation is still live: nothing is reused yet.
         assert_eq!(allocator.used(), 256 + 100);
         assert_eq!(allocator.live_bytes(), 100);
-        drop(b);
+        // a's block is free again although b is live: first fit takes it.
+        let c = allocator.allocate(200);
+        assert_eq!(c.as_ptr(), first);
+        drop((b, c));
         assert_eq!((allocator.used(), allocator.live_bytes()), (0, 0));
-        assert_eq!(allocator.allocate(100).as_ptr(), first);
+    }
+
+    #[test]
+    fn a_loop_with_live_inputs_does_not_grow() {
+        // A compiled function called in a loop: its inputs stay live while
+        // each call's workspace and output come and go.
+        let (allocator, _) = allocator(4096);
+        let _inputs = (allocator.allocate(1000), allocator.allocate(1000));
+        for _ in 0..100 {
+            let workspace = allocator.allocate(700);
+            let output = allocator.allocate(300);
+            drop(workspace);
+            drop(output);
+        }
+        assert_eq!(allocator.used(), 1024 + 1000);
+    }
+
+    #[test]
+    fn freed_neighbours_merge() {
+        let (allocator, _) = allocator(1024);
+        let blocks: Vec<_> = (0..4).map(|_| allocator.allocate(256)).collect();
+        let first = blocks[0].as_ptr();
+        // Freed out of order, the four blocks merge back into one that holds
+        // the whole region.
+        let mut blocks = blocks.into_iter().map(Some).collect::<Vec<_>>();
+        for i in [2, 0, 3, 1] {
+            blocks[i] = None;
+        }
+        assert_eq!(allocator.allocate(1024).as_ptr(), first);
     }
 
     #[test]

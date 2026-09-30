@@ -104,6 +104,12 @@ pub trait Allocator: Send + Sync {
     fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         Some(self.allocate(nbytes))
     }
+
+    /// Wait for device work in flight that keeps freed memory alive, so it
+    /// can be reused: a static allocator out of room calls this, then tries
+    /// again. MPS work holds its tensors until the GPU has run it; the
+    /// default suits devices whose frees take effect at once.
+    fn reclaim(&self) {}
 }
 
 /// The allocator for `device` (PyTorch: `c10::GetAllocator`): the CPU
