@@ -1,7 +1,7 @@
 //! Plan steps as Metal kernels on MPS: [`encode`] picks a step's kernel
-//! (in `lumen/ops/<op>/mps/<op>.metal`: elementwise, reduce, dot_general,
+//! (in `lumen/ops/<op>/mps.metal`: elementwise, reduce, dot_general,
 //! layout, factory) and computes its arguments (shapes, strides, op codes),
-//! and `lumen/ops/mps/launch.mm` launches it into lumen's MPS stream without
+//! and `lumen/ops/mps.mm` launches it into lumen's MPS stream without
 //! waiting (see [`crate::stream::mps`]). Values are contiguous, so a kernel only
 //! needs strides where it reads in another order (broadcast, transpose,
 //! reductions and contractions).
@@ -18,7 +18,7 @@ use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar, Tensor};
 
 unsafe extern "C" {
-    // In lumen/ops/mps/launch.mm.
+    // In lumen/ops/mps.mm.
     fn lumen_mps_launch_kernel(
         name: *const c_char,
         buffers: *const *const u8,

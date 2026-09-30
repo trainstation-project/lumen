@@ -2,7 +2,7 @@
 // *.metal): type traits, scalar conversions, index helpers and the dtype
 // lists that instantiate kernels. build.rs concatenates this file and the
 // op files into one source, compiled at runtime into one library;
-// lumen/ops/mps/launch.mm launches its kernels.
+// lumen/ops/mps.mm launches its kernels.
 //
 // Kernels are templates instantiated per op and dtype, named after the
 // primitive, <op>_<dtype> (add_f32, reduce_sum_i64, ...), or <kernel>_<bytes>

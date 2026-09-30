@@ -107,11 +107,11 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps_shim.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/mps_fill.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/fill.metal");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps.metal");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
-    println!("cargo:rerun-if-changed=lumen/ops/mps/launch.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/mps.mm");
     for source in PRIMITIVE_KERNELS {
         println!("cargo:rerun-if-changed={source}");
     }
@@ -121,7 +121,7 @@ fn build_mps_shim() {
     // can hand them to newLibraryWithSource: at runtime, without needing
     // Xcode's metal/metallib tools at build time.
     embed_metal_source(
-        &["lumen/ops/fill/mps/fill.metal"],
+        &["lumen/ops/fill/mps.metal"],
         "kMpsFillSource",
         "mps_fill_source.h",
     );
@@ -133,9 +133,9 @@ fn build_mps_shim() {
 
     cc::Build::new()
         .file("lumen/allocator/mps_shim.mm")
-        .file("lumen/ops/fill/mps/mps_fill.mm")
+        .file("lumen/ops/fill/mps.mm")
         .file("lumen/stream/mps/mps.mm")
-        .file("lumen/ops/mps/launch.mm")
+        .file("lumen/ops/mps.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
         ))
@@ -149,14 +149,14 @@ fn build_mps_shim() {
 }
 
 /// The graph primitives' Metal kernels, one file per op, compiled as one
-/// library (`lumen/ops/mps/launch.mm`): the shared definitions first.
+/// library (`lumen/ops/mps.mm`): the shared definitions first.
 const PRIMITIVE_KERNELS: &[&str] = &[
-    "lumen/ops/mps/common.metal",
-    "lumen/ops/elementwise/mps/elementwise.metal",
-    "lumen/ops/reduce/mps/reduce.metal",
-    "lumen/ops/dot_general/mps/dot_general.metal",
-    "lumen/ops/layout/mps/layout.metal",
-    "lumen/ops/factory/mps/factory.metal",
+    "lumen/ops/mps.metal",
+    "lumen/ops/elementwise/mps.metal",
+    "lumen/ops/reduce/mps.metal",
+    "lumen/ops/dot_general/mps.metal",
+    "lumen/ops/layout/mps.metal",
+    "lumen/ops/factory/mps.metal",
 ];
 
 /// Write the text of Metal `sources`, concatenated in order, into `header`

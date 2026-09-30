@@ -1,7 +1,7 @@
 // Factory primitives: full (a value, dtype-agnostic by element size) and
 // iota (the index along one dimension).
 //
-// Compiled after lumen/ops/mps/common.metal, which build.rs puts first
+// Compiled after lumen/ops/mps.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
 #define FULL(NAME, E)                                                                                       \

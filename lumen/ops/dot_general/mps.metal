@@ -2,7 +2,7 @@
 // batch, free and contracting dimensions each collapse into one), and a
 // naive one, one thread per output element, for the rest.
 //
-// Compiled after lumen/ops/mps/common.metal, which build.rs puts first
+// Compiled after lumen/ops/mps.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
 // One output element of a dot_general: the output dimensions (batch, lhs

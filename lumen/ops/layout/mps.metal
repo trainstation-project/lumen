@@ -3,7 +3,7 @@
 // strides, which express broadcast_in_dim (stride 0 on new or size-1
 // dimensions), transpose (permuted strides) and copies.
 //
-// Compiled after lumen/ops/mps/common.metal, which build.rs puts first
+// Compiled after lumen/ops/mps.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
 #define GATHER(NAME, E)                                              \
