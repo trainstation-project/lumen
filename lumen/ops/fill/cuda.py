@@ -1,5 +1,6 @@
 import functools
 import math
+import os
 from typing import Callable
 
 import cuda.bindings.driver as cuda
@@ -94,4 +95,25 @@ def _op(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_siz
     return cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
 
 
-register(f"{LIBRARY_NAME}::fill_", "cuda", _op)
+_CACHE: dict = {}
+
+
+def _python_dispatch(dtype: str, shape: tuple[int, ...], strides: tuple[int, ...], vector_size: int) -> Callable:
+    def launch(address: int, value, stream: int) -> None:
+        key = (dtype, shape, strides, vector_size)
+        compiled = _CACHE.get(key)
+
+        if compiled is None:
+            element = _ELEMENT[dtype]
+            
+            ptr = cute.runtime.nullptr(element, cute.AddressSpace.gmem, assumed_align=vector_size * element.width // 8)
+            kernel = _FillCUDAKernel(element, shape, strides, vector_size)
+        
+            compiled = _CACHE[key] = cute.compile(kernel, ptr, element(0), cuda.CUstream(0), options="--enable-tvm-ffi")
+
+        compiled(address, value, stream)
+
+    return launch
+
+
+register(f"{LIBRARY_NAME}::fill_", "cuda", _python_dispatch)
