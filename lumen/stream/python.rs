@@ -46,7 +46,7 @@ fn _cuda_synchronize(py: Python<'_>, device: Option<&Bound<'_, PyAny>>) -> PyRes
 /// (`torch.cuda.is_available()`).
 #[pyfunction]
 fn _cuda_is_available() -> bool {
-    core::allocator::cuda::is_available()
+    core::device::cuda::is_available()
 }
 
 /// Make the CUDA stream `stream` (a `cudaStream_t` as an int) wait for the

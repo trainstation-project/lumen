@@ -122,7 +122,7 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
         }
 
         Device::Mps => {
-            if !mps::is_available() {
+            if !crate::device::mps::is_available() {
                 return Err(
                     "MPS is not available (lumen was built without Metal, or there is no \
                      Metal device)"
@@ -133,11 +133,11 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
             #[cfg(lumen_mps_linked)]
             return Ok(Arc::new(mps::get()));
             #[cfg(not(lumen_mps_linked))]
-            unreachable!("mps::is_available() is false without Metal")
+            unreachable!("device::mps::is_available() is false without Metal")
         }
 
         Device::Cuda(index) => {
-            let count = cuda::device_count();
+            let count = crate::device::cuda::device_count();
             if index >= count {
                 return Err(format!(
                     "CUDA device {index} is not available ({count} device(s) found{})",
@@ -151,7 +151,7 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
             #[cfg(lumen_cuda_linked)]
             return Ok(Arc::new(cuda::get(index)));
             #[cfg(not(lumen_cuda_linked))]
-            unreachable!("cuda::device_count() is 0 without CUDA")
+            unreachable!("device::cuda::device_count() is 0 without CUDA")
         }
     }
 }

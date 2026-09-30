@@ -10,6 +10,7 @@ a CUDA exchange is ordered against.
 import enum
 
 from lumen import _C
+from lumen._C import LIBRARY_NAME
 
 __all__ = ["DLDeviceType", "from_dlpack"]
 
@@ -57,7 +58,7 @@ def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
             )
         return __dlpack__(self.to(_device_of(dl_device)), stream=stream, max_version=max_version)
     if copy:
-        raise BufferError("lumen cannot copy a tensor on the same device when exporting it")
+        raise BufferError(f"{LIBRARY_NAME} cannot copy a tensor on the same device when exporting it")
 
     if stream is not None and not isinstance(stream, int):
         raise TypeError("stream must be ``int`` or ``None``")

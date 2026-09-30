@@ -3,6 +3,7 @@
 from typing import Any, Literal, Optional, Sequence, Union
 
 __version__: str
+LIBRARY_NAME: str
 
 Scalar = Union[bool, int, float]
 

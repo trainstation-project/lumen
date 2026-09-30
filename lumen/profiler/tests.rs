@@ -496,7 +496,7 @@ fn within(gpu: &Event, op: &Event, slack_ns: u64) {
 mod mps {
     use super::*;
     use crate::TensorOptions;
-    use crate::allocator::mps;
+    use crate::device::mps;
 
     fn on_mps(dtype: DType) -> TensorOptions {
         TensorOptions::new().dtype(dtype).device(Device::Mps)
@@ -625,7 +625,7 @@ mod mps {
 mod cuda {
     use super::*;
     use crate::TensorOptions;
-    use crate::allocator::cuda;
+    use crate::device::cuda;
 
     #[test]
     fn cuda_copies_are_timed_on_the_gpu() {

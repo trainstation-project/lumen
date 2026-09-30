@@ -111,19 +111,6 @@ impl CachePolicy for MpsPolicy {
     }
 }
 
-/// True when lumen was built with Metal support (macOS + `mps` feature) and
-/// a default Metal device exists. Safe to call on any build.
-pub fn is_available() -> bool {
-    #[cfg(lumen_mps_linked)]
-    {
-        unsafe { ffi::lumen_mps_available() != 0 }
-    }
-    #[cfg(not(lumen_mps_linked))]
-    {
-        false
-    }
-}
-
 #[cfg(lumen_mps_linked)]
 mod ffi {
     // C ABI exported by mps_shim.mm.
@@ -137,7 +124,6 @@ mod ffi {
     }
 
     unsafe extern "C" {
-        pub fn lumen_mps_available() -> i32;
         pub fn lumen_mps_limits(out: *mut Limits) -> i32;
         pub fn lumen_mps_alloc(nbytes: usize) -> *mut u8;
         pub fn lumen_mps_free(ptr: *mut u8);
@@ -254,7 +240,10 @@ pub type MpsAllocator = CachingAllocator<MpsBackend, MpsPolicy>;
 /// Panics if no Metal device is present; check [`is_available`] first.
 #[cfg(lumen_mps_linked)]
 pub fn get() -> MpsAllocator {
-    assert!(is_available(), "no Metal device available");
+    assert!(
+        crate::device::mps::is_available(),
+        "no Metal device available"
+    );
     static ALLOCATOR: OnceLock<MpsAllocator> = OnceLock::new();
     ALLOCATOR
         .get_or_init(|| CachingAllocator::new(MpsBackend, MpsPolicy::from_device()))

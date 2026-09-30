@@ -37,7 +37,7 @@ impl Config {
         } else {
             "False"
         };
-        format!("lumen.config(memory_caching={caching})")
+        format!("{}.config(memory_caching={caching})", crate::LIBRARY_NAME)
     }
 }
 

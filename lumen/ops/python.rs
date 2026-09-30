@@ -3,10 +3,12 @@
 //! `lumen.ops.register`.
 //!
 //! Only the kernel is Python. A registered kernel is a compile hook,
-//! `compile(dtype, shape, strides)`, returning a `launch(address, value,
-//! stream)` for that one layout; everything around it is Rust: dispatch,
-//! the layout, a cache of launchers (so a layout compiles once), the data
-//! pointer and the value. A launcher that is a TVM-FFI function (what the
+//! `compile(dtype, shape, strides, vector_size)`, returning a
+//! `launch(address, value, stream)` for that one layout and vector size
+//! (how many elements, contiguous along the first dimension, a thread may
+//! store at once: [`crate::ops::vector_size`]); everything around it is
+//! Rust: dispatch, the layout, the vector size, a cache of launchers (so
+//! each compiles once), the data pointer and the value. A launcher that is a TVM-FFI function (what the
 //! CuTe DSL compiles with `--enable-tvm-ffi`) is called through its C ABI
 //! ([`crate::ops::tvm_ffi`]), so a cached launch runs no Python at all; any
 //! other callable is called through Python.
@@ -56,16 +58,17 @@ static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new())
 /// that Rust will actually call kernels of that name, with that signature.
 /// Registering anything else would silently do nothing.
 const OP_SIGNATURES: &[(&str, &str)] = &[
-    ("lumen::fill_", LAUNCHER_SIGNATURE),
-    ("lumen::dummy_op", LAUNCHER_SIGNATURE),
+    (op_name!("fill_"), LAUNCHER_SIGNATURE),
+    (op_name!("dummy_op"), LAUNCHER_SIGNATURE),
 ];
 
 /// The compile hook's signature, and the launcher's it returns.
-const LAUNCHER_SIGNATURE: &str = "(dtype, shape, strides) -> launch(address, value, stream)";
+const LAUNCHER_SIGNATURE: &str =
+    "(dtype, shape, strides, vector_size) -> launch(address, value, stream)";
 
-/// Launchers a kernel's compile hook returned, by kernel, dtype and layout.
-/// Never evicted, so a cached TVM-FFI handle stays valid.
-type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>);
+/// Launchers a kernel's compile hook returned, by kernel, dtype, layout and
+/// vector size. Never evicted, so a cached TVM-FFI handle stays valid.
+type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>, usize);
 static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Launcher>>> = Mutex::new(None);
 
 /// A cached launcher.
@@ -113,8 +116,8 @@ const STREAM: usize = 0;
 /// [`OP_SIGNATURES`] (see [`check_op`]).
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
-        "lumen::fill_" => &core::ops::fill::FILL_PY,
-        "lumen::dummy_op" => &core::ops::dummy_op::DUMMY_OP_PY,
+        n if n == core::ops::fill::FILL.name() => &core::ops::fill::FILL_PY,
+        n if n == core::ops::dummy_op::DUMMY_OP.name() => &core::ops::dummy_op::DUMMY_OP_PY,
         _ => unreachable!("{name} is not in OP_SIGNATURES"),
     }
 }
@@ -156,8 +159,14 @@ impl KernelHandle {
         // The value as the tensor's dtype holds it, as the built-in kernels
         // convert it.
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
+        let vector_size = core::ops::vector_size(shape, strides, dtype.size_of(), address);
         let run = || {
-            let key = (self.0, dtype, shape.to_vec(), strides.to_vec());
+            // A launcher launches on the current device: make it the tensor's.
+            #[cfg(lumen_cuda_linked)]
+            if let core::Device::Cuda(index) = device {
+                crate::device::cuda::set_device(index);
+            }
+            let key = (self.0, dtype, shape.to_vec(), strides.to_vec(), vector_size);
             let cached = LAUNCHERS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -226,11 +235,12 @@ impl KernelHandle {
             return Ok(Step::Done(false));
         };
         // Compiled without holding the cache's lock.
-        let (dtype, shape, strides) = (key.1, &key.2, &key.3);
+        let (dtype, shape, strides, vector_size) = (key.1, &key.2, &key.3, key.4);
         let compiled = compile.bind(py).call1((
             dtype_name(dtype),
             PyTuple::new(py, shape)?,
             PyTuple::new(py, strides)?,
+            vector_size,
         ))?;
         let launcher = Launcher::new(py, compiled)?;
         let step = match &launcher {

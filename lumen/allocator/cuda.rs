@@ -69,39 +69,15 @@ impl CachePolicy for CudaPolicy {
 }
 
 #[cfg(lumen_cuda_linked)]
-pub(crate) mod ffi {
+mod ffi {
     use std::ffi::c_void;
 
     // Minimal CUDA runtime API surface, linked dynamically against cudart.
     #[link(name = "cudart")]
     unsafe extern "C" {
-        pub fn cudaSetDevice(device: i32) -> i32;
-        pub fn cudaGetDeviceCount(count: *mut i32) -> i32;
         pub fn cudaMalloc(devPtr: *mut *mut c_void, size: usize) -> i32;
         pub fn cudaFree(devPtr: *mut c_void) -> i32;
     }
-}
-
-/// Number of visible CUDA devices (`torch.cuda.device_count()`); 0 when
-/// lumen was built without CUDA or the driver reports an error.
-pub fn device_count() -> usize {
-    #[cfg(lumen_cuda_linked)]
-    {
-        let mut count = 0;
-        match unsafe { ffi::cudaGetDeviceCount(&mut count) } {
-            0 => count.max(0) as usize,
-            _ => 0,
-        }
-    }
-    #[cfg(not(lumen_cuda_linked))]
-    {
-        0
-    }
-}
-
-/// Whether any CUDA device is usable (`torch.cuda.is_available()`).
-pub fn is_available() -> bool {
-    device_count() > 0
 }
 
 /// An uncached [`Allocator`] over the CUDA runtime: one `cudaMalloc` per
@@ -140,7 +116,7 @@ impl Allocator for CudaBackend {
 
     fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         // c10 sets the device context before every allocation.
-        unsafe { ffi::cudaSetDevice(self.device_index) };
+        crate::device::cuda::set_device(self.device_index as usize);
         let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
         if err != 0 {
@@ -151,9 +127,9 @@ impl Allocator for CudaBackend {
             NonNull::new(ptr.cast())?,
             // cudaMalloc guarantees 256-byte alignment.
             Layout::from_size_align(nbytes, 256).unwrap(),
-            move |p| unsafe {
-                ffi::cudaSetDevice(device_index);
-                ffi::cudaFree(p.as_ptr().cast());
+            move |p| {
+                crate::device::cuda::set_device(device_index as usize);
+                unsafe { ffi::cudaFree(p.as_ptr().cast()) };
             },
         ))
     }
