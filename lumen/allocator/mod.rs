@@ -1,14 +1,12 @@
-pub mod cache_stats;
-pub mod caching;
 pub mod config;
 mod cpu;
 pub mod cuda;
 pub mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+pub mod static_allocator;
 #[cfg(test)]
 mod tests;
-pub mod traits;
 
 pub use cpu::CpuAllocator;
 
@@ -22,8 +20,8 @@ use crate::device::Device;
 enum Deleter {
     /// Free with `alloc::dealloc` using the stored layout (CPU path).
     Std,
-    /// Custom deletion function to free memory. Used by the CUDA caching
-    /// allocator to return the block to its pool rather than freeing it.
+    /// Custom deletion function to free memory: a backend's release, or an
+    /// static allocator's bookkeeping.
     Custom(Box<dyn FnOnce(NonNull<u8>) + Send + Sync>),
 }
 
@@ -88,9 +86,9 @@ impl Drop for DataPtr {
 /// an owning [`DataPtr`] that releases the memory on drop.
 ///
 /// Implemented by user-facing allocators ([`cpu::CpuAllocator`],
-/// [`caching::CachingAllocator`]) and by raw *backends* alike: to the
-/// caching layer, a backend is just an uncached `Allocator` (one
-/// `cudaMalloc`/Metal allocation per call).
+/// [`static_allocator::StaticAllocator`]) and by raw *backends* alike: to an allocator, a backend is
+/// just an uncached `Allocator` (one `cudaMalloc`/Metal allocation per
+/// call), asked once for the static allocator's region.
 pub trait Allocator: Send + Sync {
     fn device(&self) -> Device;
 
@@ -99,10 +97,7 @@ pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> DataPtr;
 
     /// Fallible allocation: `None` when the device cannot satisfy the
-    /// request right now.
-    ///
-    /// Caching allocators use this on their OOM path — release cached
-    /// segments, then retry — which must not go through a panic. The
+    /// request right now (a static allocator reserving its region uses this). The
     /// default suits allocators whose failures are unrecoverable (a host
     /// `malloc` failure ends the process anyway): just call
     /// [`allocate`](Self::allocate).
@@ -112,8 +107,8 @@ pub trait Allocator: Send + Sync {
 }
 
 /// The allocator for `device` (PyTorch: `c10::GetAllocator`): the CPU
-/// allocator, or the device's global caching allocator. Errors if lumen was
-/// built without that backend or the device is not present.
+/// allocator, or the device's allocator. Errors if lumen was built without that
+/// backend or the device is not present.
 pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
     match device {
         Device::Cpu => {

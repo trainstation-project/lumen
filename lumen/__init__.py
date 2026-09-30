@@ -10,7 +10,7 @@ wraps:
   and NumPy interop (``lumen.to_numpy``, ``lumen.from_numpy``,
   ``np.array(t)``).
 * ``lumen.allocator`` (``lumen/allocator/``) — ``lumen.config``, runtime
-  settings such as ``lumen.config.memory_caching``.
+  settings such as ``lumen.config.static_allocator_bytes``.
 * ``lumen.device`` — a device, modeled on ``torch.device``.
 * ``lumen.profiler`` (``lumen/profiler/``) — the profiler, modeled on
   ``torch.profiler``.

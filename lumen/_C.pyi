@@ -113,7 +113,7 @@ class device:
 class Config:
     """Process-wide runtime settings; use the ``lumen.config`` instance."""
 
-    memory_caching: bool
+    static_allocator_bytes: int
 
 config: Config
 
