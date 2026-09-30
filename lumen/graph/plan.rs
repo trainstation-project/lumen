@@ -215,6 +215,9 @@ impl Plan {
                 ));
             }
         }
+        let _run = crate::profiler::record_op(op_name!("plan"), || {
+            self.inputs.iter().map(|ty| ty.shape.clone()).collect()
+        });
         let host: Vec<Tensor> = inputs
             .iter()
             .map(|t| dispatch_dtype!(t.dtype(), T => t.to(Device::Cpu).contiguous::<T>()))
@@ -233,6 +236,9 @@ impl Plan {
             Buffer::Workspace(offset) => workspace.data_ptr().wrapping_add(offset),
         };
         for step in &self.steps {
+            let _step = crate::profiler::record_op(step.primitive.name(), || {
+                step.inputs.iter().map(|(_, ty)| ty.shape.clone()).collect()
+            });
             let args: Vec<*const u8> = step
                 .inputs
                 .iter()
