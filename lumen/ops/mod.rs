@@ -141,13 +141,11 @@ pub(crate) fn vector_size(
     itemsize: usize,
     address: usize,
 ) -> usize {
-    // The largest power of two dividing the address.
-    let align = address & address.wrapping_neg();
     let fits = |v: usize| {
         strides.first() == Some(&1)
             && shape[0].is_multiple_of(v)
             && strides[1..].iter().all(|s| s.is_multiple_of(v))
-            && align.is_multiple_of(v * itemsize)
+            && address.is_multiple_of(v * itemsize)
     };
     let mut v = MAX_VECTOR_BYTES / itemsize;
     while v > 1 && !fits(v) {

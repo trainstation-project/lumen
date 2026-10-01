@@ -80,11 +80,9 @@ fn fill_has_built_in_host_kernels() {
     if cfg!(lumen_mps_linked) {
         assert!(fill.kernel(DispatchKey::Mps).is_some());
     }
-    assert_eq!(
-        fill.kernel(DispatchKey::Cuda).is_some(),
-        cfg!(lumen_cuda_linked),
-        "the CUDA kernel exists where cudart is linked"
-    );
+    // CUDA: none built in on any build; its fill_ is a CuTe DSL kernel
+    // registered from Python (fill/cuda.py), on `FILL_PY`.
+    assert!(fill.kernel(DispatchKey::Cuda).is_none());
 }
 
 #[test]

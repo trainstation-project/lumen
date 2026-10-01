@@ -69,7 +69,8 @@ impl Tensor {
     /// # Safety
     /// As for [`empty`](Self::empty).
     unsafe fn empty_like(&self) -> Self {
-        let storage = Storage::with_allocator(self.nbytes(), Arc::clone(self.storage.allocator()));
+        let allocator = Arc::clone(self.storage.allocator());
+        let storage = Storage::with_allocator(self.nbytes(), allocator, self.device());
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 

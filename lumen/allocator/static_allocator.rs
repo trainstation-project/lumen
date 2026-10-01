@@ -10,12 +10,11 @@
 //! back whatever order allocations are freed in: a loop that keeps its
 //! inputs alive reuses the same bytes every iteration.
 
-use std::alloc::Layout;
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
-use super::{Allocator, DataPtr};
+use super::Allocator;
 use crate::device::Device;
 
 /// A first-fit allocator over one region of `backend`'s memory. Cheap to
@@ -32,7 +31,7 @@ impl<B: Allocator> Clone for StaticAllocator<B> {
     }
 }
 
-struct Inner<B> {
+struct Inner<B: Allocator> {
     backend: B,
     device: Device,
     alignment: usize,
@@ -42,7 +41,7 @@ struct Inner<B> {
 
 struct State {
     /// The region, reserved on the first allocation.
-    region: Option<DataPtr>,
+    region: Option<Region>,
     /// Free blocks, offset to length; offsets and lengths are multiples of
     /// the alignment, and no two blocks touch (they are merged).
     free: BTreeMap<usize, usize>,
@@ -52,18 +51,25 @@ struct State {
     live_bytes: usize,
 }
 
+/// The start of the region, in the backend's address space.
+struct Region(NonNull<u8>);
+
+// SAFETY: the region is device memory owned by the allocator; the pointer
+// is only offset and handed out, never dereferenced here.
+unsafe impl Send for Region {}
+
 impl<B: Allocator> StaticAllocator<B> {
-    /// A static allocator of `capacity` bytes from `backend`, handing out
-    /// offsets aligned to `alignment` (a power of two). Nothing is reserved
-    /// until the first allocation.
-    pub fn new(backend: B, alignment: usize, capacity: usize) -> Self {
+    /// A static allocator of `capacity` bytes from `backend`, the memory of
+    /// `device`, handing out offsets aligned to `alignment` (a power of
+    /// two). Nothing is reserved until the first allocation.
+    pub fn new(backend: B, device: Device, alignment: usize, capacity: usize) -> Self {
         assert!(
             alignment.is_power_of_two(),
             "alignment must be a power of two"
         );
         StaticAllocator {
             inner: Arc::new(Inner {
-                device: backend.device(),
+                device,
                 backend,
                 alignment,
                 capacity,
@@ -98,7 +104,7 @@ impl<B: Allocator> StaticAllocator<B> {
     }
 }
 
-impl<B> Inner<B> {
+impl<B: Allocator> Inner<B> {
     /// The block an allocation of `nbytes` takes: rounded up to the
     /// alignment, so every block starts aligned.
     fn block(&self, nbytes: usize) -> usize {
@@ -141,38 +147,15 @@ impl<B> Inner<B> {
     }
 }
 
-impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
-    fn device(&self) -> Device {
-        self.inner.device
-    }
-
-    fn allocate(&self, nbytes: usize) -> DataPtr {
-        // Out of room: memory freed but held by device work in flight comes
-        // back once that work is done.
-        let data = self.try_allocate(nbytes).or_else(|| {
-            self.inner.backend.reclaim();
-            self.try_allocate(nbytes)
-        });
-        data.unwrap_or_else(|| {
-            let state = self.inner.lock();
-            panic!(
-                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
-                 (largest block {}); raise {}.config.static_allocator_bytes",
-                self.inner.device,
-                state.free.values().sum::<usize>(),
-                self.inner.capacity,
-                state.free.values().max().unwrap_or(&0),
-                crate::LIBRARY_NAME,
-            )
-        })
-    }
-
-    /// `None` when the region cannot be reserved or has no room left.
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+impl<B: Allocator + 'static> StaticAllocator<B> {
+    /// An allocation of `nbytes`, or `None` when the region has no room
+    /// left. Reserves the region on first use (panicking if the backend
+    /// cannot).
+    pub(crate) fn try_allocate(&self, nbytes: usize) -> Option<NonNull<u8>> {
         let inner = &self.inner;
         let mut state = inner.lock();
         if state.region.is_none() {
-            state.region = Some(inner.backend.try_allocate(inner.capacity)?);
+            state.region = Some(Region(inner.backend.allocate(inner.capacity)));
         }
         let block = inner.block(nbytes);
         // An empty allocation takes no block: any aligned offset will do.
@@ -180,7 +163,7 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
             0 => state.free.iter().next().unwrap_or((&0, &0)),
             _ => state.free.iter().find(|&(_, &len)| len >= block)?,
         };
-        let base = state.region.as_ref().expect("reserved above").as_ptr();
+        let base = state.region.as_ref().expect("reserved above").0.as_ptr();
         // In the device's address space: the backend's memory is not a Rust
         // allocation, so no `add`.
         let ptr = NonNull::new(base.wrapping_add(offset))?;
@@ -203,11 +186,51 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
             live_bytes,
             inner.capacity,
         );
-        let owner = Arc::clone(inner);
-        Some(DataPtr::with_deleter(
-            ptr,
-            Layout::from_size_align(nbytes, inner.alignment).expect("valid layout"),
-            move |_| owner.free(addr, offset, nbytes),
-        ))
+        Some(ptr)
+    }
+}
+
+impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+        // Out of room: memory freed but held by device work in flight comes
+        // back once that work is done.
+        let data = self.try_allocate(nbytes).or_else(|| {
+            self.inner.backend.reclaim();
+            self.try_allocate(nbytes)
+        });
+        data.unwrap_or_else(|| {
+            let state = self.inner.lock();
+            panic!(
+                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
+                 (largest block {}); raise {}.config.static_allocator_bytes",
+                self.inner.device,
+                state.free.values().sum::<usize>(),
+                self.inner.capacity,
+                state.free.values().max().unwrap_or(&0),
+                crate::LIBRARY_NAME,
+            )
+        })
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        let base = match &self.inner.lock().region {
+            Some(region) => region.0.as_ptr().addr(),
+            None => unreachable!("an allocation reserves the region first"),
+        };
+        let addr = ptr.as_ptr().addr();
+        self.inner.free(addr, addr - base, nbytes);
+    }
+}
+
+impl<B: Allocator> Drop for Inner<B> {
+    /// Give the region back to the backend, once no allocation of it is
+    /// left: storages keep their allocator, and so it, alive.
+    fn drop(&mut self) {
+        let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(region) = state.region.take() {
+            // SAFETY: the backend allocated the region with this size, and
+            // nothing points into it any more.
+            unsafe { self.backend.deallocate(region.0, self.capacity) };
+        }
     }
 }

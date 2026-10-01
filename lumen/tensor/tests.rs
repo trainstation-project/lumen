@@ -1,6 +1,6 @@
 //! Unit tests for tensors and storage, one module per topic. They live in
-//! the crate (not tests/) so they can reach private items; the Makefile's
-//! `test-mps` selects the `mps` module by path.
+//! the crate (not tests/) so they can reach private items. The `mps`
+//! module's tests skip where Metal is unavailable.
 
 mod dtype {
     //! Tests for the dtype layer: sizes, names, and per-dtype tensor roundtrips.
