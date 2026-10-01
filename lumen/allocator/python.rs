@@ -17,27 +17,25 @@ struct Config;
 
 #[pymethods]
 impl Config {
-    /// Whether device caching allocators cache freed memory (default
-    /// `True`). Set `False` to send every allocation straight to the device
-    /// (PyTorch: `PYTORCH_NO_CUDA_MEMORY_CACHING=1`), e.g. to debug memory
-    /// errors. Applies to subsequent allocations.
+    /// How many bytes each device's static allocator reserves (default
+    /// 1 GiB), read when the device first allocates; a device that has
+    /// allocated keeps its allocator.
     #[getter]
-    fn memory_caching(&self) -> bool {
-        core::allocator::config::memory_caching()
+    fn static_allocator_bytes(&self) -> usize {
+        core::allocator::config::static_allocator_bytes()
     }
 
     #[setter]
-    fn set_memory_caching(&self, enabled: bool) {
-        core::allocator::config::set_memory_caching(enabled);
+    fn set_static_allocator_bytes(&self, nbytes: usize) {
+        core::allocator::config::set_static_allocator_bytes(nbytes);
     }
 
     fn __repr__(&self) -> String {
-        let caching = if core::allocator::config::memory_caching() {
-            "True"
-        } else {
-            "False"
-        };
-        format!("{}.config(memory_caching={caching})", crate::LIBRARY_NAME)
+        format!(
+            "{}.config(static_allocator_bytes={})",
+            crate::LIBRARY_NAME,
+            core::allocator::config::static_allocator_bytes()
+        )
     }
 }
 

@@ -5,7 +5,7 @@
 //!   timed range on the CPU clock, nested per thread (PyTorch:
 //!   `RecordFunction`), plus user ranges from [`record_function`];
 //! - **memory** (`profile_memory`): each allocation and free by the CPU and
-//!   caching allocators, with the allocator's totals (PyTorch: `[memory]`
+//!   static allocators, with the allocator's totals (PyTorch: `[memory]`
 //!   events);
 //! - **GPU activity** (`Activity::Cuda` / `Activity::Mps`): device-side
 //!   start/end of copies and fills, timed with CUDA events or Metal command

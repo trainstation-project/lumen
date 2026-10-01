@@ -241,7 +241,7 @@ fn memory_is_recorded_only_with_profile_memory() {
     assert!(named(&p, "[memory]").is_empty());
 }
 
-/// Host memory posing as device 3; enough to drive a caching allocator.
+/// Host memory posing as device 3; enough to back an allocator.
 struct FakeDevice;
 
 impl crate::Allocator for FakeDevice {
@@ -255,10 +255,10 @@ impl crate::Allocator for FakeDevice {
 }
 
 #[test]
-fn caching_allocator_reports_blocks_with_its_totals() {
-    let alloc = crate::CachingAllocator::new(FakeDevice, crate::CudaPolicy);
+fn static_allocator_reports_allocations_with_its_totals() {
+    let allocator = crate::StaticAllocator::new(FakeDevice, 256, 2 << 20);
     let p = profile(with_memory(), || {
-        let block = crate::Allocator::allocate(&alloc, 100);
+        let block = crate::Allocator::allocate(&allocator, 100);
         drop(block);
     });
     let memory: Vec<&Event> = named(&p, "[memory]")
@@ -266,14 +266,14 @@ fn caching_allocator_reports_blocks_with_its_totals() {
         .filter(|e| e.device == Device::Cuda(3))
         .collect();
     assert_eq!(memory.len(), 2, "{memory:#?}");
-    // One 512 B block from a 2 MiB segment, then returned to the cache.
+    // 100 bytes live out of the static allocator's 2 MiB, then freed.
     assert_eq!(
         (
             memory[0].bytes,
             memory[0].total_allocated,
             memory[0].total_reserved
         ),
-        (512, 512, 2 << 20)
+        (100, 100, 2 << 20)
     );
     assert_eq!(
         (
@@ -281,7 +281,7 @@ fn caching_allocator_reports_blocks_with_its_totals() {
             memory[1].total_allocated,
             memory[1].total_reserved
         ),
-        (-512, 0, 2 << 20)
+        (-100, 0, 2 << 20)
     );
 }
 

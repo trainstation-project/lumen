@@ -38,7 +38,7 @@ fn detect_cuda() {
         // feature stays "on" but compiles to a stub (see lumen/allocator/cuda.rs).
         println!(
             "cargo:warning=CUDA feature enabled but cudart was not found; \
-             building the no-GPU caching allocator only (set CUDA_HOME or \
+             building without CUDA (set CUDA_HOME or \
              CUDART_LIB_DIR to link the real backend)"
         );
         return;

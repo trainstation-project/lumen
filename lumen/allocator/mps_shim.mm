@@ -7,7 +7,7 @@
 //
 // We allocate MTLBuffers in Shared storage mode: on Apple Silicon's unified
 // memory, buffer.contents is an ordinary CPU pointer, which is what lets
-// the Rust caching allocator treat Metal like any other raw-memory backend.
+// the Rust static allocator treat Metal like any other raw-memory backend.
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -31,7 +31,7 @@ static id<MTLDevice> lumen_default_device(void) {
 // contents pointer -> backing MTLBuffer, so lumen_mps_free can release the
 // buffer given only the pointer the Rust side holds. Entries are __strong:
 // inserting retains, erasing releases (ARC). Ordered, so a pointer *inside*
-// a buffer (a caching-allocator block within a segment) finds its buffer.
+// a buffer (an allocation within the static allocator's region) finds its buffer.
 static std::map<char *, id<MTLBuffer> __strong> g_buffers;
 static std::mutex g_buffers_mu;
 

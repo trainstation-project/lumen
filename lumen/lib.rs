@@ -27,10 +27,7 @@ mod python;
 pub mod stream;
 pub mod tensor;
 
-pub use allocator::caching::CachingAllocator;
-pub use allocator::cuda::CudaPolicy;
-pub use allocator::mps::MpsPolicy;
-pub use allocator::traits::CachePolicy;
+pub use allocator::static_allocator::StaticAllocator;
 pub use allocator::{Allocator, CpuAllocator, DataPtr};
 pub use device::Device;
 pub use tensor::Tensor;
