@@ -59,12 +59,12 @@ template <typename D> inline D convert_value(half x) { return from_float<D>(floa
 template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }
 template <typename D> inline D convert_value(float x) { return from_float<D>(x); }
 
-#define BINARY(OP, FN, NAME, T, U)                              \
-    kernel void OP##_##NAME(device const T *a [[buffer(0)]],    \
-                            device const T *b [[buffer(1)]],    \
-                            device U *out [[buffer(2)]],        \
-                            ELEMENTWISE_ARGS(3)) {              \
-        FOR_EACH_ELEMENT(j) { binary<FN, T, U>(a, b, out, j); } \
+#define BINARY(OP, FN, NAME, T, U)                                 \
+    kernel void OP##_##NAME(device const T *a [[buffer(0)]],       \
+                            device const T *b [[buffer(1)]],       \
+                            device U *out [[buffer(2)]],           \
+                            ELEMENTWISE_ARGS(3)) {                 \
+        FOR_EACH_ELEMENT(j, T) { binary<FN, T, U>(a, b, out, j); } \
     }
 
 #define ARITHMETIC(NAME, T)      \
@@ -84,14 +84,14 @@ FOR_ALL(ORDERED)
 #define NEG(NAME, T)                                                                                            \
     kernel void neg_##NAME(device const T *x [[buffer(0)]], device T *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \
         typedef typename acc<T>::type A;                                                                        \
-        FOR_EACH_ELEMENT(j) { out[j] = T(-A(x[j])); }                                                           \
+        FOR_EACH_ELEMENT(j, T) { out[j] = T(-A(x[j])); }                                                        \
     }
 
 FOR_NUMERIC(NEG)
 
 #define UNARY(OP, FN, NAME, T)                                                                                    \
     kernel void OP##_##NAME(device const T *in [[buffer(0)]], device T *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \
-        FOR_EACH_ELEMENT(j) { unary<FN, T>(in, out, j); }                                                         \
+        FOR_EACH_ELEMENT(j, T) { unary<FN, T>(in, out, j); }                                                      \
     }
 
 #define FLOATING(NAME, T)        \
@@ -106,7 +106,7 @@ FOR_FLOAT(FLOATING)
 #define CONVERT(SNAME, S, DNAME, D)                                                           \
     kernel void convert_##SNAME##_##DNAME(                                                    \
         device const S *in [[buffer(0)]], device D *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \
-        FOR_EACH_ELEMENT(j) { out[j] = convert_value<D>(in[j]); }                             \
+        FOR_EACH_ELEMENT(j, S) { out[j] = convert_value<D>(in[j]); }                          \
     }
 
 #define CONVERT_FROM(NAME, S) FOR_ALL_WITH(CONVERT, NAME, S)
@@ -119,7 +119,7 @@ FOR_ALL(CONVERT_FROM)
                               device const E *b [[buffer(2)]],       \
                               device E *out [[buffer(3)]],           \
                               ELEMENTWISE_ARGS(4)) {                 \
-        FOR_EACH_ELEMENT(j) { out[j] = pred[j] ? a[j] : b[j]; }      \
+        FOR_EACH_ELEMENT(j, E) { out[j] = pred[j] ? a[j] : b[j]; }   \
     }
 
 FOR_BYTES(SELECT)

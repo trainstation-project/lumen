@@ -6,7 +6,7 @@
 
 #define FULL(NAME, E)                                                                                            \
     kernel void fill_##NAME(device E *out [[buffer(0)]], constant E &value [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \
-        FOR_EACH_ELEMENT(j) { out[j] = value; }                                                                  \
+        FOR_EACH_ELEMENT(j, E) { out[j] = value; }                                                               \
     }
 
 FOR_BYTES(FULL)

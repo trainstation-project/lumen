@@ -67,9 +67,14 @@ fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
     dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec())
 }
 
-/// Elements an elementwise kernel's thread takes (`PER_THREAD` in
-/// `lumen/ops/mps.metal`).
-const PER_THREAD: usize = 4;
+/// Bytes of elements an elementwise kernel's thread takes
+/// (`BYTES_PER_THREAD` in `lumen/ops/mps.metal`).
+const BYTES_PER_THREAD: usize = 16;
+
+/// The elements of `dtype` a thread of an elementwise kernel takes.
+fn per_thread(dtype: DType) -> usize {
+    (BYTES_PER_THREAD / dtype.size_of()).max(1)
+}
 
 /// `dims` (each a size and stride, outermost first) as one dimension of
 /// the same elements, if they are laid out as one: its size and stride.
@@ -132,7 +137,8 @@ pub(crate) fn encode(
     // per output element, or per PER_THREAD elements for elementwise ones.
     let n = out.numel();
     let mut grid = Grid::Threads([n, 1, 1]);
-    let elementwise = Grid::Threads([n.div_ceil(PER_THREAD), 1, 1]);
+    // An elementwise kernel's grid, for elements of `dtype` a thread.
+    let elementwise = |dtype| Grid::Threads([n.div_ceil(per_thread(dtype)), 1, 1]);
     if n > u32::MAX as usize {
         return Err(format!(
             "{}: {n} elements are more than MPS kernels index",
@@ -142,21 +148,21 @@ pub(crate) fn encode(
     let (kernel, bytes) = match &step.primitive {
         // One kernel per op and dtype, named after the primitive.
         p @ (Add | Sub | Mul | Div | Max | Eq | Lt | Neg | Exp | Log | Rsqrt | Tanh | Logistic) => {
-            grid = elementwise;
+            grid = elementwise(args[0].dtype);
             (
                 format!("{}_{}", p.name(), args[0].dtype),
                 vec![u32_arg(n as u32)],
             )
         }
         ConvertElementType { .. } => {
-            grid = elementwise;
+            grid = elementwise(args[0].dtype);
             (
                 format!("convert_{}_{}", args[0].dtype, out.dtype),
                 vec![u32_arg(n as u32)],
             )
         }
         Select => {
-            grid = elementwise;
+            grid = elementwise(out.dtype);
             (
                 format!("select_{}", out.dtype.size_of()),
                 vec![u32_arg(n as u32)],
@@ -291,7 +297,7 @@ pub(crate) fn encode(
             }
         }
         Full { fill_value, .. } => {
-            grid = elementwise;
+            grid = elementwise(out.dtype);
             (
                 format!("fill_{}", out.dtype.size_of()),
                 vec![element_arg(out.dtype, *fill_value), u32_arg(n as u32)],

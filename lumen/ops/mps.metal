@@ -112,15 +112,19 @@ struct Max {
     template <typename A> static A identity() { return is_bool_t<A>() ? A(false) : from_float<A>(-INFINITY); }
 };
 
-// Elementwise kernels take PER_THREAD elements a thread, spaced a grid
-// apart: thread i of `threads` takes i, i + threads, ..., so each load
-// across a SIMD group is contiguous. Launched over ceil(n / PER_THREAD)
+// Elementwise kernels take BYTES_PER_THREAD bytes of elements of T a
+// thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:
+// thread i of `threads` takes i, i + threads, ..., so each load across a
+// SIMD group is contiguous. Launched over ceil(n / per_thread<T>())
 // threads (lumen/graph/mps/mod.rs). ELEMENTWISE_ARGS are the kernel
 // parameters the loop needs, after the kernel's buffers.
-#define PER_THREAD 4
+#define BYTES_PER_THREAD 16
+template <typename T> constexpr uint per_thread() {
+    return sizeof(T) >= BYTES_PER_THREAD ? 1 : BYTES_PER_THREAD / sizeof(T);
+}
 #define ELEMENTWISE_ARGS(N) \
     constant uint &n [[buffer(N)]], uint i [[thread_position_in_grid]], uint threads [[threads_per_grid]]
-#define FOR_EACH_ELEMENT(j) for (uint j = i, k_ = 0; k_ < PER_THREAD && j < n; ++k_, j += threads)
+#define FOR_EACH_ELEMENT(j, T) for (uint j = i, k_ = 0; k_ < per_thread<T>() && j < n; ++k_, j += threads)
 
 // The flat offset of row-major index `idx` of `sizes` under `strides`.
 inline ulong offset_of(ulong idx, uint ndim, constant ulong *sizes, constant ulong *strides) {
