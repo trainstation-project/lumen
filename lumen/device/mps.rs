@@ -1,6 +1,6 @@
 #[cfg(lumen_mps_linked)]
 mod ffi {
-    // C ABI exported by allocator/mps_shim.mm.
+    // C ABI exported by allocator/mps/mps_shim.mm.
     unsafe extern "C" {
         pub fn lumen_mps_available() -> i32;
     }
