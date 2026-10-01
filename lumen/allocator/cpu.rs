@@ -21,11 +21,6 @@ static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static PROFILED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 static PROFILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// The layout of a CPU block: 64-byte aligned, to keep SIMD loads happy.
-fn layout(nbytes: usize) -> Layout {
-    Layout::from_size_align(nbytes, 64).expect("invalid allocation layout")
-}
-
 impl CpuAllocator {
     pub fn get() -> &'static dyn Allocator {
         &CPU_ALLOCATOR
@@ -34,7 +29,8 @@ impl CpuAllocator {
 
 impl Allocator for CpuAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        let layout = layout(nbytes);
+        // 64-byte alignment to keep SIMD loads happy.
+        let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
         if nbytes == 0 {
             // Layout with size 0 is fine; dangling but aligned.
             return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
@@ -76,6 +72,6 @@ impl Allocator for CpuAllocator {
         }
         // SAFETY: the caller passes a live block of ours, allocated with
         // this layout.
-        unsafe { alloc::dealloc(ptr.as_ptr(), layout(nbytes)) }
+        unsafe { alloc::dealloc(ptr.as_ptr(), Layout::from_size_align_unchecked(nbytes, 64)) }
     }
 }
