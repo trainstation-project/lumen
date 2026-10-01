@@ -245,10 +245,6 @@ fn memory_is_recorded_only_with_profile_memory() {
 struct FakeDevice;
 
 impl crate::Allocator for FakeDevice {
-    fn device(&self) -> Device {
-        Device::Cuda(3)
-    }
-
     fn allocate(&self, nbytes: usize) -> crate::DataPtr {
         crate::Allocator::allocate(&crate::CpuAllocator, nbytes)
     }
@@ -256,7 +252,7 @@ impl crate::Allocator for FakeDevice {
 
 #[test]
 fn static_allocator_reports_allocations_with_its_totals() {
-    let allocator = crate::StaticAllocator::new(FakeDevice, 256, 2 << 20);
+    let allocator = crate::StaticAllocator::new(FakeDevice, Device::Cuda(3), 256, 2 << 20);
     let p = profile(with_memory(), || {
         let block = crate::Allocator::allocate(&allocator, 100);
         drop(block);

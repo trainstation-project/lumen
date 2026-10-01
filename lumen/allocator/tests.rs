@@ -5,13 +5,7 @@
 //! `test-cuda` / `test-mps` select by path.
 
 mod cpu {
-    use crate::{Allocator, CpuAllocator, DataPtr, Device};
-
-    #[test]
-    fn allocator_reports_cpu_device() {
-        assert_eq!(CpuAllocator.device(), Device::Cpu);
-        assert_eq!(CpuAllocator::get().device(), Device::Cpu);
-    }
+    use crate::{CpuAllocator, DataPtr};
 
     #[test]
     fn get_returns_the_same_global_instance() {
@@ -104,10 +98,6 @@ mod static_allocator {
     }
 
     impl Allocator for Host {
-        fn device(&self) -> Device {
-            Device::Cuda(0)
-        }
-
         fn allocate(&self, nbytes: usize) -> DataPtr {
             self.reservations.fetch_add(1, Ordering::Relaxed);
             CpuAllocator.allocate(nbytes)
@@ -119,7 +109,10 @@ mod static_allocator {
         let host = Host {
             reservations: Arc::clone(&reservations),
         };
-        (StaticAllocator::new(host, 256, capacity), reservations)
+        (
+            StaticAllocator::new(host, Device::Cuda(0), 256, capacity),
+            reservations,
+        )
     }
 
     #[test]
@@ -128,7 +121,6 @@ mod static_allocator {
         assert_eq!(reservations.load(Ordering::Relaxed), 0);
         let (_a, _b) = (allocator.allocate(100), allocator.allocate(100));
         assert_eq!(reservations.load(Ordering::Relaxed), 1);
-        assert_eq!(allocator.device(), Device::Cuda(0));
         assert_eq!(allocator.capacity(), 1 << 20);
     }
 
@@ -236,7 +228,7 @@ mod devices {
 
     #[test]
     fn cpu_is_always_available() {
-        assert_eq!(allocator_for(Device::Cpu).unwrap().device(), Device::Cpu);
+        assert!(allocator_for(Device::Cpu).is_ok());
         let t = Tensor::zeros(&[2], Device::Cpu);
         assert_eq!(t.device(), Device::Cpu);
         assert_eq!(Storage::new(8, Device::Cpu).device(), Device::Cpu);
@@ -279,10 +271,9 @@ mod cuda {
 
     #[cfg(lumen_cuda_linked)]
     mod device {
-        use crate::allocator::allocator_for;
         use crate::allocator::cuda::{self, CudaBackend};
         use crate::allocator::static_allocator::StaticAllocator;
-        use crate::{Allocator, Device};
+        use crate::{Allocator, Device, Storage};
 
         /// Skip guard: returns early from a test when there is no GPU.
         macro_rules! require_cuda {
@@ -298,9 +289,8 @@ mod cuda {
         fn reports_cuda_devices() {
             require_cuda!();
             let last = crate::device::cuda::device_count() - 1;
-            assert_eq!(cuda::get(last).device(), Device::Cuda(last));
             assert_eq!(
-                allocator_for(Device::Cuda(last)).unwrap().device(),
+                Storage::new(8, Device::Cuda(last)).device(),
                 Device::Cuda(last)
             );
         }
@@ -308,7 +298,12 @@ mod cuda {
         #[test]
         fn the_allocator_reserves_device_memory_and_rewinds() {
             require_cuda!();
-            let allocator = StaticAllocator::new(CudaBackend::new(0), cuda::ALIGNMENT, 1 << 20);
+            let allocator = StaticAllocator::new(
+                CudaBackend::new(0),
+                Device::Cuda(0),
+                cuda::ALIGNMENT,
+                1 << 20,
+            );
             let a = allocator.allocate(1000);
             let b = allocator.allocate(1000);
             assert_eq!(a.as_ptr().addr() % cuda::ALIGNMENT, 0);
@@ -338,7 +333,7 @@ mod mps {
 
     use crate::allocator::mps;
     use crate::allocator::static_allocator::StaticAllocator;
-    use crate::{Allocator, Device};
+    use crate::{Allocator, Device, Storage};
 
     /// Skip guard: returns early from a test when Metal is unavailable.
     macro_rules! require_mps {
@@ -351,13 +346,13 @@ mod mps {
     }
 
     fn fresh() -> mps::MpsAllocator {
-        StaticAllocator::new(mps::MpsBackend, mps::ALIGNMENT, 1 << 20)
+        StaticAllocator::new(mps::MpsBackend, Device::Mps, mps::ALIGNMENT, 1 << 20)
     }
 
     #[test]
     fn reports_mps_device() {
         require_mps!();
-        assert_eq!(mps::get().device(), Device::Mps);
+        assert_eq!(Storage::new(8, Device::Mps).device(), Device::Mps);
     }
 
     #[test]

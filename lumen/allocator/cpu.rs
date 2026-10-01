@@ -21,10 +21,6 @@ impl CpuAllocator {
 }
 
 impl Allocator for CpuAllocator {
-    fn device(&self) -> Device {
-        Device::Cpu
-    }
-
     fn allocate(&self, nbytes: usize) -> DataPtr {
         // 64-byte alignment to keep SIMD loads happy.
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");

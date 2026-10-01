@@ -33,10 +33,6 @@ pub struct MpsBackend;
 
 #[cfg(lumen_mps_linked)]
 impl Allocator for MpsBackend {
-    fn device(&self) -> Device {
-        Device::Mps
-    }
-
     fn allocate(&self, nbytes: usize) -> DataPtr {
         self.try_allocate(nbytes)
             .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
@@ -81,6 +77,7 @@ pub fn get() -> MpsAllocator {
         .get_or_init(|| {
             StaticAllocator::new(
                 MpsBackend,
+                Device::Mps,
                 ALIGNMENT,
                 super::config::static_allocator_bytes(),
             )

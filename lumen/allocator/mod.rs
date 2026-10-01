@@ -90,8 +90,6 @@ impl Drop for DataPtr {
 /// just an uncached `Allocator` (one `cudaMalloc`/Metal allocation per
 /// call), asked once for the static allocator's region.
 pub trait Allocator: Send + Sync {
-    fn device(&self) -> Device;
-
     /// Allocate `nbytes`, panicking on failure (c10 semantics: OOM
     /// surfaces as an error, not a return value).
     fn allocate(&self, nbytes: usize) -> DataPtr;

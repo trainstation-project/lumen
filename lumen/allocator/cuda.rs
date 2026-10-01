@@ -55,10 +55,6 @@ impl CudaBackend {
 
 #[cfg(lumen_cuda_linked)]
 impl Allocator for CudaBackend {
-    fn device(&self) -> Device {
-        Device::Cuda(self.device_index as usize)
-    }
-
     fn allocate(&self, nbytes: usize) -> DataPtr {
         self.try_allocate(nbytes).unwrap_or_else(|| {
             panic!(
@@ -107,6 +103,7 @@ pub fn get(device_index: usize) -> CudaAllocator {
         .get_or_insert_with(|| {
             StaticAllocator::new(
                 CudaBackend::new(device_index),
+                Device::Cuda(device_index),
                 ALIGNMENT,
                 super::config::static_allocator_bytes(),
             )

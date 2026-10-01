@@ -53,17 +53,17 @@ struct State {
 }
 
 impl<B: Allocator> StaticAllocator<B> {
-    /// A static allocator of `capacity` bytes from `backend`, handing out
-    /// offsets aligned to `alignment` (a power of two). Nothing is reserved
-    /// until the first allocation.
-    pub fn new(backend: B, alignment: usize, capacity: usize) -> Self {
+    /// A static allocator of `capacity` bytes from `backend`, the memory of
+    /// `device`, handing out offsets aligned to `alignment` (a power of
+    /// two). Nothing is reserved until the first allocation.
+    pub fn new(backend: B, device: Device, alignment: usize, capacity: usize) -> Self {
         assert!(
             alignment.is_power_of_two(),
             "alignment must be a power of two"
         );
         StaticAllocator {
             inner: Arc::new(Inner {
-                device: backend.device(),
+                device,
                 backend,
                 alignment,
                 capacity,
@@ -142,10 +142,6 @@ impl<B> Inner<B> {
 }
 
 impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
-    fn device(&self) -> Device {
-        self.inner.device
-    }
-
     fn allocate(&self, nbytes: usize) -> DataPtr {
         // Out of room: memory freed but held by device work in flight comes
         // back once that work is done.

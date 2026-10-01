@@ -472,6 +472,7 @@ fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
         DataPtr::with_deleter(data, bytes, release),
         layout.nbytes,
         allocator,
+        layout.device,
     );
     Tensor::from_storage(
         Arc::new(storage),

@@ -40,17 +40,18 @@ impl Storage {
     /// # Panics
     /// If `device` is not available.
     pub fn new(nbytes: usize, device: Device) -> Self {
-        Self::with_allocator(nbytes, allocator_or_panic(device))
+        Self::with_allocator(nbytes, allocator_or_panic(device), device)
     }
 
-    /// Allocate `nbytes` of uninitialized memory from `allocator` (PyTorch:
-    /// `StorageImpl(size_bytes, allocator)`), e.g. a custom allocator.
-    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
+    /// Allocate `nbytes` of uninitialized memory from `allocator`, which
+    /// hands out `device`'s memory (PyTorch: `StorageImpl(size_bytes,
+    /// allocator)`), e.g. a custom allocator.
+    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>, device: Device) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data: allocator.allocate(nbytes),
             nbytes,
-            device: allocator.device(),
+            device,
             allocator,
         }
     }
@@ -71,20 +72,22 @@ impl Storage {
         &self.allocator
     }
 
-    /// A storage over an existing buffer of `nbytes`, freed by `data`'s
-    /// deleter (PyTorch: `at::from_blob`'s storage, e.g. a DLPack import).
-    /// `allocator` is the device's, for tensors derived from this one.
+    /// A storage over an existing buffer of `nbytes` on `device`, freed by
+    /// `data`'s deleter (PyTorch: `at::from_blob`'s storage, e.g. a DLPack
+    /// import). `allocator` is the device's, for tensors derived from this
+    /// one.
     #[cfg(feature = "python")]
     pub(crate) fn from_data_ptr(
         data: DataPtr,
         nbytes: usize,
         allocator: Arc<dyn Allocator>,
+        device: Device,
     ) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data,
             nbytes,
-            device: allocator.device(),
+            device,
             allocator,
         }
     }
