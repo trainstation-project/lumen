@@ -1,50 +1,38 @@
-# The jobs in .github/workflows/ci.yml call these targets. `make ci` runs
-# every job locally, with the full `test` where GitHub runs only `test-cpu`.
+# The jobs in .github/workflows/ci.yml call these targets; `make ci` runs
+# every job locally.
 
 export RUSTFLAGS := -D warnings
 
-.PHONY: all ci test test-cpu test-cuda test-mps fmt fmt-check clang-format clang-format-check clippy miri clean
+.PHONY: all ci test fmt fmt-check clang-format clang-format-check clippy miri clean
 
 ## ci: every CI job (rustfmt, clang-format, clippy, tests, miri), in that
-## order; runs all tests (CPU, CUDA, MPS), where GitHub CI runs only the
-## CPU ones.
+## order.
 ci: fmt-check clang-format-check clippy test miri
 
-# Each test runs in exactly one of the targets below. The Rust tests are
-# unit tests inside the crate (a `tests.rs` per module folder), picked by
-# module path: `::tests::cuda::` and `::tests::mps::` are the per-device
-# modules. Rust tests never enable `python`: with pyo3 compiled in, test
-# binaries would link against libpython. The bindings are tested from
-# Python (tests/test_*.py) instead.
-DEVICE_TESTS := --skip ::tests::cuda:: --skip ::tests::mps::
+# The Rust tests are unit tests inside the crate (a `tests.rs` per module
+# folder). They never enable `python`: with pyo3 compiled in, test binaries
+# would link against libpython. The bindings are tested from Python
+# (tests/test_*.py) instead.
+#
+# Device tests skip themselves when their device is missing, so one run
+# covers every machine. MPS needs nothing extra: Metal is a default feature,
+# compiled on macOS. CUDA is built where a GPU driver is visible (the crate
+# and wheel with the `cuda` feature, the wheel with the CuTe DSL extras),
+# so CPU-only machines skip the heavy extras.
+HAS_CUDA := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo yes)
+CARGO_TEST_FEATURES := $(if $(HAS_CUDA),--features cuda)
+comma := ,
+MATURIN_FEATURES := $(if $(HAS_CUDA),--features python$(comma)cuda --extras cuda)
 # The build Linux CI gets: the Metal backend is compiled only on macOS, so
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
-test: test-cpu test-cuda test-mps
-
-## test-cpu: every unit test except the per-device modules, and the doc
-## tests (built without Metal), then the Python tests not marked for a
-## device.
-test-cpu:
-	cargo test --lib --no-default-features -- --format=terse $(DEVICE_TESTS)
-	cargo test --doc --no-default-features
-	maturin develop && python -m pytest tests -q -m "not mps and not cuda"
-
-## test-cuda: the `cuda` test modules and the Python tests marked `cuda`.
-## The static allocator runs against a mock backend everywhere; where build.rs
-## finds cudart, the real backend and tensors are also tested on the GPU
-## (skipped when none is visible). The Python wheel is rebuilt with CUDA.
-test-cuda:
-	cargo test --lib $(NO_METAL_FEATURES) -- --format=terse ::tests::cuda::
-	maturin develop --features python,cuda --extras cuda && python -m pytest tests -q -rs -m cuda
-
-## test-mps: the `mps` test modules and the Python tests marked `mps`,
-## against the real Metal device (macOS; elsewhere the Rust modules compile
-## to nothing and the Python tests skip).
-test-mps:
-	cargo test --lib --features mps -- --format=terse ::tests::mps::
-	maturin develop && python -m pytest tests -q -rs -m mps
+## test: every test: the unit and doc tests, then the Python tests. CPU
+## tests always run; MPS and CUDA ones run where the device is available.
+test:
+	cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
+	cargo test --doc
+	maturin develop $(MATURIN_FEATURES) && python -m pytest tests -q -rs
 
 fmt:
 	cargo fmt --all

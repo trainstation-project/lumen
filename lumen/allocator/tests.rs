@@ -1,8 +1,8 @@
 //! Unit tests for the allocators, one module per former test file. They
 //! live in the crate (not tests/) so they can reach private items.
 //!
-//! The `cuda` and `mps` modules hold the per-device tests the Makefile's
-//! `test-cuda` / `test-mps` select by path.
+//! The `cuda` and `mps` modules hold the per-device tests, which skip where
+//! their device is unavailable.
 
 mod cpu {
     use crate::{Allocator, CpuAllocator};

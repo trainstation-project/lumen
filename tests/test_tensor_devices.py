@@ -5,8 +5,8 @@ import pytest
 import lumen
 
 
-# Device cases carry a marker so each `make test-*` target runs only its own
-# (`-m mps`, `-m cuda`; `test-cpu` runs `-m "not mps and not cuda"`).
+# Device cases carry a marker (select them with `-m mps`, `-m cuda`) and
+# skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 

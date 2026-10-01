@@ -8,9 +8,8 @@ records what Rust hands each.
 
 The registry is process-wide and permanent, so every test that registers a
 kernel unregisters it again (`lumen.ops.unregister`) in a `finally`, or
-later tests would inherit it. Device cases carry a marker so each
-`make test-*` target runs only its own (`-m mps`, `-m cuda`; `test-cpu`
-runs `-m "not mps and not cuda"`).
+later tests would inherit it. Device cases carry a marker (select them
+with `-m mps`, `-m cuda`) and skip where the device is unavailable.
 """
 
 import ctypes
@@ -21,7 +20,7 @@ import lumen
 from lumen import _C
 
 
-# Device cases carry a marker so each `make test-*` target runs only its own.
+# Device cases carry a marker, and skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
