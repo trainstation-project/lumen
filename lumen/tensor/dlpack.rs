@@ -14,10 +14,9 @@
 //! the producer's own, and the capsule is renamed `"used_dltensor"` so it
 //! cannot be consumed twice.
 
-use std::alloc::Layout;
 use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyBufferError, PyRuntimeError};
 use pyo3::ffi;
@@ -25,7 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 
 use super::tensor::contiguous_strides;
-use crate::allocator::{DataPtr, allocator_for};
+use crate::allocator::{Allocator, DataPtr, allocator_for};
 use crate::tensor::dtype::DType;
 use crate::tensor::storage::Storage;
 use crate::{Device, Tensor};
@@ -438,8 +437,8 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     })
 }
 
-/// A producer's managed tensor, moved into the deleter of the storage that
-/// adopts its buffer.
+/// A producer's managed tensor, which the allocator of the storage that
+/// adopts its buffer releases.
 struct Producer<T>(*mut T);
 
 // SAFETY: the pointer is only used to call the producer's deleter, once,
@@ -447,33 +446,62 @@ struct Producer<T>(*mut T);
 unsafe impl<T> Send for Producer<T> {}
 unsafe impl<T> Sync for Producer<T> {}
 
-/// A tensor over `layout`'s buffer whose storage frees it with the
-/// producer's deleter (PyTorch: `at::from_blob` with a deleter).
-fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
-    let producer = Producer(managed);
-    let release = move |_| {
-        let producer = producer;
+impl<T: Managed> Producer<T> {
+    fn release(self) {
         // Producer deleters may touch Python objects (NumPy's releases the
         // array), so run them holding the GIL, as PyTorch does.
         Python::attach(|_| {
             // SAFETY: the managed tensor is ours since the capsule was
-            // renamed, and this storage frees it exactly once.
+            // renamed, and it is released exactly once.
             unsafe {
-                if let Some(deleter) = (*producer.0).deleter() {
-                    deleter(producer.0);
+                if let Some(deleter) = (*self.0).deleter() {
+                    deleter(self.0);
                 }
             }
         });
-    };
+    }
+}
+
+/// The allocator of a storage over a producer's buffer: it frees that buffer
+/// with the producer's deleter, once, and passes everything else (tensors
+/// made from this one, e.g. by `empty_like`) to the device's allocator.
+struct Adopted<T> {
+    device: Arc<dyn Allocator>,
+    /// The buffer's address and its producer, until released.
+    buffer: Mutex<Option<(usize, Producer<T>)>>,
+}
+
+impl<T: Managed> Allocator for Adopted<T> {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+        self.device.allocate(nbytes)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        match buffer.take() {
+            Some((addr, producer)) if addr == ptr.as_ptr().addr() => producer.release(),
+            other => {
+                *buffer = other;
+                drop(buffer);
+                // SAFETY: not the adopted buffer, so one of the device
+                // allocator's, as the caller guarantees.
+                unsafe { self.device.deallocate(ptr, nbytes) }
+            }
+        }
+    }
+}
+
+/// A tensor over `layout`'s buffer whose storage frees it with the
+/// producer's deleter (PyTorch: `at::from_blob` with a deleter).
+fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
     let data = NonNull::new(layout.data).unwrap_or(NonNull::dangling());
-    let bytes = Layout::from_size_align(layout.nbytes, 1).expect("DLPack buffer too large");
-    let allocator = allocator_for(layout.device).expect("checked in read_layout");
-    let storage = Storage::from_data_ptr(
-        DataPtr::with_deleter(data, bytes, release),
-        layout.nbytes,
-        allocator,
-        layout.device,
-    );
+    let allocator = Adopted {
+        device: allocator_for(layout.device).expect("checked in read_layout"),
+        buffer: Mutex::new(Some((data.as_ptr().addr(), Producer(managed)))),
+    };
+    // SAFETY: the adopted allocator releases this buffer, and only it.
+    let data = unsafe { DataPtr::from_raw_parts(data, layout.nbytes, Arc::new(allocator)) };
+    let storage = Storage::from_data_ptr(data, layout.device);
     Tensor::from_storage(
         Arc::new(storage),
         layout.dtype,

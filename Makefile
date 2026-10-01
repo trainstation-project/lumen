@@ -32,7 +32,7 @@ test-cpu:
 	maturin develop && python -m pytest tests -q -m "not mps and not cuda"
 
 ## test-cuda: the `cuda` test modules and the Python tests marked `cuda`.
-## The caching logic runs against mock backends everywhere; where build.rs
+## The static allocator runs against a mock backend everywhere; where build.rs
 ## finds cudart, the real backend and tensors are also tested on the GPU
 ## (skipped when none is visible). The Python wheel is rebuilt with CUDA.
 test-cuda:
