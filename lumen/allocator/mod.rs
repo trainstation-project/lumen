@@ -1,37 +1,26 @@
-pub mod cache_stats;
-pub mod caching;
 pub mod config;
 mod cpu;
 pub mod cuda;
 pub mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+pub mod static_allocator;
 #[cfg(test)]
 mod tests;
-pub mod traits;
 
 pub use cpu::CpuAllocator;
 
-use std::alloc::{self, Layout};
 use std::ptr::NonNull;
 use std::sync::{Arc, OnceLock};
 
 use crate::device::Device;
 
-/// How to release the buffer when the [`DataPtr`] drops.
-enum Deleter {
-    /// Free with `alloc::dealloc` using the stored layout (CPU path).
-    Std,
-    /// Custom deletion function to free memory. Used by the CUDA caching
-    /// allocator to return the block to its pool rather than freeing it.
-    Custom(Box<dyn FnOnce(NonNull<u8>) + Send + Sync>),
-}
-
-/// An owning, type-erased data pointer with an associated deleter.
+/// An owned allocation (PyTorch: `c10::DataPtr`): `nbytes` at a pointer
+/// from `allocator`, given back to it when the `DataPtr` drops.
 pub struct DataPtr {
     ptr: NonNull<u8>,
-    layout: Layout,
-    deleter: Deleter,
+    nbytes: usize,
+    allocator: Arc<dyn Allocator>,
 }
 
 // The buffer is plain bytes; sending it to another thread is fine as long
@@ -40,80 +29,82 @@ unsafe impl Send for DataPtr {}
 unsafe impl Sync for DataPtr {}
 
 impl DataPtr {
-    /// A `DataPtr` freed with `alloc::dealloc` on drop (CPU path).
-    pub fn new(ptr: NonNull<u8>, layout: Layout) -> Self {
+    /// `nbytes` from `allocator`.
+    pub fn allocate(allocator: Arc<dyn Allocator>, nbytes: usize) -> Self {
         DataPtr {
-            ptr,
-            layout,
-            deleter: Deleter::Std,
+            ptr: allocator.allocate(nbytes),
+            nbytes,
+            allocator,
         }
     }
 
-    /// A `DataPtr` whose drop runs `f` instead of `alloc::dealloc`.
+    /// Own an existing allocation, which `allocator` releases on drop.
     ///
-    /// `ptr` must point to `layout.size()` bytes that stay valid until the
-    /// `DataPtr` is dropped; `f` must release (or recycle) that buffer.
-    pub fn with_deleter(
+    /// # Safety
+    /// `ptr` and `nbytes` must be an allocation `allocator` can release
+    /// (see [`Allocator::deallocate`]), released by nothing else.
+    pub unsafe fn from_raw_parts(
         ptr: NonNull<u8>,
-        layout: Layout,
-        f: impl FnOnce(NonNull<u8>) + Send + Sync + 'static,
+        nbytes: usize,
+        allocator: Arc<dyn Allocator>,
     ) -> Self {
         DataPtr {
             ptr,
-            layout,
-            deleter: Deleter::Custom(Box::new(f)),
+            nbytes,
+            allocator,
         }
     }
 
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
+
+    pub fn nbytes(&self) -> usize {
+        self.nbytes
+    }
+
+    pub fn allocator(&self) -> &Arc<dyn Allocator> {
+        &self.allocator
+    }
 }
 
 impl Drop for DataPtr {
     fn drop(&mut self) {
-        match std::mem::replace(&mut self.deleter, Deleter::Std) {
-            Deleter::Std => {
-                if self.layout.size() > 0 {
-                    unsafe { alloc::dealloc(self.ptr.as_ptr(), self.layout) }
-                }
-            }
-
-            Deleter::Custom(f) => f(self.ptr),
-        }
+        // SAFETY: an allocation of `allocator`'s, released only here.
+        unsafe { self.allocator.deallocate(self.ptr, self.nbytes) }
     }
 }
 
-/// The memory-management contract: allocate `nbytes` on a device, get back
-/// an owning [`DataPtr`] that releases the memory on drop.
+/// The memory-management contract: allocate `nbytes` on a device, and
+/// release them again (PyTorch: c10's `raw_allocate` / `raw_deallocate`).
+/// A [`DataPtr`] owns one allocation and gives it back when it drops.
 ///
 /// Implemented by user-facing allocators ([`cpu::CpuAllocator`],
-/// [`caching::CachingAllocator`]) and by raw *backends* alike: to the
-/// caching layer, a backend is just an uncached `Allocator` (one
-/// `cudaMalloc`/Metal allocation per call).
+/// [`static_allocator::StaticAllocator`]) and by raw *backends* alike: to an allocator, a backend is
+/// just an uncached `Allocator` (one `cudaMalloc`/Metal allocation per
+/// call), asked once for the static allocator's region.
 pub trait Allocator: Send + Sync {
-    fn device(&self) -> Device;
-
     /// Allocate `nbytes`, panicking on failure (c10 semantics: OOM
     /// surfaces as an error, not a return value).
-    fn allocate(&self, nbytes: usize) -> DataPtr;
+    fn allocate(&self, nbytes: usize) -> NonNull<u8>;
 
-    /// Fallible allocation: `None` when the device cannot satisfy the
-    /// request right now.
+    /// Release an allocation.
     ///
-    /// Caching allocators use this on their OOM path — release cached
-    /// segments, then retry — which must not go through a panic. The
-    /// default suits allocators whose failures are unrecoverable (a host
-    /// `malloc` failure ends the process anyway): just call
-    /// [`allocate`](Self::allocate).
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
-        Some(self.allocate(nbytes))
-    }
+    /// # Safety
+    /// `ptr` and `nbytes` are an allocation this allocator returned, not yet
+    /// released, which nothing uses any more.
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize);
+
+    /// Wait for device work in flight that keeps freed memory alive, so it
+    /// can be reused: a static allocator out of room calls this, then tries
+    /// again. MPS work holds its tensors until the GPU has run it; the
+    /// default suits devices whose frees take effect at once.
+    fn reclaim(&self) {}
 }
 
 /// The allocator for `device` (PyTorch: `c10::GetAllocator`): the CPU
-/// allocator, or the device's global caching allocator. Errors if lumen was
-/// built without that backend or the device is not present.
+/// allocator, or the device's allocator. Errors if lumen was built without that
+/// backend or the device is not present.
 pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
     match device {
         Device::Cpu => {

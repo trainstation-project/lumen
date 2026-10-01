@@ -17,9 +17,7 @@ pub struct Storage {
     /// `StorageImpl`; exposed in python as `tensor.untyped_storage()._cdata`).
     id: usize,
     data: DataPtr,
-    nbytes: usize,
     device: Device,
-    allocator: Arc<dyn Allocator>,
 }
 
 /// The allocator for `device`, panicking if it is unavailable (PyTorch
@@ -40,18 +38,17 @@ impl Storage {
     /// # Panics
     /// If `device` is not available.
     pub fn new(nbytes: usize, device: Device) -> Self {
-        Self::with_allocator(nbytes, allocator_or_panic(device))
+        Self::with_allocator(nbytes, allocator_or_panic(device), device)
     }
 
-    /// Allocate `nbytes` of uninitialized memory from `allocator` (PyTorch:
-    /// `StorageImpl(size_bytes, allocator)`), e.g. a custom allocator.
-    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>) -> Self {
+    /// Allocate `nbytes` of uninitialized memory from `allocator`, which
+    /// hands out `device`'s memory (PyTorch: `StorageImpl(size_bytes,
+    /// allocator)`), e.g. a custom allocator.
+    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>, device: Device) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
-            data: allocator.allocate(nbytes),
-            nbytes,
-            device: allocator.device(),
-            allocator,
+            data: DataPtr::allocate(allocator, nbytes),
+            device,
         }
     }
 
@@ -60,7 +57,7 @@ impl Storage {
     }
 
     pub fn nbytes(&self) -> usize {
-        self.nbytes
+        self.data.nbytes()
     }
 
     pub fn device(&self) -> Device {
@@ -68,24 +65,19 @@ impl Storage {
     }
 
     pub fn allocator(&self) -> &Arc<dyn Allocator> {
-        &self.allocator
+        self.data.allocator()
     }
 
-    /// A storage over an existing buffer of `nbytes`, freed by `data`'s
-    /// deleter (PyTorch: `at::from_blob`'s storage, e.g. a DLPack import).
-    /// `allocator` is the device's, for tensors derived from this one.
+    /// A storage over an existing allocation on `device` (PyTorch:
+    /// `at::from_blob`'s storage, e.g. a DLPack import, whose allocator
+    /// calls the producer's deleter). Its allocator also makes tensors
+    /// derived from this one.
     #[cfg(feature = "python")]
-    pub(crate) fn from_data_ptr(
-        data: DataPtr,
-        nbytes: usize,
-        allocator: Arc<dyn Allocator>,
-    ) -> Self {
+    pub(crate) fn from_data_ptr(data: DataPtr, device: Device) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data,
-            nbytes,
-            device: allocator.device(),
-            allocator,
+            device,
         }
     }
 
@@ -117,7 +109,7 @@ impl std::fmt::Debug for Storage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Storage")
             .field("id", &self.id)
-            .field("nbytes", &self.nbytes)
+            .field("nbytes", &self.nbytes())
             .field("device", &self.device)
             .finish()
     }

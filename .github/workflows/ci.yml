@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      # `make test-cpu` builds the bindings with `maturin develop`, which
+      # `make test` builds the bindings with `maturin develop`, which
       # installs into the active virtualenv, then runs pytest.
       - name: Set up virtualenv
         run: |
@@ -70,8 +70,8 @@ jobs:
           .venv/bin/pip install maturin pytest numpy
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      # CPU tests only; `make ci` locally also runs the CUDA and MPS tests.
-      - run: make test-cpu
+      # No GPU here: the MPS and CUDA tests skip.
+      - run: make test
 
   miri:
     # The allocator hands out raw pointers; Miri catches UB (misaligned

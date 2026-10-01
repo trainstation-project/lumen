@@ -1,8 +1,10 @@
 use std::alloc::{self, Layout};
+use std::collections::BTreeSet;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{Allocator, DataPtr};
+use super::Allocator;
 use crate::device::Device;
 
 pub struct CpuAllocator;
@@ -14,6 +16,11 @@ static CPU_ALLOCATOR: CpuAllocator = CpuAllocator;
 /// `ProfiledCPUMemoryReporter`). Other blocks never touch it.
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
+/// The addresses of those blocks, whose frees are reported too, and how
+/// many there are (so frees skip the lock while there are none).
+static PROFILED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+static PROFILED_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 impl CpuAllocator {
     pub fn get() -> &'static dyn Allocator {
         &CPU_ALLOCATOR
@@ -21,38 +28,50 @@ impl CpuAllocator {
 }
 
 impl Allocator for CpuAllocator {
-    fn device(&self) -> Device {
-        Device::Cpu
-    }
-
-    fn allocate(&self, nbytes: usize) -> DataPtr {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         // 64-byte alignment to keep SIMD loads happy.
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
-
-        let ptr = if nbytes == 0 {
+        if nbytes == 0 {
             // Layout with size 0 is fine; dangling but aligned.
-            NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap()
-        } else {
-            // Uninitialized memory, like C's `malloc`. Reading
-            // uninitialized memory is undefined behaviour in Rust.
-            let raw = unsafe { alloc::alloc(layout) };
-            NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout))
-        };
-
-        if nbytes > 0 && crate::profiler::memory_enabled() {
+            return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
+        }
+        // Uninitialized memory, like C's `malloc`. Reading uninitialized
+        // memory is undefined behaviour in Rust.
+        let raw = unsafe { alloc::alloc(layout) };
+        let ptr = NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        if crate::profiler::memory_enabled() {
             // Profiling memory: report this block now and when it is freed.
             // Blocks allocated before the session are not reported when
             // freed, as in PyTorch.
             let addr = ptr.as_ptr().addr();
             let total = ALLOCATED.fetch_add(nbytes, Ordering::Relaxed) + nbytes;
             crate::profiler::report_memory(Device::Cpu, addr, nbytes as i64, total, total);
-            return DataPtr::with_deleter(ptr, layout, move |p| {
-                let total = ALLOCATED.fetch_sub(nbytes, Ordering::Relaxed) - nbytes;
-                crate::profiler::report_memory(Device::Cpu, addr, -(nbytes as i64), total, total);
-                unsafe { alloc::dealloc(p.as_ptr(), layout) }
-            });
+            PROFILED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(addr);
+            PROFILED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
+        ptr
+    }
 
-        DataPtr::new(ptr, layout)
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        if nbytes == 0 {
+            return;
+        }
+        let addr = ptr.as_ptr().addr();
+        if PROFILED_COUNT.load(Ordering::Relaxed) > 0
+            && PROFILED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&addr)
+        {
+            PROFILED_COUNT.fetch_sub(1, Ordering::Relaxed);
+            let total = ALLOCATED.fetch_sub(nbytes, Ordering::Relaxed) - nbytes;
+            crate::profiler::report_memory(Device::Cpu, addr, -(nbytes as i64), total, total);
+        }
+        // SAFETY: the caller passes a live block of ours, allocated with
+        // this layout.
+        unsafe { alloc::dealloc(ptr.as_ptr(), Layout::from_size_align_unchecked(nbytes, 64)) }
     }
 }

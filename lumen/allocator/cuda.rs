@@ -1,72 +1,24 @@
-//! CUDA support for the caching allocator.
+//! The CUDA static allocator: [`CudaBackend`] (an uncached
+//! [`Allocator`](crate::Allocator) over `cudaMalloc`/`cudaFree`) reserves
+//! each device's [`StaticAllocator`](super::static_allocator::StaticAllocator), and [`get`] holds one per
+//! device.
 //!
-//! The pooling logic lives in [`super::caching`]; this module provides
-//! c10's size math ([`CudaPolicy`]), `CudaBackend` (an uncached
-//! [`Allocator`](crate::Allocator) over `cudaMalloc`/`cudaFree`) and the
-//! global per-device allocator registry, mirroring c10's
-//! `CUDACachingAllocator::get()`.
-//!
-//! The backend is only available when built on a machine with the CUDA
-//! runtime (see `build.rs`); the policy is always available, so tests
-//! exercise it with their own mock backend.
+//! Only available when built on a machine with the CUDA runtime (see
+//! `build.rs`).
 
 #[cfg(lumen_cuda_linked)]
-use super::caching::CachingAllocator;
-use super::traits::{CachePolicy, K_MIN_LARGE_ALLOC, K_SMALL_SIZE, dedicated_segment_size};
+use super::static_allocator::StaticAllocator;
 #[cfg(lumen_cuda_linked)]
-use crate::allocator::{Allocator, DataPtr};
+use crate::allocator::Allocator;
 #[cfg(lumen_cuda_linked)]
 use crate::device::Device;
-#[cfg(lumen_cuda_linked)]
-use std::alloc::Layout;
 #[cfg(lumen_cuda_linked)]
 use std::ptr::NonNull;
 #[cfg(lumen_cuda_linked)]
 use std::sync::{Mutex, OnceLock};
 
-/// All sizes are rounded up to a multiple of this (c10: kMinBlockSize).
-pub const K_MIN_BLOCK_SIZE: usize = 512;
-/// Segment for small allocations (c10: kSmallBuffer).
-pub const K_SMALL_BUFFER: usize = 2 << 20; // 2 MiB
-/// Segment for 1–10 MiB allocations (c10: kLargeBuffer).
-pub const K_LARGE_BUFFER: usize = 20 << 20; // 20 MiB
-
-/// c10's `CUDACachingAllocator` size math, under the default
-/// `PYTORCH_CUDA_ALLOC_CONF` (no `max_split_size_mb`,
-/// `roundup_power2_divisions`, or `expandable_segments`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CudaPolicy;
-
-impl CachePolicy for CudaPolicy {
-    fn alignment(&self) -> usize {
-        K_MIN_BLOCK_SIZE
-    }
-
-    /// c10: `round_size`.
-    fn round_size(&self, nbytes: usize) -> usize {
-        nbytes.div_ceil(K_MIN_BLOCK_SIZE) * K_MIN_BLOCK_SIZE
-    }
-
-    /// c10: `should_split`.
-    fn should_split(&self, small: bool, remaining: usize) -> bool {
-        if small {
-            remaining >= K_MIN_BLOCK_SIZE
-        } else {
-            remaining > K_SMALL_SIZE
-        }
-    }
-
-    /// c10: `get_allocation_size`.
-    fn segment_size(&self, size: usize, _reserved: usize) -> usize {
-        if size <= K_SMALL_SIZE {
-            K_SMALL_BUFFER
-        } else if size < K_MIN_LARGE_ALLOC {
-            K_LARGE_BUFFER
-        } else {
-            dedicated_segment_size(size)
-        }
-    }
-}
+/// StaticAllocator offsets are aligned like `cudaMalloc`'s pointers.
+pub const ALIGNMENT: usize = 256;
 
 #[cfg(lumen_cuda_linked)]
 mod ffi {
@@ -81,7 +33,7 @@ mod ffi {
 }
 
 /// An uncached [`Allocator`] over the CUDA runtime: one `cudaMalloc` per
-/// `try_allocate`, `cudaFree` when the returned `DataPtr` drops. Only
+/// allocation, `cudaFree` in `deallocate`. Only
 /// available when the build found a CUDA toolkit to link against
 /// (cfg `lumen_cuda_linked`).
 #[cfg(lumen_cuda_linked)]
@@ -101,55 +53,50 @@ impl CudaBackend {
 
 #[cfg(lumen_cuda_linked)]
 impl Allocator for CudaBackend {
-    fn device(&self) -> Device {
-        Device::Cuda(self.device_index as usize)
-    }
-
-    fn allocate(&self, nbytes: usize) -> DataPtr {
-        self.try_allocate(nbytes).unwrap_or_else(|| {
-            panic!(
-                "CUDA out of memory: failed to allocate {nbytes} bytes on cuda:{}",
-                self.device_index
-            )
-        })
-    }
-
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         // c10 sets the device context before every allocation.
         crate::device::cuda::set_device(self.device_index as usize);
         let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
-        if err != 0 {
-            return None;
-        }
-        let device_index = self.device_index;
-        Some(DataPtr::with_deleter(
-            NonNull::new(ptr.cast())?,
-            // cudaMalloc guarantees 256-byte alignment.
-            Layout::from_size_align(nbytes, 256).unwrap(),
-            move |p| {
-                crate::device::cuda::set_device(device_index as usize);
-                unsafe { ffi::cudaFree(p.as_ptr().cast()) };
-            },
-        ))
+        // cudaMalloc guarantees 256-byte alignment.
+        NonNull::new(ptr.cast())
+            .filter(|_| err == 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "CUDA out of memory: failed to allocate {nbytes} bytes on cuda:{}",
+                    self.device_index
+                )
+            })
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, _nbytes: usize) {
+        crate::device::cuda::set_device(self.device_index as usize);
+        unsafe { ffi::cudaFree(ptr.as_ptr().cast()) };
     }
 }
 
-/// The global CUDA caching allocator type.
+/// A CUDA device's static allocator.
 #[cfg(lumen_cuda_linked)]
-pub type CudaAllocator = CachingAllocator<CudaBackend, CudaPolicy>;
+pub type CudaAllocator = StaticAllocator<CudaBackend>;
 
-/// Get (creating on first use) the global allocator for a CUDA device,
-/// mirroring `c10::cuda::CUDACachingAllocator::get()`.
+/// Get (creating on first use, sized by
+/// [`static_allocator_bytes`](super::config::static_allocator_bytes)) the static allocator for a CUDA device.
 #[cfg(lumen_cuda_linked)]
 pub fn get(device_index: usize) -> CudaAllocator {
     static ALLOCATORS: OnceLock<Mutex<Vec<Option<CudaAllocator>>>> = OnceLock::new();
     let registry = ALLOCATORS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut registry = registry.lock().unwrap();
+    let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
     if registry.len() <= device_index {
         registry.resize_with(device_index + 1, || None);
     }
     registry[device_index]
-        .get_or_insert_with(|| CachingAllocator::new(CudaBackend::new(device_index), CudaPolicy))
+        .get_or_insert_with(|| {
+            StaticAllocator::new(
+                CudaBackend::new(device_index),
+                Device::Cuda(device_index),
+                ALIGNMENT,
+                super::config::static_allocator_bytes(),
+            )
+        })
         .clone()
 }
