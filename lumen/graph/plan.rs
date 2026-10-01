@@ -173,7 +173,7 @@ impl Plan {
 
     /// Run the plan on `inputs`, which must be on one device, returning
     /// its outputs on that device (the CPU if there are no inputs). On MPS
-    /// the steps are Metal kernels ([`super::mps`]); elsewhere they run on
+    /// the steps are Metal kernels ([`crate::ops::mps`]); elsewhere they run on
     /// the host, with device inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         if inputs.len() != self.inputs.len() {
@@ -264,7 +264,7 @@ impl Plan {
                         .chain([&step.output])
                         .map(|&(b, _)| tensor(b).clone())
                         .collect();
-                    super::mps::encode(step, &args, out, keep)?;
+                    crate::ops::mps::encode(step, &args, out, keep)?;
                 }
                 _ => {
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();

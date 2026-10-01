@@ -9,10 +9,17 @@
 //!   `TORCH_LIBRARY_IMPL`), for keys the op has no built-in kernel for.
 
 pub mod copy;
+pub mod dot_general;
 pub mod dummy_op;
+pub mod elementwise;
+pub mod factory;
 pub mod fill;
+pub mod layout;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub mod python;
+pub mod reduce;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "python")]

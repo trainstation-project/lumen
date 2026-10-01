@@ -4,8 +4,6 @@
 //! [`plan`] compiles a graph into a static [`Plan`] for execution;
 //! [`reference`], a CPU interpreter, defines what each primitive computes.
 
-#[cfg(lumen_mps_linked)]
-mod mps;
 pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]

@@ -116,7 +116,7 @@ struct Max {
 // thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:
 // thread i of `threads` takes i, i + threads, ..., so each load across a
 // SIMD group is contiguous. Launched over ceil(n / per_thread<T>())
-// threads (lumen/graph/mps/mod.rs). ELEMENTWISE_ARGS are the kernel
+// threads (lumen/ops/*/mps.rs). ELEMENTWISE_ARGS are the kernel
 // parameters the loop needs, after the kernel's buffers.
 #define BYTES_PER_THREAD 16
 template <typename T> constexpr uint per_thread() {
