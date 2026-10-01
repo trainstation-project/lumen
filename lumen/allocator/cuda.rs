@@ -35,7 +35,7 @@ mod ffi {
 }
 
 /// An uncached [`Allocator`] over the CUDA runtime: one `cudaMalloc` per
-/// `try_allocate`, `cudaFree` when the returned `DataPtr` drops. Only
+/// allocation, `cudaFree` when the returned `DataPtr` drops. Only
 /// available when the build found a CUDA toolkit to link against
 /// (cfg `lumen_cuda_linked`).
 #[cfg(lumen_cuda_linked)]
@@ -56,32 +56,28 @@ impl CudaBackend {
 #[cfg(lumen_cuda_linked)]
 impl Allocator for CudaBackend {
     fn allocate(&self, nbytes: usize) -> DataPtr {
-        self.try_allocate(nbytes).unwrap_or_else(|| {
-            panic!(
-                "CUDA out of memory: failed to allocate {nbytes} bytes on cuda:{}",
-                self.device_index
-            )
-        })
-    }
-
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         // c10 sets the device context before every allocation.
         crate::device::cuda::set_device(self.device_index as usize);
         let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
-        if err != 0 {
-            return None;
-        }
+        let ptr = NonNull::new(ptr.cast())
+            .filter(|_| err == 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "CUDA out of memory: failed to allocate {nbytes} bytes on cuda:{}",
+                    self.device_index
+                )
+            });
         let device_index = self.device_index;
-        Some(DataPtr::with_deleter(
-            NonNull::new(ptr.cast())?,
+        DataPtr::with_deleter(
+            ptr,
             // cudaMalloc guarantees 256-byte alignment.
             Layout::from_size_align(nbytes, 256).unwrap(),
             move |p| {
                 crate::device::cuda::set_device(device_index as usize);
                 unsafe { ffi::cudaFree(p.as_ptr().cast()) };
             },
-        ))
+        )
     }
 }
 

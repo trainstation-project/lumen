@@ -141,34 +141,15 @@ impl<B> Inner<B> {
     }
 }
 
-impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
-    fn allocate(&self, nbytes: usize) -> DataPtr {
-        // Out of room: memory freed but held by device work in flight comes
-        // back once that work is done.
-        let data = self.try_allocate(nbytes).or_else(|| {
-            self.inner.backend.reclaim();
-            self.try_allocate(nbytes)
-        });
-        data.unwrap_or_else(|| {
-            let state = self.inner.lock();
-            panic!(
-                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
-                 (largest block {}); raise {}.config.static_allocator_bytes",
-                self.inner.device,
-                state.free.values().sum::<usize>(),
-                self.inner.capacity,
-                state.free.values().max().unwrap_or(&0),
-                crate::LIBRARY_NAME,
-            )
-        })
-    }
-
-    /// `None` when the region cannot be reserved or has no room left.
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
+impl<B: Allocator + 'static> StaticAllocator<B> {
+    /// An allocation of `nbytes`, or `None` when the region has no room
+    /// left. Reserves the region on first use (panicking if the backend
+    /// cannot).
+    pub(crate) fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
         let inner = &self.inner;
         let mut state = inner.lock();
         if state.region.is_none() {
-            state.region = Some(inner.backend.try_allocate(inner.capacity)?);
+            state.region = Some(inner.backend.allocate(inner.capacity));
         }
         let block = inner.block(nbytes);
         // An empty allocation takes no block: any aligned offset will do.
@@ -205,5 +186,28 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
             Layout::from_size_align(nbytes, inner.alignment).expect("valid layout"),
             move |_| owner.free(addr, offset, nbytes),
         ))
+    }
+}
+
+impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
+    fn allocate(&self, nbytes: usize) -> DataPtr {
+        // Out of room: memory freed but held by device work in flight comes
+        // back once that work is done.
+        let data = self.try_allocate(nbytes).or_else(|| {
+            self.inner.backend.reclaim();
+            self.try_allocate(nbytes)
+        });
+        data.unwrap_or_else(|| {
+            let state = self.inner.lock();
+            panic!(
+                "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
+                 (largest block {}); raise {}.config.static_allocator_bytes",
+                self.inner.device,
+                state.free.values().sum::<usize>(),
+                self.inner.capacity,
+                state.free.values().max().unwrap_or(&0),
+                crate::LIBRARY_NAME,
+            )
+        })
     }
 }

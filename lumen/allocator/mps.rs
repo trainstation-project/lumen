@@ -25,7 +25,7 @@ mod ffi {
 }
 
 /// An uncached [`Allocator`] over shared-mode `MTLBuffer`s (via the
-/// Objective-C++ shim): one `newBufferWithLength:` per `try_allocate`,
+/// Objective-C++ shim): one `newBufferWithLength:` per allocation,
 /// released when the returned `DataPtr` drops. Only available on macOS
 /// builds where the shim was compiled (cfg `lumen_mps_linked`).
 #[cfg(lumen_mps_linked)]
@@ -34,17 +34,13 @@ pub struct MpsBackend;
 #[cfg(lumen_mps_linked)]
 impl Allocator for MpsBackend {
     fn allocate(&self, nbytes: usize) -> DataPtr {
-        self.try_allocate(nbytes)
-            .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
-    }
-
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
-        let ptr = NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })?;
-        Some(DataPtr::with_deleter(
+        let ptr = NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })
+            .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"));
+        DataPtr::with_deleter(
             ptr,
             Layout::from_size_align(nbytes, 256).unwrap(),
             |p| unsafe { ffi::lumen_mps_free(p.as_ptr()) },
-        ))
+        )
     }
 
     /// Submitted MPS work keeps its tensors alive until the GPU has run it.

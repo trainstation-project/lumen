@@ -94,15 +94,6 @@ pub trait Allocator: Send + Sync {
     /// surfaces as an error, not a return value).
     fn allocate(&self, nbytes: usize) -> DataPtr;
 
-    /// Fallible allocation: `None` when the device cannot satisfy the
-    /// request right now (a static allocator reserving its region uses this). The
-    /// default suits allocators whose failures are unrecoverable (a host
-    /// `malloc` failure ends the process anyway): just call
-    /// [`allocate`](Self::allocate).
-    fn try_allocate(&self, nbytes: usize) -> Option<DataPtr> {
-        Some(self.allocate(nbytes))
-    }
-
     /// Wait for device work in flight that keeps freed memory alive, so it
     /// can be reused: a static allocator out of room calls this, then tries
     /// again. MPS work holds its tensors until the GPU has run it; the
