@@ -1,11 +1,12 @@
 //! `lumen._C.Graph`: bindings for [`crate::graph::Graph`], which the tracer
 //! in `lumen/graph/tracer.py` builds as the traced function runs.
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::graph::{Graph, Plan, Primitive, TensorType, Var};
+use crate::python::resolve_device;
 use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 
 #[pyclass(name = "Graph", module = "lumen")]
@@ -150,7 +151,8 @@ impl PyGraph {
     }
 }
 
-/// `lumen._C.Plan`: a graph compiled for execution ([`Plan`]).
+/// `lumen._C.Plan`: a graph compiled for execution ([`Plan`]), by the
+/// graph compiler of a device ([`crate::compiler`]).
 #[pyclass(name = "Plan", module = "lumen", frozen)]
 struct PyPlan {
     inner: Plan,
@@ -159,10 +161,11 @@ struct PyPlan {
 #[pymethods]
 impl PyPlan {
     #[new]
-    fn new(graph: PyRef<'_, PyGraph>) -> Self {
-        PyPlan {
-            inner: Plan::compile(&graph.inner),
-        }
+    #[pyo3(signature = (graph, device = None))]
+    fn new(graph: PyRef<'_, PyGraph>, device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let inner = crate::compiler::compile(&graph.inner, resolve_device(device)?)
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyPlan { inner })
     }
 
     #[getter]

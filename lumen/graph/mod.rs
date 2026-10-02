@@ -10,7 +10,7 @@ pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::fmt;
 
@@ -52,7 +52,7 @@ impl fmt::Display for TensorType {
 pub type Var = usize;
 
 /// `output = primitive(inputs...)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub primitive: Primitive,
     pub inputs: Vec<Var>,
@@ -62,7 +62,7 @@ pub struct Node {
 /// A function from typed inputs to outputs, in SSA form: each node
 /// defines one new value from earlier ones. Built by [`input`](Self::input)
 /// and [`apply`](Self::apply), which checks every node's types.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub(crate) types: Vec<TensorType>,
     inputs: Vec<Var>,
