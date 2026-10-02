@@ -228,7 +228,7 @@ use super::Plan;
 use super::plan::Buffer;
 
 /// Values in `[-2, 2)` from a fixed-seed LCG, so tests are deterministic.
-fn data(shape: &[usize], seed: u64) -> Tensor {
+pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
     let mut state = seed;
     let values: Vec<f32> = (0..shape.iter().product::<usize>())
         .map(|_| {
@@ -255,7 +255,7 @@ fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
 }
 
 /// The MLP block from run_graph.py: matmul, relu, matmul, softmax.
-fn mlp() -> Graph {
+pub(crate) fn mlp() -> Graph {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
     let w1 = g.input(ty(DType::F32, &[8, 16]));
@@ -352,7 +352,7 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
 /// Plans on MPS, whose steps are Metal kernels, against the reference
 /// executor, for every primitive and dtype (MPS has no float64).
 #[cfg(lumen_mps_linked)]
-mod mps {
+pub(crate) mod mps {
     use super::super::{Graph, Plan, Primitive, TensorType};
     use super::Primitive::*;
     use super::{data, mlp};
@@ -375,13 +375,13 @@ mod mps {
         DType::F32,
     ];
 
-    fn available() -> bool {
+    pub(crate) fn available() -> bool {
         crate::device::mps::is_available()
     }
 
     /// `shape` of `dtype` from a fixed seed: floats in [-4, 4), integers in
     /// [-100, 100) (wrapped for unsigned dtypes), bools alternating.
-    fn values(dtype: DType, shape: &[usize], seed: u64) -> Tensor {
+    pub(crate) fn values(dtype: DType, shape: &[usize], seed: u64) -> Tensor {
         let x = data(shape, seed).to_vec::<f32>();
         dispatch_dtype!(dtype, T => {
             let v: Vec<T> = x
@@ -402,10 +402,11 @@ mod mps {
         dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
     }
 
-    /// The graph's plan on MPS agrees with the reference on the CPU:
-    /// exactly for integers and bools, within the dtype's rounding for
-    /// floats (Metal computes in float, the reference in double).
-    fn check(g: &Graph, inputs: &[Tensor]) {
+    /// The graph compiled for MPS (fused, `crate::compiler::mps`) agrees
+    /// with the reference on the CPU: exactly for integers and bools, within
+    /// the dtype's rounding for floats (Metal computes in float, the
+    /// reference in double).
+    pub(crate) fn check(g: &Graph, inputs: &[Tensor]) {
         check_within(g, inputs, 0.0);
     }
 
@@ -414,7 +415,8 @@ mod mps {
     fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
-        let actual = Plan::compile(g).run(&on_mps).unwrap();
+        let plan = crate::compiler::compile(g, Device::Mps).unwrap();
+        let actual = plan.run(&on_mps).unwrap();
         for (e, a) in expected.iter().zip(&actual) {
             assert_eq!(a.device(), Device::Mps);
             assert_eq!((e.dtype(), e.shape()), (a.dtype(), a.shape()));
@@ -427,7 +429,7 @@ mod mps {
             for (x, y) in as_f64(e).into_iter().zip(as_f64(a)) {
                 let bound = tol * (1.0 + x.abs()) + if tol > 0.0 { slack } else { 0.0 };
                 let close = x == y || (x.is_nan() && y.is_nan()) || (x - y).abs() <= bound;
-                assert!(close, "{g}\nexpected {x}, got {y}");
+                assert!(close, "{plan}\nexpected {x}, got {y}");
             }
         }
     }

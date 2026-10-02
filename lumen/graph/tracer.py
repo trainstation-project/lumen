@@ -59,17 +59,17 @@ def _trace(fn, args):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape; anything else is baked into the
-    # graph, so it must be hashable.
-    return tuple((a.dtype, tuple(a.shape)) if isinstance(a, Tensor) else ("static", a) for a in args)
+    # Tensors are traced by dtype and shape, and compiled for their device;
+    # anything else is baked into the graph, so it must be hashable.
+    return tuple((a.dtype, tuple(a.shape), str(a.device)) if isinstance(a, Tensor) else ("static", a) for a in args)
 
 
 def compile(fn):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
-    and compiled into a static plan on its first call with each input
-    signature (the tensor arguments' dtypes and shapes, and the values of
-    the other arguments), which every call then runs. Results are on the
-    first tensor argument's device."""
+    and compiled into a static plan for the tensor arguments' device on its
+    first call with each input signature (the tensor arguments' dtypes,
+    shapes and devices, and the values of the other arguments), which every
+    call then runs. Results are on the first tensor argument's device."""
     plans = {}
 
     @functools.wraps(fn)
@@ -77,7 +77,8 @@ def compile(fn):
         key = _signature(args)
         if key not in plans:
             graph, single = _trace(fn, args)
-            plans[key] = Plan(graph), single
+            device = next((a.device for a in args if isinstance(a, Tensor)), None)
+            plans[key] = Plan(graph, device), single
         plan, single = plans[key]
         outputs = plan.run([a for a in args if isinstance(a, Tensor)])
         return outputs[0] if single else tuple(outputs)

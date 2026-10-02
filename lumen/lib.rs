@@ -19,6 +19,7 @@ macro_rules! op_name {
 pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;
+pub mod compiler;
 pub mod device;
 pub mod graph;
 pub mod ops;
