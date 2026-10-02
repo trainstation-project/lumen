@@ -51,6 +51,7 @@ struct Submission {
 struct Profiled {
     context: GpuContext,
     name: &'static str,
+    kernel: String,
     profiler_ns: u64,
     host_seconds: f64,
 }
@@ -60,14 +61,20 @@ struct Profiled {
 pub(crate) type Completion = unsafe extern "C" fn(*mut c_void, f64, f64, i32);
 
 /// Register work on `tensors` about to be submitted, recorded in the profiler
-/// as `name`. Pass the returned context and [`completed`] to the shim, which
+/// as `name`, running Metal function `kernel` (copied only while profiling).
+/// Pass the returned context and [`completed`] to the shim, which
 /// must call it exactly once; if the shim does not submit, call [`cancel`].
 /// The flag is whether the profiler times it (the shim samples its GPU
 /// start and end).
-pub(crate) fn submit(tensors: Vec<Tensor>, name: &'static str) -> (*mut c_void, Completion, bool) {
+pub(crate) fn submit(
+    tensors: Vec<Tensor>,
+    name: &'static str,
+    kernel: &str,
+) -> (*mut c_void, Completion, bool) {
     let profile = crate::profiler::gpu_context(Device::Mps).map(|context| Profiled {
         context,
         name,
+        kernel: kernel.to_owned(),
         profiler_ns: crate::profiler::now_ns(),
         host_seconds: unsafe { lumen_mps_stream_host_time() },
     });
@@ -93,7 +100,8 @@ unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f6
     if let Some(p) = &submission.profile {
         let to_ns = |t: f64| (p.profiler_ns as f64 + (t - p.host_seconds) * 1e9).max(0.0) as u64;
         let (start, end) = (to_ns(gpu_start), to_ns(gpu_end));
-        crate::profiler::record_gpu_in(p.context, p.name, Device::Mps, start, end);
+        let kernel = Some(p.kernel.clone());
+        crate::profiler::record_kernel_in(p.context, p.name, kernel, Device::Mps, start, end);
     }
     drop(submission); // may free the tensors' blocks
     *FINISHED.lock().unwrap_or_else(|e| e.into_inner()) += 1;

@@ -130,8 +130,12 @@ pub(crate) fn trace(events: &[Event]) -> String {
                 };
                 let gpu_pid = pid(e.device);
                 let correlation = e.parent.unwrap_or(0);
+                let kernel = e
+                    .kernel
+                    .as_deref()
+                    .map_or(String::new(), |k| format!(",\"kernel\":{}", json_str(k)));
                 out.push(format!(
-                    "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":{gpu_pid},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"device\":{},\"stream\":{GPU_TID},\"correlation\":{correlation}}}}}",
+                    "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":{gpu_pid},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"device\":{},\"stream\":{GPU_TID},\"correlation\":{correlation}{kernel}}}}}",
                     json_str(&e.name),
                     us(e.start_ns),
                     us(e.duration_ns()),

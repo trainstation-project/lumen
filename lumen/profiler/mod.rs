@@ -105,6 +105,9 @@ pub struct Event {
     /// Memory events: the allocator's allocated and reserved bytes after it.
     pub total_allocated: usize,
     pub total_reserved: usize,
+    /// GPU events: the device kernel that ran (`reduce_sum_rows_f32`), where
+    /// the backend names it.
+    pub kernel: Option<String>,
 }
 
 impl Event {
@@ -326,6 +329,7 @@ impl Drop for RecordGuard {
                 addr: 0,
                 total_allocated: 0,
                 total_reserved: 0,
+                kernel: None,
             },
         );
     }
@@ -382,6 +386,7 @@ pub(crate) fn report_memory(
             addr,
             total_allocated,
             total_reserved,
+            kernel: None,
         },
     );
 }
@@ -419,10 +424,23 @@ pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
 }
 
 /// Record device work captured in `context`.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+#[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
 pub(crate) fn record_gpu_in(
     context: GpuContext,
     name: &str,
+    device: Device,
+    start_ns: u64,
+    end_ns: u64,
+) {
+    record_kernel_in(context, name, None, device, start_ns, end_ns);
+}
+
+/// [`record_gpu_in`], for work that ran `kernel`.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+pub(crate) fn record_kernel_in(
+    context: GpuContext,
+    name: &str,
+    kernel: Option<String>,
     device: Device,
     start_ns: u64,
     end_ns: u64,
@@ -443,6 +461,7 @@ pub(crate) fn record_gpu_in(
             addr: 0,
             total_allocated: 0,
             total_reserved: 0,
+            kernel,
         },
     );
 }

@@ -49,6 +49,13 @@ pub(crate) fn compile(graph: &Graph) -> Result<Plan, String> {
     Ok(Plan::compile(&fused))
 }
 
+/// The Metal source of the kernel a fusion with `body` runs, as
+/// [`compile`] generates it.
+#[cfg(feature = "python")]
+pub(crate) fn fusion_source(body: &Graph) -> String {
+    codegen::kernel(body).1
+}
+
 /// Encode fusion `step`: its kernel, compiled with its graph, over the
 /// output's elements.
 pub(crate) fn encode(

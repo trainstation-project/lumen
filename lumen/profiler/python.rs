@@ -114,6 +114,7 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("addr", e.addr)?;
     d.set_item("total_allocated", e.total_allocated)?;
     d.set_item("total_reserved", e.total_reserved)?;
+    d.set_item("kernel", e.kernel.as_deref())?;
     Ok(d)
 }
 

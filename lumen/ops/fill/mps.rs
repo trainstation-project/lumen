@@ -61,7 +61,18 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     };
     let dst = t.data_ptr();
 
-    let (context, done, timed) = mps::submit(vec![t.clone()], "Fill");
+    // The Metal function lumen_mps_fill runs, for the profiler.
+    let kernel = match (contiguous, pattern.len()) {
+        (true, 1) => "fill_u8",
+        (true, 2) => "fill_u16",
+        (true, 4) => "fill_u32",
+        (true, _) => "fill_u64",
+        (false, 1) => "fill_strided_u8",
+        (false, 2) => "fill_strided_u16",
+        (false, 4) => "fill_strided_u32",
+        (false, _) => "fill_strided_u64",
+    };
+    let (context, done, timed) = mps::submit(vec![t.clone()], "Fill", kernel);
     let status = unsafe {
         lumen_mps_fill(
             dst,

@@ -163,7 +163,7 @@ pub(crate) fn launch(
     let c_name = CString::new(kernel).expect("kernel names have no NUL");
     let pointers: Vec<*const u8> = args.iter().map(|a| a.as_ptr()).collect();
     let lens: Vec<usize> = args.iter().map(Vec::len).collect();
-    let (context, done, timed) = mps::submit(keep, name);
+    let (context, done, timed) = mps::submit(keep, name, kernel);
     let status = unsafe {
         lumen_mps_launch_kernel(
             c_name.as_ptr(),
