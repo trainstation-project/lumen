@@ -5,6 +5,7 @@ use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::graph::plan::Buffer;
 use crate::graph::{Graph, Plan, Primitive, TensorType, Var};
 use crate::python::resolve_device;
 use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
@@ -128,6 +129,30 @@ impl PyGraph {
         Ok((dtype_name(ty.dtype), ty.shape.clone()))
     }
 
+    fn inputs(&self) -> Vec<Var> {
+        self.inner.inputs().to_vec()
+    }
+
+    fn outputs(&self) -> Vec<Var> {
+        self.inner.outputs().to_vec()
+    }
+
+    /// The nodes in order, as dicts: `primitive` (its name), `text` (with
+    /// its parameters), `fusion` (see [`primitive_dict`]), and the `inputs`
+    /// and `output` values.
+    fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .nodes()
+            .iter()
+            .map(|node| {
+                let d = primitive_dict(py, &node.primitive)?;
+                d.set_item("inputs", node.inputs.clone())?;
+                d.set_item("output", node.output)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     fn set_outputs(&mut self, outputs: Vec<Var>) -> PyResult<()> {
         self.inner
             .set_outputs(&outputs)
@@ -173,6 +198,25 @@ impl PyPlan {
         self.inner.workspace_bytes()
     }
 
+    /// The steps in order, as dicts: as [`PyGraph::nodes`], with `inputs`
+    /// and `output` as `(buffer, dtype, shape)`, buffers named as the plan
+    /// prints them (`in0`, `out0`, `ws+1024`).
+    fn steps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let typed = |(buffer, ty): &(Buffer, TensorType)| {
+            (buffer.to_string(), dtype_name(ty.dtype), ty.shape.clone())
+        };
+        self.inner
+            .steps()
+            .iter()
+            .map(|step| {
+                let d = primitive_dict(py, &step.primitive)?;
+                d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
+                d.set_item("output", typed(&step.output))?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
         let outputs = self.inner.run(&inputs).map_err(PyValueError::new_err)?;
@@ -186,6 +230,33 @@ impl PyPlan {
     fn __repr__(&self) -> String {
         self.inner.to_string()
     }
+}
+
+/// `p` as a dict: `primitive`, its name; `text`, it with its parameters;
+/// and `fusion`, for a fusion, a dict of its `kernel` name, its `body`
+/// graph's text and the kernel's Metal `source` (None off macOS), else
+/// None.
+fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("primitive", p.name())?;
+    match p {
+        Primitive::Fusion { name, body, .. } => {
+            d.set_item("text", p.name())?;
+            let fusion = PyDict::new(py);
+            fusion.set_item("kernel", name)?;
+            fusion.set_item("body", body.to_string())?;
+            #[cfg(lumen_mps_linked)]
+            fusion.set_item("source", crate::compiler::mps::fusion_source(body))?;
+            #[cfg(not(lumen_mps_linked))]
+            fusion.set_item("source", py.None())?;
+            d.set_item("fusion", fusion)?;
+        }
+        p => {
+            d.set_item("text", p.to_string())?;
+            d.set_item("fusion", py.None())?;
+        }
+    }
+    Ok(d)
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

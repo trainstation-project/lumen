@@ -1,0 +1,394 @@
+<title>__TITLE__ · lumen graph</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+/* Layout: a header with the views and totals; the graph canvas on the left, the selected node's details and kernel source on the right (stacked below on narrow screens). */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --sunken: #eef0f3;
+  --ink: #16191d;
+  --ink-2: #4a515b;
+  --ink-3: #7b838e;
+  --rule: #dcdfe4;
+  --edge: #b6bcc5;
+  --accent: #2a78d6;
+  --k-fusion: #2a78d6;
+  --k-matmul: #eb6834;
+  --k-reduce: #1baf7a;
+  --k-layout: #eda100;
+  --k-elementwise: #8a74d8;
+  --k-io: #7b838e;
+  --tint: 0.13;
+  --code-kw: #a2378a;
+  --code-ty: #1c5cab;
+  --code-num: #b5560b;
+  --code-com: #7b838e;
+  --code-mark: #fff3cc;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121418; --surface: #1a1d22; --sunken: #15181c; --ink: #eef0f3; --ink-2: #b8bec7; --ink-3: #868e99;
+    --rule: #2c3138; --edge: #4a515b; --accent: #3987e5;
+    --k-fusion: #3987e5; --k-matmul: #d95926; --k-reduce: #199e70; --k-layout: #c98500; --k-elementwise: #9085e9; --k-io: #868e99;
+    --tint: 0.22; --code-kw: #e38ccd; --code-ty: #86b6ef; --code-num: #f0a35e; --code-com: #868e99; --code-mark: #3b3420;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121418; --surface: #1a1d22; --sunken: #15181c; --ink: #eef0f3; --ink-2: #b8bec7; --ink-3: #868e99;
+  --rule: #2c3138; --edge: #4a515b; --accent: #3987e5;
+  --k-fusion: #3987e5; --k-matmul: #d95926; --k-reduce: #199e70; --k-layout: #c98500; --k-elementwise: #9085e9; --k-io: #868e99;
+  --tint: 0.22; --code-kw: #e38ccd; --code-ty: #86b6ef; --code-num: #f0a35e; --code-com: #868e99; --code-mark: #3b3420;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--font-ui); display: flex; flex-direction: column; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding: 10px 16px; border-bottom: 1px solid var(--rule); background: var(--surface); }
+header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+header .meta { font: 12px var(--font-mono); color: var(--ink-3); }
+.tabs { display: flex; gap: 2px; background: var(--sunken); padding: 3px; border-radius: 7px; }
+.tabs button { font: 500 13px var(--font-ui); color: var(--ink-2); background: none; border: 0; padding: 5px 12px; border-radius: 5px; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.totals { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 12px var(--font-mono); color: var(--ink-2); margin-left: auto; }
+.totals b { color: var(--ink); font-weight: 600; }
+main { flex: 1; display: flex; min-height: 0; }
+#canvas { flex: 1; min-width: 0; position: relative; overflow: hidden; background: var(--bg); }
+#canvas svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#canvas svg.drag { cursor: grabbing; }
+.controls { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 6px; }
+.controls button, .legend { font: 12px var(--font-ui); background: var(--surface); color: var(--ink-2); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 9px; }
+.controls button { cursor: pointer; }
+.legend { position: absolute; left: 12px; top: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; max-width: calc(100% - 24px); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+aside { width: min(46%, 640px); border-left: 1px solid var(--rule); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
+.detail { padding: 14px 16px; border-bottom: 1px solid var(--rule); overflow: auto; max-height: 48%; display: flex; flex-direction: column; gap: 10px; }
+.detail h2 { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px var(--font-mono); padding: 2px 7px; border-radius: 4px; background: var(--sunken); color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; font-size: 13px; }
+.kv dt { color: var(--ink-3); }
+.kv dd { margin: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
+table.kernels { border-collapse: collapse; font-size: 12px; width: 100%; }
+table.kernels td { padding: 4px 6px; border-top: 1px solid var(--rule); font-family: var(--font-mono); }
+table.kernels td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note { font-size: 12px; color: var(--ink-3); }
+.code { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.code-tabs { display: flex; gap: 2px; padding: 6px 10px 0; overflow-x: auto; border-bottom: 1px solid var(--rule); flex: none; }
+.code-tabs button { font: 12px var(--font-mono); color: var(--ink-2); background: none; border: 1px solid transparent; border-bottom: 0; padding: 5px 9px; border-radius: 5px 5px 0 0; cursor: pointer; white-space: nowrap; }
+.code-tabs button[aria-selected="true"] { background: var(--sunken); color: var(--ink); border-color: var(--rule); }
+.code-head { font: 12px var(--font-mono); color: var(--ink-3); padding: 6px 12px; background: var(--sunken); flex: none; overflow-wrap: anywhere; }
+pre.src { margin: 0; flex: 1; overflow: auto; background: var(--sunken); font: 12px/1.55 var(--font-mono); padding: 6px 0 24px; tab-size: 4; }
+pre.src .ln { display: block; padding: 0 12px 0 0; white-space: pre; }
+pre.src .ln::before { content: attr(data-n); display: inline-block; width: 44px; padding-right: 12px; text-align: right; color: var(--ink-3); opacity: .7; user-select: none; }
+pre.src .ln.mark { background: var(--code-mark); }
+.kw { color: var(--code-kw); } .ty { color: var(--code-ty); } .nu { color: var(--code-num); } .co { color: var(--code-com); font-style: italic; }
+.empty { padding: 24px 16px; color: var(--ink-3); font-size: 13px; }
+#text { flex: 1; overflow: auto; padding: 16px; display: grid; gap: 16px; align-content: start; }
+#text section { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; min-width: 0; }
+#text h3 { margin: 0; padding: 10px 14px; font-size: 13px; border-bottom: 1px solid var(--rule); }
+#text pre { margin: 0; padding: 12px 14px; overflow: auto; font: 12px/1.5 var(--font-mono); }
+svg text { font-family: var(--font-ui); }
+.node rect.box { stroke-width: 1.2; }
+.node.sel rect.box { stroke-width: 2.5; }
+.node:hover rect.box { stroke-width: 2; }
+.node:focus { outline: none; }
+.node:focus-visible rect.box { stroke-width: 3; }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.3; }
+.edge.hl { stroke: var(--accent); stroke-width: 2; }
+@media (max-width: 820px) {
+  main { flex-direction: column; }
+  #canvas { min-height: 55vh; }
+  aside { width: 100%; border-left: 0; border-top: 1px solid var(--rule); }
+  .detail { max-height: none; }
+  pre.src { max-height: 60vh; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header>
+  <h1 id="title"></h1>
+  <span class="meta" id="meta"></span>
+  <div class="tabs" role="tablist" aria-label="View">
+    <button role="tab" id="tab-fused" aria-selected="true">Fused plan</button>
+    <button role="tab" id="tab-traced" aria-selected="false">Traced graph</button>
+    <button role="tab" id="tab-text" aria-selected="false">Text</button>
+  </div>
+  <div class="totals" id="totals"></div>
+</header>
+<main id="main">
+  <div id="canvas">
+    <svg id="svg" aria-label="Graph"><g id="viewport"></g></svg>
+    <div class="legend" id="legend"></div>
+    <div class="controls"><button id="fit">Fit</button><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button></div>
+  </div>
+  <aside>
+    <div class="detail" id="detail"><div class="empty">Select a node to see its types, buffers, kernels and source.</div></div>
+    <div class="code" id="code"></div>
+  </aside>
+</main>
+<div id="text" hidden></div>
+
+<script>
+const DATA = __DATA__;
+const NS = "http://www.w3.org/2000/svg";
+const fmtUs = us => us >= 1000 ? `${(us / 1000).toFixed(2)} ms` : `${us.toFixed(us < 10 ? 2 : 1)} µs`;
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (parent) parent.appendChild(e); return e; };
+const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+
+// ---------------------------------------------------------------- header
+document.getElementById("title").textContent = DATA.title;
+document.getElementById("meta").textContent = `${DATA.device} · ${DATA.inputs.join(", ")} · ${DATA.created}`;
+function totals(view) {
+  const ks = view.nodes.flatMap(n => n.kernels || []);
+  return { us: ks.reduce((a, k) => a + k.us, 0), kernels: ks.length, steps: view.nodes.filter(n => n.kind === "step" || n.kind === "fusion" || (n.kind === "node" && (n.kernels || []).length)).length };
+}
+const tf = totals(DATA.views.fused), tt = totals(DATA.views.traced);
+document.getElementById("totals").innerHTML = DATA.device === "cpu"
+  ? `<span>runs on the CPU: no kernels to time</span>`
+  : `<span>fused <b>${fmtUs(tf.us)}</b> in <b>${tf.kernels}</b> kernels</span><span>unfused <b>${fmtUs(tt.us)}</b> in <b>${tt.kernels}</b></span><span>workspace <b>${(DATA.workspace.fused / 1024).toFixed(0)}</b> / ${(DATA.workspace.unfused / 1024).toFixed(0)} KiB</span>`;
+
+// ---------------------------------------------------------------- kinds
+const KINDS = [
+  ["fusion", "fusion"], ["matmul", "dot_general"], ["reduce", "reduction"], ["layout", "layout"], ["elementwise", "elementwise"], ["io", "input / output"],
+];
+function kindOf(n) {
+  if (n.kind === "fusion") return "fusion";
+  if (n.kind === "input" || n.kind === "output" || n.kind === "buffer") return "io";
+  const p = n.label;
+  if (p === "dot_general") return "matmul";
+  if (p.startsWith("reduce")) return "reduce";
+  if (["reshape", "broadcast_in_dim", "transpose", "full", "iota"].includes(p)) return "layout";
+  return "elementwise";
+}
+document.getElementById("legend").innerHTML = KINDS.map(([k, l]) => `<span><i style="background:var(--k-${k})"></i>${l}</span>`).join("");
+
+// ---------------------------------------------------------------- layout
+// A node's label (a fusion's is its primitives, `a -> b -> c`, as the
+// profiler names it) in lines of up to LABEL_CHARS characters, broken after
+// an arrow.
+const LABEL_CHARS = 44, LINE = 16;
+function lines(n) {
+  if (n._lines) return n._lines;
+  const out = [];
+  for (const part of n.label.split(" -> ")) {
+    const last = out.length - 1;
+    if (last >= 0 && out[last].length + 4 + part.length <= LABEL_CHARS) out[last] += ` -> ${part}`;
+    else { if (last >= 0) out[last] += " ->"; out.push(part); }
+  }
+  return (n._lines = out.map(l => (l.length > LABEL_CHARS + 3 ? l.slice(0, LABEL_CHARS + 2) + "…" : l)));
+}
+
+function layout(view) {
+  const preds = view.nodes.map(() => []), succs = view.nodes.map(() => []);
+  for (const [a, b] of view.edges) { preds[b].push(a); succs[a].push(b); }
+  const layer = view.nodes.map(() => 0);
+  for (const n of view.nodes) for (const p of preds[n.id]) layer[n.id] = Math.max(layer[n.id], layer[p] + 1);
+  // Outputs at the bottom.
+  const depth = Math.max(0, ...layer);
+  for (const n of view.nodes) if (n.kind === "output") layer[n.id] = depth;
+  const layers = [];
+  for (const n of view.nodes) (layers[layer[n.id]] ||= []).push(n.id);
+  const W = n => Math.max(120, Math.min(360, 26 + 7.2 * Math.max(...lines(n).map(l => l.length), (n.type || "").length + 10)));
+  const H = n => 46 + LINE * (lines(n).length - 1), GX = 28, GY = 54;
+  const x = {}, y = {};
+  const place = row => { let cx = 0; for (const id of row) { const w = W(view.nodes[id]); x[id] = cx + w / 2; cx += w + GX; } const shift = cx / 2; for (const id of row) x[id] -= shift; };
+  let top = 0;
+  layers.forEach(row => { place(row); row.forEach(id => (y[id] = top)); top += Math.max(...row.map(id => H(view.nodes[id]))) + GY; });
+  // Barycenter sweeps down and up, to shorten edges.
+  for (let pass = 0; pass < 4; pass++) {
+    const down = pass % 2 === 0;
+    const order = down ? layers.slice(1) : layers.slice(0, -1).reverse();
+    for (const row of order) {
+      const bary = id => { const ns = down ? preds[id] : succs[id]; return ns.length ? ns.reduce((a, p) => a + x[p], 0) / ns.length : x[id]; };
+      row.sort((a, b) => bary(a) - bary(b));
+      place(row);
+      // Pull the row toward its neighbours' mean.
+      const target = row.reduce((a, id) => a + bary(id), 0) / row.length, now = row.reduce((a, id) => a + x[id], 0) / row.length;
+      for (const id of row) x[id] += target - now;
+    }
+  }
+  return { x, y, W, H, preds, succs };
+}
+
+// ---------------------------------------------------------------- graph
+const svg = document.getElementById("svg"), vp = document.getElementById("viewport");
+let view = null, geo = null, selected = null, tx = 0, ty = 0, scale = 1;
+const apply = () => vp.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
+
+function render(name) {
+  view = DATA.views[name];
+  geo = layout(view);
+  vp.innerHTML = "";
+  const total = view.nodes.reduce((a, n) => a + (n.kernels || []).reduce((s, k) => s + k.us, 0), 0) || 1;
+  const gEdges = el("g", {}, vp), gNodes = el("g", {}, vp);
+  view.edgeEls = [];
+  for (const [a, b] of view.edges) {
+    const x1 = geo.x[a], y1 = geo.y[a] + geo.H(view.nodes[a]), x2 = geo.x[b], y2 = geo.y[b], my = (y1 + y2) / 2;
+    view.edgeEls.push([a, b, el("path", { class: "edge", d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}` }, gEdges)]);
+  }
+  view.nodeEls = {};
+  for (const n of view.nodes) {
+    const w = geo.W(n), hgt = geo.H(n), kind = kindOf(n), x0 = geo.x[n.id] - w / 2, y0 = geo.y[n.id];
+    const g = el("g", { class: "node", transform: `translate(${x0},${y0})`, tabindex: 0, role: "button", "aria-label": `${n.label} ${n.type || ""}` }, gNodes);
+    const io = kind === "io";
+    el("rect", { class: "box", width: w, height: hgt, rx: io ? 23 : 7, fill: `color-mix(in srgb, var(--k-${kind}) calc(var(--tint) * 100%), var(--surface))`, stroke: `var(--k-${kind})` }, g);
+    const us = (n.kernels || []).reduce((s, k) => s + k.us, 0);
+    lines(n).forEach((line, i) => {
+      const t = el("text", { x: 12, y: 19 + LINE * i, "font-size": 13, "font-weight": 600, fill: "var(--ink)" }, g);
+      t.textContent = line;
+    });
+    const sub = el("text", { x: 12, y: hgt - 10, "font-size": 11, fill: "var(--ink-2)", "font-family": "var(--font-mono)" }, g);
+    sub.textContent = (n.type || "") + (us ? `  ·  ${fmtUs(us)}` : "");
+    if (us) el("rect", { x: 1, y: hgt - 4, width: Math.max(2, (w - 2) * us / total), height: 3, rx: 1.5, fill: `var(--k-${kind})` }, g);
+    const t = el("title", {}, g); t.textContent = n.kind === "fusion" ? n.label : n.text || n.label;
+    g.addEventListener("click", () => select(n.id));
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(n.id); } });
+    view.nodeEls[n.id] = g;
+  }
+  selected = null;
+  fit();
+  const first = view.nodes.find(n => (n.kernels || []).length) || view.nodes[0];
+  if (first) select(first.id);
+}
+
+function fit() {
+  const b = vp.getBBox(), r = svg.getBoundingClientRect();
+  if (!b.width || !r.width) return;
+  scale = Math.min(1.4, Math.min((r.width - 40) / b.width, (r.height - 90) / b.height));
+  tx = r.width / 2 - (b.x + b.width / 2) * scale;
+  ty = 56 - b.y * scale;
+  apply();
+}
+function zoom(f, cx, cy) {
+  const r = svg.getBoundingClientRect();
+  cx ??= r.width / 2; cy ??= r.height / 2;
+  const ns = Math.min(4, Math.max(0.08, scale * f));
+  tx = cx - (cx - tx) * ns / scale; ty = cy - (cy - ty) * ns / scale; scale = ns; apply();
+}
+svg.addEventListener("wheel", e => { e.preventDefault(); const r = svg.getBoundingClientRect(); zoom(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+let drag = null;
+svg.addEventListener("pointerdown", e => { if (e.target.closest(".node")) return; drag = [e.clientX, e.clientY, tx, ty]; svg.classList.add("drag"); svg.setPointerCapture(e.pointerId); });
+svg.addEventListener("pointermove", e => { if (!drag) return; tx = drag[2] + e.clientX - drag[0]; ty = drag[3] + e.clientY - drag[1]; apply(); });
+svg.addEventListener("pointerup", () => { drag = null; svg.classList.remove("drag"); });
+document.getElementById("fit").onclick = fit;
+document.getElementById("zin").onclick = () => zoom(1.25);
+document.getElementById("zout").onclick = () => zoom(0.8);
+
+// ---------------------------------------------------------------- details
+function select(id) {
+  if (selected !== null && view.nodeEls[selected]) view.nodeEls[selected].classList.remove("sel");
+  selected = id;
+  view.nodeEls[id].classList.add("sel");
+  for (const [a, b, p] of view.edgeEls) p.classList.toggle("hl", a === id || b === id);
+  const n = view.nodes[id], d = document.getElementById("detail");
+  d.innerHTML = "";
+  d.appendChild(h("h2", "", n.label));
+  const chips = h("div", "chips");
+  chips.appendChild(h("span", "chip", KINDS.find(k => k[0] === kindOf(n))[1]));
+  if (n.type) chips.appendChild(h("span", "chip", n.type));
+  if (n.buffer) chips.appendChild(h("span", "chip", n.buffer));
+  if (n.step !== undefined) chips.appendChild(h("span", "chip", `step ${n.step}`));
+  if (n.fusion) chips.appendChild(h("span", "chip", n.fusion.kernel));
+  d.appendChild(chips);
+  const kv = h("dl", "kv");
+  const row = (k, v) => { kv.appendChild(h("dt", "", k)); kv.appendChild(h("dd", "", v)); };
+  if (n.text && n.kind !== "fusion") row("primitive", n.text);
+  (n.inputs || []).forEach(([b, t], i) => row(`input ${i}`, `${b}  ${t}`));
+  if (kv.children.length) d.appendChild(kv);
+  const ks = n.kernels || [];
+  if (ks.length) {
+    const t = h("table", "kernels");
+    for (const k of ks) {
+      const tr = document.createElement("tr");
+      tr.appendChild(h("td", "", k.name));
+      tr.appendChild(h("td", "", k.file ? `ops/${k.file}` : k.name.startsWith("fusion_") ? "generated" : ""));
+      tr.appendChild(h("td", "num", fmtUs(k.us)));
+      t.appendChild(tr);
+    }
+    d.appendChild(t);
+  } else if (n.note) d.appendChild(h("div", "note", n.note));
+  else if (n.kind !== "input" && n.kind !== "output" && DATA.device !== "cpu") d.appendChild(h("div", "note", "No kernel ran for this step (it aliases its input, or has no elements)."));
+  showCode(n);
+}
+
+// ---------------------------------------------------------------- source
+const KW = /\b(kernel|device|constant|threadgroup|thread|inline|template|typename|typedef|for|if|else|return|const|constexpr|struct|static|auto|using|namespace|while|uint|ulong|int|long|float|half|bfloat|bool|char|uchar|short|ushort|void|uint2|uint3|float4|uchar4|ushort4|uint4|ulong2|simdgroup_float8x8|true|false)\b/g;
+function highlight(line) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ci = line.indexOf("//");
+  const code = ci >= 0 ? line.slice(0, ci) : line, comment = ci >= 0 ? line.slice(ci) : "";
+  let out = esc(code)
+    .replace(/(#\w+)/g, '<span class="kw">$1</span>')
+    .replace(KW, m => /^(uint|ulong|int|long|float|half|bfloat|bool|char|uchar|short|ushort|void|uint2|uint3|float4|uchar4|ushort4|uint4|ulong2|simdgroup_float8x8)$/.test(m) ? `<span class="ty">${m}</span>` : `<span class="kw">${m}</span>`)
+    .replace(/\b(\d+(\.\d+)?[uf]?|0x[0-9a-fA-F]+u?)\b/g, '<span class="nu">$1</span>');
+  return out + (comment ? `<span class="co">${esc(comment)}</span>` : "");
+}
+function codeBlock(text, anchor) {
+  const pre = h("pre", "src");
+  const lines = text.split("\n");
+  let start = -1, end = -1;
+  if (anchor) {
+    start = lines.findIndex(l => l.includes(anchor));
+    if (start >= 0) {
+      // Through the end of the definition: a macro's continued lines, or a
+      // function's closing brace at column 0.
+      end = start;
+      if (lines[start].trim().startsWith("#define")) { while (end + 1 < lines.length && lines[end].trimEnd().endsWith("\\")) end++; }
+      else { while (end + 1 < lines.length && !lines[end].startsWith("}")) end++; }
+      // Include the comment above it.
+      while (start > 0 && lines[start - 1].trim().startsWith("//")) start--;
+      while (start > 0 && lines[start - 1].startsWith("template")) start--;
+    }
+  }
+  pre.innerHTML = lines.map((l, i) => `<span class="ln${i >= start && i <= end ? " mark" : ""}" data-n="${i + 1}">${highlight(l) || " "}</span>`).join("");
+  if (start >= 0) requestAnimationFrame(() => { const t = pre.children[start]; if (t) pre.scrollTop = t.offsetTop - 12; });
+  return pre;
+}
+function showCode(n) {
+  const c = document.getElementById("code");
+  c.innerHTML = "";
+  const tabs = [];
+  for (const k of n.kernels || []) {
+    if (k.name.startsWith("fusion_") && n.fusion && n.fusion.source) tabs.push([k.name, `generated Metal for ${n.fusion.kernel}, compiled with the plan (plus the shared prelude: see "prelude")`, n.fusion.source, null]);
+    else if (k.file && DATA.sources[k.file]) tabs.push([k.name, `lumen/ops/${k.file} · ${k.name} is instantiated from the highlighted template`, DATA.sources[k.file], k.anchor]);
+  }
+  if (n.fusion) {
+    if (!tabs.length && n.fusion.source) tabs.push([n.fusion.kernel, "generated Metal", n.fusion.source, null]);
+    tabs.push(["body", "the fused primitives, as a graph", n.fusion.body, null]);
+  }
+  if (tabs.length && DATA.prelude) tabs.push(["prelude", "lumen/ops/mps.metal: the definitions every kernel shares", DATA.prelude, null]);
+  if (!tabs.length) { c.appendChild(h("div", "empty", n.kind === "input" || n.kind === "output" ? "Inputs and outputs have no kernel." : "No kernel source for this node.")); return; }
+  const bar = h("div", "code-tabs"); bar.setAttribute("role", "tablist");
+  const head = h("div", "code-head"), body = h("div");
+  body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column";
+  const show = i => {
+    [...bar.children].forEach((b, j) => b.setAttribute("aria-selected", String(i === j)));
+    head.textContent = tabs[i][1];
+    body.innerHTML = "";
+    body.appendChild(codeBlock(tabs[i][2], tabs[i][3]));
+  };
+  tabs.forEach((t, i) => { const b = h("button", "", t[0]); b.setAttribute("role", "tab"); b.onclick = () => show(i); bar.appendChild(b); });
+  c.append(bar, head, body);
+  show(0);
+}
+
+// ---------------------------------------------------------------- views
+const text = document.getElementById("text");
+for (const [title, body] of [["Traced graph", DATA.graph_text], [`Fused plan (${DATA.device})`, DATA.fused_text], ["Unfused plan", DATA.unfused_text]]) {
+  const s = h("section"); s.appendChild(h("h3", "", title)); s.appendChild(h("pre", "", body)); text.appendChild(s);
+}
+const tabs = { fused: "tab-fused", traced: "tab-traced", text: "tab-text" };
+function setView(name) {
+  for (const [k, id] of Object.entries(tabs)) document.getElementById(id).setAttribute("aria-selected", String(k === name));
+  document.getElementById("main").hidden = name === "text";
+  text.hidden = name !== "text";
+  if (name !== "text") render(name);
+}
+for (const [k, id] of Object.entries(tabs)) document.getElementById(id).onclick = () => setView(k);
+setView("fused");
+window.addEventListener("resize", () => { if (view) fit(); });
+</script>

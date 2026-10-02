@@ -277,3 +277,51 @@ def test_plan():
     np.testing.assert_allclose(lumen.to_numpy(plan.run([lumen.from_numpy(x)])[0]), np.tanh(np.exp(x) + 1).ravel(), rtol=1e-6)
     with pytest.raises(ValueError, match="must be f32"):
         plan.run([lumen.zeros([16, 16], dtype="float64")])
+
+
+def test_graph_and_plan_describe_themselves():
+    graph = lumen.make_graph(lambda x: (x * 2.0).exp().sum(-1))(lumen.zeros([2, 3]))
+    nodes = graph.nodes()
+    assert [n["primitive"] for n in nodes] == ["full", "broadcast_in_dim", "mul", "exp", "reduce_sum"]
+    assert nodes[-1]["text"] == "reduce_sum[axes=(1,)]" and nodes[-1]["fusion"] is None
+    assert graph.inputs() == [0] and graph.outputs() == [nodes[-1]["output"]]
+    steps = lumen.graph.Plan(graph).steps()
+    assert steps[-1]["output"] == ("out0", "float32", [2])
+    assert steps[2]["inputs"][0] == ("in0", "float32", [2, 3])
+
+
+@pytest.mark.mps
+def test_mps_plan_steps_and_profiled_kernels():
+    try:
+        x = lumen.ones([64, 128], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    from lumen.profiler import ProfilerActivity, profile
+
+    graph = lumen.make_graph(lambda x: (x * 2.0 + 1.0).tanh().sum(-1))(x)
+    plan = lumen.graph.Plan(graph, "mps")
+    fusion = plan.steps()[0]["fusion"]
+    assert fusion["kernel"] in fusion["source"] and "tanh" in fusion["body"]
+    plan.run([x])
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.MPS]) as prof:
+        plan.run([x])
+        lumen.mps.synchronize()
+    kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
+    assert kernels == [fusion["kernel"], "reduce_sum_rows_f32"]
+
+
+def test_dump_graph(tmp_path):
+    f = lumen.compile(lambda x, w: (x @ w).relu())
+    with pytest.raises(RuntimeError, match="call <lambda> first"):
+        f.dump_graph(tmp_path / "none.html")
+    f(lumen.zeros([2, 3]), lumen.zeros([3, 4]))
+    data = f.dump_graph(tmp_path / "graph.html", json_path=tmp_path / "graph.json")
+    page = (tmp_path / "graph.html").read_text()
+    assert page.startswith("<!doctype html>") and "<title>&lt;lambda&gt; · lumen graph</title>" in page
+    assert data["inputs"] == ["f32[2,3]", "f32[3,4]"] and data["device"] == "cpu"
+    assert [n["label"] for n in data["views"]["traced"]["nodes"] if n["kind"] == "node"] == [
+        "dot_general", "full", "broadcast_in_dim", "max"]
+    # Another signature, traced for the dump.
+    data = f.dump_graph(tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16"))
+    assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
