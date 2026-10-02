@@ -6,7 +6,7 @@
 use crate::Tensor;
 use crate::graph::Primitive::*;
 use crate::graph::plan::Step;
-use crate::ops::mps::{Grid, dims32_arg, launch_step, u32_arg};
+use crate::ops::mps::{BYTES_PER_THREAD, Grid, dims32_arg, launch, launch_step, u32_arg};
 use crate::tensor::contiguous_strides;
 
 pub(crate) fn encode(
@@ -17,9 +17,10 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     let (x, out) = (&step.inputs[0].1, &step.output.1);
     let xs = contiguous_strides(&x.shape);
+    let (width, name) = (out.dtype.size_of(), step.primitive.name());
     let strides = match &step.primitive {
         Reshape { .. } => {
-            return gather(step, &[out.numel()], &[1], inputs, output, keep);
+            return gather(width, &[out.numel()], &[1], inputs[0], output, keep, name);
         }
         BroadcastInDim {
             broadcast_dimensions,
@@ -37,25 +38,29 @@ pub(crate) fn encode(
             if let Some((batch, rows, cols)) = swapped_blocks(&x.shape, permutation) {
                 let grid = Grid::Groups([cols.div_ceil(32), rows.div_ceil(32), batch]);
                 let args = [u32_arg(rows as u32), u32_arg(cols as u32)];
-                let kernel = format!("transpose_{}", out.dtype.size_of());
+                let kernel = format!("transpose_{width}");
                 return launch_step(step, &kernel, inputs, output, &args, grid, keep);
             }
             permutation.iter().map(|&d| xs[d]).collect()
         }
         _ => unreachable!("a layout primitive"),
     };
-    gather(step, &out.shape, &strides, inputs, output, keep)
+    gather(width, &out.shape, &strides, inputs[0], output, keep, name)
 }
 
-/// A gather of `shape` from the input at `strides`: a thread per element,
-/// on a grid of (innermost dimension, rows).
-fn gather(
-    step: &Step,
+/// Copy the elements of `src` at `strides` (in elements of `width` bytes)
+/// into `dst` as a contiguous tensor of `shape`, recorded in the profiler as
+/// `name`, on a grid of (innermost dimension, rows): a few elements a
+/// thread where the innermost dimension reads contiguous elements or a
+/// broadcast one, else one (strided reads need the threads in flight).
+pub(crate) fn gather(
+    width: usize,
     shape: &[usize],
     strides: &[usize],
-    inputs: &[*const u8],
-    output: *mut u8,
+    src: *const u8,
+    dst: *mut u8,
     keep: Vec<Tensor>,
+    name: &'static str,
 ) -> Result<(), String> {
     let inner = shape.last().copied().unwrap_or(1);
     let inner_stride = strides.last().copied().unwrap_or(0);
@@ -65,10 +70,16 @@ fn gather(
         dims32_arg(outer.iter().copied()),
         dims32_arg(strides[..outer.len()].iter().copied()),
         u32_arg(inner_stride as u32),
+        u32_arg(inner as u32),
     ];
-    let grid = Grid::Threads([inner, outer.iter().product(), 1]);
-    let kernel = format!("gather_{}", step.output.1.dtype.size_of());
-    launch_step(step, &kernel, inputs, output, &args, grid, keep)
+    let per_thread = if inner_stride <= 1 {
+        (BYTES_PER_THREAD / width).max(1)
+    } else {
+        1
+    };
+    let grid = Grid::Threads([inner.div_ceil(per_thread), outer.iter().product(), 1]);
+    let kernel = format!("gather_{width}");
+    launch(&kernel, &[src, dst.cast_const()], &args, grid, keep, name)
 }
 
 /// A transpose by `permutation` as a swap of two blocks of dimensions after

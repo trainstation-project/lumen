@@ -6,20 +6,25 @@
 // Compiled after lumen/ops/mps.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
-// Thread (x, y) writes element x of output row y: the row's offset in the
-// input comes from its index over the outer dimensions, and x steps the
-// innermost dimension's stride.
-#define GATHER(NAME, E)                                                  \
-    kernel void gather_##NAME(device const E *in [[buffer(0)]],          \
-                              device E *out [[buffer(1)]],               \
-                              constant uint &ndim [[buffer(2)]],         \
-                              constant uint *sizes [[buffer(3)]],        \
-                              constant uint *strides [[buffer(4)]],      \
-                              constant uint &inner_stride [[buffer(5)]], \
-                              uint2 gid [[thread_position_in_grid]],     \
-                              uint2 grid [[threads_per_grid]]) {         \
-        uint row = offset_of32(gid.y, ndim, sizes, strides);             \
-        out[gid.y * grid.x + gid.x] = in[row + gid.x * inner_stride];    \
+// Thread (x, y) writes elements x, x + X, ... of output row y (X the grid
+// width, so neighbouring threads write neighbouring elements): the row's
+// offset in the input comes from its index over the outer dimensions, and
+// x steps the innermost dimension's stride.
+#define GATHER(NAME, E)                                                      \
+    kernel void gather_##NAME(device const E *in [[buffer(0)]],              \
+                              device E *out [[buffer(1)]],                   \
+                              constant uint &ndim [[buffer(2)]],             \
+                              constant uint *sizes [[buffer(3)]],            \
+                              constant uint *strides [[buffer(4)]],          \
+                              constant uint &inner_stride [[buffer(5)]],     \
+                              constant uint &inner [[buffer(6)]],            \
+                              uint2 gid [[thread_position_in_grid]],         \
+                              uint2 grid [[threads_per_grid]]) {             \
+        device const E *row = in + offset_of32(gid.y, ndim, sizes, strides); \
+        device E *o = out + gid.y * inner;                                   \
+        for (uint j = gid.x; j < inner; j += grid.x) {                       \
+            o[j] = row[j * inner_stride];                                    \
+        }                                                                    \
     }
 
 // A transpose of the input viewed as [batch, rows, cols] into [batch, cols,

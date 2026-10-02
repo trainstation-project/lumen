@@ -1,13 +1,16 @@
 //! reduce_sum and reduce_max on MPS (`mps.metal`). Consecutive axes are a
 //! view [a, count, b] reduced over the middle: rows when b = 1, columns
 //! otherwise, split into chunks when there are too few outputs to fill
-//! the GPU. Other axes take a generic kernel, a thread per output.
+//! the GPU. Other axes take a generic kernel: a threadgroup per output, or
+//! a thread per output for outputs of few elements.
 
 use crate::graph::Primitive::*;
 use crate::graph::TensorType;
 use crate::graph::plan::Step;
 use crate::graph::primitive::free_dims;
-use crate::ops::mps::{Grid, dims_arg, element_arg, launch, launch_step, u32_arg, u64_arg};
+use crate::ops::mps::{
+    Grid, dims_arg, dims32_arg, element_arg, launch, launch_step, u32_arg, u64_arg,
+};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor, TensorOptions};
 
@@ -26,28 +29,54 @@ pub(crate) fn encode(
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         return consecutive(step, x, &reduced, inputs[0], output, keep);
     }
-    // Other axes: a thread per output, summing in the reference's
-    // (row-major) order.
+    // Other axes: a threadgroup per output (indexing the reduced
+    // dimensions in 32 bits), or, for outputs of few elements, a thread per
+    // output, which sums in the reference's (row-major) order.
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
     let init = match step.primitive {
         ReduceSum { .. } => Scalar::Int(0),
         _ => lowest(x.dtype),
     };
-    let args = [
+    let count: usize = reduced.iter().map(|&d| x.shape[d]).product();
+    let grouped = count >= REDUCE_THREADS && x.numel() <= u32::MAX as usize;
+    let reduced_sizes = reduced.iter().map(|&d| x.shape[d]);
+    let reduced_strides = reduced.iter().map(|&d| strides[d]);
+    let mut args = vec![
         element_arg(x.dtype, init),
         u32_arg(kept.len() as u32),
         dims_arg(kept.iter().map(|&d| x.shape[d])),
         dims_arg(kept.iter().map(|&d| strides[d])),
         u32_arg(reduced.len() as u32),
-        dims_arg(reduced.iter().map(|&d| x.shape[d])),
-        dims_arg(reduced.iter().map(|&d| strides[d])),
-        u64_arg(reduced.iter().map(|&d| x.shape[d]).product()),
     ];
-    let kernel = format!("{}_{}", step.primitive.name(), x.dtype);
-    let grid = Grid::Threads([step.output.1.numel(), 1, 1]);
+    let (name, outputs) = (step.primitive.name(), step.output.1.numel());
+    let (kernel, grid) = if grouped {
+        args.extend([
+            dims32_arg(reduced_sizes),
+            dims32_arg(reduced_strides),
+            u32_arg(count as u32),
+        ]);
+        (
+            format!("{name}_grouped_{}", x.dtype),
+            Grid::Groups([outputs, 1, 1]),
+        )
+    } else {
+        args.extend([
+            dims_arg(reduced_sizes),
+            dims_arg(reduced_strides),
+            u64_arg(count),
+        ]);
+        (
+            format!("{name}_{}", x.dtype),
+            Grid::Threads([outputs, 1, 1]),
+        )
+    };
     launch_step(step, &kernel, inputs, output, &args, grid, keep)
 }
+
+/// The threads of a threadgroup that reduce one output together
+/// (`REDUCE_THREADS` in `mps.metal`): a [`Grid::Groups`] threadgroup.
+const REDUCE_THREADS: usize = 256;
 
 /// The smallest value of `dtype`: the identity of `max`.
 fn lowest(dtype: DType) -> Scalar {
