@@ -254,6 +254,7 @@ fn every_dtype_round_trips() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn files_round_trip_with_metadata() {
     let dir = std::env::temp_dir().join(format!("lumen_safetensors_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
