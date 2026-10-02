@@ -72,7 +72,6 @@ aside { width: min(46%, 640px); border-left: 1px solid var(--rule); background: 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; font-size: 13px; }
 .kv dt { color: var(--ink-3); }
 .kv dd { margin: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
-.ops { font: 12px var(--font-mono); color: var(--ink-2); overflow-wrap: anywhere; }
 table.kernels { border-collapse: collapse; font-size: 12px; width: 100%; }
 table.kernels td { padding: 4px 6px; border-top: 1px solid var(--rule); font-family: var(--font-mono); }
 table.kernels td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -168,6 +167,21 @@ function kindOf(n) {
 document.getElementById("legend").innerHTML = KINDS.map(([k, l]) => `<span><i style="background:var(--k-${k})"></i>${l}</span>`).join("");
 
 // ---------------------------------------------------------------- layout
+// A node's label (a fusion's is its primitives, `a -> b -> c`, as the
+// profiler names it) in lines of up to LABEL_CHARS characters, broken after
+// an arrow.
+const LABEL_CHARS = 44, LINE = 16;
+function lines(n) {
+  if (n._lines) return n._lines;
+  const out = [];
+  for (const part of n.label.split(" -> ")) {
+    const last = out.length - 1;
+    if (last >= 0 && out[last].length + 4 + part.length <= LABEL_CHARS) out[last] += ` -> ${part}`;
+    else { if (last >= 0) out[last] += " ->"; out.push(part); }
+  }
+  return (n._lines = out.map(l => (l.length > LABEL_CHARS + 3 ? l.slice(0, LABEL_CHARS + 2) + "…" : l)));
+}
+
 function layout(view) {
   const preds = view.nodes.map(() => []), succs = view.nodes.map(() => []);
   for (const [a, b] of view.edges) { preds[b].push(a); succs[a].push(b); }
@@ -178,11 +192,12 @@ function layout(view) {
   for (const n of view.nodes) if (n.kind === "output") layer[n.id] = depth;
   const layers = [];
   for (const n of view.nodes) (layers[layer[n.id]] ||= []).push(n.id);
-  const W = n => Math.max(120, Math.min(260, 26 + 7.2 * Math.max(n.label.length, (n.type || "").length + 10)));
-  const H = 46, GX = 28, GY = 54;
+  const W = n => Math.max(120, Math.min(360, 26 + 7.2 * Math.max(...lines(n).map(l => l.length), (n.type || "").length + 10)));
+  const H = n => 46 + LINE * (lines(n).length - 1), GX = 28, GY = 54;
   const x = {}, y = {};
   const place = row => { let cx = 0; for (const id of row) { const w = W(view.nodes[id]); x[id] = cx + w / 2; cx += w + GX; } const shift = cx / 2; for (const id of row) x[id] -= shift; };
-  layers.forEach((row, i) => { place(row); row.forEach(id => (y[id] = i * (H + GY))); });
+  let top = 0;
+  layers.forEach(row => { place(row); row.forEach(id => (y[id] = top)); top += Math.max(...row.map(id => H(view.nodes[id]))) + GY; });
   // Barycenter sweeps down and up, to shorten edges.
   for (let pass = 0; pass < 4; pass++) {
     const down = pass % 2 === 0;
@@ -212,22 +227,24 @@ function render(name) {
   const gEdges = el("g", {}, vp), gNodes = el("g", {}, vp);
   view.edgeEls = [];
   for (const [a, b] of view.edges) {
-    const x1 = geo.x[a], y1 = geo.y[a] + geo.H, x2 = geo.x[b], y2 = geo.y[b], my = (y1 + y2) / 2;
+    const x1 = geo.x[a], y1 = geo.y[a] + geo.H(view.nodes[a]), x2 = geo.x[b], y2 = geo.y[b], my = (y1 + y2) / 2;
     view.edgeEls.push([a, b, el("path", { class: "edge", d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}` }, gEdges)]);
   }
   view.nodeEls = {};
   for (const n of view.nodes) {
-    const w = geo.W(n), kind = kindOf(n), x0 = geo.x[n.id] - w / 2, y0 = geo.y[n.id];
+    const w = geo.W(n), hgt = geo.H(n), kind = kindOf(n), x0 = geo.x[n.id] - w / 2, y0 = geo.y[n.id];
     const g = el("g", { class: "node", transform: `translate(${x0},${y0})`, tabindex: 0, role: "button", "aria-label": `${n.label} ${n.type || ""}` }, gNodes);
     const io = kind === "io";
-    el("rect", { class: "box", width: w, height: geo.H, rx: io ? 23 : 7, fill: `color-mix(in srgb, var(--k-${kind}) calc(var(--tint) * 100%), var(--surface))`, stroke: `var(--k-${kind})` }, g);
+    el("rect", { class: "box", width: w, height: hgt, rx: io ? 23 : 7, fill: `color-mix(in srgb, var(--k-${kind}) calc(var(--tint) * 100%), var(--surface))`, stroke: `var(--k-${kind})` }, g);
     const us = (n.kernels || []).reduce((s, k) => s + k.us, 0);
-    const label = el("text", { x: 12, y: 19, "font-size": 13, "font-weight": 600, fill: "var(--ink)" }, g);
-    label.textContent = n.label.length > 32 ? n.label.slice(0, 31) + "…" : n.label;
-    const sub = el("text", { x: 12, y: 36, "font-size": 11, fill: "var(--ink-2)", "font-family": "var(--font-mono)" }, g);
+    lines(n).forEach((line, i) => {
+      const t = el("text", { x: 12, y: 19 + LINE * i, "font-size": 13, "font-weight": 600, fill: "var(--ink)" }, g);
+      t.textContent = line;
+    });
+    const sub = el("text", { x: 12, y: hgt - 10, "font-size": 11, fill: "var(--ink-2)", "font-family": "var(--font-mono)" }, g);
     sub.textContent = (n.type || "") + (us ? `  ·  ${fmtUs(us)}` : "");
-    if (us) el("rect", { x: 1, y: geo.H - 4, width: Math.max(2, (w - 2) * us / total), height: 3, rx: 1.5, fill: `var(--k-${kind})` }, g);
-    const t = el("title", {}, g); t.textContent = n.ops || n.text || n.label;
+    if (us) el("rect", { x: 1, y: hgt - 4, width: Math.max(2, (w - 2) * us / total), height: 3, rx: 1.5, fill: `var(--k-${kind})` }, g);
+    const t = el("title", {}, g); t.textContent = n.kind === "fusion" ? n.label : n.text || n.label;
     g.addEventListener("click", () => select(n.id));
     g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(n.id); } });
     view.nodeEls[n.id] = g;
@@ -269,14 +286,14 @@ function select(id) {
   for (const [a, b, p] of view.edgeEls) p.classList.toggle("hl", a === id || b === id);
   const n = view.nodes[id], d = document.getElementById("detail");
   d.innerHTML = "";
-  d.appendChild(h("h2", "", n.kind === "fusion" ? `fusion (${n.fusion.kernel})` : n.label));
+  d.appendChild(h("h2", "", n.label));
   const chips = h("div", "chips");
   chips.appendChild(h("span", "chip", KINDS.find(k => k[0] === kindOf(n))[1]));
   if (n.type) chips.appendChild(h("span", "chip", n.type));
   if (n.buffer) chips.appendChild(h("span", "chip", n.buffer));
   if (n.step !== undefined) chips.appendChild(h("span", "chip", `step ${n.step}`));
+  if (n.fusion) chips.appendChild(h("span", "chip", n.fusion.kernel));
   d.appendChild(chips);
-  if (n.ops) d.appendChild(h("div", "ops", n.ops));
   const kv = h("dl", "kv");
   const row = (k, v) => { kv.appendChild(h("dt", "", k)); kv.appendChild(h("dd", "", v)); };
   if (n.text && n.kind !== "fusion") row("primitive", n.text);

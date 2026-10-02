@@ -152,9 +152,6 @@ def plan_view(plan, kernels):
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,
         }
-        if fusion:
-            node["label"] = f"fusion · {len(step['primitive'].split(' -> '))} ops"
-            node["ops"] = step["primitive"]
         nodes.append(node)
         for src, b in sources:
             edges.append([src, node["id"], b])
