@@ -2,8 +2,8 @@
 ``jax.lax``). Each records one node in the graph being traced; its shape
 and dtype rules are checked in Rust (``lumen/graph/primitive.rs``) and a
 violation raises ``ValueError``. Operands of elementwise primitives must
-already share a shape and dtype: broadcasting and type promotion are the
-torch-like layer's job (``lumen/graph/tracer.py``).
+already share a shape and dtype: broadcasting is the torch-like layer's job
+(``lumen/graph/tracer.py``), and neither layer converts dtypes implicitly.
 """
 
 from lumen.graph import tracer
