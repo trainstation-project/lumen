@@ -14,6 +14,10 @@ wraps:
 * ``lumen.device`` — a device, modeled on ``torch.device``.
 * ``lumen.profiler`` (``lumen/profiler/``) — the profiler, modeled on
   ``torch.profiler``.
+* ``lumen.graph`` (``lumen/graph/``) — compiled execution:
+  ``lumen.compile`` traces a function into a graph of primitive ops
+  (``lumen.prims``, modeled on ``jax.lax``), with a torch-like API on the
+  traced tensors (``x @ w``, ``x.softmax(-1)``, ``lumen.where``, ...).
 * ``lumen.ops`` (``lumen/ops.py``) — registering device kernels written in
   Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
 * ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
@@ -24,7 +28,22 @@ factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
-from lumen import ops, profiler
+from lumen import graph, ops, profiler
+from lumen.graph import (
+    compile,
+    exp,
+    log,
+    make_graph,
+    matmul,
+    maximum,
+    minimum,
+    prims,
+    rsqrt,
+    sigmoid,
+    softmax,
+    tanh,
+    where,
+)
 from lumen.stream import cuda, mps
 from lumen.allocator import config
 from lumen.tensor import (
@@ -61,6 +80,7 @@ __all__ = [
     "config",
     "cuda",
     "device",
+    "graph",
     "mps",
     "ops",
     "profiler",
@@ -75,4 +95,7 @@ __all__ = [
     "tensor", "empty", "zeros", "ones", "full", "arange",
     # numpy interop
     "to_numpy", "from_numpy", "from_dlpack",
+    # compiled execution
+    "compile", "make_graph", "prims",
+    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
 ]

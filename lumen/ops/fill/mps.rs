@@ -1,5 +1,5 @@
 //! The MPS `fill_` kernel: compute shaders for dense and strided fills
-//! (`mps_fill.mm`), as in PyTorch, encoded into the MPS stream without
+//! (`mps.mm`), as in PyTorch, encoded into the MPS stream without
 //! waiting (see [`crate::stream::mps`]). Memory outside lumen's MPS segments
 //! (a custom allocator's) takes the CPU kernel: MPS memory is unified.
 
@@ -11,7 +11,7 @@ use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
 
 unsafe extern "C" {
-    // In mps_fill.mm.
+    // In mps.mm.
     fn lumen_mps_fill(
         ptr: *mut u8,
         pattern: *const u8,
@@ -42,7 +42,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     };
     let dst = t.data_ptr();
 
-    let (context, done, timed) = mps::submit(t, "Fill");
+    let (context, done, timed) = mps::submit(vec![t.clone()], "Fill");
     let status = unsafe {
         lumen_mps_fill(
             dst,

@@ -38,6 +38,7 @@ static id<MTLComputeCommandEncoder> encoder = nil;
 static bool encoder_timed = false;
 static id<MTLCounterSampleBuffer> samples = nil; // timed ops' start/end
 static std::vector<Op> ops;
+static uint64_t encoded_total = 0; // ops ever encoded
 
 static void end_encoder(void) {
     [encoder endEncoding];
@@ -137,6 +138,7 @@ id<MTLComputeCommandEncoder> lumen_mps_stream_encoder(bool timed) {
 
 void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
     ops.push_back({done, context, encoder_timed ? (long)(2 * ops.size()) : -1});
+    ++encoded_total;
     if (encoder_timed) {
         end_encoder(); // so its end is sampled now
     }
@@ -147,11 +149,14 @@ void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
 }
 
 extern "C" {
-// Commit the ops encoded so far (stream::mps::synchronize then waits).
-void lumen_mps_stream_flush(void) {
+// Commit the ops encoded so far, returning how many ops have ever been
+// encoded (stream::mps::synchronize waits until that many have finished).
+uint64_t lumen_mps_stream_flush(void) {
     os_unfair_lock_lock(&lock);
     commit();
+    uint64_t total = encoded_total;
     os_unfair_lock_unlock(&lock);
+    return total;
 }
 
 // The host clock Metal's GPUStartTime/GPUEndTime use (mach_absolute_time, as

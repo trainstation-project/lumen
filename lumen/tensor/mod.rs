@@ -14,4 +14,6 @@ pub mod tensor_options;
 mod tests;
 
 pub use tensor::Tensor;
+#[cfg(lumen_mps_linked)]
+pub(crate) use tensor::contiguous_strides;
 pub(crate) use tensor::{flat_offset, for_each_index};
