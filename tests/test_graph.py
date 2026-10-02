@@ -309,3 +309,19 @@ def test_mps_plan_steps_and_profiled_kernels():
         lumen.mps.synchronize()
     kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
     assert kernels == [fusion["kernel"], "reduce_sum_rows_f32"]
+
+
+def test_dump_graph(tmp_path):
+    f = lumen.compile(lambda x, w: (x @ w).relu())
+    with pytest.raises(RuntimeError, match="call <lambda> first"):
+        f.dump_graph(tmp_path / "none.html")
+    f(lumen.zeros([2, 3]), lumen.zeros([3, 4]))
+    data = f.dump_graph(tmp_path / "graph.html", json_path=tmp_path / "graph.json")
+    page = (tmp_path / "graph.html").read_text()
+    assert page.startswith("<!doctype html>") and "<title>&lt;lambda&gt; · lumen graph</title>" in page
+    assert data["inputs"] == ["f32[2,3]", "f32[3,4]"] and data["device"] == "cpu"
+    assert [n["label"] for n in data["views"]["traced"]["nodes"] if n["kind"] == "node"] == [
+        "dot_general", "full", "broadcast_in_dim", "max"]
+    # Another signature, traced for the dump.
+    data = f.dump_graph(tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16"))
+    assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]

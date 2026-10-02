@@ -1,17 +1,13 @@
-"""Trace a function with lumen, compile it for a device, run it under the
-profiler, and write one self-contained HTML page to explore it: the fused
-plan and the traced graph as node graphs, and for every node its types,
-buffers, the kernels it launched (with GPU time) and their Metal source,
-generated (fusions) or hand-written (``lumen/ops/<op>/mps.metal``).
+"""A compiled function's graph as one self-contained HTML page:
+``lumen.compile(fn).dump_graph(path)``. The page shows the fused plan and
+the traced graph as node graphs, and for every node its types, buffers, the
+kernels it launched (with GPU time) and their Metal source, generated
+(fusions) or hand-written (``lumen/ops/<op>/mps.metal``).
 
-    python tools/graph_viz.py --example attention -o attention.html
-    python tools/graph_viz.py my_model.py:block --input f32[64,128] --input f32[128,128]
-    python tools/graph_viz.py my_pkg.layers:mlp --input bf16[8,512] ... --device cpu --json graph.json
+From the command line, for a function and inputs of the given types:
 
-or from Python:
-
-    from tools.graph_viz import dump
-    dump(fn, x, w, path="graph.html")   # x, w: lumen tensors on the device
+    python -m lumen.graph.viz --example attention -o attention.html
+    python -m lumen.graph.viz my_model.py:block --input 'f32[64,128]' --input 'f32[128,128]'
 """
 
 import argparse
@@ -26,6 +22,7 @@ import statistics
 import sys
 
 import lumen
+from lumen._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 
 OPS = pathlib.Path(lumen.__file__).parent / "ops"
@@ -213,39 +210,35 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
-def collect(fn, *args, device=None, runs=5, title=None):
-    """Everything the page shows, as a JSON-able dict."""
-    tensors = [a for a in args if isinstance(a, lumen.Tensor)]
-    device = device or (str(tensors[0].device) if tensors else "cpu")
-    graph = lumen.make_graph(fn)(*args)
-    fused = lumen.graph.Plan(graph, device)
-    unfused = lumen.graph.Plan(graph)
+def collect(graph, plan, inputs, title, runs=5):
+    """Everything the page shows, as a JSON-able dict: ``graph``, its
+    ``plan`` (fused, for the inputs' device) and its unfused plan, both
+    profiled on ``inputs``."""
+    device = str(inputs[0].device) if inputs else "cpu"
+    unfused = Plan(graph)
     timed = device != "cpu"
-    fused_kernels = profile_steps(fused, tensors, runs) if timed else []
-    unfused_kernels = profile_steps(unfused, tensors, runs) if timed else []
+    fused_kernels = profile_steps(plan, inputs, runs) if timed else []
+    unfused_kernels = profile_steps(unfused, inputs, runs) if timed else []
     files = sorted({k["file"] for view in (fused_kernels, unfused_kernels) for step in view for k in _kernel_entries(step) if k["file"]})
     return {
-        "title": title or getattr(fn, "__name__", "graph"),
+        "title": title,
         "device": device,
         "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "inputs": [type_text(t.dtype, t.shape) for t in tensors],
+        "inputs": [type_text(t.dtype, t.shape) for t in inputs],
         "graph_text": str(graph),
-        "fused_text": str(fused),
+        "fused_text": str(plan),
         "unfused_text": str(unfused),
-        "workspace": {"fused": fused.workspace_bytes, "unfused": unfused.workspace_bytes},
-        "views": {"fused": plan_view(fused, fused_kernels), "traced": graph_view(graph, unfused, unfused_kernels)},
+        "workspace": {"fused": plan.workspace_bytes, "unfused": unfused.workspace_bytes},
+        "views": {"fused": plan_view(plan, fused_kernels), "traced": graph_view(graph, unfused, unfused_kernels)},
         "sources": {f: (OPS / f).read_text() for f in files},
         "prelude": (OPS / "mps.metal").read_text(),
     }
 
 
-def dump(fn, *args, path="graph.html", device=None, runs=5, title=None, json_path=None, fragment=False):
-    """Trace ``fn`` on ``args``, profile it on ``device`` (default: the
-    tensor arguments'), and write the page to ``path`` (and the data as JSON
-    to ``json_path``). ``fragment`` leaves out the doctype, for hosts that
-    wrap the page in their own document (a published artifact). Returns the
-    data."""
-    data = collect(fn, *args, device=device, runs=runs, title=title)
+def write(data, path, json_path=None, fragment=False):
+    """Write the page for ``data`` to ``path`` (and ``data`` as JSON to
+    ``json_path``). ``fragment`` leaves out the doctype, for a host that
+    wraps the page in its own document (a published artifact)."""
     page = TEMPLATE.replace("__TITLE__", html.escape(data["title"])).replace(
         "__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
     if not fragment:
@@ -253,7 +246,6 @@ def dump(fn, *args, path="graph.html", device=None, runs=5, title=None, json_pat
     pathlib.Path(path).write_text(page)
     if json_path:
         pathlib.Path(json_path).write_text(json.dumps(data, indent=1))
-    return data
 
 
 # ---------------------------------------------------------------------
@@ -324,14 +316,14 @@ def main():
         parser.error("give a FUNCTION or --example")
     tensors = [_tensor(s, args.device) for s in inputs]
     out = args.out or f"{fn.__name__}.html"
-    data = dump(fn, *tensors, path=out, device=args.device, runs=args.runs, json_path=args.json, fragment=args.fragment)
+    data = lumen.compile(fn).dump_graph(out, *tensors, runs=args.runs, json_path=args.json, fragment=args.fragment)
     fused = data["views"]["fused"]["nodes"]
     print(f"{out}: {sum(n['kind'] in ('step', 'fusion') for n in fused)} plan steps "
           f"({sum(n['kind'] == 'fusion' for n in fused)} fusions), "
           f"{sum(n['kind'] == 'node' for n in data['views']['traced']['nodes'])} traced primitives")
 
 
-TEMPLATE = (pathlib.Path(__file__).parent / "graph_viz.html").read_text()
+TEMPLATE = (pathlib.Path(__file__).parent / "viz.html").read_text()
 
 if __name__ == "__main__":
     main()

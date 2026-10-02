@@ -70,20 +70,50 @@ def compile(fn):
     and compiled into a static plan for the tensor arguments' device on its
     first call with each input signature (the tensor arguments' dtypes,
     shapes and devices, and the values of the other arguments), which every
-    call then runs. Results are on the first tensor argument's device."""
-    plans = {}
+    call then runs. Results are on the first tensor argument's device.
 
-    @functools.wraps(fn)
-    def compiled(*args):
+    ``compiled.dump_graph(path)`` writes the graph and plan of the latest
+    call's signature, profiled, as an HTML page (``lumen.graph.viz``);
+    ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
+    plans = {}
+    latest = []
+
+    def entry(args):
         key = _signature(args)
         if key not in plans:
             graph, single = _trace(fn, args)
             device = next((a.device for a in args if isinstance(a, Tensor)), None)
-            plans[key] = Plan(graph, device), single
-        plan, single = plans[key]
+            plans[key] = graph, Plan(graph, device), single
+        latest[:] = [key]
+        return plans[key]
+
+    @functools.wraps(fn)
+    def compiled(*args):
+        _, plan, single = entry(args)
         outputs = plan.run([a for a in args if isinstance(a, Tensor)])
         return outputs[0] if single else tuple(outputs)
 
+    def dump_graph(path, *args, runs=5, json_path=None, fragment=False):
+        """Write the graph and plan for ``args``' signature (default: the
+        latest call's) to ``path`` as an HTML page, profiled over ``runs``
+        runs on new tensors of the signature's types; ``json_path`` also
+        gets the page's data, which is returned. ``fragment`` leaves out the
+        doctype, for a host that wraps the page (a published artifact)."""
+        if args:
+            entry(args)
+        elif not latest:
+            raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
+        key = latest[0]
+        graph, plan, _ = plans[key]
+        # Kernels do not depend on the values: profile on ones.
+        inputs = [Tensor.ones(list(shape), dtype, device) for dtype, shape, device in (k for k in key if k[0] != "static")]
+        from lumen.graph import viz
+
+        data = viz.collect(graph, plan, inputs, title=fn.__name__, runs=runs)
+        viz.write(data, path, json_path=json_path, fragment=fragment)
+        return data
+
+    compiled.dump_graph = dump_graph
     return compiled
 
 
