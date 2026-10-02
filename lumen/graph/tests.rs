@@ -609,6 +609,14 @@ mod mps {
                 dot(3, 2, vec![0, 1]),
                 &[ty(dtype, &[2, 3, 5, 7]), ty(dtype, &[2, 3, 7, 4])],
             );
+            // Enough output tiles for the floats' large-tile kernel, with
+            // edges in both dimensions.
+            if dtype.is_float() {
+                check_node(
+                    dot(1, 0, vec![]),
+                    &[ty(dtype, &[500, 20]), ty(dtype, &[20, 700])],
+                );
+            }
         }
     }
 

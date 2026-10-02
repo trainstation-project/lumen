@@ -1,8 +1,8 @@
 //! reduce_sum and reduce_max on MPS (`mps.metal`). Consecutive axes are a
 //! view [a, count, b] reduced over the middle: rows when b = 1, columns
 //! otherwise, split into chunks when there are too few outputs to fill
-//! the GPU. Other axes take a generic kernel: a threadgroup per output, or
-//! a thread per output for outputs of few elements.
+//! the GPU. Other axes take a generic kernel, with up to a threadgroup
+//! (fewer threads for outputs of fewer elements) reducing each output.
 
 use crate::graph::Primitive::*;
 use crate::graph::TensorType;
@@ -29,9 +29,9 @@ pub(crate) fn encode(
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         return consecutive(step, x, &reduced, inputs[0], output, keep);
     }
-    // Other axes: a threadgroup per output (indexing the reduced
-    // dimensions in 32 bits), or, for outputs of few elements, a thread per
-    // output, which sums in the reference's (row-major) order.
+    // Other axes: a power-of-two number of lanes per output, indexing the
+    // reduced dimensions in 32 bits; inputs of 2^32 elements or more take a
+    // thread per output, which sums in the reference's (row-major) order.
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
     let init = match step.primitive {
@@ -39,7 +39,7 @@ pub(crate) fn encode(
         _ => lowest(x.dtype),
     };
     let count: usize = reduced.iter().map(|&d| x.shape[d]).product();
-    let grouped = count >= REDUCE_THREADS && x.numel() <= u32::MAX as usize;
+    let grouped = x.numel() <= u32::MAX as usize;
     let reduced_sizes = reduced.iter().map(|&d| x.shape[d]);
     let reduced_strides = reduced.iter().map(|&d| strides[d]);
     let mut args = vec![
@@ -51,14 +51,24 @@ pub(crate) fn encode(
     ];
     let (name, outputs) = (step.primitive.name(), step.output.1.numel());
     let (kernel, grid) = if grouped {
+        // About 32 bytes a lane: enough lanes to read the elements
+        // coalesced, few enough that each lane's loads stay in flight.
+        let per_lane = (LANE_BYTES / x.dtype.size_of()).max(1);
+        let lanes = count
+            .div_ceil(per_lane)
+            .next_power_of_two()
+            .min(REDUCE_THREADS);
         args.extend([
             dims32_arg(reduced_sizes),
             dims32_arg(reduced_strides),
             u32_arg(count as u32),
+            u32_arg(lanes as u32),
+            u32_arg(outputs as u32),
         ]);
+        let per_group = REDUCE_THREADS / lanes;
         (
             format!("{name}_grouped_{}", x.dtype),
-            Grid::Groups([outputs, 1, 1]),
+            Grid::Groups([outputs.div_ceil(per_group), 1, 1]),
         )
     } else {
         args.extend([
@@ -74,9 +84,12 @@ pub(crate) fn encode(
     launch_step(step, &kernel, inputs, output, &args, grid, keep)
 }
 
-/// The threads of a threadgroup that reduce one output together
-/// (`REDUCE_THREADS` in `mps.metal`): a [`Grid::Groups`] threadgroup.
+/// The threads of a threadgroup that reduce together (`REDUCE_THREADS` in
+/// `mps.metal`): a [`Grid::Groups`] threadgroup.
 const REDUCE_THREADS: usize = 256;
+
+/// The bytes of input each lane of a grouped reduction takes.
+const LANE_BYTES: usize = 32;
 
 /// The smallest value of `dtype`: the identity of `max`.
 fn lowest(dtype: DType) -> Scalar {

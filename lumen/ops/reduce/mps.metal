@@ -40,10 +40,11 @@ inline void reduce(device const T *in,
         reduce<FN, T>(in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, i); \
     }
 
-// As reduce, for outputs of many elements: threadgroup i of REDUCE_THREADS
-// reduces output i cooperatively, each thread a strided share of its
-// elements, then a tree over the threads. The reduced dimensions index in 32
-// bits (the input has fewer than 2^32 elements).
+// As reduce, `lanes` threads an output (a power of two up to
+// REDUCE_THREADS): thread t of threadgroup g reduces a strided share of
+// output g * (REDUCE_THREADS / lanes) + t / lanes, then a tree over its
+// lanes. Neighbouring lanes read neighbouring reduced elements. The reduced
+// dimensions index in 32 bits (the input has fewer than 2^32 elements).
 template <typename Op, typename T>
 inline void reduce_grouped(device const T *in,
                            device T *out,
@@ -55,43 +56,63 @@ inline void reduce_grouped(device const T *in,
                            constant uint *rsizes,
                            constant uint *rstrides,
                            uint count,
+                           uint lanes,
+                           uint outputs,
                            threadgroup typename acc<T>::type *shared,
-                           uint i,
+                           uint g,
                            uint t) {
     typedef typename acc<T>::type A;
-    ulong base = offset_of(i, nk, ksizes, kstrides);
+    uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;
     A r = A(init);
-    for (uint j = t; j < count; j += REDUCE_THREADS) {
-        r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));
+    if (i < outputs) {
+        ulong base = offset_of(i, nk, ksizes, kstrides);
+        for (uint j = lane; j < count; j += lanes) {
+            r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));
+        }
     }
     shared[t] = r;
-    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {
+    for (uint s = lanes / 2; s > 0; s /= 2) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (t < s) {
+        if (lane < s) {
             shared[t] = Op::apply(shared[t], shared[t + s]);
         }
     }
-    if (t == 0) {
-        out[i] = T(shared[0]);
+    if (lane == 0 && i < outputs) {
+        out[i] = T(shared[t]);
     }
 }
 
-#define GROUPED(OP, FN, NAME, T)                                                                                    \
-    kernel void OP##_grouped_##NAME(device const T *in [[buffer(0)]],                                               \
-                                    device T *out [[buffer(1)]],                                                    \
-                                    constant T &init [[buffer(2)]],                                                 \
-                                    constant uint &nk [[buffer(3)]],                                                \
-                                    constant ulong *ksizes [[buffer(4)]],                                           \
-                                    constant ulong *kstrides [[buffer(5)]],                                         \
-                                    constant uint &nr [[buffer(6)]],                                                \
-                                    constant uint *rsizes [[buffer(7)]],                                            \
-                                    constant uint *rstrides [[buffer(8)]],                                          \
-                                    constant uint &count [[buffer(9)]],                                             \
-                                    uint3 group [[threadgroup_position_in_grid]],                                   \
-                                    uint3 tid [[thread_position_in_threadgroup]]) {                                 \
-        threadgroup typename acc<T>::type shared[REDUCE_THREADS];                                                   \
-        reduce_grouped<FN, T>(                                                                                      \
-            in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, shared, group.x, tid.y * 16 + tid.x); \
+#define GROUPED(OP, FN, NAME, T)                                                    \
+    kernel void OP##_grouped_##NAME(device const T *in [[buffer(0)]],               \
+                                    device T *out [[buffer(1)]],                    \
+                                    constant T &init [[buffer(2)]],                 \
+                                    constant uint &nk [[buffer(3)]],                \
+                                    constant ulong *ksizes [[buffer(4)]],           \
+                                    constant ulong *kstrides [[buffer(5)]],         \
+                                    constant uint &nr [[buffer(6)]],                \
+                                    constant uint *rsizes [[buffer(7)]],            \
+                                    constant uint *rstrides [[buffer(8)]],          \
+                                    constant uint &count [[buffer(9)]],             \
+                                    constant uint &lanes [[buffer(10)]],            \
+                                    constant uint &outputs [[buffer(11)]],          \
+                                    uint3 group [[threadgroup_position_in_grid]],   \
+                                    uint3 tid [[thread_position_in_threadgroup]]) { \
+        threadgroup typename acc<T>::type shared[REDUCE_THREADS];                   \
+        reduce_grouped<FN, T>(in,                                                   \
+                              out,                                                  \
+                              init,                                                 \
+                              nk,                                                   \
+                              ksizes,                                               \
+                              kstrides,                                             \
+                              nr,                                                   \
+                              rsizes,                                               \
+                              rstrides,                                             \
+                              count,                                                \
+                              lanes,                                                \
+                              outputs,                                              \
+                              shared,                                               \
+                              group.x,                                              \
+                              tid.y * 16 + tid.x);                                  \
     }
 
 #define REDUCE_SUM(NAME, T) REDUCE(reduce_sum, Add, NAME, T) GROUPED(reduce_sum, Add, NAME, T)

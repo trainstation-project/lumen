@@ -12,9 +12,14 @@ use crate::ops::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 use crate::{Device, Tensor, TensorOptions};
 
-/// The output tile of a threadgroup of the float kernels (`SG_BM` x
-/// `SG_BN` in `mps.metal`); the integer kernels take 32 x 32.
+/// The output tile of a threadgroup (`mps.metal`): 128 x 64 for the float
+/// kernels and 64 x 64 for their `_small` variants, which matmuls with
+/// fewer than `SMALL_TILES` of the large tiles (or whose M fills less than
+/// half of the last) take; 64 x 64 (`MM_TILE`) for the integer kernels.
 const FLOAT_TILE: (usize, usize) = (128, 64);
+const SMALL_TILE: (usize, usize) = (64, 64);
+const INT_TILE: (usize, usize) = (64, 64);
+const SMALL_TILES: usize = 32;
 
 pub(crate) fn encode(
     step: &Step,
@@ -60,14 +65,15 @@ pub(crate) fn encode(
         name,
     )?;
     let (rp, [rsb, rsk, rsn]) = operand(rhs, &rhs_order, nb, nb + nk, inputs[1], &mut keep, name)?;
-    let (tm, tn) = if out.dtype.is_float() {
-        FLOAT_TILE
-    } else {
-        (32, 32)
+    let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
+    let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
+    let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
+        (true, false) => (format!("matmul_{}", out.dtype), FLOAT_TILE),
+        (true, true) => (format!("matmul_small_{}", out.dtype), SMALL_TILE),
+        (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
     };
     let grid = Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]);
     let p = [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn];
-    let kernel = format!("matmul_{}", out.dtype);
     launch(
         &kernel,
         &[lp, rp, output.cast_const()],
