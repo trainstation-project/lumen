@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use super::{Graph, Primitive, TensorType, Var, reference};
+use super::{Graph, Primitive, TensorType, Var};
+use crate::ops::reference;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
 

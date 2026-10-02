@@ -2,13 +2,13 @@
 //! execution (JAX: a jaxpr). `lumen.compile` traces a Python function once
 //! per input signature into a [`Graph`]; the graph is then run as a whole.
 //! [`plan`] compiles a graph into a static [`Plan`] for execution;
-//! [`reference`], a CPU interpreter, defines what each primitive computes.
+//! [`reference`](crate::ops::reference), a CPU interpreter, defines what
+//! each primitive computes.
 
 pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
-pub mod reference;
 #[cfg(test)]
 mod tests;
 
@@ -64,7 +64,7 @@ pub struct Node {
 /// and [`apply`](Self::apply), which checks every node's types.
 #[derive(Debug, Clone, Default)]
 pub struct Graph {
-    types: Vec<TensorType>,
+    pub(crate) types: Vec<TensorType>,
     inputs: Vec<Var>,
     nodes: Vec<Node>,
     outputs: Vec<Var>,

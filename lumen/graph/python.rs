@@ -137,7 +137,7 @@ impl PyGraph {
     fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
         let outputs =
-            crate::graph::reference::run(&self.inner, &inputs).map_err(PyValueError::new_err)?;
+            crate::ops::reference::run(&self.inner, &inputs).map_err(PyValueError::new_err)?;
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 

@@ -107,8 +107,8 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps/mps_shim.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/mps_fill.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/fill.metal");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps.mm");
+    println!("cargo:rerun-if-changed=lumen/ops/fill/mps.metal");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
     println!("cargo:rerun-if-changed=lumen/ops/mps.mm");
@@ -133,7 +133,7 @@ fn build_mps_shim() {
 
     cc::Build::new()
         .file("lumen/allocator/mps/mps_shim.mm")
-        .file("lumen/ops/fill/mps/mps_fill.mm")
+        .file("lumen/ops/fill/mps.mm")
         .file("lumen/stream/mps/mps.mm")
         .file("lumen/ops/mps.mm")
         .include(PathBuf::from(

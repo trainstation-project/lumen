@@ -5,8 +5,8 @@
 //! wrap around and float ops round as if computed in that dtype. Device
 //! executors are checked against it.
 
-use super::primitive::free_dims;
-use super::{Graph, Primitive, TensorType};
+use crate::graph::primitive::free_dims;
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::dtype::{bf16, dispatch_dtype, f16};
 use crate::tensor::for_each_index;
 use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
@@ -88,7 +88,7 @@ fn from_scalars(scalars: impl Iterator<Item = Scalar>, dtype: DType) -> Values {
 }
 
 /// Primitive `p` as a host kernel over raw row-major buffers, the way a
-/// CPU [`Plan`](super::plan::Plan) runs each step: reads `inputs` (of
+/// CPU [`Plan`](crate::graph::Plan) runs each step: reads `inputs` (of
 /// `types`) and writes `output` (of `out`).
 ///
 /// # Safety

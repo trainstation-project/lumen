@@ -20,6 +20,7 @@ pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod reduce;
+pub mod reference;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "python")]

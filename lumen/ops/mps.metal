@@ -7,7 +7,7 @@
 // Kernels are templates instantiated per op and dtype, named after the
 // primitive, <op>_<dtype> (add_f32, reduce_sum_i64, ...), or <kernel>_<bytes>
 // for dtype-agnostic ones (gather_4, ...). Semantics follow the reference executor
-// (lumen/graph/reference.rs): integers wrap, integer division by zero
+// (lumen/ops/reference.rs): integers wrap, integer division by zero
 // gives -1, max propagates NaN, float-to-integer conversion saturates (NaN
 // to 0), and half and bfloat compute in float and round once per op. Metal
 // has no float64.

@@ -1,5 +1,6 @@
 use super::Primitive::*;
-use super::{Graph, Primitive, TensorType, reference};
+use super::{Graph, Primitive, TensorType};
+use crate::ops::reference;
 use crate::{DType, Scalar, Tensor};
 
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
@@ -352,7 +353,8 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
 /// executor, for every primitive and dtype (MPS has no float64).
 #[cfg(lumen_mps_linked)]
 mod mps {
-    use super::super::{Graph, Plan, Primitive, TensorType, reference};
+    use super::super::{Graph, Plan, Primitive, TensorType};
+    use crate::ops::reference;
     use super::Primitive::*;
     use super::{data, mlp};
     use crate::tensor::dtype::dispatch_dtype;
