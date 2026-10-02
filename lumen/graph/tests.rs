@@ -354,9 +354,9 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
 #[cfg(lumen_mps_linked)]
 mod mps {
     use super::super::{Graph, Plan, Primitive, TensorType};
-    use crate::ops::reference;
     use super::Primitive::*;
     use super::{data, mlp};
+    use crate::ops::reference;
     use crate::tensor::dtype::dispatch_dtype;
     use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
