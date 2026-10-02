@@ -6,9 +6,12 @@ applies into a graph (JAX: a jaxpr), which then runs as a whole. Only
 traced tensors have ops: a ``lumen.Tensor`` holds data, and the graph is
 the only thing that computes with it.
 
-The methods and functions here follow PyTorch (names, broadcasting, type
-promotion, ``dim``/``keepdim``), and each is a composition of the strict
-primitives in ``lumen.graph.prims``.
+The methods and functions here follow PyTorch (names, broadcasting,
+``dim``/``keepdim``), and each is a composition of the strict primitives in
+``lumen.graph.prims``. Unlike PyTorch, no op changes a dtype the user did
+not ask for: operands must share a dtype (a Python scalar takes its tensor
+operand's, and must be of its kind), and floating-point functions take
+floating-point tensors. Convert with ``.to(dtype)``, or an op's ``dtype=``.
 """
 
 import builtins
@@ -17,11 +20,9 @@ import math
 
 from lumen._C import Graph, Plan, Tensor
 from lumen.graph import prims
-from lumen.tensor import default_dtype
 
 __all__ = [
-    "TracedTensor", "compile", "make_graph", "promote_types", "result_type",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
+    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
 ]
 
 # The graphs being traced, innermost last.
@@ -59,17 +60,17 @@ def _trace(fn, args):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape; anything else is baked into the
-    # graph, so it must be hashable.
-    return tuple((a.dtype, tuple(a.shape)) if isinstance(a, Tensor) else ("static", a) for a in args)
+    # Tensors are traced by dtype and shape, and compiled for their device;
+    # anything else is baked into the graph, so it must be hashable.
+    return tuple((a.dtype, tuple(a.shape), str(a.device)) if isinstance(a, Tensor) else ("static", a) for a in args)
 
 
 def compile(fn):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
-    and compiled into a static plan on its first call with each input
-    signature (the tensor arguments' dtypes and shapes, and the values of
-    the other arguments), which every call then runs. Results are on the
-    first tensor argument's device."""
+    and compiled into a static plan for the tensor arguments' device on its
+    first call with each input signature (the tensor arguments' dtypes,
+    shapes and devices, and the values of the other arguments), which every
+    call then runs. Results are on the first tensor argument's device."""
     plans = {}
 
     @functools.wraps(fn)
@@ -77,7 +78,8 @@ def compile(fn):
         key = _signature(args)
         if key not in plans:
             graph, single = _trace(fn, args)
-            plans[key] = Plan(graph), single
+            device = next((a.device for a in args if isinstance(a, Tensor)), None)
+            plans[key] = Plan(graph, device), single
         plan, single = plans[key]
         outputs = plan.run([a for a in args if isinstance(a, Tensor)])
         return outputs[0] if single else tuple(outputs)
@@ -97,70 +99,39 @@ def make_graph(fn):
 
 
 # ---------------------------------------------------------------------
-# dtypes (torch.promote_types, torch.result_type)
+# dtypes: never changed implicitly
 # ---------------------------------------------------------------------
 
 
-def _kind(dtype):
-    return "b" if dtype == "bool" else "f" if "float" in dtype else "u" if dtype.startswith("u") else "i"
-
-
-def _bits(dtype):
-    return int(dtype.lstrip("bfloatuint"))
-
-
 def _is_float(dtype):
-    return _kind(dtype) == "f"
+    return "float" in dtype
 
 
-def promote_types(a, b):
-    """The smallest dtype both ``a`` and ``b`` convert to without loss
-    (``torch.promote_types``)."""
-    if a == b:
-        return a
-    ka, kb = _kind(a), _kind(b)
-    if ka == "b" or kb == "b":
-        return b if ka == "b" else a
-    if ka != kb and "f" in (ka, kb):
-        return a if ka == "f" else b
-    if {a, b} == {"float16", "bfloat16"}:
-        return "float32"
-    if ka == kb:
-        return builtins.max(a, b, key=_bits)
-    signed, unsigned = (a, b) if ka == "i" else (b, a)
-    if _bits(signed) > _bits(unsigned):
-        return signed
-    if _bits(unsigned) == 64:
-        raise TypeError(f"promotion of {unsigned} with {signed} is not supported")
-    return f"int{2 * _bits(unsigned)}"
+def _require_float(x, op):
+    if not _is_float(x.dtype):
+        raise TypeError(f"{op} needs a floating-point tensor, got {x.dtype}: convert it with .to(dtype)")
+    return x
 
 
-def _scalar_dtype(x):
-    return "bool" if isinstance(x, bool) else "int64" if isinstance(x, int) else default_dtype
+def _common_dtype(op, operands):
+    """The dtype the tensors among ``operands`` share."""
+    dtypes = sorted({x.dtype for x in operands if isinstance(x, TracedTensor)})
+    if not dtypes:
+        raise TypeError(f"{op} needs a tensor operand")
+    if len(dtypes) > 1:
+        raise TypeError(f"{op} got tensors of dtypes {' and '.join(dtypes)}: convert them to one with .to(dtype)")
+    return dtypes[0]
 
 
-def _category(dtype):
-    return {"b": 0, "u": 1, "i": 1, "f": 2}[_kind(dtype)]
-
-
-def result_type(*operands):
-    """The dtype an op computes in (``torch.result_type``): tensors with
-    dimensions decide it, then zero-dimensional tensors, then Python
-    scalars; a later group only matters if it is of a higher category
-    (bool < integer < float), and a Python float then means the default
-    dtype."""
-    groups = [
-        [x.dtype for x in operands if isinstance(x, TracedTensor) and x.ndim],
-        [x.dtype for x in operands if isinstance(x, TracedTensor) and not x.ndim],
-        [_scalar_dtype(x) for x in operands if not isinstance(x, TracedTensor)],
-    ]
-    result = None
-    for dtypes in groups:
-        if dtypes:
-            dtype = functools.reduce(promote_types, dtypes)
-            if result is None or _category(dtype) > _category(result):
-                result = dtype
-    return result
+def _scalar_fits(x, dtype):
+    """Whether Python scalar ``x`` is of ``dtype``'s kind: a bool of bool, an
+    int of an integer or floating-point dtype, a float of a floating-point
+    one."""
+    if isinstance(x, bool):
+        return dtype == "bool"
+    if isinstance(x, int):
+        return dtype != "bool"
+    return _is_float(dtype)
 
 
 # ---------------------------------------------------------------------
@@ -172,12 +143,15 @@ def _is_operand(x):
     return isinstance(x, (TracedTensor, bool, int, float))
 
 
-def _as_tensor(x, dtype):
-    """``x`` (a traced tensor or Python scalar) as a traced tensor of ``dtype``."""
+def _as_tensor(x, dtype, op):
+    """``x`` (a traced tensor of ``dtype``, or a Python scalar of its kind)
+    as a traced tensor."""
     if isinstance(x, TracedTensor):
-        return x.to(dtype)
+        return x
     if not _is_operand(x):
         raise TypeError(f"expected a tensor or a Python scalar, got {type(x).__name__}")
+    if not _scalar_fits(x, dtype):
+        raise TypeError(f"{op} of a {dtype} tensor and the {type(x).__name__} {x!r}: convert the tensor with .to(dtype)")
     return prims.full((), x, dtype)
 
 
@@ -199,19 +173,18 @@ def _broadcast_to(x, shape):
     return prims.broadcast_in_dim(x, shape, range(lead, len(shape)))
 
 
-def _elementwise(prim, *operands, dtype=None):
-    """``prim`` on ``operands`` promoted to ``dtype`` (default: their result
-    type) and broadcast to a common shape."""
-    dtype = dtype or result_type(*operands)
-    tensors = [_as_tensor(x, dtype) for x in operands]
+def _operands(op, *operands):
+    """``operands`` as traced tensors of their common dtype, broadcast to a
+    common shape."""
+    dtype = _common_dtype(op, operands)
+    tensors = [_as_tensor(x, dtype, op) for x in operands]
     shape = _broadcast_shapes(*(t.shape for t in tensors))
-    return prim(*(_broadcast_to(t, shape) for t in tensors))
+    return [_broadcast_to(t, shape) for t in tensors]
 
 
-def _to_float(x):
-    """Integer and bool tensors to the default dtype, as torch does for
-    floating-point functions."""
-    return x if _is_float(x.dtype) else x.to(default_dtype)
+def _elementwise(prim, *operands):
+    """``prim`` on ``operands``, of one dtype, broadcast to a common shape."""
+    return prim(*_operands(prim.__name__.lstrip("_"), *operands))
 
 
 def _dim(dim, ndim):
@@ -270,8 +243,8 @@ def _binary(prim, reflected=False):
 
 
 def _true_div(x, y):
-    dtype = result_type(x, y)
-    return _elementwise(prims.div, x, y, dtype=dtype if _is_float(dtype) else default_dtype)
+    x, y = _operands("div", x, y)
+    return prims.div(_require_float(x, "true division (/)"), y)
 
 
 class TracedTensor:
@@ -388,22 +361,22 @@ class TracedTensor:
     # -- elementwise functions -------------------------------------------
 
     def exp(self):
-        return prims.exp(_to_float(self))
+        return prims.exp(_require_float(self, "exp"))
 
     def log(self):
-        return prims.log(_to_float(self))
+        return prims.log(_require_float(self, "log"))
 
     def rsqrt(self):
-        return prims.rsqrt(_to_float(self))
+        return prims.rsqrt(_require_float(self, "rsqrt"))
 
     def tanh(self):
-        return prims.tanh(_to_float(self))
+        return prims.tanh(_require_float(self, "tanh"))
 
     def sigmoid(self):
-        return prims.logistic(_to_float(self))
+        return prims.logistic(_require_float(self, "sigmoid"))
 
     def relu(self):
-        return _elementwise(prims.max, self, 0, dtype=self.dtype)
+        return _elementwise(prims.max, self, 0)
 
     # -- dtype conversion --------------------------------------------------
 
@@ -442,9 +415,9 @@ class TracedTensor:
         return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(self.shape)))
 
     def sum(self, dim=None, keepdim=False, dtype=None):
-        """Sum over ``dim`` (all dimensions if None); integers and bools sum
-        to int64, as in torch."""
-        x = self.to(dtype or (self.dtype if _is_float(self.dtype) else "int64"))
+        """Sum over ``dim`` (all dimensions if None), in the tensor's dtype
+        (integers wrap) or ``dtype``."""
+        x = self.to(dtype) if dtype else self
         dims = _dims(dim, self.ndim)
         return self._keep(prims.reduce_sum(x, dims), dims, keepdim)
 
@@ -471,12 +444,12 @@ class TracedTensor:
         raise NotImplementedError("max(dim) returns indices, which lumen does not support yet; use amax(dim)")
 
     def softmax(self, dim, dtype=None):
-        x = self.to(dtype) if dtype else _to_float(self)
+        x = _require_float(self.to(dtype) if dtype else self, "softmax")
         e = (x - x.amax(dim, keepdim=True)).exp()
         return e / e.sum(dim, keepdim=True)
 
     def log_softmax(self, dim, dtype=None):
-        x = self.to(dtype) if dtype else _to_float(self)
+        x = _require_float(self.to(dtype) if dtype else self, "log_softmax")
         shifted = x - x.amax(dim, keepdim=True)
         return shifted - shifted.exp().sum(dim, keepdim=True).log()
 
@@ -558,8 +531,8 @@ class TracedTensor:
 def where(condition, input, other):
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
-    dtype = result_type(input, other)
-    input, other = _as_tensor(input, dtype), _as_tensor(other, dtype)
+    dtype = _common_dtype("where", (input, other))
+    input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
     shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
     return prims.select(*(_broadcast_to(t, shape) for t in (condition, input, other)))
 
@@ -567,8 +540,7 @@ def where(condition, input, other):
 def matmul(input, other):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
     the dimensions before the last two are batch dimensions, broadcast."""
-    if input.dtype != other.dtype:
-        raise RuntimeError(f"expected both matmul operands to have the same dtype, but got {input.dtype} and {other.dtype}")
+    _common_dtype("matmul", (input, other))
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
     x = input.unsqueeze(0) if input.ndim == 1 else input

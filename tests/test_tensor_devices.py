@@ -128,6 +128,12 @@ def test_fill_strided_higher_rank(device):
                     yield x
 
         assert list(flatten(flat)) == [value] * n
+    # Permuted views cover one contiguous block, which MPS fills as such;
+    # a narrowed one does not, and its fill must leave the rest alone.
+    t = lumen.zeros([4, 5, 6], device=device)
+    t.narrow(2, 1, 3).permute([2, 0, 1]).fill_(2.0)
+    rows = t.to("cpu").tolist()
+    assert all(rows[i][j][k] == (2.0 if 1 <= k < 4 else 0.0) for i in range(4) for j in range(5) for k in range(6))
 
 
 @pytest.mark.cuda

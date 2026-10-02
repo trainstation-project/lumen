@@ -1,46 +1,6 @@
-// Each op is a functor and each (op, dtype) its own kernel, named after
-// the primitive (add_f32, lt_i64, exp_bf16, convert_i32_f16, ...), so the
-// op is fixed at compile time.
-
-struct Sub {
-    template <typename A> static A apply(A x, A y) { return x - y; }
-};
-
-struct Mul {
-    template <typename A> static A apply(A x, A y) { return x * y; }
-};
-
-struct Div {
-    template <typename A> static A apply(A x, A y) { return div_op(x, y); }
-};
-
-struct Eq {
-    template <typename A> static bool apply(A x, A y) { return x == y; }
-};
-
-struct Lt {
-    template <typename A> static bool apply(A x, A y) { return x < y; }
-};
-
-struct Exp {
-    static float apply(float x) { return exp(x); }
-};
-
-struct Log {
-    static float apply(float x) { return log(x); }
-};
-
-struct Rsqrt {
-    static float apply(float x) { return rsqrt(x); }
-};
-
-struct Tanh {
-    static float apply(float x) { return tanh(x); }
-};
-
-struct Logistic {
-    static float apply(float x) { return 1.0f / (1.0f + exp(-x)); }
-};
+// Each (op, dtype) is its own kernel, named after the primitive (add_f32,
+// lt_i64, exp_bf16, convert_i32_f16, ...), applying the op's functor (in
+// lumen/ops/mps.metal), so the op is fixed at compile time.
 
 // `U` is the result's element type: T, or bool for comparisons.
 template <typename Op, typename T, typename U>
@@ -52,12 +12,6 @@ inline void binary(device const T *a, device const T *b, device U *out, uint i) 
 template <typename Op, typename T> inline void unary(device const T *in, device T *out, uint i) {
     out[i] = T(Op::apply(float(in[i])));
 }
-
-// x converted to D: from_float for float sources, from_int for the rest.
-template <typename D, typename S> inline D convert_value(S x) { return from_int<D>(x); }
-template <typename D> inline D convert_value(half x) { return from_float<D>(float(x)); }
-template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }
-template <typename D> inline D convert_value(float x) { return from_float<D>(x); }
 
 #define BINARY(OP, FN, NAME, T, U)                                 \
     kernel void OP##_##NAME(device const T *a [[buffer(0)]],       \

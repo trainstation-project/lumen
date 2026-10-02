@@ -68,6 +68,7 @@ pub(crate) fn encode(
         DotGeneral { .. } => super::dot_general::mps::encode,
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } => super::layout::mps::encode,
         Full { .. } | Iota { .. } => super::factory::mps::encode,
+        Fusion { .. } => crate::compiler::mps::encode,
     };
     encode(step, inputs, output, keep)
 }
@@ -107,7 +108,7 @@ pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
 
 /// Bytes of elements an elementwise kernel's thread takes
 /// (`BYTES_PER_THREAD` in `mps.metal`).
-const BYTES_PER_THREAD: usize = 16;
+pub(crate) const BYTES_PER_THREAD: usize = 16;
 
 /// The grid of an elementwise kernel over `n` elements of `dtype`.
 pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {

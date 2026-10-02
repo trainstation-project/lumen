@@ -1,5 +1,6 @@
 // Launches the graph primitives' Metal kernels (lumen/ops/*/mps.metal,
-// compiled as one library) into lumen's MPS stream. Generic: Rust
+// compiled as one library), and the fused kernels the MPS graph compiler
+// generates (lumen/compiler/mps), into lumen's MPS stream. Generic: Rust
 // (lumen/ops/*/mps.rs) names the kernel and passes its buffers and
 // argument bytes, bound in that order.
 
@@ -16,24 +17,29 @@
 
 id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset);
 
+// `source` compiled into a library on the stream's device, with IEEE
+// semantics (NaN, infinities) rather than fast math, to match the reference
+// executor (nil if that fails, with why in `error`).
+static id<MTLLibrary> compile(NSString *source, NSError **error) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil) {
+        return nil;
+    }
+    MTLCompileOptions *options = [MTLCompileOptions new];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    return [queue.device newLibraryWithSource:source options:options error:error];
+}
+
 // The kernels' library, compiled on first use (nil if that fails).
 static id<MTLLibrary> library(void) {
     static id<MTLLibrary> lib = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
-        if (queue == nil) {
-            return;
-        }
-        MTLCompileOptions *options = [MTLCompileOptions new];
-        // IEEE semantics (NaN, infinities) rather than fast math, to match
-        // the reference executor.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        options.fastMathEnabled = NO;
-#pragma clang diagnostic pop
         NSError *error = nil;
-        lib = [queue.device newLibraryWithSource:kPrimitiveKernels options:options error:&error];
+        lib = compile(kPrimitiveKernels, &error);
         if (lib == nil) {
             NSLog(@"lumen: compiling the MPS primitive kernels failed: %@", error);
         }
@@ -41,11 +47,14 @@ static id<MTLLibrary> library(void) {
     return lib;
 }
 
+// Pipelines by kernel name: the primitives' on first use, and those of
+// lumen_mps_compile_kernels.
+static os_unfair_lock cache_lock = OS_UNFAIR_LOCK_INIT;
+static auto *cache = new std::unordered_map<std::string, id<MTLComputePipelineState>>();
+
 // The pipeline for kernel `name`, created on first use.
 static id<MTLComputePipelineState> pipeline(const char *name) {
-    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
-    static auto *cache = new std::unordered_map<std::string, id<MTLComputePipelineState>>();
-    os_unfair_lock_lock(&lock);
+    os_unfair_lock_lock(&cache_lock);
     auto it = cache->find(name);
     id<MTLComputePipelineState> pso = it == cache->end() ? nil : it->second;
     if (pso == nil) {
@@ -56,11 +65,43 @@ static id<MTLComputePipelineState> pipeline(const char *name) {
             (*cache)[name] = pso;
         }
     }
-    os_unfair_lock_unlock(&lock);
+    os_unfair_lock_unlock(&cache_lock);
     return pso;
 }
 
 extern "C" {
+// Compile Metal `source` (generated kernels, lumen/compiler/mps) and add a
+// pipeline for each of its kernels, which lumen_mps_launch_kernel then
+// launches by name. A kernel already added keeps its pipeline.
+int lumen_mps_compile_kernels(const char *source) {
+    @autoreleasepool {
+        NSError *error = nil;
+        id<MTLLibrary> lib = compile([NSString stringWithUTF8String:source], &error);
+        if (lib == nil) {
+            NSLog(@"lumen: compiling generated MPS kernels failed: %@", error);
+            return -1;
+        }
+        for (NSString *name in lib.functionNames) {
+            os_unfair_lock_lock(&cache_lock);
+            bool known = cache->count(name.UTF8String) != 0;
+            os_unfair_lock_unlock(&cache_lock);
+            if (known) {
+                continue;
+            }
+            id<MTLFunction> fn = [lib newFunctionWithName:name];
+            id<MTLComputePipelineState> pso = [lib.device newComputePipelineStateWithFunction:fn error:&error];
+            if (pso == nil) {
+                NSLog(@"lumen: creating the MPS pipeline %@ failed: %@", name, error);
+                return -2;
+            }
+            os_unfair_lock_lock(&cache_lock);
+            (*cache)[name.UTF8String] = pso;
+            os_unfair_lock_unlock(&cache_lock);
+        }
+    }
+    return 0;
+}
+
 int lumen_mps_launch_kernel(const char *name,
                             const void *const *buffers,
                             size_t nbuffers,

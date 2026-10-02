@@ -81,12 +81,12 @@ def test_must_return_traced_tensors():
 
 def test_factories_record_primitives_while_tracing():
     def f(x):
-        return x + lumen.ones([3]) + lumen.full([2, 3], 2) + lumen.arange(3) + lumen.zeros([3], dtype="float64")
+        return x + lumen.ones([3]) + lumen.full([2, 3], 2.0) + lumen.arange(3) + lumen.zeros([3])
 
     x = lumen.zeros([2, 3])
     assert "iota" in str(lumen.make_graph(f)(x))
     out = run(f, x)
-    assert out.dtype == np.float64
+    assert out.dtype == np.float32
     assert out.tolist() == [[3.0, 4.0, 5.0]] * 2
     assert run(lambda: lumen.full([2], True)).tolist() == [True, True]  # no tensor inputs: on the CPU
     assert isinstance(lumen.ones([2]), lumen.Tensor)  # eager outside a trace
@@ -124,20 +124,36 @@ def test_prims_compose():
 # ---------------------------------------------------------------------
 
 
-def test_type_promotion_follows_torch():
+def test_no_implicit_dtype_changes():
     i, f = lumen.tensor([1, 2]), lumen.tensor([1.0, 2.0])
-    assert run(lambda i: i + 1.5, i).dtype == np.float32  # int tensor, float scalar: default dtype
-    assert run(lambda i: i / 2, i).dtype == np.float32  # true division
+    half = lumen.tensor([1.0], dtype="float16")
+    # Python scalars take the tensor's dtype.
     assert run(lambda i: i * 2, i).dtype == np.int64
     assert run(lambda f: f * 2, f).dtype == np.float32
-    assert run(lambda i: i.exp(), i).dtype == np.float32
-    u8, i8 = lumen.tensor([200], dtype="uint8"), lumen.tensor([-1], dtype="int8")
-    assert run(lambda a, b: a + b, u8, i8).tolist() == [199]
-    assert run(lambda a, b: a + b, u8, i8).dtype == np.int16
-    assert run(lambda b: b.sum(), lumen.tensor([True, True, False])).tolist() == 2
-    half = lumen.tensor([1.0], dtype="float16")
-    assert run(lambda h, s: h + s, half, lumen.tensor(2.0, dtype="float64")).dtype == np.float16  # 0-d tensors defer
-    assert lumen.graph.promote_types("float16", "bfloat16") == "float32"
+    assert run(lambda h: h + 2.5, half).dtype == np.float16
+    assert run(lambda b: b == True, lumen.tensor([True, False])).tolist() == [True, False]  # noqa: E712
+    # Sums stay in the tensor's dtype (integers wrap) unless given one.
+    u8 = lumen.tensor([200, 100], dtype="uint8")
+    assert run(lambda x: x.sum(), u8).tolist() == 44
+    assert run(lambda x: x.sum(dtype="int64"), u8).tolist() == 300
+    # Explicit conversions are how dtypes change.
+    assert run(lambda i: i.float().exp(), i).dtype == np.float32
+    assert run(lambda i, f: i.to(f.dtype) + f, i, f).tolist() == [2.0, 4.0]
+    assert run(lambda i: i.softmax(0, dtype="float32"), i).dtype == np.float32
+    errors = [
+        (lambda i, f: i + f, (i, f), "dtypes float32 and int64"),
+        (lambda h, f: lumen.maximum(h, f), (half, lumen.tensor([0.0])), "dtypes float16 and float32"),
+        (lambda f, h: lumen.where(f > 0, f, h), (lumen.tensor([1.0]), half), "dtypes float16 and float32"),
+        (lambda h, f: h @ f, (lumen.zeros([2, 2], dtype="float16"), lumen.zeros([2, 2])), "dtypes float16 and float32"),
+        (lambda i: i + 1.5, (i,), "int64 tensor and the float 1.5"),
+        (lambda b: b + 1, (lumen.tensor([True]),), "bool tensor and the int 1"),
+        (lambda i: i / 2, (i,), "true division"),
+        (lambda i: i.exp(), (i,), "exp needs a floating-point tensor"),
+        (lambda i: i.softmax(0), (i,), "softmax needs a floating-point tensor"),
+    ]
+    for fn, args, message in errors:
+        with pytest.raises(TypeError, match=message):
+            lumen.compile(fn)(*args)
 
 
 def test_broadcasting():

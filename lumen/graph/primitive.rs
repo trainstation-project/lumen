@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use super::TensorType;
+use super::{Graph, TensorType};
 use crate::{DType, Scalar};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +70,15 @@ pub enum Primitive {
         shape: Vec<usize>,
         dimension: usize,
     },
+    /// `body` (a graph with one output) run as one kernel, `name`: what a
+    /// device's graph compiler (`crate::compiler`) groups the primitives it
+    /// fuses into.
+    /// Profiled as `label`, its primitives' names: `mul -> tanh -> add`.
+    Fusion {
+        name: String,
+        label: &'static str,
+        body: Graph,
+    },
 }
 
 impl Primitive {
@@ -99,6 +108,7 @@ impl Primitive {
             Transpose { .. } => "transpose",
             Full { .. } => "full",
             Iota { .. } => "iota",
+            Fusion { label, .. } => label,
         }
     }
 
@@ -110,6 +120,7 @@ impl Primitive {
             Full { .. } | Iota { .. } => 0,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } => 2,
             Select => 3,
+            Fusion { body, .. } => body.inputs().len(),
             _ => 1,
         };
         if args.len() != arity {
@@ -253,6 +264,21 @@ impl Primitive {
                 }
                 Ok(TensorType::new(*dtype, shape))
             }
+            Fusion { body, .. } => {
+                let types = body.inputs().iter().map(|&v| body.type_of(v));
+                if let Some((i, (arg, ty))) = args
+                    .iter()
+                    .zip(types)
+                    .enumerate()
+                    .find(|(_, (a, t))| **a != *t)
+                {
+                    return err(format!("operand {i} must be {ty}, got {arg}"));
+                }
+                match body.outputs() {
+                    &[out] => Ok(body.type_of(out).clone()),
+                    outs => err(format!("the body must have one output, got {}", outs.len())),
+                }
+            }
         }
     }
 }
@@ -290,6 +316,9 @@ impl fmt::Display for Tuple<'_> {
 impl fmt::Display for Primitive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Primitive::*;
+        if let Fusion { name, body, .. } = self {
+            return write!(f, "fusion[name={name} body={body}]");
+        }
         f.write_str(self.name())?;
         match self {
             ConvertElementType { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),

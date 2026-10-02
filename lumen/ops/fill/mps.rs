@@ -33,12 +33,31 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     }
 
     let pattern = as_bytes(std::slice::from_ref(&value));
-    // Contiguous elements are passed without strides.
-    let contiguous = t.is_contiguous();
-    let strides = if contiguous {
+    // A fill writes its elements in any order: take the dimensions in
+    // decreasing stride, so neighbouring threads write neighbouring
+    // addresses. Elements that make up one contiguous block in that order
+    // (a transposed tensor's, say) are filled as contiguous, which is passed
+    // without strides.
+    let mut dims: Vec<(usize, usize)> = t
+        .shape()
+        .iter()
+        .copied()
+        .zip(t.strides().iter().copied())
+        .filter(|&(size, _)| size != 1)
+        .collect();
+    dims.sort_by_key(|&(_, stride)| std::cmp::Reverse(stride));
+    let contiguous = dims
+        .iter()
+        .rev()
+        .try_fold(1, |stride, &(size, s)| {
+            (s == stride).then_some(stride * size)
+        })
+        .is_some();
+    let (sizes, strides): (Vec<usize>, Vec<usize>) = dims.into_iter().unzip();
+    let strides_ptr = if contiguous {
         std::ptr::null()
     } else {
-        t.strides().as_ptr()
+        strides.as_ptr()
     };
     let dst = t.data_ptr();
 
@@ -49,9 +68,9 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
             pattern.as_ptr(),
             pattern.len(),
             numel,
-            t.shape().as_ptr(),
-            strides,
-            t.ndim(),
+            sizes.as_ptr(),
+            strides_ptr,
+            sizes.len(),
             timed.into(),
             done,
             context,

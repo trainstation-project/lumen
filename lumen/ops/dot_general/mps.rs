@@ -1,20 +1,33 @@
-//! dot_general on MPS (`mps.metal`): a tiled kernel when the contraction
-//! is a matmul (the batch, lhs free, rhs free and contracting dimensions
-//! each collapse into one: any matmul, batched or with transposed
-//! operands), a naive one, a thread per output, otherwise.
+//! dot_general on MPS (`mps.metal`) as a tiled matmul: each operand's
+//! batch, free and contracting dimensions collapse into one each (any
+//! matmul, batched or with transposed operands), or, where they do not, the
+//! operand is first gathered into a contiguous copy in that order.
 
-use crate::Tensor;
 use crate::graph::Primitive::DotGeneral;
+use crate::graph::TensorType;
 use crate::graph::plan::Step;
 use crate::graph::primitive::free_dims;
-use crate::ops::mps::{Grid, dims_arg, launch_step, u32_arg, u64_arg};
+use crate::ops::layout::mps::gather;
+use crate::ops::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
+use crate::{Device, Tensor, TensorOptions};
+
+/// The output tile of a threadgroup (`mps.metal`): 128 x 64 for the float
+/// kernels and 64 x 64 for their `_small` variants, which matmuls with
+/// fewer than `SMALL_TILES` of the large tiles (or whose M fills less than
+/// half of the last) take; 64 x 64 (`MM_TILE`) for the 8- to 32-bit integer
+/// kernels and 32 x 32 (`WIDE_TILE`) for the 64-bit ones.
+const FLOAT_TILE: (usize, usize) = (128, 64);
+const SMALL_TILE: (usize, usize) = (64, 64);
+const INT_TILE: (usize, usize) = (64, 64);
+const WIDE_TILE: (usize, usize) = (32, 32);
+const SMALL_TILES: usize = 32;
 
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
-    keep: Vec<Tensor>,
+    mut keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let DotGeneral {
         lhs_contracting,
@@ -26,64 +39,94 @@ pub(crate) fn encode(
         unreachable!("a dot_general")
     };
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let (ls, rs) = (
-        contiguous_strides(&lhs.shape),
-        contiguous_strides(&rhs.shape),
-    );
-    // Each output dimension as (size, lhs stride, rhs stride).
-    let mut dims: Vec<(usize, usize, usize)> = lhs_batch
-        .iter()
-        .zip(rhs_batch)
-        .map(|(&l, &r)| (lhs.shape[l], ls[l], rs[r]))
-        .collect();
+    let name = step.primitive.name();
+    // The operands' dimensions in matmul order: lhs [batch, free,
+    // contracting], rhs [batch, contracting, free].
     let lhs_used = [lhs_batch.as_slice(), lhs_contracting].concat();
     let rhs_used = [rhs_batch.as_slice(), rhs_contracting].concat();
-    dims.extend(free_dims(lhs.shape.len(), &lhs_used).map(|d| (lhs.shape[d], ls[d], 0)));
-    dims.extend(free_dims(rhs.shape.len(), &rhs_used).map(|d| (rhs.shape[d], 0, rs[d])));
-    let contracting: Vec<(usize, usize, usize)> = lhs_contracting
-        .iter()
-        .zip(rhs_contracting)
-        .map(|(&l, &r)| (lhs.shape[l], ls[l], rs[r]))
-        .collect();
-    let (nb, nl) = (lhs_batch.len(), lhs.shape.len() - lhs_used.len());
-    let one = |dims: &[(usize, usize, usize)], pick: fn(&(usize, usize, usize)) -> usize| {
-        collapse(dims.iter().map(|d| (d.0, pick(d))))
+    let lhs_free: Vec<usize> = free_dims(lhs.shape.len(), &lhs_used).collect();
+    let rhs_free: Vec<usize> = free_dims(rhs.shape.len(), &rhs_used).collect();
+    let lhs_order = [lhs_batch.as_slice(), &lhs_free, lhs_contracting].concat();
+    let rhs_order = [rhs_batch.as_slice(), rhs_contracting, &rhs_free].concat();
+    let (nb, nk) = (lhs_batch.len(), lhs_contracting.len());
+    let size =
+        |ty: &TensorType, dims: &[usize]| dims.iter().map(|&d| ty.shape[d]).product::<usize>();
+    let (b, m, n, k) = (
+        size(lhs, lhs_batch),
+        size(lhs, &lhs_free),
+        size(rhs, &rhs_free),
+        size(lhs, lhs_contracting),
+    );
+    let (lp, [lsb, lsm, lsk]) = operand(
+        lhs,
+        &lhs_order,
+        nb,
+        nb + lhs_free.len(),
+        inputs[0],
+        &mut keep,
+        name,
+    )?;
+    let (rp, [rsb, rsk, rsn]) = operand(rhs, &rhs_order, nb, nb + nk, inputs[1], &mut keep, name)?;
+    let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
+    let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
+    let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
+        (true, false) => (format!("matmul_{}", out.dtype), FLOAT_TILE),
+        (true, true) => (format!("matmul_small_{}", out.dtype), SMALL_TILE),
+        (false, _) if out.dtype.size_of() == 8 => (format!("matmul_{}", out.dtype), WIDE_TILE),
+        (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
     };
-    let matmul = (|| {
-        let (b, lsb) = one(&dims[..nb], |d| d.1)?;
-        let (_, rsb) = one(&dims[..nb], |d| d.2)?;
-        let (m, lsm) = one(&dims[nb..nb + nl], |d| d.1)?;
-        let (n, rsn) = one(&dims[nb + nl..], |d| d.2)?;
-        let (k, lsk) = one(&contracting, |d| d.1)?;
-        let (_, rsk) = one(&contracting, |d| d.2)?;
-        Some((b, [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn]))
-    })();
-    if let Some((b, p)) = matmul {
-        let grid = Grid::Groups([p[1].div_ceil(32), p[0].div_ceil(32), b]);
-        let kernel = format!("matmul_{}", out.dtype);
-        return launch_step(step, &kernel, inputs, output, &[dims_arg(p)], grid, keep);
-    }
-    let args = [
-        u32_arg(dims.len() as u32),
-        dims_arg(dims.iter().map(|d| d.0)),
-        dims_arg(dims.iter().map(|d| d.1)),
-        dims_arg(dims.iter().map(|d| d.2)),
-        u32_arg(contracting.len() as u32),
-        dims_arg(contracting.iter().map(|d| d.0)),
-        dims_arg(contracting.iter().map(|d| d.1)),
-        dims_arg(contracting.iter().map(|d| d.2)),
-        u64_arg(contracting.iter().map(|d| d.0).product()),
-    ];
-    let grid = Grid::Threads([out.numel(), 1, 1]);
-    launch_step(
-        step,
-        &format!("dot_{}", out.dtype),
-        inputs,
-        output,
-        &args,
+    let grid = Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]);
+    let p = [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn];
+    launch(
+        &kernel,
+        &[lp, rp, output.cast_const()],
+        &[dims_arg(p)],
         grid,
         keep,
+        name,
     )
+}
+
+/// The operand `ty` at `ptr` with its dimensions in `order`, as three
+/// strided dimensions: `order[..i]`, `order[i..j]` and `order[j..]`, each
+/// collapsed into one. Where they do not collapse, gathers the operand into
+/// a contiguous copy in `order` (kept alive in `keep`) and returns that.
+fn operand(
+    ty: &TensorType,
+    order: &[usize],
+    i: usize,
+    j: usize,
+    ptr: *const u8,
+    keep: &mut Vec<Tensor>,
+    name: &'static str,
+) -> Result<(*const u8, [usize; 3]), String> {
+    let strides = contiguous_strides(&ty.shape);
+    let groups = [&order[..i], &order[i..j], &order[j..]];
+    let collapsed: Option<Vec<(usize, usize)>> = groups
+        .iter()
+        .map(|g| collapse(g.iter().map(|&d| (ty.shape[d], strides[d]))))
+        .collect();
+    if let Some(c) = collapsed {
+        return Ok((ptr, [c[0].1, c[1].1, c[2].1]));
+    }
+    let options = TensorOptions::new().dtype(ty.dtype).device(Device::Mps);
+    // SAFETY: the gather writes every element before the matmul reads it.
+    let copy = unsafe { Tensor::empty(&[ty.numel()], options) };
+    keep.push(copy.clone());
+    let shape: Vec<usize> = order.iter().map(|&d| ty.shape[d]).collect();
+    let from: Vec<usize> = order.iter().map(|&d| strides[d]).collect();
+    gather(
+        ty.dtype.size_of(),
+        &shape,
+        &from,
+        ptr,
+        copy.data_ptr(),
+        keep.clone(),
+        name,
+    )?;
+    let inner = |g: &[usize]| g.iter().map(|&d| ty.shape[d]).product::<usize>();
+    let (s1, s2) = (inner(groups[1]), inner(groups[2]));
+    Ok((copy.data_ptr().cast_const(), [s1 * s2, s2, 1]))
 }
 
 /// `dims` (each a size and stride, outermost first) as one dimension of

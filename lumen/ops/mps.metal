@@ -1,8 +1,9 @@
 // Shared by the Metal kernels of the graph primitives (lumen/ops/*/mps/
-// *.metal): type traits, scalar conversions, index helpers and the dtype
-// lists that instantiate kernels. build.rs concatenates this file and the
-// op files into one source, compiled at runtime into one library;
-// lumen/ops/mps.mm launches its kernels.
+// *.metal): type traits, scalar conversions, op functors, index helpers and
+// the dtype lists that instantiate kernels. build.rs concatenates this file
+// and the op files into one source, compiled at runtime into one library;
+// lumen/ops/mps.mm launches its kernels. The MPS graph compiler
+// (lumen/compiler/mps) also prepends it to the fused kernels it generates.
 //
 // Kernels are templates instantiated per op and dtype, named after the
 // primitive, <op>_<dtype> (add_f32, reduce_sum_i64, ...), or <kernel>_<bytes>
@@ -111,6 +112,54 @@ struct Max {
     // -inf for floats, the lowest value for integers (saturated), false.
     template <typename A> static A identity() { return is_bool_t<A>() ? A(false) : from_float<A>(-INFINITY); }
 };
+
+// The other elementwise ops, as functors: shared by the elementwise
+// kernels and the fused kernels lumen/compiler/mps generates.
+struct Sub {
+    template <typename A> static A apply(A x, A y) { return x - y; }
+};
+
+struct Mul {
+    template <typename A> static A apply(A x, A y) { return x * y; }
+};
+
+struct Div {
+    template <typename A> static A apply(A x, A y) { return div_op(x, y); }
+};
+
+struct Eq {
+    template <typename A> static bool apply(A x, A y) { return x == y; }
+};
+
+struct Lt {
+    template <typename A> static bool apply(A x, A y) { return x < y; }
+};
+
+struct Exp {
+    static float apply(float x) { return exp(x); }
+};
+
+struct Log {
+    static float apply(float x) { return log(x); }
+};
+
+struct Rsqrt {
+    static float apply(float x) { return rsqrt(x); }
+};
+
+struct Tanh {
+    static float apply(float x) { return tanh(x); }
+};
+
+struct Logistic {
+    static float apply(float x) { return 1.0f / (1.0f + exp(-x)); }
+};
+
+// x converted to D: from_float for float sources, from_int for the rest.
+template <typename D, typename S> inline D convert_value(S x) { return from_int<D>(x); }
+template <typename D> inline D convert_value(half x) { return from_float<D>(float(x)); }
+template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }
+template <typename D> inline D convert_value(float x) { return from_float<D>(x); }
 
 // Elementwise kernels take BYTES_PER_THREAD bytes of elements of T a
 // thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:

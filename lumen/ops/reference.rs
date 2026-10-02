@@ -28,7 +28,6 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
             inputs.len()
         ));
     }
-    let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
     for (&var, t) in graph.inputs().iter().zip(inputs) {
         let ty = graph.type_of(var);
         if t.dtype() != ty.dtype || t.shape() != ty.shape {
@@ -37,7 +36,22 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
                 TensorType::new(t.dtype(), t.shape())
             ));
         }
-        env[var] = Some(load(t));
+    }
+    let outputs = eval_graph(graph, inputs.iter().map(load).collect());
+    let device = inputs.first().map_or(Device::Cpu, Tensor::device);
+    Ok(graph
+        .outputs()
+        .iter()
+        .zip(&outputs)
+        .map(|(&v, values)| store(values, graph.type_of(v), device))
+        .collect())
+}
+
+/// The values of `graph`'s outputs, given its inputs'.
+fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
+    let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
+    for (&var, values) in graph.inputs().iter().zip(inputs) {
+        env[var] = Some(values);
     }
     for node in graph.nodes() {
         let args: Vec<&Values> = node
@@ -57,12 +71,11 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
             graph.type_of(node.output),
         ));
     }
-    let device = inputs.first().map_or(Device::Cpu, Tensor::device);
-    Ok(graph
+    graph
         .outputs()
         .iter()
-        .map(|&v| store(env[v].as_ref().unwrap(), graph.type_of(v), device))
-        .collect())
+        .map(|&v| env[v].clone().expect("graph values are defined before use"))
+        .collect()
 }
 
 fn load(t: &Tensor) -> Values {
@@ -459,6 +472,10 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 Int((0..n).map(|i| wrap(i as i128, dtype)).collect())
             };
             gather(&values, out, |idx| ravel([idx[*dimension]], &range.shape))
+        }
+        Fusion { body, .. } => {
+            let inputs = args.iter().map(|&v| v.clone()).collect();
+            eval_graph(body, inputs).remove(0)
         }
     }
 }
