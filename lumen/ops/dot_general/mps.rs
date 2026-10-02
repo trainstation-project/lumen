@@ -15,10 +15,12 @@ use crate::{Device, Tensor, TensorOptions};
 /// The output tile of a threadgroup (`mps.metal`): 128 x 64 for the float
 /// kernels and 64 x 64 for their `_small` variants, which matmuls with
 /// fewer than `SMALL_TILES` of the large tiles (or whose M fills less than
-/// half of the last) take; 64 x 64 (`MM_TILE`) for the integer kernels.
+/// half of the last) take; 64 x 64 (`MM_TILE`) for the 8- to 32-bit integer
+/// kernels and 32 x 32 (`WIDE_TILE`) for the 64-bit ones.
 const FLOAT_TILE: (usize, usize) = (128, 64);
 const SMALL_TILE: (usize, usize) = (64, 64);
 const INT_TILE: (usize, usize) = (64, 64);
+const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
 
 pub(crate) fn encode(
@@ -70,6 +72,7 @@ pub(crate) fn encode(
     let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
         (true, false) => (format!("matmul_{}", out.dtype), FLOAT_TILE),
         (true, true) => (format!("matmul_small_{}", out.dtype), SMALL_TILE),
+        (false, _) if out.dtype.size_of() == 8 => (format!("matmul_{}", out.dtype), WIDE_TILE),
         (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
     };
     let grid = Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]);

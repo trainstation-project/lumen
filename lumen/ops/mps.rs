@@ -68,6 +68,7 @@ pub(crate) fn encode(
         DotGeneral { .. } => super::dot_general::mps::encode,
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } => super::layout::mps::encode,
         Full { .. } | Iota { .. } => super::factory::mps::encode,
+        Fusion { .. } => crate::compiler::mps::encode,
     };
     encode(step, inputs, output, keep)
 }
