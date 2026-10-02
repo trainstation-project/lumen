@@ -20,6 +20,9 @@ wraps:
   traced tensors (``x @ w``, ``x.softmax(-1)``, ``lumen.where``, ...).
 * ``lumen.ops`` (``lumen/ops.py``) — registering device kernels written in
   Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
+* ``lumen.safetensors`` (``lumen/safetensors/``) — ``save_file``,
+  ``load_file`` and ``safe_open`` for safetensors files, as in
+  ``safetensors.torch``.
 * ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
   ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``.
 
@@ -28,7 +31,7 @@ factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
-from lumen import graph, ops, profiler
+from lumen import graph, ops, profiler, safetensors
 from lumen.graph import (
     compile,
     exp,

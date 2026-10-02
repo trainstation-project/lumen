@@ -26,6 +26,7 @@ pub mod ops;
 pub mod profiler;
 #[cfg(feature = "python")]
 mod python;
+pub mod safetensors;
 pub mod stream;
 pub mod tensor;
 
