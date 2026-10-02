@@ -519,14 +519,16 @@ mod mps {
         if !available() {
             return;
         }
-        // Rows and columns, split into chunks and not, and a middle axis.
-        let cases: [(&[usize], Vec<usize>); 6] = [
+        // Rows and columns, split into chunks and not, a middle axis, and
+        // axes that are not consecutive (a threadgroup per output).
+        let cases: [(&[usize], Vec<usize>); 7] = [
             (&[3, 50_000], vec![1]),
             (&[50_000, 3], vec![0]),
             (&[300, 700], vec![0, 1]),
             (&[4, 5_000, 3], vec![1]),
             (&[2_000, 300], vec![1]),
             (&[300, 2_000], vec![0]),
+            (&[40, 7, 300], vec![0, 2]),
         ];
         for dtype in [
             DType::F32,
