@@ -138,5 +138,14 @@ fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<()> {
         && m.captures[ONE].is_none_or(|one| matcher.scalar(one) == Some(1.0))
         && weight_ok
         && matcher.exclusive(m);
-    (ok && m.captures[EPS].is_none_or(|eps| matcher.scalar(eps).is_some())).then_some(())
+    // Epsilon: a scalar, constant or (a runtime scalar, `lumen.compile`'s
+    // float) one value broadcast.
+    let scalar = |eps| {
+        matcher.scalar(eps).is_some()
+            || matcher.node(eps).is_some_and(|b| {
+                matches!(b.primitive, Primitive::BroadcastInDim { .. })
+                    && graph.type_of(b.inputs[0]).numel() == 1
+            })
+    };
+    (ok && m.captures[EPS].is_none_or(scalar)).then_some(())
 }

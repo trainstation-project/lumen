@@ -54,17 +54,40 @@ def _weights(args):
     return list(params.values())
 
 
+def _scalars(args):
+    """The runtime scalars of ``args``: the float arguments, then the float
+    fields of the module arguments, in order."""
+    floats = [a for a in args if isinstance(a, float)]
+    return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
+
+
 def _trace(fn, args):
     """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
     single tensor (rather than a tuple or list of them). The graph's inputs
-    are the tensor arguments, then the weights of the module arguments
-    (``_weights``), each a whole meta tensor."""
+    are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
+    float32 inputs, weakly typed: each takes its tensor operand's dtype),
+    then the weights of the module arguments (``_weights``), each a whole
+    meta tensor."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
+
+    def scalar(_):
+        t = TracedTensor(graph, graph.input("float32", []))
+        t.weak = True
+        return t
+
+    traced = [scalar(a) if isinstance(a, float) else a for a in traced]
+    scalars = [scalar(v) for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
     weights = {}
     for t in _weights(args):
         weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape))
-    traced = [nn.map_tensors(a, lambda t: weights[t.storage_id]) if isinstance(a, nn.Module) else a for a in traced]
+    module_scalars = iter(scalars)
+    traced = [
+        nn.map_tensors(a, lambda t: weights[t.storage_id], lambda _: next(module_scalars))
+        if isinstance(a, nn.Module)
+        else a
+        for a in traced
+    ]
     _TRACES.append(graph)
     try:
         out = fn(*traced)
@@ -90,13 +113,18 @@ def _lift(x):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape (data or meta alike), modules by
-    # their structure and which of their weights are one tensor; anything
-    # else is baked into the graph, so it must be hashable.
+    # Tensors are traced by dtype and shape (data or meta alike), floats as
+    # runtime scalars (their values change nothing), modules by their
+    # structure and which of their weights are one tensor; anything else is
+    # baked into the graph, so it must be hashable.
     ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
     shared = tuple(ids.index(i) for i in ids)
     return tuple(
-        (a.dtype, tuple(a.shape)) if isinstance(a, Tensor) else nn.structure(a) if isinstance(a, nn.Module) else ("static", a)
+        (a.dtype, tuple(a.shape))
+        if isinstance(a, Tensor)
+        else nn.structure(a)
+        if isinstance(a, (nn.Module, float))
+        else ("static", a)
         for a in args
     ) + (shared,)
 
@@ -116,7 +144,11 @@ def compile(fn, device=None):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
     and compiled into a static plan for ``device`` on its first call with
     each input signature (the tensor arguments' dtypes and shapes, and the
-    values of the other arguments), which every call then runs. ``device``
+    values of the other arguments but floats), which every call then runs.
+    Float arguments, and float fields of module arguments, are runtime
+    scalars, as in ``jax.jit``: inputs of the plan, whose values each call
+    passes (another value reuses the plan), weakly typed (each takes its
+    tensor operand's dtype). Ints and the rest are static. ``device``
     defaults to the first tensor argument with data's (the CPU without
     any).
 
@@ -162,7 +194,9 @@ def compile(fn, device=None):
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
         key = _signature(args), target
+        # The arguments the plan copies in: tensors, then runtime scalars.
         tensors = [a for a in args if isinstance(a, Tensor)]
+        tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors))
         graph, single, entries, _ = plans[key]
@@ -280,8 +314,10 @@ def _require_float(x, op):
 
 
 def _common_dtype(op, operands):
-    """The dtype the tensors among ``operands`` share."""
-    dtypes = sorted({x.dtype for x in map(_lift, operands) if isinstance(x, TracedTensor)})
+    """The dtype the tensors among ``operands`` share (weakly typed ones,
+    runtime scalars, take the others')."""
+    tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
+    dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
         raise TypeError(f"{op} needs a tensor operand")
     if len(dtypes) > 1:
@@ -313,6 +349,11 @@ def _as_tensor(x, dtype, op):
     """``x`` (a traced tensor of ``dtype``, or a Python scalar of its kind)
     as a traced tensor."""
     x = _lift(x)
+    if isinstance(x, TracedTensor) and x.weak and x.dtype != dtype:
+        # A runtime scalar (float32): converted, as a Python float would be.
+        if not _is_float(dtype):
+            raise TypeError(f"{op} of a {dtype} tensor and a float: convert the tensor with .to(dtype)")
+        return x.to(dtype)
     if isinstance(x, TracedTensor):
         return x
     if not _is_operand(x):
@@ -350,8 +391,12 @@ def _operands(op, *operands):
 
 
 def _elementwise(prim, *operands):
-    """``prim`` on ``operands``, of one dtype, broadcast to a common shape."""
-    return prim(*_operands(prim.__name__.lstrip("_"), *operands))
+    """``prim`` on ``operands``, of one dtype, broadcast to a common shape:
+    weakly typed if every tensor among them is (``eps * 2``)."""
+    out = prim(*_operands(prim.__name__.lstrip("_"), *operands))
+    tensors = [x for x in operands if isinstance(x, TracedTensor)]
+    out.weak = bool(tensors) and all(x.weak for x in tensors)
+    return out
 
 
 def _dim(dim, ndim):
@@ -420,11 +465,14 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "var", "dtype", "shape")
+    __slots__ = ("graph", "var", "dtype", "shape", "weak")
 
     def __init__(self, graph, var):
         self.graph = graph
         self.var = var
+        # A runtime scalar's (a float argument's): it takes its tensor
+        # operand's dtype, as a Python scalar does.
+        self.weak = False
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)

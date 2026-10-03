@@ -2,8 +2,9 @@
 ``eqx.Module``.
 
 A ``Module`` subclass is a frozen dataclass whose fields are its weights
-(tensors), its submodules, lists or tuples of those, or static
-configuration (anything else: ints, strings, ...). Weights are meta tensors:
+(tensors), its submodules, lists or tuples of those, runtime scalars
+(floats: ``eps``, read by the compiled function each call, not baked into
+it), or static configuration (anything else: ints, strings, ...). Weights are meta tensors:
 ``lumen.compile`` places them on its device when a function taking the
 module compiles, and every function taking it shares that memory::
 
@@ -78,26 +79,47 @@ def _leaves(x, path):
         for i, v in enumerate(x):
             yield from _leaves(v, prefix + str(i))
 
+    
+def _floats(x):
+    """Each float field of ``x`` (a module, a list or tuple), recursively, in
+    field order: runtime scalars of a compiled function (``lumen.compile``),
+    not baked into it."""
+    if isinstance(x, float):
+        yield x
+    elif isinstance(x, Module):
+        for f in dataclasses.fields(x):
+            yield from _floats(getattr(x, f.name))
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            yield from _floats(v)
+
 
 def structure(x):
-    """``x``'s structure, hashable: its classes, static fields and weights'
-    types (what a compiled function's plan depends on)."""
+    """``x``'s structure, hashable: its classes, static fields (not floats,
+    which are runtime scalars) and weights' types (what a compiled
+    function's plan depends on)."""
     if isinstance(x, Tensor):
         return ("tensor", x.dtype, tuple(x.shape))
     if isinstance(x, Module):
         return (type(x), tuple((f.name, structure(getattr(x, f.name))) for f in dataclasses.fields(x)))
     if isinstance(x, (list, tuple)):
         return (type(x), tuple(map(structure, x)))
+    if isinstance(x, float):
+        return ("scalar",)
     return ("static", x)
 
 
-def map_tensors(x, f):
+def map_tensors(x, f, scalar=None):
     """``x`` with each tensor ``t`` in it (recursively, through modules,
-    lists and tuples) replaced by ``f(t)``."""
+    lists and tuples) replaced by ``f(t)``, and each float ``v`` by
+    ``scalar(v)`` if given."""
     if isinstance(x, Tensor):
         return f(x)
+    if isinstance(x, float) and scalar is not None:
+        return scalar(x)
     if isinstance(x, Module):
-        return dataclasses.replace(x, **{fl.name: map_tensors(getattr(x, fl.name), f) for fl in dataclasses.fields(x)})
+        fields = {fl.name: map_tensors(getattr(x, fl.name), f, scalar) for fl in dataclasses.fields(x)}
+        return dataclasses.replace(x, **fields)
     if isinstance(x, (list, tuple)):
-        return type(x)(map_tensors(v, f) for v in x)
+        return type(x)(map_tensors(v, f, scalar) for v in x)
     return x

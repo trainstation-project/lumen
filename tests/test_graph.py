@@ -50,9 +50,16 @@ def test_traces_once_per_signature():
     f(lumen.ones([2]), 2.0)
     assert len(traces) == 1
     assert lumen.to_numpy(f(lumen.ones([3]), 2.0)).tolist() == [2.0] * 3
-    assert lumen.to_numpy(f(lumen.ones([3]), 3.0)).tolist() == [3.0] * 3  # static args are part of the key
-    f(lumen.ones([3], dtype="float64"), 3.0)
-    assert len(traces) == 4
+    # A float is a runtime scalar: another value, the same plan.
+    assert lumen.to_numpy(f(lumen.ones([3]), 3.0)).tolist() == [3.0] * 3
+    assert len(traces) == 2
+    # Weakly typed: it takes the tensor's dtype.
+    assert f(lumen.ones([3], dtype="float64"), 3.0).dtype == "float64"
+    assert len(traces) == 3
+    # An int is static, part of the key.
+    f(lumen.ones([3]), 2)
+    f(lumen.ones([3]), 3)
+    assert len(traces) == 5
 
 
 def test_multiple_outputs_and_passthrough():
@@ -797,3 +804,40 @@ def test_sqrt(device):
         for f in (lambda a: 1.0 / a.sqrt(), lambda a: a / a.sum(-1, keepdim=True).sqrt()):
             *_, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
             assert last["label"].endswith("div") and "rsqrt(" in last["fusion"]["source"]
+
+class ScaledNorm(lumen.nn.Module):
+    weight: lumen.Tensor
+    eps: float
+
+    def __call__(self, x):
+        return self.weight * (x / ((x * x).mean(-1, keepdim=True) + self.eps).sqrt())
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_float_fields_are_runtime_scalars(device):
+    """A module's float field is a runtime scalar: another value runs the same
+    plan (no trace, no kernel compiled), read by the kernel, not baked in; an
+    RMS norm with it is still one kernel on MPS."""
+    x, w = rand(8, 300) * 0.3, rand(300, seed=1)
+    traces = []
+
+    def forward(m, a):
+        traces.append(1)
+        return m(a)
+
+    weight = lumen.empty([300], device="meta")
+    f = lumen.compile(forward, device=device)
+    try:
+        f(ScaledNorm(weight, 1e-6), lumen.empty([8, 300], device="meta"))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    ScaledNorm(weight, 1e-6).load_state_dict({"weight": lumen.from_numpy(w)})
+    for eps in (1e-6, 0.1, 1.0):
+        out = lumen.to_numpy(f(ScaledNorm(weight, eps), lumen.from_numpy(x)))
+        expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
+        np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
+    assert len(traces) == 1
+    if device == "mps":
+        graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
+        (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], packable=[2]).steps()
+        assert "in1[0]" in step["fusion"]["source"]  # eps, an input

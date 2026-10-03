@@ -249,8 +249,13 @@ fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
     let rows: usize = out_type.shape[..out_type.shape.len() - 1].iter().product();
     let mut e = Emitter::new(body);
     // Which values are the same across a row: the reductions', constants
-    // (index-free: no iota), and values of `rows` elements of those.
+    // (index-free: no iota), one-element inputs (runtime scalars), and
+    // values of `rows` elements of those.
     let mut constant = vec![false; body.types.len()];
+    for &v in body.inputs() {
+        constant[v] = body.type_of(v).numel() == 1;
+        e.invariant[v] = constant[v];
+    }
     for node in body.nodes() {
         let v = node.output;
         let reduced = reductions.iter().any(|r| r.output == v);
@@ -261,6 +266,21 @@ fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
             body.type_of(v).numel() == rows && node.inputs.iter().all(|&u| e.invariant[u]);
         e.invariant[v] = reduced || constant[v] || of_rows;
     }
+    // Values the same across the row, computed once a row before the loop
+    // reading them, at the kernel's indentation.
+    let hoisted = |code: &str| match code.is_empty() {
+        true => String::new(),
+        false => {
+            let lines: Vec<&str> = code
+                .lines()
+                .map(|l| l.strip_prefix("    ").unwrap_or(l))
+                .collect();
+            format!(
+                "    // the same across the row: once a row\n{}\n",
+                lines.join("\n")
+            )
+        }
+    };
     let mut source = String::new();
     for (k, r) in reductions.iter().enumerate() {
         let x = body.type_of(r.inputs[0]);
@@ -278,7 +298,8 @@ fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
         write!(
             source,
             "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        acc{k} = {op}::apply(acc{k}, {a}({value}));\n    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = {rt}(shared{k}[0]);\n",
-            e.hoisted, e.lines
+            hoisted(&e.hoisted),
+            e.lines
         )
         .unwrap();
         e.row_locals.insert(r.output, format!("r{k}"));
@@ -289,7 +310,8 @@ fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
     write!(
         source,
         "{}    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        out[j] = {value};\n    }}\n",
-        e.hoisted, e.lines
+        hoisted(&e.hoisted),
+        e.lines
     )
     .unwrap();
     let mut params = String::new();
@@ -458,7 +480,12 @@ impl<'a> Emitter<'a> {
             std::mem::take(&mut self.values),
             std::mem::take(&mut self.indices),
         );
-        let name = self.element(v, "row".into());
+        // One element: at index 0; else the row's.
+        let idx = match self.body.type_of(v).numel() {
+            1 => "0",
+            _ => "row",
+        };
+        let name = self.element(v, idx.into());
         let hoisted = std::mem::replace(&mut self.lines, lines);
         self.hoisted.push_str(&hoisted);
         (self.values, self.indices) = caches;
@@ -714,7 +741,12 @@ fn constant(dtype: DType, value: Scalar) -> String {
                 4 => ("uint", "u"),
                 _ => ("ulong", "ul"),
             };
-            format!("as_type<{}>({raw}(0x{bits:x}{suffix}))", metal_type(dtype))
+            // The bits exactly, the value for a reader: `/* 0.1 */`.
+            format!(
+                "as_type<{}>({raw}(0x{bits:x}{suffix})) /* {} */",
+                metal_type(dtype),
+                value.to_f64()
+            )
         }
     }
 }
