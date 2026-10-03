@@ -719,7 +719,7 @@ fn dots_read_slices_in_place() {
 
 /// A reduction fuses the primitives computing its input, in each of its
 /// layouts (rows, split rows, columns, other axes), for sums and maxima of
-/// several dtypes; its consumers read its output.
+/// several dtypes, and an elementwise primitive after it (its epilogue).
 #[test]
 fn reductions_fuse_their_inputs() {
     for (shape, axes) in [
@@ -747,8 +747,9 @@ fn reductions_fuse_their_inputs() {
                 let r = apply(&mut g, r, &[n]);
                 let out = apply(&mut g, Neg, &[r]);
                 g.set_outputs(&[out]).unwrap();
+                // The last `neg` is the reduction's epilogue: one kernel.
                 let fused = fuse(&g);
-                assert_eq!(names(&fused), ["fusion", "neg"], "{fused}");
+                assert_eq!(names(&fused), ["fusion"], "{fused}");
                 if available() {
                     // A float16 sum accumulates in float16: on values it
                     // sums exactly in any order.
@@ -764,6 +765,72 @@ fn reductions_fuse_their_inputs() {
                     let slack = if dtype == DType::F32 && sum { 1.0 } else { 0.0 };
                     check_within(&g, &inputs, slack);
                 }
+            }
+        }
+    }
+}
+
+/// `x.float().sum().bfloat16()` and a mean (`/ n`) cast back: one fusion,
+/// the reduction in float32 and the division and cast its epilogue. One
+/// launch applies it as it writes; a split reduction's partials stay
+/// float32, its second launch (the fusion's `_final` kernel) applying it.
+#[test]
+fn reductions_apply_their_epilogue() {
+    for (shape, axes, split) in [
+        (vec![64, 300], vec![1], false),
+        (vec![4, 200_000], vec![1], true),
+        (vec![100_000, 8], vec![0], true),
+        (vec![40, 7, 30], vec![0, 2], false),
+    ] {
+        for mean in [false, true] {
+            let mut g = Graph::new();
+            let x = g.input(ty(DType::BF16, &shape));
+            let w = apply(
+                &mut g,
+                ConvertElementType {
+                    new_dtype: DType::F32,
+                },
+                &[x],
+            );
+            let sum = ReduceSum {
+                axes: axes.clone(),
+                accum_dtype: DType::F32,
+            };
+            let mut s = apply(&mut g, sum, &[w]);
+            if mean {
+                let count: usize = axes.iter().map(|&d| shape[d]).product();
+                let n = Full {
+                    shape: vec![],
+                    fill_value: Scalar::Float(count as f64),
+                    dtype: DType::F32,
+                };
+                let n = apply(&mut g, n, &[]);
+                let b = BroadcastInDim {
+                    shape: g.type_of(s).shape.clone(),
+                    broadcast_dimensions: vec![],
+                };
+                let n = apply(&mut g, b, &[n]);
+                s = apply(&mut g, Div, &[s, n]);
+            }
+            let y = apply(
+                &mut g,
+                ConvertElementType {
+                    new_dtype: DType::BF16,
+                },
+                &[s],
+            );
+            g.set_outputs(&[y]).unwrap();
+            let fused = fuse(&g);
+            assert_eq!(names(&fused), ["fusion"], "{fused}");
+            let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+                panic!("{fused}")
+            };
+            assert!(super::codegen::has_epilogue(body));
+            let source = codegen::kernel(body, &[]).1;
+            assert!(source.contains("operator()(float r)"), "{source}");
+            assert_eq!(source.contains("_final("), split, "{source}");
+            if available() {
+                check(&g, &[values(DType::BF16, &shape, 1)]);
             }
         }
     }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use super::fusion;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
@@ -50,13 +51,41 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
 /// one (an input fusion, XLA's reduce input fusion): the fused primitives
 /// compute its input.
 pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
-    let out = body.outputs()[0];
-    let root = body.nodes().iter().find(|n| n.output == out)?;
-    matches!(
-        root.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
-    )
-    .then_some(root)
+    use Primitive::*;
+    let nodes = body.nodes();
+    let mut producer = vec![None; body.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+    }
+    // From the output back through its epilogue (elementwise primitives and
+    // reshapes of one value and constants) to a reduction.
+    let mut v = body.outputs()[0];
+    loop {
+        let node = &nodes[producer[v]?];
+        match &node.primitive {
+            ReduceSum { .. } | ReduceMax { .. } => return Some(node),
+            Softmax { .. } if v == body.outputs()[0] => return Some(node),
+            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => {
+                let mut rest = node
+                    .inputs
+                    .iter()
+                    .filter(|&&u| !fusion::constant(body, &producer, u));
+                let next = *rest.next()?;
+                if rest.any(|&u| u != next) {
+                    return None;
+                }
+                v = next;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether the fusion with `body` is a reduction with an epilogue: its
+/// output computed from the reduction's by elementwise primitives
+/// ([`reduction_root`]).
+pub(crate) fn has_epilogue(body: &Graph) -> bool {
+    reduction_root(body).is_some_and(|r| r.output != body.outputs()[0])
 }
 
 /// The kernel of a reduction (or softmax) fusion: the reduction's template
@@ -66,6 +95,12 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
 /// the fusion's inputs, as the loop emitter computes an output element. A
 /// split reduction's kernel writes the partials, which the reduction's own
 /// final kernel reduces.
+///
+/// An epilogue (the elementwise primitives after the reduction, of its
+/// value and constants: a cast, a mean's division) is a functor applied to
+/// each output as it is written; a split reduction's applies it in its
+/// second launch, the fusion's own `NAME_final` kernel, its partials of
+/// the accumulation dtype.
 fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     let x = root.inputs[0];
     let ty = body.type_of(x);
@@ -97,6 +132,22 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     }
     let first_arg = io_params(body, by_value, t).1;
     let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", first_arg + k);
+    // The epilogue: the output from the reduction's value `r`, every value
+    // of it the same for each output (none reads an input), so computed as
+    // a row kernel computes values the same across a row.
+    let out = body.outputs()[0];
+    let o = metal_type(body.type_of(out).dtype);
+    let epilogue = (out != root.output).then(|| {
+        let mut e = Emitter::new(body, by_value);
+        e.invariant = vec![true; body.types.len()];
+        e.row_locals.insert(root.output, "r".into());
+        let value = e.value(out, "i".into());
+        let a = metal_type(body.type_of(root.output).dtype);
+        format!(
+            "struct NAME_epilogue {{\n    inline {o} operator()({a} r) const {{\n{}        return {value};\n    }}\n}};\n\n",
+            e.hoisted
+        )
+    });
     let (op, axes) = match &root.primitive {
         Primitive::ReduceSum { axes, .. } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
@@ -117,15 +168,22 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         }
     };
     // Accumulated in the output's type (reduce_sum's accum_dtype), as are a
-    // split reduction's partials: each element widened as read.
+    // split reduction's partials: each element widened as read. The
+    // epilogue is applied here unless the reduction splits (its second
+    // launch applies it).
     let a = metal_type(body.type_of(root.output).dtype);
     let shared = format!("threadgroup {a} shared[REDUCE_THREADS];");
+    let split = reduce::splits(ty, axes);
+    let (epi, written) = match (&epilogue, split) {
+        (Some(_), false) => (", NAME_epilogue()", o),
+        _ => ("", a),
+    };
     let (args, call) = match reduce::layout(ty, axes) {
         reduce::Layout::Rows => {
             let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
             let call = format!(
-                "{shared}\n    reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
+                "{shared}\n    reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x{epi});"
             );
             (args, call)
         }
@@ -139,7 +197,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             .join(", ")
                 + ", uint i [[thread_position_in_grid]]";
             let call =
-                format!("reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i);");
+                format!("reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i{epi});");
             (args, call)
         }
         reduce::Layout::Grouped => {
@@ -158,16 +216,29 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             .join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
             let call = format!(
-                "{shared}\n    reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x);"
+                "{shared}\n    reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x{epi});"
             );
             (args, call)
         }
         reduce::Layout::Generic => unreachable!("reduction fusions read fewer than 2^32 elements"),
     };
+    // A split reduction with an epilogue: its second launch, reducing the
+    // partials (of the accumulation dtype) and applying the epilogue, with
+    // the arguments of the primitive's kernels (ops/reduce/mps.metal).
+    let last = match (&epilogue, split, reduce::layout(ty, axes)) {
+        (Some(_), true, reduce::Layout::Rows) => format!(
+            "\nkernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant ulong &count [[buffer(2)]], constant ulong &chunk [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]) {{\n    threadgroup {a} shared[REDUCE_THREADS];\n    reduce_rows<{op}, {a}>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());\n}}\n"
+        ),
+        (Some(_), true, reduce::Layout::Cols) => format!(
+            "\nkernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant uint &cols [[buffer(2)]], constant ulong &count [[buffer(3)]], constant ulong &chunk [[buffer(4)]], constant uint &chunks [[buffer(5)]], uint i [[thread_position_in_grid]]) {{\n    reduce_cols<{op}, {a}>(in, out, cols, count, chunk, chunks, i, NAME_epilogue());\n}}\n"
+        ),
+        _ => String::new(),
+    };
     named(format!(
-        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+        "{}struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n{last}",
+        epilogue.as_deref().unwrap_or(""),
         emitter.lines,
-        io_params(body, by_value, a).0,
+        io_params(body, by_value, written).0,
         members.join(", "),
     ))
 }
@@ -222,6 +293,10 @@ fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
 /// normalization's (`rms_norm.rs`), each over the last dimension of a value
 /// of the root's shape, which make its kernel a row kernel.
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
+    // A reduction with an epilogue is not a row kernel's.
+    if reduction_root(body).is_some() {
+        return Vec::new();
+    }
     let out = body.outputs()[0];
     body.nodes()
         .iter()
@@ -397,7 +472,7 @@ fn kept_values(body: &Graph, invariant: &[bool], roots: &[Var]) -> Vec<(Var, usi
                 continue;
             }
             if let Some(node) = producer.get(&v)
-                && super::fusion::elementwise(&node.primitive)
+                && fusion::elementwise(&node.primitive)
             {
                 stack.extend(&node.inputs);
             }
