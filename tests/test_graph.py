@@ -735,10 +735,11 @@ def test_packed_weights_are_read_in_place_elsewhere():
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
-def test_softmax_is_one_primitive(device):
-    """softmax over the last dimension traces to one primitive: on MPS one
-    kernel (online softmax), with the scale before it fused in. Over
-    another dimension it stays composite."""
+def test_softmax_traces_to_its_primitives(device):
+    """softmax traces to its primitives (max, sub, exp, sum, div; no
+    primitive of its own): over the last dimension the MPS compiler runs
+    them, with the scale before them, as one row kernel (a chain of
+    normalization diamonds). Over another dimension too, as kernels."""
     x = rand(8, 300) * 4
     try:
         t = lumen.from_numpy(x).to(device)
@@ -749,21 +750,20 @@ def test_softmax_is_one_primitive(device):
         return (t * 0.5).softmax(-1)
 
     graph = lumen.make_graph(scaled)(t)
-    assert [n["primitive"] for n in graph.nodes()][-1] == "softmax"
+    primitives = [n["primitive"] for n in graph.nodes()]
+    assert "softmax" not in primitives and {"reduce_max", "exp", "reduce_sum", "div"} <= set(primitives)
     s = x * 0.5
     e = np.exp(s - s.max(-1, keepdims=True))
     np.testing.assert_allclose(
         lumen.to_numpy(lumen.compile(scaled)(t)), e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7
     )
     if device == "mps":
-        assert [s["label"] for s in lumen.graph.Plan(graph, "mps").steps()] == [
-            "full -> broadcast_in_dim -> mul -> softmax"
-        ]
+        (step,) = lumen.graph.Plan(graph, "mps").steps()
+        assert step["fusion"] is not None and step["label"].startswith("full -> broadcast_in_dim -> mul")
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(
         lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7
     )
-    assert "softmax" not in [n["primitive"] for n in lumen.make_graph(lambda t: t.softmax(0))(t).nodes()]
 
 
 class Norm(lumen.nn.Module):

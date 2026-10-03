@@ -29,7 +29,7 @@ fn elementwise_is_strict() {
     assert!(infer(Add, &[x.clone(), ty(DType::F16, &[2, 3])]).is_err());
     assert!(infer(Exp, &[ty(DType::I32, &[2])]).is_err());
     // Nothing computes bfloat16 math as traced: convert it first.
-    for p in [Exp, Log, Sqrt, Tanh, Logistic, Softmax { axis: 0 }] {
+    for p in [Exp, Log, Sqrt, Tanh, Logistic] {
         let e = infer(p, &[ty(DType::BF16, &[2])]).unwrap_err();
         assert!(e.contains("convert to float32"), "{e}");
     }
@@ -84,15 +84,6 @@ fn concatenate_rules() {
     assert!(infer(cat(1), &[a.clone(), ty(DType::F16, &[2, 3, 4])]).is_err());
     assert!(infer(cat(1), &[a, ty(DType::F32, &[2, 3])]).is_err());
     assert!(infer(cat(0), &[]).is_err());
-}
-
-#[test]
-fn softmax_rules() {
-    let x = ty(DType::F16, &[3, 5]);
-    let y = infer(Softmax { axis: 1 }, std::slice::from_ref(&x)).unwrap();
-    assert_eq!(y, x);
-    assert!(infer(Softmax { axis: 2 }, std::slice::from_ref(&x)).is_err());
-    assert!(infer(Softmax { axis: 0 }, &[ty(DType::I32, &[3])]).is_err());
 }
 
 #[test]
@@ -811,6 +802,31 @@ pub(crate) mod mps {
         }
     }
 
+    /// `exp(x - max) / sum(exp(x - max))` over the last dimension of `x`, of
+    /// `dtype` and `shape`, as `softmax` traces it.
+    fn written_softmax(dtype: DType, shape: &[usize]) -> Graph {
+        let mut g = Graph::new();
+        let x = g.input(ty(dtype, shape));
+        let last = shape.len() - 1;
+        let bcast = BroadcastInDim {
+            shape: shape.to_vec(),
+            broadcast_dimensions: (0..last).collect(),
+        };
+        let m = g.apply(ReduceMax { axes: vec![last] }, &[x]).unwrap();
+        let m = g.apply(bcast.clone(), &[m]).unwrap();
+        let d = g.apply(Sub, &[x, m]).unwrap();
+        let e = g.apply(Exp, &[d]).unwrap();
+        let sum = ReduceSum {
+            axes: vec![last],
+            accum_dtype: dtype,
+        };
+        let s = g.apply(sum, &[e]).unwrap();
+        let s = g.apply(bcast, &[s]).unwrap();
+        let y = g.apply(Div, &[e, s]).unwrap();
+        g.set_outputs(&[y]).unwrap();
+        g
+    }
+
     /// Check the one-node graph `p` on inputs of `types`.
     fn check_node(p: Primitive, types: &[TensorType]) {
         check_node_within(p, types, 0.0);
@@ -1103,12 +1119,13 @@ pub(crate) mod mps {
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
             }
-            // Softmax over the last dimension: rows shorter and longer than
-            // a threadgroup, one element, none.
+            // A softmax written out over the last dimension (one row
+            // kernel): rows shorter and longer than a threadgroup, one
+            // element, none.
             if matches!(dtype, DType::F16 | DType::F32) {
                 for shape in [vec![4, 7], vec![3, 1000], vec![2, 3, 1], vec![0, 5]] {
-                    let axis = shape.len() - 1;
-                    check_node(Softmax { axis }, &[ty(dtype, &shape)]);
+                    let g = written_softmax(dtype, &shape);
+                    check(&g, &[values(dtype, &shape, 1)]);
                 }
             }
             // Each dimension, operands of different sizes (one empty).

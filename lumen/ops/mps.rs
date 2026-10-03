@@ -55,9 +55,6 @@ pub(crate) fn encode(
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
-    if let Softmax { .. } = step.primitive {
-        return super::softmax::mps::encode(step, inputs, output, keep);
-    }
     if let Fusion { .. } = step.primitive {
         return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -90,7 +87,6 @@ pub(crate) fn encode(
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
-        Softmax { .. } => unreachable!("encoded above"),
     };
     encode(step, inputs, output, keep)
 }
