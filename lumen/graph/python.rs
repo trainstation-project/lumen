@@ -57,6 +57,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             lhs_batch: dims("lhs_batch")?,
             rhs_batch: dims("rhs_batch")?,
             accum_dtype: dtype("accum_dtype")?,
+            output_dtype: dtype("output_dtype")?,
         },
         "reshape" => Reshape {
             new_sizes: dims("new_sizes")?,

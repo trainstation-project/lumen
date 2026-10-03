@@ -374,6 +374,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             rhs_contracting,
             lhs_batch,
             rhs_batch,
+            accum_dtype,
             ..
         } => {
             let (lhs, rhs) = (types[0], types[1]);
@@ -436,12 +437,13 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 (Float(x), Float(y)) => Float(
                     terms
                         .iter()
-                        // In the accumulation dtype (the result's), each
-                        // product and sum rounded to it.
+                        // In the accumulation dtype, each product and sum
+                        // rounded to it; the result to output_dtype, once.
                         .map(|t| {
-                            t.iter().fold(0.0, |acc, &(i, j)| {
-                                round(acc + round(x[i] * y[j], dtype), dtype)
-                            })
+                            let acc = t.iter().fold(0.0, |acc, &(i, j)| {
+                                round(acc + round(x[i] * y[j], *accum_dtype), *accum_dtype)
+                            });
+                            round(acc, dtype)
                         })
                         .collect(),
                 ),

@@ -24,6 +24,7 @@ fn matmul() -> Primitive {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     }
 }
 

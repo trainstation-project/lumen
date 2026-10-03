@@ -221,7 +221,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     except RuntimeError as e:
         pytest.skip(str(e))
     b = lumen.ones([8, 16], device=device).to(dtype="bfloat16")
-    f = lumen.compile(lambda a, b: ((a @ b).to(dtype="bfloat16").sum(-1), a.amax(-1), a * 2.0))
+    f = lumen.compile(lambda a, b: ((a @ b).sum(-1), a.amax(-1), a * 2.0))
     f(a, b)
     activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
     with profile(activities=activities, record_shapes=True) as prof:
@@ -231,7 +231,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     ops = {e["name"]: e for e in prof.events() if e["kind"] == "op"}
     dot = ops["dot_general"]
     assert dot["inputs"] == [("bfloat16", [4, 8]), ("bfloat16", [8, 16])]
-    assert dot["accum"] == ["float32"] and dot["outputs"] == [("float32", [4, 16])]
+    assert dot["accum"] == ["float32"] and dot["outputs"] == [("bfloat16", [4, 16])]
     (total,) = [e for n, e in ops.items() if n.endswith("reduce_sum")]
     assert total["accum"] == ["float32"] and total["outputs"] == [("float32", [4])]
     (peak,) = [e for n, e in ops.items() if n.endswith("reduce_max")]

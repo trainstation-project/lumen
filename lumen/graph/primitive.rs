@@ -44,16 +44,18 @@ pub enum Primitive {
     },
     /// The result's dimensions are the batch dimensions, then the free
     /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
-    /// It accumulates in `accum_dtype`, the result's dtype: the operands',
-    /// or float32 for floats narrower than it (16-bit, later 8- and 4-bit),
-    /// whose products it holds exactly (`lax.dot_general`'s
-    /// `preferred_element_type`, required).
+    /// It accumulates in `accum_dtype`: the operands', or float32 for
+    /// floats narrower than it (16-bit, later 8- and 4-bit), whose products
+    /// it holds exactly; the result is of `output_dtype`, the operands' or
+    /// `accum_dtype`, each element rounded to it once from the accumulator
+    /// (`lax.dot_general`'s `preferred_element_type`). Both required.
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
         lhs_batch: Vec<usize>,
         rhs_batch: Vec<usize>,
         accum_dtype: DType,
+        output_dtype: DType,
     },
     Reshape {
         new_sizes: Vec<usize>,
@@ -153,15 +155,14 @@ impl Primitive {
     /// The type of the result of applying this primitive to operands of
     /// types `args`, or why it cannot be applied.
     /// The dtypes this primitive accumulates in, given its `output`
-    /// dtype: a dot's and a sum's `accum_dtype` (their result's), a max's
-    /// and softmax's dtype; a fusion's, each of its body's reductions' and
-    /// dots', in order. None for the others, which accumulate nothing.
+    /// dtype: a dot's and a sum's `accum_dtype`, a max's and softmax's
+    /// dtype; a fusion's, each of its body's reductions' and dots', in
+    /// order. None for the others, which accumulate nothing.
     pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
         use Primitive::*;
         match self {
-            DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Softmax { .. } => {
-                vec![output]
-            }
+            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => vec![*accum_dtype],
+            ReduceMax { .. } | Softmax { .. } => vec![output],
             Fusion { body, .. } => body
                 .nodes()
                 .iter()
@@ -255,6 +256,7 @@ impl Primitive {
                 lhs_batch,
                 rhs_batch,
                 accum_dtype,
+                output_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
                 if lhs.dtype != rhs.dtype || lhs.dtype == DType::Bool {
@@ -263,7 +265,11 @@ impl Primitive {
                     ));
                 }
                 check_accum(lhs, *accum_dtype).map_err(prefix)?;
-                let accum = *accum_dtype;
+                if *output_dtype != lhs.dtype && output_dtype != accum_dtype {
+                    return err(format!(
+                        "outputs the operands' dtype or accum_dtype ({accum_dtype}): got output_dtype {output_dtype} for {lhs}"
+                    ));
+                }
                 let lhs_dims = [lhs_batch.as_slice(), lhs_contracting].concat();
                 let rhs_dims = [rhs_batch.as_slice(), rhs_contracting].concat();
                 check_dims(&lhs_dims, lhs.shape.len(), "lhs dimensions").map_err(prefix)?;
@@ -283,7 +289,7 @@ impl Primitive {
                 let lhs_free = free_dims(lhs.shape.len(), &lhs_dims).map(|d| lhs.shape[d]);
                 let rhs_free = free_dims(rhs.shape.len(), &rhs_dims).map(|d| rhs.shape[d]);
                 let shape: Vec<usize> = batch.chain(lhs_free).chain(rhs_free).collect();
-                Ok(TensorType::new(accum, &shape))
+                Ok(TensorType::new(*output_dtype, &shape))
             }
             Reshape { new_sizes } => {
                 let x = args[0];
@@ -482,10 +488,11 @@ impl fmt::Display for Primitive {
                 lhs_batch,
                 rhs_batch,
                 accum_dtype,
+                output_dtype,
             } => {
                 write!(
                     f,
-                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype}]",
+                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype} output_dtype={output_dtype}]",
                     Tuple(lhs_contracting),
                     Tuple(rhs_contracting),
                     Tuple(lhs_batch),
