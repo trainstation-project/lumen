@@ -373,9 +373,8 @@ impl Plan {
             };
             return Ok(self.outputs.iter().map(meta).collect());
         }
-        let _run = crate::profiler::record_op(op_name!("plan"), || {
-            self.inputs.iter().map(|ty| ty.shape.clone()).collect()
-        });
+        let mut run = crate::profiler::record_op(op_name!("plan"), || self.inputs.clone());
+        run.outputs(|| self.outputs.clone());
         let inputs: Vec<Tensor> = inputs
             .iter()
             .map(|t| dispatch_dtype!(t.dtype(), T => t.to(executor).contiguous::<T>()))
@@ -422,9 +421,8 @@ impl Plan {
                 workspace.numel()
             ));
         }
-        let _run = crate::profiler::record_op(op_name!("plan"), || {
-            self.inputs.iter().map(|ty| ty.shape.clone()).collect()
-        });
+        let mut run = crate::profiler::record_op(op_name!("plan"), || self.inputs.clone());
+        run.outputs(|| self.outputs.clone());
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
         // A parameter read in place; contiguous if a step reads it (a packed
@@ -547,9 +545,10 @@ impl Plan {
             return Err("operands read as views run on MPS only".into());
         }
         for step in &self.steps {
-            let _step = crate::profiler::record_op(step.primitive.name(), || {
-                step.inputs.iter().map(|(_, ty)| ty.shape.clone()).collect()
+            let mut record = crate::profiler::record_op(step.primitive.name(), || {
+                step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
             });
+            record.outputs(|| vec![step.output.1.clone()]);
             // A view's first element is past its buffer's.
             let args: Vec<*const u8> = step
                 .inputs

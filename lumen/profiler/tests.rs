@@ -6,6 +6,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use super::*;
+use crate::graph::TensorType;
 use crate::{DType, Tensor};
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -139,21 +140,70 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
 }
 
 #[test]
-fn shapes_are_recorded_only_with_record_shapes() {
-    let shapes = |record_shapes| {
+fn types_are_recorded_only_with_record_shapes() {
+    let types = |record_shapes| {
         let p = profile(
             ProfilerConfig {
                 record_shapes,
                 ..cpu()
             },
             || {
-                let _ = Tensor::zeros(&[2, 3], DType::F32);
+                let _ = Tensor::zeros(&[2, 3], DType::I32).reshape(&[3, 2]);
             },
         );
-        one(&p, "lumen::zeros").shapes.clone()
+        let (zeros, reshape) = (one(&p, "lumen::zeros"), one(&p, "lumen::reshape"));
+        (
+            zeros.inputs.clone(),
+            zeros.outputs.clone(),
+            reshape.inputs.clone(),
+            reshape.outputs.clone(),
+        )
     };
-    assert_eq!(shapes(true), vec![vec![2, 3]]);
-    assert!(shapes(false).is_empty());
+    let ty = |shape: &[usize]| TensorType::new(DType::I32, shape);
+    assert_eq!(
+        types(true),
+        (
+            vec![],
+            vec![ty(&[2, 3])],
+            vec![ty(&[2, 3])],
+            vec![ty(&[3, 2])]
+        )
+    );
+    assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
+}
+
+/// Device work shows the types of the op that issued it, in the events and
+/// on the device side of the trace.
+#[test]
+fn device_events_have_their_ops_types() {
+    let config = ProfilerConfig {
+        activities: vec![Activity::Cpu, Activity::Cuda],
+        record_shapes: true,
+        ..cpu()
+    };
+    let ty = |shape: &[usize]| TensorType::new(DType::F16, shape);
+    let p = profile(config, || {
+        let mut op = record_op("lumen::matmul", || vec![ty(&[2, 3]), ty(&[3, 4])]);
+        op.outputs(|| vec![ty(&[2, 4])]);
+        let t = now_ns();
+        record_gpu("matmul_kernel", Device::Cuda(0), t, t + 1000);
+    });
+    let kernel = one(&p, "matmul_kernel");
+    assert_eq!(kernel.inputs, [ty(&[2, 3]), ty(&[3, 4])]);
+    assert_eq!(kernel.outputs, [ty(&[2, 4])]);
+    let trace = p.chrome_trace();
+    let line = trace
+        .split("},{")
+        .find(|e| e.contains("\"cat\":\"kernel\""))
+        .expect("the kernel's event");
+    assert!(
+        line.contains("\"Input Dims\":[[2,3],[3,4]],\"Input type\":[\"f16\",\"f16\"]"),
+        "{line}"
+    );
+    assert!(
+        line.contains("\"Output Dims\":[[2,4]],\"Output type\":[\"f16\"]"),
+        "{line}"
+    );
 }
 
 #[test]
@@ -447,7 +497,7 @@ fn chrome_trace_has_pytorchs_event_layout() {
     };
     let p = profile(config, || {
         let _r = record_function("quote \" and \\ backslash");
-        let _t = Tensor::zeros(&[3], DType::F32);
+        Tensor::zeros(&[3], DType::F32).fill_(1.0);
         let t = now_ns();
         record_gpu("Memcpy DtoH", Device::Cuda(0), t, t + 2000);
     });
@@ -461,7 +511,8 @@ fn chrome_trace_has_pytorchs_event_layout() {
         "\"Bytes\":12",
         "\"cat\":\"gpu_memcpy\",\"name\":\"Memcpy DtoH\"",
         "\"cat\":\"ac2g\"",
-        "\"Input Dims\":[[3]]",
+        "\"Output Dims\":[[3]],\"Output type\":[\"f32\"]",
+        "\"Input Dims\":[[3]],\"Input type\":[\"f32\"]",
         "\"args\":{\"name\":\"CUDA 0\"}",
     ] {
         assert!(trace.contains(needle), "missing {needle} in\n{trace}");

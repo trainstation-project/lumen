@@ -80,7 +80,20 @@ def test_record_shapes():
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         lumen.zeros([2, 5])
     zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
-    assert zeros["shapes"] == [[2, 5]]
+    assert zeros["inputs"] == [] and zeros["outputs"] == [("float32", [2, 5])]
+
+
+def test_plans_record_their_steps_types():
+    f = lumen.compile(lambda x, y: (x * y).sum(-1))
+    x, y = lumen.ones([2, 3], dtype="int32"), lumen.ones([2, 3], dtype="int32")
+    f(x, y)
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        f(x, y)
+    by_name = {e["name"]: e for e in prof.events()}
+    assert by_name["lumen::plan"]["inputs"] == [("int32", [2, 3])] * 2
+    assert by_name["lumen::plan"]["outputs"] == [("int32", [2])]
+    assert by_name["mul"]["inputs"] == [("int32", [2, 3])] * 2 and by_name["mul"]["outputs"] == [("int32", [2, 3])]
+    assert by_name["reduce_sum"]["outputs"] == [("int32", [2])]
 
 
 def test_chrome_trace_is_valid_json_in_pytorchs_layout(tmp_path):
@@ -180,3 +193,18 @@ def _trace(prof):
             return f.read()
     finally:
         os.remove(path)
+
+
+@pytest.mark.mps
+def test_kernels_record_their_steps_types():
+    try:
+        x = lumen.ones([4, 8], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(lambda x: (x * 2.0).exp())
+    f(x)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(x)
+    kernels = [e for e in prof.events() if e["kind"] == "gpu"]
+    assert kernels and all(k["outputs"] == [("float32", [4, 8])] for k in kernels)
+    assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)

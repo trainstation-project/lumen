@@ -19,6 +19,7 @@ use std::fmt::Write;
 
 use super::{Event, EventKind};
 use crate::device::Device;
+use crate::graph::TensorType;
 
 /// Stream id GPU events are drawn on (Kineto's default stream is 7).
 const GPU_TID: u64 = 7;
@@ -81,15 +82,34 @@ pub(crate) fn json_str(s: &str) -> String {
     out
 }
 
-fn shapes_json(shapes: &[Vec<usize>]) -> String {
-    let dims: Vec<String> = shapes
+/// `types`' shapes and dtypes, as the trace's `Input Dims` and `Input type`
+/// (PyTorch's; and `Output ...` for outputs) arguments.
+fn types_json(types: &[TensorType]) -> (String, String) {
+    let dims: Vec<String> = types
         .iter()
-        .map(|s| {
-            let d: Vec<String> = s.iter().map(|n| n.to_string()).collect();
+        .map(|t| {
+            let d: Vec<String> = t.shape.iter().map(|n| n.to_string()).collect();
             format!("[{}]", d.join(","))
         })
         .collect();
-    format!("[{}]", dims.join(","))
+    let dtypes: Vec<String> = types.iter().map(|t| json_str(t.dtype.name())).collect();
+    (
+        format!("[{}]", dims.join(",")),
+        format!("[{}]", dtypes.join(",")),
+    )
+}
+
+/// `e`'s input and output types as trace arguments, each preceded by a
+/// comma (none if it has none).
+fn types_args(e: &Event) -> String {
+    let mut args = String::new();
+    for (side, types) in [("Input", &e.inputs), ("Output", &e.outputs)] {
+        if !types.is_empty() {
+            let (dims, dtypes) = types_json(types);
+            let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
+        }
+    }
+    args
 }
 
 pub(crate) fn trace(events: &[Event]) -> String {
@@ -104,10 +124,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
                 } else {
                     "user_annotation"
                 };
-                let mut args = format!("\"External id\":{}", e.id);
-                if !e.shapes.is_empty() {
-                    let _ = write!(args, ",\"Input Dims\":{}", shapes_json(&e.shapes));
-                }
+                let args = format!("\"External id\":{}{}", e.id, types_args(e));
                 out.push(format!(
                     "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":{cpu_pid},\"tid\":{},\"ts\":{},\"dur\":{},\"args\":{{{args}}}}}",
                     json_str(&e.name),
@@ -146,11 +163,12 @@ pub(crate) fn trace(events: &[Event]) -> String {
                     .as_deref()
                     .map_or(String::new(), |k| format!(",\"kernel\":{}", json_str(k)));
                 out.push(format!(
-                    "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":{gpu_pid},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"device\":{},\"stream\":{GPU_TID},\"correlation\":{correlation}{kernel}}}}}",
+                    "{{\"ph\":\"X\",\"cat\":\"{cat}\",\"name\":{},\"pid\":{gpu_pid},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"device\":{},\"stream\":{GPU_TID},\"correlation\":{correlation}{kernel}{}}}}}",
                     json_str(&e.name),
                     us(e.start_ns),
                     us(e.duration_ns()),
                     device_type(e.device).1,
+                    types_args(e),
                 ));
                 // Flow arrow from the issuing op to its GPU work.
                 if let Some(op) = e.parent.and_then(|p| events.iter().find(|o| o.id == p)) {

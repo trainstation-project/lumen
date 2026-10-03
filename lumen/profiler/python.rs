@@ -6,6 +6,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::tensor::python::dtype_name;
+
 use super::{Activity, Event, EventAvg, EventKind, Profile, ProfilerConfig, RecordGuard, SortBy};
 
 /// Nanoseconds as PyTorch's profiler reports times: microseconds.
@@ -109,7 +111,14 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("thread", e.thread)?;
     d.set_item("parent", e.parent)?;
     d.set_item("device", e.device.to_string())?;
-    d.set_item("shapes", e.shapes.clone())?;
+    let types = |types: &[crate::graph::TensorType]| -> Vec<(&'static str, Vec<usize>)> {
+        types
+            .iter()
+            .map(|t| (dtype_name(t.dtype), t.shape.clone()))
+            .collect()
+    };
+    d.set_item("inputs", types(&e.inputs))?;
+    d.set_item("outputs", types(&e.outputs))?;
     d.set_item("bytes", e.bytes)?;
     d.set_item("addr", e.addr)?;
     d.set_item("total_allocated", e.total_allocated)?;
