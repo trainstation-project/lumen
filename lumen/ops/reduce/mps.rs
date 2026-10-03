@@ -28,6 +28,7 @@ pub(crate) fn encode(
         name,
         &inputs[..1],
         output,
+        &[],
         scratch,
         keep,
     )
@@ -71,8 +72,9 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
 
 /// Reduce `x` with `op` (reduce_sum or reduce_max), its first launch the
 /// kernel `fused` if given (a reduction fusion's, computing its input from
-/// `inputs`), else the primitive's own (reading `inputs[0]`), recorded in
-/// the profiler as `name`.
+/// `inputs`, and writing its `extra` outputs after `output`), else the
+/// primitive's own (reading `inputs[0]`), recorded in the profiler as
+/// `name`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_reduction(
     op: &Primitive,
@@ -81,6 +83,7 @@ pub(crate) fn encode_reduction(
     name: &'static str,
     inputs: &[*const u8],
     output: *mut u8,
+    extra: &[*const u8],
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
@@ -91,12 +94,13 @@ pub(crate) fn encode_reduction(
     let kernel = |own: String| fused.map_or(own, str::to_owned);
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
+    buffers.extend(extra);
     let mut reduced = axes.clone();
     reduced.sort_unstable();
     let layout = layout(x, &reduced);
     if let Layout::Rows { .. } | Layout::Cols { .. } = layout {
         return consecutive(
-            op_name, name, x, &reduced, fused, inputs, output, scratch, keep,
+            op_name, name, x, &reduced, fused, inputs, output, extra, scratch, keep,
         );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
@@ -242,8 +246,8 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
 /// rows when b = 1, columns otherwise. One launch, or, with too few outputs
 /// to fill the GPU, two: `count` split into chunks reduced in parallel into
 /// partials (in `scratch`, which the planner set aside), then the partials.
-/// The first launch is the kernel `fused` if given (reading `inputs`), else
-/// `op`'s own (reading `inputs[0]`).
+/// The first launch is the kernel `fused` if given (reading `inputs`, and
+/// writing its `extra` outputs), else `op`'s own (reading `inputs[0]`).
 #[allow(clippy::too_many_arguments)]
 fn consecutive(
     op: &str,
@@ -253,6 +257,7 @@ fn consecutive(
     fused: Option<&str>,
     inputs: &[*const u8],
     output: *mut u8,
+    extra: &[*const u8],
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
@@ -268,35 +273,42 @@ fn consecutive(
         return Ok(());
     }
     let layout = if rows { "rows" } else { "cols" };
-    let pass =
-        |kernel: String, srcs: &[*const u8], dst: *const u8, count, chunk, chunks: usize, keep| {
-            let mut buffers = srcs.to_vec();
-            buffers.push(dst);
-            if rows {
-                let args = [u64_arg(count), u64_arg(chunk)];
-                launch(
-                    &kernel,
-                    &buffers,
-                    &args,
-                    Grid::Groups([chunks, a, 1]),
-                    keep,
-                    name,
-                )
-            } else {
-                let args = [
-                    u32_arg(b as u32),
-                    u64_arg(count),
-                    u64_arg(chunk),
-                    u32_arg(chunks as u32),
-                ];
-                let grid = Grid::Threads([a * chunks * b, 1, 1]);
-                launch(&kernel, &buffers, &args, grid, keep, name)
-            }
-        };
+    let pass = |kernel: String,
+                srcs: &[*const u8],
+                dst: *const u8,
+                extra: &[*const u8],
+                count,
+                chunk,
+                chunks: usize,
+                keep| {
+        let mut buffers = srcs.to_vec();
+        buffers.push(dst);
+        buffers.extend(extra);
+        if rows {
+            let args = [u64_arg(count), u64_arg(chunk)];
+            launch(
+                &kernel,
+                &buffers,
+                &args,
+                Grid::Groups([chunks, a, 1]),
+                keep,
+                name,
+            )
+        } else {
+            let args = [
+                u32_arg(b as u32),
+                u64_arg(count),
+                u64_arg(chunk),
+                u32_arg(chunks as u32),
+            ];
+            let grid = Grid::Threads([a * chunks * b, 1, 1]);
+            launch(&kernel, &buffers, &args, grid, keep, name)
+        }
+    };
     let first = |own: String| fused.map_or(own, str::to_owned);
     if chunks == 1 {
         let kernel = first(format!("{op}_{layout}_{dtype}"));
-        return pass(kernel, inputs, output, count, count, 1, keep);
+        return pass(kernel, inputs, output, extra, count, count, 1, keep);
     }
     if scratch.is_null() {
         return Err(format!(
@@ -306,7 +318,7 @@ fn consecutive(
     // The first launch writes every partial before the second reads them.
     let p = scratch.cast_const();
     let kernel = first(format!("{op}_{layout}_partial_{dtype}"));
-    pass(kernel, inputs, p, count, chunk, chunks, keep.clone())?;
+    pass(kernel, inputs, p, extra, count, chunk, chunks, keep.clone())?;
     let kernel = format!("{op}_{layout}_final_{dtype}");
-    pass(kernel, &[p], output, chunks, chunks, 1, keep)
+    pass(kernel, &[p], output, &[], chunks, chunks, 1, keep)
 }

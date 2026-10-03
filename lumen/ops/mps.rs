@@ -86,6 +86,7 @@ pub(crate) fn encode(
         }
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
+        FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
     };
     encode(step, inputs, output, keep)
 }

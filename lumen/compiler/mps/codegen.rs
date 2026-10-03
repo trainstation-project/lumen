@@ -30,6 +30,12 @@ pub(crate) fn kernel(body: &Graph) -> (String, String) {
     let mut emitter = Emitter::new(body);
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
+    // A multi-output fusion's other outputs, of the output's shape: each
+    // written at the same index.
+    let extra: Vec<String> = body.outputs()[1..]
+        .iter()
+        .map(|&v| emitter.value(v, "j".into()))
+        .collect();
     let out_type = metal_type(body.type_of(out).dtype);
     let mut params = String::new();
     for (k, &v) in body.inputs().iter().enumerate() {
@@ -37,12 +43,22 @@ pub(crate) fn kernel(body: &Graph) -> (String, String) {
         write!(params, "device const {t} *in{k} [[buffer({k})]], ").unwrap();
     }
     let k = body.inputs().len();
-    let signature = format!(
-        "({params}device {out_type} *out [[buffer({k})]], ELEMENTWISE_ARGS({}))",
-        k + 1
-    );
+    write!(params, "device {out_type} *out [[buffer({k})]], ").unwrap();
+    let mut writes = format!("        out[j] = {result};\n");
+    for (e, (&v, value)) in body.outputs()[1..].iter().zip(&extra).enumerate() {
+        let t = metal_type(body.type_of(v).dtype);
+        write!(
+            params,
+            "device {t} *out{} [[buffer({})]], ",
+            e + 1,
+            k + 1 + e
+        )
+        .unwrap();
+        writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
+    }
+    let signature = format!("({params}ELEMENTWISE_ARGS({}))", k + body.outputs().len());
     let loop_body = format!(
-        "    FOR_EACH_ELEMENT(j, {out_type}) {{\n{}        out[j] = {result};\n    }}\n",
+        "    FOR_EACH_ELEMENT(j, {out_type}) {{\n{}{writes}    }}\n",
         emitter.lines
     );
     let mut hasher = DefaultHasher::new();
@@ -76,6 +92,13 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
     let ty = body.type_of(x);
     let mut emitter = Emitter::new(body);
     let element = emitter.value(x, "j".into());
+    // A multi-output fusion's other outputs, of the reduced value's shape:
+    // written as the reduction reads each element (once).
+    let mut writes = String::new();
+    for (e, &v) in body.outputs()[1..].iter().enumerate() {
+        let value = emitter.value(v, "j".into());
+        writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
+    }
     let t = metal_type(ty.dtype);
     let (mut fields, mut params, mut members) = (String::new(), String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
@@ -85,6 +108,20 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         members.push(format!("in{k}"));
     }
     let n = body.inputs().len();
+    let m = body.outputs().len() - 1;
+    let mut extra_params = String::new();
+    for (e, &v) in body.outputs()[1..].iter().enumerate() {
+        let vt = metal_type(body.type_of(v).dtype);
+        writeln!(fields, "    device {vt} *out{};", e + 1).unwrap();
+        write!(
+            extra_params,
+            ", device {vt} *out{} [[buffer({})]]",
+            e + 1,
+            n + 1 + e
+        )
+        .unwrap();
+        members.push(format!("out{}", e + 1));
+    }
     let op = match root.primitive {
         Primitive::ReduceSum { .. } => "Add",
         _ => "Max",
@@ -92,7 +129,7 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
     let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive else {
         unreachable!("a reduction")
     };
-    let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", n + 1 + k);
+    let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", n + 1 + m + k);
     let shared = format!("threadgroup typename acc<{t}>::type shared[REDUCE_THREADS];");
     let (out, args, call) = match reduce::layout(ty, axes) {
         reduce::Layout::Rows { split } => {
@@ -150,7 +187,7 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
     };
     // The kernel and its input type are named by a hash of their source.
     let source = format!(
-        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {out} *out [[buffer({n})]], {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {out} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
         emitter.lines,
         members.join(", "),
     );

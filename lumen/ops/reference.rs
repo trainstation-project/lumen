@@ -50,6 +50,8 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
 /// The values of `graph`'s outputs, given its inputs'.
 fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
     let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
+    // A multi-output fusion's other outputs, by its value.
+    let mut extra: Vec<Vec<Values>> = vec![Vec::new(); graph.types.len()];
     for (&var, values) in graph.inputs().iter().zip(inputs) {
         env[var] = Some(values);
     }
@@ -64,12 +66,16 @@ fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
             })
             .collect();
         let types: Vec<&TensorType> = node.inputs.iter().map(|&v| graph.type_of(v)).collect();
-        env[node.output] = Some(eval(
-            &node.primitive,
-            &args,
-            &types,
-            graph.type_of(node.output),
-        ));
+        let value = match &node.primitive {
+            Primitive::Fusion { body, .. } if body.outputs().len() > 1 => {
+                let mut outputs = eval_graph(body, args.iter().map(|&v| v.clone()).collect());
+                extra[node.output] = outputs.split_off(1);
+                outputs.remove(0)
+            }
+            Primitive::FusionOutput { index, .. } => extra[node.inputs[0]][index - 1].clone(),
+            p => eval(p, &args, &types, graph.type_of(node.output)),
+        };
+        env[node.output] = Some(value);
     }
     graph
         .outputs()
@@ -521,6 +527,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             let inputs = args.iter().map(|&v| v.clone()).collect();
             eval_graph(body, inputs).remove(0)
         }
+        FusionOutput { .. } => unreachable!("evaluated with its fusion (eval_graph)"),
     }
 }
 

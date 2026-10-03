@@ -53,7 +53,8 @@ class Plan:
     def steps(self) -> list[dict[str, Any]]:
         """Each step, as ``Graph.nodes``, with its ``label`` (what the
         profiler calls it: the primitive's name, or ``3x dot_general`` for a
-        merged dot), ``inputs`` and ``output`` as ``(buffer, dtype, shape)``, ``views`` as each input's ``(element
+        merged dot), ``inputs`` and ``output`` as ``(buffer, dtype, shape)``,
+        ``extra_outputs`` likewise (a multi-output fusion's other outputs), ``views`` as each input's ``(element
         offset, strides)`` in its buffer if it reads it as a strided view (a
         slice; else None), and its kernel's ``scratch`` in the workspace as
         ``(offset, bytes)`` (or None)."""

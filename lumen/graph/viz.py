@@ -157,6 +157,8 @@ def plan_view(plan, kernels):
         for src, b in sources:
             edges.append([src, node["id"], b])
         writer[out_buffer] = node["id"]
+        for b, _, _ in step["extra_outputs"]:  # a multi-output fusion's other outputs
+            writer[b] = node["id"]
     for buffer in sorted((b for b in writer if b.startswith("out")), key=lambda b: int(b[3:])):
         src = writer[buffer]
         if nodes[src]["kind"] in ("input", "buffer"):

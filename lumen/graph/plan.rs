@@ -54,6 +54,9 @@ pub struct Step {
     /// buffer, contiguous).
     pub views: Vec<Option<View>>,
     pub output: (Buffer, TensorType),
+    /// A multi-output fusion's other outputs, in order (its
+    /// [`Primitive::FusionOutput`]s, which have no steps).
+    pub extra_outputs: Vec<(Buffer, TensorType)>,
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
@@ -140,6 +143,7 @@ impl Plan {
             }
         }
         let is_view = |v: Var| view[v].is_some();
+        let is_fusion_output = |p: &Primitive| matches!(p, Primitive::FusionOutput { .. });
 
         let mut live = vec![false; n];
         for &v in graph.outputs() {
@@ -156,7 +160,10 @@ impl Plan {
             .nodes()
             .iter()
             .filter(|node| {
-                live[node.output] && !is_reshape(&node.primitive) && !is_view(node.output)
+                live[node.output]
+                    && !is_reshape(&node.primitive)
+                    && !is_view(node.output)
+                    && !is_fusion_output(&node.primitive)
             })
             .collect();
 
@@ -191,6 +198,17 @@ impl Plan {
         }
         for &(_, v) in &copies {
             last[root[v]] = nodes.len();
+        }
+        // A fusion's other outputs are written by its step, its output's
+        // first; each its own value (`root`), read by later steps.
+        let mut extra: Vec<Vec<(usize, Var)>> = vec![Vec::new(); n];
+        for node in graph.nodes().iter().filter(|n| live[n.output]) {
+            if let Primitive::FusionOutput { index, .. } = node.primitive {
+                let fusion = node.inputs[0];
+                first[node.output] = first[root[fusion]];
+                last[node.output] = last[node.output].max(first[node.output]);
+                extra[fusion].push((index, node.output));
+            }
         }
         if owned.is_some() {
             // Inputs are copied in before the first step; outputs are read
@@ -307,6 +325,11 @@ impl Plan {
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
                 views: node.inputs.iter().map(|&v| view[v].clone()).collect(),
                 output: slot(node.output),
+                extra_outputs: {
+                    let mut outputs = extra[node.output].clone();
+                    outputs.sort_unstable();
+                    outputs.into_iter().map(|(_, v)| slot(v)).collect()
+                },
                 scratch,
             })
             .collect();
@@ -319,6 +342,7 @@ impl Plan {
                 inputs: vec![slot(v)],
                 views: vec![view[v].clone()],
                 output: (Buffer::Output(k), ty(v)),
+                extra_outputs: Vec::new(),
                 scratch: None,
             });
         }
@@ -616,8 +640,14 @@ impl Plan {
             let mut record = crate::profiler::record_op(step.label, || {
                 step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
             });
-            record.outputs(|| vec![step.output.1.clone()]);
-            // A view's first element is past its buffer's.
+            record.outputs(|| {
+                let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
+                std::iter::once(step.output.1.clone())
+                    .chain(extra)
+                    .collect()
+            });
+            // A view's first element is past its buffer's; a multi-output
+            // fusion's other outputs follow its inputs.
             let args: Vec<*const u8> = step
                 .inputs
                 .iter()
@@ -626,6 +656,7 @@ impl Plan {
                     let at = v.as_ref().map_or(0, |v| v.offset * s.1.dtype.size_of());
                     pointer(s).cast_const().wrapping_add(at)
                 })
+                .chain(step.extra_outputs.iter().map(|s| pointer(s).cast_const()))
                 .collect();
             let out = pointer(&step.output);
             let scratch = step.scratch.map_or(std::ptr::null_mut(), |(offset, _)| {
@@ -638,6 +669,7 @@ impl Plan {
                         .inputs
                         .iter()
                         .chain([&step.output])
+                        .chain(&step.extra_outputs)
                         .map(|&(b, _)| tensor(b).clone())
                         .collect();
                     if step.scratch.is_some() {
@@ -673,7 +705,11 @@ impl fmt::Display for Plan {
         write!(f, "plan (workspace {} bytes)", self.workspace_bytes)?;
         for step in &self.steps {
             let (out, ty) = &step.output;
-            write!(f, "\n    {out}:{ty} = {}", step.primitive)?;
+            write!(f, "\n    {out}:{ty}")?;
+            for (b, ty) in &step.extra_outputs {
+                write!(f, ", {b}:{ty}")?;
+            }
+            write!(f, " = {}", step.primitive)?;
             for ((b, _), v) in step.inputs.iter().zip(&step.views) {
                 write!(f, " {b}")?;
                 if let Some(View { offset, strides }) = v {

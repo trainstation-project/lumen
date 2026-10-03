@@ -81,14 +81,22 @@ pub enum Primitive {
         shape: Vec<usize>,
         dimension: usize,
     },
-    /// `body` (a graph with one output) run as one kernel, `name`: what a
-    /// device's graph compiler (`crate::compiler`) groups the primitives it
-    /// fuses into.
+    /// `body` run as one kernel, `name`: what a device's graph compiler
+    /// (`crate::compiler`) groups the primitives it fuses into. Its value is
+    /// the body's first output; a body with more (a multi-output fusion)
+    /// has each other one read by a [`Primitive::FusionOutput`].
     /// Profiled as `label`, its primitives' names: `mul -> tanh -> add`.
     Fusion {
         name: String,
         label: &'static str,
         body: Graph,
+    },
+    /// Output `index` (of type `ty`) of its operand's fusion, whose body
+    /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
+    /// value the fusion's kernel writes too, which no step computes.
+    FusionOutput {
+        index: usize,
+        ty: TensorType,
     },
 }
 
@@ -122,6 +130,7 @@ impl Primitive {
             Full { .. } => "full",
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
+            FusionOutput { .. } => "fusion_output",
         }
     }
 
@@ -309,6 +318,7 @@ impl Primitive {
                 Ok(TensorType::new(x.dtype, &shape))
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
+            FusionOutput { ty, .. } => Ok(ty.clone()),
             Iota {
                 dtype,
                 shape,
@@ -331,9 +341,11 @@ impl Primitive {
                 {
                     return err(format!("operand {i} must be {ty}, got {arg}"));
                 }
-                match body.outputs() {
-                    &[out] => Ok(body.type_of(out).clone()),
-                    outs => err(format!("the body must have one output, got {}", outs.len())),
+                // Its value is its body's first output; any others are its
+                // `FusionOutput`s.
+                match body.outputs().first() {
+                    Some(&out) => Ok(body.type_of(out).clone()),
+                    None => err("the body must have an output".into()),
                 }
             }
         }
@@ -414,6 +426,7 @@ impl fmt::Display for Primitive {
                 Tuple(start_indices)
             ),
             Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
+            FusionOutput { index, .. } => write!(f, "[index={index}]"),
             Full {
                 shape,
                 fill_value,

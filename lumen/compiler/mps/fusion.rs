@@ -128,26 +128,62 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         })
         .collect();
 
+    // Producer-consumer multi-output fusion (XLA's MultiOutputFusion): an
+    // expensive value with several readers is a root, stored once rather
+    // than recomputed in each. It is computed in the fusion of its first
+    // reader instead, as another output of that fusion's kernel, when that
+    // reader is a fusion root computing it at its own index (through
+    // elementwise primitives); every other reader comes after it and reads
+    // the stored output. Later nodes first, so a value is not hosted by a
+    // fusion that is itself hosted.
+    let mut host: Vec<Option<usize>> = vec![None; nodes.len()];
+    for (i, node) in nodes.iter().enumerate().rev() {
+        let candidate = live[i]
+            && root[i]
+            && fusible[i]
+            && !is_reduction(node)
+            && !is_output[node.output]
+            && expensive(graph, node);
+        let Some(&first) = users[node.output].first().filter(|_| candidate) else {
+            continue;
+        };
+        if root[first]
+            && fusible[first]
+            && host[first].is_none()
+            && at_index(graph, &producer, &root, first, node.output)
+        {
+            host[i] = Some(first);
+        }
+    }
+
     // Each fusible root's fusion: its nodes and the values it reads. One
     // that reads more values than a kernel binds is not fused: its nodes
-    // become roots, each reading at most three.
+    // become roots, each reading at most three (and it hosts no values).
     let fusions = loop {
         let fusions: Vec<Option<(Vec<usize>, Vec<Var>)>> = (0..nodes.len())
             .map(|i| {
-                (live[i] && root[i] && fusible[i]).then(|| members(graph, &producer, &root, i))
+                let hosted = |p: usize| root[p] && host[p] != Some(i);
+                (live[i] && root[i] && fusible[i] && host[i].is_none())
+                    .then(|| members(graph, &producer, hosted, i))
             })
             .collect();
-        let too_big: Vec<usize> = fusions
-            .iter()
-            .flatten()
-            .filter(|(_, reads)| reads.len() > MAX_INPUTS)
-            .flat_map(|(members, _)| members.iter().copied())
+        let too_big: Vec<usize> = (0..nodes.len())
+            .filter(|&i| {
+                fusions[i]
+                    .as_ref()
+                    .is_some_and(|(_, reads)| reads.len() > MAX_INPUTS)
+            })
             .collect();
         if too_big.is_empty() {
             break fusions;
         }
-        for i in too_big {
-            root[i] = true;
+        for f in too_big {
+            for &m in &fusions[f].as_ref().expect("a fusion").0 {
+                root[m] = true;
+            }
+            host.iter_mut()
+                .filter(|h| **h == Some(f))
+                .for_each(|h| *h = None);
         }
     };
 
@@ -157,7 +193,8 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         var[v] = fused.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
-        if !live[i] || !root[i] {
+        // A hosted value is its host fusion's output.
+        if !live[i] || !root[i] || host[i].is_some() {
             continue;
         }
         let out = match &fusions[i] {
@@ -165,12 +202,23 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
             Some((members, reads))
                 if members.len() > 1 || matches!(node.primitive, Primitive::Concatenate { .. }) =>
             {
-                let body = body(graph, members, reads);
+                let hosted: Vec<Var> = (0..nodes.len())
+                    .filter(|&h| host[h] == Some(i))
+                    .map(|h| nodes[h].output)
+                    .collect();
+                let body = body(graph, members, reads, &hosted);
                 let name = kernel(&body);
                 let label = members.iter().map(|&m| nodes[m].primitive.name());
                 let label = intern(label.collect::<Vec<_>>().join(" -> "));
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
-                fused.apply(Primitive::Fusion { name, label, body }, &reads)
+                let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
+                let out = out.expect("a fused graph is typed as the original");
+                for (k, &v) in hosted.iter().enumerate() {
+                    let ty = graph.type_of(v).clone();
+                    let output = Primitive::FusionOutput { index: k + 1, ty };
+                    var[v] = fused.apply(output, &[out]).expect("the fusion's output");
+                }
+                Ok(out)
             }
             _ => {
                 let inputs: Vec<Var> = node.inputs.iter().map(|&v| var[v]).collect();
@@ -201,11 +249,11 @@ pub(super) fn intern(label: String) -> &'static str {
 
 /// The nodes of the fusion rooted at node `root_node` and the values it
 /// reads, each in graph order: the root and, from it, every fusible
-/// producer that is not a root.
+/// producer that is not a `root` (for this fusion: one it hosts is not).
 fn members(
     graph: &Graph,
     producer: &[Option<usize>],
-    root: &[bool],
+    root: impl Fn(usize) -> bool,
     root_node: usize,
 ) -> (Vec<usize>, Vec<Var>) {
     let nodes = graph.nodes();
@@ -214,7 +262,7 @@ fn members(
     while let Some(i) = stack.pop() {
         for &v in &nodes[i].inputs {
             match producer[v] {
-                Some(p) if !root[p] => {
+                Some(p) if !root(p) => {
                     if !members.contains(&p) {
                         members.push(p);
                         stack.push(p);
@@ -234,8 +282,9 @@ fn members(
 }
 
 /// The fusion's body: a graph of its `members` from inputs `reads`, whose
-/// output is the last member's (the root's) value.
-fn body(graph: &Graph, members: &[usize], reads: &[Var]) -> Graph {
+/// outputs are the last member's (the root's) value, then the `hosted`
+/// values (a multi-output fusion's).
+fn body(graph: &Graph, members: &[usize], reads: &[Var], hosted: &[Var]) -> Graph {
     let mut body = Graph::new();
     let mut var = std::collections::HashMap::new();
     for &v in reads {
@@ -250,7 +299,51 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var]) -> Graph {
         var.insert(node.output, out);
     }
     let root = graph.nodes()[*members.last().expect("a fusion has a root")].output;
-    body.set_outputs(&[var[&root]])
-        .expect("the root is a value of the body");
+    let outputs: Vec<Var> = std::iter::once(root)
+        .chain(hosted.iter().copied())
+        .map(|v| var[&v])
+        .collect();
+    body.set_outputs(&outputs)
+        .expect("the root and hosted values are values of the body");
     body
+}
+
+/// Whether the fusion rooted at node `r` computes value `v` at its own
+/// index (the index of its output, or of a reduction's input): from that
+/// value through elementwise primitives of the fusion.
+fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, v: Var) -> bool {
+    use Primitive::*;
+    let nodes = graph.nodes();
+    let start = match is_reduction(&nodes[r]) {
+        true => nodes[r].inputs[0],
+        false => nodes[r].output,
+    };
+    let mut stack = vec![start];
+    while let Some(x) = stack.pop() {
+        if x == v {
+            return true;
+        }
+        let Some(p) = producer[x] else { continue };
+        let elementwise = matches!(
+            nodes[p].primitive,
+            Add | Sub
+                | Mul
+                | Div
+                | Max
+                | Eq
+                | Lt
+                | Neg
+                | Exp
+                | Log
+                | Rsqrt
+                | Tanh
+                | Logistic
+                | ConvertElementType { .. }
+                | Select
+        );
+        if (p == r || !root[p]) && elementwise {
+            stack.extend(&nodes[p].inputs);
+        }
+    }
+    false
 }

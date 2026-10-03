@@ -23,7 +23,7 @@ use crate::Tensor;
 use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
-use crate::ops::mps::{elementwise_grid, launch_step, scratch_bytes, u32_arg};
+use crate::ops::mps::{elementwise_grid, launch, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 
 unsafe extern "C" {
@@ -227,6 +227,8 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    // The kernel's inputs, then (a multi-output fusion's) other outputs.
+    let (inputs, extra) = inputs.split_at(body.inputs().len());
     if let Some(root) = codegen::reduction_root(body) {
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
@@ -237,6 +239,7 @@ pub(crate) fn encode(
             label,
             inputs,
             output,
+            extra,
             scratch,
             keep,
         );
@@ -244,7 +247,13 @@ pub(crate) fn encode(
     let out = &step.output.1;
     let n = out.numel();
     let grid = elementwise_grid(n, out.dtype);
-    launch_step(step, name, inputs, output, &[u32_arg(n as u32)], grid, keep)
+    let buffers: Vec<*const u8> = inputs
+        .iter()
+        .copied()
+        .chain([output.cast_const()])
+        .chain(extra.iter().copied())
+        .collect();
+    launch(name, &buffers, &[u32_arg(n as u32)], grid, keep, step.label)
 }
 
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's

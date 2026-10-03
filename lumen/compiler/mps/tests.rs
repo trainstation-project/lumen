@@ -79,8 +79,9 @@ fn fuses_elementwise_and_layout_chains() {
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
-    // relu's max and its zero; softmax's broadcast max, sub and exp; then
-    // its broadcast sum and divide.
+    // relu's max and its zero; softmax's max; its broadcast max, sub and
+    // exp with the sum, which writes the exp too; then its broadcast sum and
+    // divide.
     assert_eq!(
         fused_primitives(&mlp(), &inputs),
         [
@@ -89,7 +90,7 @@ fn reductions_and_contractions_are_boundaries() {
             "dot_general",
             "reduce_max",
             "fusion",
-            "reduce_sum",
+            "fusion_output",
             "fusion"
         ]
     );
@@ -97,7 +98,8 @@ fn reductions_and_contractions_are_boundaries() {
 
 #[test]
 fn only_cheap_values_are_recomputed() {
-    // exp has two users: computed once, not in each.
+    // exp has two users: computed once, not in each (in the first, which
+    // writes it for the other).
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8]));
     let e = apply(&mut g, Exp, &[x]);
@@ -106,7 +108,7 @@ fn only_cheap_values_are_recomputed() {
     g.set_outputs(&[a, b]).unwrap();
     assert_eq!(
         fused_primitives(&g, &[data(&[8], 1)]),
-        ["exp", "add", "mul"]
+        ["fusion", "fusion_output", "mul"]
     );
 
     // add has two users: copied into each.
@@ -632,11 +634,73 @@ fn reduction_inputs_shared_with_other_readers() {
     );
     let y = apply(&mut g, Div, &[e, z]);
     g.set_outputs(&[y]).unwrap();
-    // The scale fuses into the max and into the exp; the sum reads the
-    // stored exp.
+    // The scale fuses into the max and into the sum, which also writes the
+    // exp (its input, which the division reads too): a multi-output fusion.
     let fused = fused_primitives(&g, &[data(&[4, 16], 1)]);
-    assert_eq!(fused, ["fusion", "fusion", "reduce_sum", "fusion"]);
+    assert_eq!(fused, ["fusion", "fusion", "fusion_output", "fusion"]);
     if available() {
         check(&g, &[values(DType::F32, &[4, 16], 1)]);
     }
+}
+
+/// An expensive value read by two fusions is computed in the first, which
+/// writes it as another output (producer-consumer multi-output fusion):
+/// a reduction, in each layout, or a loop fusion; the later reader reads
+/// it. Not when a reader comes before the fusion that would compute it.
+#[test]
+fn multi_output_fusion() {
+    for (shape, axes) in [
+        (vec![8, 300], vec![1]),
+        (vec![2, 70_000], vec![1]),
+        (vec![300, 5], vec![0]),
+        (vec![4, 5, 6], vec![0, 2]),
+    ] {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &shape));
+        let y = g.input(ty(DType::F32, &shape));
+        let p = apply(&mut g, Mul, &[x, y]);
+        let e = apply(&mut g, Exp, &[p]);
+        let s = apply(&mut g, ReduceSum { axes: axes.clone() }, &[e]);
+        let n = apply(&mut g, Neg, &[e]);
+        g.set_outputs(&[s, n]).unwrap();
+        let inputs = [data(&shape, 1), data(&shape, 2)];
+        let fused = fused_primitives(&g, &inputs);
+        assert_eq!(fused, ["fusion", "fusion_output", "neg"], "{shape:?}");
+        if available() {
+            check_within(&g, &inputs, 1.0);
+        }
+    }
+
+    // A loop fusion hosting it.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[64]));
+    let e = apply(&mut g, Exp, &[x]);
+    let a = apply(&mut g, Neg, &[e]);
+    let b = apply(&mut g, Tanh, &[e]);
+    g.set_outputs(&[a, b]).unwrap();
+    assert_eq!(
+        fused_primitives(&g, &[data(&[64], 1)]),
+        ["fusion", "fusion_output", "tanh"]
+    );
+    if available() {
+        check(&g, &[values(DType::F32, &[64], 1)]);
+    }
+
+    // A reader before the would-be host: the exp is stored on its own.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let e = apply(&mut g, Exp, &[x]);
+    let first = apply(&mut g, ReduceMax { axes: vec![1] }, &[e]);
+    let t = apply(
+        &mut g,
+        Transpose {
+            permutation: vec![1, 0],
+        },
+        &[e],
+    );
+    let second = apply(&mut g, ReduceSum { axes: vec![0] }, &[t]);
+    g.set_outputs(&[first, second]).unwrap();
+    // The max hosts it; the sum reads its transpose.
+    let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
+    assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
 }
