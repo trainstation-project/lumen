@@ -8,6 +8,7 @@ only: at runtime every name lives in ``lumen._C``.
 
 from typing import Literal, Optional, Union, final
 
+from lumen.allocator._C import CompilerConfig as CompilerConfig
 from lumen.allocator._C import Config as Config
 from lumen.allocator._C import config as config
 from lumen.graph._C import Graph as Graph

@@ -9,20 +9,25 @@
 //! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.
 
+pub mod config;
 mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 #[cfg(test)]
 mod tests;
 
 use crate::Device;
 use crate::graph::{Graph, Plan, PlanOptions};
 
+pub use config::CompilerConfig;
+
 /// How to compile a graph.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// Fuse primitives into generated kernels (where the device does).
-    pub fuse: bool,
+    /// The compiler's flags: by default, [`config::config`]'s.
+    pub config: CompilerConfig,
     /// Inputs the caller donates (JAX: `donate_argnums`; see
     /// [`PlanOptions::donate`]).
     pub donate: Vec<usize>,
@@ -40,7 +45,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            fuse: true,
+            config: config::config(),
             donate: Vec::new(),
             parameters: None,
             packable: Vec::new(),

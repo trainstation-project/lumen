@@ -19,7 +19,7 @@ import functools
 import math
 
 from lumen import nn
-from lumen._C import Graph, Plan, Tensor, _pack
+from lumen._C import Graph, Plan, Tensor, _pack, config
 from lumen.graph import prims
 
 __all__ = [
@@ -210,7 +210,8 @@ def compile(fn, device=None):
         workspace, whether ``fn`` returns a single tensor, and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
-        key = _signature(args), target
+        # The compiler's flags too: a plan compiled with others is not reused.
+        key = _signature(args), target, repr(config.compiler)
         # The arguments the plan copies in: tensors, then runtime scalars.
         # The kernels take the scalars by value, read from the host on each
         # call: a new value needs no new plan.
@@ -281,7 +282,7 @@ def compile(fn, device=None):
             prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        ((_, target),) = latest
+        ((_, target, _),) = latest
         graph, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights

@@ -1,9 +1,25 @@
 """The part of `lumen._C` that ``lumen/allocator/python.rs`` defines (see
 ``lumen/_C.pyi``)."""
 
+class CompilerConfig:
+    """The graph compilers' flags; use the ``lumen.config.compiler`` instance.
+    Read when a graph is compiled; the defaults run every program exactly as
+    traced."""
+
+    fuse: bool
+    merge_dots: bool
+    normalization_diamonds: bool
+    reduction_epilogues: bool
+    multi_output_fusion: bool
+    online_softmax: bool
+    row_cache: int
+    def reset(self) -> None: ...
+
 class Config:
     """Process-wide runtime settings; use the ``lumen.config`` instance."""
 
     static_allocator_bytes: int
+    @property
+    def compiler(self) -> CompilerConfig: ...
 
 config: Config
