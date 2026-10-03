@@ -4,7 +4,8 @@
 class CompilerConfig:
     """The graph compilers' flags; use the ``lumen.config.compiler`` instance.
     Read when a graph is compiled; the defaults run every program exactly as
-    traced."""
+    traced, but for ``online_softmax`` (on: set it off for softmax as
+    traced)."""
 
     fuse: bool
     merge_dots: bool

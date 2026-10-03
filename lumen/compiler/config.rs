@@ -1,7 +1,9 @@
 //! How the graph compilers compile: process-wide flags, read when a graph
 //! is compiled (Python: `lumen.config.compiler`). Each compile takes a
-//! snapshot ([`config`]) into its [`Options`](super::Options); the
-//! defaults run every program exactly as traced.
+//! snapshot ([`config`]) into its [`Options`](super::Options). The
+//! defaults run every program exactly as traced, but for `online_softmax`
+//! (on: a softmax's max and sum in one pass, its rounding not the
+//! program's); turn it off to run softmax as traced too.
 
 use std::sync::{PoisonError, RwLock};
 
@@ -25,8 +27,9 @@ pub struct CompilerConfig {
     pub multi_output_fusion: bool,
     /// In a row kernel, a softmax's max and its sum of `exp(x - max)` in one
     /// pass, the sum rescaled as the max grows (online softmax): a row of
-    /// more elements than `row_cache` holds is read once less. Not what the
-    /// program computes: its rounding differs.
+    /// more elements than `row_cache` holds is read once less. On by
+    /// default; not what the program computes (its rounding differs), so
+    /// off runs softmax exactly as traced.
     pub online_softmax: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
@@ -42,7 +45,7 @@ impl Default for CompilerConfig {
             normalization_diamonds: true,
             reduction_epilogues: true,
             multi_output_fusion: true,
-            online_softmax: false,
+            online_softmax: true,
             row_cache: 8,
         }
     }

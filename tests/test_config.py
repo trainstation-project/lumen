@@ -64,16 +64,18 @@ def _labels(f, *args, device="mps"):
         pytest.skip(str(e))
 
 
-def test_compiler_flags_default_to_running_programs_as_traced(compiler):
+def test_compiler_flags_defaults(compiler):
+    """Every program runs as traced, but for online softmax (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
-    assert compiler.online_softmax is False and compiler.row_cache == 8
+    assert compiler.online_softmax is True and compiler.row_cache == 8
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
+    assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
-    compiler.online_softmax, compiler.row_cache = True, 4
-    assert lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
+    compiler.online_softmax, compiler.row_cache = False, 4
+    assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
     compiler.reset()
-    assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 8
+    assert lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 8
     with pytest.raises(TypeError):
         compiler.fuse = "yes"
     with pytest.raises(OverflowError):
@@ -104,9 +106,9 @@ def test_compiler_flags_change_what_compiles(compiler):
 
     big = lumen.empty([8, 65536], device="meta")
     online = lambda: lumen.graph.Plan(lumen.make_graph(_manual_softmax)(big), "mps").steps()[0]  # noqa: E731
-    assert "maxima" not in online()["fusion"]["source"]
-    compiler.online_softmax = True
     assert "maxima" in online()["fusion"]["source"]
+    compiler.online_softmax = False
+    assert "maxima" not in online()["fusion"]["source"]
     compiler.reset()
 
     (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
@@ -119,9 +121,9 @@ def test_compiler_flags_change_what_compiles(compiler):
 @pytest.mark.mps
 @pytest.mark.parametrize("n", [300, 65536])
 def test_online_softmax_agrees(compiler, n):
-    """With ``online_softmax`` a softmax's max and sum are one pass; it agrees
-    with the default (as traced) to rounding. ``lumen.compile`` compiles
-    again when a flag changes."""
+    """With ``online_softmax`` (the default) a softmax's max and sum are one
+    pass; it agrees with softmax as traced (off) to rounding.
+    ``lumen.compile`` compiles again when a flag changes."""
     x = np.random.default_rng(0).standard_normal((8, n)).astype(np.float32) * 3
     try:
         t = lumen.from_numpy(x).to("mps")
@@ -137,9 +139,9 @@ def test_online_softmax_agrees(compiler, n):
         (kernel,) = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
         return out, kernel
 
-    exact, exact_kernel = run()
-    compiler.online_softmax = True
     online, online_kernel = run()
+    compiler.online_softmax = False
+    exact, exact_kernel = run()
     # Compiled again: another kernel (its name is its source's hash).
     assert online_kernel != exact_kernel
     e = np.exp(x - x.max(-1, keepdims=True))

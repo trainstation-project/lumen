@@ -7,7 +7,8 @@ use super::config::{self, CompilerConfig};
 
 /// The graph compilers' flags (``lumen.config.compiler``), read when a
 /// graph is compiled: ``lumen.compile`` compiles again once they change.
-/// The defaults run every program exactly as traced.
+/// The defaults run every program exactly as traced, but for
+/// ``online_softmax`` (on).
 #[pyclass(name = "CompilerConfig", module = "lumen")]
 pub(crate) struct PyCompilerConfig;
 
@@ -57,7 +58,8 @@ flags! {
     /// another output of its kernel.
     multi_output_fusion, set_multi_output_fusion: bool;
     /// A softmax's max and sum in one pass of its row kernel (online
-    /// softmax): not what the program computes, its rounding differs.
+    /// softmax; on by default): not what the program computes, its rounding
+    /// differs; off runs softmax exactly as traced.
     online_softmax, set_online_softmax: bool;
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).
