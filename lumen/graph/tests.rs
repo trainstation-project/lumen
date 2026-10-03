@@ -349,6 +349,118 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     assert_eq!(plan.workspace_bytes(), 0);
 }
 
+/// A plan of `g` donating its first input, and the output's buffer.
+fn donating(g: &Graph) -> (Plan, Buffer) {
+    let options = super::PlanOptions {
+        scratch: None,
+        donate: vec![0],
+    };
+    let plan = Plan::compile_with(g, &options);
+    let out = plan
+        .steps()
+        .iter()
+        .map(|s| s.output.0)
+        .find(|b| !matches!(b, Buffer::Workspace(_)));
+    (plan, out.expect("a step writes the output"))
+}
+
+#[test]
+fn donated_inputs_hold_outputs_written_in_place() {
+    let ty = TensorType::new(DType::F32, &[2, 3]);
+    // exp(x) + x: the add reads x at the element it writes.
+    let mut g = Graph::new();
+    let x = g.input(ty.clone());
+    let e = g.apply(Exp, &[x]).unwrap();
+    let y = g.apply(Add, &[e, x]).unwrap();
+    g.set_outputs(&[y]).unwrap();
+    let (plan, out) = donating(&g);
+    assert_eq!(out, Buffer::Input(0), "{plan}");
+    let input = data(&[2, 3], 1);
+    let expected = reference::run(&g, std::slice::from_ref(&input)).unwrap();
+    let result = plan.run(std::slice::from_ref(&input)).unwrap();
+    assert!(result[0].shares_storage_with(&input));
+    assert_eq!(result[0].to_vec::<f32>(), expected[0].to_vec::<f32>());
+
+    // A transpose reads other elements: it cannot overwrite its operand.
+    let mut g = Graph::new();
+    let x = g.input(TensorType::new(DType::F32, &[3, 3]));
+    let t = g
+        .apply(
+            Transpose {
+                permutation: vec![1, 0],
+            },
+            &[x],
+        )
+        .unwrap();
+    g.set_outputs(&[t]).unwrap();
+    assert_eq!(donating(&g).1, Buffer::Output(0));
+
+    // exp(x) is written before x is read again: it takes new memory, and
+    // x * 2, the last reader, takes x's.
+    let mut g = Graph::new();
+    let x = g.input(ty.clone());
+    let e = g.apply(Exp, &[x]).unwrap();
+    let two = g
+        .apply(
+            Full {
+                shape: vec![2, 3],
+                fill_value: Scalar::Float(2.0),
+                dtype: DType::F32,
+            },
+            &[],
+        )
+        .unwrap();
+    let d = g.apply(Mul, &[x, two]).unwrap();
+    g.set_outputs(&[e, d]).unwrap();
+    let plan = Plan::compile_with(
+        &g,
+        &super::PlanOptions {
+            scratch: None,
+            donate: vec![0],
+        },
+    );
+    let outputs: Vec<Buffer> = plan
+        .steps()
+        .iter()
+        .map(|s| s.output.0)
+        .filter(|b| !matches!(b, Buffer::Workspace(_)))
+        .collect();
+    assert_eq!(outputs, [Buffer::Output(0), Buffer::Input(0)], "{plan}");
+}
+
+#[test]
+fn kernel_scratch_is_placed_in_the_workspace() {
+    let mut g = Graph::new();
+    let x = g.input(TensorType::new(DType::F32, &[4, 64]));
+    let e = g.apply(Exp, &[x]).unwrap();
+    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    g.set_outputs(&[s]).unwrap();
+    let options = super::PlanOptions {
+        scratch: Some(|p, _, _| {
+            if matches!(p, ReduceSum { .. }) {
+                100
+            } else {
+                0
+            }
+        }),
+        donate: Vec::new(),
+    };
+    let plan = Plan::compile_with(&g, &options);
+    let reduce = &plan.steps()[1];
+    let (offset, bytes) = reduce.scratch.expect("the reduction's scratch");
+    assert_eq!(bytes, 100);
+    // Clear of the exp's result, which the reduction reads.
+    let Buffer::Workspace(e_at) = reduce.inputs[0].0 else {
+        panic!("{plan}")
+    };
+    assert!(
+        offset >= e_at + 4 * 64 * 4 || offset + bytes <= e_at,
+        "{plan}"
+    );
+    assert!(plan.workspace_bytes() >= offset + bytes);
+    assert!(plan.to_string().contains("(scratch ws+"));
+}
+
 #[test]
 fn plans_run_on_meta_tensors_compute_nothing() {
     let g = mlp();

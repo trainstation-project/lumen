@@ -49,7 +49,7 @@ pub(crate) fn encode(
 /// rows): a few elements a thread where the innermost dimension reads
 /// contiguous elements or a broadcast one, else one (strided reads need
 /// the threads in flight).
-pub(crate) fn gather(
+fn gather(
     width: usize,
     shape: &[usize],
     strides: &[usize],

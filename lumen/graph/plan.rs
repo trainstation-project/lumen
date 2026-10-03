@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use super::{Graph, Primitive, TensorType, Var};
+use super::{Graph, Node, Primitive, TensorType, Var};
 use crate::ops::reference;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
@@ -38,18 +38,47 @@ pub struct Step {
     pub primitive: Primitive,
     pub inputs: Vec<(Buffer, TensorType)>,
     pub output: (Buffer, TensorType),
+    /// Workspace bytes the kernel uses while it runs (its offset and
+    /// length), if it asked for any ([`PlanOptions::scratch`]).
+    pub scratch: Option<(usize, usize)>,
+}
+
+/// The scratch bytes a step's kernel needs while it runs, from its
+/// primitive, operand types and result type.
+pub type ScratchFn = fn(&Primitive, &[&TensorType], &TensorType) -> usize;
+
+/// What a device compiler gives the planner (XLA: what a backend gives
+/// buffer assignment).
+#[derive(Debug, Clone, Default)]
+pub struct PlanOptions {
+    /// Each step's kernel scratch ([`ScratchFn`]): placed in the workspace,
+    /// alive for that step alone, so kernels never allocate.
+    pub scratch: Option<ScratchFn>,
+    /// Inputs the caller donates (JAX: `donate_argnums`): an output of an
+    /// input's type may be written into its buffer, in place, rather than
+    /// into new memory, once nothing reads the input any more.
+    pub donate: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Plan {
     inputs: Vec<TensorType>,
     outputs: Vec<TensorType>,
+    /// The donated input each output is written into, if any.
+    aliases: Vec<Option<usize>>,
     steps: Vec<Step>,
     workspace_bytes: usize,
 }
 
 impl Plan {
     pub fn compile(graph: &Graph) -> Self {
+        Self::compile_with(graph, &PlanOptions::default())
+    }
+
+    /// `graph`'s plan: its steps in order, each value (and kernel scratch)
+    /// placed in one workspace, values whose lifetimes do not overlap
+    /// sharing bytes; outputs in their own memory, or in a donated input's.
+    pub fn compile_with(graph: &Graph, options: &PlanOptions) -> Self {
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
         let is_reshape = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
@@ -107,18 +136,64 @@ impl Plan {
             last[root[v]] = nodes.len();
         }
 
-        let mut pending: Vec<Var> = (0..n)
+        // Donation: an output goes into a donated input's buffer if it has
+        // the input's type, and nothing reads the input after the step that
+        // writes the output (which may read it only at the element it
+        // writes).
+        let mut aliases = vec![None; graph.outputs().len()];
+        let mut donors: Vec<usize> = options.donate.clone();
+        for (k, &v) in graph.outputs().iter().enumerate() {
+            if v != root[v] || buffer[v] != Some(Buffer::Output(k)) {
+                continue;
+            }
+            let fits = |&i: &usize| {
+                let u = graph.inputs()[i];
+                let writer = nodes[first[v]];
+                let read_by_writer = writer.inputs.iter().any(|&w| root[w] == u);
+                let read_later =
+                    last[u] > first[v] || (read_by_writer && !reads_in_place(writer, u, &root));
+                let is_output = graph.outputs().iter().any(|&o| root[o] == u);
+                ty(u) == ty(v) && !read_later && !is_output
+            };
+            if let Some(pos) = donors.iter().position(fits) {
+                let i = donors.remove(pos);
+                buffer[v] = Some(Buffer::Input(i));
+                aliases[k] = Some(i);
+            }
+        }
+
+        // The workspace: each value without a buffer, alive from its step
+        // to its last reader, and each kernel's scratch, alive for its step,
+        // placed largest first at the lowest offset clear of the regions
+        // alive at the same time.
+        enum Region {
+            Value(Var),
+            Scratch(usize),
+        }
+
+        let mut regions: Vec<(usize, usize, usize, Region)> = (0..n)
             .filter(|&r| root[r] == r && buffer[r].is_none() && first[r] != usize::MAX)
+            .map(|r| (bytes(r), first[r], last[r], Region::Value(r)))
             .collect();
-        pending.sort_by_key(|&r| Reverse(bytes(r)));
-        let mut placed: Vec<(usize, usize, Var)> = Vec::new();
+        if let Some(scratch) = options.scratch {
+            for (t, node) in nodes.iter().enumerate() {
+                let types: Vec<&TensorType> =
+                    node.inputs.iter().map(|&v| graph.type_of(v)).collect();
+                let size = scratch(&node.primitive, &types, graph.type_of(node.output));
+                if size > 0 {
+                    regions.push((size, t, t, Region::Scratch(t)));
+                }
+            }
+        }
+        regions.sort_by_key(|&(size, ..)| Reverse(size));
+        let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
+        let mut scratch_at = vec![None; nodes.len()];
         let mut workspace_bytes = 0;
-        for r in pending {
-            let size = bytes(r);
+        for (size, from, to, region) in regions {
             let mut taken: Vec<(usize, usize)> = placed
                 .iter()
-                .filter(|&&(_, _, o)| first[o] <= last[r] && first[r] <= last[o])
-                .map(|&(offset, size, _)| (offset, size))
+                .filter(|&&(_, _, f, l)| f <= to && from <= l)
+                .map(|&(offset, size, _, _)| (offset, size))
                 .collect();
             taken.sort();
             let mut offset = 0;
@@ -128,8 +203,11 @@ impl Plan {
                 }
                 offset = offset.max((start + len).next_multiple_of(ALIGNMENT));
             }
-            placed.push((offset, size, r));
-            buffer[r] = Some(Buffer::Workspace(offset));
+            placed.push((offset, size, from, to));
+            match region {
+                Region::Value(r) => buffer[r] = Some(Buffer::Workspace(offset)),
+                Region::Scratch(t) => scratch_at[t] = Some((offset, size)),
+            }
             workspace_bytes = workspace_bytes.max(offset + size);
         }
 
@@ -141,10 +219,12 @@ impl Plan {
         };
         let mut steps: Vec<Step> = nodes
             .iter()
-            .map(|node| Step {
+            .zip(scratch_at)
+            .map(|(node, scratch)| Step {
                 primitive: node.primitive.clone(),
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
                 output: slot(node.output),
+                scratch,
             })
             .collect();
         for (k, v) in copies {
@@ -154,11 +234,13 @@ impl Plan {
                 },
                 inputs: vec![slot(v)],
                 output: (Buffer::Output(k), ty(v)),
+                scratch: None,
             });
         }
         Plan {
             inputs: graph.inputs().iter().map(|&v| ty(v)).collect(),
             outputs: graph.outputs().iter().map(|&v| ty(v)).collect(),
+            aliases,
             steps,
             workspace_bytes,
         }
@@ -249,7 +331,12 @@ impl Plan {
         let outputs: Vec<Tensor> = self
             .outputs
             .iter()
-            .map(|ty| unsafe { Tensor::empty(&ty.shape, options(ty.dtype)) })
+            .zip(&self.aliases)
+            .map(|(ty, alias)| match alias {
+                // The donated input's storage, overwritten in place.
+                Some(i) => inputs[*i].clone(),
+                None => unsafe { Tensor::empty(&ty.shape, options(ty.dtype)) },
+            })
             .collect();
         let tensor = |buffer: Buffer| match buffer {
             Buffer::Input(i) => &inputs[i],
@@ -272,18 +359,27 @@ impl Plan {
                 .map(|s| pointer(s).cast_const())
                 .collect();
             let out = pointer(&step.output);
+            let scratch = step.scratch.map_or(std::ptr::null_mut(), |(offset, _)| {
+                workspace.data_ptr().wrapping_add(offset)
+            });
             match executor {
                 #[cfg(lumen_mps_linked)]
                 Device::Mps => {
-                    let keep = step
+                    let mut keep: Vec<Tensor> = step
                         .inputs
                         .iter()
                         .chain([&step.output])
                         .map(|&(b, _)| tensor(b).clone())
                         .collect();
-                    crate::ops::mps::encode(step, &args, out, keep)?;
+                    if step.scratch.is_some() {
+                        // The kernel uses its scratch until the GPU has run it.
+                        keep.push(workspace.clone());
+                    }
+                    crate::ops::mps::encode(step, &args, out, scratch, keep)?;
                 }
                 _ => {
+                    // The reference evaluates each step whole: no scratch.
+                    let _ = scratch;
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
                     // SAFETY: all buffers are host memory of their step
                     // types' sizes, and the inputs were written before
@@ -312,7 +408,50 @@ impl fmt::Display for Plan {
             for (b, _) in &step.inputs {
                 write!(f, " {b}")?;
             }
+            if let Some((offset, bytes)) = step.scratch {
+                write!(f, " (scratch ws+{offset}, {bytes} bytes)")?;
+            }
         }
         Ok(())
+    }
+}
+
+/// Whether `node` reads each operand whose root is `r` only at the element
+/// it writes (an elementwise primitive, or a fusion that uses it only in
+/// elementwise ones), so its output may overwrite `r`'s buffer.
+fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
+    use Primitive::*;
+    let elementwise = |p: &Primitive| {
+        matches!(
+            p,
+            Add | Sub
+                | Mul
+                | Div
+                | Max
+                | Eq
+                | Lt
+                | Neg
+                | Exp
+                | Log
+                | Rsqrt
+                | Tanh
+                | Logistic
+                | ConvertElementType { .. }
+                | Select
+        )
+    };
+    match &node.primitive {
+        Fusion { body, .. } => node
+            .inputs
+            .iter()
+            .zip(body.inputs())
+            .filter(|&(&v, _)| root[v] == r)
+            .all(|(_, &b)| {
+                body.nodes()
+                    .iter()
+                    .filter(|n| n.inputs.contains(&b))
+                    .all(|n| elementwise(&n.primitive))
+            }),
+        p => elementwise(p),
     }
 }

@@ -26,12 +26,17 @@ class Plan:
     """A graph compiled for execution by ``device``'s graph compiler (on
     MPS, with its elementwise ops fused), with its memory planned."""
 
-    def __init__(self, graph: Graph, device: Optional[DeviceLike] = None) -> None: ...
+    def __init__(
+        self, graph: Graph, device: Optional[DeviceLike] = None, fuse: bool = True, donate: Sequence[int] = ()
+    ) -> None:
+        """Fused where ``device`` fuses (unless ``fuse`` is false), with outputs
+        written into the inputs at positions ``donate`` where they fit."""
     @property
     def workspace_bytes(self) -> int: ...
     def steps(self) -> list[dict[str, Any]]:
         """Each step, as ``Graph.nodes``, with ``inputs`` and ``output`` as
-        ``(buffer, dtype, shape)``."""
+        ``(buffer, dtype, shape)``, and its kernel's ``scratch`` in the
+        workspace as ``(offset, bytes)`` (or None)."""
     def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
         """Run on ``device`` (where the inputs must be), or else the inputs'
         device (the CPU without inputs)."""

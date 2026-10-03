@@ -183,12 +183,17 @@ def graph_view(graph, unfused, kernels):
             "inputs": [[f"%{v}", type_text(*graph.type_of(v))] for v in node["inputs"]], "kernels": [], "fusion": None,
         }
         # The unfused plan's steps are the live nodes in graph order (it may
-        # drop dead ones and alias reshapes): match the next step of this
-        # primitive and output type.
-        if s < len(steps) and steps[s]["primitive"] == node["primitive"] and list(steps[s]["output"][1:]) == [dtype, list(shape)]:
-            entry["kernels"] = _kernel_entries(kernels[s] if s < len(kernels) else [])
-            entry["buffer"] = steps[s]["output"][0]
-            s += 1
+        # drop dead ones and alias reshapes), plus steps the device's
+        # compiler added (a transpose putting a dot_general's operand in
+        # matmul form): those go with the node after them.
+        added = []
+        for t in range(s, len(steps)):
+            if steps[t]["primitive"] == node["primitive"] and list(steps[t]["output"][1:]) == [dtype, list(shape)]:
+                added += [k for u in range(s, t + 1) for k in (kernels[u] if u < len(kernels) else [])]
+                entry["kernels"] = _kernel_entries(added)
+                entry["buffer"] = steps[t]["output"][0]
+                s = t + 1
+                break
         else:
             entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, or dead)"
         nodes.append(entry)
@@ -212,7 +217,9 @@ def collect(graph, plan, inputs, title, runs=5, device=None):
     ``plan`` (fused, for ``device``, default the inputs') and its unfused
     plan, both profiled on ``inputs`` on that device."""
     device = device or (str(inputs[0].device) if inputs else "cpu")
-    unfused = Plan(graph)
+    # The unfused plan for the same device: its steps are the graph's
+    # primitives (after the device's rewrites), each its own kernel.
+    unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False)
     timed = device not in ("cpu", "meta")
     fused_kernels = profile_steps(plan, inputs, runs, device) if timed else []
     unfused_kernels = profile_steps(unfused, inputs, runs, device) if timed else []

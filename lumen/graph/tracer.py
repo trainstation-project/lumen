@@ -73,7 +73,7 @@ def _device(args, device):
     return next((str(a.device) for a in args if isinstance(a, Tensor)), "cpu")
 
 
-def compile(fn, device=None):
+def compile(fn, device=None, donate_argnums=()):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
     and compiled into a static plan for ``device`` on its first call with
     each input signature (the tensor arguments' dtypes, shapes and devices,
@@ -88,23 +88,42 @@ def compile(fn, device=None):
 
         params = lumen.compile(init, device="mps")()
 
+    ``donate_argnums`` are positions of tensor arguments the caller gives up
+    (``jax.jit``'s ``donate_argnums``): an output of the same dtype and shape
+    is written into a donated argument's memory, in place, instead of new
+    memory (``params = step(params, grads)`` without a second copy of
+    ``params``). A donated argument's contents are undefined after the call.
+
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
     compile_device = device  # dump_graph's own `device` shadows it
+    donate_argnums = tuple(sorted(set(donate_argnums)))
     plans = {}
     latest = []
+
+    def donated(args):
+        """The donated arguments' indices among the tensor arguments."""
+        for i in donate_argnums:
+            if i >= len(args) or not isinstance(args[i], Tensor):
+                raise TypeError(f"donate_argnums: argument {i} of {fn.__name__} is not a tensor")
+        tensors = [i for i, a in enumerate(args) if isinstance(a, Tensor)]
+        return [tensors.index(i) for i in donate_argnums]
 
     def entry(args):
         key = _signature(args)
         if key not in plans:
             graph, single = _trace(fn, args)
-            plans[key] = graph, Plan(graph, _device(args, device)), single
+            plans[key] = graph, Plan(graph, _device(args, device), donate=donated(args)), single
         latest[:] = [key]
         return plans[key]
 
     @functools.wraps(fn)
     def compiled(*args):
+        for i in donate_argnums:
+            others = [a for j, a in enumerate(args) if j != i and isinstance(a, Tensor)]
+            if i < len(args) and isinstance(args[i], Tensor) and any(args[i].shares_storage_with(a) for a in others):
+                raise ValueError(f"{fn.__name__}: donated argument {i} shares memory with another argument")
         _, plan, single = entry(args)
         outputs = plan.run([a for a in args if isinstance(a, Tensor)], _device(args, device))
         return outputs[0] if single else tuple(outputs)

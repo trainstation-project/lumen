@@ -226,3 +226,62 @@ fn fused_kernels_match_reference() {
         check(&g, &inputs);
     }
 }
+
+#[test]
+fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
+    // Contracting dims (0, 2) of lhs do not collapse: a transpose first.
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::F32, &[3, 2, 4]));
+    let b = g.input(ty(DType::F32, &[4, 5, 3]));
+    let dot = DotGeneral {
+        lhs_contracting: vec![0, 2],
+        rhs_contracting: vec![2, 0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+    };
+    let y = apply(&mut g, dot, &[a, b]);
+    g.set_outputs(&[y]).unwrap();
+    let canonical = super::canonicalize_dots(&g);
+    assert_eq!(
+        names(&canonical),
+        ["transpose", "transpose", "dot_general"],
+        "{canonical}"
+    );
+    let inputs = [data(&[3, 2, 4], 1), data(&[4, 5, 3], 2)];
+    let expected = reference::run(&g, &inputs).unwrap();
+    let actual = reference::run(&canonical, &inputs).unwrap();
+    assert_eq!(expected[0].to_vec::<f32>(), actual[0].to_vec::<f32>());
+    // A matmul already in form is left alone.
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::F32, &[4, 8]));
+    let b = g.input(ty(DType::F32, &[8, 3]));
+    let mm = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+    };
+    let y = apply(&mut g, mm, &[a, b]);
+    g.set_outputs(&[y]).unwrap();
+    assert_eq!(names(&super::canonicalize_dots(&g)), ["dot_general"]);
+}
+
+/// Split reductions and dots out of matmul form need what only the MPS
+/// compiler arranges: their scratch and transposes are planned (no kernel
+/// allocates), and a generic plan run on MPS says so.
+#[test]
+fn mps_plans_hold_kernel_scratch() {
+    if !available() {
+        return;
+    }
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F16, &[4, 50_000]));
+    let s = apply(&mut g, ReduceSum { axes: vec![1] }, &[x]);
+    g.set_outputs(&[s]).unwrap();
+    let plan = crate::compiler::compile(&g, crate::Device::Mps).unwrap();
+    let (_, bytes) = plan.steps()[0].scratch.expect("partials in the workspace");
+    assert!(bytes > 0 && plan.workspace_bytes() >= bytes, "{plan}");
+    let input = values(DType::F16, &[4, 50_000], 1).to(crate::Device::Mps);
+    let generic = crate::graph::Plan::compile(&g).run(std::slice::from_ref(&input));
+    assert!(generic.unwrap_err().contains("compile the graph for MPS"));
+}

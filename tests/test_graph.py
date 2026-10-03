@@ -394,3 +394,51 @@ def test_compiled_init_on_device(tmp_path):
     data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
     assert data["device"] == "mps" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
     assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+
+
+# ---------------------------------------------------------------------
+# memory: donation and planned scratch (JAX / XLA buffer assignment)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_donated_arguments_hold_the_outputs(device):
+    try:
+        params = lumen.ones([4, 8], device=device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grads = lumen.full([4, 8], 2.0, device=device)
+    step = lumen.compile(lambda p, g: p - g * 0.25, donate_argnums=(0,))
+    new = step(params, grads)
+    assert new.shares_storage_with(params)  # updated in place
+    assert new.tolist() == [[0.5] * 8] * 4
+    # Without donation, new memory.
+    assert not lumen.compile(lambda p, g: p - g * 0.25)(new, grads).shares_storage_with(new)
+
+
+def test_donation_checks():
+    x = lumen.ones([2])
+    with pytest.raises(TypeError, match="argument 1 of <lambda> is not a tensor"):
+        lumen.compile(lambda x, s: x * s, donate_argnums=(1,))(x, 2.0)
+    with pytest.raises(ValueError, match="shares memory"):
+        lumen.compile(lambda a, b: a + b, donate_argnums=(0,))(x, x)
+
+
+@pytest.mark.mps
+def test_mps_plans_put_copies_and_scratch_in_the_workspace():
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    # A contraction out of matmul form: a transpose step, then the matmul.
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())))  # noqa: E731
+    graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
+    steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
+    assert steps == ["transpose", "transpose", "dot_general"]
+    # A split reduction's partials are scratch in the workspace.
+    graph = lumen.make_graph(lambda x: x.sum(-1))(lumen.zeros([4, 50_000]))
+    plan = lumen.graph.Plan(graph, "mps")
+    offset, size = plan.steps()[0]["scratch"]
+    assert size > 0 and plan.workspace_bytes >= offset + size
+    x = lumen.ones([4, 50_000], device="mps")
+    assert plan.run([x])[0].tolist() == [50_000.0] * 4

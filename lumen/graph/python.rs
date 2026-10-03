@@ -185,10 +185,25 @@ struct PyPlan {
 
 #[pymethods]
 impl PyPlan {
+    /// `graph` compiled for `device` (default: generic, run on the inputs'
+    /// device): fused where the device fuses, unless `fuse` is false; with
+    /// outputs written into the inputs at positions `donate` where they fit.
     #[new]
-    #[pyo3(signature = (graph, device = None))]
-    fn new(graph: PyRef<'_, PyGraph>, device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let inner = crate::compiler::compile(&graph.inner, resolve_device(device)?)
+    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new()))]
+    fn new(
+        graph: PyRef<'_, PyGraph>,
+        device: Option<&Bound<'_, PyAny>>,
+        fuse: bool,
+        donate: Vec<usize>,
+    ) -> PyResult<Self> {
+        if let Some(&i) = donate.iter().find(|&&i| i >= graph.inner.inputs().len()) {
+            return Err(PyValueError::new_err(format!(
+                "donate: the graph has {} inputs, got {i}",
+                graph.inner.inputs().len()
+            )));
+        }
+        let options = crate::compiler::Options { fuse, donate };
+        let inner = crate::compiler::compile_with(&graph.inner, resolve_device(device)?, &options)
             .map_err(PyRuntimeError::new_err)?;
         Ok(PyPlan { inner })
     }
@@ -212,6 +227,7 @@ impl PyPlan {
                 let d = primitive_dict(py, &step.primitive)?;
                 d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
                 d.set_item("output", typed(&step.output))?;
+                d.set_item("scratch", step.scratch)?;
                 Ok(d)
             })
             .collect()

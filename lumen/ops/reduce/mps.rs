@@ -12,12 +12,13 @@ use crate::ops::mps::{
     Grid, dims_arg, dims32_arg, element_arg, launch, launch_step, u32_arg, u64_arg,
 };
 use crate::tensor::contiguous_strides;
-use crate::{DType, Scalar, Tensor, TensorOptions};
+use crate::{DType, Scalar, Tensor};
 
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
+    scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let (ReduceSum { axes } | ReduceMax { axes }) = &step.primitive else {
@@ -27,7 +28,7 @@ pub(crate) fn encode(
     let mut reduced = axes.clone();
     reduced.sort_unstable();
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
-        return consecutive(step, x, &reduced, inputs[0], output, keep);
+        return consecutive(step, x, &reduced, inputs[0], output, scratch, keep);
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
     // reduced dimensions in 32 bits; inputs of 2^32 elements or more take a
@@ -102,30 +103,27 @@ fn lowest(dtype: DType) -> Scalar {
     }
 }
 
-/// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]:
-/// rows when b = 1, columns otherwise. One launch, or, with too few outputs
-/// to fill the GPU, two: `count` split into chunks reduced in parallel into
-/// partials, then the partials.
-fn consecutive(
-    step: &Step,
-    x: &TensorType,
-    reduced: &[usize],
-    input: *const u8,
-    output: *mut u8,
-    mut keep: Vec<Tensor>,
-) -> Result<(), String> {
+/// How [`consecutive`] reduces `x` over the consecutive axes `reduced`,
+/// viewed as [a, count, b]: rows when b = 1, columns otherwise, in `chunks`
+/// chunks of `chunk` elements (one: a single launch; more: partials, then
+/// the partials).
+struct Split {
+    a: usize,
+    count: usize,
+    b: usize,
+    chunks: usize,
+    chunk: usize,
+}
+
+fn split(x: &TensorType, reduced: &[usize]) -> Split {
     let first = reduced.first().copied().unwrap_or(x.shape.len());
     let end = reduced.last().map_or(first, |last| last + 1);
     let a: usize = x.shape[..first].iter().product();
     let count: usize = x.shape[first..end].iter().product();
     let b: usize = x.shape[end..].iter().product();
-    let (name, dtype, rows) = (step.primitive.name(), x.dtype, b == 1);
-    if a * b == 0 {
-        return Ok(());
-    }
     // Chunks per output, so enough run at once: rows take a threadgroup of
     // 256 threads per chunk, columns a thread.
-    let chunks = if rows {
+    let chunks = if b == 1 {
         if a >= 256 {
             1
         } else {
@@ -138,6 +136,64 @@ fn consecutive(
     };
     let chunk = count.div_ceil(chunks.max(1));
     let chunks = if chunk == 0 { 1 } else { count.div_ceil(chunk) };
+    Split {
+        a,
+        count,
+        b,
+        chunks,
+        chunk,
+    }
+}
+
+/// The type a split reduction's partials have: float for the 16-bit
+/// floats, as the kernels accumulate.
+fn partial_dtype(dtype: DType) -> DType {
+    if matches!(dtype, DType::F16 | DType::BF16) {
+        DType::F32
+    } else {
+        dtype
+    }
+}
+
+/// The scratch a reduction of `x` over `axes` needs: a split reduction's
+/// partials (none for the others).
+pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
+    let mut reduced = axes.to_vec();
+    reduced.sort_unstable();
+    if !reduced.windows(2).all(|w| w[1] == w[0] + 1) {
+        return 0;
+    }
+    let Split { a, b, chunks, .. } = split(x, &reduced);
+    if chunks == 1 || a * b == 0 {
+        return 0;
+    }
+    a * chunks * b * partial_dtype(x.dtype).size_of()
+}
+
+/// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]:
+/// rows when b = 1, columns otherwise. One launch, or, with too few outputs
+/// to fill the GPU, two: `count` split into chunks reduced in parallel into
+/// partials (in `scratch`, which the planner set aside), then the partials.
+fn consecutive(
+    step: &Step,
+    x: &TensorType,
+    reduced: &[usize],
+    input: *const u8,
+    output: *mut u8,
+    scratch: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let Split {
+        a,
+        count,
+        b,
+        chunks,
+        chunk,
+    } = split(x, reduced);
+    let (name, dtype, rows) = (step.primitive.name(), x.dtype, b == 1);
+    if a * b == 0 {
+        return Ok(());
+    }
     let layout = if rows { "rows" } else { "cols" };
     let pass =
         |kernel: String, src: *const u8, dst: *const u8, count, chunk, chunks: usize, keep| {
@@ -166,17 +222,13 @@ fn consecutive(
         let kernel = format!("{name}_{layout}_{dtype}");
         return pass(kernel, input, output, count, count, 1, keep);
     }
-    // Partials accumulate in float for the 16-bit floats, as the kernels do.
-    let acc = if matches!(dtype, DType::F16 | DType::BF16) {
-        DType::F32
-    } else {
-        dtype
-    };
-    let options = TensorOptions::new().dtype(acc).device(crate::Device::Mps);
-    // SAFETY: the first launch writes every partial before the second reads.
-    let partials = unsafe { Tensor::empty(&[a * chunks * b], options) };
-    keep.push(partials.clone());
-    let p = partials.data_ptr().cast_const();
+    if scratch.is_null() {
+        return Err(format!(
+            "{name}: a split reduction needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))"
+        ));
+    }
+    // The first launch writes every partial before the second reads them.
+    let p = scratch.cast_const();
     let kernel = format!("{name}_{layout}_partial_{dtype}");
     pass(kernel, input, p, count, chunk, chunks, keep.clone())?;
     let kernel = format!("{name}_{layout}_final_{dtype}");
