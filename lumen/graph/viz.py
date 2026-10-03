@@ -195,7 +195,7 @@ def graph_view(graph, unfused, kernels):
                 s = t + 1
                 break
         else:
-            entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, or dead)"
+            entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, a repeat of an earlier node, or dead)"
         nodes.append(entry)
         of_var[node["output"]] = entry["id"]
         for v in node["inputs"]:
