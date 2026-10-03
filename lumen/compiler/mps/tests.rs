@@ -704,3 +704,33 @@ fn multi_output_fusion() {
     let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
     assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
 }
+
+/// Softmax over the last dimension fuses the primitives computing its input
+/// into its kernel; over another dimension no kernel takes it (on MPS, an
+/// error), so it fuses nothing.
+#[test]
+fn softmax_fuses_its_input() {
+    let scaled = |axis: usize| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[8, 300]));
+        let half = Full {
+            shape: vec![8, 300],
+            fill_value: Scalar::Float(0.5),
+            dtype: DType::F32,
+        };
+        let half = apply(&mut g, half, &[]);
+        let s = apply(&mut g, Mul, &[x, half]);
+        let y = apply(&mut g, Softmax { axis }, &[s]);
+        g.set_outputs(&[y]).unwrap();
+        g
+    };
+    let inputs = [data(&[8, 300], 1)];
+    assert_eq!(fused_primitives(&scaled(1), &inputs), ["fusion"]);
+    assert_eq!(fused_primitives(&scaled(0), &inputs), ["fusion", "softmax"]);
+    if available() {
+        check(&scaled(1), &[values(DType::F32, &[8, 300], 1)]);
+        let on_mps = [inputs[0].to(crate::Device::Mps)];
+        let plan = crate::compiler::compile(&scaled(0), crate::Device::Mps).unwrap();
+        assert!(plan.run(&on_mps).unwrap_err().contains("last dimension"));
+    }
+}

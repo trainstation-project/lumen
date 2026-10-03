@@ -80,6 +80,15 @@ fn concatenate_rules() {
 }
 
 #[test]
+fn softmax_rules() {
+    let x = ty(DType::F16, &[3, 5]);
+    let y = infer(Softmax { axis: 1 }, std::slice::from_ref(&x)).unwrap();
+    assert_eq!(y, x);
+    assert!(infer(Softmax { axis: 2 }, std::slice::from_ref(&x)).is_err());
+    assert!(infer(Softmax { axis: 0 }, &[ty(DType::I32, &[3])]).is_err());
+}
+
+#[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
     let sum = ReduceSum { axes: vec![0, 2] };
@@ -872,6 +881,14 @@ pub(crate) mod mps {
                     limit_indices: limit.to_vec(),
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
+            }
+            // Softmax over the last dimension: rows shorter and longer than
+            // a threadgroup, one element, none.
+            if dtype.is_float() && dtype != DType::F64 {
+                for shape in [vec![4, 7], vec![3, 1000], vec![2, 3, 1], vec![0, 5]] {
+                    let axis = shape.len() - 1;
+                    check_node(Softmax { axis }, &[ty(dtype, &shape)]);
+                }
             }
             // Each dimension, operands of different sizes (one empty).
             for dimension in 0..3 {

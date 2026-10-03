@@ -703,3 +703,28 @@ def test_packed_weights_are_read_in_place_elsewhere():
         out = run(alone, lumen.from_numpy(x))
     np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}  # no host copy of w1
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_softmax_is_one_primitive(device):
+    """softmax over the last dimension traces to one primitive: on MPS one
+    kernel (online softmax), with the scale before it fused in. Over
+    another dimension it stays composite."""
+    x = rand(8, 300) * 4
+    try:
+        t = lumen.from_numpy(x).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def scaled(t):
+        return (t * 0.5).softmax(-1)
+
+    graph = lumen.make_graph(scaled)(t)
+    assert [n["primitive"] for n in graph.nodes()][-1] == "softmax"
+    s = x * 0.5
+    e = np.exp(s - s.max(-1, keepdims=True))
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(scaled)(t)), e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7)
+    if device == "mps":
+        assert [s["label"] for s in lumen.graph.Plan(graph, "mps").steps()] == ["full -> broadcast_in_dim -> mul -> softmax"]
+    e0 = np.exp(x - x.max(0, keepdims=True))
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7)
+    assert "softmax" not in [n["primitive"] for n in lumen.make_graph(lambda t: t.softmax(0))(t).nodes()]

@@ -123,7 +123,7 @@ inline void reduce_grouped(In in,
 #define REDUCE_MAX(NAME, T) REDUCE(reduce_max, Max, NAME, T) GROUPED(reduce_max, Max, NAME, T)
 
 // The generated kernels include the templates alone.
-#ifndef REDUCE_TEMPLATES_ONLY
+#ifndef TEMPLATES_ONLY
 FOR_NUMERIC(REDUCE_SUM)
 FOR_ALL(REDUCE_MAX)
 #endif
@@ -234,7 +234,7 @@ inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chun
 #define SUM_LAYOUTS(NAME, T) LAYOUTS(reduce_sum, Add, NAME, T)
 #define MAX_LAYOUTS(NAME, T) LAYOUTS(reduce_max, Max, NAME, T)
 
-#ifndef REDUCE_TEMPLATES_ONLY
+#ifndef TEMPLATES_ONLY
 FOR_NUMERIC(SUM_LAYOUTS)
 FOR_ALL(MAX_LAYOUTS)
 #endif

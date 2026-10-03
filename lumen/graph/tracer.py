@@ -616,6 +616,9 @@ class TracedTensor:
 
     def softmax(self, dim, dtype=None):
         x = _require_float(self.to(dtype) if dtype else self, "softmax")
+        if _dim(dim, x.ndim) == x.ndim - 1:
+            # One primitive: one kernel (online softmax) on MPS.
+            return prims.softmax(x, x.ndim - 1)
         e = (x - x.amax(dim, keepdim=True)).exp()
         return e / e.sum(dim, keepdim=True)
 

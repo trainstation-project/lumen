@@ -68,25 +68,26 @@ pub(crate) fn kernel(body: &Graph) -> (String, String) {
     (name, source)
 }
 
-/// The reduction a fusion with `body` computes, if its root is one (a
-/// reduction fusion, XLA's reduce input fusion): the fused primitives
+/// The reduction or softmax a fusion with `body` computes, if its root is
+/// one (an input fusion, XLA's reduce input fusion): the fused primitives
 /// compute its input.
 pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     let out = body.outputs()[0];
     let root = body.nodes().iter().find(|n| n.output == out)?;
     matches!(
         root.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
     )
     .then_some(root)
 }
 
-/// The kernel of a reduction fusion: the reduction's template
+/// The kernel of a reduction (or softmax) fusion: the reduction's template
 /// (`ops/reduce/mps.metal`) for its layout ([`reduce::layout`], as its
-/// encoder launches it), reading an input whose `operator[]` computes each
-/// element of the reduced value from the fusion's inputs, as the loop
-/// emitter computes an output element. A split reduction's kernel writes
-/// the partials, which the reduction's own final kernel reduces.
+/// encoder launches it), or softmax's (`ops/softmax/mps.metal`), reading an
+/// input whose `operator[]` computes each element of the reduced value from
+/// the fusion's inputs, as the loop emitter computes an output element. A
+/// split reduction's kernel writes the partials, which the reduction's own
+/// final kernel reduces.
 fn reduction(body: &Graph, root: &Node) -> (String, String) {
     let x = root.inputs[0];
     let ty = body.type_of(x);
@@ -122,14 +123,24 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         .unwrap();
         members.push(format!("out{}", e + 1));
     }
-    let op = match root.primitive {
-        Primitive::ReduceSum { .. } => "Add",
-        _ => "Max",
-    };
-    let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive else {
-        unreachable!("a reduction")
-    };
     let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", n + 1 + m + k);
+    let (op, axes) = match &root.primitive {
+        Primitive::ReduceSum { axes } => ("Add", axes),
+        Primitive::ReduceMax { axes } => ("Max", axes),
+        _ => {
+            // Softmax over the last dimension: a threadgroup a row.
+            let args = arg(0, "ulong &count")
+                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
+            let call = format!(
+                "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];\n    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
+            );
+            return named(format!(
+                "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {t} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+                emitter.lines,
+                members.join(", "),
+            ));
+        }
+    };
     let shared = format!("threadgroup typename acc<{t}>::type shared[REDUCE_THREADS];");
     let (out, args, call) = match reduce::layout(ty, axes) {
         reduce::Layout::Rows { split } => {
@@ -185,12 +196,16 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         }
         reduce::Layout::Generic => unreachable!("reduction fusions read fewer than 2^32 elements"),
     };
-    // The kernel and its input type are named by a hash of their source.
-    let source = format!(
+    named(format!(
         "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {out} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
         emitter.lines,
         members.join(", "),
-    );
+    ))
+}
+
+/// A generated kernel's name and `source`, with `NAME` (the kernel's and
+/// its input type's) replaced by a hash of the source.
+fn named(source: String) -> (String, String) {
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());

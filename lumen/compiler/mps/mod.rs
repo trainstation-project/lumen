@@ -32,11 +32,13 @@ unsafe extern "C" {
 }
 
 /// The shared definitions the generated kernels use (functors, conversions,
-/// `FOR_EACH_ELEMENT`, the reduction templates without their kernels).
+/// `FOR_EACH_ELEMENT`, the reduction and softmax templates without their
+/// kernels).
 const PRELUDE: &str = concat!(
     include_str!("../../ops/mps.metal"),
-    "\n#define REDUCE_TEMPLATES_ONLY\n",
+    "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
+    include_str!("../../ops/softmax/mps.metal"),
 );
 
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
@@ -232,6 +234,16 @@ pub(crate) fn encode(
     if let Some(root) = codegen::reduction_root(body) {
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
+        if let Primitive::Softmax { .. } = root.primitive {
+            return crate::ops::softmax::mps::encode_softmax(
+                x,
+                Some(name),
+                label,
+                inputs,
+                output,
+                keep,
+            );
+        }
         return crate::ops::reduce::mps::encode_reduction(
             &root.primitive,
             x,
@@ -259,7 +271,9 @@ pub(crate) fn encode(
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's
 /// split reduction's partials ([`crate::ops::reduce::mps::scratch_bytes`]).
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
-    match codegen::reduction_root(body) {
+    match codegen::reduction_root(body)
+        .filter(|r| !matches!(r.primitive, Primitive::Softmax { .. }))
+    {
         Some(root) => {
             let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive
             else {

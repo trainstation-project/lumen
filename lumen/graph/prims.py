@@ -13,7 +13,7 @@ __all__ = [
     "neg", "exp", "log", "rsqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate",
+    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax",
     "full", "iota",
 ]
 
@@ -134,6 +134,12 @@ def concatenate(operands, dimension):
     """``operands`` one after another along ``dimension``, their other
     dimensions equal (``lax.concatenate``)."""
     return bind("concatenate", *operands, dimension=dimension)
+
+
+def softmax(x, axis):
+    """``exp(x - max) / sum(exp(x - max))`` along ``axis`` (``jax.nn.softmax``,
+    one primitive: one kernel, online softmax, on MPS for the last axis)."""
+    return bind("softmax", x, axis=axis)
 
 
 def full(shape, fill_value, dtype):

@@ -91,6 +91,12 @@ pub enum Primitive {
         label: &'static str,
         body: Graph,
     },
+    /// `exp(x - max) / sum(exp(x - max))` along `axis`: what `softmax`
+    /// traces to, as one primitive (XLA's softmax rewriter matches it so),
+    /// which the MPS compiler rewrites it into and runs as one kernel.
+    Softmax {
+        axis: usize,
+    },
     /// Output `index` (of type `ty`) of its operand's fusion, whose body
     /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
     /// value the fusion's kernel writes too, which no step computes.
@@ -131,6 +137,7 @@ impl Primitive {
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
+            Softmax { .. } => "softmax",
         }
     }
 
@@ -319,6 +326,15 @@ impl Primitive {
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             FusionOutput { ty, .. } => Ok(ty.clone()),
+            Softmax { axis } => {
+                let x = args[0];
+                if !x.dtype.is_float() || *axis >= x.shape.len() {
+                    return err(format!(
+                        "needs a float tensor and a dimension of it, got {x} and {axis}"
+                    ));
+                }
+                Ok(x.clone())
+            }
             Iota {
                 dtype,
                 shape,
@@ -427,6 +443,7 @@ impl fmt::Display for Primitive {
             ),
             Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
             FusionOutput { index, .. } => write!(f, "[index={index}]"),
+            Softmax { axis } => write!(f, "[axis={axis}]"),
             Full {
                 shape,
                 fill_value,

@@ -50,8 +50,13 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     );
     // A reduction fuses the primitives computing its input (XLA's reduce
     // input fusion), whose elements it indexes in 32 bits.
-    let reduction = matches!(node.primitive, ReduceSum { .. } | ReduceMax { .. })
-        && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
+    // Softmax (over its last dimension, the one its kernel takes) likewise.
+    let rows = |axis: usize| axis + 1 == graph.type_of(node.inputs[0]).shape.len();
+    let reduction = match node.primitive {
+        ReduceSum { .. } | ReduceMax { .. } => true,
+        Softmax { axis } => rows(axis),
+        _ => false,
+    } && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     // Metal has no float64; such steps fail when the plan runs.
     let f64 = node
         .inputs
@@ -61,12 +66,12 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || reduction) && !f64
 }
 
-/// Whether `node` is a reduction: a fusion's root, never computed inside
-/// another (its consumers read its output).
+/// Whether `node` is a reduction (or softmax): a fusion's root, never
+/// computed inside another (its consumers read its output).
 fn is_reduction(node: &Node) -> bool {
     matches!(
         node.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
     )
 }
 
@@ -147,8 +152,10 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
+        // Softmax reads its input twice: it hosts nothing.
         if root[first]
             && fusible[first]
+            && !matches!(nodes[first].primitive, Primitive::Softmax { .. })
             && host[first].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {
