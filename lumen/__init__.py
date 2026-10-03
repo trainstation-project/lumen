@@ -87,6 +87,7 @@ __all__ = [
     "mps",
     "ops",
     "profiler",
+    "safetensors",
     # dtypes
     "float16", "bfloat16", "float32", "float64",
     "int8", "int16", "int32", "int64",

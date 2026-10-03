@@ -79,15 +79,15 @@ def source_of(kernel):
 # ---------------------------------------------------------------------
 
 
-def profile_steps(plan, inputs, runs):
+def profile_steps(plan, inputs, runs, device):
     """For each step of ``plan``, its kernels in launch order as ``[name,
-    median GPU us]`` over ``runs`` runs on ``inputs``."""
-    sync = lumen.mps.synchronize if any(str(t.device) == "mps" for t in inputs) else (lambda: None)
-    plan.run(inputs)
+    median GPU us]`` over ``runs`` runs on ``inputs`` on ``device``."""
+    sync = lumen.mps.synchronize if device == "mps" else (lambda: None)
+    plan.run(inputs, device)
     sync()
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         for _ in range(runs):
-            plan.run(inputs)
+            plan.run(inputs, device)
             sync()
     events = prof.events()
     by_parent = {}
@@ -207,21 +207,21 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
-def collect(graph, plan, inputs, title, runs=5):
+def collect(graph, plan, inputs, title, runs=5, device=None):
     """Everything the page shows, as a JSON-able dict: ``graph``, its
-    ``plan`` (fused, for the inputs' device) and its unfused plan, both
-    profiled on ``inputs``."""
-    device = str(inputs[0].device) if inputs else "cpu"
+    ``plan`` (fused, for ``device``, default the inputs') and its unfused
+    plan, both profiled on ``inputs`` on that device."""
+    device = device or (str(inputs[0].device) if inputs else "cpu")
     unfused = Plan(graph)
-    timed = device != "cpu"
-    fused_kernels = profile_steps(plan, inputs, runs) if timed else []
-    unfused_kernels = profile_steps(unfused, inputs, runs) if timed else []
+    timed = device not in ("cpu", "meta")
+    fused_kernels = profile_steps(plan, inputs, runs, device) if timed else []
+    unfused_kernels = profile_steps(unfused, inputs, runs, device) if timed else []
     files = sorted({k["file"] for view in (fused_kernels, unfused_kernels) for step in view for k in _kernel_entries(step) if k["file"]})
     return {
         "title": title,
         "device": device,
         "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "inputs": [type_text(t.dtype, t.shape) for t in inputs],
+        "inputs": [type_text(*graph.type_of(v)) for v in graph.inputs()],
         "graph_text": str(graph),
         "fused_text": str(plan),
         "unfused_text": str(unfused),

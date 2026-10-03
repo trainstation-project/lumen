@@ -217,9 +217,20 @@ impl PyPlan {
             .collect()
     }
 
-    fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
+    /// Run on `inputs`; on `device` (where the inputs must be), or else the
+    /// inputs' device (the CPU without inputs).
+    #[pyo3(signature = (inputs, device = None))]
+    fn run(
+        &self,
+        inputs: Vec<PyRef<'_, PyTensor>>,
+        device: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
-        let outputs = self.inner.run(&inputs).map_err(PyValueError::new_err)?;
+        let outputs = match device {
+            Some(d) if !d.is_none() => self.inner.run_on(&inputs, resolve_device(Some(d))?),
+            _ => self.inner.run(&inputs),
+        }
+        .map_err(PyValueError::new_err)?;
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 

@@ -325,3 +325,72 @@ def test_dump_graph(tmp_path):
     # Another signature, traced for the dump.
     data = f.dump_graph(tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16"))
     assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
+
+
+# ---------------------------------------------------------------------
+# specs and making tensors by running functions (JAX's design)
+# ---------------------------------------------------------------------
+
+
+def test_meta_tensors_have_no_data():
+    x = lumen.empty([2, 3], device="meta")
+    assert (x.device, x.shape, x.dtype) == ("meta", [2, 3], "float32")
+    assert repr(x) == "Tensor(shape=[2, 3], dtype=f32, device=meta)"
+    assert lumen.ones([2, 3], device="meta").device == "meta"  # nothing filled
+    assert lumen.tensor([1.0, 2.0]).to("meta").shape == [2]  # data dropped
+    assert x.transpose(0, 1).contiguous().shape == [3, 2]  # views, no copies
+    for read in (x.tolist, lambda: x.to("cpu"), lambda: x[0, 0], lambda: lumen.to_numpy(x), x.__dlpack__):
+        with pytest.raises(RuntimeError, match="no data"):
+            read()
+
+
+def test_tracing_and_running_on_meta_tensors():
+    def f(x, w):
+        return (x @ w).relu(), x.sum(-1)
+
+    x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
+    assert "dot_general" in str(lumen.make_graph(f)(x, w))
+    # A compiled function runs nothing on meta tensors: meta results, of
+    # the types real ones would have (shape inference).
+    y, s = lumen.compile(f)(x, w)
+    assert (y.device, y.shape, s.shape) == ("meta", [8, 16], [8])
+    assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
+
+
+def test_compiled_init_runs_once_per_call(tmp_path):
+    calls = []
+
+    def init():
+        calls.append(1)
+        return lumen.full([2, 3], 0.5) + lumen.arange(3)
+
+    make = lumen.compile(init)
+    a, b = make(), make()
+    assert calls == [1]  # traced once; each call runs the plan into new storage
+    assert a.tolist() == [[0.5, 1.5, 2.5]] * 2 and not a.shares_storage_with(b)
+    data = make.dump_graph(tmp_path / "init.html")
+    assert data["inputs"] == [] and data["device"] == "cpu"
+
+
+@pytest.mark.mps
+def test_compiled_init_on_device(tmp_path):
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    make = lumen.compile(lambda: (lumen.ones([4, 8]) * 2.0, lumen.arange(8)), device="mps")
+    w, i = make()
+    assert (w.device, i.device) == ("mps", "mps")
+    assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
+    # Tensor arguments must be on the compiled function's device.
+    with pytest.raises(ValueError, match="one device"):
+        lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2]))
+    # Profiled on the device it creates tensors on.
+    data = make.dump_graph(tmp_path / "init.html")
+    assert data["device"] == "mps" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+    # Meta tensors trace a dump with no data; it is profiled on `device`.
+    f = lumen.compile(lambda x, w: x @ w)
+    meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
+    data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
+    assert data["device"] == "mps" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
+    assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])

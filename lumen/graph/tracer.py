@@ -65,16 +65,33 @@ def _signature(args):
     return tuple((a.dtype, tuple(a.shape), str(a.device)) if isinstance(a, Tensor) else ("static", a) for a in args)
 
 
-def compile(fn):
+def _device(args, device):
+    """Where a function of ``args`` runs: ``device``, or the first tensor
+    argument's, or the CPU."""
+    if device is not None:
+        return str(device)
+    return next((str(a.device) for a in args if isinstance(a, Tensor)), "cpu")
+
+
+def compile(fn, device=None):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
-    and compiled into a static plan for the tensor arguments' device on its
-    first call with each input signature (the tensor arguments' dtypes,
-    shapes and devices, and the values of the other arguments), which every
-    call then runs. Results are on the first tensor argument's device.
+    and compiled into a static plan for ``device`` on its first call with
+    each input signature (the tensor arguments' dtypes, shapes and devices,
+    and the values of the other arguments), which every call then runs.
+    ``device`` defaults to the first tensor argument's (the CPU without
+    any); tensor arguments must be on it, and results are. On the meta
+    device nothing runs: results are meta tensors of the right types.
+
+    Tensors are made by running a function (JAX: ``jax.jit(init)``): the
+    plan writes its outputs into new storage, so a function of no tensors
+    creates them where they are used, once::
+
+        params = lumen.compile(init, device="mps")()
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
+    compile_device = device  # dump_graph's own `device` shadows it
     plans = {}
     latest = []
 
@@ -82,34 +99,39 @@ def compile(fn):
         key = _signature(args)
         if key not in plans:
             graph, single = _trace(fn, args)
-            device = next((a.device for a in args if isinstance(a, Tensor)), None)
-            plans[key] = graph, Plan(graph, device), single
+            plans[key] = graph, Plan(graph, _device(args, device)), single
         latest[:] = [key]
         return plans[key]
 
     @functools.wraps(fn)
     def compiled(*args):
         _, plan, single = entry(args)
-        outputs = plan.run([a for a in args if isinstance(a, Tensor)])
+        outputs = plan.run([a for a in args if isinstance(a, Tensor)], _device(args, device))
         return outputs[0] if single else tuple(outputs)
 
-    def dump_graph(path, *args, runs=5, json_path=None, fragment=False):
+    def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
-        latest call's) to ``path`` as an HTML page, profiled over ``runs``
-        runs on new tensors of the signature's types; ``json_path`` also
-        gets the page's data, which is returned. ``fragment`` leaves out the
-        doctype, for a host that wraps the page (a published artifact)."""
+        latest call's; meta tensors trace it without data) to ``path`` as an
+        HTML page, compiled for and profiled on ``device`` (default: the
+        function's) over ``runs`` runs on new tensors of the signature's
+        types; ``json_path`` also gets the page's data, which is returned.
+        ``fragment`` leaves out the doctype, for a host that wraps the page
+        (a published artifact)."""
         if args:
             entry(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         key = latest[0]
         graph, plan, _ = plans[key]
+        tensors = [k for k in key if k[0] != "static"]
+        target = str(device or compile_device or next((d for _, _, d in tensors), "cpu"))
+        if target != next((d for _, _, d in tensors), target):
+            plan = Plan(graph, target)
         # Kernels do not depend on the values: profile on ones.
-        inputs = [Tensor.ones(list(shape), dtype, device) for dtype, shape, device in (k for k in key if k[0] != "static")]
+        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape, _ in tensors]
         from lumen.graph import viz
 
-        data = viz.collect(graph, plan, inputs, title=fn.__name__, runs=runs)
+        data = viz.collect(graph, plan, inputs, title=fn.__name__, runs=runs, device=target)
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
@@ -119,7 +141,8 @@ def compile(fn):
 
 def make_graph(fn):
     """A function returning the graph ``fn`` traces to on the given
-    arguments (``jax.make_jaxpr``); ``print`` it to read it."""
+    arguments (``jax.make_jaxpr``), which may be meta tensors; ``print`` it
+    to read it."""
 
     @functools.wraps(fn)
     def graph(*args):

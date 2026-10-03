@@ -750,3 +750,63 @@ mod cuda {
         assert_eq!(b.to_vec::<f64>(), vec![0.0, 1.0, 2.0, 3.0]);
     }
 }
+
+mod meta {
+    //! The meta device: tensors with a shape, dtype and strides but no data.
+
+    use crate::{DType, Device, Tensor, TensorOptions};
+
+    fn meta(dtype: DType) -> TensorOptions {
+        TensorOptions::new().dtype(dtype).device(Device::Meta)
+    }
+
+    #[test]
+    fn factories_and_views_need_no_data() {
+        for t in [
+            Tensor::zeros(&[2, 3], meta(DType::F32)),
+            Tensor::ones(&[2, 3], meta(DType::F32)),
+            Tensor::full(&[2, 3], 7, meta(DType::F32)),
+        ] {
+            assert_eq!((t.device(), t.shape()), (Device::Meta, &[2, 3][..]));
+        }
+        let t = Tensor::arange(5, meta(DType::I64));
+        assert_eq!(t.shape(), [5]);
+        let t = Tensor::zeros(&[2, 3], meta(DType::F32));
+        let view = t.transpose(0, 1);
+        assert!(view.shares_storage_with(&t));
+        let packed = view.contiguous::<f32>();
+        assert_eq!(
+            (packed.device(), packed.shape()),
+            (Device::Meta, &[3, 2][..])
+        );
+        assert!(packed.is_contiguous());
+        t.fill_(1.0f32).zero_();
+        t.set(&[0, 0], 1.0f32);
+        assert_eq!(
+            t.to_string(),
+            "Tensor(shape=[2, 3], dtype=f32, device=meta)"
+        );
+    }
+
+    #[test]
+    fn to_meta_drops_the_data() {
+        let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], DType::F32).reshape(&[3, 1]);
+        let m = t.to(Device::Meta);
+        assert_eq!(
+            (m.device(), m.shape(), m.strides()),
+            (Device::Meta, &[3, 1][..], &[1, 1][..])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "meta tensors have no data")]
+    fn reading_data_panics() {
+        Tensor::zeros(&[2], meta(DType::F32)).to_vec::<f32>();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot copy a meta tensor to cpu")]
+    fn copying_out_panics() {
+        Tensor::zeros(&[2], meta(DType::F32)).to(Device::Cpu);
+    }
+}

@@ -171,7 +171,7 @@ pub(crate) fn memory_enabled() -> bool {
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn device_enabled(device: Device) -> bool {
     let bit = match device {
-        Device::Cpu => return false,
+        Device::Cpu | Device::Meta => return false,
         Device::Cuda(_) => CUDA,
         Device::Mps => MPS,
     };

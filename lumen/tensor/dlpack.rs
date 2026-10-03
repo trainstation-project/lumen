@@ -266,6 +266,11 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
 }
 
 fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
+    if t.device() == Device::Meta {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "meta tensors have no data to export",
+        ));
+    }
     let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
     // SAFETY: the capsule owns the managed tensor, and its destructor frees
     // it unless a consumer takes it.
@@ -298,6 +303,7 @@ fn dl_device(device: Device) -> DLDevice {
         Device::Cpu => (K_DL_CPU, 0),
         Device::Cuda(index) => (K_DL_CUDA, index as i32),
         Device::Mps => (K_DL_METAL, 0),
+        Device::Meta => unreachable!("meta tensors are not exported (to_capsule)"),
     };
     DLDevice {
         device_type,

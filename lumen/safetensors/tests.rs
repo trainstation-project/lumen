@@ -341,3 +341,26 @@ fn tensors_load_onto_mps() {
         .collect();
     assert_eq!(serialize(&named(&on_mps), None).unwrap(), bytes);
 }
+
+#[test]
+fn meta_tensors_load_from_the_header_and_do_not_save() {
+    let tensors = tensors();
+    let bytes = serialize(&named(&tensors), None).unwrap();
+    let loaded = deserialize(&bytes, Device::Meta).unwrap();
+    assert!(loaded.iter().all(|(_, t)| t.device() == Device::Meta));
+    let by_name: BTreeMap<_, _> = loaded.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    for (name, t) in &tensors {
+        assert_eq!(
+            (
+                by_name[name.as_str()].dtype(),
+                by_name[name.as_str()].shape()
+            ),
+            (t.dtype(), t.shape())
+        );
+    }
+    let m = Tensor::zeros(&[2], TensorOptions::new().device(Device::Meta));
+    assert_err(
+        serialize(&[("m", &m)], None),
+        |e| matches!(e, Error::MetaTensor(n) if n == "m"),
+    );
+}

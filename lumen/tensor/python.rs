@@ -2,7 +2,7 @@
 //! `lumen._C` by [`crate::python`].
 
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
@@ -162,7 +162,18 @@ fn tensor_from_flat(
 // scalar / list conversion back to Python
 // ---------------------------------------------------------------------
 
+/// Errors for a meta tensor, which has no data to read.
+fn has_data(t: &Tensor) -> PyResult<()> {
+    if t.device() == core::Device::Meta {
+        return Err(PyRuntimeError::new_err(
+            "meta tensors have no data: make the tensor by running a function (lumen.compile) or loading it",
+        ));
+    }
+    Ok(())
+}
+
 fn scalar_to_py(py: Python<'_>, t: &Tensor, index: &[usize]) -> PyResult<Py<PyAny>> {
+    has_data(t)?;
     Ok(match t.dtype() {
         DType::F32 => t.get::<f32>(index).into_py_any(py)?,
         DType::F64 => t.get::<f64>(index).into_py_any(py)?,
@@ -494,7 +505,11 @@ impl PyTensor {
     /// This tensor on `device` (a string or `lumen.device`); returns a view
     /// of the same storage if it is already there (PyTorch: `Tensor.to`).
     fn to(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(Self::wrap(self.inner.to(resolve_device(Some(device))?)))
+        let device = resolve_device(Some(device))?;
+        if device != core::Device::Meta {
+            has_data(&self.inner)?;
+        }
+        Ok(Self::wrap(self.inner.to(device)))
     }
 
     /// Set every element to `value` in place and return the tensor
@@ -535,6 +550,7 @@ impl PyTensor {
 
     /// Nested-list copy of the logical contents (row-major).
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        has_data(&self.inner)?;
         let shape = self.inner.shape();
         match self.inner.dtype() {
             DType::F32 => build_nested(py, &self.inner.to_vec::<f32>(), shape),

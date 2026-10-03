@@ -10,6 +10,18 @@ mod tests;
 
 pub use cpu::CpuAllocator;
 
+/// The meta device's allocator: no memory. Its pointers are dangling and
+/// never dereferenced (meta tensors have no data to read or write).
+pub struct MetaAllocator;
+
+impl Allocator for MetaAllocator {
+    fn allocate(&self, _nbytes: usize) -> NonNull<u8> {
+        NonNull::dangling()
+    }
+
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _nbytes: usize) {}
+}
+
 use std::ptr::NonNull;
 use std::sync::{Arc, OnceLock};
 
@@ -125,6 +137,11 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
             return Ok(Arc::new(mps::get()));
             #[cfg(not(lumen_mps_linked))]
             unreachable!("device::mps::is_available() is false without Metal")
+        }
+
+        Device::Meta => {
+            static META: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+            Ok(Arc::clone(META.get_or_init(|| Arc::new(MetaAllocator))))
         }
 
         Device::Cuda(index) => {

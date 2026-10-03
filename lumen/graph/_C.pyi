@@ -32,4 +32,6 @@ class Plan:
     def steps(self) -> list[dict[str, Any]]:
         """Each step, as ``Graph.nodes``, with ``inputs`` and ``output`` as
         ``(buffer, dtype, shape)``."""
-    def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...
+    def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
+        """Run on ``device`` (where the inputs must be), or else the inputs'
+        device (the CPU without inputs)."""

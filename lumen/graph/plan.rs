@@ -177,6 +177,13 @@ impl Plan {
     /// the steps are Metal kernels ([`crate::ops::mps`]); elsewhere they run on
     /// the host, with device inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
+        self.run_on(inputs, inputs.first().map_or(Device::Cpu, Tensor::device))
+    }
+
+    /// [`run`](Self::run) on `device`, where the inputs must be: for plans
+    /// without inputs (creating tensors) on a device. On the meta device
+    /// nothing runs: the outputs are meta tensors.
+    pub fn run_on(&self, inputs: &[Tensor], device: Device) -> Result<Vec<Tensor>, String> {
         if inputs.len() != self.inputs.len() {
             return Err(format!(
                 "the plan takes {} inputs, got {}",
@@ -192,7 +199,6 @@ impl Plan {
                 ));
             }
         }
-        let device = inputs.first().map_or(Device::Cpu, Tensor::device);
         if let Some(t) = inputs.iter().find(|t| t.device() != device) {
             return Err(format!(
                 "inputs must be on one device, got {device} and {}",
@@ -218,6 +224,16 @@ impl Plan {
                     step.primitive.name()
                 ));
             }
+        }
+        if device == Device::Meta {
+            // Nothing to compute: outputs of the right types, without data
+            // (shape inference).
+            let meta = |ty: &TensorType| {
+                let options = TensorOptions::new().dtype(ty.dtype).device(Device::Meta);
+                // SAFETY: meta tensors have no data to read.
+                unsafe { Tensor::empty(&ty.shape, options) }
+            };
+            return Ok(self.outputs.iter().map(meta).collect());
         }
         let _run = crate::profiler::record_op(op_name!("plan"), || {
             self.inputs.iter().map(|ty| ty.shape.clone()).collect()

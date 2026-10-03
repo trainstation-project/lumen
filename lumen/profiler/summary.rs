@@ -226,7 +226,7 @@ impl Profile {
                 match e.device {
                     Device::Cuda(_) => cuda = true,
                     Device::Mps => mps = true,
-                    Device::Cpu => {}
+                    Device::Cpu | Device::Meta => {}
                 }
             }
         }

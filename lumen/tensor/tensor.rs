@@ -177,6 +177,9 @@ impl Tensor {
     /// [`copy_h2d`]. Same data-race caveat as [`set`](Self::set).
     fn write<T: Element>(&self, data: &[T]) {
         self.check_dtype::<T>();
+        if self.device() == Device::Meta {
+            return;
+        }
         if self.device() != Device::Cpu {
             return copy_h2d(self, &Self::host(data));
         }
@@ -390,6 +393,10 @@ impl Tensor {
         if self.is_contiguous() {
             return self.clone();
         }
+        if self.device() == Device::Meta {
+            // SAFETY: meta storage holds no data.
+            return unsafe { self.empty_like() };
+        }
         let values = self.to_vec::<T>();
         // SAFETY: the write below covers every element.
         let t = unsafe { self.empty_like() };
@@ -416,17 +423,22 @@ impl Tensor {
         if device == self.device() {
             return self.clone();
         }
+        assert!(
+            self.device() != Device::Meta,
+            "cannot copy a meta tensor to {device}: meta tensors have no data"
+        );
         if device != Device::Cpu && self.device() != Device::Cpu {
             return self.copy_to(Device::Cpu).copy_to(device);
         }
         let span = self.span();
-        // SAFETY: the copy below covers every element of the span.
+        // SAFETY: the copy below covers every element of the span (none, on
+        // the meta device).
         let options = TensorOptions::new().dtype(self.dtype).device(device);
         let out = unsafe { Self::empty(&span.shape, options) };
-        if device == Device::Cpu {
-            copy_d2h(&out, &span);
-        } else {
-            copy_h2d(&out, &span);
+        match device {
+            Device::Meta => {}
+            Device::Cpu => copy_d2h(&out, &span),
+            _ => copy_h2d(&out, &span),
         }
         Tensor {
             storage: out.storage,
@@ -446,6 +458,7 @@ impl Tensor {
 
     /// [`to_vec`](Self::to_vec) without the profiler record or dtype check.
     fn values<T: Element>(&self) -> Vec<T> {
+        assert!(self.device() != Device::Meta, "meta tensors have no data");
         let mut out = Vec::with_capacity(self.numel());
         if self.numel() == 0 {
             return out;
@@ -574,6 +587,13 @@ pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
 
 impl std::fmt::Display for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.device() == Device::Meta {
+            return write!(
+                f,
+                "Tensor(shape={:?}, dtype={}, device=meta)",
+                self.shape, self.dtype
+            );
+        }
         match self.dtype {
             DType::F32 => self.fmt_typed::<f32>(f),
             DType::F64 => self.fmt_typed::<f64>(f),

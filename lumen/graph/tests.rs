@@ -349,6 +349,31 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     assert_eq!(plan.workspace_bytes(), 0);
 }
 
+#[test]
+fn plans_run_on_meta_tensors_compute_nothing() {
+    let g = mlp();
+    let meta = |t: Tensor| t.to(crate::Device::Meta);
+    let inputs = [
+        meta(data(&[4, 8], 1)),
+        meta(data(&[8, 16], 2)),
+        meta(data(&[16, 3], 3)),
+    ];
+    let outputs = Plan::compile(&g)
+        .run_on(&inputs, crate::Device::Meta)
+        .unwrap();
+    let out = &outputs[0];
+    assert_eq!(
+        (out.device(), out.shape(), out.dtype()),
+        (crate::Device::Meta, &[4, 3][..], DType::F32)
+    );
+    // Inputs must be on the device asked for.
+    assert!(
+        Plan::compile(&g)
+            .run_on(&inputs, crate::Device::Cpu)
+            .is_err()
+    );
+}
+
 /// Plans on MPS, whose steps are Metal kernels, against the reference
 /// executor, for every primitive and dtype (MPS has no float64).
 #[cfg(lumen_mps_linked)]

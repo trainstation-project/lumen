@@ -44,6 +44,8 @@ def test_files_and_safe_open(tmp_path):
         assert f.offset_keys()[0] in ("float64", "int64", "uint64")  # the widest first
         assert f.metadata() == {"format": "lumen"}
         assert f.get_tensor("float32").tolist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 0.0]]
+        meta = f.get_tensor("bfloat16", device="meta")  # the header only
+        assert (meta.device, meta.shape, meta.dtype) == ("meta", [2, 3], "bfloat16")
         with pytest.raises(KeyError, match="missing"):
             f.get_tensor("missing")
     with pytest.raises(ValueError, match="closed"):
@@ -74,6 +76,8 @@ def test_save_checks(tmp_path):
         save({"a": w, "b": w})
     with pytest.raises(ValueError, match="not contiguous"):
         save({"t": w.transpose(0, 1)})
+    with pytest.raises(ValueError, match="meta device"):
+        save({"m": lumen.empty([2], device="meta")})
 
 
 def test_load_errors(tmp_path):

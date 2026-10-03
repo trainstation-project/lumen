@@ -23,7 +23,7 @@ fn pid(device: Device) -> u64 {
     match device {
         Device::Cpu => std::process::id().into(),
         Device::Cuda(i) => i as u64,
-        Device::Mps => 0,
+        Device::Mps | Device::Meta => 0,
     }
 }
 
@@ -33,6 +33,7 @@ fn device_type(device: Device) -> (i32, i64) {
         Device::Cpu => (0, -1),
         Device::Cuda(i) => (1, i as i64),
         Device::Mps => (13, 0),
+        Device::Meta => (9, 0),
     }
 }
 
@@ -41,6 +42,7 @@ fn process_name(device: Device) -> String {
         Device::Cpu => "CPU".to_owned(),
         Device::Cuda(i) => format!("CUDA {i}"),
         Device::Mps => "MPS".to_owned(),
+        Device::Meta => "Meta".to_owned(),
     }
 }
 
