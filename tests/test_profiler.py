@@ -208,3 +208,41 @@ def test_kernels_record_their_steps_types():
     kernels = [e for e in prof.events() if e["kind"] == "gpu"]
     assert kernels and all(k["outputs"] == [("float32", [4, 8])] for k in kernels)
     assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_steps_record_their_accumulation_dtypes(device, tmp_path):
+    """With record_shapes each plan step records its inputs', outputs' and
+    accumulation dtypes (``accum``): a dot's and a sum's accum_dtype, a
+    max's dtype, a fusion's reductions'; none for elementwise steps. Its
+    kernels on the device carry them too, and the trace has them."""
+    try:
+        a = lumen.ones([4, 8], device=device).to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    b = lumen.ones([8, 16], device=device).to(dtype="bfloat16")
+    f = lumen.compile(lambda a, b: ((a @ b).to(dtype="bfloat16").sum(-1), a.amax(-1), a * 2.0))
+    f(a, b)
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities, record_shapes=True) as prof:
+        f(a, b)
+        if device == "mps":
+            lumen.mps.synchronize()
+    ops = {e["name"]: e for e in prof.events() if e["kind"] == "op"}
+    dot = ops["dot_general"]
+    assert dot["inputs"] == [("bfloat16", [4, 8]), ("bfloat16", [8, 16])]
+    assert dot["accum"] == ["float32"] and dot["outputs"] == [("float32", [4, 16])]
+    (total,) = [e for n, e in ops.items() if n.endswith("reduce_sum")]
+    assert total["accum"] == ["float32"] and total["outputs"] == [("float32", [4])]
+    (peak,) = [e for n, e in ops.items() if n.endswith("reduce_max")]
+    assert peak["accum"] == ["bfloat16"]
+    (scaled,) = [e for n, e in ops.items() if n.endswith("mul") and "reduce" not in n]
+    assert scaled["accum"] == []
+    if device == "mps":
+        kernels = [e for e in prof.events() if e["kind"] == "gpu"]
+        by_parent = {k["parent"]: k for k in kernels}
+        assert by_parent[dot["id"]]["accum"] == ["float32"]
+        path = tmp_path / "trace.json"
+        prof.export_chrome_trace(str(path))
+        text = path.read_text()
+        assert '"Accum type":["f32"]' in text and '"Accum type":["bf16"]' in text

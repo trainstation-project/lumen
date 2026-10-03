@@ -150,8 +150,11 @@ class profile:
         """Every recorded event as a dict (``name``, ``kind`` = op /
         user_range / memory / gpu, ``start_us``, ``duration_us``, ``thread``,
         ``parent``, ``device``, ``inputs`` and ``outputs`` (with
-        ``record_shapes``: each a list of ``(dtype, shape)``), ``bytes``,
-        ...), by start time."""
+        ``record_shapes``: each a list of ``(dtype, shape)``), ``accum``
+        (with ``record_shapes``: the dtypes the op accumulates in, a dot's
+        or sum's ``accum_dtype``, a max's or softmax's dtype, each of a
+        fusion's reductions'), ``bytes``, ...), by start time. A gpu event
+        has the types of the op that issued it."""
         return self._profile().events()
 
     def key_averages(self):

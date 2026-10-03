@@ -172,8 +172,9 @@ fn types_are_recorded_only_with_record_shapes() {
     assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
 }
 
-/// Device work shows the types of the op that issued it, in the events and
-/// on the device side of the trace.
+/// Device work shows the types of the op that issued it (inputs, outputs
+/// and accumulation dtypes), in the events and on the device side of the
+/// trace.
 #[test]
 fn device_events_have_their_ops_types() {
     let config = ProfilerConfig {
@@ -185,12 +186,14 @@ fn device_events_have_their_ops_types() {
     let p = profile(config, || {
         let mut op = record_op("lumen::matmul", || vec![ty(&[2, 3]), ty(&[3, 4])]);
         op.outputs(|| vec![ty(&[2, 4])]);
+        op.accum(|| vec![DType::F32]);
         let t = now_ns();
         record_gpu("matmul_kernel", Device::Cuda(0), t, t + 1000);
     });
     let kernel = one(&p, "matmul_kernel");
     assert_eq!(kernel.inputs, [ty(&[2, 3]), ty(&[3, 4])]);
     assert_eq!(kernel.outputs, [ty(&[2, 4])]);
+    assert_eq!(kernel.accum, [DType::F32]);
     let trace = p.chrome_trace();
     let line = trace
         .split("},{")
@@ -204,6 +207,7 @@ fn device_events_have_their_ops_types() {
         line.contains("\"Output Dims\":[[2,4]],\"Output type\":[\"f16\"]"),
         "{line}"
     );
+    assert!(line.contains("\"Accum type\":[\"f32\"]"), "{line}");
 }
 
 #[test]
