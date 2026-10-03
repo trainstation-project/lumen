@@ -274,6 +274,30 @@ impl Tensor {
         }
     }
 
+    /// A contiguous `dtype` view of `shape` at `byte_offset` into this
+    /// contiguous byte tensor (a plan's workspace), which must hold it at an
+    /// offset aligned for `dtype`.
+    pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
+        let start = self.offset * self.dtype.size_of() + byte_offset;
+        let size = dtype.size_of();
+        let numel: usize = shape.iter().product();
+        assert!(
+            self.is_contiguous() && start.is_multiple_of(size),
+            "an aligned view"
+        );
+        assert!(
+            byte_offset + numel * size <= self.nbytes(),
+            "a view within the tensor"
+        );
+        Tensor {
+            storage: self.storage.clone(),
+            dtype,
+            shape: shape.to_vec(),
+            strides: contiguous_strides(shape),
+            offset: start / size,
+        }
+    }
+
     pub fn is_contiguous(&self) -> bool {
         self.strides == contiguous_strides(&self.shape)
     }
@@ -563,6 +587,51 @@ impl Tensor {
         let _op = crate::profiler::record_op(op_name!("fill_"), || vec![self.shape.clone()]);
         crate::ops::fill::fill_op(self, value.into());
         self
+    }
+
+    /// Copy `src`'s elements (of this view's dtype and shape, on any
+    /// device) into this view (PyTorch: `Tensor::copy_`). Writes through to
+    /// aliases, with the same data-race caveat as [`set`](Self::set).
+    pub fn copy_(&self, src: &Tensor) -> Result<&Self, String> {
+        let _op = crate::profiler::record_op(op_name!("copy_"), || vec![self.shape.clone()]);
+        if src.dtype != self.dtype || src.shape != self.shape {
+            return Err(format!(
+                "copy_: cannot copy {}{:?} into {}{:?}",
+                src.dtype, src.shape, self.dtype, self.shape
+            ));
+        }
+        if self.device() == Device::Meta || src.device() == Device::Meta {
+            return Err("copy_: meta tensors have no data".into());
+        }
+        let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
+        if self.is_contiguous() {
+            copy_h2d(self, &host);
+            return Ok(self);
+        }
+        if !matches!(self.device(), Device::Cpu | Device::Mps) {
+            return Err(format!(
+                "copy_: a strided view on {} is not supported",
+                self.device()
+            ));
+        }
+        // A strided view of host-accessible memory: element by element.
+        self.storage.synchronize();
+        let size = self.dtype.size_of();
+        let mut k = 0;
+        for_each_index(&self.shape, |idx| {
+            let at = flat_offset(&idx, &self.strides) * size;
+            // SAFETY: the element is in bounds of the view's storage (host
+            // accessible), and of the host tensor's `numel` elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    host.data_ptr().add(k * size),
+                    self.data_ptr().add(at),
+                    size,
+                )
+            };
+            k += 1;
+        });
+        Ok(self)
     }
 
     /// Set every element to zero (PyTorch: `Tensor::zero_`).

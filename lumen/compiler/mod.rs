@@ -26,6 +26,12 @@ pub struct Options {
     /// Inputs the caller donates (JAX: `donate_argnums`; see
     /// [`PlanOptions::donate`]).
     pub donate: Vec<usize>,
+    /// An executable that owns its memory, these inputs its parameters
+    /// ([`PlanOptions::parameters`]).
+    pub parameters: Option<Vec<bool>>,
+    /// Parameters not yet placed, which the compiler may place side by
+    /// side in blocks ([`Plan::packed`](crate::graph::Plan)).
+    pub packable: Vec<bool>,
 }
 
 impl Default for Options {
@@ -33,6 +39,8 @@ impl Default for Options {
         Options {
             fuse: true,
             donate: Vec::new(),
+            parameters: None,
+            packable: Vec::new(),
         }
     }
 }
@@ -53,6 +61,8 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
             let plan = PlanOptions {
                 scratch: None,
                 donate: options.donate.clone(),
+                parameters: options.parameters.clone(),
+                views: Vec::new(),
             };
             Ok(Plan::compile_with(graph, &plan))
         }

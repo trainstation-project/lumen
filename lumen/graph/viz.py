@@ -79,15 +79,16 @@ def source_of(kernel):
 # ---------------------------------------------------------------------
 
 
-def profile_steps(plan, inputs, runs, device):
+def profile_steps(plan, run, runs, device):
     """For each step of ``plan``, its kernels in launch order as ``[name,
-    median GPU us]`` over ``runs`` runs on ``inputs`` on ``device``."""
+    median GPU us]`` over ``runs`` calls of ``run`` (running it) on
+    ``device``."""
     sync = lumen.mps.synchronize if device == "mps" else (lambda: None)
-    plan.run(inputs, device)
+    run()
     sync()
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         for _ in range(runs):
-            plan.run(inputs, device)
+            run()
             sync()
     events = prof.events()
     by_parent = {}
@@ -212,17 +213,20 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
-def collect(graph, plan, inputs, title, runs=5, device=None):
+def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
     """Everything the page shows, as a JSON-able dict: ``graph``, its
     ``plan`` (fused, for ``device``, default the inputs') and its unfused
-    plan, both profiled on ``inputs`` on that device."""
+    plan, both profiled on ``inputs`` on that device (the graph's, then any
+    the plan adds), ``plan`` by ``run`` if given (else ``plan.run``)."""
     device = device or (str(inputs[0].device) if inputs else "cpu")
     # The unfused plan for the same device: its steps are the graph's
     # primitives (after the device's rewrites), each its own kernel.
     unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False)
     timed = device not in ("cpu", "meta")
-    fused_kernels = profile_steps(plan, inputs, runs, device) if timed else []
-    unfused_kernels = profile_steps(unfused, inputs, runs, device) if timed else []
+    graph_inputs = inputs[: len(graph.inputs())]
+    run = run or (lambda: plan.run(inputs, device))
+    fused_kernels = profile_steps(plan, run, runs, device) if timed else []
+    unfused_kernels = profile_steps(unfused, lambda: unfused.run(graph_inputs, device), runs, device) if timed else []
     files = sorted({k["file"] for view in (fused_kernels, unfused_kernels) for step in view for k in _kernel_entries(step) if k["file"]})
     return {
         "title": title,

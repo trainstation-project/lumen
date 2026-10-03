@@ -1,6 +1,6 @@
-//! The MPS graph compiler: dot merging (with fusion, which runs the
-//! concatenations it adds; [`merge_dots`]), dot canonicalization
-//! ([`canonicalize_dots`]),
+//! The MPS graph compiler: dot merging into blocks of parameters (with
+//! fusion, which reads the merged dots' slices; [`merge_dots`]), dot
+//! canonicalization ([`canonicalize_dots`]),
 //! then loop fusion ([`fusion`]) into kernels generated as Metal source
 //! ([`codegen`]), compiled together into one library when the graph is
 //! compiled, then the fused graph's [`Plan`], with the workspace scratch
@@ -24,6 +24,7 @@ use crate::graph::plan::Step;
 use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order};
 use crate::ops::mps::{elementwise_grid, launch_step, scratch_bytes, u32_arg};
+use crate::tensor::contiguous_strides;
 
 unsafe extern "C" {
     // In lumen/ops/mps.mm.
@@ -37,13 +38,12 @@ const PRELUDE: &str = include_str!("../../ops/mps.metal");
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
-    let merged;
-    let graph = if options.fuse {
-        merged = merge_dots(graph);
-        &merged
-    } else {
-        graph
+    // Merging needs fusion: the merged dot's readers read its slices.
+    let (merged, packed) = match options.fuse {
+        true => merge_dots(graph, &options.packable),
+        false => (graph.clone(), Vec::new()),
     };
+    let graph = &merged;
     let graph = canonicalize_dots(graph);
     let mut kernels = BTreeMap::new();
     let fused = if options.fuse {
@@ -67,11 +67,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             return Err(format!("compiling the fused MPS kernels failed ({status})"));
         }
     }
+    // The blocks it added are parameters too.
+    let parameters = options.parameters.clone().map(|mut p| {
+        p.resize(merged.inputs().len(), true);
+        p
+    });
     let plan = PlanOptions {
         scratch: Some(scratch_bytes),
         donate: options.donate.clone(),
+        parameters,
+        views: dot_views(&fused),
     };
-    Ok(Plan::compile_with(&fused, &plan))
+    let mut plan = Plan::compile_with(&fused, &plan);
+    plan.packed = packed;
+    Ok(plan)
 }
 
 /// `graph` with each dot_general whose operands' dimensions do not collapse
@@ -105,12 +114,26 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
                         .apply(t, &[*input])
                         .expect("a permutation of its dimensions");
                 };
-                if collapsed(lhs, &order.lhs, order.lhs_split).is_none() {
+                if collapsed(
+                    lhs,
+                    &contiguous_strides(&lhs.shape),
+                    &order.lhs,
+                    order.lhs_split,
+                )
+                .is_none()
+                {
                     transposed(&mut inputs[0], &order.lhs);
                     let (i, j) = order.lhs_split;
                     (lb, lc) = ((0..i).collect(), (j..order.lhs.len()).collect());
                 }
-                if collapsed(rhs, &order.rhs, order.rhs_split).is_none() {
+                if collapsed(
+                    rhs,
+                    &contiguous_strides(&rhs.shape),
+                    &order.rhs,
+                    order.rhs_split,
+                )
+                .is_none()
+                {
                     transposed(&mut inputs[1], &order.rhs);
                     let (i, j) = order.rhs_split;
                     (rb, rc) = ((0..i).collect(), (i..j).collect());
@@ -131,6 +154,42 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// The slices of `graph` its dots read in place, as strided views of the
+/// sliced value ([`PlanOptions::views`]; the matmul kernels take any
+/// operand strides): those read by dots alone, each of which reads it in
+/// matmul form at those strides, that are not outputs or of a value that
+/// is such a view itself.
+fn dot_views(graph: &Graph) -> Vec<Var> {
+    let nodes = graph.nodes();
+    let mut views = Vec::new();
+    for node in nodes {
+        let (Primitive::Slice { .. }, &[x]) = (&node.primitive, node.inputs.as_slice()) else {
+            continue;
+        };
+        let (v, ty) = (node.output, graph.type_of(node.output));
+        if graph.outputs().contains(&v) || views.contains(&x) {
+            continue;
+        }
+        let strides = contiguous_strides(&graph.type_of(x).shape);
+        let mut readers = nodes.iter().filter(|n| n.inputs.contains(&v)).peekable();
+        let read = readers.peek().is_some();
+        let in_place = readers.all(|n| {
+            let Primitive::DotGeneral { .. } = n.primitive else {
+                return false;
+            };
+            let rank = |k: usize| graph.type_of(n.inputs[k]).shape.len();
+            let order = matmul_order(&n.primitive, rank(0), rank(1));
+            let as_lhs = collapsed(ty, &strides, &order.lhs, order.lhs_split).is_some();
+            let as_rhs = collapsed(ty, &strides, &order.rhs, order.rhs_split).is_some();
+            (n.inputs[0] != v || as_lhs) && (n.inputs[1] != v || as_rhs)
+        });
+        if read && in_place {
+            views.push(v);
+        }
+    }
+    views
 }
 
 /// The Metal source of the kernel a fusion with `body` runs, as

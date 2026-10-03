@@ -386,11 +386,48 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     assert_eq!(plan.workspace_bytes(), 0);
 }
 
+/// A plan that owns its memory: the input that is not a parameter and
+/// the outputs in the workspace (an output that is that input in its
+/// place, one that is a parameter the parameter); each run copies the
+/// input in and overwrites the outputs, views of the workspace.
+#[test]
+fn owned_plans_place_inputs_and_outputs_in_the_workspace() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4]));
+    let w = g.input(ty(DType::F32, &[4]));
+    let y = g.apply(Mul, &[x, w]).unwrap();
+    g.set_outputs(&[y, x, w]).unwrap();
+    let options = super::PlanOptions {
+        parameters: Some(vec![false, true]),
+        ..Default::default()
+    };
+    let plan = Plan::compile_with(&g, &options);
+    assert!(matches!(plan.steps()[0].inputs[0].0, Buffer::Workspace(_)));
+    assert_eq!(plan.steps()[0].inputs[1].0, Buffer::Input(1));
+    let workspace = Tensor::zeros(&[plan.workspace_bytes()], DType::U8);
+    let w = Tensor::from_slice(&[2.0f32; 4], DType::F32);
+    let run = |x: &[f32]| {
+        plan.run_in(&workspace, &[Tensor::from_slice(x, DType::F32), w.clone()])
+            .unwrap()
+    };
+    let first = run(&[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(first[0].to_vec::<f32>(), [2.0, 4.0, 6.0, 8.0]);
+    assert_eq!(first[1].to_vec::<f32>(), [1.0, 2.0, 3.0, 4.0]);
+    assert!(first[0].shares_storage_with(&workspace) && first[2].shares_storage_with(&w));
+    let second = run(&[0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(second[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]);
+    assert_eq!(first[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]); // overwritten
+    let small = Tensor::zeros(&[plan.workspace_bytes() - 1], DType::U8);
+    assert!(plan.run_in(&small, &[w.clone(), w.clone()]).is_err());
+}
+
 /// A plan of `g` donating its first input, and the output's buffer.
 fn donating(g: &Graph) -> (Plan, Buffer) {
     let options = super::PlanOptions {
         scratch: None,
         donate: vec![0],
+        parameters: None,
+        views: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -454,6 +491,8 @@ fn donated_inputs_hold_outputs_written_in_place() {
         &super::PlanOptions {
             scratch: None,
             donate: vec![0],
+            parameters: None,
+            views: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -481,6 +520,8 @@ fn kernel_scratch_is_placed_in_the_workspace() {
             }
         }),
         donate: Vec::new(),
+        parameters: None,
+        views: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];
@@ -586,7 +627,7 @@ pub(crate) mod mps {
 
     /// [`check`], allowing floats a further `slack` of absolute error: the
     /// float accumulation error of a large sum.
-    pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
+    fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
         let plan = crate::compiler::compile(g, Device::Mps).unwrap();

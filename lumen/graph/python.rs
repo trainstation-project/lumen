@@ -195,24 +195,65 @@ impl PyPlan {
     /// `graph` compiled for `device` (default: generic, run on the inputs'
     /// device): fused where the device fuses, unless `fuse` is false; with
     /// outputs written into the inputs at positions `donate` where they fit.
+    /// With `parameters` (input positions), an executable that owns its
+    /// memory (`run_in`), those inputs its parameters, and those of them in
+    /// `packable` (not yet placed) packed into blocks where dots merge
+    /// (`packed`).
     #[new]
-    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new()))]
+    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new(), parameters = None, packable = Vec::new()))]
     fn new(
         graph: PyRef<'_, PyGraph>,
         device: Option<&Bound<'_, PyAny>>,
         fuse: bool,
         donate: Vec<usize>,
+        parameters: Option<Vec<usize>>,
+        packable: Vec<usize>,
     ) -> PyResult<Self> {
-        if let Some(&i) = donate.iter().find(|&&i| i >= graph.inner.inputs().len()) {
+        let n = graph.inner.inputs().len();
+        let all = donate
+            .iter()
+            .chain(parameters.iter().flatten())
+            .chain(&packable);
+        if let Some(&i) = all.into_iter().find(|&&i| i >= n) {
             return Err(PyValueError::new_err(format!(
-                "donate: the graph has {} inputs, got {i}",
-                graph.inner.inputs().len()
+                "the graph has {n} inputs, got input {i}"
             )));
         }
-        let options = crate::compiler::Options { fuse, donate };
+        let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
+        let options = crate::compiler::Options {
+            fuse,
+            donate,
+            parameters: parameters.as_deref().map(mask),
+            packable: mask(&packable),
+        };
         let inner = crate::compiler::compile_with(&graph.inner, resolve_device(device)?, &options)
             .map_err(PyRuntimeError::new_err)?;
         Ok(PyPlan { inner })
+    }
+
+    /// The inputs the compiler added after the graph's: each the block of
+    /// parameters (input positions) side by side along a dimension, as
+    /// `(positions, dimension)`.
+    #[getter]
+    fn packed(&self) -> Vec<(Vec<usize>, usize)> {
+        self.inner.packed().to_vec()
+    }
+
+    /// Run an executable that owns its memory in `workspace` (uint8, at
+    /// least `workspace_bytes`): the inputs that are not parameters copied
+    /// in, the parameters read in place; the outputs are views valid until
+    /// the next run in it.
+    fn run_in(
+        &self,
+        workspace: PyRef<'_, PyTensor>,
+        inputs: Vec<PyRef<'_, PyTensor>>,
+    ) -> PyResult<Vec<PyTensor>> {
+        let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
+        let outputs = self
+            .inner
+            .run_in(&workspace.inner, &inputs)
+            .map_err(PyValueError::new_err)?;
+        Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
     #[getter]
@@ -234,6 +275,11 @@ impl PyPlan {
                 let d = primitive_dict(py, &step.primitive)?;
                 d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
                 d.set_item("output", typed(&step.output))?;
+                let views = step
+                    .views
+                    .iter()
+                    .map(|v| v.as_ref().map(|v| (v.offset, v.strides.clone())));
+                d.set_item("views", views.collect::<Vec<_>>())?;
                 d.set_item("scratch", step.scratch)?;
                 Ok(d)
             })

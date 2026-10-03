@@ -18,7 +18,7 @@ import builtins
 import functools
 import math
 
-from lumen._C import Graph, Plan, Tensor
+from lumen._C import Graph, Plan, Tensor, _pack
 from lumen.graph import prims
 
 __all__ = [
@@ -60,73 +60,128 @@ def _trace(fn, args):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape, and compiled for their device;
-    # anything else is baked into the graph, so it must be hashable.
-    return tuple((a.dtype, tuple(a.shape), str(a.device)) if isinstance(a, Tensor) else ("static", a) for a in args)
+    # Tensors are traced by dtype and shape, meta ones (parameters) apart
+    # from those with data; anything else is baked into the graph, so it
+    # must be hashable.
+    return tuple(
+        (a.dtype, tuple(a.shape), a.device == "meta") if isinstance(a, Tensor) else ("static", a) for a in args
+    )
 
 
 def _device(args, device):
     """Where a function of ``args`` runs: ``device``, or the first tensor
-    argument's, or the CPU."""
+    argument with data's, or the meta device if all are meta (nothing
+    runs), or the CPU."""
     if device is not None:
         return str(device)
-    return next((str(a.device) for a in args if isinstance(a, Tensor)), "cpu")
+    tensors = [a for a in args if isinstance(a, Tensor)]
+    data = [a for a in tensors if a.device != "meta"]
+    return str(data[0].device) if data else ("meta" if tensors else "cpu")
 
 
-def compile(fn, device=None, donate_argnums=()):
+def compile(fn, device=None):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
     and compiled into a static plan for ``device`` on its first call with
-    each input signature (the tensor arguments' dtypes, shapes and devices,
-    and the values of the other arguments), which every call then runs.
-    ``device`` defaults to the first tensor argument's (the CPU without
-    any); tensor arguments must be on it, and results are. On the meta
-    device nothing runs: results are meta tensors of the right types.
+    each input signature (the tensor arguments' dtypes and shapes, and the
+    values of the other arguments), which every call then runs. ``device``
+    defaults to the first tensor argument with data's (the CPU without
+    any).
 
-    Tensors are made by running a function (JAX: ``jax.jit(init)``): the
-    plan writes its outputs into new storage, so a function of no tensors
-    creates them where they are used, once::
+    The compiled function owns its memory (XLA: buffer assignment over the
+    whole program). Its plan places every value, the tensor arguments with
+    data and the results included, in one workspace, allocated once: each
+    call copies those arguments in (from any device) and returns views of
+    the results, which the next call overwrites (``.clone()`` one to keep
+    it). Meta tensor arguments are parameters: never the caller's to
+    allocate, they are placed on the device the first time a compiled
+    function uses them, and every compiled function using them shares that
+    memory. Where dots that share an operand merge into one (``x @ w1`` and
+    ``x @ w3``), their parameters are placed side by side in one block,
+    read by the merged dot, never concatenated. Placed parameters start
+    zeroed: ``compiled.place(*args)`` places them without running and
+    returns each meta argument's memory, to copy data into (``copy_``).
 
-        params = lumen.compile(init, device="mps")()
-
-    ``donate_argnums`` are positions of tensor arguments the caller gives up
-    (``jax.jit``'s ``donate_argnums``): an output of the same dtype and shape
-    is written into a donated argument's memory, in place, instead of new
-    memory (``params = step(params, grads)`` without a second copy of
-    ``params``). A donated argument's contents are undefined after the call.
+    With only meta tensors (and no ``device``), nothing runs: results are
+    meta tensors of the right types.
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
     compile_device = device  # dump_graph's own `device` shadows it
-    donate_argnums = tuple(sorted(set(donate_argnums)))
+    # Per signature and device, the graph and its plans: each with its
+    # workspace (`None` on the meta device), tried in order.
     plans = {}
     latest = []
 
-    def donated(args):
-        """The donated arguments' indices among the tensor arguments."""
-        for i in donate_argnums:
-            if i >= len(args) or not isinstance(args[i], Tensor):
-                raise TypeError(f"donate_argnums: argument {i} of {fn.__name__} is not a tensor")
-        tensors = [i for i, a in enumerate(args) if isinstance(a, Tensor)]
-        return [tensors.index(i) for i in donate_argnums]
-
-    def entry(args):
-        key = _signature(args)
+    def prepare(args):
+        """The plan for ``args`` and its inputs: the graph, the plan, its
+        workspace, whether ``fn`` returns a single tensor, and the plan's
+        inputs (the parameters placed, and their blocks)."""
+        target = _device(args, device)
+        key = _signature(args), target
         if key not in plans:
             graph, single = _trace(fn, args)
-            plans[key] = graph, Plan(graph, _device(args, device), donate=donated(args)), single
+            plans[key] = graph, single, []
+        graph, single, entries = plans[key]
         latest[:] = [key]
-        return plans[key]
+        tensors = [a for a in args if isinstance(a, Tensor)]
+        if target == "meta":
+            if not entries:
+                entries.append((Plan(graph, "meta"), None))
+            return graph, entries[0][0], None, single, tensors
+        params = [i for i, t in enumerate(tensors) if t.device == "meta"]
+        for i in params:
+            if not tensors[i]._is_parameter:
+                raise TypeError(f"{fn.__name__}: a meta argument must be a whole tensor (a parameter), not a view")
+
+        def inputs_for(plan):
+            # The parameters in their blocks, if they are placed so (or not
+            # yet placed), else None.
+            blocks = []
+            for positions, dimension in plan.packed:
+                block = _pack([tensors[i] for i in positions], dimension, target)
+                if block is None:
+                    return None
+                blocks.append(block)
+            placed = [t._placed(target) if t.device == "meta" else t for t in tensors]
+            return placed + blocks
+
+        for plan, workspace in entries:
+            inputs = inputs_for(plan)
+            if inputs is not None:
+                return graph, plan, workspace, single, inputs
+        # A new plan: dots merged into blocks of parameters while none of
+        # theirs is placed yet; once they are placed otherwise, without.
+        packable = params if not entries else []
+        plan = Plan(graph, target, parameters=params, packable=packable)
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        entries.append((plan, workspace))
+        inputs = inputs_for(plan)
+        if inputs is None:
+            plan = Plan(graph, target, parameters=params)
+            entries[-1] = plan, workspace
+            inputs = inputs_for(plan)
+        return graph, plan, workspace, single, inputs
 
     @functools.wraps(fn)
     def compiled(*args):
-        for i in donate_argnums:
-            others = [a for j, a in enumerate(args) if j != i and isinstance(a, Tensor)]
-            if i < len(args) and isinstance(args[i], Tensor) and any(args[i].shares_storage_with(a) for a in others):
-                raise ValueError(f"{fn.__name__}: donated argument {i} shares memory with another argument")
-        _, plan, single = entry(args)
-        outputs = plan.run([a for a in args if isinstance(a, Tensor)], _device(args, device))
+        _, plan, workspace, single, inputs = prepare(args)
+        if workspace is None:
+            outputs = plan.run(inputs, "meta")
+        else:
+            outputs = plan.run_in(workspace, inputs)
         return outputs[0] if single else tuple(outputs)
+
+    def place(*args):
+        """Place the meta arguments (parameters) as calls with ``args``'
+        signature use them, without running: each one's memory on the
+        device, in order, to copy its data into (``copy_``)."""
+        _, _, workspace, _, inputs = prepare(args)
+        if workspace is None:
+            raise ValueError(f"place: {fn.__name__} runs on the meta device: pass device= or a tensor with data")
+        tensors = [a for a in args if isinstance(a, Tensor)]
+        placed = [t for t, a in zip(inputs, tensors) if a.device == "meta"]
+        return placed[0] if len(placed) == 1 else tuple(placed)
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
@@ -137,23 +192,32 @@ def compile(fn, device=None, donate_argnums=()):
         ``fragment`` leaves out the doctype, for a host that wraps the page
         (a published artifact)."""
         if args:
-            entry(args)
+            prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        key = latest[0]
-        graph, plan, _ = plans[key]
-        tensors = [k for k in key if k[0] != "static"]
-        target = str(device or compile_device or next((d for _, _, d in tensors), "cpu"))
-        if target != next((d for _, _, d in tensors), target):
-            plan = Plan(graph, target)
-        # Kernels do not depend on the values: profile on ones.
+        (signature, target), = latest
+        graph, _, _ = plans[latest[0]]
+        tensors = [k for k in signature if k[0] != "static"]
+        target = str(device or compile_device or (target if target != "meta" else "cpu"))
+        # Kernels do not depend on the values: profile on ones, the
+        # parameters packed where the compiler merges dots.
+        params = [i for i, (_, _, meta) in enumerate(tensors) if meta]
+        plan = Plan(graph, target, parameters=params, packable=params)
         inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape, _ in tensors]
+        for positions, dimension in plan.packed:
+            shape = list(tensors[positions[0]][1])
+            shape[dimension] = sum(tensors[i][1][dimension] for i in positions)
+            inputs.append(Tensor.ones(shape, tensors[positions[0]][0], target))
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         from lumen.graph import viz
 
-        data = viz.collect(graph, plan, inputs, title=fn.__name__, runs=runs, device=target)
+        data = viz.collect(
+            graph, plan, inputs, title=fn.__name__, runs=runs, device=target, run=lambda: plan.run_in(workspace, inputs)
+        )
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
+    compiled.place = place
     compiled.dump_graph = dump_graph
     return compiled
 

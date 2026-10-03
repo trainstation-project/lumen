@@ -41,6 +41,7 @@ from lumen.tensor._C import (
     Scalar as Scalar,
     Tensor as Tensor,
     _from_dlpack as _from_dlpack,
+    _pack as _pack,
     _to_dlpack as _to_dlpack,
     _to_dlpack_versioned as _to_dlpack_versioned,
 )

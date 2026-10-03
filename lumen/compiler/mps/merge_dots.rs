@@ -1,24 +1,22 @@
 //! Dot merging (XLA: `DotMerger`): dots that share an operand, as `x @ w1`
 //! and `x @ w3` share `x`, become one dot of it with their other operands
-//! concatenated, `x @ [w1 | w3]`, sliced back into each one's result: one
-//! larger matmul instead of several small ones. The concatenation copies
-//! the operands on every run, so as in XLA only while the concatenated
-//! operand and the result fit in [`MAX_BYTES`].
+//! side by side, `x @ [w1 | w3]`, sliced back into each one's result: one
+//! larger matmul instead of several small ones. Nothing concatenates them:
+//! the other operands must be parameters not yet placed, which are then
+//! placed side by side in one block ([`crate::Tensor::pack`]), read by the
+//! merged dot as a new input.
 //!
 //! Dots merge if they have the same dimension numbers and the same operand
-//! on the same side, and their other operands differ only in their last
-//! free dimension (the one concatenated). Only dots whose results are read
-//! by primitives that fuse (and are not outputs) merge: those read their
-//! slices in place, where any other reader would need a copy of its own. The merged dot replaces the
-//! group's first, so each other operand must be defined before it, which
-//! also keeps any dot from depending on another of its group.
+//! on the same side, and their other operands are distinct packable
+//! parameters, read by that dot alone, differing only in their last free
+//! dimension (the one they are side by side along). Only dots whose results
+//! are read by primitives that fuse, or dots (and are not outputs), merge:
+//! those read their slices in place, where any other reader would need a
+//! copy of its own.
 
 use super::fusion::fusible;
 use crate::graph::primitive::free_dims;
-use crate::graph::{Graph, Primitive, TensorType, Var};
-
-/// XLA's default `xla_gpu_dot_merger_threshold_mb`.
-const MAX_BYTES: usize = 32 << 20;
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 
 /// Dots that can merge: their nodes, in graph order.
 struct Group {
@@ -31,71 +29,77 @@ struct Group {
     /// The concatenated dimension of those operands.
     dimension: usize,
     nodes: Vec<usize>,
-    /// The bytes of the concatenated operand and the merged result.
-    bytes: usize,
 }
 
-/// `graph` with each group of dots that share an operand merged into one.
-pub(crate) fn merge_dots(graph: &Graph) -> Graph {
+/// `graph` with each group of dots that share an operand merged into one,
+/// and the inputs it adds: each the block of these inputs (positions,
+/// among those `packable`) side by side along a dimension.
+pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<usize>, usize)>) {
     let nodes = graph.nodes();
-    let mut defined_at = vec![0; graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        defined_at[node.output] = i + 1;
+    // Each packable input read by one node alone: its position.
+    let mut reads = vec![0; graph.types.len()];
+    for &v in nodes
+        .iter()
+        .flat_map(|node| &node.inputs)
+        .chain(graph.outputs())
+    {
+        reads[v] += 1;
     }
-    // Whether each value is read only by fusible primitives, in place.
+    let mut position: Vec<Option<usize>> = vec![None; graph.types.len()];
+    for (i, &v) in graph.inputs().iter().enumerate() {
+        if packable.get(i) == Some(&true) && reads[v] == 1 {
+            position[v] = Some(i);
+        }
+    }
+    // Whether each value is read only in place: by fusible primitives, or
+    // by dots (which read a slice as a strided view of it).
     let mut read_in_place = vec![true; graph.types.len()];
     for &v in graph.outputs() {
         read_in_place[v] = false;
     }
-    for node in nodes.iter().filter(|node| !fusible(graph, node)) {
+    let in_place = |node: &&Node| {
+        fusible(graph, node) || matches!(node.primitive, Primitive::DotGeneral { .. })
+    };
+    for node in nodes.iter().filter(|node| !in_place(node)) {
         node.inputs.iter().for_each(|&v| read_in_place[v] = false);
     }
-    let bytes = |t: &TensorType| t.numel() * t.dtype.size_of();
     // Each dot joins the first group it can, else starts one on each side.
     let mut groups: Vec<Group> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
         if !matches!(node.primitive, Primitive::DotGeneral { .. }) || !read_in_place[node.output] {
             continue;
         }
-        let out_bytes = bytes(graph.type_of(node.output));
         let mut candidates = Vec::new();
-        for side in 0..2 {
+        for side in (0..2).filter(|&side| position[node.inputs[1 - side]].is_some()) {
             let other = graph.type_of(node.inputs[1 - side]);
             let Some(dimension) = concat_dimension(&node.primitive, side, other.shape.len()) else {
                 continue;
             };
             let mut key = other.clone();
             key.shape[dimension] = 0;
-            candidates.push((side, key, dimension, bytes(other) + out_bytes));
+            candidates.push((side, key, dimension));
         }
         let joins = groups.iter().position(|g| {
-            candidates.iter().any(|(side, key, dimension, added)| {
+            candidates.iter().any(|(side, key, dimension)| {
                 g.shared == node.inputs[*side]
                     && g.side == *side
                     && g.primitive == node.primitive
                     && g.other == *key
                     && g.dimension == *dimension
-                    && g.bytes + added <= MAX_BYTES
-                    && defined_at[node.inputs[1 - side]] <= g.nodes[0]
             })
         });
         match joins {
-            Some(g) => {
-                let g = &mut groups[g];
-                g.nodes.push(i);
-                g.bytes += bytes(graph.type_of(node.inputs[1 - g.side])) + out_bytes;
-            }
+            Some(g) => groups[g].nodes.push(i),
             None => groups.extend(
                 candidates
                     .into_iter()
-                    .map(|(side, other, dimension, bytes)| Group {
+                    .map(|(side, other, dimension)| Group {
                         shared: node.inputs[side],
                         side,
                         primitive: node.primitive.clone(),
                         other,
                         dimension,
                         nodes: vec![i],
-                        bytes,
                     }),
             ),
         }
@@ -112,6 +116,7 @@ pub(crate) fn merge_dots(graph: &Graph) -> Graph {
         }
     }
 
+    let mut packs = Vec::new();
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
     for &v in graph.inputs() {
@@ -123,18 +128,20 @@ pub(crate) fn merge_dots(graph: &Graph) -> Graph {
             let others: Vec<Var> = g
                 .nodes
                 .iter()
-                .map(|&m| map[nodes[m].inputs[1 - g.side]])
+                .map(|&m| nodes[m].inputs[1 - g.side])
                 .collect();
-            let concatenated = out
-                .apply(
-                    Primitive::Concatenate {
-                        dimension: g.dimension,
-                    },
-                    &others,
-                )
-                .expect("operands equal but in the dimension");
+            let types: Vec<&TensorType> = others.iter().map(|&v| graph.type_of(v)).collect();
+            let block = Primitive::Concatenate {
+                dimension: g.dimension,
+            }
+            .infer(&types)
+            .expect("operands equal but in the dimension");
+            packs.push((
+                others.iter().filter_map(|&v| position[v]).collect(),
+                g.dimension,
+            ));
             let mut operands = [map[g.shared]; 2];
-            operands[1 - g.side] = concatenated;
+            operands[1 - g.side] = out.input(block);
             let result = out
                 .apply(g.primitive.clone(), &operands)
                 .expect("the dots' dimension numbers");
@@ -174,7 +181,7 @@ pub(crate) fn merge_dots(graph: &Graph) -> Graph {
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
-    out
+    (out, packs)
 }
 
 /// The batch and contracting dimensions of a dot's operand on `side`.

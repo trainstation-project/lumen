@@ -365,9 +365,11 @@ def test_compiled_init_runs_once_per_call(tmp_path):
         return lumen.full([2, 3], 0.5) + lumen.arange(3)
 
     make = lumen.compile(init)
-    a, b = make(), make()
-    assert calls == [1]  # traced once; each call runs the plan into new storage
-    assert a.tolist() == [[0.5, 1.5, 2.5]] * 2 and not a.shares_storage_with(b)
+    a = make().clone()
+    b = make()
+    assert calls == [1]  # traced once; each call runs the plan
+    # Results are views of the function's workspace, which each call reuses.
+    assert a.tolist() == b.tolist() == [[0.5, 1.5, 2.5]] * 2 and b.shares_storage_with(make())
     data = make.dump_graph(tmp_path / "init.html")
     assert data["inputs"] == [] and data["device"] == "cpu"
 
@@ -382,9 +384,8 @@ def test_compiled_init_on_device(tmp_path):
     w, i = make()
     assert (w.device, i.device) == ("mps", "mps")
     assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
-    # Tensor arguments must be on the compiled function's device.
-    with pytest.raises(ValueError, match="one device"):
-        lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2]))
+    # Tensor arguments with data are copied in, from any device.
+    assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
     # Profiled on the device it creates tensors on.
     data = make.dump_graph(tmp_path / "init.html")
     assert data["device"] == "mps" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
@@ -397,31 +398,43 @@ def test_compiled_init_on_device(tmp_path):
 
 
 # ---------------------------------------------------------------------
-# memory: donation and planned scratch (JAX / XLA buffer assignment)
+# memory: parameters, the workspace and planned scratch (XLA buffer
+# assignment)
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
-def test_donated_arguments_hold_the_outputs(device):
+def test_parameters_are_placed_once_and_shared(device):
+    """Meta arguments are parameters: placed (zeroed) on the device by the
+    first compiled function using them, shared by every other, filled by
+    copying into what ``place`` returns."""
+    w, b = lumen.empty([4, 3], device="meta"), lumen.empty([3], device="meta")
+    f = lumen.compile(lambda x, w, b: x @ w + b, device=device)
+    x = rand(2, 4)
     try:
-        params = lumen.ones([4, 8], device=device)
+        pw, pb = f.place(lumen.from_numpy(x), w, b)
     except RuntimeError as e:
         pytest.skip(str(e))
-    grads = lumen.full([4, 8], 2.0, device=device)
-    step = lumen.compile(lambda p, g: p - g * 0.25, donate_argnums=(0,))
-    new = step(params, grads)
-    assert new.shares_storage_with(params)  # updated in place
-    assert new.tolist() == [[0.5] * 8] * 4
-    # Without donation, new memory.
-    assert not lumen.compile(lambda p, g: p - g * 0.25)(new, grads).shares_storage_with(new)
+    assert (pw.device, pw.shape) == (device, [4, 3]) and pw.tolist() == [[0.0] * 3] * 4
+    wv, bv = rand(4, 3, seed=1), rand(3, seed=2)
+    pw.copy_(lumen.from_numpy(wv))
+    pb.copy_(lumen.from_numpy(bv))
+    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), w, b)), x @ wv + bv, rtol=1e-5, atol=1e-5)
+    # Another function reads the same memory.
+    g = lumen.compile(lambda w: w * 2.0, device=device)
+    np.testing.assert_allclose(lumen.to_numpy(g(w)), wv * 2, rtol=1e-6)
+    assert g.place(w).shares_storage_with(pw)
+    with pytest.raises(TypeError, match="whole tensor"):
+        g(lumen.empty([4, 6], device="meta").narrow(1, 0, 3))
 
 
-def test_donation_checks():
-    x = lumen.ones([2])
-    with pytest.raises(TypeError, match="argument 1 of <lambda> is not a tensor"):
-        lumen.compile(lambda x, s: x * s, donate_argnums=(1,))(x, 2.0)
-    with pytest.raises(ValueError, match="shares memory"):
-        lumen.compile(lambda a, b: a + b, donate_argnums=(0,))(x, x)
+def test_results_are_views_of_the_workspace():
+    f = lumen.compile(lambda x: x * 2.0)
+    a = f(lumen.ones([3]))
+    assert a.tolist() == [2.0] * 3
+    b = f(lumen.full([3], 5.0))
+    assert a.shares_storage_with(b) and a.tolist() == [10.0] * 3  # overwritten
+    assert not a.clone().shares_storage_with(b)
 
 
 @pytest.mark.mps
@@ -524,22 +537,63 @@ def test_concatenate(device):
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_dots_sharing_an_operand_merge(device):
-    """relu(x @ w1) * (x @ w3): on MPS, one matmul of x and [w1 | w3]
-    concatenated (XLA's DotMerger), its halves read in place by the gate."""
-    x, w1, w3 = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
-    try:
-        args = [lumen.from_numpy(a).to(device) for a in (x, w1, w3)]
-    except RuntimeError as e:
-        pytest.skip(str(e))
+    """relu(x @ w1) * (x @ w3) with parameters w1 and w3: on MPS, one matmul
+    of x and a block holding w1 and w3 side by side (XLA's DotMerger, with
+    the parameters placed together instead of concatenated)."""
+    x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
+    w1, w3 = lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta")
 
     def gated(x, w1, w3):
         return (x @ w1).relu() * (x @ w3)
 
-    out = lumen.to_numpy(lumen.compile(gated)(*args))
-    np.testing.assert_allclose(out, np.maximum(x @ w1, 0) * (x @ w3), rtol=1e-5, atol=1e-5)
-    graph = lumen.make_graph(gated)(*args)
-    steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
+    f = lumen.compile(gated, device=device)
+    try:
+        p1, p3 = f.place(lumen.from_numpy(x), w1, w3)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    p1.copy_(lumen.from_numpy(w1v))
+    p3.copy_(lumen.from_numpy(w3v))
+    out = lumen.to_numpy(f(lumen.from_numpy(x), w1, w3))
+    np.testing.assert_allclose(out, np.maximum(x @ w1v, 0) * (x @ w3v), rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(gated)(lumen.from_numpy(x), w1, w3)
+    plan = lumen.graph.Plan(graph, device, parameters=[1, 2], packable=[1, 2])
+    steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
-        assert steps[:2] == ["concatenate", "dot_general"] and len(steps) == 3
+        assert plan.packed == [([1, 2], 1)] and p1.shares_storage_with(p3)
+        assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
     else:
-        assert steps.count("dot_general") == 2
+        assert plan.packed == [] and steps.count("dot_general") == 2
+
+
+@pytest.mark.mps
+def test_attention_projections_merge_into_one_matmul():
+    """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
+    of the three weights; the matmuls reading q and v read them in place,
+    strided views of its result, and k's transpose fuses its slice."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def attention(x, wq, wk, wv):
+        q, k, v = x @ wq, x @ wk, x @ wv
+        return (q @ k.t()).softmax(-1) @ v
+
+    weights = [lumen.empty([32, 32], device="meta") for _ in range(3)]
+    values = [rand(32, 32, seed=i + 1) / 4 for i in range(3)]
+    x = rand(16, 32)
+    f = lumen.compile(attention, device="mps")
+    for p, v in zip(f.place(lumen.from_numpy(x), *weights), values):
+        p.copy_(lumen.from_numpy(v))
+    q, k, v = (x @ w for w in values)
+    s = np.exp(q @ k.T - (q @ k.T).max(-1, keepdims=True))
+    expected = (s / s.sum(-1, keepdims=True)) @ v
+    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), *weights)), expected, rtol=1e-4, atol=1e-4)
+    graph = lumen.make_graph(attention)(lumen.from_numpy(x), *weights)
+    plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    steps = plan.steps()
+    assert plan.packed == [([1, 2, 3], 1)]
+    assert [s["primitive"] for s in steps].count("dot_general") == 3
+    assert "slice" not in [s["primitive"] for s in steps]
+    views = [v for s in steps for v in s["views"] if v is not None]
+    assert views == [(0, [96, 1]), (64, [96, 1])]

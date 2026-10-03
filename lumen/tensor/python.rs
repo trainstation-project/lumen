@@ -531,6 +531,44 @@ impl PyTensor {
         slf
     }
 
+    /// Copy `src`'s elements (same dtype and shape, any device) into this
+    /// tensor in place and return it (PyTorch: `Tensor.copy_`): how data
+    /// gets into a placed parameter.
+    fn copy_<'py>(slf: PyRef<'py, Self>, src: PyRef<'_, Self>) -> PyResult<PyRef<'py, Self>> {
+        slf.inner.copy_(&src.inner).map_err(PyValueError::new_err)?;
+        Ok(slf)
+    }
+
+    /// A copy of this tensor in new storage on its device (PyTorch:
+    /// `Tensor.clone`): how to keep a compiled function's result past its
+    /// next call.
+    fn clone(&self) -> PyResult<Self> {
+        has_data(&self.inner)?;
+        let options = TensorOptions::new()
+            .dtype(self.inner.dtype())
+            .device(self.inner.device());
+        // SAFETY: the copy below writes every element.
+        let t = unsafe { Tensor::empty(self.inner.shape(), options) };
+        t.copy_(&self.inner).map_err(PyValueError::new_err)?;
+        Ok(Self::wrap(t))
+    }
+
+    /// Whether this can be a parameter of a compiled function: a whole
+    /// meta tensor (`lumen/tensor/parameter.rs`).
+    #[getter]
+    fn _is_parameter(&self) -> bool {
+        self.inner.is_parameter()
+    }
+
+    /// This parameter's memory on `device`, placed (zeroed) on first use.
+    fn _placed(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let device = resolve_device(Some(device))?;
+        self.inner
+            .placed(device)
+            .map(Self::wrap)
+            .map_err(PyValueError::new_err)
+    }
+
     /// The address of the first element in the device's address space
     /// (PyTorch: `Tensor.data_ptr`).
     ///
@@ -639,8 +677,23 @@ impl PyTensor {
     }
 }
 
+/// The parameters `members` side by side along `dimension` in one block on
+/// `device` (placed so if none is placed yet), or `None` if they are placed
+/// otherwise (`lumen/tensor/parameter.rs`).
+#[pyfunction]
+fn _pack(
+    members: Vec<PyRef<'_, PyTensor>>,
+    dimension: usize,
+    device: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyTensor>> {
+    let members: Vec<Tensor> = members.iter().map(|t| t.inner.clone()).collect();
+    let block = Tensor::pack(&members, dimension, resolve_device(Some(device))?);
+    Ok(block.map_err(PyValueError::new_err)?.map(PyTensor::wrap))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(_pack, m)?)?;
     m.add_function(wrap_pyfunction!(_to_dlpack, m)?)?;
     m.add_function(wrap_pyfunction!(_to_dlpack_versioned, m)?)?;
     m.add_function(wrap_pyfunction!(_from_dlpack, m)?)

@@ -1,6 +1,7 @@
 #[cfg(feature = "python")]
 pub(crate) mod dlpack;
 pub mod dtype;
+pub(crate) mod parameter;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub mod scalar;
@@ -14,6 +15,4 @@ pub mod tensor_options;
 mod tests;
 
 pub use tensor::Tensor;
-#[cfg(lumen_mps_linked)]
-pub(crate) use tensor::contiguous_strides;
-pub(crate) use tensor::{flat_offset, for_each_index};
+pub(crate) use tensor::{contiguous_strides, flat_offset, for_each_index};

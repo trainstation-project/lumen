@@ -58,15 +58,16 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
     }
 }
 
-/// The contiguous tensor `ty`'s dimensions in `order`, split at `(i, j)`,
-/// as three strided dimensions (`order[..i]`, `order[i..j]`, `order[j..]`
-/// each collapsed into one), if they collapse: their strides.
+/// The dimensions of `ty`, laid out at `strides` (in elements), in
+/// `order`, split at `(i, j)`, as three strided dimensions (`order[..i]`,
+/// `order[i..j]`, `order[j..]` each collapsed into one), if they collapse:
+/// their strides.
 pub(crate) fn collapsed(
     ty: &TensorType,
+    strides: &[usize],
     order: &[usize],
     (i, j): (usize, usize),
 ) -> Option<[usize; 3]> {
-    let strides = contiguous_strides(&ty.shape);
     let mut out = [0; 3];
     for (k, group) in [&order[..i], &order[i..j], &order[j..]]
         .into_iter()
@@ -86,13 +87,19 @@ pub(crate) fn encode(
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
     let name = step.primitive.name();
     let order = matmul_order(&step.primitive, lhs.shape.len(), rhs.shape.len());
-    let strides = |ty, order, split| {
-        collapsed(ty, order, split).ok_or_else(|| {
+    // An operand read in place as a view of a larger buffer (a slice) has
+    // its strides; any other is contiguous.
+    let strides = |k: usize, order, split| {
+        let ty = &step.inputs[k].1;
+        let layout = step.views[k]
+            .as_ref()
+            .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone());
+        collapsed(ty, &layout, order, split).ok_or_else(|| {
             format!("{name}: an operand is not in matmul form: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))")
         })
     };
-    let [lsb, lsm, lsk] = strides(lhs, &order.lhs, order.lhs_split)?;
-    let [rsb, rsk, rsn] = strides(rhs, &order.rhs, order.rhs_split)?;
+    let [lsb, lsm, lsk] = strides(0, &order.lhs, order.lhs_split)?;
+    let [rsb, rsk, rsn] = strides(1, &order.rhs, order.rhs_split)?;
     let size =
         |ty: &TensorType, dims: &[usize]| dims.iter().map(|&d| ty.shape[d]).product::<usize>();
     let (b, m) = (
