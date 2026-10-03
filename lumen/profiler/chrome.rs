@@ -99,8 +99,8 @@ fn types_json(types: &[TensorType]) -> (String, String) {
     )
 }
 
-/// `e`'s input and output types as trace arguments, each preceded by a
-/// comma (none if it has none).
+/// `e`'s input, output and accumulation types as trace arguments, each
+/// preceded by a comma (none if it has none).
 fn types_args(e: &Event) -> String {
     let mut args = String::new();
     for (side, types) in [("Input", &e.inputs), ("Output", &e.outputs)] {
@@ -108,6 +108,10 @@ fn types_args(e: &Event) -> String {
             let (dims, dtypes) = types_json(types);
             let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
         }
+    }
+    if !e.accum.is_empty() {
+        let accum: Vec<String> = e.accum.iter().map(|d| json_str(d.name())).collect();
+        let _ = write!(args, ",\"Accum type\":[{}]", accum.join(","));
     }
     args
 }

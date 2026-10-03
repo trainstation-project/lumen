@@ -152,6 +152,25 @@ impl Primitive {
 
     /// The type of the result of applying this primitive to operands of
     /// types `args`, or why it cannot be applied.
+    /// The dtypes this primitive accumulates in, given its `output`
+    /// dtype: a dot's and a sum's `accum_dtype` (their result's), a max's
+    /// and softmax's dtype; a fusion's, each of its body's reductions' and
+    /// dots', in order. None for the others, which accumulate nothing.
+    pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
+        use Primitive::*;
+        match self {
+            DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Softmax { .. } => {
+                vec![output]
+            }
+            Fusion { body, .. } => body
+                .nodes()
+                .iter()
+                .flat_map(|n| n.primitive.accum_dtypes(body.type_of(n.output).dtype))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn infer(&self, args: &[&TensorType]) -> Result<TensorType, String> {
         use Primitive::*;
         let arity = match self {

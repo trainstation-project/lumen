@@ -660,6 +660,7 @@ impl Plan {
                     .chain(extra)
                     .collect()
             });
+            record.accum(|| step.primitive.accum_dtypes(step.output.1.dtype));
             // A view's first element is past its buffer's; a multi-output
             // fusion's other outputs follow its inputs.
             let args: Vec<*const u8> = step

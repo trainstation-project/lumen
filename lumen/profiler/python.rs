@@ -119,6 +119,8 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
     };
     d.set_item("inputs", types(&e.inputs))?;
     d.set_item("outputs", types(&e.outputs))?;
+    let accum: Vec<&'static str> = e.accum.iter().map(|&d| dtype_name(d)).collect();
+    d.set_item("accum", accum)?;
     d.set_item("bytes", e.bytes)?;
     d.set_item("addr", e.addr)?;
     d.set_item("total_allocated", e.total_allocated)?;

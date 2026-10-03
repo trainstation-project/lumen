@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::DType;
 use crate::device::Device;
 use crate::graph::TensorType;
 
@@ -102,6 +103,10 @@ pub struct Event {
     /// `record_shapes`.
     pub inputs: Vec<TensorType>,
     pub outputs: Vec<TensorType>,
+    /// The dtypes the op accumulates in, with `record_shapes`: a dot's or
+    /// sum's `accum_dtype`, a max's or softmax's dtype; a fusion's, each
+    /// of its reductions' (none for elementwise ops).
+    pub accum: Vec<DType>,
     /// Memory events: bytes allocated (positive) or freed (negative).
     pub bytes: i64,
     /// Memory events: the block's address.
@@ -233,14 +238,15 @@ pub fn stop() -> Result<Profile, String> {
     // Events are pushed as they end; order them by start for readers.
     events.sort_by_key(|e| (e.start_ns, e.id));
     // Device work has the types of the op that issued it.
-    let types: std::collections::HashMap<u64, (Vec<TensorType>, Vec<TensorType>)> = events
+    type Types = (Vec<TensorType>, Vec<TensorType>, Vec<DType>);
+    let types: std::collections::HashMap<u64, Types> = events
         .iter()
         .filter(|e| e.kind == EventKind::Op)
-        .map(|e| (e.id, (e.inputs.clone(), e.outputs.clone())))
+        .map(|e| (e.id, (e.inputs.clone(), e.outputs.clone(), e.accum.clone())))
         .collect();
     for e in events.iter_mut().filter(|e| e.kind == EventKind::Gpu) {
-        if let Some((inputs, outputs)) = e.parent.and_then(|p| types.get(&p)) {
-            (e.inputs, e.outputs) = (inputs.clone(), outputs.clone());
+        if let Some((inputs, outputs, accum)) = e.parent.and_then(|p| types.get(&p)) {
+            (e.inputs, e.outputs, e.accum) = (inputs.clone(), outputs.clone(), accum.clone());
         }
     }
     Ok(Profile::new(events, session.config))
@@ -282,8 +288,9 @@ struct OpenRange {
     kind: EventKind,
     start_ns: u64,
     parent: Option<u64>,
-    /// `None` without `record_shapes`.
-    types: Option<(Vec<TensorType>, Vec<TensorType>)>,
+    /// Inputs', outputs' and accumulation types; `None` without
+    /// `record_shapes`.
+    types: Option<(Vec<TensorType>, Vec<TensorType>, Vec<DType>)>,
 }
 
 fn open_range(
@@ -306,7 +313,7 @@ fn open_range(
             kind,
             start_ns: now_ns(),
             parent,
-            types: (bits & SHAPES != 0).then(|| (inputs(), Vec::new())),
+            types: (bits & SHAPES != 0).then(|| (inputs(), Vec::new(), Vec::new())),
         }),
     }
 }
@@ -315,8 +322,16 @@ impl RecordGuard {
     /// Record the op's outputs' types (with `record_shapes`; `outputs` is
     /// only called then), once it has them.
     pub(crate) fn outputs(&mut self, outputs: impl FnOnce() -> Vec<TensorType>) {
-        if let Some((_, out)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
+        if let Some((_, out, _)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
             *out = outputs();
+        }
+    }
+
+    /// Record the dtypes the op accumulates in (with `record_shapes`;
+    /// `accum` is only called then).
+    pub(crate) fn accum(&mut self, accum: impl FnOnce() -> Vec<DType>) {
+        if let Some((_, _, a)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
+            *a = accum();
         }
     }
 }
@@ -335,7 +350,7 @@ impl Drop for RecordGuard {
             }
         });
         let thread = thread_id();
-        let (inputs, outputs) = open.types.unwrap_or_default();
+        let (inputs, outputs, accum) = open.types.unwrap_or_default();
         push(
             open.session,
             Event {
@@ -349,6 +364,7 @@ impl Drop for RecordGuard {
                 device: Device::Cpu,
                 inputs,
                 outputs,
+                accum,
                 bytes: 0,
                 addr: 0,
                 total_allocated: 0,
@@ -408,6 +424,7 @@ pub(crate) fn report_memory(
             device,
             inputs: Vec::new(),
             outputs: Vec::new(),
+            accum: Vec::new(),
             bytes,
             addr,
             total_allocated,
@@ -484,6 +501,7 @@ pub(crate) fn record_kernel_in(
             device,
             inputs: Vec::new(),
             outputs: Vec::new(),
+            accum: Vec::new(),
             bytes: 0,
             addr: 0,
             total_allocated: 0,
