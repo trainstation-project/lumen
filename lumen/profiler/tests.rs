@@ -670,3 +670,37 @@ mod cuda {
         assert!(named(&p, "Memcpy HtoD").is_empty());
     }
 }
+
+#[test]
+fn ranges_are_annotated_on_the_gpu_timeline() {
+    let config = ProfilerConfig {
+        activities: vec![Activity::Cpu, Activity::Cuda],
+        ..cpu()
+    };
+    let p = profile(config, || {
+        let _model = record_function("model");
+        let t = now_ns();
+        {
+            let _layer = record_function("layer");
+            record_gpu("kernel_a", Device::Cuda(0), t + 100, t + 300);
+        }
+        record_gpu("kernel_b", Device::Cuda(0), t + 400, t + 900);
+    });
+    let trace = p.chrome_trace();
+    let annotations: Vec<&str> = trace
+        .lines()
+        .filter(|l| l.contains("\"gpu_user_annotation\""))
+        .collect();
+    assert_eq!(annotations.len(), 2, "{trace}");
+    // "model" spans both kernels; "layer" only its own.
+    let model = annotations
+        .iter()
+        .find(|l| l.contains("\"name\":\"model\""))
+        .unwrap();
+    assert!(model.contains("\"dur\":0.800"), "{model}");
+    let layer = annotations
+        .iter()
+        .find(|l| l.contains("\"name\":\"layer\""))
+        .unwrap();
+    assert!(layer.contains("\"dur\":0.200"), "{layer}");
+}

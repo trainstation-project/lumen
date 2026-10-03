@@ -7,8 +7,12 @@
 //!   (`Device Type`, `Device Id`, `Addr`, `Bytes`, `Total Allocated`,
 //!   `Total Reserved`);
 //! - GPU work: complete events with category `gpu_memcpy` / `gpu_memset`
-//!   on a process per device, linked to the issuing op by an `ac2g` flow.
+//!   on a process per device, linked to the issuing op by an `ac2g` flow;
+//! - each `record_function` range again on the device's timeline, category
+//!   `gpu_user_annotation` (Kineto's), spanning the GPU work issued inside
+//!   it: from its first kernel's start to its last's end.
 
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::{Event, EventKind};
@@ -157,6 +161,31 @@ pub(crate) fn trace(events: &[Event]) -> String {
                 }
             }
         }
+    }
+    // Each range's GPU span, per device: the GPU work whose chain of
+    // issuing ops and ranges includes it.
+    let by_id: HashMap<u64, &Event> = events.iter().map(|e| (e.id, e)).collect();
+    let mut spans: HashMap<(u64, Device), (u64, u64)> = HashMap::new();
+    for gpu in events.iter().filter(|e| e.kind == EventKind::Gpu) {
+        let mut parent = gpu.parent;
+        while let Some(range) = parent.and_then(|p| by_id.get(&p)) {
+            if range.kind == EventKind::UserRange {
+                let span = spans.entry((range.id, gpu.device)).or_insert((u64::MAX, 0));
+                *span = (span.0.min(gpu.start_ns), span.1.max(gpu.end_ns));
+            }
+            parent = range.parent;
+        }
+    }
+    let mut spans: Vec<_> = spans.into_iter().collect();
+    spans.sort_by_key(|&((id, _), (start, _))| (start, id));
+    for ((id, device), (start, end)) in spans {
+        out.push(format!(
+            "{{\"ph\":\"X\",\"cat\":\"gpu_user_annotation\",\"name\":{},\"pid\":{},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"External id\":{id}}}}}",
+            json_str(&by_id[&id].name),
+            pid(device),
+            us(start),
+            us(end - start),
+        ));
     }
     // Name the timelines.
     out.push(format!(
