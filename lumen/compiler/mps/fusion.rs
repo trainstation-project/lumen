@@ -21,7 +21,7 @@ use crate::graph::{Graph, Node, Primitive, Var};
 const MAX_INPUTS: usize = 29;
 
 /// Whether `node` can be computed an element at a time inside a fusion.
-fn fusible(graph: &Graph, node: &Node) -> bool {
+pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     let loop_op = matches!(
         node.primitive,
@@ -43,6 +43,7 @@ fn fusible(graph: &Graph, node: &Node) -> bool {
             | BroadcastInDim { .. }
             | Transpose { .. }
             | Slice { .. }
+            | Concatenate { .. }
             | Full { .. }
             | Iota { .. }
     );
@@ -145,7 +146,10 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
             continue;
         }
         let out = match &fusions[i] {
-            Some((members, reads)) if members.len() > 1 => {
+            // A concatenate has no kernel of its own: alone, it is a fusion too.
+            Some((members, reads))
+                if members.len() > 1 || matches!(node.primitive, Primitive::Concatenate { .. }) =>
+            {
                 let body = body(graph, members, reads);
                 let name = kernel(&body);
                 let label = members.iter().map(|&m| nodes[m].primitive.name());

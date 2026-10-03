@@ -6,7 +6,7 @@
 //! Every device first runs the passes that hold for any: [`cse`] (common
 //! subexpression elimination).
 //!
-//! - [`mps`]: dot canonicalization, then loop fusion into generated Metal
+//! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.
 
 mod cse;

@@ -56,6 +56,10 @@ pub(crate) fn encode(
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
 
+    if let Concatenate { .. } = step.primitive {
+        return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
+    }
+
     let encode = match step.primitive {
         Add
         | Sub
@@ -72,7 +76,7 @@ pub(crate) fn encode(
         | Logistic
         | ConvertElementType { .. }
         | Select => super::elementwise::mps::encode,
-        ReduceSum { .. } | ReduceMax { .. } => unreachable!("encoded above"),
+        ReduceSum { .. } | ReduceMax { .. } | Concatenate { .. } => unreachable!("encoded above"),
         DotGeneral { .. } => super::dot_general::mps::encode,
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
             super::layout::mps::encode

@@ -70,6 +70,9 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             start_indices: dims("start_indices")?,
             limit_indices: dims("limit_indices")?,
         },
+        "concatenate" => Concatenate {
+            dimension: get("dimension")?.extract()?,
+        },
         "full" => Full {
             shape: dims("shape")?,
             fill_value: to_scalar(&get("fill_value")?)?,

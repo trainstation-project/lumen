@@ -1,4 +1,6 @@
-//! The MPS graph compiler: dot canonicalization ([`canonicalize_dots`]),
+//! The MPS graph compiler: dot merging (with fusion, which runs the
+//! concatenations it adds; [`merge_dots`]), dot canonicalization
+//! ([`canonicalize_dots`]),
 //! then loop fusion ([`fusion`]) into kernels generated as Metal source
 //! ([`codegen`]), compiled together into one library when the graph is
 //! compiled, then the fused graph's [`Plan`], with the workspace scratch
@@ -8,12 +10,14 @@
 
 mod codegen;
 mod fusion;
+mod merge_dots;
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char};
 
+use self::merge_dots::merge_dots;
 use super::Options;
 use crate::Tensor;
 use crate::graph::plan::Step;
@@ -33,6 +37,13 @@ const PRELUDE: &str = include_str!("../../ops/mps.metal");
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+    let merged;
+    let graph = if options.fuse {
+        merged = merge_dots(graph);
+        &merged
+    } else {
+        graph
+    };
     let graph = canonicalize_dots(graph);
     let mut kernels = BTreeMap::new();
     let fused = if options.fuse {

@@ -63,6 +63,23 @@ fn slice_rules() {
 }
 
 #[test]
+fn concatenate_rules() {
+    let (a, b) = (ty(DType::F32, &[2, 3, 4]), ty(DType::F32, &[2, 5, 4]));
+    let cat = |dimension| Concatenate { dimension };
+    let y = infer(cat(1), &[a.clone(), b.clone(), a.clone()]).unwrap();
+    assert_eq!((y.dtype, y.shape), (DType::F32, vec![2, 11, 4]));
+    assert_eq!(
+        infer(cat(0), std::slice::from_ref(&a)).unwrap().shape,
+        [2, 3, 4]
+    );
+    assert!(infer(cat(0), &[a.clone(), b.clone()]).is_err());
+    assert!(infer(cat(3), std::slice::from_ref(&a)).is_err());
+    assert!(infer(cat(1), &[a.clone(), ty(DType::F16, &[2, 3, 4])]).is_err());
+    assert!(infer(cat(1), &[a, ty(DType::F32, &[2, 3])]).is_err());
+    assert!(infer(cat(0), &[]).is_err());
+}
+
+#[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
     let sum = ReduceSum { axes: vec![0, 2] };
@@ -569,7 +586,7 @@ pub(crate) mod mps {
 
     /// [`check`], allowing floats a further `slack` of absolute error: the
     /// float accumulation error of a large sum.
-    fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
+    pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
         let plan = crate::compiler::compile(g, Device::Mps).unwrap();
@@ -814,6 +831,18 @@ pub(crate) mod mps {
                     limit_indices: limit.to_vec(),
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
+            }
+            // Each dimension, operands of different sizes (one empty).
+            for dimension in 0..3 {
+                let shape = |n| {
+                    let mut shape = vec![3, 4, 5];
+                    shape[dimension] = n;
+                    ty(dtype, &shape)
+                };
+                check_node(
+                    Concatenate { dimension },
+                    &[shape(2), shape(0), shape(3), shape(1)],
+                );
             }
             if dtype != DType::Bool {
                 for dimension in 0..3 {

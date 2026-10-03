@@ -65,6 +65,11 @@ pub enum Primitive {
         start_indices: Vec<usize>,
         limit_indices: Vec<usize>,
     },
+    /// The operands one after another along `dimension`, their other
+    /// dimensions equal (`lax.concatenate`).
+    Concatenate {
+        dimension: usize,
+    },
     Full {
         shape: Vec<usize>,
         fill_value: Scalar,
@@ -113,6 +118,7 @@ impl Primitive {
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
             Slice { .. } => "slice",
+            Concatenate { .. } => "concatenate",
             Full { .. } => "full",
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
@@ -128,6 +134,7 @@ impl Primitive {
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } => 2,
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
+            Concatenate { .. } => args.len().max(1),
             _ => 1,
         };
         if args.len() != arity {
@@ -282,6 +289,25 @@ impl Primitive {
                 }
                 Ok(TensorType::new(x.dtype, &shape))
             }
+            Concatenate { dimension } => {
+                let x = args[0];
+                if *dimension >= x.shape.len() {
+                    return err(format!("dimension {dimension} is not a dimension of {x}"));
+                }
+                let mut shape = x.shape.clone();
+                shape[*dimension] = 0;
+                for y in args {
+                    let others_equal = y.shape.len() == x.shape.len()
+                        && (0..x.shape.len()).all(|d| d == *dimension || y.shape[d] == x.shape[d]);
+                    if y.dtype != x.dtype || !others_equal {
+                        return err(format!(
+                            "operands must share a dtype and all dimensions but {dimension}, got {x} and {y}"
+                        ));
+                    }
+                    shape[*dimension] += y.shape[*dimension];
+                }
+                Ok(TensorType::new(x.dtype, &shape))
+            }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             Iota {
                 dtype,
@@ -387,6 +413,7 @@ impl fmt::Display for Primitive {
                 Tuple(limit_indices),
                 Tuple(start_indices)
             ),
+            Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
             Full {
                 shape,
                 fill_value,

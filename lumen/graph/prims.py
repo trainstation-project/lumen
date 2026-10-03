@@ -13,7 +13,7 @@ __all__ = [
     "neg", "exp", "log", "rsqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose", "slice",
+    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate",
     "full", "iota",
 ]
 
@@ -127,6 +127,12 @@ def slice(x, start_indices, limit_indices):
     """The elements from ``start_indices`` up to ``limit_indices``
     (exclusive) in each dimension (``lax.slice``, unit strides)."""
     return bind("slice", x, start_indices=tuple(start_indices), limit_indices=tuple(limit_indices))
+
+
+def concatenate(operands, dimension):
+    """``operands`` one after another along ``dimension``, their other
+    dimensions equal (``lax.concatenate``)."""
+    return bind("concatenate", *operands, dimension=dimension)
 
 
 def full(shape, fill_value, dtype):

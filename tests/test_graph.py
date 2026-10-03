@@ -507,3 +507,39 @@ def test_packed_weights_are_one_matmul(device):
     if device == "mps":
         assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice -> slice")
     assert steps.count("dot_general") == 1
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_concatenate(device):
+    a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
+    try:
+        args = [lumen.from_numpy(v).to(device) for v in (a, b, c)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    out = lumen.to_numpy(lumen.compile(lambda *xs: prims.concatenate(xs, 1))(*args))
+    assert np.array_equal(out, np.concatenate([a, b, c], 1))
+    with pytest.raises(ValueError, match="all dimensions but 0"):
+        lumen.compile(lambda *xs: prims.concatenate(xs, 0))(*args)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_dots_sharing_an_operand_merge(device):
+    """relu(x @ w1) * (x @ w3): on MPS, one matmul of x and [w1 | w3]
+    concatenated (XLA's DotMerger), its halves read in place by the gate."""
+    x, w1, w3 = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, w1, w3)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def gated(x, w1, w3):
+        return (x @ w1).relu() * (x @ w3)
+
+    out = lumen.to_numpy(lumen.compile(gated)(*args))
+    np.testing.assert_allclose(out, np.maximum(x @ w1, 0) * (x @ w3), rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(gated)(*args)
+    steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
+    if device == "mps":
+        assert steps[:2] == ["concatenate", "dot_general"] and len(steps) == 3
+    else:
+        assert steps.count("dot_general") == 2

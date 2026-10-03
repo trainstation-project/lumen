@@ -1,6 +1,6 @@
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
-use crate::graph::tests::mps::{available, check, values};
+use crate::graph::tests::mps::{available, check, check_within, values};
 use crate::graph::tests::{data, mlp};
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::ops::reference;
@@ -306,5 +306,97 @@ fn slices_fuse_into_their_readers() {
     assert_eq!(fused_primitives(&g, &[data(&[16, 128], 1)]), ["fusion"]);
     if available() {
         check(&g, &[values(DType::F32, &[16, 128], 1)]);
+    }
+}
+
+/// A dot of `x` [16, 32] and each of `ws` [32, n] as one dot of `x` and
+/// the `ws` concatenated, its result sliced back into each.
+#[test]
+fn dots_sharing_an_operand_merge() {
+    let matmul = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+    };
+    // The gated MLP: relu(x @ w1) * (x @ w3) @ w2.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[16, 32]));
+    let w1 = g.input(ty(DType::F32, &[32, 64]));
+    let w3 = g.input(ty(DType::F32, &[32, 64]));
+    let w2 = g.input(ty(DType::F32, &[64, 32]));
+    let gate = apply(&mut g, matmul.clone(), &[x, w1]);
+    let up = apply(&mut g, matmul.clone(), &[x, w3]);
+    let zero = Full {
+        shape: vec![16, 64],
+        fill_value: Scalar::Float(0.0),
+        dtype: DType::F32,
+    };
+    let zero = apply(&mut g, zero, &[]);
+    let relu = apply(&mut g, Max, &[gate, zero]);
+    let h = apply(&mut g, Mul, &[relu, up]);
+    let y = apply(&mut g, matmul.clone(), &[h, w2]);
+    g.set_outputs(&[y]).unwrap();
+    let merged = super::merge_dots::merge_dots(&g);
+    let inputs = [
+        data(&[16, 32], 1),
+        data(&[32, 64], 2),
+        data(&[32, 64], 3),
+        data(&[64, 32], 4),
+    ];
+    let expected = reference::run(&g, &inputs).unwrap();
+    assert_eq!(
+        reference::run(&merged, &inputs).unwrap()[0].to_vec::<f32>(),
+        expected[0].to_vec::<f32>()
+    );
+    let dots = |g: &Graph| names(g).iter().filter(|&&n| n == "dot_general").count();
+    assert_eq!(dots(&merged), 2, "{merged}");
+    // The concatenation is a fusion of its own; the slices fuse into the gate.
+    assert_eq!(
+        names(&fuse(&merged)),
+        ["fusion", "dot_general", "fusion", "dot_general"]
+    );
+    if available() {
+        // Two dots' float accumulation error, chained.
+        check_within(&g, &inputs, 1e-3);
+    }
+
+    // Shared rhs (lhs concatenated, rows), three of them, one of another
+    // size; a dot reading another's result does not merge with it, and a
+    // result read other than in place (an output) does not merge.
+    let mut g = Graph::new();
+    let w = g.input(ty(DType::F32, &[32, 32]));
+    let xs: Vec<Var> = [4, 6, 4]
+        .iter()
+        .map(|&m| g.input(ty(DType::F32, &[m, 32])))
+        .collect();
+    let ys: Vec<Var> = xs
+        .iter()
+        .map(|&x| apply(&mut g, matmul.clone(), &[x, w]))
+        .collect();
+    let mut outs: Vec<Var> = ys.iter().map(|&y| apply(&mut g, Neg, &[y])).collect();
+    let dependent = apply(&mut g, matmul.clone(), &[outs[0], w]);
+    let out = apply(&mut g, matmul.clone(), &[xs[1], w]);
+    outs.extend([apply(&mut g, Neg, &[dependent]), out]);
+    g.set_outputs(&outs).unwrap();
+    let merged = super::merge_dots::merge_dots(&g);
+    assert_eq!(dots(&merged), 3, "{merged}");
+    let inputs: Vec<Tensor> = [vec![32, 32], vec![4, 32], vec![6, 32], vec![4, 32]]
+        .iter()
+        .enumerate()
+        .map(|(i, shape)| data(shape, i as u64 + 1))
+        .collect();
+    let expected = reference::run(&g, &inputs).unwrap();
+    for (e, a) in expected
+        .iter()
+        .zip(reference::run(&merged, &inputs).unwrap())
+    {
+        assert_eq!(
+            (e.shape(), e.to_vec::<f32>()),
+            (a.shape(), a.to_vec::<f32>())
+        );
+    }
+    if available() {
+        check_within(&g, &inputs, 1e-3);
     }
 }

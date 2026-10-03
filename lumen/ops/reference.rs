@@ -460,6 +460,44 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ravel(idx.iter().zip(start_indices).map(|(i, s)| i + s), &x.shape)
             })
         }
+        // The operands' elements one after another; an index's element is
+        // in the last operand starting at or before its coordinate.
+        Concatenate { dimension } => {
+            let d = *dimension;
+            let all = match args[0] {
+                Int(_) => Int(args
+                    .iter()
+                    .flat_map(|a| match a {
+                        Int(v) => v.clone(),
+                        Float(_) => unreachable!("operands of one dtype"),
+                    })
+                    .collect()),
+                Float(_) => Float(
+                    args.iter()
+                        .flat_map(|a| match a {
+                            Float(v) => v.clone(),
+                            Int(_) => unreachable!("operands of one dtype"),
+                        })
+                        .collect(),
+                ),
+            };
+            let (mut starts, mut bases) = (Vec::new(), Vec::new());
+            let (mut start, mut base) = (0, 0);
+            for t in types {
+                starts.push(start);
+                bases.push(base);
+                start += t.shape[d];
+                base += t.numel();
+            }
+            gather(&all, out, |idx| {
+                let k = starts.partition_point(|&s| s <= idx[d]) - 1;
+                let source = idx
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| if i == d { c - starts[k] } else { c });
+                bases[k] + ravel(source, &types[k].shape)
+            })
+        }
         Full { fill_value, .. } => {
             let one = match (*fill_value, dtype.is_float()) {
                 (v, true) => Float(vec![round(v.to_f64(), dtype)]),
