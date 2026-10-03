@@ -21,7 +21,6 @@ pub(crate) mod mps;
 pub mod python;
 pub mod reduce;
 pub mod reference;
-pub mod rms_norm;
 pub mod softmax;
 #[cfg(test)]
 mod tests;

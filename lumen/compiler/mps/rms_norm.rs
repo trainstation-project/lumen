@@ -8,13 +8,14 @@
 //! y = x * broadcast(1 / s)  or  x / broadcast(s)  [* broadcast(weight)]
 //! ```
 //!
-//! become one [`Primitive::RmsNorm`], which
-//! runs as one kernel (`ops/rms_norm/mps.metal`), when nothing else reads
-//! the values in between ([`Matcher::exclusive`]).
+//! run as one kernel, when nothing else reads the values in between
+//! ([`Matcher::exclusive`]): a fusion of these primitives with its
+//! reduction inside (no primitive of its own), which the codegen makes a
+//! kernel a threadgroup a row (`codegen.rs`: a row kernel).
 
 use crate::DType;
 use crate::compiler::pattern::{Match, Matcher, Pattern, bind, either, one_of, op};
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Primitive};
 
 // Captures.
 const X: usize = 0;
@@ -71,9 +72,10 @@ fn normalized() -> Pattern {
     ])
 }
 
-/// `graph` with each RMS norm over the last dimension one primitive (the
-/// primitives it replaces are left dead).
-pub(crate) fn rewrite_rms_norm(graph: &Graph) -> Graph {
+/// Each RMS norm over the last dimension in `graph`: its root node (the
+/// normalized, or weighted, value) and its reduction's, by index. The
+/// fusion pass fuses each into one row kernel, its reduction inside.
+pub(crate) fn rms_norms(graph: &Graph) -> Vec<(usize, usize)> {
     let matcher = Matcher::new(graph);
     let weighted = either(
         |p| matches!(p, Primitive::Mul),
@@ -85,7 +87,7 @@ pub(crate) fn rewrite_rms_norm(graph: &Graph) -> Graph {
     let plain = normalized();
     let nodes = graph.nodes();
     // Weighted norms first, so their weight's multiply is part of them.
-    let mut found: Vec<Option<(Match, f64)>> = vec![None; nodes.len()];
+    let mut found = Vec::new();
     let mut taken = vec![false; nodes.len()];
     for pattern in [&weighted, &plain] {
         for (i, node) in nodes.iter().enumerate().rev() {
@@ -95,45 +97,20 @@ pub(crate) fn rewrite_rms_norm(graph: &Graph) -> Graph {
             let Some(m) = matcher.find(pattern, node.output, CAPTURES) else {
                 continue;
             };
-            if let Some(eps) = rms_norm(graph, &matcher, &m) {
+            if rms_norm(graph, &matcher, &m).is_some() {
                 m.nodes.iter().for_each(|&j| taken[j] = true);
-                found[i] = Some((m, eps));
+                found.push((i, matcher.index(m.get(SUM)).expect("a reduction")));
             }
         }
     }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![0; graph.types.len()];
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-    for (i, node) in nodes.iter().enumerate() {
-        map[node.output] = match &found[i] {
-            Some((m, epsilon)) => {
-                let operands: Vec<Var> = [Some(m.get(X)), m.captures[W]]
-                    .into_iter()
-                    .flatten()
-                    .map(|v| map[v])
-                    .collect();
-                out.apply(Primitive::RmsNorm { epsilon: *epsilon }, &operands)
-            }
-            None => {
-                let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-                out.apply(node.primitive.clone(), &inputs)
-            }
-        }
-        .expect("a rewrite keeps the node's type");
-    }
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
+    found
 }
 
-/// The epsilon of match `m`, if it is an RMS norm over the last dimension:
-/// the sum over that dimension, divided by its size, the broadcasts back
-/// along it (the weight's, of its size), a float dtype the kernel takes,
-/// and nothing else reading what it replaces.
-fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<f64> {
+/// Whether match `m` is an RMS norm over the last dimension: the sum over
+/// that dimension, divided by its size, plus a scalar epsilon (or not),
+/// the broadcasts back along it (the weight's, of its size), a float dtype,
+/// and nothing else reading its values in between.
+fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<()> {
     let x = graph.type_of(m.get(X));
     let last = x.shape.len().checked_sub(1)?;
     let n = x.shape[last];
@@ -161,9 +138,5 @@ fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<f64> {
         && m.captures[ONE].is_none_or(|one| matcher.scalar(one) == Some(1.0))
         && weight_ok
         && matcher.exclusive(m);
-    let epsilon = match m.captures[EPS] {
-        Some(eps) => matcher.scalar(eps),
-        None => Some(0.0),
-    };
-    ok.then_some(epsilon).flatten()
+    (ok && m.captures[EPS].is_none_or(|eps| matcher.scalar(eps).is_some())).then_some(())
 }

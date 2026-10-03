@@ -24,7 +24,7 @@ use crate::Tensor;
 use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
-use crate::ops::mps::{elementwise_grid, launch, scratch_bytes, u32_arg};
+use crate::ops::mps::{Grid, elementwise_grid, launch, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 
 unsafe extern "C" {
@@ -33,30 +33,30 @@ unsafe extern "C" {
 }
 
 /// The shared definitions the generated kernels use (functors, conversions,
-/// `FOR_EACH_ELEMENT`, the reduction, softmax and rms_norm templates
-/// without their kernels).
+/// `FOR_EACH_ELEMENT`, the reduction and softmax templates without their
+/// kernels).
 const PRELUDE: &str = concat!(
     include_str!("../../ops/mps.metal"),
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
     include_str!("../../ops/softmax/mps.metal"),
-    include_str!("../../ops/rms_norm/mps.metal"),
 );
 
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
-    // Rewriting into fused kernels, and merging (its merged dot's readers
-    // read its slices), need fusion.
+    // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match options.fuse {
-        true => merge_dots(&rms_norm::rewrite_rms_norm(graph), &options.packable),
+        true => merge_dots(graph, &options.packable),
         false => (graph.clone(), Vec::new()),
     };
     let graph = &merged;
     let graph = canonicalize_dots(graph);
     let mut kernels = BTreeMap::new();
     let fused = if options.fuse {
-        fusion::fuse(&graph, |body| {
+        // RMS norms: each one fusion, its reduction inside.
+        let rows = rms_norm::rms_norms(&graph);
+        fusion::fuse(&graph, &rows, |body| {
             let (name, source) = codegen::kernel(body);
             kernels.insert(name.clone(), source);
             name
@@ -234,22 +234,25 @@ pub(crate) fn encode(
     };
     // The kernel's inputs, then (a multi-output fusion's) other outputs.
     let (inputs, extra) = inputs.split_at(body.inputs().len());
+    // A row kernel: a threadgroup a row of the last dimension.
+    if !codegen::row_reductions(body).is_empty() {
+        let out = &step.output.1;
+        let n = out.shape.last().copied().unwrap_or(1);
+        let rows = out.numel().checked_div(n).unwrap_or(0);
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        return launch(
+            name,
+            &buffers,
+            &[],
+            Grid::Groups([rows, 1, 1]),
+            keep,
+            step.label,
+        );
+    }
     if let Some(root) = codegen::reduction_root(body) {
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
-        if let Primitive::RmsNorm { .. } = root.primitive {
-            let weighted = root.inputs.len() == 2;
-            return crate::ops::rms_norm::mps::encode_rms_norm(
-                &root.primitive,
-                x,
-                weighted,
-                Some(name),
-                label,
-                inputs,
-                output,
-                keep,
-            );
-        }
         if let Primitive::Softmax { .. } = root.primitive {
             return crate::ops::softmax::mps::encode_softmax(
                 x,

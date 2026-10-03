@@ -155,7 +155,6 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/ops/elementwise/mps.metal",
     "lumen/ops/reduce/mps.metal",
     "lumen/ops/softmax/mps.metal",
-    "lumen/ops/rms_norm/mps.metal",
     "lumen/ops/dot_general/mps.metal",
     "lumen/ops/layout/mps.metal",
     "lumen/ops/factory/mps.metal",

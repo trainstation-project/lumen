@@ -742,8 +742,8 @@ class Norm(lumen.nn.Module):
 def test_rms_norm(device):
     """lumen.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
     as primitives, which the MPS compiler recognizes, as it does an RMS norm
-    written by hand, and runs as one kernel with the ops computing its input
-    fused."""
+    written by hand, and fuses into one kernel (its reduction inside) with
+    the ops computing its input."""
     x, w = rand(8, 300), rand(300, seed=1)
     try:
         X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
@@ -763,7 +763,11 @@ def test_rms_norm(device):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
     if device == "mps":
         steps = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()]  # noqa: E731
-        assert steps(f) == ["full -> broadcast_in_dim -> add -> rms_norm"] and steps(by_hand) == ["rms_norm"]
+        # One kernel each: a fusion with its reduction inside (a row kernel).
+        for g in (f, by_hand):
+            (label,) = steps(g)
+            assert "reduce_sum" in label and "sqrt" in label, label
+        assert steps(f)[0].startswith("full -> broadcast_in_dim -> add -> mul -> reduce_sum")
     with pytest.raises(NotImplementedError, match="last dimension"):
         lumen.make_graph(lambda a: lumen.rms_norm(a, (8, 300)))(X)
     norm = Norm(lumen.empty([300], device="meta"), 1e-6)

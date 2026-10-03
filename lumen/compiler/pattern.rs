@@ -120,6 +120,11 @@ impl<'a> Matcher<'a> {
         self.producer[v].map(|i| &self.graph.nodes()[i])
     }
 
+    /// The index of the node defining `v`, if a node does.
+    pub(crate) fn index(&self, v: Var) -> Option<usize> {
+        self.producer[v]
+    }
+
     /// `pattern` matched at `v`, with `captures` slots.
     pub(crate) fn find(&self, pattern: &Pattern, v: Var, captures: usize) -> Option<Match> {
         let mut m = Match {

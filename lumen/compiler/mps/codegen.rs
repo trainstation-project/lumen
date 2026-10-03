@@ -26,6 +26,10 @@ use crate::{DType, Scalar};
 /// The fusion kernel for `body`: its name and Metal source. The name is a
 /// hash of the source, so identical fusions share one kernel.
 pub(crate) fn kernel(body: &Graph) -> (String, String) {
+    let rows = row_reductions(body);
+    if !rows.is_empty() {
+        return row_kernel(body, &rows);
+    }
     if let Some(root) = reduction_root(body) {
         return reduction(body, root);
     }
@@ -78,10 +82,7 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     let root = body.nodes().iter().find(|n| n.output == out)?;
     matches!(
         root.primitive,
-        Primitive::ReduceSum { .. }
-            | Primitive::ReduceMax { .. }
-            | Primitive::Softmax { .. }
-            | Primitive::RmsNorm { .. }
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
     )
     .then_some(root)
 }
@@ -133,34 +134,13 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         Primitive::ReduceSum { axes } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
         _ => {
-            // Softmax or rms_norm over the last dimension: a threadgroup a
-            // row; rms_norm's weight read from its own input buffer.
-            let threads = ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
-            let (args, call) = match root.inputs.get(1) {
-                _ if matches!(root.primitive, Primitive::Softmax { .. }) => (
-                    arg(0, "ulong &count") + threads,
-                    format!(
-                        "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];\n    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
-                    ),
-                ),
-                weight => {
-                    let w = weight.map(|w| {
-                        body.inputs()
-                            .iter()
-                            .position(|v| v == w)
-                            .expect("the weight is read")
-                    });
-                    let (flag, pointer) = w.map_or(("false", "nullptr".to_string()), |k| {
-                        ("true", format!("in{k}"))
-                    });
-                    (
-                        [arg(0, "ulong &count"), arg(1, "float &eps")].join(", ") + threads,
-                        format!(
-                            "threadgroup float shared[REDUCE_THREADS];\n    rms_norm_rows<{t}, {flag}>(input, {pointer}, out, count, eps, shared, group.x, tid.y * 16 + tid.x);"
-                        ),
-                    )
-                }
-            };
+            // Softmax over the last dimension: a threadgroup a row.
+            let args = arg(0, "ulong &count")
+                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
+            let call = format!(
+                "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];
+    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
+            );
             return named(format!(
                 "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {t} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
                 emitter.lines,
@@ -239,6 +219,99 @@ fn named(source: String) -> (String, String) {
     (name.clone(), source.replace("NAME", &name))
 }
 
+/// The reductions of a fusion with `body` other than its root: a
+/// normalization's (`rms_norm.rs`), each over the last dimension of a value
+/// of the root's shape, which make its kernel a row kernel.
+pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
+    let out = body.outputs()[0];
+    body.nodes()
+        .iter()
+        .filter(|n| n.output != out)
+        .filter(|n| {
+            matches!(
+                n.primitive,
+                Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+            )
+        })
+        .collect()
+}
+
+/// The kernel of a fusion with reductions inside (a normalization over the
+/// last dimension, `rms_norm.rs`): a threadgroup a row of the output. A
+/// pass over the row for each reduction, in order, accumulating it (in
+/// float, combined in threadgroup memory); then one writing the output.
+/// Values the same across the row (the reductions', constants, and what
+/// they compute alone: `rsqrt(mean + eps)`) are computed once a row.
+fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
+    let out = body.outputs()[0];
+    let out_type = body.type_of(out);
+    let n = *out_type.shape.last().expect("a dimension");
+    let rows: usize = out_type.shape[..out_type.shape.len() - 1].iter().product();
+    let mut e = Emitter::new(body);
+    // Which values are the same across a row: the reductions', constants
+    // (index-free: no iota), and values of `rows` elements of those.
+    let mut constant = vec![false; body.types.len()];
+    for node in body.nodes() {
+        let v = node.output;
+        let reduced = reductions.iter().any(|r| r.output == v);
+        constant[v] = !reduced
+            && !matches!(node.primitive, Primitive::Iota { .. })
+            && node.inputs.iter().all(|&u| constant[u]);
+        let of_rows =
+            body.type_of(v).numel() == rows && node.inputs.iter().all(|&u| e.invariant[u]);
+        e.invariant[v] = reduced || constant[v] || of_rows;
+    }
+    let mut source = String::new();
+    for (k, r) in reductions.iter().enumerate() {
+        let x = body.type_of(r.inputs[0]);
+        assert_eq!(
+            (x.shape.last(), body.type_of(r.output).numel()),
+            (Some(&n), rows),
+            "a reduction of rows"
+        );
+        let op = functor_of_reduction(&r.primitive);
+        let a = format!("typename acc<{}>::type", metal_type(x.dtype));
+        (e.lines, e.hoisted) = (String::new(), String::new());
+        (e.values, e.indices) = (HashMap::new(), HashMap::new());
+        let value = e.value(r.inputs[0], "j".into());
+        let rt = metal_type(body.type_of(r.output).dtype);
+        write!(
+            source,
+            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        acc{k} = {op}::apply(acc{k}, {a}({value}));\n    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = {rt}(shared{k}[0]);\n",
+            e.hoisted, e.lines
+        )
+        .unwrap();
+        e.row_locals.insert(r.output, format!("r{k}"));
+    }
+    (e.lines, e.hoisted) = (String::new(), String::new());
+    (e.values, e.indices) = (HashMap::new(), HashMap::new());
+    let value = e.value(out, "j".into());
+    write!(
+        source,
+        "{}    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        out[j] = {value};\n    }}\n",
+        e.hoisted, e.lines
+    )
+    .unwrap();
+    let mut params = String::new();
+    for (k, &v) in body.inputs().iter().enumerate() {
+        let t = metal_type(body.type_of(v).dtype);
+        write!(params, "device const {t} *in{k} [[buffer({k})]], ").unwrap();
+    }
+    let k = body.inputs().len();
+    let ot = metal_type(out_type.dtype);
+    named(format!(
+        "kernel void NAME({params}device {ot} *out [[buffer({k})]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{source}}}\n"
+    ))
+}
+
+/// The functor reducing as reduction `p` does.
+fn functor_of_reduction(p: &Primitive) -> &'static str {
+    match p {
+        Primitive::ReduceSum { .. } => "Add",
+        _ => "Max",
+    }
+}
+
 struct Emitter<'a> {
     body: &'a Graph,
     /// The node defining each value that is not an input.
@@ -249,6 +322,13 @@ struct Emitter<'a> {
     values: HashMap<(Var, String), String>,
     /// The local holding each index expression computed so far.
     indices: HashMap<String, String>,
+    /// The locals named so far.
+    locals: usize,
+    /// A row kernel's values the same across a row ([`row_kernel`]), by
+    /// value: computed once a row, into `hoisted`, held in `row_locals`.
+    invariant: Vec<bool>,
+    row_locals: HashMap<Var, String>,
+    hoisted: String,
 }
 
 impl<'a> Emitter<'a> {
@@ -264,7 +344,17 @@ impl<'a> Emitter<'a> {
             lines: String::new(),
             values: HashMap::new(),
             indices: HashMap::new(),
+            locals: 0,
+            invariant: vec![false; body.types.len()],
+            row_locals: HashMap::new(),
+            hoisted: String::new(),
         }
+    }
+
+    /// A new local's name.
+    fn fresh(&mut self, prefix: &str) -> String {
+        self.locals += 1;
+        format!("{prefix}{}", self.locals - 1)
     }
 
     /// A local holding the index `expr` (or `expr` itself if it is one).
@@ -275,7 +365,7 @@ impl<'a> Emitter<'a> {
         if let Some(name) = self.indices.get(&expr) {
             return name.clone();
         }
-        let name = format!("i{}", self.indices.len());
+        let name = self.fresh("i");
         writeln!(self.lines, "        uint {name} = {expr};").unwrap();
         self.indices.insert(expr, name.clone());
         name
@@ -353,8 +443,31 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The local holding value `v` at row-major index `idx` of its shape.
+    /// The local holding value `v` at row-major index `idx` of its shape: in
+    /// a row kernel, a value the same across the row whatever the index,
+    /// computed once (into `hoisted`, before the loops).
     fn value(&mut self, v: Var, idx: String) -> String {
+        if !self.invariant[v] {
+            return self.element(v, idx);
+        }
+        if let Some(name) = self.row_locals.get(&v) {
+            return name.clone();
+        }
+        let lines = std::mem::take(&mut self.lines);
+        let caches = (
+            std::mem::take(&mut self.values),
+            std::mem::take(&mut self.indices),
+        );
+        let name = self.element(v, "row".into());
+        let hoisted = std::mem::replace(&mut self.lines, lines);
+        self.hoisted.push_str(&hoisted);
+        (self.values, self.indices) = caches;
+        self.row_locals.insert(v, name.clone());
+        name
+    }
+
+    /// The local holding value `v` at row-major index `idx` of its shape.
+    fn element(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
         if let Some(name) = self.values.get(&key) {
             return name.clone();
@@ -427,7 +540,7 @@ impl<'a> Emitter<'a> {
                             c = format!("({c}) % {}u", ty.shape[d]);
                         }
                         let c = self.index(c);
-                        let name = format!("v{}", self.values.len());
+                        let name = self.fresh("v");
                         writeln!(self.lines, "        {t} {name};").unwrap();
                         self.values.insert(key, name.clone());
                         let mut start = 0;
@@ -474,7 +587,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         };
-        let name = format!("v{}", self.values.len());
+        let name = self.fresh("v");
         writeln!(self.lines, "        {t} {name} = {expr};").unwrap();
         self.values.insert(key, name.clone());
         name

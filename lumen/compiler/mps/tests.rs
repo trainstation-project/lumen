@@ -11,8 +11,12 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
+/// `g` fused as the MPS compiler fuses it (its RMS norms one row kernel
+/// each, `rms_norm.rs`).
 fn fuse(g: &Graph) -> Graph {
-    fusion::fuse(g, |body| codegen::kernel(body).0)
+    fusion::fuse(g, &super::rms_norm::rms_norms(g), |body| {
+        codegen::kernel(body).0
+    })
 }
 
 /// The fused graph's primitives, after checking it computes exactly what
@@ -735,30 +739,6 @@ fn softmax_fuses_its_input() {
     }
 }
 
-/// rms_norm fuses the primitives computing its input into its kernel; its
-/// weight, read from memory, is computed by a kernel of its own.
-#[test]
-fn rms_norm_fuses_its_input() {
-    let mut g = Graph::new();
-    let x = g.input(ty(DType::F32, &[8, 300]));
-    let y = g.input(ty(DType::F32, &[8, 300]));
-    let w = g.input(ty(DType::F32, &[300]));
-    let h = apply(&mut g, Add, &[x, y]);
-    let w2 = apply(&mut g, Mul, &[w, w]);
-    let out = apply(&mut g, RmsNorm { epsilon: 1e-6 }, &[h, w2]);
-    g.set_outputs(&[out]).unwrap();
-    let inputs = [data(&[8, 300], 1), data(&[8, 300], 2), data(&[300], 3)];
-    assert_eq!(fused_primitives(&g, &inputs), ["mul", "fusion"]);
-    if available() {
-        let inputs: Vec<Tensor> = [vec![8, 300], vec![8, 300], vec![300]]
-            .iter()
-            .enumerate()
-            .map(|(i, s)| values(DType::F32, s, i as u64 + 1))
-            .collect();
-        check(&g, &inputs);
-    }
-}
-
 /// The pattern matcher: operands in order or (`either`) either order, a
 /// capture matching one value throughout, and exclusivity.
 #[test]
@@ -799,11 +779,12 @@ fn patterns_match_graphs() {
 }
 
 /// An RMS norm written as its primitives (the weight's multiply and each
-/// other multiply in either order) becomes one rms_norm; not when its
-/// values are read elsewhere, when it divides by anything but the size of
-/// the last dimension, or reduces another.
+/// other multiply in either order) is one fusion, a row kernel with its
+/// reduction inside; not when its values are read elsewhere, when it
+/// divides by anything but the size of the last dimension, or reduces
+/// another.
 #[test]
-fn rms_norms_are_rewritten() {
+fn rms_norms_are_one_row_kernel() {
     // x * (1 / sqrt(sum(x * x, last) / n + eps)) [* w], with `flip` putting each
     // multiply's operands the other way round, `n` the divisor, and `axis`
     // the dimension reduced.
@@ -861,26 +842,14 @@ fn rms_norms_are_rewritten() {
         g.set_outputs(&outputs).unwrap();
         g
     };
-    let rewritten = |g: &Graph| {
-        let r = super::rms_norm::rewrite_rms_norm(g);
-        r.nodes()
-            .iter()
-            .any(|n| matches!(n.primitive, RmsNorm { .. }))
-    };
+    // One fusion (a row kernel, its reduction inside), checked against the
+    // unfused graph (the reference) by fused_primitives.
+    let inputs = [data(&[8, 300], 1), data(&[300], 2)];
+    let rewritten = |g: &Graph| fused_primitives(g, &inputs) == ["fusion"];
     for weighted in [false, true] {
         for flip in [false, true] {
             let g = build(weighted, flip, 300.0, 1, false);
             assert!(rewritten(&g), "weighted {weighted}, flipped {flip}");
-            let r = super::rms_norm::rewrite_rms_norm(&g);
-            let norm = r
-                .nodes()
-                .iter()
-                .find(|n| matches!(n.primitive, RmsNorm { .. }))
-                .unwrap();
-            assert_eq!(
-                (norm.primitive.clone(), norm.inputs.len()),
-                (RmsNorm { epsilon: 1e-6 }, 1 + weighted as usize)
-            );
             if available() {
                 let inputs = [
                     values(DType::F32, &[8, 300], 1),
@@ -905,9 +874,9 @@ fn rms_norms_are_rewritten() {
 }
 
 /// An RMS norm without epsilon, written as a division
-/// (`x / sqrt(mean(x * x))`), is one too, with epsilon 0.
+/// (`x / sqrt(mean(x * x))`), is one fusion too.
 #[test]
-fn rms_norms_without_epsilon_are_rewritten() {
+fn rms_norms_without_epsilon_are_one_row_kernel() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8, 300]));
     let sq = apply(&mut g, Mul, &[x, x]);
@@ -939,12 +908,7 @@ fn rms_norms_without_epsilon_are_rewritten() {
     let s = apply(&mut g, b, &[s]);
     let y = apply(&mut g, Div, &[x, s]);
     g.set_outputs(&[y]).unwrap();
-    let rewritten = super::rms_norm::rewrite_rms_norm(&g);
-    let norm = rewritten
-        .nodes()
-        .iter()
-        .find(|n| matches!(n.primitive, RmsNorm { .. }));
-    assert_eq!(norm.map(|n| &n.primitive), Some(&RmsNorm { epsilon: 0.0 }));
+    assert_eq!(fused_primitives(&g, &[data(&[8, 300], 1)]), ["fusion"]);
     if available() {
         check(&g, &[values(DType::F32, &[8, 300], 1)]);
     }
@@ -1000,5 +964,72 @@ fn division_by_sqrt_is_rsqrt() {
     if available() {
         let m = Tensor::from_slice(&[1.0f32, 4.0, 9.0, 16.0], DType::F32).reshape(&[4, 1]);
         check(&g, &[data(&[4, 8], 1), m]);
+    }
+}
+
+/// The primitives computing an RMS norm's input (a residual add) fuse into
+/// its row kernel too; its weight, computed, is a kernel of its own.
+#[test]
+fn rms_norm_row_kernels_fuse_their_input() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 300]));
+    let y = g.input(ty(DType::F32, &[8, 300]));
+    let w = g.input(ty(DType::F32, &[300]));
+    let h = apply(&mut g, Add, &[x, y]);
+    let sq = apply(&mut g, Mul, &[h, h]);
+    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let sum = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![8, 1],
+        },
+        &[sum],
+    );
+    let scalar = |g: &mut Graph, v: f64| {
+        let c = Full {
+            shape: vec![],
+            fill_value: Scalar::Float(v),
+            dtype: DType::F32,
+        };
+        let c = apply(g, c, &[]);
+        let b = BroadcastInDim {
+            shape: vec![8, 1],
+            broadcast_dimensions: vec![],
+        };
+        apply(g, b, &[c])
+    };
+    let n = scalar(&mut g, 300.0);
+    let mean = apply(&mut g, Div, &[sum, n]);
+    let s = apply(&mut g, Sqrt, &[mean]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let s = apply(&mut g, b, &[s]);
+    let normed = apply(&mut g, Div, &[h, s]);
+    let w2 = apply(&mut g, Exp, &[w]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![1],
+    };
+    let w2 = apply(&mut g, b, &[w2]);
+    let out = apply(&mut g, Mul, &[normed, w2]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [data(&[8, 300], 1), data(&[8, 300], 2), data(&[300], 3)];
+    let fused = fuse(&g);
+    let labels: Vec<_> = fused.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(labels.len(), 1, "{fused}");
+    assert!(
+        labels[0].starts_with("add -> mul -> reduce_sum"),
+        "{labels:?}"
+    );
+    assert_eq!(fused_primitives(&g, &inputs), ["fusion"]);
+    if available() {
+        let inputs: Vec<Tensor> = [vec![8, 300], vec![8, 300], vec![300]]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| values(DType::F32, s, i as u64 + 1))
+            .collect();
+        check(&g, &inputs);
     }
 }

@@ -97,14 +97,6 @@ pub enum Primitive {
     Softmax {
         axis: usize,
     },
-    /// `x * rsqrt(mean(x^2) + epsilon)` over the last dimension, times
-    /// `weight` (of that dimension's size) if given as a second operand,
-    /// computed in float and rounded once. Not traced (no `prims` binding):
-    /// the MPS compiler rewrites the primitives of an RMS norm into it
-    /// (`compiler/mps/rms_norm.rs`), which runs as one kernel.
-    RmsNorm {
-        epsilon: f64,
-    },
     /// Output `index` (of type `ty`) of its operand's fusion, whose body
     /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
     /// value the fusion's kernel writes too, which no step computes.
@@ -146,7 +138,6 @@ impl Primitive {
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
             Softmax { .. } => "softmax",
-            RmsNorm { .. } => "rms_norm",
         }
     }
 
@@ -160,7 +151,6 @@ impl Primitive {
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
-            RmsNorm { .. } => args.len().clamp(1, 2),
             _ => 1,
         };
         if args.len() != arity {
@@ -336,25 +326,6 @@ impl Primitive {
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             FusionOutput { ty, .. } => Ok(ty.clone()),
-            RmsNorm { .. } => {
-                let x = args[0];
-                let n = x.shape.last().copied();
-                if !x.dtype.is_float() || n.is_none() {
-                    return err(format!(
-                        "needs a float tensor of at least one dimension, got {x}"
-                    ));
-                }
-                if let Some(w) = args.get(1)
-                    && (w.dtype != x.dtype || w.shape.as_slice() != [n.unwrap()])
-                {
-                    return err(format!(
-                        "weight must be {}[{}], got {w}",
-                        x.dtype,
-                        n.unwrap()
-                    ));
-                }
-                Ok(x.clone())
-            }
             Softmax { axis } => {
                 let x = args[0];
                 if !x.dtype.is_float() || *axis >= x.shape.len() {
@@ -473,7 +444,6 @@ impl fmt::Display for Primitive {
             Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
             FusionOutput { index, .. } => write!(f, "[index={index}]"),
             Softmax { axis } => write!(f, "[axis={axis}]"),
-            RmsNorm { epsilon } => write!(f, "[epsilon={epsilon:?}]"),
             Full {
                 shape,
                 fill_value,

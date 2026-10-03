@@ -528,25 +528,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             eval_graph(body, inputs).remove(0)
         }
         FusionOutput { .. } => unreachable!("evaluated with its fusion (eval_graph)"),
-        // In float (f64 here), rounded once.
-        RmsNorm { epsilon } => {
-            let Float(x) = args[0] else {
-                unreachable!("a float tensor")
-            };
-            let n = *types[0].shape.last().expect("a dimension");
-            let weight = match args.get(1) {
-                Some(Float(w)) => Some(w),
-                _ => None,
-            };
-            let mut y = vec![0.0; x.len()];
-            for (row, out) in x.chunks(n.max(1)).zip(y.chunks_mut(n.max(1))) {
-                let r = 1.0 / (row.iter().map(|v| v * v).sum::<f64>() / n as f64 + epsilon).sqrt();
-                for (k, (o, v)) in out.iter_mut().zip(row).enumerate() {
-                    *o = round(v * r * weight.map_or(1.0, |w| w[k]), dtype);
-                }
-            }
-            Float(y)
-        }
         // As softmax's primitives compute it, each rounding to the dtype.
         Softmax { axis } => {
             let Float(x) = args[0] else {

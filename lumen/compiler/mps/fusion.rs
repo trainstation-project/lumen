@@ -55,7 +55,6 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     let reduction = match node.primitive {
         ReduceSum { .. } | ReduceMax { .. } => true,
         Softmax { axis } => rows(axis),
-        RmsNorm { .. } => true,
         _ => false,
     } && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     // Metal has no float64; such steps fail when the plan runs.
@@ -67,21 +66,12 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || reduction) && !f64
 }
 
-/// Whether fusible `node` computes its operand `v` inside its kernel: every
-/// operand but rms_norm's weight, which its kernel reads from memory.
-fn fuses(node: &Node, v: Var) -> bool {
-    !matches!(node.primitive, Primitive::RmsNorm { .. }) || node.inputs[0] == v
-}
-
 /// Whether `node` is a reduction (or softmax): a fusion's root, never
 /// computed inside another (its consumers read its output).
 fn is_reduction(node: &Node) -> bool {
     matches!(
         node.primitive,
-        Primitive::ReduceSum { .. }
-            | Primitive::ReduceMax { .. }
-            | Primitive::Softmax { .. }
-            | Primitive::RmsNorm { .. }
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
     )
 }
 
@@ -99,7 +89,15 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// `graph` with its loop fusions: each fusion of more than one primitive
 /// becomes a [`Primitive::Fusion`], its kernel named by `kernel` (given the
 /// fusion's body). Dead nodes are dropped.
-pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> Graph {
+///
+/// `rows` are (root, reduction) node pairs, normalizations over the last
+/// dimension (`rms_norm.rs`): each root's fusion has its reduction inside
+/// (a row kernel, `codegen.rs`), where any other reduction is a root.
+pub(crate) fn fuse(
+    graph: &Graph,
+    rows: &[(usize, usize)],
+    mut kernel: impl FnMut(&Graph) -> String,
+) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
     let mut producer: Vec<Option<usize>> = vec![None; n];
@@ -135,12 +133,12 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
+            let inside = rows.iter().any(|&(_, r)| r == i);
             !fusible[i]
-                || is_reduction(node)
+                || (is_reduction(node) && !inside)
+                || rows.iter().any(|&(root, _)| root == i)
                 || is_output[node.output]
-                || users
-                    .iter()
-                    .any(|&u| !fusible[u] || !fuses(&nodes[u], node.output))
+                || users.iter().any(|&u| !fusible[u])
                 || (expensive(graph, node) && users.len() > 1)
         })
         .collect();
@@ -164,13 +162,11 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
-        // Softmax and rms_norm read their input twice: they host nothing.
+        // Softmax and row kernels read their input twice: they host nothing.
         if root[first]
             && fusible[first]
-            && !matches!(
-                nodes[first].primitive,
-                Primitive::Softmax { .. } | Primitive::RmsNorm { .. }
-            )
+            && !matches!(nodes[first].primitive, Primitive::Softmax { .. })
+            && !rows.iter().any(|&(root, _)| root == first)
             && host[first].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {
@@ -283,12 +279,6 @@ fn members(
     let mut stack = vec![root_node];
     while let Some(i) = stack.pop() {
         for &v in &nodes[i].inputs {
-            if !fuses(&nodes[i], v) {
-                if !reads.contains(&v) {
-                    reads.push(v);
-                }
-                continue;
-            }
             match producer[v] {
                 Some(p) if !root(p) => {
                     if !members.contains(&p) {
