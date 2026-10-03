@@ -12,8 +12,6 @@
 mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod pattern;
 #[cfg(test)]
 mod tests;
 

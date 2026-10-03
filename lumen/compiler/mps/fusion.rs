@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
 
+use super::diamonds::Row;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 
@@ -90,14 +91,14 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// becomes a [`Primitive::Fusion`], its kernel named by `kernel` (given the
 /// fusion's body). Dead nodes are dropped.
 ///
-/// `rows` are (root, reduction) node pairs, normalizations over the last
-/// dimension (`rms_norm.rs`): each root's fusion has its reduction inside
-/// (a row kernel, `codegen.rs`), where any other reduction is a root.
+/// `rows` are chains of normalization diamonds (`diamonds.rs`): each
+/// root's fusion has its reductions and inner nodes inside (a row kernel,
+/// `codegen.rs`), where any other reduction is a root.
 /// `scalars` are inputs a kernel takes by value (runtime scalars): `kernel`
 /// is told which of a body's inputs are.
 pub(crate) fn fuse(
     graph: &Graph,
-    rows: &[(usize, usize)],
+    rows: &[Row],
     scalars: &[Var],
     mut kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
@@ -134,19 +135,23 @@ pub(crate) fn fuse(
     // A row kernel's epilogue: its root extends to the elementwise
     // primitive reading it, while that is its only reader (a norm computed
     // in float32, then cast back and scaled by its weight: one kernel).
-    let rows: Vec<(usize, usize)> = rows
+    let rows: Vec<Row> = rows
         .iter()
-        .map(|&(mut r, reduction)| {
-            while let [u] = users[nodes[r].output][..] {
-                if is_output[nodes[r].output] || !fusible[u] || !elementwise(&nodes[u].primitive) {
+        .map(|row| {
+            let mut row = row.clone();
+            while let [u] = users[nodes[row.root].output][..] {
+                let v = nodes[row.root].output;
+                if is_output[v] || !fusible[u] || !elementwise(&nodes[u].primitive) {
                     break;
                 }
-                r = u;
+                row.inner.push(row.root);
+                row.root = u;
             }
-            (r, reduction)
+            row
         })
         .collect();
     let rows = rows.as_slice();
+    let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     // A reduction's epilogue: the elementwise primitives (and reshapes
     // between them) after it, each its only reader, reading it and
     // constants alone (a cast of the result, a mean's division): computed
@@ -160,7 +165,7 @@ pub(crate) fn fuse(
             node.primitive,
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
         );
-        if !live[i] || !fusible[i] || !reduction || rows.iter().any(|&(_, r)| r == i) {
+        if !live[i] || !fusible[i] || !reduction || rows.iter().any(|r| r.reductions.contains(&i)) {
             continue;
         }
         let (mut r, mut end) = (i, None);
@@ -189,11 +194,18 @@ pub(crate) fn fuse(
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
-            let inside = rows.iter().any(|&(_, r)| r == i) || ends[i].is_some();
+            // A row fusion's inner nodes are computed in it alone.
+            if rows
+                .iter()
+                .any(|r| r.inner.contains(&i) || r.reductions.contains(&i))
+            {
+                return false;
+            }
+            let inside = ends[i].is_some();
             !fusible[i]
                 || (is_reduction(node) && !inside)
                 || epilogue[i].is_some()
-                || rows.iter().any(|&(root, _)| root == i)
+                || row_root(i)
                 || is_output[node.output]
                 || users.iter().any(|&u| !fusible[u])
                 || (expensive(graph, node) && users.len() > 1)
@@ -225,7 +237,7 @@ pub(crate) fn fuse(
         if root[fusion]
             && fusible[first]
             && !matches!(nodes[first].primitive, Primitive::Softmax { .. })
-            && !rows.iter().any(|&(root, _)| root == first)
+            && !row_root(first)
             && host[fusion].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {

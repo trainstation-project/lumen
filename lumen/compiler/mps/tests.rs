@@ -12,10 +12,10 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
-/// `g` fused as the MPS compiler fuses it (its RMS norms one row kernel
-/// each, `rms_norm.rs`).
+/// `g` fused as the MPS compiler fuses it (its normalization diamonds one
+/// row kernel each, `diamonds.rs`).
 fn fuse(g: &Graph) -> Graph {
-    fusion::fuse(g, &super::rms_norm::rms_norms(g), &[], |body, by_value| {
+    fusion::fuse(g, &super::diamonds::diamonds(g), &[], |body, by_value| {
         codegen::kernel(body, by_value).0
     })
 }
@@ -991,45 +991,6 @@ fn softmax_fuses_its_input() {
         let plan = crate::compiler::compile(&scaled(0), crate::Device::Mps).unwrap();
         assert!(plan.run(&on_mps).unwrap_err().contains("last dimension"));
     }
-}
-
-/// The pattern matcher: operands in order or (`either`) either order, a
-/// capture matching one value throughout, and exclusivity.
-#[test]
-fn patterns_match_graphs() {
-    use crate::compiler::pattern::{Matcher, bind, either, one_of, op};
-    let mut g = Graph::new();
-    let x = g.input(ty(DType::F32, &[4]));
-    let y = g.input(ty(DType::F32, &[4]));
-    let e = apply(&mut g, Exp, &[x]);
-    let a = apply(&mut g, Add, &[y, e]);
-    let s = apply(&mut g, Sub, &[e, x]);
-    g.set_outputs(&[a, s]).unwrap();
-    let m = Matcher::new(&g);
-    let exp_of = |k| op(|p| matches!(p, Exp), [bind(k)]);
-    // add(y, exp(x)) matches add(exp(_), _) only in either order.
-    let strict = op(|p| matches!(p, Add), [exp_of(0), bind(1)]);
-    assert!(m.find(&strict, a, 2).is_none());
-    let found = m
-        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
-        .unwrap();
-    assert_eq!((found.get(0), found.get(1)), (x, y));
-    // sub(exp(x), x): one capture, one value; sub(exp(x), y) fails.
-    let same = op(|p| matches!(p, Sub), [exp_of(0), bind(0)]);
-    assert!(m.find(&same, s, 1).is_some());
-    let mut h = g.clone();
-    let other = apply(&mut h, Sub, &[e, y]);
-    assert!(Matcher::new(&h).find(&same, other, 1).is_none());
-    // one_of: the first alternative that matches, its captures alone.
-    let alternatives = one_of([op(|p| matches!(p, Mul), [bind(0), bind(1)]), same]);
-    let found = m.find(&alternatives, s, 2).unwrap();
-    assert_eq!((found.get(0), found.captures[1]), (x, None));
-    // exp is read outside the add: not exclusive.
-    let found = m
-        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
-        .unwrap();
-    assert!(!m.exclusive(&found));
-    assert_eq!(m.scalar(x), None);
 }
 
 /// An RMS norm written as its primitives (the weight's multiply and each
