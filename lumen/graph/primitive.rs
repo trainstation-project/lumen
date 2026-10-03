@@ -41,8 +41,9 @@ pub enum Primitive {
     /// The result's dimensions are the batch dimensions, then the free
     /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
     /// It accumulates in `accum_dtype`, the result's dtype: the operands',
-    /// or float32 for 16-bit float operands, whose products it holds
-    /// exactly (`lax.dot_general`'s `preferred_element_type`, required).
+    /// or float32 for floats narrower than it (16-bit, later 8- and 4-bit),
+    /// whose products it holds exactly (`lax.dot_general`'s
+    /// `preferred_element_type`, required).
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
@@ -234,10 +235,13 @@ impl Primitive {
                     ));
                 }
                 let accum = *accum_dtype;
-                let widened = matches!(lhs.dtype, DType::F16 | DType::BF16) && accum == DType::F32;
+                // Floats narrower than float32 may widen to it.
+                let widened = lhs.dtype.is_float()
+                    && lhs.dtype.size_of() < DType::F32.size_of()
+                    && accum == DType::F32;
                 if accum != lhs.dtype && !widened {
                     return err(format!(
-                        "accumulates in the operands' dtype, or float32 for 16-bit floats: got accum_dtype {accum} for {lhs}"
+                        "accumulates in the operands' dtype, or float32 for narrower floats: got accum_dtype {accum} for {lhs}"
                     ));
                 }
                 let lhs_dims = [lhs_batch.as_slice(), lhs_contracting].concat();

@@ -239,6 +239,11 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
 /// dtype, combined in threadgroup memory); then one writing the output.
 /// Values the same across the row (the reductions', constants, and what
 /// they compute alone: `sqrt(mean + eps)`) are computed once a row.
+///
+/// When a thread takes at most [`MAX_CACHED`] elements of the row, the
+/// values a pass needs that an earlier one computed at the same index
+/// (`x`, or `x.float()`, for an RMS norm's output) are kept in its
+/// registers, each in its own dtype: the row is read once.
 fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
@@ -278,7 +283,56 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
             )
         }
     };
+    // Each pass's root, and the values kept for later passes: each with
+    // the pass computing it.
+    let roots: Vec<Var> = reductions
+        .iter()
+        .map(|r| r.inputs[0])
+        .chain([out])
+        .collect();
+    let per_thread = n.div_ceil(reduce::REDUCE_THREADS);
+    let kept = match per_thread <= MAX_CACHED {
+        true => kept_values(body, &e.invariant, &roots),
+        false => Vec::new(),
+    };
     let mut source = String::new();
+    for (m, &(v, _)) in kept.iter().enumerate() {
+        let t = metal_type(body.type_of(v).dtype);
+        writeln!(source, "    {t} kept{m}[{per_thread}];").unwrap();
+    }
+    // A pass's loop over this thread's elements of the row: unrolled over
+    // its registers when values are kept.
+    let header = match kept.is_empty() {
+        true => format!(
+            "    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n"
+        ),
+        false => {
+            let bound = match n % reduce::REDUCE_THREADS {
+                0 => String::new(),
+                _ => format!("        if (c >= {n}u) {{\n            break;\n        }}\n"),
+            };
+            format!(
+                "    _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n{bound}        uint j = row * {n}u + c;\n"
+            )
+        }
+    };
+    // Pass `k`'s values kept from earlier passes, read from their
+    // registers; then its root's value, and the statements storing those
+    // it keeps.
+    let pass = |e: &mut Emitter, k: usize| {
+        (e.lines, e.hoisted) = (String::new(), String::new());
+        (e.values, e.indices) = (HashMap::new(), HashMap::new());
+        for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p < k) {
+            e.values.insert((v, "j".into()), format!("kept{m}[e]"));
+        }
+        let value = e.value(roots[k], "j".into());
+        let mut stores = String::new();
+        for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p == k) {
+            let local = e.value(v, "j".into());
+            writeln!(stores, "        kept{m}[e] = {local};").unwrap();
+        }
+        (value, stores)
+    };
     for (k, r) in reductions.iter().enumerate() {
         let x = body.type_of(r.inputs[0]);
         assert_eq!(
@@ -288,25 +342,21 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
         );
         let op = functor_of_reduction(&r.primitive);
         let a = metal_type(x.dtype);
-        (e.lines, e.hoisted) = (String::new(), String::new());
-        (e.values, e.indices) = (HashMap::new(), HashMap::new());
-        let value = e.value(r.inputs[0], "j".into());
+        let (value, stores) = pass(&mut e, k);
         let rt = metal_type(body.type_of(r.output).dtype);
         write!(
             source,
-            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        acc{k} = {op}::apply(acc{k}, {value});\n    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = shared{k}[0];\n",
+            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = shared{k}[0];\n",
             hoisted(&e.hoisted),
             e.lines
         )
         .unwrap();
         e.row_locals.insert(r.output, format!("r{k}"));
     }
-    (e.lines, e.hoisted) = (String::new(), String::new());
-    (e.values, e.indices) = (HashMap::new(), HashMap::new());
-    let value = e.value(out, "j".into());
+    let (value, _) = pass(&mut e, reductions.len());
     write!(
         source,
-        "{}    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        out[j] = {value};\n    }}\n",
+        "{}{header}{}        out[j] = {value};\n    }}\n",
         hoisted(&e.hoisted),
         e.lines
     )
@@ -315,6 +365,55 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
     named(format!(
         "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{source}}}\n"
     ))
+}
+
+/// The most elements of a row a row kernel's thread keeps values of in
+/// registers (rows of up to 8 x `REDUCE_THREADS`).
+const MAX_CACHED: usize = 8;
+
+/// The values a row kernel keeps in registers across its passes, each
+/// with the first pass computing it: of the values at a pass's own index
+/// (from its root `roots[k]` through elementwise primitives, short of
+/// those the same across the row), those an earlier pass computed, where a
+/// later pass first needs them.
+fn kept_values(body: &Graph, invariant: &[bool], roots: &[Var]) -> Vec<(Var, usize)> {
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    // From `root`, each value at its index, stopping where `stop` says.
+    let walk = |root: Var, stop: &dyn Fn(Var) -> bool| {
+        let (mut seen, mut stack) = (Vec::new(), vec![root]);
+        while let Some(v) = stack.pop() {
+            if invariant[v] || seen.contains(&v) {
+                continue;
+            }
+            seen.push(v);
+            if stop(v) {
+                continue;
+            }
+            if let Some(node) = producer.get(&v)
+                && super::fusion::elementwise(&node.primitive)
+            {
+                stack.extend(&node.inputs);
+            }
+        }
+        seen
+    };
+    let mut first: HashMap<Var, usize> = HashMap::new();
+    let mut kept: Vec<(Var, usize)> = Vec::new();
+    for (k, &root) in roots.iter().enumerate() {
+        if k > 0 {
+            for v in walk(root, &|v| first.contains_key(&v)) {
+                if let Some(&p) = first.get(&v)
+                    && !kept.iter().any(|&(u, _)| u == v)
+                {
+                    kept.push((v, p));
+                }
+            }
+        }
+        for v in walk(root, &|_| false) {
+            first.entry(v).or_insert(k);
+        }
+    }
+    kept
 }
 
 /// The functor reducing as reduction `p` does.
@@ -504,6 +603,10 @@ impl<'a> Emitter<'a> {
                     }
                     // Layout: the operand at the index it maps the index to.
                     Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
+                        // One the same across the row needs no index.
+                        if self.invariant[node.inputs[0]] {
+                            return self.value(node.inputs[0], idx);
+                        }
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }

@@ -131,6 +131,22 @@ pub(crate) fn fuse(
         }
     }
     let fusible: Vec<bool> = nodes.iter().map(|node| fusible(graph, node)).collect();
+    // A row kernel's epilogue: its root extends to the elementwise
+    // primitive reading it, while that is its only reader (a norm computed
+    // in float32, then cast back and scaled by its weight: one kernel).
+    let rows: Vec<(usize, usize)> = rows
+        .iter()
+        .map(|&(mut r, reduction)| {
+            while let [u] = users[nodes[r].output][..] {
+                if is_output[nodes[r].output] || !fusible[u] || !elementwise(&nodes[u].primitive) {
+                    break;
+                }
+                r = u;
+            }
+            (r, reduction)
+        })
+        .collect();
+    let rows = rows.as_slice();
     let mut root: Vec<bool> = nodes
         .iter()
         .enumerate()
@@ -334,7 +350,6 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], hosted: &[Var]) -> Grap
 /// index (the index of its output, or of a reduction's input): from that
 /// value through elementwise primitives of the fusion.
 fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, v: Var) -> bool {
-    use Primitive::*;
     let nodes = graph.nodes();
     let start = match is_reduction(&nodes[r]) {
         true => nodes[r].inputs[0],
@@ -346,26 +361,32 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
             return true;
         }
         let Some(p) = producer[x] else { continue };
-        let elementwise = matches!(
-            nodes[p].primitive,
-            Add | Sub
-                | Mul
-                | Div
-                | Max
-                | Eq
-                | Lt
-                | Neg
-                | Exp
-                | Log
-                | Sqrt
-                | Tanh
-                | Logistic
-                | ConvertElementType { .. }
-                | Select
-        );
-        if (p == r || !root[p]) && elementwise {
+        if (p == r || !root[p]) && elementwise(&nodes[p].primitive) {
             stack.extend(&nodes[p].inputs);
         }
     }
     false
+}
+
+/// Whether `p` computes each element from its operands' elements at the
+/// same index.
+pub(super) fn elementwise(p: &Primitive) -> bool {
+    use Primitive::*;
+    matches!(
+        p,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | ConvertElementType { .. }
+            | Select
+    )
 }

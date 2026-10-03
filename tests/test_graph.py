@@ -260,10 +260,14 @@ def test_mps_kernels_match_cpu(dtype):
         pytest.skip(str(e))
 
     def block(x, wq, wk, w1):
-        scores = (x @ wq) @ (x @ wk).t() * 0.25
+        # Matmuls accumulate in float32: each cast back to x's dtype.
+        def mm(a, b):
+            return (a @ b).to(dtype=x.dtype)
+
+        scores = mm(mm(x, wq), mm(x, wk).t()) * 0.25
         # Softmax in float32 (bfloat16 has no exp).
-        h = x + scores.float().softmax(-1).to(dtype=x.dtype) @ x
-        return (h @ w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
+        h = x + mm(scores.float().softmax(-1).to(dtype=x.dtype), x)
+        return mm(h, w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
 
     arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
     cpu = [lumen.from_numpy(a) for a in arrays]
@@ -862,7 +866,7 @@ def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
-    program), its result's dtype."""
+    program; `@` always float32), its result's dtype."""
     try:
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
@@ -881,4 +885,48 @@ def test_programs_run_in_their_dtypes(device):
     a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
     np.testing.assert_allclose(lumen.to_numpy(wide), a @ b, rtol=1e-6, atol=1e-6)
     assert lumen.compile(lambda a, b: dot(a, b, "bfloat16"))(x, w).dtype == "bfloat16"
-    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
+    # `@` accumulates floats in float32.
+    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "float32"
+
+
+class UpcastNorm(lumen.nn.Module):
+    """Llama's RMS norm: normalized in float32, scaled in the input's dtype."""
+
+    weight: lumen.Tensor
+    eps: float
+
+    def __call__(self, x):
+        h = x.float()
+        h = h / ((h * h).mean(-1, keepdim=True) + self.eps).sqrt()
+        return self.weight * h.to(dtype=x.dtype)
+
+
+@pytest.mark.parametrize("n", [300, 1024, 4096])
+def test_upcast_rms_norm_is_one_kernel(n):
+    """On MPS an RMS norm in float32 of a bfloat16 input, cast back and
+    scaled by its weight, is one row kernel: the cast and the weight run in
+    its last pass (an epilogue). Rows of up to 8 elements a thread read x
+    once, keeping x.float() (its traced dtype) in registers for the last
+    pass. It agrees with the CPU to a bfloat16 rounding."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    weight = lumen.empty([n], dtype="bfloat16", device="meta")
+    graph = lumen.make_graph(lambda m, a: m(a))(UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta"))
+    (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
+    source = step["fusion"]["source"]
+    assert step["label"].endswith("div -> convert_element_type -> broadcast_in_dim -> mul"), step["label"]
+    cached = n <= 8 * 256
+    assert ("float kept0[" in source) == cached
+    assert source.count("in0[j]") == (1 if cached else 2), source
+    x, w = rand(8, n), rand(n, seed=1)
+    out = {}
+    for device in ("cpu", "mps"):
+        f = lumen.compile(lambda m, a: m(a), device=device)
+        norm = UpcastNorm(weight, 1e-6)
+        f(norm, lumen.empty([8, n], dtype="bfloat16", device="meta"))
+        norm.load_state_dict({"weight": lumen.from_numpy(w).to(dtype="bfloat16")})
+        y = f(norm, lumen.from_numpy(x).to(dtype="bfloat16"))
+        out[device] = lumen.to_numpy(y.to(dtype="float32"))
+    np.testing.assert_allclose(out["mps"], out["cpu"], rtol=2**-7, atol=2**-7)

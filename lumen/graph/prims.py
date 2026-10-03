@@ -103,7 +103,7 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype):
     (lhs_batch, rhs_batch))``; the result's dimensions are the batch
     dimensions, then the free ones of ``lhs``, then those of ``rhs``. It
     accumulates in ``accum_dtype``, the result's dtype: the operands', or
-    ``float32`` for 16-bit float operands (``lax.dot_general``'s
+    ``float32`` for floats narrower than it (``lax.dot_general``'s
     ``preferred_element_type``)."""
     (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
     return bind(

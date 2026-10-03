@@ -846,7 +846,8 @@ def where(condition, input, other):
 
 def matmul(input, other):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
-    the dimensions before the last two are batch dimensions, broadcast."""
+    the dimensions before the last two are batch dimensions, broadcast. It
+    accumulates floats in float32 (float64 in float64), its result's dtype."""
     input, other = _lift(input), _lift(other)
     _common_dtype("matmul", (input, other))
     if input.ndim == 0 or other.ndim == 0:
@@ -856,7 +857,11 @@ def matmul(input, other):
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
     b = tuple(range(len(batch)))
-    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), x.dtype)
+    # Floats accumulate in float32, or their own dtype if wider (float64):
+    # the result's dtype (cast it back with .to(dtype) for a narrower
+    # result); integers in their own dtype.
+    accum = x.dtype if not _is_float(x.dtype) or x.dtype == "float64" else "float32"
+    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), accum)
     if input.ndim == 1:
         out = out.squeeze(-2)
     if other.ndim == 1:

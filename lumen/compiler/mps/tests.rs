@@ -333,6 +333,66 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// A hierarchical reduction keeps its dtype at every level: each thread's
+/// accumulator, the threadgroup's tree, a split reduction's partials (its
+/// scratch, 2 bytes each for 16-bit floats) and the second launch over
+/// them; in a row kernel (an RMS norm's), and in softmax's.
+#[test]
+fn hierarchical_reductions_keep_their_dtype() {
+    use crate::ops::reduce::mps::scratch_bytes;
+    // Whether `source` has the word `word` (not `bfloat`'s).
+    let mentions = |source: &str, word: &str| {
+        source
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == word)
+    };
+    for dtype in [DType::F16, DType::BF16] {
+        // Rows and columns split into partials, axes that are not
+        // consecutive (grouped), and rows in one launch.
+        for (shape, axes) in [
+            (vec![4, 200_000], vec![1]),
+            (vec![200_000, 4], vec![0]),
+            (vec![40, 7, 300], vec![0, 2]),
+            (vec![8, 300], vec![1]),
+        ] {
+            let wide = scratch_bytes(&ty(DType::F32, &shape), &axes);
+            assert_eq!(scratch_bytes(&ty(dtype, &shape), &axes) * 2, wide);
+            let mut g = Graph::new();
+            let x = g.input(ty(dtype, &shape));
+            let p = apply(&mut g, Mul, &[x, x]);
+            let r = apply(&mut g, ReduceSum { axes }, &[p]);
+            g.set_outputs(&[r]).unwrap();
+            let fused = fuse(&g);
+            let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+                panic!("{fused}")
+            };
+            let source = codegen::kernel(body, &[]).1;
+            assert!(!mentions(&source, "float"), "{source}");
+        }
+    }
+    // An RMS norm in float16: its row kernel, and softmax's kernel.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F16, &[8, 300]));
+    let sq = apply(&mut g, Mul, &[x, x]);
+    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0],
+    };
+    let sum = apply(&mut g, b, &[sum]);
+    let norm = apply(&mut g, Sqrt, &[sum]);
+    let y = apply(&mut g, Div, &[x, norm]);
+    let s = apply(&mut g, Softmax { axis: 1 }, &[y]);
+    g.set_outputs(&[y, s]).unwrap();
+    let fused = fuse(&g);
+    for node in fused.nodes() {
+        if let Fusion { body, .. } = &node.primitive {
+            let source = codegen::kernel(body, &[]).1;
+            assert!(!mentions(&source, "float"), "{source}");
+        }
+    }
+}
+
 /// Dots sharing an operand merge only if they accumulate in the same
 /// dtype: `x @ w1` in float32 and `x @ w3` in bfloat16 stay two dots.
 #[test]

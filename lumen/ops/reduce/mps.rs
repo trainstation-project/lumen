@@ -158,7 +158,7 @@ pub(crate) fn encode_reduction(
 
 /// The threads of a threadgroup that reduce together (`REDUCE_THREADS` in
 /// `mps.metal`): a [`Grid::Groups`] threadgroup.
-const REDUCE_THREADS: usize = 256;
+pub(crate) const REDUCE_THREADS: usize = 256;
 
 /// The bytes of input each lane of a grouped reduction takes.
 const LANE_BYTES: usize = 32;
