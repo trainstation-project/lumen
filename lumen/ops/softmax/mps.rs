@@ -24,7 +24,7 @@ pub(crate) fn encode(
             step.primitive
         ));
     }
-    encode_softmax(x, None, step.label, inputs, output, keep)
+    encode_softmax(x, None, step.label, inputs, output, &[], keep)
 }
 
 /// Softmax of `x` over its last dimension, a threadgroup a row: the kernel
@@ -37,6 +37,7 @@ pub(crate) fn encode_softmax(
     name: &'static str,
     inputs: &[*const u8],
     output: *mut u8,
+    scalars: &[Vec<u8>],
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let count = x.shape.last().copied().unwrap_or(1);
@@ -47,7 +48,7 @@ pub(crate) fn encode_softmax(
     launch(
         &kernel,
         &buffers,
-        &[u64_arg(count)],
+        &[scalars, &[u64_arg(count)]].concat(),
         Grid::Groups([rows, 1, 1]),
         keep,
         name,

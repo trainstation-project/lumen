@@ -29,6 +29,7 @@ pub(crate) fn encode(
         &inputs[..1],
         output,
         &[],
+        &[],
         scratch,
         keep,
     )
@@ -84,6 +85,7 @@ pub(crate) fn encode_reduction(
     inputs: &[*const u8],
     output: *mut u8,
     extra: &[*const u8],
+    scalars: &[Vec<u8>],
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
@@ -100,7 +102,7 @@ pub(crate) fn encode_reduction(
     let layout = layout(x, &reduced);
     if let Layout::Rows { .. } | Layout::Cols { .. } = layout {
         return consecutive(
-            op_name, name, x, &reduced, fused, inputs, output, extra, scratch, keep,
+            op_name, name, x, &reduced, fused, inputs, output, extra, scalars, scratch, keep,
         );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
@@ -154,6 +156,8 @@ pub(crate) fn encode_reduction(
             Grid::Threads([outputs, 1, 1]),
         )
     };
+    // A fused kernel's by-value inputs come before its own arguments.
+    let args: Vec<Vec<u8>> = scalars.iter().cloned().chain(args).collect();
     launch(&kernel, &buffers, &args, grid, keep, name)
 }
 
@@ -258,6 +262,7 @@ fn consecutive(
     inputs: &[*const u8],
     output: *mut u8,
     extra: &[*const u8],
+    scalars: &[Vec<u8>],
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
@@ -277,6 +282,7 @@ fn consecutive(
                 srcs: &[*const u8],
                 dst: *const u8,
                 extra: &[*const u8],
+                scalars: &[Vec<u8>],
                 count,
                 chunk,
                 chunks: usize,
@@ -284,8 +290,11 @@ fn consecutive(
         let mut buffers = srcs.to_vec();
         buffers.push(dst);
         buffers.extend(extra);
+        // A fused kernel's by-value inputs come before its own arguments.
+        let args =
+            |own: &[Vec<u8>]| -> Vec<Vec<u8>> { scalars.iter().chain(own).cloned().collect() };
         if rows {
-            let args = [u64_arg(count), u64_arg(chunk)];
+            let args = args(&[u64_arg(count), u64_arg(chunk)]);
             launch(
                 &kernel,
                 &buffers,
@@ -295,12 +304,12 @@ fn consecutive(
                 name,
             )
         } else {
-            let args = [
+            let args = args(&[
                 u32_arg(b as u32),
                 u64_arg(count),
                 u64_arg(chunk),
                 u32_arg(chunks as u32),
-            ];
+            ]);
             let grid = Grid::Threads([a * chunks * b, 1, 1]);
             launch(&kernel, &buffers, &args, grid, keep, name)
         }
@@ -308,7 +317,9 @@ fn consecutive(
     let first = |own: String| fused.map_or(own, str::to_owned);
     if chunks == 1 {
         let kernel = first(format!("{op}_{layout}_{dtype}"));
-        return pass(kernel, inputs, output, extra, count, count, 1, keep);
+        return pass(
+            kernel, inputs, output, extra, scalars, count, count, 1, keep,
+        );
     }
     if scratch.is_null() {
         return Err(format!(
@@ -318,7 +329,17 @@ fn consecutive(
     // The first launch writes every partial before the second reads them.
     let p = scratch.cast_const();
     let kernel = first(format!("{op}_{layout}_partial_{dtype}"));
-    pass(kernel, inputs, p, extra, count, chunk, chunks, keep.clone())?;
+    pass(
+        kernel,
+        inputs,
+        p,
+        extra,
+        scalars,
+        count,
+        chunk,
+        chunks,
+        keep.clone(),
+    )?;
     let kernel = format!("{op}_{layout}_final_{dtype}");
-    pass(kernel, &[p], output, &[], chunks, chunks, 1, keep)
+    pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep)
 }

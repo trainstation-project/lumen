@@ -155,7 +155,7 @@ impl PyGraph {
             .nodes()
             .iter()
             .map(|node| {
-                let d = primitive_dict(py, &node.primitive)?;
+                let d = primitive_dict(py, &node.primitive, &[])?;
                 d.set_item("inputs", node.inputs.clone())?;
                 d.set_item("output", node.output)?;
                 Ok(d)
@@ -203,7 +203,7 @@ impl PyPlan {
     /// `packable` (not yet placed) packed into blocks where dots merge
     /// (`packed`).
     #[new]
-    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new(), parameters = None, packable = Vec::new()))]
+    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new()))]
     fn new(
         graph: PyRef<'_, PyGraph>,
         device: Option<&Bound<'_, PyAny>>,
@@ -211,12 +211,14 @@ impl PyPlan {
         donate: Vec<usize>,
         parameters: Option<Vec<usize>>,
         packable: Vec<usize>,
+        scalars: Vec<usize>,
     ) -> PyResult<Self> {
         let n = graph.inner.inputs().len();
         let all = donate
             .iter()
             .chain(parameters.iter().flatten())
-            .chain(&packable);
+            .chain(&packable)
+            .chain(&scalars);
         if let Some(&i) = all.into_iter().find(|&&i| i >= n) {
             return Err(PyValueError::new_err(format!(
                 "the graph has {n} inputs, got input {i}"
@@ -228,6 +230,7 @@ impl PyPlan {
             donate,
             parameters: parameters.as_deref().map(mask),
             packable: mask(&packable),
+            scalars: mask(&scalars),
         };
         let inner = crate::compiler::compile_with(&graph.inner, resolve_device(device)?, &options)
             .map_err(PyRuntimeError::new_err)?;
@@ -275,7 +278,13 @@ impl PyPlan {
             .steps()
             .iter()
             .map(|step| {
-                let d = primitive_dict(py, &step.primitive)?;
+                // Its fusion's kernel takes these inputs by value.
+                let by_value: Vec<bool> = step
+                    .inputs
+                    .iter()
+                    .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+                    .collect();
+                let d = primitive_dict(py, &step.primitive, &by_value)?;
                 d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
                 d.set_item("output", typed(&step.output))?;
                 let extra: Vec<_> = step.extra_outputs.iter().map(typed).collect();
@@ -322,7 +331,11 @@ impl PyPlan {
 /// and `fusion`, for a fusion, a dict of its `kernel` name, its `body`
 /// graph's text and the kernel's Metal `source` (None off macOS), else
 /// None.
-fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
+fn primitive_dict<'py>(
+    py: Python<'py>,
+    p: &Primitive,
+    by_value: &[bool],
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
     match p {
@@ -332,9 +345,15 @@ fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, Py
             fusion.set_item("kernel", name)?;
             fusion.set_item("body", body.to_string())?;
             #[cfg(lumen_mps_linked)]
-            fusion.set_item("source", crate::compiler::mps::fusion_source(body))?;
+            fusion.set_item(
+                "source",
+                crate::compiler::mps::fusion_source(body, by_value),
+            )?;
             #[cfg(not(lumen_mps_linked))]
-            fusion.set_item("source", py.None())?;
+            {
+                let _ = by_value;
+                fusion.set_item("source", py.None())?;
+            }
             d.set_item("fusion", fusion)?;
         }
         p => {

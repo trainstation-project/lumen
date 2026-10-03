@@ -93,10 +93,13 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// `rows` are (root, reduction) node pairs, normalizations over the last
 /// dimension (`rms_norm.rs`): each root's fusion has its reduction inside
 /// (a row kernel, `codegen.rs`), where any other reduction is a root.
+/// `scalars` are inputs a kernel takes by value (runtime scalars): `kernel`
+/// is told which of a body's inputs are.
 pub(crate) fn fuse(
     graph: &Graph,
     rows: &[(usize, usize)],
-    mut kernel: impl FnMut(&Graph) -> String,
+    scalars: &[Var],
+    mut kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -225,7 +228,8 @@ pub(crate) fn fuse(
                     .map(|h| nodes[h].output)
                     .collect();
                 let body = body(graph, members, reads, &hosted);
-                let name = kernel(&body);
+                let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
+                let name = kernel(&body, &by_value);
                 let label = members.iter().map(|&m| nodes[m].primitive.name());
                 let label = intern(label.collect::<Vec<_>>().join(" -> "));
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();

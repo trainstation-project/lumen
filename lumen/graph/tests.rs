@@ -437,6 +437,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         donate: vec![0],
         parameters: None,
         views: Vec::new(),
+        scalars: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -502,6 +503,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
             donate: vec![0],
             parameters: None,
             views: Vec::new(),
+            scalars: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -531,6 +533,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         donate: Vec::new(),
         parameters: None,
         views: Vec::new(),
+        scalars: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];

@@ -24,16 +24,17 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 /// The fusion kernel for `body`: its name and Metal source. The name is a
-/// hash of the source, so identical fusions share one kernel.
-pub(crate) fn kernel(body: &Graph) -> (String, String) {
+/// hash of the source, so identical fusions share one kernel. The inputs
+/// `by_value` marks (runtime scalars; none if empty) it takes by value.
+pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     let rows = row_reductions(body);
     if !rows.is_empty() {
-        return row_kernel(body, &rows);
+        return row_kernel(body, by_value, &rows);
     }
     if let Some(root) = reduction_root(body) {
-        return reduction(body, root);
+        return reduction(body, by_value, root);
     }
-    let mut emitter = Emitter::new(body);
+    let mut emitter = Emitter::new(body, by_value);
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
     // A multi-output fusion's other outputs, of the output's shape: each
@@ -43,26 +44,12 @@ pub(crate) fn kernel(body: &Graph) -> (String, String) {
         .map(|&v| emitter.value(v, "j".into()))
         .collect();
     let out_type = metal_type(body.type_of(out).dtype);
-    let mut params = String::new();
-    for (k, &v) in body.inputs().iter().enumerate() {
-        let t = metal_type(body.type_of(v).dtype);
-        write!(params, "device const {t} *in{k} [[buffer({k})]], ").unwrap();
-    }
-    let k = body.inputs().len();
-    write!(params, "device {out_type} *out [[buffer({k})]], ").unwrap();
+    let (params, args) = io_params(body, by_value, out_type);
     let mut writes = format!("        out[j] = {result};\n");
-    for (e, (&v, value)) in body.outputs()[1..].iter().zip(&extra).enumerate() {
-        let t = metal_type(body.type_of(v).dtype);
-        write!(
-            params,
-            "device {t} *out{} [[buffer({})]], ",
-            e + 1,
-            k + 1 + e
-        )
-        .unwrap();
+    for (e, value) in extra.iter().enumerate() {
         writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
     }
-    let signature = format!("({params}ELEMENTWISE_ARGS({}))", k + body.outputs().len());
+    let signature = format!("({params}ELEMENTWISE_ARGS({args}))");
     let loop_body = format!(
         "    FOR_EACH_ELEMENT(j, {out_type}) {{\n{}{writes}    }}\n",
         emitter.lines
@@ -94,10 +81,10 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
 /// the fusion's inputs, as the loop emitter computes an output element. A
 /// split reduction's kernel writes the partials, which the reduction's own
 /// final kernel reduces.
-fn reduction(body: &Graph, root: &Node) -> (String, String) {
+fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     let x = root.inputs[0];
     let ty = body.type_of(x);
-    let mut emitter = Emitter::new(body);
+    let mut emitter = Emitter::new(body, by_value);
     let element = emitter.value(x, "j".into());
     // A multi-output fusion's other outputs, of the reduced value's shape:
     // written as the reduction reads each element (once).
@@ -107,29 +94,24 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
     }
     let t = metal_type(ty.dtype);
-    let (mut fields, mut params, mut members) = (String::new(), String::new(), Vec::new());
+    // The input: the fusion's inputs (by value: runtime scalars) and other
+    // outputs, as fields.
+    let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
-        writeln!(fields, "    device const {vt} *in{k};").unwrap();
-        write!(params, "device const {vt} *in{k} [[buffer({k})]], ").unwrap();
+        match by_value.get(k) == Some(&true) {
+            true => writeln!(fields, "    {vt} in{k};").unwrap(),
+            false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
+        }
         members.push(format!("in{k}"));
     }
-    let n = body.inputs().len();
-    let m = body.outputs().len() - 1;
-    let mut extra_params = String::new();
     for (e, &v) in body.outputs()[1..].iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
         writeln!(fields, "    device {vt} *out{};", e + 1).unwrap();
-        write!(
-            extra_params,
-            ", device {vt} *out{} [[buffer({})]]",
-            e + 1,
-            n + 1 + e
-        )
-        .unwrap();
         members.push(format!("out{}", e + 1));
     }
-    let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", n + 1 + m + k);
+    let first_arg = io_params(body, by_value, t).1;
+    let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", first_arg + k);
     let (op, axes) = match &root.primitive {
         Primitive::ReduceSum { axes } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
@@ -142,8 +124,9 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
     softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
             );
             return named(format!(
-                "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {t} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+                "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
                 emitter.lines,
+                io_params(body, by_value, t).0,
                 members.join(", "),
             ));
         }
@@ -204,8 +187,9 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         reduce::Layout::Generic => unreachable!("reduction fusions read fewer than 2^32 elements"),
     };
     named(format!(
-        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {out} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
         emitter.lines,
+        io_params(body, by_value, &out).0,
         members.join(", "),
     ))
 }
@@ -217,6 +201,43 @@ fn named(source: String) -> (String, String) {
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());
     (name.clone(), source.replace("NAME", &name))
+}
+
+/// A fusion kernel's buffer parameters: `body`'s inputs (those `by_value`
+/// marks aside), `out` (of Metal type `out`) and a multi-output fusion's
+/// other outputs (`out1`, ...), as device buffers; then its by-value
+/// inputs, as constants (`setBytes`, `ops/mps.rs`). The parameters (each
+/// followed by a comma), and the index the kernel's own arguments start
+/// at.
+fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
+    let (mut params, mut index) = (String::new(), 0);
+    let mut param = |decl: String| {
+        write!(params, "{decl} [[buffer({index})]], ").unwrap();
+        index += 1;
+    };
+    let scalar = |k: usize| by_value.get(k) == Some(&true);
+    let inputs = body.inputs().iter().enumerate();
+    for (k, &v) in inputs.clone().filter(|&(k, _)| !scalar(k)) {
+        param(format!(
+            "device const {} *in{k}",
+            metal_type(body.type_of(v).dtype)
+        ));
+    }
+    param(format!("device {out} *out"));
+    for (e, &v) in body.outputs()[1..].iter().enumerate() {
+        param(format!(
+            "device {} *out{}",
+            metal_type(body.type_of(v).dtype),
+            e + 1
+        ));
+    }
+    for (k, &v) in inputs.filter(|&(k, _)| scalar(k)) {
+        param(format!(
+            "constant {} &in{k}",
+            metal_type(body.type_of(v).dtype)
+        ));
+    }
+    (params, index)
 }
 
 /// The reductions of a fusion with `body` other than its root: a
@@ -242,12 +263,12 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
 /// float, combined in threadgroup memory); then one writing the output.
 /// Values the same across the row (the reductions', constants, and what
 /// they compute alone: `rsqrt(mean + eps)`) are computed once a row.
-fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
+fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
     let n = *out_type.shape.last().expect("a dimension");
     let rows: usize = out_type.shape[..out_type.shape.len() - 1].iter().product();
-    let mut e = Emitter::new(body);
+    let mut e = Emitter::new(body, by_value);
     // Which values are the same across a row: the reductions', constants
     // (index-free: no iota), one-element inputs (runtime scalars), and
     // values of `rows` elements of those.
@@ -314,15 +335,9 @@ fn row_kernel(body: &Graph, reductions: &[&Node]) -> (String, String) {
         e.lines
     )
     .unwrap();
-    let mut params = String::new();
-    for (k, &v) in body.inputs().iter().enumerate() {
-        let t = metal_type(body.type_of(v).dtype);
-        write!(params, "device const {t} *in{k} [[buffer({k})]], ").unwrap();
-    }
-    let k = body.inputs().len();
-    let ot = metal_type(out_type.dtype);
+    let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
     named(format!(
-        "kernel void NAME({params}device {ot} *out [[buffer({k})]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{source}}}\n"
+        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{source}}}\n"
     ))
 }
 
@@ -346,6 +361,8 @@ struct Emitter<'a> {
     indices: HashMap<String, String>,
     /// The locals named so far.
     locals: usize,
+    /// Which of the body's inputs the kernel takes by value (none if empty).
+    by_value: &'a [bool],
     /// A row kernel's values the same across a row ([`row_kernel`]), by
     /// value: computed once a row, into `hoisted`, held in `row_locals`.
     invariant: Vec<bool>,
@@ -354,9 +371,10 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    fn new(body: &'a Graph) -> Self {
+    fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
         Emitter {
             body,
+            by_value,
             producer: body
                 .nodes()
                 .iter()
@@ -505,7 +523,10 @@ impl<'a> Emitter<'a> {
         let expr = match self.producer.get(&v) {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
-                format!("in{k}[{idx}]")
+                match self.by_value.get(k) == Some(&true) {
+                    true => format!("in{k}"),
+                    false => format!("in{k}[{idx}]"),
+                }
             }
             Some(&i) => {
                 let node = &body.nodes()[i];

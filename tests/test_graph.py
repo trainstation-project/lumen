@@ -837,7 +837,18 @@ def test_float_fields_are_runtime_scalars(device):
         expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
     assert len(traces) == 1
+    # One plan, compiled once: each run reads eps from the host, a kernel
+    # argument on MPS (no copy to the device, no new plan).
+    graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
+    plan = lumen.graph.Plan(graph, device, parameters=[2], scalars=[1])
+    workspace = lumen.Tensor.empty([plan.workspace_bytes], "uint8", device)
+    inputs = [lumen.from_numpy(x).to(device), None, lumen.from_numpy(w).to(device)]
+    for eps in (1e-6, 0.1, 1.0):
+        inputs[1] = lumen.Tensor.full([], eps, "float32")
+        (out,) = plan.run_in(workspace, inputs)
+        expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
+        np.testing.assert_allclose(lumen.to_numpy(out), expected, rtol=1e-5, atol=1e-6)
+    (step,) = [s for s in plan.steps() if ("s1", "float32", []) in s["inputs"]]
     if device == "mps":
-        graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
-        (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], packable=[2]).steps()
-        assert "in1[0]" in step["fusion"]["source"]  # eps, an input
+        assert len(plan.steps()) == 1
+        assert "constant float &in1" in step["fusion"]["source"]  # eps, by value

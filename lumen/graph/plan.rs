@@ -20,6 +20,10 @@ pub enum Buffer {
     Output(usize),
     /// The bytes at this offset in the workspace.
     Workspace(usize),
+    /// The caller's input `i`, a scalar a kernel takes by value (a runtime
+    /// scalar, [`PlanOptions::scalars`]): read on the host when its steps
+    /// are encoded, never copied to the device.
+    Scalar(usize),
 }
 
 impl fmt::Display for Buffer {
@@ -28,6 +32,7 @@ impl fmt::Display for Buffer {
             Buffer::Input(i) => write!(f, "in{i}"),
             Buffer::Output(i) => write!(f, "out{i}"),
             Buffer::Workspace(offset) => write!(f, "ws+{offset}"),
+            Buffer::Scalar(i) => write!(f, "s{i}"),
         }
     }
 }
@@ -89,6 +94,11 @@ pub struct PlanOptions {
     /// strides ([`Step::views`]). The device compiler picks them: slices
     /// read only by kernels that take strided operands.
     pub views: Vec<Var>,
+    /// Inputs passed to the kernels reading them by value (one-element
+    /// runtime scalars: `lumen.compile`'s floats): [`Buffer::Scalar`], no
+    /// memory of their own. The device compiler picks them: inputs only
+    /// kernels taking scalars by value read.
+    pub scalars: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +181,9 @@ impl Plan {
         let is_parameter = |i: usize| owned.is_none_or(|p| p[i]);
         let mut buffer: Vec<Option<Buffer>> = vec![None; n];
         for (i, &v) in graph.inputs().iter().enumerate() {
-            if is_parameter(i) {
+            if options.scalars.contains(&i) {
+                buffer[v] = Some(Buffer::Scalar(i));
+            } else if is_parameter(i) {
                 buffer[v] = Some(Buffer::Input(i));
             }
         }
@@ -484,6 +496,8 @@ impl Plan {
                     view(offset, ty).copy_(t)?;
                     params.push(t.clone());
                 }
+                // Read on the host as its steps are encoded.
+                Buffer::Scalar(_) => params.push(t.to(Device::Cpu)),
                 _ if t.device() != device => {
                     return Err(format!(
                         "parameters must be on {device}, got {}",
@@ -503,7 +517,7 @@ impl Plan {
             .zip(&self.outputs)
             .map(|(at, ty)| match *at {
                 Buffer::Workspace(offset) => view(offset, ty),
-                Buffer::Input(i) => params[i].clone(),
+                Buffer::Input(i) | Buffer::Scalar(i) => params[i].clone(),
                 Buffer::Output(_) => unreachable!("an owned plan has no output buffers"),
             })
             .collect())
@@ -597,7 +611,7 @@ impl Plan {
         workspace: &Tensor,
     ) -> Result<(), String> {
         let tensor = |buffer: Buffer| match buffer {
-            Buffer::Input(i) => &inputs[i],
+            Buffer::Input(i) | Buffer::Scalar(i) => &inputs[i],
             Buffer::Output(i) => &outputs[i],
             Buffer::Workspace(_) => workspace,
         };

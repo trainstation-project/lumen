@@ -137,7 +137,7 @@ def plan_view(plan, kernels):
 
     def node_for(buffer, dtype, shape):
         if buffer not in writer:
-            nodes.append({"id": len(nodes), "kind": "input" if buffer.startswith("in") else "buffer",
+            nodes.append({"id": len(nodes), "kind": "input" if buffer.startswith(("in", "s")) else "buffer",
                           "label": buffer, "type": type_text(dtype, shape), "buffer": buffer})
             writer[buffer] = nodes[-1]["id"]
         return writer[buffer]

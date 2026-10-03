@@ -22,7 +22,7 @@ use self::merge_dots::merge_dots;
 use super::Options;
 use crate::Tensor;
 use crate::graph::plan::{Buffer, Step};
-use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
+use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{Grid, elementwise_grid, launch, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
@@ -53,15 +53,38 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let graph = &merged;
     let graph = canonicalize_dots(graph);
     let mut kernels = BTreeMap::new();
+    // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
+    // position (the passes keep inputs in order): those every step reading
+    // them is a fusion of; any other, a buffer.
+    let mut scalars: Vec<usize> = (0..graph.inputs().len())
+        .filter(|&i| options.scalars.get(i) == Some(&true))
+        .collect();
     let fused = if options.fuse {
         // RMS norms: each one fusion, its reduction inside.
         let rows = rms_norm::rms_norms(&graph);
-        fusion::fuse(&graph, &rows, |body| {
-            let (name, source) = codegen::kernel(body);
-            kernels.insert(name.clone(), source);
-            name
-        })
+        loop {
+            kernels.clear();
+            let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
+            let fused = fusion::fuse(&graph, &rows, &vars, |body, by_value| {
+                let (name, source) = codegen::kernel(body, by_value);
+                kernels.insert(name.clone(), source);
+                name
+            });
+            let unfused = |&i: &usize| {
+                let v = fused.inputs()[i];
+                let read = |n: &&Node| n.inputs.contains(&v);
+                let mut readers = fused.nodes().iter().filter(read);
+                readers.any(|n| !matches!(n.primitive, Primitive::Fusion { .. }))
+                    || fused.outputs().contains(&v)
+            };
+            let before = scalars.len();
+            scalars.retain(|i| !unfused(i));
+            if scalars.len() == before {
+                break fused;
+            }
+        }
     } else {
+        scalars.clear();
         graph
     };
     if !kernels.is_empty() {
@@ -86,6 +109,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         donate: options.donate.clone(),
         parameters,
         views: dot_views(&fused),
+        scalars,
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named
@@ -216,8 +240,8 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
 /// The Metal source of the kernel a fusion with `body` runs, as
 /// [`compile`] generates it.
 #[cfg(feature = "python")]
-pub(crate) fn fusion_source(body: &Graph) -> String {
-    codegen::kernel(body).1
+pub(crate) fn fusion_source(body: &Graph, by_value: &[bool]) -> String {
+    codegen::kernel(body, by_value).1
 }
 
 /// Encode fusion `step`: its kernel, compiled with its graph, over the
@@ -232,8 +256,21 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
-    // The kernel's inputs, then (a multi-output fusion's) other outputs.
+    // The kernel's inputs, then (a multi-output fusion's) other outputs; of
+    // the inputs, device buffers and the by-value ones' bytes, read on the
+    // host now (`setBytes`, before the kernel's own arguments).
     let (inputs, extra) = inputs.split_at(body.inputs().len());
+    let (mut device, mut scalars) = (Vec::new(), Vec::new());
+    for (&p, (b, ty)) in inputs.iter().zip(&step.inputs) {
+        match b {
+            // SAFETY: the plan's host value of the input, of its dtype.
+            Buffer::Scalar(_) => {
+                scalars.push(unsafe { std::slice::from_raw_parts(p, ty.dtype.size_of()) }.to_vec())
+            }
+            _ => device.push(p),
+        }
+    }
+    let inputs = device.as_slice();
     // A row kernel: a threadgroup a row of the last dimension.
     if !codegen::row_reductions(body).is_empty() {
         let out = &step.output.1;
@@ -244,7 +281,7 @@ pub(crate) fn encode(
         return launch(
             name,
             &buffers,
-            &[],
+            &scalars,
             Grid::Groups([rows, 1, 1]),
             keep,
             step.label,
@@ -260,6 +297,7 @@ pub(crate) fn encode(
                 label,
                 inputs,
                 output,
+                &scalars,
                 keep,
             );
         }
@@ -271,6 +309,7 @@ pub(crate) fn encode(
             inputs,
             output,
             extra,
+            &scalars,
             scratch,
             keep,
         );
@@ -284,7 +323,8 @@ pub(crate) fn encode(
         .chain([output.cast_const()])
         .chain(extra.iter().copied())
         .collect();
-    launch(name, &buffers, &[u32_arg(n as u32)], grid, keep, step.label)
+    let args: Vec<Vec<u8>> = scalars.into_iter().chain([u32_arg(n as u32)]).collect();
+    launch(name, &buffers, &args, grid, keep, step.label)
 }
 
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's

@@ -195,11 +195,14 @@ def compile(fn, device=None):
         target = _device(args, device)
         key = _signature(args), target
         # The arguments the plan copies in: tensors, then runtime scalars.
+        # The kernels take the scalars by value, read from the host on each
+        # call: a new value needs no new plan.
         tensors = [a for a in args if isinstance(a, Tensor)]
+        scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
-            plans[key] = (*_trace(fn, args), [], len(tensors))
-        graph, single, entries, _ = plans[key]
+            plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
+        graph, single, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
@@ -227,12 +230,12 @@ def compile(fn, device=None):
         # A new plan: dots merged into blocks of weights while none of theirs
         # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
-        plan = Plan(graph, target, parameters=params, packable=packable)
+        plan = Plan(graph, target, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         entries.append((plan, workspace))
         placed = inputs_for(plan)
         if placed is None:
-            plan = Plan(graph, target, parameters=params)
+            plan = Plan(graph, target, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
             placed = inputs_for(plan)
         return graph, plan, workspace, single, placed
@@ -260,13 +263,13 @@ def compile(fn, device=None):
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target),) = latest
-        graph, _, _, n_tensors = plans[latest[0]]
+        graph, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
         types = [graph.type_of(v) for v in graph.inputs()]
         params = list(range(n_tensors, len(types)))
-        plan = Plan(graph, target, parameters=params, packable=params)
+        plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
         inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:
             dtype, shape = types[positions[0]]

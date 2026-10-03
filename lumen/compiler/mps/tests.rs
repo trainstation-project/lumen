@@ -14,8 +14,8 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 /// `g` fused as the MPS compiler fuses it (its RMS norms one row kernel
 /// each, `rms_norm.rs`).
 fn fuse(g: &Graph) -> Graph {
-    fusion::fuse(g, &super::rms_norm::rms_norms(g), |body| {
-        codegen::kernel(body).0
+    fusion::fuse(g, &super::rms_norm::rms_norms(g), &[], |body, by_value| {
+        codegen::kernel(body, by_value).0
     })
 }
 
@@ -928,7 +928,7 @@ fn division_by_sqrt_is_rsqrt() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body).1;
+    let source = codegen::kernel(body, &[]).1;
     assert!(
         source.contains("rsqrt(") && !source.contains("Div::"),
         "{source}"
@@ -956,7 +956,7 @@ fn division_by_sqrt_is_rsqrt() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body).1;
+    let source = codegen::kernel(body, &[]).1;
     assert!(
         source.contains("rsqrt(") && !source.contains("Div::"),
         "{source}"
