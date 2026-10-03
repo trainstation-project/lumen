@@ -305,11 +305,15 @@ pub(crate) fn encode(
                 keep,
             );
         }
+        // A split reduction's second launch, the fusion's own if it has an
+        // epilogue to apply.
+        let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));
         return crate::ops::reduce::mps::encode_reduction(
             step,
             &root.primitive,
             x,
             Some(name),
+            last.as_deref(),
             label,
             inputs,
             output,

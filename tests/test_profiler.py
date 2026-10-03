@@ -221,7 +221,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     except RuntimeError as e:
         pytest.skip(str(e))
     b = lumen.ones([8, 16], device=device).to(dtype="bfloat16")
-    f = lumen.compile(lambda a, b: ((a @ b).sum(-1), a.amax(-1), a * 2.0))
+    f = lumen.compile(lambda a, b: ((a @ b).float().sum(-1), a.amax(-1), a * 2.0))
     f(a, b)
     activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
     with profile(activities=activities, record_shapes=True) as prof:
@@ -257,7 +257,7 @@ def test_split_reduction_launches_record_their_own_types():
         x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
     except RuntimeError as e:
         pytest.skip(str(e))
-    f = lumen.compile(lambda a: a.sum(-1))
+    f = lumen.compile(lambda a: a.float().sum(-1))
     f(x)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(x)

@@ -147,14 +147,52 @@ pub(crate) fn fuse(
         })
         .collect();
     let rows = rows.as_slice();
+    // A reduction's epilogue: the elementwise primitives (and reshapes
+    // between them) after it, each its only reader, reading it and
+    // constants alone (a cast of the result, a mean's division): computed
+    // in its kernel, as it writes each output (a split reduction's second
+    // launch). The epilogue's last primitive is the fusion's root, by
+    // index, with its reduction's.
+    let mut epilogue: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut ends: Vec<Option<usize>> = vec![None; nodes.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        let reduction = matches!(
+            node.primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        );
+        if !live[i] || !fusible[i] || !reduction || rows.iter().any(|&(_, r)| r == i) {
+            continue;
+        }
+        let (mut r, mut end) = (i, None);
+        while let [u] = users[nodes[r].output][..] {
+            let v = nodes[r].output;
+            let step = elementwise(&nodes[u].primitive)
+                || matches!(nodes[u].primitive, Primitive::Reshape { .. });
+            let reads = nodes[u]
+                .inputs
+                .iter()
+                .all(|&x| x == v || constant(graph, &producer, x));
+            if is_output[v] || !fusible[u] || !step || !reads {
+                break;
+            }
+            r = u;
+            if elementwise(&nodes[u].primitive) {
+                end = Some(u);
+            }
+        }
+        if let Some(end) = end {
+            (epilogue[end], ends[i]) = (Some(i), Some(end));
+        }
+    }
     let mut root: Vec<bool> = nodes
         .iter()
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
-            let inside = rows.iter().any(|&(_, r)| r == i);
+            let inside = rows.iter().any(|&(_, r)| r == i) || ends[i].is_some();
             !fusible[i]
                 || (is_reduction(node) && !inside)
+                || epilogue[i].is_some()
                 || rows.iter().any(|&(root, _)| root == i)
                 || is_output[node.output]
                 || users.iter().any(|&u| !fusible[u])
@@ -181,15 +219,17 @@ pub(crate) fn fuse(
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
+        // A reduction with an epilogue is in the fusion of its end.
+        let fusion = ends[first].unwrap_or(first);
         // Softmax and row kernels read their input twice: they host nothing.
-        if root[first]
+        if root[fusion]
             && fusible[first]
             && !matches!(nodes[first].primitive, Primitive::Softmax { .. })
             && !rows.iter().any(|&(root, _)| root == first)
-            && host[first].is_none()
+            && host[fusion].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {
-            host[i] = Some(first);
+            host[i] = Some(fusion);
         }
     }
 
@@ -389,4 +429,23 @@ pub(super) fn elementwise(p: &Primitive) -> bool {
             | ConvertElementType { .. }
             | Select
     )
+}
+
+/// Whether value `v` is the same everywhere and known when compiling: a
+/// `full`, perhaps through elementwise and layout primitives of such
+/// values (no input, iota or reduction).
+pub(super) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
+    use Primitive::*;
+    let Some(p) = producer[v] else {
+        return false;
+    };
+    let node = &graph.nodes()[p];
+    match node.primitive {
+        Full { .. } => true,
+        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
+            constant(graph, producer, node.inputs[0])
+        }
+        ref p if elementwise(p) => node.inputs.iter().all(|&u| constant(graph, producer, u)),
+        _ => false,
+    }
 }

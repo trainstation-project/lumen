@@ -311,9 +311,8 @@ def _is_float(dtype):
 
 
 def _accum_dtype(dtype):
-    """The dtype sums of ``dtype`` accumulate in (matmul, sum, mean), their
-    result's: float32 for floats, or their own if wider (float64); integers
-    their own."""
+    """The dtype a matmul of ``dtype`` accumulates in: float32 for floats,
+    or their own if wider (float64); integers their own."""
     return dtype if not _is_float(dtype) or dtype == "float64" else "float32"
 
 
@@ -642,22 +641,22 @@ class TracedTensor:
             return out
         return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(self.shape)))
 
-    def sum(self, dim=None, keepdim=False, dtype=None):
-        """Sum over ``dim`` (all dimensions if None) of the tensor (or it
-        converted to ``dtype``), accumulated in float32 for floats (their
-        own dtype if wider), the result's dtype; integers in theirs (they
-        wrap)."""
-        x = self.to(dtype) if dtype else self
+    def sum(self, dim=None, keepdim=False):
+        """Sum over ``dim`` (all dimensions if None), accumulated in the
+        tensor's dtype, the result's (integers wrap): for another, convert
+        first (``x.float().sum()``); a cast of the result after it runs in
+        the reduction's kernel."""
         dims = _dims(dim, self.ndim)
-        return self._keep(prims.reduce_sum(x, dims, _accum_dtype(x.dtype)), dims, keepdim)
+        return self._keep(prims.reduce_sum(self, dims, self.dtype), dims, keepdim)
 
-    def mean(self, dim=None, keepdim=False, dtype=None):
-        x = self.to(dtype) if dtype else self
-        if not _is_float(x.dtype):
-            raise RuntimeError(f"mean(): input dtype must be floating point, got {x.dtype}")
+    def mean(self, dim=None, keepdim=False):
+        """Mean over ``dim`` (all dimensions if None), in the tensor's
+        dtype, as :meth:`sum`."""
+        if not _is_float(self.dtype):
+            raise RuntimeError(f"mean(): input dtype must be floating point, got {self.dtype}")
         dims = _dims(dim, self.ndim)
         count = math.prod(self.shape[d] for d in dims)
-        return x.sum(dims, keepdim) / count
+        return self.sum(dims, keepdim) / count
 
     def amax(self, dim=(), keepdim=False):
         dims = _dims(dim, self.ndim)

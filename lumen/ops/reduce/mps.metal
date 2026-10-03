@@ -7,14 +7,21 @@
 // accumulates in A, the output's type (reduce_sum's accum_dtype): the
 // input's, or float for half and bfloat, each element widened as read;
 // every level (a thread's, the threadgroup's, a split reduction's
-// partials) is of A.
+// partials) is of A. Each output is written as epi(its value): Same for
+// a primitive's kernel; a reduction fusion's epilogue (the elementwise
+// primitives after it, lumen/compiler/mps/codegen.rs), writing O.
+
+// The identity epilogue.
+struct Same {
+    template <typename T> T operator()(T x) const { return x; }
+};
 
 // Any axes, a thread per output: thread i reduces output i, at offset
 // `base` from its index over the kept dimensions, over its `count`
 // elements in the reference's (row-major) order.
-template <typename Op, typename A, typename In>
+template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce(In in,
-                   device A *out,
+                   device O *out,
                    A init,
                    uint nk,
                    constant ulong *ksizes,
@@ -23,13 +30,14 @@ inline void reduce(In in,
                    constant ulong *rsizes,
                    constant ulong *rstrides,
                    ulong count,
-                   uint i) {
+                   uint i,
+                   Epi epi = Epi()) {
     ulong base = offset_of(i, nk, ksizes, kstrides);
     A r = init;
     for (ulong j = 0; j < count; ++j) {
         r = Op::apply(r, A(in[base + offset_of(j, nr, rsizes, rstrides)]));
     }
-    out[i] = r;
+    out[i] = epi(r);
 }
 
 #define REDUCE(OP, FN, NAME, T, A)                                                             \
@@ -52,9 +60,9 @@ inline void reduce(In in,
 // output g * (REDUCE_THREADS / lanes) + t / lanes, then a tree over its
 // lanes. Neighbouring lanes read neighbouring reduced elements. The reduced
 // dimensions index in 32 bits (the input has fewer than 2^32 elements).
-template <typename Op, typename A, typename In>
+template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_grouped(In in,
-                           device A *out,
+                           device O *out,
                            A init,
                            uint nk,
                            constant ulong *ksizes,
@@ -67,7 +75,8 @@ inline void reduce_grouped(In in,
                            uint outputs,
                            threadgroup A *shared,
                            uint g,
-                           uint t) {
+                           uint t,
+                           Epi epi = Epi()) {
     uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;
     A r = init;
     if (i < outputs) {
@@ -84,7 +93,7 @@ inline void reduce_grouped(In in,
         }
     }
     if (lane == 0 && i < outputs) {
-        out[i] = shared[t];
+        out[i] = epi(shared[t]);
     }
 }
 
@@ -143,15 +152,16 @@ FOR_ALL(REDUCE_MAX)
 
 // Threadgroup (p, a) of REDUCE_THREADS reduces chunk p of row a
 // cooperatively, into out[a * chunks + p].
-template <typename Op, typename A, typename In>
+template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_rows(In in,
-                        device A *out,
+                        device O *out,
                         ulong count,
                         ulong chunk,
                         threadgroup A *shared,
                         uint3 group,
                         uint chunks,
-                        uint t) {
+                        uint t,
+                        Epi epi = Epi()) {
     ulong start = ulong(group.x) * chunk, end = start + chunk < count ? start + chunk : count;
     ulong row = ulong(group.y) * count;
     // Four independent accumulators keep four loads in flight.
@@ -174,15 +184,16 @@ inline void reduce_rows(In in,
         }
     }
     if (t == 0) {
-        out[ulong(group.y) * chunks + group.x] = shared[0];
+        out[ulong(group.y) * chunks + group.x] = epi(shared[0]);
     }
 }
 
 // Thread i reduces column i % cols of chunk p of batch a, where i / cols =
 // a * chunks + p, stepping `cols` elements a row: neighbouring threads read
 // neighbouring addresses. Writes out[i].
-template <typename Op, typename A, typename In>
-inline void reduce_cols(In in, device A *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
+template <typename Op, typename A, typename In, typename O, typename Epi = Same>
+inline void reduce_cols(
+    In in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i, Epi epi = Epi()) {
     uint b = i % cols, ap = i / cols, a = ap / chunks, p = ap % chunks;
     ulong start = ulong(p) * chunk, end = start + chunk < count ? start + chunk : count;
     ulong column = ulong(a) * count * cols + b;
@@ -198,7 +209,7 @@ inline void reduce_cols(In in, device A *out, uint cols, ulong count, ulong chun
     for (; j < end; ++j) {
         r0 = Op::apply(r0, A(in[column + j * cols]));
     }
-    out[i] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
+    out[i] = epi(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
 }
 
 #define ROWS(KERNEL, FN, I, O)                                                                         \

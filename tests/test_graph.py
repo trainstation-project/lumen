@@ -142,10 +142,10 @@ def test_no_implicit_dtype_changes():
     assert run(lambda f: f * 2, f).dtype == np.float32
     assert run(lambda h: h + 2.5, half).dtype == np.float16
     assert run(lambda b: b == True, lumen.tensor([True, False])).tolist() == [True, False]  # noqa: E712
-    # Sums stay in the tensor's dtype (integers wrap) unless given one.
+    # Sums stay in the tensor's dtype (integers wrap): convert for another.
     u8 = lumen.tensor([200, 100], dtype="uint8")
     assert run(lambda x: x.sum(), u8).tolist() == 44
-    assert run(lambda x: x.sum(dtype="int64"), u8).tolist() == 300
+    assert run(lambda x: x.long().sum(), u8).tolist() == 300
     # Explicit conversions are how dtypes change.
     assert run(lambda i: i.float().exp(), i).dtype == np.float32
     assert run(lambda i, f: i.to(f.dtype) + f, i, f).tolist() == [2.0, 4.0]
@@ -803,11 +803,17 @@ def test_sqrt(device):
     ]:
         np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(t)), expected, rtol=1e-6)
     if device == "mps":
-        for f in (lambda a: 1.0 / a.sqrt(), lambda a: a / a.sum(-1, keepdim=True).sqrt()):
-            *_, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
-            source = last["fusion"]["source"]
-            assert last["label"].endswith("div") and "rsqrt(" not in source
-            assert "Sqrt::apply" in source and "Div::apply" in source
+        (step,) = lumen.graph.Plan(lumen.make_graph(lambda a: 1.0 / a.sqrt())(t), "mps").steps()
+        source = step["fusion"]["source"]
+        assert step["label"].endswith("div") and "rsqrt(" not in source
+        assert "Sqrt::apply" in source and "Div::apply" in source
+        # The sqrt of a sum is its reduction's epilogue, once an output; the
+        # division by it stays a division.
+        f = lambda a: a / a.sum(-1, keepdim=True).sqrt()  # noqa: E731
+        first, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
+        assert first["label"].endswith("reduce_sum -> reshape -> sqrt"), first["label"]
+        assert "Sqrt::apply" in first["fusion"]["source"]
+        assert last["label"].endswith("div") and "rsqrt(" not in last["fusion"]["source"]
 
 class ScaledNorm(lumen.nn.Module):
     weight: lumen.Tensor
@@ -863,8 +869,9 @@ def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
-    program; `@`, sum and mean always float32). A dot returns its required
-    output_dtype (`@`: its inputs'), a sum its accum_dtype."""
+    program; `@` always float32; sum and mean in their input's dtype). A
+    dot returns its required output_dtype (`@`: its inputs'), a sum its
+    accum_dtype."""
     try:
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
@@ -894,13 +901,20 @@ def test_programs_run_in_their_dtypes(device):
     graph = lumen.make_graph(lambda a, b: a @ b)(x, w)
     assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
     assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
-    # So do sum and mean: read as bfloat16, accumulated in float32, with no
-    # convert in the graph.
+    # Sum and mean follow their input's dtype: bfloat16 sums in bfloat16; a
+    # float32 sum is written as one (x.float().sum()), its cast back the
+    # reduction's epilogue.
     graph = lumen.make_graph(lambda a: a.sum(-1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]
-    total = lumen.compile(lambda a: a.sum(-1))(x)
-    assert total.dtype == "float32" and lumen.compile(lambda a: a.mean())(x).dtype == "float32"
+    assert "accum_dtype=bf16" in str(graph)
+    assert lumen.compile(lambda a: a.sum(-1))(x).dtype == "bfloat16"
+    assert lumen.compile(lambda a: a.mean())(x).dtype == "bfloat16"
+    total = lumen.compile(lambda a: a.float().sum(-1))(x)
+    assert total.dtype == "float32"
     np.testing.assert_allclose(lumen.to_numpy(total), a.sum(-1), rtol=1e-6, atol=1e-6)
+    back = lumen.compile(lambda a: a.float().sum(-1).bfloat16())(x)
+    assert back.dtype == "bfloat16"
+    np.testing.assert_allclose(lumen.to_numpy(back.to(dtype="float32")), a.sum(-1), rtol=2**-8, atol=2**-8)
 
 
 class UpcastNorm(lumen.nn.Module):
