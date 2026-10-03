@@ -70,6 +70,9 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             start_indices: dims("start_indices")?,
             limit_indices: dims("limit_indices")?,
         },
+        "rms_norm" => RmsNorm {
+            epsilon: get("epsilon")?.extract()?,
+        },
         "softmax" => Softmax {
             axis: get("axis")?.extract()?,
         },

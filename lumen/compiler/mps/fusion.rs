@@ -55,6 +55,7 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     let reduction = match node.primitive {
         ReduceSum { .. } | ReduceMax { .. } => true,
         Softmax { axis } => rows(axis),
+        RmsNorm { .. } => true,
         _ => false,
     } && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     // Metal has no float64; such steps fail when the plan runs.
@@ -66,12 +67,21 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || reduction) && !f64
 }
 
+/// Whether fusible `node` computes its operand `v` inside its kernel: every
+/// operand but rms_norm's weight, which its kernel reads from memory.
+fn fuses(node: &Node, v: Var) -> bool {
+    !matches!(node.primitive, Primitive::RmsNorm { .. }) || node.inputs[0] == v
+}
+
 /// Whether `node` is a reduction (or softmax): a fusion's root, never
 /// computed inside another (its consumers read its output).
 fn is_reduction(node: &Node) -> bool {
     matches!(
         node.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
+        Primitive::ReduceSum { .. }
+            | Primitive::ReduceMax { .. }
+            | Primitive::Softmax { .. }
+            | Primitive::RmsNorm { .. }
     )
 }
 
@@ -128,7 +138,9 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
             !fusible[i]
                 || is_reduction(node)
                 || is_output[node.output]
-                || users.iter().any(|&u| !fusible[u])
+                || users
+                    .iter()
+                    .any(|&u| !fusible[u] || !fuses(&nodes[u], node.output))
                 || (expensive(graph, node) && users.len() > 1)
         })
         .collect();
@@ -152,10 +164,13 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
-        // Softmax reads its input twice: it hosts nothing.
+        // Softmax and rms_norm read their input twice: they host nothing.
         if root[first]
             && fusible[first]
-            && !matches!(nodes[first].primitive, Primitive::Softmax { .. })
+            && !matches!(
+                nodes[first].primitive,
+                Primitive::Softmax { .. } | Primitive::RmsNorm { .. }
+            )
             && host[first].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {
@@ -268,6 +283,12 @@ fn members(
     let mut stack = vec![root_node];
     while let Some(i) = stack.pop() {
         for &v in &nodes[i].inputs {
+            if !fuses(&nodes[i], v) {
+                if !reads.contains(&v) {
+                    reads.push(v);
+                }
+                continue;
+            }
             match producer[v] {
                 Some(p) if !root(p) => {
                     if !members.contains(&p) {

@@ -734,3 +734,27 @@ fn softmax_fuses_its_input() {
         assert!(plan.run(&on_mps).unwrap_err().contains("last dimension"));
     }
 }
+
+/// rms_norm fuses the primitives computing its input into its kernel; its
+/// weight, read from memory, is computed by a kernel of its own.
+#[test]
+fn rms_norm_fuses_its_input() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 300]));
+    let y = g.input(ty(DType::F32, &[8, 300]));
+    let w = g.input(ty(DType::F32, &[300]));
+    let h = apply(&mut g, Add, &[x, y]);
+    let w2 = apply(&mut g, Mul, &[w, w]);
+    let out = apply(&mut g, RmsNorm { epsilon: 1e-6 }, &[h, w2]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [data(&[8, 300], 1), data(&[8, 300], 2), data(&[300], 3)];
+    assert_eq!(fused_primitives(&g, &inputs), ["mul", "fusion"]);
+    if available() {
+        let inputs: Vec<Tensor> = [vec![8, 300], vec![8, 300], vec![300]]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| values(DType::F32, s, i as u64 + 1))
+            .collect();
+        check(&g, &inputs);
+    }
+}

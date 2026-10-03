@@ -80,6 +80,17 @@ fn concatenate_rules() {
 }
 
 #[test]
+fn rms_norm_rules() {
+    let (x, w) = (ty(DType::BF16, &[3, 5]), ty(DType::BF16, &[5]));
+    let norm = || RmsNorm { epsilon: 1e-6 };
+    assert_eq!(infer(norm(), std::slice::from_ref(&x)).unwrap(), x);
+    assert_eq!(infer(norm(), &[x.clone(), w]).unwrap(), x);
+    assert!(infer(norm(), &[x.clone(), ty(DType::F32, &[5])]).is_err());
+    assert!(infer(norm(), &[x, ty(DType::BF16, &[3])]).is_err());
+    assert!(infer(norm(), &[ty(DType::I32, &[5])]).is_err());
+}
+
+#[test]
 fn softmax_rules() {
     let x = ty(DType::F16, &[3, 5]);
     let y = infer(Softmax { axis: 1 }, std::slice::from_ref(&x)).unwrap();
@@ -882,12 +893,17 @@ pub(crate) mod mps {
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
             }
-            // Softmax over the last dimension: rows shorter and longer than
-            // a threadgroup, one element, none.
+            // Softmax and rms_norm (with a weight and without) over the
+            // last dimension: rows shorter and longer than a threadgroup,
+            // one element, none.
             if dtype.is_float() && dtype != DType::F64 {
                 for shape in [vec![4, 7], vec![3, 1000], vec![2, 3, 1], vec![0, 5]] {
                     let axis = shape.len() - 1;
                     check_node(Softmax { axis }, &[ty(dtype, &shape)]);
+                    let norm = RmsNorm { epsilon: 1e-5 };
+                    check_node(norm.clone(), &[ty(dtype, &shape)]);
+                    let w = ty(dtype, &shape[axis..]);
+                    check_node(norm, &[ty(dtype, &shape), w]);
                 }
             }
             // Each dimension, operands of different sizes (one empty).

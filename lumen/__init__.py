@@ -43,6 +43,7 @@ from lumen.graph import (
     prims,
     rsqrt,
     sigmoid,
+    rms_norm,
     softmax,
     tanh,
     where,
@@ -102,5 +103,5 @@ __all__ = [
     "to_numpy", "from_numpy", "from_dlpack",
     # compiled execution
     "compile", "make_graph", "prims",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
+    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax", "rms_norm",
 ]

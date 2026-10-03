@@ -28,6 +28,7 @@ from lumen.graph.tracer import (
     maximum,
     minimum,
     rsqrt,
+    rms_norm,
     sigmoid,
     softmax,
     tanh,
@@ -37,5 +38,5 @@ from lumen.graph import prims
 
 __all__ = [
     "Graph", "Plan", "TracedTensor", "compile", "make_graph", "prims",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
+    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax", "rms_norm",
 ]

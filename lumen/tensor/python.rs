@@ -519,7 +519,9 @@ impl PyTensor {
             if t.device() != core::Device::Meta {
                 has_data(&t)?;
             }
-            t = t.to_dtype(parse_dtype(dtype)?).map_err(PyRuntimeError::new_err)?;
+            t = t
+                .to_dtype(parse_dtype(dtype)?)
+                .map_err(PyRuntimeError::new_err)?;
         }
         if let Some(device) = device.filter(|&d| d != t.device()) {
             if device != core::Device::Meta {

@@ -76,7 +76,10 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     let root = body.nodes().iter().find(|n| n.output == out)?;
     matches!(
         root.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } | Primitive::Softmax { .. }
+        Primitive::ReduceSum { .. }
+            | Primitive::ReduceMax { .. }
+            | Primitive::Softmax { .. }
+            | Primitive::RmsNorm { .. }
     )
     .then_some(root)
 }
@@ -128,12 +131,34 @@ fn reduction(body: &Graph, root: &Node) -> (String, String) {
         Primitive::ReduceSum { axes } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
         _ => {
-            // Softmax over the last dimension: a threadgroup a row.
-            let args = arg(0, "ulong &count")
-                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
-            let call = format!(
-                "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];\n    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
-            );
+            // Softmax or rms_norm over the last dimension: a threadgroup a
+            // row; rms_norm's weight read from its own input buffer.
+            let threads = ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
+            let (args, call) = match root.inputs.get(1) {
+                _ if matches!(root.primitive, Primitive::Softmax { .. }) => (
+                    arg(0, "ulong &count") + threads,
+                    format!(
+                        "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];\n    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
+                    ),
+                ),
+                weight => {
+                    let w = weight.map(|w| {
+                        body.inputs()
+                            .iter()
+                            .position(|v| v == w)
+                            .expect("the weight is read")
+                    });
+                    let (flag, pointer) = w.map_or(("false", "nullptr".to_string()), |k| {
+                        ("true", format!("in{k}"))
+                    });
+                    (
+                        [arg(0, "ulong &count"), arg(1, "float &eps")].join(", ") + threads,
+                        format!(
+                            "threadgroup float shared[REDUCE_THREADS];\n    rms_norm_rows<{t}, {flag}>(input, {pointer}, out, count, eps, shared, group.x, tid.y * 16 + tid.x);"
+                        ),
+                    )
+                }
+            };
             return named(format!(
                 "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {t} *out [[buffer({n})]]{extra_params}, {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
                 emitter.lines,

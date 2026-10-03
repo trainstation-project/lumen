@@ -58,6 +58,9 @@ pub(crate) fn encode(
     if let Softmax { .. } = step.primitive {
         return super::softmax::mps::encode(step, inputs, output, keep);
     }
+    if let RmsNorm { .. } = step.primitive {
+        return super::rms_norm::mps::encode(step, inputs, output, keep);
+    }
     if let Fusion { .. } = step.primitive {
         return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -90,7 +93,7 @@ pub(crate) fn encode(
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
-        Softmax { .. } => unreachable!("encoded above"),
+        Softmax { .. } | RmsNorm { .. } => unreachable!("encoded above"),
     };
     encode(step, inputs, output, keep)
 }

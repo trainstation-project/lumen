@@ -728,3 +728,32 @@ def test_softmax_is_one_primitive(device):
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7)
     assert "softmax" not in [n["primitive"] for n in lumen.make_graph(lambda t: t.softmax(0))(t).nodes()]
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_rms_norm(device):
+    """lumen.rms_norm (torch.nn.functional.rms_norm) and nn.RMSNorm: one
+    primitive, on MPS one kernel with the ops computing its input fused."""
+    x, w = rand(8, 300), rand(300, seed=1)
+    try:
+        X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def expected(x, w, eps):
+        y = x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
+        return y * w if w is not None else y
+
+    f = lambda a, b: lumen.rms_norm(a + 1.0, 300, b, 1e-6)  # noqa: E731
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected(x + 1, w, 1e-6), rtol=1e-5, atol=1e-6)
+    g = lambda a: lumen.rms_norm(a, [300])  # noqa: E731  (eps: float32's machine epsilon)
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(g)(X)), expected(x, None, 2.0**-23), rtol=1e-5, atol=1e-6)
+    if device == "mps":
+        assert [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()] == ["full -> broadcast_in_dim -> add -> rms_norm"]
+    with pytest.raises(NotImplementedError, match="last dimension"):
+        lumen.make_graph(lambda a: lumen.rms_norm(a, (8, 300)))(X)
+    norm = lumen.nn.RMSNorm(lumen.empty([300], device="meta"), eps=1e-6)
+    step = lumen.compile(lambda m, a: m(a), device=device)
+    step(norm, lumen.empty([8, 300], device="meta"))
+    norm.load_state_dict({"weight": W})
+    np.testing.assert_allclose(lumen.to_numpy(step(norm, X)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
