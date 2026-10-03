@@ -8,13 +8,15 @@ it), or static configuration (anything else: ints, strings, ...). Weights are me
 ``lumen.compile`` places them on its device when a function taking the
 module compiles, and every function taking it shares that memory::
 
+    import lumen.functional as F
+
     class MLP(lumen.nn.Module):
         w1: lumen.Tensor
         w3: lumen.Tensor
         w2: lumen.Tensor
 
         def __call__(self, x):
-            return ((x @ self.w1).relu() * (x @ self.w3)) @ self.w2
+            return (F.relu(x @ self.w1) * (x @ self.w3)) @ self.w2
 
     model = MLP(*(lumen.empty(s, device="meta") for s in shapes))
     f = lumen.compile(lambda model, x: model(x), device="mps")

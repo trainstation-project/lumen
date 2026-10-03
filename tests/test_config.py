@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import lumen
+import lumen.functional as F
 
 
 @pytest.fixture(autouse=True)
@@ -53,8 +54,8 @@ def compiler():
 
 
 def _manual_softmax(a):
-    e = (a - a.amax(-1, keepdim=True)).exp()
-    return e / e.sum(-1, keepdim=True)
+    e = F.exp(a - F.amax(a, -1, keepdim=True))
+    return e / F.sum(e, -1, keepdim=True)
 
 
 def _labels(f, *args, device="mps"):
@@ -93,7 +94,7 @@ def test_compiler_flags_change_what_compiles(compiler):
     assert len(_labels(_manual_softmax, x)) > 1
     compiler.reset()
 
-    cast = lambda a: a.float().sum(-1).half()  # noqa: E731
+    cast = lambda a: F.sum(a.float(), -1).half()  # noqa: E731
     h = lumen.empty([64, 300], dtype="float16", device="meta")
     assert len(_labels(cast, h)) == 1
     compiler.reduction_epilogues = False
@@ -131,7 +132,7 @@ def test_online_softmax_agrees(compiler, n):
         pytest.skip(str(e))
     from lumen.profiler import ProfilerActivity, profile
 
-    f = lumen.compile(lambda a: a.softmax(-1))
+    f = lumen.compile(lambda a: F.softmax(a, -1))
 
     def run():
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:

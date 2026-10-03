@@ -777,7 +777,7 @@ fn reductions_fuse_their_inputs() {
     }
 }
 
-/// `x.float().sum().bfloat16()` and a mean (`/ n`) cast back: one fusion,
+/// `F.sum(x.float()).bfloat16()` and a mean (`/ n`) cast back: one fusion,
 /// the reduction in float32 and the division and cast its epilogue. One
 /// launch applies it as it writes; a split reduction's partials stay
 /// float32, its second launch (the fusion's `_final` kernel) applying it.
