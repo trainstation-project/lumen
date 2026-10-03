@@ -807,13 +807,12 @@ def test_sqrt(device):
         source = step["fusion"]["source"]
         assert step["label"].endswith("div") and "rsqrt(" not in source
         assert "Sqrt::apply" in source and "Div::apply" in source
-        # The sqrt of a sum is its reduction's epilogue, once an output; the
-        # division by it stays a division.
+        # A division by the sqrt of a row's sum (a diamond: one row kernel)
+        # stays a sqrt, once a row, and a division.
         f = lambda a: a / a.sum(-1, keepdim=True).sqrt()  # noqa: E731
-        first, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
-        assert first["label"].endswith("reduce_sum -> reshape -> sqrt"), first["label"]
-        assert "Sqrt::apply" in first["fusion"]["source"]
-        assert last["label"].endswith("div") and "rsqrt(" not in last["fusion"]["source"]
+        (step,) = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
+        source = step["fusion"]["source"]
+        assert "Sqrt::apply" in source and "Div::apply" in source and "rsqrt(" not in source
 
 class ScaledNorm(lumen.nn.Module):
     weight: lumen.Tensor
@@ -988,3 +987,35 @@ def test_split_reduction_converts_its_input_once():
     assert last["kernel"] == "reduce_sum_rows_f32"
     assert last["inputs"] == first["outputs"] and last["inputs"][0][0] == "float32"
     np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))
+
+
+def _layer_norm(a, w):
+    xc = a - a.mean(-1, keepdim=True)
+    return xc / ((xc * xc).mean(-1, keepdim=True) + 1e-5).sqrt() * w
+
+
+@pytest.mark.parametrize(
+    "f",
+    [
+        lambda a, w: a / ((a * a).mean(-1, keepdim=True) + 1e-6).sqrt() * w,
+        lambda a, w: a / ((a * a).sum(-1, keepdim=True) + 1e-6).sqrt() * w,
+        lambda a, w: a * (1.0 / ((a * a).mean(-1, keepdim=True)).sqrt()),
+        lambda a, w: (lambda e: e / e.sum(-1, keepdim=True))((a - a.amax(-1, keepdim=True)).exp()),
+        _layer_norm,
+    ],
+    ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"],
+)
+def test_normalizations_are_one_row_kernel(f):
+    """Whatever normalizes rows by reductions of them is a normalization
+    diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
+    written: one row kernel on MPS, its reductions inside, agreeing with the
+    CPU. Nothing matches any one normalization."""
+    x, w = rand(64, 300), rand(300, seed=1)
+    try:
+        X, W = lumen.from_numpy(x).to("mps"), lumen.from_numpy(w).to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    (step,) = lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+    assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
+    expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)

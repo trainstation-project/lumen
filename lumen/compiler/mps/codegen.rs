@@ -290,7 +290,7 @@ fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
 }
 
 /// The reductions of a fusion with `body` other than its root: a
-/// normalization's (`rms_norm.rs`), each over the last dimension of a value
+/// normalization's (`diamonds.rs`), each over the last dimension of a value
 /// of the root's shape, which make its kernel a row kernel.
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
     // A reduction with an epilogue is not a row kernel's.
@@ -311,7 +311,7 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
 }
 
 /// The kernel of a fusion with reductions inside (a normalization over the
-/// last dimension, `rms_norm.rs`): a threadgroup a row of the output. A
+/// last dimension, `diamonds.rs`): a threadgroup a row of the output. A
 /// pass over the row for each reduction, in order, accumulating it (in its
 /// dtype, combined in threadgroup memory); then one writing the output.
 /// Values the same across the row (the reductions', constants, and what

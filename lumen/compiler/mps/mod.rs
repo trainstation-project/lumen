@@ -9,9 +9,9 @@
 //! primitives' kernels ([`crate::ops::mps`]).
 
 mod codegen;
+mod diamonds;
 mod fusion;
 mod merge_dots;
-mod rms_norm;
 #[cfg(test)]
 mod tests;
 
@@ -61,7 +61,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .collect();
     let fused = if options.fuse {
         // RMS norms: each one fusion, its reduction inside.
-        let rows = rms_norm::rms_norms(&graph);
+        let rows = diamonds::diamonds(&graph);
         loop {
             kernels.clear();
             let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
