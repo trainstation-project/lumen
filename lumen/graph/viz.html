@@ -44,6 +44,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--font-ui); display: flex; flex-direction: column; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding: 10px 16px; border-bottom: 1px solid var(--rule); background: var(--surface); }
@@ -55,7 +56,7 @@ header .meta { font: 12px var(--font-mono); color: var(--ink-3); }
 .totals { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 12px var(--font-mono); color: var(--ink-2); margin-left: auto; }
 .totals b { color: var(--ink); font-weight: 600; }
 main { flex: 1; display: flex; min-height: 0; }
-#canvas { flex: 1; min-width: 0; position: relative; overflow: hidden; background: var(--bg); }
+#canvas { flex: 1 1 50%; min-width: 0; position: relative; overflow: hidden; background: var(--bg); }
 #canvas svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
 #canvas svg.drag { cursor: grabbing; }
 .controls { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 6px; }
@@ -64,7 +65,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .legend { position: absolute; left: 12px; top: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; max-width: calc(100% - 24px); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-aside { width: min(46%, 640px); border-left: 1px solid var(--rule); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
+aside { flex: 1 1 50%; min-width: 0; border-left: 1px solid var(--rule); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
 .detail { padding: 14px 16px; border-bottom: 1px solid var(--rule); overflow: auto; max-height: 48%; display: flex; flex-direction: column; gap: 10px; }
 .detail h2 { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
