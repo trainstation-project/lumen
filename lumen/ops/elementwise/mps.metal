@@ -48,11 +48,11 @@ FOR_NUMERIC(NEG)
         FOR_EACH_ELEMENT(j, T) { unary<FN, T>(in, out, j); }                                                      \
     }
 
-#define FLOATING(NAME, T)        \
-    UNARY(exp, Exp, NAME, T)     \
-    UNARY(log, Log, NAME, T)     \
-    UNARY(rsqrt, Rsqrt, NAME, T) \
-    UNARY(tanh, Tanh, NAME, T)   \
+#define FLOATING(NAME, T)      \
+    UNARY(exp, Exp, NAME, T)   \
+    UNARY(log, Log, NAME, T)   \
+    UNARY(sqrt, Sqrt, NAME, T) \
+    UNARY(tanh, Tanh, NAME, T) \
     UNARY(logistic, Logistic, NAME, T)
 
 FOR_FLOAT(FLOATING)

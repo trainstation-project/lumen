@@ -296,14 +296,14 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             Int(x) => Int(x.iter().map(|&a| wrap(-a, dtype)).collect()),
             Float(x) => Float(x.iter().map(|&a| -a).collect()),
         },
-        Exp | Log | Rsqrt | Tanh | Logistic => {
+        Exp | Log | Sqrt | Tanh | Logistic => {
             let Float(x) = args[0] else {
                 unreachable!("float operand")
             };
             let f = |a: f64| match p {
                 Exp => a.exp(),
                 Log => a.ln(),
-                Rsqrt => 1.0 / a.sqrt(),
+                Sqrt => a.sqrt(),
                 Tanh => a.tanh(),
                 _ => 1.0 / (1.0 + (-a).exp()),
             };

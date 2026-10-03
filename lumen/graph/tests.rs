@@ -723,7 +723,7 @@ pub(crate) mod mps {
             }
             check_node(Neg, std::slice::from_ref(&x));
             if dtype.is_float() {
-                for p in [Exp, Log, Rsqrt, Tanh, Logistic] {
+                for p in [Exp, Log, Sqrt, Tanh, Logistic] {
                     check_node(p, std::slice::from_ref(&x));
                 }
             }

@@ -143,8 +143,8 @@ struct Log {
     static float apply(float x) { return log(x); }
 };
 
-struct Rsqrt {
-    static float apply(float x) { return rsqrt(x); }
+struct Sqrt {
+    static float apply(float x) { return sqrt(x); }
 };
 
 struct Tanh {

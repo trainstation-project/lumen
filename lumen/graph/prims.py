@@ -10,7 +10,7 @@ from lumen.graph import tracer
 
 __all__ = [
     "add", "sub", "mul", "div", "max", "eq", "lt",
-    "neg", "exp", "log", "rsqrt", "tanh", "logistic",
+    "neg", "exp", "log", "sqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
     "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax",
@@ -70,8 +70,8 @@ def log(x):
     return bind("log", x)
 
 
-def rsqrt(x):
-    return bind("rsqrt", x)
+def sqrt(x):
+    return bind("sqrt", x)
 
 
 def tanh(x):

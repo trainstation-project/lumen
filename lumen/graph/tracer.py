@@ -23,7 +23,7 @@ from lumen import nn
 from lumen.graph import prims
 
 __all__ = [
-    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax", "rms_norm",
+    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
 ]
 
 # The graphs being traced, innermost last.
@@ -536,8 +536,8 @@ class TracedTensor:
     def log(self):
         return prims.log(_require_float(self, "log"))
 
-    def rsqrt(self):
-        return prims.rsqrt(_require_float(self, "rsqrt"))
+    def sqrt(self):
+        return prims.sqrt(_require_float(self, "sqrt"))
 
     def tanh(self):
         return prims.tanh(_require_float(self, "tanh"))
@@ -829,8 +829,9 @@ def log(input):
     return input.log()
 
 
-def rsqrt(input):
-    return input.rsqrt()
+def sqrt(input):
+    return input.sqrt()
+
 
 
 def tanh(input):
@@ -848,7 +849,7 @@ def softmax(input, dim, dtype=None):
 def rms_norm(input, normalized_shape, weight=None, eps=None):
     """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
     square over the last dimension (``normalized_shape``, its size),
-    ``input * rsqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
+    ``input / sqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
     defaults to the dtype's machine epsilon, as in torch. Traced as its
     primitives, which the MPS compiler recognizes (as it does an RMS norm
     written by hand) and runs as one kernel, with the ops computing
@@ -867,7 +868,7 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
     if eps is None:
         eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
 
-    y = x * ((x * x).mean(-1, keepdim=True) + eps).rsqrt()
+    y = x / ((x * x).mean(-1, keepdim=True) + eps).sqrt()
 
     if weight is not None:
         y = y * weight

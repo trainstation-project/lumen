@@ -80,7 +80,7 @@ pub(crate) fn encode(
         | Neg
         | Exp
         | Log
-        | Rsqrt
+        | Sqrt
         | Tanh
         | Logistic
         | ConvertElementType { .. }

@@ -37,7 +37,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
         "neg" => Neg,
         "exp" => Exp,
         "log" => Log,
-        "rsqrt" => Rsqrt,
+        "sqrt" => Sqrt,
         "tanh" => Tanh,
         "logistic" => Logistic,
         "convert_element_type" => ConvertElementType {

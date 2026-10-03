@@ -1,18 +1,3 @@
-//! Pattern matching on graphs (XLA: `pattern_matcher.h`), for rewrites
-//! that recognize a computation however it was written, so its fused
-//! kernel runs: a [`Pattern`] is a tree of primitive tests, matched at a
-//! value against the nodes defining it.
-//!
-//! ```text
-//! // x * rsqrt(..): a Mul of the captured x and a broadcast of an Rsqrt,
-//! // in either order.
-//! either(is(|p| matches!(p, Mul)), [bind(X), op(is_broadcast, [op(is_rsqrt, [..])])])
-//! ```
-//!
-//! A [`Match`] holds the captured values and the nodes matched; a rewrite
-//! replacing them checks they are [`Matcher::exclusive`]: nothing outside the
-//! match reads its intermediate values.
-
 use crate::graph::{Graph, Node, Primitive, Var};
 
 /// A test of a value: what defines it, and what defines its operands.
@@ -102,16 +87,24 @@ impl Match {
 pub(crate) struct Matcher<'a> {
     graph: &'a Graph,
     producer: Vec<Option<usize>>,
-    /// The reads of each value: by nodes (once per operand) and as outputs.
+    /// The reads of each value: by live nodes (once per operand; dead ones,
+    /// which earlier rewrites leave, read nothing) and as outputs.
     readers: Vec<usize>,
 }
 
 impl<'a> Matcher<'a> {
     pub(crate) fn new(graph: &'a Graph) -> Self {
         let mut producer = vec![None; graph.types.len()];
-        let mut readers = vec![0; graph.types.len()];
-        for (i, node) in graph.nodes().iter().enumerate() {
+        let mut live = vec![false; graph.types.len()];
+        graph.outputs().iter().for_each(|&v| live[v] = true);
+        for (i, node) in graph.nodes().iter().enumerate().rev() {
             producer[node.output] = Some(i);
+            if live[node.output] {
+                node.inputs.iter().for_each(|&v| live[v] = true);
+            }
+        }
+        let mut readers = vec![0; graph.types.len()];
+        for node in graph.nodes().iter().filter(|n| live[n.output]) {
             node.inputs.iter().for_each(|&v| readers[v] += 1);
         }
         graph.outputs().iter().for_each(|&v| readers[v] += 1);

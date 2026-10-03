@@ -35,7 +35,7 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Neg
             | Exp
             | Log
-            | Rsqrt
+            | Sqrt
             | Tanh
             | Logistic
             | ConvertElementType { .. }
@@ -90,7 +90,7 @@ fn is_reduction(node: &Node) -> bool {
 fn expensive(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     match node.primitive {
-        Exp | Log | Rsqrt | Tanh | Logistic => true,
+        Exp | Log | Sqrt | Tanh | Logistic => true,
         Div => graph.type_of(node.output).dtype.is_float(),
         _ => false,
     }
@@ -363,7 +363,7 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
                 | Neg
                 | Exp
                 | Log
-                | Rsqrt
+                | Sqrt
                 | Tanh
                 | Logistic
                 | ConvertElementType { .. }

@@ -741,7 +741,7 @@ fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
                 | Neg
                 | Exp
                 | Log
-                | Rsqrt
+                | Sqrt
                 | Tanh
                 | Logistic
                 | ConvertElementType { .. }

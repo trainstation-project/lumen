@@ -1,16 +1,16 @@
 //! RMS norm rewriting: the primitives an RMS norm traces to, however it is
-//! written (`lumen.rms_norm`, or by hand as `x * (x * x).mean(-1,
-//! keepdim=True).add(eps).rsqrt()`, each multiply's operands in either
-//! order), times a weight or not,
+//! written (`lumen.rms_norm`, or by hand as `x / (x * x).mean(-1,
+//! keepdim=True).add(eps).sqrt()` or `x * (1 / (..).sqrt())`, each
+//! multiply's operands in either order), times a weight or not,
 //!
 //! ```text
-//! r = rsqrt(sum(x * x) / n [+ eps])  over the last dimension, of size n
-//! y = x * broadcast(r)  [* broadcast(weight)]
+//! s = sqrt(sum(x * x) / n [+ eps])  over the last dimension, of size n
+//! y = x * broadcast(1 / s)  or  x / broadcast(s)  [* broadcast(weight)]
 //! ```
 //!
-//! become one [`Primitive::RmsNorm`], which runs as one kernel
-//! (`ops/rms_norm/mps.metal`), when nothing else reads the values in
-//! between ([`Matcher::exclusive`]).
+//! become one [`Primitive::RmsNorm`], which
+//! runs as one kernel (`ops/rms_norm/mps.metal`), when nothing else reads
+//! the values in between ([`Matcher::exclusive`]).
 
 use crate::DType;
 use crate::compiler::pattern::{Match, Matcher, Pattern, bind, either, one_of, op};
@@ -24,9 +24,12 @@ const W: usize = 3;
 const SUM: usize = 4;
 const R: usize = 5;
 const WB: usize = 6;
-const CAPTURES: usize = 7;
+const ONE: usize = 7;
+const CAPTURES: usize = 8;
 
-/// The RMS norm of `x` without its weight: `x * broadcast(rsqrt(..))`.
+/// The RMS norm of `x` without its weight: `x * broadcast(1 / sqrt(..))`
+/// or `x / broadcast(sqrt(..))`, the reciprocal or square root captured as
+/// `R`.
 fn normalized() -> Pattern {
     use Primitive::*;
     let mean = || {
@@ -45,21 +48,27 @@ fn normalized() -> Pattern {
             ],
         )
     };
-    // Plus epsilon, or not (epsilon 0).
-    let rsqrt = op(
-        |p| matches!(p, Rsqrt),
-        [one_of([
-            either(|p| matches!(p, Add), [mean(), bind(EPS)]),
-            mean(),
-        ])],
-    );
-    either(
-        |p| matches!(p, Mul),
-        [
-            bind(X),
-            op(|p| matches!(p, BroadcastInDim { .. }), [rsqrt.bind(R)]),
-        ],
-    )
+    // The square root of the mean, plus epsilon or not (epsilon 0).
+    let sqrt = || {
+        op(
+            |p| matches!(p, Sqrt),
+            [one_of([
+                either(|p| matches!(p, Add), [mean(), bind(EPS)]),
+                mean(),
+            ])],
+        )
+    };
+    let broadcast = |p: Pattern| op(|p| matches!(p, BroadcastInDim { .. }), [p]);
+    one_of([
+        either(
+            |p| matches!(p, Mul),
+            [
+                bind(X),
+                broadcast(op(|p| matches!(p, Div), [bind(ONE), sqrt()]).bind(R)),
+            ],
+        ),
+        op(|p| matches!(p, Div), [bind(X), broadcast(sqrt().bind(R))]),
+    ])
 }
 
 /// `graph` with each RMS norm over the last dimension one primitive (the
@@ -149,6 +158,7 @@ fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<f64> {
         && sum.primitive == (Primitive::ReduceSum { axes: vec![last] })
         && r.shape == kept
         && matcher.scalar(m.get(N)) == Some(n as f64)
+        && m.captures[ONE].is_none_or(|one| matcher.scalar(one) == Some(1.0))
         && weight_ok
         && matcher.exclusive(m);
     let epsilon = match m.captures[EPS] {

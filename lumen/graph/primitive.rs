@@ -24,7 +24,7 @@ pub enum Primitive {
     Neg,
     Exp,
     Log,
-    Rsqrt,
+    Sqrt,
     Tanh,
     Logistic,
     ConvertElementType {
@@ -128,7 +128,7 @@ impl Primitive {
             Neg => "neg",
             Exp => "exp",
             Log => "log",
-            Rsqrt => "rsqrt",
+            Sqrt => "sqrt",
             Tanh => "tanh",
             Logistic => "logistic",
             ConvertElementType { .. } => "convert_element_type",
@@ -188,7 +188,7 @@ impl Primitive {
                 };
                 Ok(TensorType::new(dtype, &x.shape))
             }
-            Neg | Exp | Log | Rsqrt | Tanh | Logistic => {
+            Neg | Exp | Log | Sqrt | Tanh | Logistic => {
                 let x = args[0];
                 if matches!(self, Neg) && x.dtype == DType::Bool {
                     return err("does not take bool operands".into());

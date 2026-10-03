@@ -9,7 +9,9 @@
 //! cost index arithmetic, not memory. Each (value, index) pair is computed
 //! once per element, into a local, and shapes are baked into the source as
 //! constants. Every op rounds to its dtype as its own kernel does, so a
-//! fusion computes what its primitives would.
+//! fusion computes what its primitives would; but a division by a fused
+//! `sqrt` is one `rsqrt` and a multiplication, skipping the square root's
+//! rounding.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -279,6 +281,78 @@ impl<'a> Emitter<'a> {
         name
     }
 
+    /// The index layout primitive `node` (reshape, broadcast_in_dim,
+    /// transpose, slice) reads its operand at to compute its value at `idx`
+    /// (XLA's indexing maps).
+    fn operand_index(&mut self, node: &Node, idx: String) -> String {
+        use Primitive::*;
+        let body = self.body;
+        let (x, ty) = (body.type_of(node.inputs[0]), body.type_of(node.output));
+        let x_strides = contiguous_strides(&x.shape);
+        match &node.primitive {
+            // Same elements, same order: the same index.
+            Reshape { .. } => idx,
+            BroadcastInDim {
+                broadcast_dimensions,
+                ..
+            } => {
+                let mut strides = vec![0; ty.shape.len()];
+                for (k, &d) in broadcast_dimensions.iter().enumerate() {
+                    if x.shape[k] != 1 {
+                        strides[d] = x_strides[k];
+                    }
+                }
+                self.index(gather_index(&idx, &ty.shape, &strides))
+            }
+            Transpose { permutation } => {
+                let strides: Vec<usize> = permutation.iter().map(|&d| x_strides[d]).collect();
+                self.index(gather_index(&idx, &ty.shape, &strides))
+            }
+            // The operand's element at the index plus the start.
+            Slice { start_indices, .. } => {
+                let start: usize = start_indices
+                    .iter()
+                    .zip(&x_strides)
+                    .map(|(s, st)| s * st)
+                    .sum();
+                let i = gather_index(&idx, &ty.shape, &x_strides);
+                self.index(format!("{start} + {i}"))
+            }
+            p => unreachable!("{p} is not a layout primitive"),
+        }
+    }
+
+    /// Whether value `v` is a `sqrt` this fusion computes, perhaps through
+    /// layout primitives (reshape, broadcast_in_dim, transpose, slice).
+    fn sqrt_through_layout(&self, v: Var) -> bool {
+        use Primitive::*;
+        match self.producer.get(&v).map(|&i| &self.body.nodes()[i]) {
+            Some(n) if matches!(n.primitive, Sqrt) => true,
+            Some(n)
+                if matches!(
+                    n.primitive,
+                    Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. }
+                ) =>
+            {
+                self.sqrt_through_layout(n.inputs[0])
+            }
+            _ => false,
+        }
+    }
+
+    /// `1 / v` at `idx`, as `rsqrt` of the square root's operand, where `v` is
+    /// a `sqrt` through layout primitives ([`Self::sqrt_through_layout`]).
+    fn rsqrt_of(&mut self, v: Var, idx: String) -> String {
+        let node = &self.body.nodes()[self.producer[&v]];
+        match node.primitive {
+            Primitive::Sqrt => format!("rsqrt(float({}))", self.value(node.inputs[0], idx)),
+            _ => {
+                let i = self.operand_index(node, idx);
+                self.rsqrt_of(node.inputs[0], i)
+            }
+        }
+    }
+
     /// The local holding value `v` at row-major index `idx` of its shape.
     fn value(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
@@ -301,6 +375,15 @@ impl<'a> Emitter<'a> {
                 let a = acc_type(operand);
                 use Primitive::*;
                 match &node.primitive {
+                    // x / sqrt(y), the sqrt computed here (perhaps through
+                    // layout primitives): x * rsqrt(y), one instruction where
+                    // they were two (XLA's algebraic simplifier: A / sqrt(B)
+                    // => A * rsqrt(B)).
+                    Div if self.sqrt_through_layout(node.inputs[1]) => {
+                        let x = self.value(node.inputs[0], idx.clone());
+                        let r = self.rsqrt_of(node.inputs[1], idx);
+                        format!("{t}({a}({x}) * {a}({r}))")
+                    }
                     Add | Sub | Mul | Div | Max | Eq | Lt => {
                         let (x, y) = (
                             self.value(node.inputs[0], idx.clone()),
@@ -310,7 +393,7 @@ impl<'a> Emitter<'a> {
                         format!("{t}({op}::apply({a}({x}), {a}({y})))")
                     }
                     Neg => format!("{t}(-{a}({}))", self.value(node.inputs[0], idx)),
-                    Exp | Log | Rsqrt | Tanh | Logistic => {
+                    Exp | Log | Sqrt | Tanh | Logistic => {
                         let x = self.value(node.inputs[0], idx);
                         let op = functor(&node.primitive);
                         format!("{t}({op}::apply(float({x})))")
@@ -324,42 +407,9 @@ impl<'a> Emitter<'a> {
                         let y = self.value(node.inputs[2], idx);
                         format!("{p} ? {x} : {y}")
                     }
-                    // Same elements, same order: the operand at the same index.
-                    Reshape { .. } => return self.value(node.inputs[0], idx),
-                    BroadcastInDim {
-                        broadcast_dimensions,
-                        ..
-                    } => {
-                        let x = body.type_of(node.inputs[0]);
-                        let x_strides = contiguous_strides(&x.shape);
-                        let mut strides = vec![0; ty.shape.len()];
-                        for (k, &d) in broadcast_dimensions.iter().enumerate() {
-                            if x.shape[k] != 1 {
-                                strides[d] = x_strides[k];
-                            }
-                        }
-                        let i = self.index(gather_index(&idx, &ty.shape, &strides));
-                        return self.value(node.inputs[0], i);
-                    }
-                    Transpose { permutation } => {
-                        let x = body.type_of(node.inputs[0]);
-                        let x_strides = contiguous_strides(&x.shape);
-                        let strides: Vec<usize> =
-                            permutation.iter().map(|&d| x_strides[d]).collect();
-                        let i = self.index(gather_index(&idx, &ty.shape, &strides));
-                        return self.value(node.inputs[0], i);
-                    }
-                    // The operand's element at the index plus the start.
-                    Slice { start_indices, .. } => {
-                        let x = body.type_of(node.inputs[0]);
-                        let x_strides = contiguous_strides(&x.shape);
-                        let start: usize = start_indices
-                            .iter()
-                            .zip(&x_strides)
-                            .map(|(s, st)| s * st)
-                            .sum();
-                        let i = gather_index(&idx, &ty.shape, &x_strides);
-                        let i = self.index(format!("{start} + {i}"));
+                    // Layout: the operand at the index it maps the index to.
+                    Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
+                        let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
                     // The operand holding the coordinate along `dimension`,
@@ -528,7 +578,7 @@ fn functor(p: &Primitive) -> &'static str {
         Lt => "Lt",
         Exp => "Exp",
         Log => "Log",
-        Rsqrt => "Rsqrt",
+        Sqrt => "Sqrt",
         Tanh => "Tanh",
         Logistic => "Logistic",
         _ => unreachable!("{p} has no functor"),

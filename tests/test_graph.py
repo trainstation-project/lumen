@@ -759,7 +759,7 @@ def test_rms_norm(device):
     g = lambda a: lumen.rms_norm(a, [300])  # noqa: E731  (eps: float32's machine epsilon)
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(g)(X)), expected(x, None, 2.0**-23), rtol=1e-5, atol=1e-6)
     assert "rms_norm" not in [n["primitive"] for n in lumen.make_graph(f)(X, W).nodes()]
-    by_hand = lambda a, b: b * (a * (1e-6 + (a * a).mean(-1, keepdim=True)).rsqrt())  # noqa: E731
+    by_hand = lambda a, b: b * (a / (1e-6 + (a * a).mean(-1, keepdim=True)).sqrt())  # noqa: E731
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
     if device == "mps":
         steps = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()]  # noqa: E731
@@ -771,3 +771,25 @@ def test_rms_norm(device):
     step(norm, lumen.empty([8, 300], device="meta"))
     norm.load_state_dict({"weight": W})
     np.testing.assert_allclose(lumen.to_numpy(step(norm, X)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_sqrt(device):
+    """sqrt is a primitive (rsqrt is not: write 1 / x.sqrt()); on MPS a fused
+    division by a fused sqrt is one rsqrt instruction."""
+    x = rand(8, 16) ** 2 + 0.1
+    try:
+        t = lumen.from_numpy(x).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    assert not hasattr(lumen, "rsqrt") and not hasattr(lumen.graph.TracedTensor, "rsqrt")
+    for f, expected in [
+        (lambda a: a.sqrt(), np.sqrt(x)),
+        (lambda a: lumen.sqrt(a), np.sqrt(x)),
+        (lambda a: 3.0 / a.sqrt(), 3 / np.sqrt(x)),
+    ]:
+        np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(t)), expected, rtol=1e-6)
+    if device == "mps":
+        for f in (lambda a: 1.0 / a.sqrt(), lambda a: a / a.sum(-1, keepdim=True).sqrt()):
+            *_, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
+            assert last["label"].endswith("div") and "rsqrt(" in last["fusion"]["source"]

@@ -804,7 +804,7 @@ fn patterns_match_graphs() {
 /// the last dimension, or reduces another.
 #[test]
 fn rms_norms_are_rewritten() {
-    // x * rsqrt(sum(x * x, last) / n + eps) [* w], with `flip` putting each
+    // x * (1 / sqrt(sum(x * x, last) / n + eps)) [* w], with `flip` putting each
     // multiply's operands the other way round, `n` the divisor, and `axis`
     // the dimension reduced.
     let build = |weighted: bool, flip: bool, n: f64, axis: usize, leak: bool| {
@@ -840,7 +840,9 @@ fn rms_norms_are_rewritten() {
         let mean = apply(&mut g, Div, &[sum, n]);
         let eps = scalar(&mut g, 1e-6);
         let v = apply(&mut g, Add, &pair(mean, eps));
-        let r = apply(&mut g, Rsqrt, &[v]);
+        let s = apply(&mut g, Sqrt, &[v]);
+        let one = scalar(&mut g, 1.0);
+        let r = apply(&mut g, Div, &[one, s]);
         let b = BroadcastInDim {
             shape: vec![8, 300],
             broadcast_dimensions: vec![0, 1],
@@ -902,8 +904,8 @@ fn rms_norms_are_rewritten() {
     );
 }
 
-/// An RMS norm without epsilon (`rsqrt(mean(x * x))`) is one too, with
-/// epsilon 0.
+/// An RMS norm without epsilon, written as a division
+/// (`x / sqrt(mean(x * x))`), is one too, with epsilon 0.
 #[test]
 fn rms_norms_without_epsilon_are_rewritten() {
     let mut g = Graph::new();
@@ -929,13 +931,13 @@ fn rms_norms_without_epsilon_are_rewritten() {
     };
     let n = apply(&mut g, b, &[n]);
     let mean = apply(&mut g, Div, &[sum, n]);
-    let r = apply(&mut g, Rsqrt, &[mean]);
+    let s = apply(&mut g, Sqrt, &[mean]);
     let b = BroadcastInDim {
         shape: vec![8, 300],
         broadcast_dimensions: vec![0, 1],
     };
-    let r = apply(&mut g, b, &[r]);
-    let y = apply(&mut g, Mul, &[r, x]);
+    let s = apply(&mut g, b, &[s]);
+    let y = apply(&mut g, Div, &[x, s]);
     g.set_outputs(&[y]).unwrap();
     let rewritten = super::rms_norm::rewrite_rms_norm(&g);
     let norm = rewritten
@@ -945,5 +947,58 @@ fn rms_norms_without_epsilon_are_rewritten() {
     assert_eq!(norm.map(|n| &n.primitive), Some(&RmsNorm { epsilon: 0.0 }));
     if available() {
         check(&g, &[values(DType::F32, &[8, 300], 1)]);
+    }
+}
+
+/// A fused division by a fused `sqrt` is generated as a multiplication by
+/// `rsqrt`, one instruction (so `1 / x.sqrt()` is one too).
+#[test]
+fn division_by_sqrt_is_rsqrt() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let y = g.input(ty(DType::F32, &[4, 8]));
+    let s = apply(&mut g, Sqrt, &[y]);
+    let q = apply(&mut g, Div, &[x, s]);
+    g.set_outputs(&[q]).unwrap();
+    let fused = fuse(&g);
+    let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+        panic!("{fused}")
+    };
+    let source = codegen::kernel(body).1;
+    assert!(
+        source.contains("rsqrt(") && !source.contains("Div::"),
+        "{source}"
+    );
+    if available() {
+        check(
+            &g,
+            &[data(&[4, 8], 1), Tensor::full(&[4, 8], 2.0, DType::F32)],
+        );
+    }
+
+    // Through a broadcast: x / broadcast(sqrt(m)), m [4, 1].
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let m = g.input(ty(DType::F32, &[4, 1]));
+    let s = apply(&mut g, Sqrt, &[m]);
+    let b = BroadcastInDim {
+        shape: vec![4, 8],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let s = apply(&mut g, b, &[s]);
+    let q = apply(&mut g, Div, &[x, s]);
+    g.set_outputs(&[q]).unwrap();
+    let fused = fuse(&g);
+    let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+        panic!("{fused}")
+    };
+    let source = codegen::kernel(body).1;
+    assert!(
+        source.contains("rsqrt(") && !source.contains("Div::"),
+        "{source}"
+    );
+    if available() {
+        let m = Tensor::from_slice(&[1.0f32, 4.0, 9.0, 16.0], DType::F32).reshape(&[4, 1]);
+        check(&g, &[data(&[4, 8], 1), m]);
     }
 }

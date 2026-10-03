@@ -60,7 +60,7 @@ _SOURCES = [
     (r"^convert_", "elementwise/mps.metal", "#define CONVERT"),
     (r"^select_", "elementwise/mps.metal", "#define SELECT"),
     (r"^neg_", "elementwise/mps.metal", "#define NEG"),
-    (r"^(exp|log|rsqrt|tanh|logistic)_", "elementwise/mps.metal", "#define UNARY"),
+    (r"^(exp|log|sqrt|tanh|logistic)_", "elementwise/mps.metal", "#define UNARY"),
     (r"^(max|eq|lt)_", "elementwise/mps.metal", "#define ORDERED"),
     (r"^(add|sub|mul|div)_", "elementwise/mps.metal", "#define BINARY"),
 ]
