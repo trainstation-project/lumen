@@ -442,3 +442,68 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     assert size > 0 and plan.workspace_bytes >= offset + size
     x = lumen.ones([4, 50_000], device="mps")
     assert plan.run([x])[0].tolist() == [50_000.0] * 4
+
+
+# ---------------------------------------------------------------------
+# indexing and splitting (prims.slice)
+# ---------------------------------------------------------------------
+
+
+def test_indexing_and_splitting_follow_numpy():
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    t = lumen.from_numpy(x)
+    cases = {
+        lambda x: x[1]: x[1],
+        lambda x: x[:, 1:3]: x[:, 1:3],
+        lambda x: x[..., -1]: x[..., -1],
+        lambda x: x[0, ..., 1:]: x[0, ..., 1:],
+        lambda x: x[-1, -2, -3]: x[-1, -2, -3],
+        lambda x: x[:, :, 2:2]: x[:, :, 2:2],
+        lambda x: x[:, 5:]: x[:, 5:],
+        lambda x: x.narrow(2, 1, 2): x[:, :, 1:3],
+        lambda x: x.narrow(-1, -3, 2): x[:, :, 1:3],
+    }
+    for fn, expected in cases.items():
+        out = run(fn, t)
+        assert out.shape == expected.shape and np.array_equal(out, expected)
+    assert [p.shape for p in lumen.compile(lambda x: x.split(3, 2))(t)] == [[2, 3, 3], [2, 3, 1]]
+    assert [p.shape for p in lumen.compile(lambda x: x.split([1, 3], -1))(t)] == [[2, 3, 1], [2, 3, 3]]
+    assert [p.shape for p in lumen.compile(lambda x: x.chunk(2, 1))(t)] == [[2, 2, 4], [2, 1, 4]]
+    a, b = run(lambda x: x.chunk(2, -1), t)
+    assert np.array_equal(a, x[..., :2]) and np.array_equal(b, x[..., 2:])
+    errors = [
+        (lambda x: x[2], IndexError, "out of bounds"),
+        (lambda x: x[0, 0, 0, 0], IndexError, "too many indices"),
+        (lambda x: x[..., ...], IndexError, "single ellipsis"),
+        (lambda x: x[::2], NotImplementedError, "steps"),
+        (lambda x: x[True], TypeError, "indices must be"),
+        (lambda x: x.split([1, 1], 2), RuntimeError, "sum exactly to 4"),
+        (lambda x: x.narrow(2, 3, 2), IndexError, "narrow"),
+    ]
+    for fn, error, message in errors:
+        with pytest.raises(error, match=message):
+            lumen.compile(fn)(t)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_packed_weights_are_one_matmul(device):
+    """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
+    matmul, its halves read in place by the fused gate on MPS."""
+    x, w13 = rand(16, 32), rand(32, 128, seed=1)
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, w13)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def gated(x, w13):
+        gate, up = (x @ w13).chunk(2, -1)
+        return gate.relu() * up
+
+    out = lumen.to_numpy(lumen.compile(gated)(*args))
+    h = x @ w13
+    np.testing.assert_allclose(out, np.maximum(h[:, :64], 0) * h[:, 64:], rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(gated)(*args)
+    steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
+    if device == "mps":
+        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice -> slice")
+    assert steps.count("dot_general") == 1

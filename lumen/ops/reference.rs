@@ -454,6 +454,12 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ravel(source, &x.shape)
             })
         }
+        Slice { start_indices, .. } => {
+            let x = types[0];
+            gather(args[0], out, |idx| {
+                ravel(idx.iter().zip(start_indices).map(|(i, s)| i + s), &x.shape)
+            })
+        }
         Full { fill_value, .. } => {
             let one = match (*fill_value, dtype.is_float()) {
                 (v, true) => Float(vec![round(v.to_f64(), dtype)]),

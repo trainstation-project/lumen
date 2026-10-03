@@ -161,7 +161,7 @@ function kindOf(n) {
   const p = n.label;
   if (p === "dot_general") return "matmul";
   if (p.startsWith("reduce")) return "reduce";
-  if (["reshape", "broadcast_in_dim", "transpose", "full", "iota"].includes(p)) return "layout";
+  if (["reshape", "broadcast_in_dim", "transpose", "slice", "full", "iota"].includes(p)) return "layout";
   return "elementwise";
 }
 document.getElementById("legend").innerHTML = KINDS.map(([k, l]) => `<span><i style="background:var(--k-${k})"></i>${l}</span>`).join("");

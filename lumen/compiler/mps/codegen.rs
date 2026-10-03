@@ -156,6 +156,19 @@ impl Emitter<'_> {
                         let i = self.index(gather_index(&idx, &ty.shape, &strides));
                         return self.value(node.inputs[0], i);
                     }
+                    // The operand's element at the index plus the start.
+                    Slice { start_indices, .. } => {
+                        let x = body.type_of(node.inputs[0]);
+                        let x_strides = contiguous_strides(&x.shape);
+                        let start: usize = start_indices
+                            .iter()
+                            .zip(&x_strides)
+                            .map(|(s, st)| s * st)
+                            .sum();
+                        let i = gather_index(&idx, &ty.shape, &x_strides);
+                        let i = self.index(format!("{start} + {i}"));
+                        return self.value(node.inputs[0], i);
+                    }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
                     Iota { dimension, .. } => {
                         let mut strides = vec![0; ty.shape.len()];

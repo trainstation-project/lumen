@@ -227,10 +227,15 @@ where
     if shape.len() <= 1 {
         return Ok(PyList::new(py, flat.iter().copied())?.into_any().unbind());
     }
+    // By row index: a zero-size inner dimension still has shape[0] rows.
     let stride: usize = shape[1..].iter().product();
     let mut rows = Vec::with_capacity(shape[0]);
-    for chunk in flat.chunks(stride) {
-        rows.push(build_nested(py, chunk, &shape[1..])?);
+    for i in 0..shape[0] {
+        rows.push(build_nested(
+            py,
+            &flat[i * stride..(i + 1) * stride],
+            &shape[1..],
+        )?);
     }
     Ok(PyList::new(py, rows)?.into_any().unbind())
 }

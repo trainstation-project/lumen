@@ -13,7 +13,7 @@ __all__ = [
     "neg", "exp", "log", "rsqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose",
+    "reshape", "broadcast_in_dim", "transpose", "slice",
     "full", "iota",
 ]
 
@@ -121,6 +121,12 @@ def broadcast_in_dim(x, shape, broadcast_dimensions):
 
 def transpose(x, permutation):
     return bind("transpose", x, permutation=tuple(permutation))
+
+
+def slice(x, start_indices, limit_indices):
+    """The elements from ``start_indices`` up to ``limit_indices``
+    (exclusive) in each dimension (``lax.slice``, unit strides)."""
+    return bind("slice", x, start_indices=tuple(start_indices), limit_indices=tuple(limit_indices))
 
 
 def full(shape, fill_value, dtype):

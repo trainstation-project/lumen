@@ -594,6 +594,87 @@ class TracedTensor:
     def matmul(self, other):
         return matmul(self, other)
 
+    # -- indexing and splitting ----------------------------------------------
+
+    def _slice(self, starts, limits):
+        if list(starts) == [0] * self.ndim and list(limits) == list(self.shape):
+            return self
+        return prims.slice(self, starts, limits)
+
+    def __getitem__(self, key):
+        """Basic indexing (torch, NumPy): integers (which drop their
+        dimension), slices with unit steps, and one ``...``."""
+        key = key if isinstance(key, tuple) else (key,)
+        ellipses = [i for i, k in enumerate(key) if k is Ellipsis]
+        if len(ellipses) > 1:
+            raise IndexError("an index can only have a single ellipsis ('...')")
+        if len(key) - len(ellipses) > self.ndim:
+            raise IndexError(f"too many indices for tensor of dimension {self.ndim}")
+        at = ellipses[0] if ellipses else len(key)
+        fill = (slice(None),) * (self.ndim - (len(key) - len(ellipses)))
+        key = key[:at] + fill + key[at + len(ellipses):]
+        starts, limits, shape = [], [], []
+        for d, (k, n) in enumerate(zip(key, self.shape)):
+            if isinstance(k, slice):
+                start, stop, step = k.indices(n)
+                if step != 1:
+                    raise NotImplementedError("slices with steps other than 1 are not supported")
+                starts.append(start)
+                limits.append(builtins.max(start, stop))
+                shape.append(limits[-1] - start)
+            elif isinstance(k, int) and not isinstance(k, bool):
+                if not -n <= k < n:
+                    raise IndexError(f"index {k} is out of bounds for dimension {d} with size {n}")
+                starts.append(k % n)
+                limits.append(k % n + 1)
+            else:
+                raise TypeError(f"indices must be integers, slices or '...', got {type(k).__name__}")
+        out = self._slice(starts, limits)
+        return out if tuple(shape) == out.shape else out.reshape(shape)
+
+    def narrow(self, dim, start, length):
+        """The ``length`` elements of dimension ``dim`` from ``start``."""
+        d = _dim(dim, self.ndim)
+        n = self.shape[d]
+        start = start + n if start < 0 else start
+        if not (0 <= start and length >= 0 and start + length <= n):
+            raise IndexError(f"narrow: [{start}, {start + length}) is not within dimension {d} of size {n}")
+        starts = [0] * self.ndim
+        limits = list(self.shape)
+        starts[d], limits[d] = start, start + length
+        return self._slice(starts, limits)
+
+    def split(self, split_size_or_sections, dim=0):
+        """Pieces along ``dim`` (torch): of ``split_size_or_sections``
+        elements each (the last may be smaller), or of the given sizes."""
+        d = _dim(dim, self.ndim)
+        n = self.shape[d]
+        if isinstance(split_size_or_sections, int):
+            size = split_size_or_sections
+            if size <= 0:
+                raise RuntimeError(f"split expects split_size be positive, but got split_size={size}")
+            sizes = [builtins.min(size, n - start) for start in range(0, n, size)] or [0]
+        else:
+            sizes = list(split_size_or_sections)
+            if sum(sizes) != n:
+                raise RuntimeError(
+                    f"split_with_sizes expects split_sizes to sum exactly to {n} (input tensor's size at "
+                    f"dimension {d}), but got split_sizes={sizes}"
+                )
+        pieces, start = [], 0
+        for size in sizes:
+            pieces.append(self.narrow(d, start, size))
+            start += size
+        return tuple(pieces)
+
+    def chunk(self, chunks, dim=0):
+        """Up to ``chunks`` equal pieces along ``dim`` (torch: each of
+        ``ceil(size / chunks)`` elements, the last possibly smaller)."""
+        if chunks <= 0:
+            raise RuntimeError(f"chunk expects `chunks` to be greater than 0, got: {chunks}")
+        n = self.shape[_dim(dim, self.ndim)]
+        return self.split(builtins.max(-(-n // chunks), 1), dim)
+
 
 # ---------------------------------------------------------------------
 # functions (torch.where, torch.matmul, ...)

@@ -285,3 +285,26 @@ fn mps_plans_hold_kernel_scratch() {
     let generic = crate::graph::Plan::compile(&g).run(std::slice::from_ref(&input));
     assert!(generic.unwrap_err().contains("compile the graph for MPS"));
 }
+
+/// Slices fuse into the kernel that reads them: a packed weight's matmul,
+/// then its halves gated, read in place.
+#[test]
+fn slices_fuse_into_their_readers() {
+    let mut g = Graph::new();
+    let h = g.input(ty(DType::F32, &[16, 128]));
+    let half = |g: &mut Graph, start: usize| {
+        let s = Slice {
+            start_indices: vec![0, start],
+            limit_indices: vec![16, start + 64],
+        };
+        apply(g, s, &[h])
+    };
+    let (a, b) = (half(&mut g, 0), half(&mut g, 64));
+    let e = apply(&mut g, Exp, &[a]);
+    let y = apply(&mut g, Mul, &[e, b]);
+    g.set_outputs(&[y]).unwrap();
+    assert_eq!(fused_primitives(&g, &[data(&[16, 128], 1)]), ["fusion"]);
+    if available() {
+        check(&g, &[values(DType::F32, &[16, 128], 1)]);
+    }
+}

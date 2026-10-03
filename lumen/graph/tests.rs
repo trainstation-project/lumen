@@ -43,6 +43,26 @@ fn select_rules() {
 }
 
 #[test]
+fn slice_rules() {
+    let x = ty(DType::F32, &[4, 6]);
+    let slice = |s: &[usize], l: &[usize]| Slice {
+        start_indices: s.to_vec(),
+        limit_indices: l.to_vec(),
+    };
+    let y = infer(slice(&[1, 2], &[3, 6]), std::slice::from_ref(&x)).unwrap();
+    assert_eq!((y.dtype, y.shape), (DType::F32, vec![2, 4]));
+    assert_eq!(
+        infer(slice(&[2, 2], &[2, 2]), std::slice::from_ref(&x))
+            .unwrap()
+            .shape,
+        [0, 0]
+    );
+    assert!(infer(slice(&[0], &[4]), std::slice::from_ref(&x)).is_err());
+    assert!(infer(slice(&[3, 0], &[2, 6]), std::slice::from_ref(&x)).is_err());
+    assert!(infer(slice(&[0, 0], &[4, 7]), &[x]).is_err());
+}
+
+#[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
     let sum = ReduceSum { axes: vec![0, 2] };
@@ -783,6 +803,17 @@ pub(crate) mod mps {
                 (vec![4, 5, 6], vec![1, 0, 2]),
             ] {
                 check_node(Transpose { permutation }, &[ty(dtype, &shape)]);
+            }
+            for (start, limit) in [
+                ([1, 0, 2], [3, 5, 6]),
+                ([0, 2, 0], [4, 3, 6]),
+                ([2, 1, 3], [2, 4, 5]),
+            ] {
+                let slice = Slice {
+                    start_indices: start.to_vec(),
+                    limit_indices: limit.to_vec(),
+                };
+                check_node(slice, &[ty(dtype, &[4, 5, 6])]);
             }
             if dtype != DType::Bool {
                 for dimension in 0..3 {

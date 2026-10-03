@@ -1,5 +1,5 @@
 //! Layout primitives on MPS (`mps.metal`): a plan's reshapes (copies; the
-//! others alias their operand), broadcast_in_dim and transpose, as a
+//! others alias their operand), broadcast_in_dim, transpose and slice, as a
 //! dtype-agnostic gather: a tiled transpose where the output's innermost
 //! dimension would read the input at a stride.
 
@@ -35,6 +35,12 @@ pub(crate) fn encode(
             strides
         }
         Transpose { permutation } => permutation.iter().map(|&d| xs[d]).collect(),
+        // The operand's strides, from its element at the start.
+        Slice { start_indices, .. } => {
+            let start: usize = start_indices.iter().zip(&xs).map(|(s, st)| s * st).sum();
+            let src = inputs[0].wrapping_add(start * width);
+            return gather(width, &out.shape, &xs, src, output, keep, name);
+        }
         _ => unreachable!("a layout primitive"),
     };
     gather(width, &out.shape, &strides, inputs[0], output, keep, name)

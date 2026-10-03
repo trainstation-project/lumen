@@ -42,6 +42,7 @@ fn fusible(graph: &Graph, node: &Node) -> bool {
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
+            | Slice { .. }
             | Full { .. }
             | Iota { .. }
     );
