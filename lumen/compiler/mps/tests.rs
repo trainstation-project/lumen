@@ -758,3 +758,139 @@ fn rms_norm_fuses_its_input() {
         check(&g, &inputs);
     }
 }
+
+/// The pattern matcher: operands in order or (`either`) either order, a
+/// capture matching one value throughout, and exclusivity.
+#[test]
+fn patterns_match_graphs() {
+    use crate::compiler::pattern::{Matcher, bind, either, op};
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4]));
+    let y = g.input(ty(DType::F32, &[4]));
+    let e = apply(&mut g, Exp, &[x]);
+    let a = apply(&mut g, Add, &[y, e]);
+    let s = apply(&mut g, Sub, &[e, x]);
+    g.set_outputs(&[a, s]).unwrap();
+    let m = Matcher::new(&g);
+    let exp_of = |k| op(|p| matches!(p, Exp), [bind(k)]);
+    // add(y, exp(x)) matches add(exp(_), _) only in either order.
+    let strict = op(|p| matches!(p, Add), [exp_of(0), bind(1)]);
+    assert!(m.find(&strict, a, 2).is_none());
+    let found = m
+        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
+        .unwrap();
+    assert_eq!((found.get(0), found.get(1)), (x, y));
+    // sub(exp(x), x): one capture, one value; sub(exp(x), y) fails.
+    let same = op(|p| matches!(p, Sub), [exp_of(0), bind(0)]);
+    assert!(m.find(&same, s, 1).is_some());
+    let mut h = g.clone();
+    let other = apply(&mut h, Sub, &[e, y]);
+    assert!(Matcher::new(&h).find(&same, other, 1).is_none());
+    // exp is read outside the add: not exclusive.
+    assert!(!m.exclusive(&found));
+    assert_eq!(m.scalar(x), None);
+}
+
+/// An RMS norm written as its primitives (the weight's multiply and each
+/// other multiply in either order) becomes one rms_norm; not when its
+/// values are read elsewhere, when it divides by anything but the size of
+/// the last dimension, or reduces another.
+#[test]
+fn rms_norms_are_rewritten() {
+    // x * rsqrt(sum(x * x, last) / n + eps) [* w], with `flip` putting each
+    // multiply's operands the other way round, `n` the divisor, and `axis`
+    // the dimension reduced.
+    let build = |weighted: bool, flip: bool, n: f64, axis: usize, leak: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[8, 300]));
+        let w = g.input(ty(DType::F32, &[300]));
+        let pair = |a, b| if flip { [b, a] } else { [a, b] };
+        let sq = apply(&mut g, Mul, &[x, x]);
+        let sum = apply(&mut g, ReduceSum { axes: vec![axis] }, &[sq]);
+        let mut kept = vec![8, 300];
+        kept[axis] = 1;
+        let sum = apply(
+            &mut g,
+            Reshape {
+                new_sizes: kept.clone(),
+            },
+            &[sum],
+        );
+        let scalar = |g: &mut Graph, v: f64| {
+            let c = Full {
+                shape: vec![],
+                fill_value: Scalar::Float(v),
+                dtype: DType::F32,
+            };
+            let c = apply(g, c, &[]);
+            let b = BroadcastInDim {
+                shape: kept.clone(),
+                broadcast_dimensions: vec![],
+            };
+            apply(g, b, &[c])
+        };
+        let n = scalar(&mut g, n);
+        let mean = apply(&mut g, Div, &[sum, n]);
+        let eps = scalar(&mut g, 1e-6);
+        let v = apply(&mut g, Add, &pair(mean, eps));
+        let r = apply(&mut g, Rsqrt, &[v]);
+        let b = BroadcastInDim {
+            shape: vec![8, 300],
+            broadcast_dimensions: vec![0, 1],
+        };
+        let r = apply(&mut g, b, &[r]);
+        let mut y = apply(&mut g, Mul, &pair(x, r));
+        if weighted {
+            let b = BroadcastInDim {
+                shape: vec![8, 300],
+                broadcast_dimensions: vec![1],
+            };
+            let w = apply(&mut g, b, &[w]);
+            y = apply(&mut g, Mul, &pair(y, w));
+        }
+        let outputs = if leak { vec![y, mean] } else { vec![y] };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+    let rewritten = |g: &Graph| {
+        let r = super::rms_norm::rewrite_rms_norm(g);
+        r.nodes()
+            .iter()
+            .any(|n| matches!(n.primitive, RmsNorm { .. }))
+    };
+    for weighted in [false, true] {
+        for flip in [false, true] {
+            let g = build(weighted, flip, 300.0, 1, false);
+            assert!(rewritten(&g), "weighted {weighted}, flipped {flip}");
+            let r = super::rms_norm::rewrite_rms_norm(&g);
+            let norm = r
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.primitive, RmsNorm { .. }))
+                .unwrap();
+            assert_eq!(
+                (norm.primitive.clone(), norm.inputs.len()),
+                (RmsNorm { epsilon: 1e-6 }, 1 + weighted as usize)
+            );
+            if available() {
+                let inputs = [
+                    values(DType::F32, &[8, 300], 1),
+                    values(DType::F32, &[300], 2),
+                ];
+                check(&g, &inputs);
+            }
+        }
+    }
+    assert!(
+        !rewritten(&build(true, false, 300.0, 1, true)),
+        "a read intermediate"
+    );
+    assert!(
+        !rewritten(&build(true, false, 299.0, 1, false)),
+        "not a mean"
+    );
+    assert!(
+        !rewritten(&build(false, false, 8.0, 0, false)),
+        "not the last dimension"
+    );
+}

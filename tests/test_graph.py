@@ -730,10 +730,20 @@ def test_softmax_is_one_primitive(device):
     assert "softmax" not in [n["primitive"] for n in lumen.make_graph(lambda t: t.softmax(0))(t).nodes()]
 
 
+class Norm(lumen.nn.Module):
+    weight: lumen.Tensor
+    eps: float
+
+    def __call__(self, x):
+        return lumen.rms_norm(x, self.weight.shape, self.weight, self.eps)
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_rms_norm(device):
-    """lumen.rms_norm (torch.nn.functional.rms_norm) and nn.RMSNorm: one
-    primitive, on MPS one kernel with the ops computing its input fused."""
+    """lumen.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
+    as primitives, which the MPS compiler recognizes, as it does an RMS norm
+    written by hand, and runs as one kernel with the ops computing its input
+    fused."""
     x, w = rand(8, 300), rand(300, seed=1)
     try:
         X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
@@ -748,11 +758,15 @@ def test_rms_norm(device):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected(x + 1, w, 1e-6), rtol=1e-5, atol=1e-6)
     g = lambda a: lumen.rms_norm(a, [300])  # noqa: E731  (eps: float32's machine epsilon)
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(g)(X)), expected(x, None, 2.0**-23), rtol=1e-5, atol=1e-6)
+    assert "rms_norm" not in [n["primitive"] for n in lumen.make_graph(f)(X, W).nodes()]
+    by_hand = lambda a, b: b * (a * (1e-6 + (a * a).mean(-1, keepdim=True)).rsqrt())  # noqa: E731
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
     if device == "mps":
-        assert [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()] == ["full -> broadcast_in_dim -> add -> rms_norm"]
+        steps = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()]  # noqa: E731
+        assert steps(f) == ["full -> broadcast_in_dim -> add -> rms_norm"] and steps(by_hand) == ["rms_norm"]
     with pytest.raises(NotImplementedError, match="last dimension"):
         lumen.make_graph(lambda a: lumen.rms_norm(a, (8, 300)))(X)
-    norm = lumen.nn.RMSNorm(lumen.empty([300], device="meta"), eps=1e-6)
+    norm = Norm(lumen.empty([300], device="meta"), 1e-6)
     step = lumen.compile(lambda m, a: m(a), device=device)
     step(norm, lumen.empty([8, 300], device="meta"))
     norm.load_state_dict({"weight": W})

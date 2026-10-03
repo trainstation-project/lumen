@@ -98,9 +98,10 @@ pub enum Primitive {
         axis: usize,
     },
     /// `x * rsqrt(mean(x^2) + epsilon)` over the last dimension, times
-    /// `weight` (of that dimension's size) if given as a second operand
-    /// (`torch.nn.functional.rms_norm`), computed in float and rounded once:
-    /// one primitive, one kernel on MPS.
+    /// `weight` (of that dimension's size) if given as a second operand,
+    /// computed in float and rounded once. Not traced (no `prims` binding):
+    /// the MPS compiler rewrites the primitives of an RMS norm into it
+    /// (`compiler/mps/rms_norm.rs`), which runs as one kernel.
     RmsNorm {
         epsilon: f64,
     },

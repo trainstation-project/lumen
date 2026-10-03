@@ -849,15 +849,27 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
     """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
     square over the last dimension (``normalized_shape``, its size),
     ``input * rsqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
-    defaults to the dtype's machine epsilon, as in torch. One primitive:
-    one kernel on MPS, with the ops computing ``input`` fused in."""
+    defaults to the dtype's machine epsilon, as in torch. Traced as its
+    primitives, which the MPS compiler recognizes (as it does an RMS norm
+    written by hand) and runs as one kernel, with the ops computing
+    ``input`` fused in."""
+
     x = _require_float(_lift(input), "rms_norm")
     shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
+
     if shape != list(x.shape[-1:]):
         raise NotImplementedError(f"rms_norm normalizes the last dimension, of size {x.shape[-1:]}, got {shape}")
+
     weight = _lift(weight)
     if weight is not None and (weight.dtype != x.dtype or list(weight.shape) != shape):
         raise TypeError(f"rms_norm: weight must be {x.dtype}{shape}, got {weight.dtype}{list(weight.shape)}")
+
     if eps is None:
         eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
-    return prims.rms_norm(x, weight, eps)
+
+    y = x * ((x * x).mean(-1, keepdim=True) + eps).rsqrt()
+
+    if weight is not None:
+        y = y * weight
+
+    return y

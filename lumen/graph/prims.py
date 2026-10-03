@@ -13,7 +13,7 @@ __all__ = [
     "neg", "exp", "log", "rsqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax", "rms_norm",
+    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax",
     "full", "iota",
 ]
 
@@ -140,14 +140,6 @@ def softmax(x, axis):
     """``exp(x - max) / sum(exp(x - max))`` along ``axis`` (``jax.nn.softmax``,
     one primitive: one kernel, online softmax, on MPS for the last axis)."""
     return bind("softmax", x, axis=axis)
-
-
-def rms_norm(x, weight, epsilon):
-    """``x * rsqrt(mean(x^2) + epsilon)`` over the last dimension, times
-    ``weight`` (of that dimension's size) unless it is None; computed in
-    float, rounded once (one kernel on MPS)."""
-    operands = (x,) if weight is None else (x, weight)
-    return bind("rms_norm", *operands, epsilon=float(epsilon))
 
 
 def full(shape, fill_value, dtype):

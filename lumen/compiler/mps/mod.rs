@@ -11,6 +11,7 @@
 mod codegen;
 mod fusion;
 mod merge_dots;
+mod rms_norm;
 #[cfg(test)]
 mod tests;
 
@@ -45,9 +46,10 @@ const PRELUDE: &str = concat!(
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
-    // Merging needs fusion: the merged dot's readers read its slices.
+    // Rewriting into fused kernels, and merging (its merged dot's readers
+    // read its slices), need fusion.
     let (merged, packed) = match options.fuse {
-        true => merge_dots(graph, &options.packable),
+        true => merge_dots(&rms_norm::rewrite_rms_norm(graph), &options.packable),
         false => (graph.clone(), Vec::new()),
     };
     let graph = &merged;
