@@ -15,26 +15,19 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
+use crate::ops::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 /// The fusion kernel for `body`: its name and Metal source. The name is a
 /// hash of the source, so identical fusions share one kernel.
 pub(crate) fn kernel(body: &Graph) -> (String, String) {
-    let mut emitter = Emitter {
-        body,
-        producer: body
-            .nodes()
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.output, i))
-            .collect(),
-        lines: String::new(),
-        values: HashMap::new(),
-        indices: HashMap::new(),
-    };
+    if let Some(root) = reduction_root(body) {
+        return reduction(body, root);
+    }
+    let mut emitter = Emitter::new(body);
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
     let out_type = metal_type(body.type_of(out).dtype);
@@ -59,6 +52,114 @@ pub(crate) fn kernel(body: &Graph) -> (String, String) {
     (name, source)
 }
 
+/// The reduction a fusion with `body` computes, if its root is one (a
+/// reduction fusion, XLA's reduce input fusion): the fused primitives
+/// compute its input.
+pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
+    let out = body.outputs()[0];
+    let root = body.nodes().iter().find(|n| n.output == out)?;
+    matches!(
+        root.primitive,
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+    )
+    .then_some(root)
+}
+
+/// The kernel of a reduction fusion: the reduction's template
+/// (`ops/reduce/mps.metal`) for its layout ([`reduce::layout`], as its
+/// encoder launches it), reading an input whose `operator[]` computes each
+/// element of the reduced value from the fusion's inputs, as the loop
+/// emitter computes an output element. A split reduction's kernel writes
+/// the partials, which the reduction's own final kernel reduces.
+fn reduction(body: &Graph, root: &Node) -> (String, String) {
+    let x = root.inputs[0];
+    let ty = body.type_of(x);
+    let mut emitter = Emitter::new(body);
+    let element = emitter.value(x, "j".into());
+    let t = metal_type(ty.dtype);
+    let (mut fields, mut params, mut members) = (String::new(), String::new(), Vec::new());
+    for (k, &v) in body.inputs().iter().enumerate() {
+        let vt = metal_type(body.type_of(v).dtype);
+        writeln!(fields, "    device const {vt} *in{k};").unwrap();
+        write!(params, "device const {vt} *in{k} [[buffer({k})]], ").unwrap();
+        members.push(format!("in{k}"));
+    }
+    let n = body.inputs().len();
+    let op = match root.primitive {
+        Primitive::ReduceSum { .. } => "Add",
+        _ => "Max",
+    };
+    let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive else {
+        unreachable!("a reduction")
+    };
+    let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", n + 1 + k);
+    let shared = format!("threadgroup typename acc<{t}>::type shared[REDUCE_THREADS];");
+    let (out, args, call) = match reduce::layout(ty, axes) {
+        reduce::Layout::Rows { split } => {
+            let o = if split {
+                format!("typename acc<{t}>::type")
+            } else {
+                t.to_string()
+            };
+            let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
+                + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
+            let call = format!(
+                "{shared}\n    reduce_rows<{op}, {t}, {o}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
+            );
+            (o, args, call)
+        }
+        reduce::Layout::Cols { split } => {
+            let o = if split {
+                format!("typename acc<{t}>::type")
+            } else {
+                t.to_string()
+            };
+            let args = [
+                arg(0, "uint &cols"),
+                arg(1, "ulong &count"),
+                arg(2, "ulong &chunk"),
+                arg(3, "uint &chunks"),
+            ]
+            .join(", ")
+                + ", uint i [[thread_position_in_grid]]";
+            let call =
+                format!("reduce_cols<{op}, {t}, {o}>(input, out, cols, count, chunk, chunks, i);");
+            (o, args, call)
+        }
+        reduce::Layout::Grouped => {
+            let args = [
+                arg(0, &format!("{t} &init")),
+                arg(1, "uint &nk"),
+                arg(2, "ulong *ksizes"),
+                arg(3, "ulong *kstrides"),
+                arg(4, "uint &nr"),
+                arg(5, "uint *rsizes"),
+                arg(6, "uint *rstrides"),
+                arg(7, "uint &count"),
+                arg(8, "uint &lanes"),
+                arg(9, "uint &outputs"),
+            ]
+            .join(", ")
+                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
+            let call = format!(
+                "{shared}\n    reduce_grouped<{op}, {t}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x);"
+            );
+            (t.to_string(), args, call)
+        }
+        reduce::Layout::Generic => unreachable!("reduction fusions read fewer than 2^32 elements"),
+    };
+    // The kernel and its input type are named by a hash of their source.
+    let source = format!(
+        "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}        return {element};\n    }}\n}};\n\nkernel void NAME({params}device {out} *out [[buffer({n})]], {args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
+        emitter.lines,
+        members.join(", "),
+    );
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    let name = format!("fusion_{:016x}", hasher.finish());
+    (name.clone(), source.replace("NAME", &name))
+}
+
 struct Emitter<'a> {
     body: &'a Graph,
     /// The node defining each value that is not an input.
@@ -71,7 +172,22 @@ struct Emitter<'a> {
     indices: HashMap<String, String>,
 }
 
-impl Emitter<'_> {
+impl<'a> Emitter<'a> {
+    fn new(body: &'a Graph) -> Self {
+        Emitter {
+            body,
+            producer: body
+                .nodes()
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.output, i))
+                .collect(),
+            lines: String::new(),
+            values: HashMap::new(),
+            indices: HashMap::new(),
+        }
+    }
+
     /// A local holding the index `expr` (or `expr` itself if it is one).
     fn index(&mut self, expr: String) -> String {
         if expr == "j" || expr.parse::<u64>().is_ok() {

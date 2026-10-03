@@ -4,13 +4,11 @@
 //! the GPU. Other axes take a generic kernel, with up to a threadgroup
 //! (fewer threads for outputs of fewer elements) reducing each output.
 
-use crate::graph::Primitive::*;
+use crate::graph::Primitive::{self, *};
 use crate::graph::TensorType;
 use crate::graph::plan::Step;
 use crate::graph::primitive::free_dims;
-use crate::ops::mps::{
-    Grid, dims_arg, dims32_arg, element_arg, launch, launch_step, u32_arg, u64_arg,
-};
+use crate::ops::mps::{Grid, dims_arg, dims32_arg, element_arg, launch, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 
@@ -21,40 +19,110 @@ pub(crate) fn encode(
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let (ReduceSum { axes } | ReduceMax { axes }) = &step.primitive else {
-        unreachable!("a reduction")
-    };
     let x = &step.inputs[0].1;
-    let mut reduced = axes.clone();
+    let name = step.primitive.name();
+    encode_reduction(
+        &step.primitive,
+        x,
+        None,
+        name,
+        &inputs[..1],
+        output,
+        scratch,
+        keep,
+    )
+}
+
+/// How a reduction of `x` over `axes` runs: the kernel template its (first)
+/// launch instantiates, as [`encode_reduction`] launches it.
+pub(crate) enum Layout {
+    /// Any axes, a thread an output (`reduce`): inputs of 2^32 elements or
+    /// more.
+    Generic,
+    /// Any axes, lanes of threads an output (`reduce_grouped`).
+    Grouped,
+    /// Consecutive axes, viewed as [a, count, b]: rows when b = 1
+    /// (`reduce_rows`), columns otherwise (`reduce_cols`); `split` into
+    /// partials, which a second launch reduces, when there are too few
+    /// outputs to fill the GPU.
+    Rows {
+        split: bool,
+    },
+    Cols {
+        split: bool,
+    },
+}
+
+pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
+    let mut reduced = axes.to_vec();
     reduced.sort_unstable();
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
-        return consecutive(step, x, &reduced, inputs[0], output, scratch, keep);
+        let Split { b, chunks, .. } = split(x, &reduced);
+        return match b {
+            1 => Layout::Rows { split: chunks > 1 },
+            _ => Layout::Cols { split: chunks > 1 },
+        };
+    }
+    match x.numel() <= u32::MAX as usize {
+        true => Layout::Grouped,
+        false => Layout::Generic,
+    }
+}
+
+/// Reduce `x` with `op` (reduce_sum or reduce_max), its first launch the
+/// kernel `fused` if given (a reduction fusion's, computing its input from
+/// `inputs`), else the primitive's own (reading `inputs[0]`), recorded in
+/// the profiler as `name`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_reduction(
+    op: &Primitive,
+    x: &TensorType,
+    fused: Option<&str>,
+    name: &'static str,
+    inputs: &[*const u8],
+    output: *mut u8,
+    scratch: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let (ReduceSum { axes } | ReduceMax { axes }) = op else {
+        unreachable!("a reduction")
+    };
+    let (op_name, dtype) = (op.name(), x.dtype);
+    let kernel = |own: String| fused.map_or(own, str::to_owned);
+    let mut buffers = inputs.to_vec();
+    buffers.push(output.cast_const());
+    let mut reduced = axes.clone();
+    reduced.sort_unstable();
+    let layout = layout(x, &reduced);
+    if let Layout::Rows { .. } | Layout::Cols { .. } = layout {
+        return consecutive(
+            op_name, name, x, &reduced, fused, inputs, output, scratch, keep,
+        );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
     // reduced dimensions in 32 bits; inputs of 2^32 elements or more take a
     // thread per output, which sums in the reference's (row-major) order.
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
-    let init = match step.primitive {
+    let init = match op {
         ReduceSum { .. } => Scalar::Int(0),
-        _ => lowest(x.dtype),
+        _ => lowest(dtype),
     };
     let count: usize = reduced.iter().map(|&d| x.shape[d]).product();
-    let grouped = x.numel() <= u32::MAX as usize;
+    let outputs: usize = kept.iter().map(|&d| x.shape[d]).product();
     let reduced_sizes = reduced.iter().map(|&d| x.shape[d]);
     let reduced_strides = reduced.iter().map(|&d| strides[d]);
     let mut args = vec![
-        element_arg(x.dtype, init),
+        element_arg(dtype, init),
         u32_arg(kept.len() as u32),
         dims_arg(kept.iter().map(|&d| x.shape[d])),
         dims_arg(kept.iter().map(|&d| strides[d])),
         u32_arg(reduced.len() as u32),
     ];
-    let (name, outputs) = (step.primitive.name(), step.output.1.numel());
-    let (kernel, grid) = if grouped {
+    let (kernel, grid) = if let Layout::Grouped = layout {
         // About 32 bytes a lane: enough lanes to read the elements
         // coalesced, few enough that each lane's loads stay in flight.
-        let per_lane = (LANE_BYTES / x.dtype.size_of()).max(1);
+        let per_lane = (LANE_BYTES / dtype.size_of()).max(1);
         let lanes = count
             .div_ceil(per_lane)
             .next_power_of_two()
@@ -68,7 +136,7 @@ pub(crate) fn encode(
         ]);
         let per_group = REDUCE_THREADS / lanes;
         (
-            format!("{name}_grouped_{}", x.dtype),
+            kernel(format!("{op_name}_grouped_{dtype}")),
             Grid::Groups([outputs.div_ceil(per_group), 1, 1]),
         )
     } else {
@@ -78,11 +146,11 @@ pub(crate) fn encode(
             u64_arg(count),
         ]);
         (
-            format!("{name}_{}", x.dtype),
+            kernel(format!("{op_name}_{dtype}")),
             Grid::Threads([outputs, 1, 1]),
         )
     };
-    launch_step(step, &kernel, inputs, output, &args, grid, keep)
+    launch(&kernel, &buffers, &args, grid, keep, name)
 }
 
 /// The threads of a threadgroup that reduce together (`REDUCE_THREADS` in
@@ -174,11 +242,16 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
 /// rows when b = 1, columns otherwise. One launch, or, with too few outputs
 /// to fill the GPU, two: `count` split into chunks reduced in parallel into
 /// partials (in `scratch`, which the planner set aside), then the partials.
+/// The first launch is the kernel `fused` if given (reading `inputs`), else
+/// `op`'s own (reading `inputs[0]`).
+#[allow(clippy::too_many_arguments)]
 fn consecutive(
-    step: &Step,
+    op: &str,
+    name: &'static str,
     x: &TensorType,
     reduced: &[usize],
-    input: *const u8,
+    fused: Option<&str>,
+    inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,
     keep: Vec<Tensor>,
@@ -190,18 +263,20 @@ fn consecutive(
         chunks,
         chunk,
     } = split(x, reduced);
-    let (name, dtype, rows) = (step.primitive.name(), x.dtype, b == 1);
+    let (dtype, rows) = (x.dtype, b == 1);
     if a * b == 0 {
         return Ok(());
     }
     let layout = if rows { "rows" } else { "cols" };
     let pass =
-        |kernel: String, src: *const u8, dst: *const u8, count, chunk, chunks: usize, keep| {
+        |kernel: String, srcs: &[*const u8], dst: *const u8, count, chunk, chunks: usize, keep| {
+            let mut buffers = srcs.to_vec();
+            buffers.push(dst);
             if rows {
                 let args = [u64_arg(count), u64_arg(chunk)];
                 launch(
                     &kernel,
-                    &[src, dst],
+                    &buffers,
                     &args,
                     Grid::Groups([chunks, a, 1]),
                     keep,
@@ -215,12 +290,13 @@ fn consecutive(
                     u32_arg(chunks as u32),
                 ];
                 let grid = Grid::Threads([a * chunks * b, 1, 1]);
-                launch(&kernel, &[src, dst], &args, grid, keep, name)
+                launch(&kernel, &buffers, &args, grid, keep, name)
             }
         };
+    let first = |own: String| fused.map_or(own, str::to_owned);
     if chunks == 1 {
-        let kernel = format!("{name}_{layout}_{dtype}");
-        return pass(kernel, input, output, count, count, 1, keep);
+        let kernel = first(format!("{op}_{layout}_{dtype}"));
+        return pass(kernel, inputs, output, count, count, 1, keep);
     }
     if scratch.is_null() {
         return Err(format!(
@@ -229,8 +305,8 @@ fn consecutive(
     }
     // The first launch writes every partial before the second reads them.
     let p = scratch.cast_const();
-    let kernel = format!("{name}_{layout}_partial_{dtype}");
-    pass(kernel, input, p, count, chunk, chunks, keep.clone())?;
-    let kernel = format!("{name}_{layout}_final_{dtype}");
-    pass(kernel, p, output, chunks, chunks, 1, keep)
+    let kernel = first(format!("{op}_{layout}_partial_{dtype}"));
+    pass(kernel, inputs, p, count, chunk, chunks, keep.clone())?;
+    let kernel = format!("{op}_{layout}_final_{dtype}");
+    pass(kernel, &[p], output, chunks, chunks, 1, keep)
 }

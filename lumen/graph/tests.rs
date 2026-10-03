@@ -627,7 +627,7 @@ pub(crate) mod mps {
 
     /// [`check`], allowing floats a further `slack` of absolute error: the
     /// float accumulation error of a large sum.
-    fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
+    pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
         let plan = crate::compiler::compile(g, Device::Mps).unwrap();

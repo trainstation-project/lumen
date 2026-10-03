@@ -8,8 +8,9 @@
 //! value of the graph (a fusion's root) if it is an output, if a user
 //! cannot fuse it, or if it is expensive (XLA's `IsExpensive`) and has more
 //! than one user, which would each recompute it. Every other fusible value
-//! is copied into each fusion that reads it. Reductions and contractions are
-//! never fused.
+//! is copied into each fusion that reads it. A reduction is always a root:
+//! its fusion computes its input (XLA's reduce input fusion), and its
+//! consumers read its output. Contractions are never fused.
 
 use std::collections::BTreeSet;
 use std::sync::{Mutex, PoisonError};
@@ -47,13 +48,26 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Full { .. }
             | Iota { .. }
     );
+    // A reduction fuses the primitives computing its input (XLA's reduce
+    // input fusion), whose elements it indexes in 32 bits.
+    let reduction = matches!(node.primitive, ReduceSum { .. } | ReduceMax { .. })
+        && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     // Metal has no float64; such steps fail when the plan runs.
     let f64 = node
         .inputs
         .iter()
         .chain([&node.output])
         .any(|&v| graph.type_of(v).dtype == DType::F64);
-    loop_op && !f64
+    (loop_op || reduction) && !f64
+}
+
+/// Whether `node` is a reduction: a fusion's root, never computed inside
+/// another (its consumers read its output).
+fn is_reduction(node: &Node) -> bool {
+    matches!(
+        node.primitive,
+        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+    )
 }
 
 /// Whether recomputing `node` in each of its users costs more than
@@ -107,6 +121,7 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
         .map(|(i, node)| {
             let users = &users[node.output];
             !fusible[i]
+                || is_reduction(node)
                 || is_output[node.output]
                 || users.iter().any(|&u| !fusible[u])
                 || (expensive(graph, node) && users.len() > 1)

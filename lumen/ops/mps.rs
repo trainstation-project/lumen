@@ -55,6 +55,9 @@ pub(crate) fn encode(
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
+    if let Fusion { .. } = step.primitive {
+        return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
+    }
 
     if let Concatenate { .. } = step.primitive {
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
@@ -82,7 +85,7 @@ pub(crate) fn encode(
             super::layout::mps::encode
         }
         Full { .. } | Iota { .. } => super::factory::mps::encode,
-        Fusion { .. } => crate::compiler::mps::encode,
+        Fusion { .. } => unreachable!("encoded above"),
     };
     encode(step, inputs, output, keep)
 }
@@ -95,6 +98,7 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes } => {
             super::reduce::mps::scratch_bytes(inputs[0], axes)
         }
+        Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
         _ => 0,
     }
 }

@@ -1,11 +1,15 @@
 // The threads of a threadgroup that reduce together.
 #define REDUCE_THREADS 256
 
+// Each template reads its input as `in[i]`, i a row-major index of the
+// reduced tensor: `in` a pointer to it, or (a reduction fusion,
+// lumen/compiler/mps/codegen.rs) a value computing each element.
+
 // Any axes, a thread per output: thread i reduces output i, at offset
 // `base` from its index over the kept dimensions, over its `count`
 // elements in the reference's (row-major) order.
-template <typename Op, typename T>
-inline void reduce(device const T *in,
+template <typename Op, typename T, typename In>
+inline void reduce(In in,
                    device T *out,
                    T init,
                    uint nk,
@@ -45,8 +49,8 @@ inline void reduce(device const T *in,
 // output g * (REDUCE_THREADS / lanes) + t / lanes, then a tree over its
 // lanes. Neighbouring lanes read neighbouring reduced elements. The reduced
 // dimensions index in 32 bits (the input has fewer than 2^32 elements).
-template <typename Op, typename T>
-inline void reduce_grouped(device const T *in,
+template <typename Op, typename T, typename In>
+inline void reduce_grouped(In in,
                            device T *out,
                            T init,
                            uint nk,
@@ -118,8 +122,11 @@ inline void reduce_grouped(device const T *in,
 #define REDUCE_SUM(NAME, T) REDUCE(reduce_sum, Add, NAME, T) GROUPED(reduce_sum, Add, NAME, T)
 #define REDUCE_MAX(NAME, T) REDUCE(reduce_max, Max, NAME, T) GROUPED(reduce_max, Max, NAME, T)
 
+// The generated kernels include the templates alone.
+#ifndef REDUCE_TEMPLATES_ONLY
 FOR_NUMERIC(REDUCE_SUM)
 FOR_ALL(REDUCE_MAX)
+#endif
 
 // The input viewed as [A, count, B], reduced over the middle: rows when
 // B = 1 (contiguous), columns otherwise. With few outputs, `count` is split
@@ -130,8 +137,8 @@ FOR_ALL(REDUCE_MAX)
 
 // Threadgroup (p, a) of REDUCE_THREADS reduces chunk p of row a
 // cooperatively, into out[a * chunks + p].
-template <typename Op, typename I, typename O>
-inline void reduce_rows(device const I *in,
+template <typename Op, typename I, typename O, typename In>
+inline void reduce_rows(In in,
                         device O *out,
                         ulong count,
                         ulong chunk,
@@ -141,18 +148,18 @@ inline void reduce_rows(device const I *in,
                         uint t) {
     typedef typename acc<I>::type A;
     ulong start = ulong(group.x) * chunk, end = start + chunk < count ? start + chunk : count;
-    device const I *row = in + ulong(group.y) * count;
+    ulong row = ulong(group.y) * count;
     // Four independent accumulators keep four loads in flight.
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start + t;
     for (; j + 3 * REDUCE_THREADS < end; j += 4 * REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(row[j]));
-        r1 = Op::apply(r1, A(row[j + REDUCE_THREADS]));
-        r2 = Op::apply(r2, A(row[j + 2 * REDUCE_THREADS]));
-        r3 = Op::apply(r3, A(row[j + 3 * REDUCE_THREADS]));
+        r0 = Op::apply(r0, A(in[row + j]));
+        r1 = Op::apply(r1, A(in[row + j + REDUCE_THREADS]));
+        r2 = Op::apply(r2, A(in[row + j + 2 * REDUCE_THREADS]));
+        r3 = Op::apply(r3, A(in[row + j + 3 * REDUCE_THREADS]));
     }
     for (; j < end; j += REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(row[j]));
+        r0 = Op::apply(r0, A(in[row + j]));
     }
     shared[t] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
     for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {
@@ -169,23 +176,23 @@ inline void reduce_rows(device const I *in,
 // Thread i reduces column i % cols of chunk p of batch a, where i / cols =
 // a * chunks + p, stepping `cols` elements a row: neighbouring threads read
 // neighbouring addresses. Writes out[i].
-template <typename Op, typename I, typename O>
-inline void reduce_cols(device const I *in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
+template <typename Op, typename I, typename O, typename In>
+inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
     typedef typename acc<I>::type A;
     uint b = i % cols, ap = i / cols, a = ap / chunks, p = ap % chunks;
     ulong start = ulong(p) * chunk, end = start + chunk < count ? start + chunk : count;
-    device const I *column = in + ulong(a) * count * cols + b;
+    ulong column = ulong(a) * count * cols + b;
     // Four independent accumulators keep four loads in flight.
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start;
     for (; j + 3 < end; j += 4) {
-        r0 = Op::apply(r0, A(column[j * cols]));
-        r1 = Op::apply(r1, A(column[(j + 1) * cols]));
-        r2 = Op::apply(r2, A(column[(j + 2) * cols]));
-        r3 = Op::apply(r3, A(column[(j + 3) * cols]));
+        r0 = Op::apply(r0, A(in[column + j * cols]));
+        r1 = Op::apply(r1, A(in[column + (j + 1) * cols]));
+        r2 = Op::apply(r2, A(in[column + (j + 2) * cols]));
+        r3 = Op::apply(r3, A(in[column + (j + 3) * cols]));
     }
     for (; j < end; ++j) {
-        r0 = Op::apply(r0, A(column[j * cols]));
+        r0 = Op::apply(r0, A(in[column + j * cols]));
     }
     out[i] = O(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
 }
@@ -227,5 +234,7 @@ inline void reduce_cols(device const I *in, device O *out, uint cols, ulong coun
 #define SUM_LAYOUTS(NAME, T) LAYOUTS(reduce_sum, Add, NAME, T)
 #define MAX_LAYOUTS(NAME, T) LAYOUTS(reduce_max, Max, NAME, T)
 
+#ifndef REDUCE_TEMPLATES_ONLY
 FOR_NUMERIC(SUM_LAYOUTS)
 FOR_ALL(MAX_LAYOUTS)
+#endif

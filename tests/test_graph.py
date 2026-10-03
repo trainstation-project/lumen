@@ -302,15 +302,19 @@ def test_mps_plan_steps_and_profiled_kernels():
 
     graph = lumen.make_graph(lambda x: (x * 2.0 + 1.0).tanh().sum(-1))(x)
     plan = lumen.graph.Plan(graph, "mps")
-    fusion = plan.steps()[0]["fusion"]
-    assert fusion["kernel"] in fusion["source"] and "tanh" in fusion["body"]
+    # One step: the reduction fused with the ops computing its input.
+    (step,) = plan.steps()
+    fusion = step["fusion"]
+    assert fusion["kernel"] in fusion["source"] and "tanh" in fusion["body"] and "reduce_sum" in fusion["body"]
+    assert "reduce_rows" in fusion["source"]
     plan.run([x])
     lumen.mps.synchronize()
     with profile(activities=[ProfilerActivity.MPS]) as prof:
         plan.run([x])
         lumen.mps.synchronize()
     kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
-    assert kernels == [fusion["kernel"], "reduce_sum_rows_f32"]
+    assert kernels == [fusion["kernel"]]
+    assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 128] * 64)
 
 
 def test_dump_graph(tmp_path):

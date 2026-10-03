@@ -32,8 +32,12 @@ unsafe extern "C" {
 }
 
 /// The shared definitions the generated kernels use (functors, conversions,
-/// `FOR_EACH_ELEMENT`).
-const PRELUDE: &str = include_str!("../../ops/mps.metal");
+/// `FOR_EACH_ELEMENT`, the reduction templates without their kernels).
+const PRELUDE: &str = concat!(
+    include_str!("../../ops/mps.metal"),
+    "\n#define REDUCE_TEMPLATES_ONLY\n",
+    include_str!("../../ops/reduce/mps.metal"),
+);
 
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
 /// fusion kernels compiled.
@@ -197,18 +201,48 @@ pub(crate) fn fusion_source(body: &Graph) -> String {
 }
 
 /// Encode fusion `step`: its kernel, compiled with its graph, over the
-/// output's elements.
+/// output's elements, or, for a reduction fusion, over its reduction's.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
+    scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let Primitive::Fusion { name, .. } = &step.primitive else {
+    let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    if let Some(root) = codegen::reduction_root(body) {
+        let x = body.type_of(root.inputs[0]);
+        let label = step.primitive.name();
+        return crate::ops::reduce::mps::encode_reduction(
+            &root.primitive,
+            x,
+            Some(name),
+            label,
+            inputs,
+            output,
+            scratch,
+            keep,
+        );
+    }
     let out = &step.output.1;
     let n = out.numel();
     let grid = elementwise_grid(n, out.dtype);
     launch_step(step, name, inputs, output, &[u32_arg(n as u32)], grid, keep)
+}
+
+/// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's
+/// split reduction's partials ([`crate::ops::reduce::mps::scratch_bytes`]).
+pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
+    match codegen::reduction_root(body) {
+        Some(root) => {
+            let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive
+            else {
+                unreachable!("a reduction")
+            };
+            crate::ops::reduce::mps::scratch_bytes(body.type_of(root.inputs[0]), axes)
+        }
+        None => 0,
+    }
 }

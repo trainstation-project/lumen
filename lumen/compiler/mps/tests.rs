@@ -1,7 +1,7 @@
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
-use crate::graph::tests::mps::{available, check, values};
+use crate::graph::tests::mps::{available, check, check_within, values};
 use crate::graph::tests::{data, mlp};
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::ops::reference;
@@ -554,5 +554,89 @@ fn dots_read_slices_in_place() {
         {
             assert!((e - a).abs() <= 1e-3 * (1.0 + e.abs()), "{e} vs {a}");
         }
+    }
+}
+
+/// A reduction fuses the primitives computing its input, in each of its
+/// layouts (rows, split rows, columns, other axes), for sums and maxima of
+/// several dtypes; its consumers read its output.
+#[test]
+fn reductions_fuse_their_inputs() {
+    for (shape, axes) in [
+        (vec![8, 300], vec![1]),
+        (vec![2, 70_000], vec![1]),
+        (vec![300, 5], vec![0]),
+        (vec![2, 40_000, 3], vec![1]),
+        (vec![4, 5, 6], vec![0, 2]),
+    ] {
+        for dtype in [DType::F32, DType::F16, DType::I32] {
+            for sum in [true, false] {
+                let mut g = Graph::new();
+                let x = g.input(ty(dtype, &shape));
+                let y = g.input(ty(dtype, &shape));
+                // A product, so the reduction reads two inputs, then `neg`.
+                let p = apply(&mut g, Mul, &[x, y]);
+                let n = apply(&mut g, Neg, &[p]);
+                let r = match sum {
+                    true => ReduceSum { axes: axes.clone() },
+                    false => ReduceMax { axes: axes.clone() },
+                };
+                let r = apply(&mut g, r, &[n]);
+                let out = apply(&mut g, Neg, &[r]);
+                g.set_outputs(&[out]).unwrap();
+                let fused = fuse(&g);
+                assert_eq!(names(&fused), ["fusion", "neg"], "{fused}");
+                if available() {
+                    let inputs = [values(dtype, &shape, 1), values(dtype, &shape, 2)];
+                    // Sums of many floats: their accumulation error.
+                    let slack = if dtype.is_float() && sum { 1.0 } else { 0.0 };
+                    check_within(&g, &inputs, slack);
+                }
+            }
+        }
+    }
+}
+
+/// A value read by a reduction and by another fusion is computed in each
+/// when cheap; an expensive one (exp) with two readers is stored once.
+#[test]
+fn reduction_inputs_shared_with_other_readers() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 16]));
+    let half = Full {
+        shape: vec![4, 16],
+        fill_value: Scalar::Float(0.5),
+        dtype: DType::F32,
+    };
+    let half = apply(&mut g, half, &[]);
+    let s = apply(&mut g, Mul, &[x, half]);
+    let m = apply(&mut g, ReduceMax { axes: vec![1] }, &[s]);
+    let m = apply(
+        &mut g,
+        BroadcastInDim {
+            shape: vec![4, 16],
+            broadcast_dimensions: vec![0],
+        },
+        &[m],
+    );
+    let d = apply(&mut g, Sub, &[s, m]);
+    let e = apply(&mut g, Exp, &[d]);
+    let z = apply(&mut g, ReduceSum { axes: vec![1] }, &[e]);
+    let z = apply(
+        &mut g,
+        BroadcastInDim {
+            shape: vec![4, 16],
+            broadcast_dimensions: vec![0],
+        },
+        &[z],
+    );
+    let y = apply(&mut g, Div, &[e, z]);
+    g.set_outputs(&[y]).unwrap();
+    // The scale fuses into the max and into the exp; the sum reads the
+    // stored exp.
+    let fused = fused_primitives(&g, &[data(&[4, 16], 1)]);
+    assert_eq!(fused, ["fusion", "fusion", "reduce_sum", "fusion"]);
+    if available() {
+        check(&g, &[values(DType::F32, &[4, 16], 1)]);
     }
 }
