@@ -19,6 +19,7 @@ class Graph:
         """Each node: ``primitive``, ``text`` (with its parameters),
         ``fusion`` (``kernel``, ``body``, Metal ``source``; or None),
         ``inputs`` and ``output`` values."""
+
     def set_outputs(self, outputs: Sequence[int]) -> None: ...
     def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...
 
@@ -40,16 +41,19 @@ class Plan:
         ``parameters`` (input positions), an executable that owns its memory
         (``run_in``), those inputs its parameters, the ``packable`` ones of
         them packed into blocks where dots merge (``packed``)."""
+
     @property
     def workspace_bytes(self) -> int: ...
     @property
     def packed(self) -> list[tuple[list[int], int]]:
         """The inputs the compiler added after the graph's: each the block
         of these parameter inputs side by side along a dimension."""
+
     def run_in(self, workspace: Tensor, inputs: Sequence[Tensor]) -> list[Tensor]:
         """Run in ``workspace`` (uint8, at least ``workspace_bytes``): inputs
         that are not parameters copied in, parameters read in place; the
         outputs are views valid until the next run in it."""
+
     def steps(self) -> list[dict[str, Any]]:
         """Each step, as ``Graph.nodes``, with its ``label`` (what the
         profiler calls it: the primitive's name, or ``3x dot_general`` for a
@@ -58,6 +62,7 @@ class Plan:
         offset, strides)`` in its buffer if it reads it as a strided view (a
         slice; else None), and its kernel's ``scratch`` in the workspace as
         ``(offset, bytes)`` (or None)."""
+
     def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
         """Run on ``device`` (where the inputs must be), or else the inputs'
         device (the CPU without inputs)."""

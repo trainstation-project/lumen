@@ -30,8 +30,9 @@ Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
 """
 
-from lumen._C import __version__, device
 from lumen import graph, nn, ops, profiler, safetensors
+from lumen._C import __version__, device
+from lumen.allocator import config
 from lumen.graph import (
     compile,
     exp,
@@ -41,15 +42,15 @@ from lumen.graph import (
     maximum,
     minimum,
     prims,
-    sqrt,
-    sigmoid,
     rms_norm,
+    sigmoid,
     softmax,
+    sqrt,
     tanh,
     where,
 )
 from lumen.stream import cuda, mps
-from lumen.allocator import config
+from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
 from lumen.tensor import (
     Tensor,
     arange,
@@ -69,7 +70,6 @@ from lumen.tensor import (
     int32,
     int64,
     ones,
-    tensor,  # rebinds `lumen.tensor` from the package to the factory
     to_numpy,
     uint8,
     uint16,
@@ -91,17 +91,45 @@ __all__ = [
     "profiler",
     "safetensors",
     # dtypes
-    "float16", "bfloat16", "float32", "float64",
-    "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64",
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
     "bool",
     "dtypes",
     "default_dtype",
     # factories
-    "tensor", "empty", "zeros", "ones", "full", "arange",
+    "tensor",
+    "empty",
+    "zeros",
+    "ones",
+    "full",
+    "arange",
     # numpy interop
-    "to_numpy", "from_numpy", "from_dlpack",
+    "to_numpy",
+    "from_numpy",
+    "from_dlpack",
     # compiled execution
-    "compile", "make_graph", "prims",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
+    "compile",
+    "make_graph",
+    "prims",
+    "where",
+    "matmul",
+    "maximum",
+    "minimum",
+    "exp",
+    "log",
+    "sqrt",
+    "tanh",
+    "sigmoid",
+    "softmax",
+    "rms_norm",
 ]

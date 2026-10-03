@@ -18,12 +18,25 @@ import builtins
 import functools
 import math
 
-from lumen._C import Graph, Plan, Tensor, _pack
 from lumen import nn
+from lumen._C import Graph, Plan, Tensor, _pack
 from lumen.graph import prims
 
 __all__ = [
-    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
+    "TracedTensor",
+    "compile",
+    "make_graph",
+    "where",
+    "matmul",
+    "maximum",
+    "minimum",
+    "exp",
+    "log",
+    "sqrt",
+    "tanh",
+    "sigmoid",
+    "softmax",
+    "rms_norm",
 ]
 
 # The graphs being traced, innermost last.
@@ -49,7 +62,9 @@ def _weights(args):
         if isinstance(a, nn.Module):
             for _, t in nn._leaves(a, ""):
                 if not t._is_parameter:
-                    raise TypeError(f"a module's weights must be whole meta tensors, got a {t.device} tensor of shape {t.shape}")
+                    raise TypeError(
+                        f"a module's weights must be whole meta tensors, got a {t.device} tensor of shape {t.shape}"
+                    )
                 params.setdefault(t.storage_id, t)
     return list(params.values())
 
@@ -83,9 +98,11 @@ def _trace(fn, args):
         weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape))
     module_scalars = iter(scalars)
     traced = [
-        nn.map_tensors(a, lambda t: weights[t.storage_id], lambda _: next(module_scalars))
-        if isinstance(a, nn.Module)
-        else a
+        (
+            nn.map_tensors(a, lambda t: weights[t.storage_id], lambda _: next(module_scalars))
+            if isinstance(a, nn.Module)
+            else a
+        )
         for a in traced
     ]
     _TRACES.append(graph)
@@ -120,11 +137,11 @@ def _signature(args):
     ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
     shared = tuple(ids.index(i) for i in ids)
     return tuple(
-        (a.dtype, tuple(a.shape))
-        if isinstance(a, Tensor)
-        else nn.structure(a)
-        if isinstance(a, (nn.Module, float))
-        else ("static", a)
+        (
+            (a.dtype, tuple(a.shape))
+            if isinstance(a, Tensor)
+            else nn.structure(a) if isinstance(a, (nn.Module, float)) else ("static", a)
+        )
         for a in args
     ) + (shared,)
 
@@ -245,7 +262,9 @@ def compile(fn, device=None):
         graph, plan, workspace, single, inputs = prepare(args)
         if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
             # Compiled (and the weights placed); nothing to run.
-            outputs = [Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())]
+            outputs = [
+                Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
+            ]
         else:
             outputs = plan.run_in(workspace, inputs)
         return outputs[0] if single else tuple(outputs)
@@ -280,7 +299,13 @@ def compile(fn, device=None):
         from lumen.graph import viz
 
         data = viz.collect(
-            graph, plan, inputs, title=fn.__name__, runs=runs, device=target, run=lambda: plan.run_in(workspace, inputs)
+            graph,
+            plan,
+            inputs,
+            title=fn.__name__,
+            runs=runs,
+            device=target,
+            run=lambda: plan.run_in(workspace, inputs),
         )
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
@@ -368,7 +393,9 @@ def _as_tensor(x, dtype, op):
     if not _is_operand(x):
         raise TypeError(f"expected a tensor or a Python scalar, got {type(x).__name__}")
     if not _scalar_fits(x, dtype):
-        raise TypeError(f"{op} of a {dtype} tensor and the {type(x).__name__} {x!r}: convert the tensor with .to(dtype)")
+        raise TypeError(
+            f"{op} of a {dtype} tensor and the {type(x).__name__} {x!r}: convert the tensor with .to(dtype)"
+        )
     return prims.full((), x, dtype)
 
 
@@ -378,7 +405,9 @@ def _broadcast_shapes(*shapes):
     for d in range(-ndim, 0):
         sizes = {s[d] for s in shapes if len(s) >= -d} - {1}
         if len(sizes) > 1:
-            raise RuntimeError(f"shapes {', '.join(map(str, map(list, shapes)))} are not broadcastable at dimension {d}")
+            raise RuntimeError(
+                f"shapes {', '.join(map(str, map(list, shapes)))} are not broadcastable at dimension {d}"
+            )
         out.append(sizes.pop() if sizes else 1)
     return tuple(out)
 
@@ -707,7 +736,7 @@ class TracedTensor:
         if self.ndim == 0:
             return self.reshape(1)
         start, end = _dim(start_dim, self.ndim), _dim(end_dim, self.ndim)
-        return self.reshape(self.shape[:start] + (-1,) + self.shape[end + 1:])
+        return self.reshape(self.shape[:start] + (-1,) + self.shape[end + 1 :])
 
     def unsqueeze(self, dim):
         dim = _dim(dim, self.ndim + 1)
@@ -742,7 +771,9 @@ class TracedTensor:
         sizes = _sizes(sizes)
         lead = len(sizes) - self.ndim
         if lead < 0:
-            raise RuntimeError(f"expand: the number of sizes ({len(sizes)}) must be at least the tensor's rank ({self.ndim})")
+            raise RuntimeError(
+                f"expand: the number of sizes ({len(sizes)}) must be at least the tensor's rank ({self.ndim})"
+            )
         shape = tuple(self.shape[i - lead] if n == -1 and i >= lead else n for i, n in enumerate(sizes))
         return _broadcast_to(self, shape)
 
@@ -773,7 +804,7 @@ class TracedTensor:
             raise IndexError(f"too many indices for tensor of dimension {self.ndim}")
         at = ellipses[0] if ellipses else len(key)
         fill = (slice(None),) * (self.ndim - (len(key) - len(ellipses)))
-        key = key[:at] + fill + key[at + len(ellipses):]
+        key = key[:at] + fill + key[at + len(ellipses) :]
         starts, limits, shape = [], [], []
         for d, (k, n) in enumerate(zip(key, self.shape)):
             if isinstance(k, slice):
@@ -894,7 +925,6 @@ def log(input):
 
 def sqrt(input):
     return input.sqrt()
-
 
 
 def tanh(input):

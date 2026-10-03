@@ -16,16 +16,32 @@ from lumen.tensor.dlpack import from_dlpack
 __all__ = [
     "Tensor",
     # dtypes
-    "float16", "bfloat16", "float32", "float64",
-    "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64",
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
     "bool",
     "dtypes",
     "default_dtype",
     # factories
-    "tensor", "empty", "zeros", "ones", "full", "arange",
+    "tensor",
+    "empty",
+    "zeros",
+    "ones",
+    "full",
+    "arange",
     # numpy interop
-    "to_numpy", "from_numpy", "from_dlpack",
+    "to_numpy",
+    "from_numpy",
+    "from_dlpack",
 ]
 
 # ---------------------------------------------------------------------
@@ -47,9 +63,18 @@ uint64 = "uint64"
 bool = "bool"  # shadows the builtin within this namespace, like torch.bool
 
 dtypes = (
-    float16, bfloat16, float32, float64,
-    int8, int16, int32, int64,
-    uint8, uint16, uint32, uint64,
+    float16,
+    bfloat16,
+    float32,
+    float64,
+    int8,
+    int16,
+    int32,
+    int64,
+    uint8,
+    uint16,
+    uint32,
+    uint64,
     bool,
 )
 
@@ -76,6 +101,7 @@ def _prims():
     from lumen.graph import prims, tracer  # lazily: lumen.graph imports this package
 
     return prims if tracer._TRACES else None
+
 
 def tensor(data, dtype=None, device=None):
     """Build a tensor from (nested) lists. Dtype is inferred unless given."""
@@ -117,6 +143,7 @@ def arange(n, dtype=None, device=None):
 # ---------------------------------------------------------------------
 # NumPy interop
 # ---------------------------------------------------------------------
+
 
 def to_numpy(t):
     """Copy a lumen.Tensor into a numpy array (via tolist())."""

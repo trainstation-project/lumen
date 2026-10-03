@@ -53,8 +53,7 @@ def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
     if dl_device is not None and tuple(dl_device) != self.__dlpack_device__():
         if copy is False:
             raise ValueError(
-                f"cannot export a tensor on {self.device} to DLPack device "
-                f"{tuple(dl_device)} without copying"
+                f"cannot export a tensor on {self.device} to DLPack device " f"{tuple(dl_device)} without copying"
             )
         return __dlpack__(self.to(_device_of(dl_device)), stream=stream, max_version=max_version)
     if copy:

@@ -16,19 +16,14 @@ class Tensor:
         device: Optional[DeviceLike] = None,
     ) -> None: ...
     @staticmethod
-    def empty(
-        shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None
-    ) -> Tensor:
+    def empty(shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None) -> Tensor:
         """Uninitialized, like ``torch.empty``: write every element before
         reading it (reading first is undefined behavior in the Rust core)."""
+
     @staticmethod
-    def zeros(
-        shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None
-    ) -> Tensor: ...
+    def zeros(shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None) -> Tensor: ...
     @staticmethod
-    def ones(
-        shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None
-    ) -> Tensor: ...
+    def ones(shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None) -> Tensor: ...
     @staticmethod
     def full(
         shape: Sequence[int],
@@ -37,9 +32,7 @@ class Tensor:
         device: Optional[DeviceLike] = None,
     ) -> Tensor: ...
     @staticmethod
-    def arange(
-        n: int, dtype: Optional[str] = None, device: Optional[DeviceLike] = None
-    ) -> Tensor: ...
+    def arange(n: int, dtype: Optional[str] = None, device: Optional[DeviceLike] = None) -> Tensor: ...
 
     # metadata
     @property
@@ -72,7 +65,6 @@ class Tensor:
     def contiguous(self) -> Tensor: ...
     def to(self, device: Optional[DeviceLike] = None, dtype: Optional[str] = None) -> Tensor:
         """This tensor converted to ``dtype`` and/or on ``device``."""
-
     # element access
     def get(self, index: Sequence[int]) -> Scalar: ...
     def set(self, index: Sequence[int], value: Scalar) -> None: ...

@@ -4,7 +4,6 @@
 
 from cutlass import BFloat16, Float16, Float32, Int32, Int64, Numeric, Uint32
 
-
 #: lumen dtype names to the CuTe dtype of the same element.
 _LUMEN_DTYPE_TO_CUTE_DTYPE_MAPPING = {
     # floating point dtypes

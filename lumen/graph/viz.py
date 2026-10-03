@@ -28,9 +28,19 @@ from lumen.profiler import ProfilerActivity, profile
 OPS = pathlib.Path(lumen.__file__).parent / "ops"
 
 DTYPES = {
-    "f32": "float32", "f16": "float16", "bf16": "bfloat16", "f64": "float64", "bool": "bool",
-    "u8": "uint8", "u16": "uint16", "u32": "uint32", "u64": "uint64",
-    "i8": "int8", "i16": "int16", "i32": "int32", "i64": "int64",
+    "f32": "float32",
+    "f16": "float16",
+    "bf16": "bfloat16",
+    "f64": "float64",
+    "bool": "bool",
+    "u8": "uint8",
+    "u16": "uint16",
+    "u32": "uint32",
+    "u64": "uint64",
+    "i8": "int8",
+    "i16": "int16",
+    "i32": "int32",
+    "i64": "int64",
 }
 SHORT = {v: k for k, v in DTYPES.items()}
 
@@ -99,7 +109,11 @@ def profile_steps(plan, run, runs, device):
     times = [[] for _ in range(nsteps)]  # per step, per run: [(kernel, us), ...]
     for run in (e for e in events if e["name"] == "lumen::plan"):
         steps = sorted(
-            (e for e in events if e["parent"] == run["id"] and e["kind"] == "op" and not e["name"].startswith("lumen::")),
+            (
+                e
+                for e in events
+                if e["parent"] == run["id"] and e["kind"] == "op" and not e["name"].startswith("lumen::")
+            ),
             key=lambda e: e["start_us"],
         )
         if len(steps) != nsteps:
@@ -113,7 +127,9 @@ def profile_steps(plan, run, runs, device):
             result.append([])
             continue
         kernels = [name for name, _ in runs_of_step[0]]
-        result.append([[name, statistics.median(r[k][1] for r in runs_of_step if len(r) > k)] for k, name in enumerate(kernels)])
+        result.append(
+            [[name, statistics.median(r[k][1] for r in runs_of_step if len(r) > k)] for k, name in enumerate(kernels)]
+        )
     return result
 
 
@@ -137,8 +153,15 @@ def plan_view(plan, kernels):
 
     def node_for(buffer, dtype, shape):
         if buffer not in writer:
-            nodes.append({"id": len(nodes), "kind": "input" if buffer.startswith(("in", "s")) else "buffer",
-                          "label": buffer, "type": type_text(dtype, shape), "buffer": buffer})
+            nodes.append(
+                {
+                    "id": len(nodes),
+                    "kind": "input" if buffer.startswith(("in", "s")) else "buffer",
+                    "label": buffer,
+                    "type": type_text(dtype, shape),
+                    "buffer": buffer,
+                }
+            )
             writer[buffer] = nodes[-1]["id"]
         return writer[buffer]
 
@@ -147,8 +170,13 @@ def plan_view(plan, kernels):
         out_buffer, dtype, shape = step["output"]
         fusion = step["fusion"]
         node = {
-            "id": len(nodes), "kind": "fusion" if fusion else "step", "step": i,
-            "label": step["label"], "text": step["text"], "type": type_text(dtype, shape), "buffer": out_buffer,
+            "id": len(nodes),
+            "kind": "fusion" if fusion else "step",
+            "step": i,
+            "label": step["label"],
+            "text": step["text"],
+            "type": type_text(dtype, shape),
+            "buffer": out_buffer,
             "inputs": [[b, type_text(d, s)] for b, d, s in step["inputs"]],
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,
@@ -163,7 +191,9 @@ def plan_view(plan, kernels):
         src = writer[buffer]
         if nodes[src]["kind"] in ("input", "buffer"):
             continue
-        nodes.append({"id": len(nodes), "kind": "output", "label": buffer, "type": nodes[src]["type"], "buffer": buffer})
+        nodes.append(
+            {"id": len(nodes), "kind": "output", "label": buffer, "type": nodes[src]["type"], "buffer": buffer}
+        )
         edges.append([src, nodes[-1]["id"], ""])
     return {"nodes": nodes, "edges": edges}
 
@@ -181,9 +211,15 @@ def graph_view(graph, unfused, kernels):
     for node in graph.nodes():
         dtype, shape = graph.type_of(node["output"])
         entry = {
-            "id": len(nodes), "kind": "node", "label": node["primitive"], "text": node["text"],
-            "type": type_text(dtype, shape), "var": node["output"],
-            "inputs": [[f"%{v}", type_text(*graph.type_of(v))] for v in node["inputs"]], "kernels": [], "fusion": None,
+            "id": len(nodes),
+            "kind": "node",
+            "label": node["primitive"],
+            "text": node["text"],
+            "type": type_text(dtype, shape),
+            "var": node["output"],
+            "inputs": [[f"%{v}", type_text(*graph.type_of(v))] for v in node["inputs"]],
+            "kernels": [],
+            "fusion": None,
         }
         # The unfused plan's steps are the live nodes in graph order (it may
         # drop dead ones and alias reshapes), plus steps the device's
@@ -198,7 +234,9 @@ def graph_view(graph, unfused, kernels):
                 s = t + 1
                 break
         else:
-            entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, a repeat of an earlier node, or dead)"
+            entry["note"] = (
+                "no kernel of its own in the unfused plan (an aliasing reshape, a repeat of an earlier node, or dead)"
+            )
         nodes.append(entry)
         of_var[node["output"]] = entry["id"]
         for v in node["inputs"]:
@@ -229,7 +267,15 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
     run = run or (lambda: plan.run(inputs, device))
     fused_kernels = profile_steps(plan, run, runs, device) if timed else []
     unfused_kernels = profile_steps(unfused, lambda: unfused.run(graph_inputs, device), runs, device) if timed else []
-    files = sorted({k["file"] for view in (fused_kernels, unfused_kernels) for step in view for k in _kernel_entries(step) if k["file"]})
+    files = sorted(
+        {
+            k["file"]
+            for view in (fused_kernels, unfused_kernels)
+            for step in view
+            for k in _kernel_entries(step)
+            if k["file"]
+        }
+    )
     return {
         "title": title,
         "device": device,
@@ -250,7 +296,8 @@ def write(data, path, json_path=None, fragment=False):
     ``json_path``). ``fragment`` leaves out the doctype, for a host that
     wraps the page in its own document (a published artifact)."""
     page = TEMPLATE.replace("__TITLE__", html.escape(data["title"])).replace(
-        "__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+        "__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    )
     if not fragment:
         page = '<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n' + page
     pathlib.Path(path).write_text(page)
@@ -276,7 +323,10 @@ def _examples():
 
     seq, dim, hidden = 128, 256, 1024
     return {
-        "attention": (attention, [f"f32[{seq},{dim}]"] + [f"f32[{dim},{dim}]"] * 3 + [f"f32[{dim},{hidden}]", f"f32[{hidden},{dim}]"]),
+        "attention": (
+            attention,
+            [f"f32[{seq},{dim}]"] + [f"f32[{dim},{dim}]"] * 3 + [f"f32[{dim},{hidden}]", f"f32[{hidden},{dim}]"],
+        ),
         "mlp": (mlp, [f"f32[{seq},{dim}]", f"f32[{dim},{hidden}]", f"f32[{hidden},{dim}]"]),
     }
 
@@ -307,15 +357,21 @@ def _tensor(spec, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("function", nargs="?", help="FILE.py:FUNCTION or MODULE:FUNCTION")
     parser.add_argument("--example", choices=sorted(_examples()), help="a built-in function instead")
-    parser.add_argument("--input", action="append", default=[], help="an input as dtype[shape], e.g. f32[64,128]; repeat per argument")
+    parser.add_argument(
+        "--input", action="append", default=[], help="an input as dtype[shape], e.g. f32[64,128]; repeat per argument"
+    )
     parser.add_argument("--device", default="mps")
     parser.add_argument("--runs", type=int, default=5, help="profiled runs (GPU times are medians)")
     parser.add_argument("-o", "--out", default=None, help="the HTML page (default: <function>.html)")
     parser.add_argument("--json", default=None, help="also write the data as JSON here")
-    parser.add_argument("--fragment", action="store_true", help="no doctype: for a host that wraps the page (an artifact)")
+    parser.add_argument(
+        "--fragment", action="store_true", help="no doctype: for a host that wraps the page (an artifact)"
+    )
     args = parser.parse_args()
     if args.example:
         fn, inputs = _examples()[args.example]
@@ -328,9 +384,11 @@ def main():
     out = args.out or f"{fn.__name__}.html"
     data = lumen.compile(fn).dump_graph(out, *tensors, runs=args.runs, json_path=args.json, fragment=args.fragment)
     fused = data["views"]["fused"]["nodes"]
-    print(f"{out}: {sum(n['kind'] in ('step', 'fusion') for n in fused)} plan steps "
-          f"({sum(n['kind'] == 'fusion' for n in fused)} fusions), "
-          f"{sum(n['kind'] == 'node' for n in data['views']['traced']['nodes'])} traced primitives")
+    print(
+        f"{out}: {sum(n['kind'] in ('step', 'fusion') for n in fused)} plan steps "
+        f"({sum(n['kind'] == 'fusion' for n in fused)} fusions), "
+        f"{sum(n['kind'] == 'node' for n in data['views']['traced']['nodes'])} traced primitives"
+    )
 
 
 TEMPLATE = (pathlib.Path(__file__).parent / "viz.html").read_text()

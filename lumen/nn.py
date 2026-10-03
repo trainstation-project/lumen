@@ -79,7 +79,7 @@ def _leaves(x, path):
         for i, v in enumerate(x):
             yield from _leaves(v, prefix + str(i))
 
-    
+
 def _floats(x):
     """Each float field of ``x`` (a module, a list or tuple), recursively, in
     field order: runtime scalars of a compiled function (``lumen.compile``),

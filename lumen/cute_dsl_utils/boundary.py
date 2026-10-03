@@ -7,9 +7,7 @@ from cutlass import Boolean, range_constexpr
 
 
 @cute.jit
-def lane_boundary(
-    gC: cute.Tensor, tiled_copy: cute.TiledCopy, block_coord, THREAD_ID: int, shape: cute.Shape
-):
+def lane_boundary(gC: cute.Tensor, tiled_copy: cute.TiledCopy, block_coord, THREAD_ID: int, shape: cute.Shape):
     thr_copy = tiled_copy.get_slice(THREAD_ID)
 
     bC = gC[block_coord]
