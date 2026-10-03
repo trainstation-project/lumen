@@ -55,6 +55,12 @@ pub(crate) fn encode(
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
+    if let Softmax { .. } = step.primitive {
+        return super::softmax::mps::encode(step, inputs, output, keep);
+    }
+    if let Fusion { .. } = step.primitive {
+        return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
+    }
 
     if let Concatenate { .. } = step.primitive {
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
@@ -71,7 +77,7 @@ pub(crate) fn encode(
         | Neg
         | Exp
         | Log
-        | Rsqrt
+        | Sqrt
         | Tanh
         | Logistic
         | ConvertElementType { .. }
@@ -82,7 +88,9 @@ pub(crate) fn encode(
             super::layout::mps::encode
         }
         Full { .. } | Iota { .. } => super::factory::mps::encode,
-        Fusion { .. } => crate::compiler::mps::encode,
+        Fusion { .. } => unreachable!("encoded above"),
+        FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
+        Softmax { .. } => unreachable!("encoded above"),
     };
     encode(step, inputs, output, keep)
 }
@@ -92,9 +100,11 @@ pub(crate) fn encode(
 /// reduction's partials.
 pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
     match p {
-        Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes } => {
-            super::reduce::mps::scratch_bytes(inputs[0], axes)
+        Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+            let accum = super::reduce::mps::accum_dtype(p, inputs[0].dtype);
+            super::reduce::mps::scratch_bytes(inputs[0], axes, accum)
         }
+        Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
         _ => 0,
     }
 }
@@ -167,7 +177,7 @@ pub(crate) fn launch_step(
 ) -> Result<(), String> {
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
-    launch(kernel, &buffers, args, grid, keep, step.primitive.name())
+    launch(kernel, &buffers, args, grid, keep, step.label)
 }
 
 /// Launch `kernel` over `grid`, recorded in the profiler as `name`.

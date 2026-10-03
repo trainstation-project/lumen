@@ -24,7 +24,7 @@ pub enum Primitive {
     Neg,
     Exp,
     Log,
-    Rsqrt,
+    Sqrt,
     Tanh,
     Logistic,
     ConvertElementType {
@@ -32,19 +32,28 @@ pub enum Primitive {
     },
     /// `select(pred, on_true, on_false)`, elementwise.
     Select,
+    /// The sum over `axes`, accumulated in `accum_dtype`, the result's
+    /// dtype: the operand's, or float32 for floats narrower than it (each
+    /// element widened exactly), as [`Primitive::DotGeneral`].
     ReduceSum {
         axes: Vec<usize>,
+        accum_dtype: DType,
     },
     ReduceMax {
         axes: Vec<usize>,
     },
     /// The result's dimensions are the batch dimensions, then the free
     /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
+    /// It accumulates in `accum_dtype`, the result's dtype: the operands',
+    /// or float32 for floats narrower than it (16-bit, later 8- and 4-bit),
+    /// whose products it holds exactly (`lax.dot_general`'s
+    /// `preferred_element_type`, required).
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
         lhs_batch: Vec<usize>,
         rhs_batch: Vec<usize>,
+        accum_dtype: DType,
     },
     Reshape {
         new_sizes: Vec<usize>,
@@ -81,14 +90,28 @@ pub enum Primitive {
         shape: Vec<usize>,
         dimension: usize,
     },
-    /// `body` (a graph with one output) run as one kernel, `name`: what a
-    /// device's graph compiler (`crate::compiler`) groups the primitives it
-    /// fuses into.
+    /// `body` run as one kernel, `name`: what a device's graph compiler
+    /// (`crate::compiler`) groups the primitives it fuses into. Its value is
+    /// the body's first output; a body with more (a multi-output fusion)
+    /// has each other one read by a [`Primitive::FusionOutput`].
     /// Profiled as `label`, its primitives' names: `mul -> tanh -> add`.
     Fusion {
         name: String,
         label: &'static str,
         body: Graph,
+    },
+    /// `exp(x - max) / sum(exp(x - max))` along `axis`: what `softmax`
+    /// traces to, as one primitive (XLA's softmax rewriter matches it so),
+    /// which the MPS compiler rewrites it into and runs as one kernel.
+    Softmax {
+        axis: usize,
+    },
+    /// Output `index` (of type `ty`) of its operand's fusion, whose body
+    /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
+    /// value the fusion's kernel writes too, which no step computes.
+    FusionOutput {
+        index: usize,
+        ty: TensorType,
     },
 }
 
@@ -106,7 +129,7 @@ impl Primitive {
             Neg => "neg",
             Exp => "exp",
             Log => "log",
-            Rsqrt => "rsqrt",
+            Sqrt => "sqrt",
             Tanh => "tanh",
             Logistic => "logistic",
             ConvertElementType { .. } => "convert_element_type",
@@ -122,6 +145,8 @@ impl Primitive {
             Full { .. } => "full",
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
+            FusionOutput { .. } => "fusion_output",
+            Softmax { .. } => "softmax",
         }
     }
 
@@ -162,13 +187,16 @@ impl Primitive {
                 };
                 Ok(TensorType::new(dtype, &x.shape))
             }
-            Neg | Exp | Log | Rsqrt | Tanh | Logistic => {
+            Neg | Exp | Log | Sqrt | Tanh | Logistic => {
                 let x = args[0];
                 if matches!(self, Neg) && x.dtype == DType::Bool {
                     return err("does not take bool operands".into());
                 }
                 if !matches!(self, Neg) && !x.dtype.is_float() {
                     return err(format!("takes a floating-point operand, got {x}"));
+                }
+                if !matches!(self, Neg) {
+                    no_bf16_math(x).map_err(prefix)?;
                 }
                 Ok(x.clone())
             }
@@ -185,23 +213,29 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            ReduceSum { axes } | ReduceMax { axes } => {
+            ReduceSum { axes, .. } | ReduceMax { axes } => {
                 let x = args[0];
                 check_dims(axes, x.shape.len(), "axes").map_err(prefix)?;
-                if matches!(self, ReduceSum { .. }) && x.dtype == DType::Bool {
-                    return err("does not take bool operands".into());
+                let mut dtype = x.dtype;
+                if let ReduceSum { accum_dtype, .. } = self {
+                    if x.dtype == DType::Bool {
+                        return err("does not take bool operands".into());
+                    }
+                    check_accum(x, *accum_dtype).map_err(prefix)?;
+                    dtype = *accum_dtype;
                 }
                 let shape: Vec<usize> = (0..x.shape.len())
                     .filter(|d| !axes.contains(d))
                     .map(|d| x.shape[d])
                     .collect();
-                Ok(TensorType::new(x.dtype, &shape))
+                Ok(TensorType::new(dtype, &shape))
             }
             DotGeneral {
                 lhs_contracting,
                 rhs_contracting,
                 lhs_batch,
                 rhs_batch,
+                accum_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
                 if lhs.dtype != rhs.dtype || lhs.dtype == DType::Bool {
@@ -209,6 +243,8 @@ impl Primitive {
                         "operands must share a non-bool dtype, got {lhs} and {rhs}"
                     ));
                 }
+                check_accum(lhs, *accum_dtype).map_err(prefix)?;
+                let accum = *accum_dtype;
                 let lhs_dims = [lhs_batch.as_slice(), lhs_contracting].concat();
                 let rhs_dims = [rhs_batch.as_slice(), rhs_contracting].concat();
                 check_dims(&lhs_dims, lhs.shape.len(), "lhs dimensions").map_err(prefix)?;
@@ -228,7 +264,7 @@ impl Primitive {
                 let lhs_free = free_dims(lhs.shape.len(), &lhs_dims).map(|d| lhs.shape[d]);
                 let rhs_free = free_dims(rhs.shape.len(), &rhs_dims).map(|d| rhs.shape[d]);
                 let shape: Vec<usize> = batch.chain(lhs_free).chain(rhs_free).collect();
-                Ok(TensorType::new(lhs.dtype, &shape))
+                Ok(TensorType::new(accum, &shape))
             }
             Reshape { new_sizes } => {
                 let x = args[0];
@@ -309,6 +345,17 @@ impl Primitive {
                 Ok(TensorType::new(x.dtype, &shape))
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
+            FusionOutput { ty, .. } => Ok(ty.clone()),
+            Softmax { axis } => {
+                let x = args[0];
+                if !x.dtype.is_float() || *axis >= x.shape.len() {
+                    return err(format!(
+                        "needs a float tensor and a dimension of it, got {x} and {axis}"
+                    ));
+                }
+                no_bf16_math(x).map_err(prefix)?;
+                Ok(x.clone())
+            }
             Iota {
                 dtype,
                 shape,
@@ -331,9 +378,11 @@ impl Primitive {
                 {
                     return err(format!("operand {i} must be {ty}, got {arg}"));
                 }
-                match body.outputs() {
-                    &[out] => Ok(body.type_of(out).clone()),
-                    outs => err(format!("the body must have one output, got {}", outs.len())),
+                // Its value is its body's first output; any others are its
+                // `FusionOutput`s.
+                match body.outputs().first() {
+                    Some(&out) => Ok(body.type_of(out).clone()),
+                    None => err("the body must have an output".into()),
                 }
             }
         }
@@ -368,6 +417,31 @@ impl fmt::Display for Tuple<'_> {
     }
 }
 
+/// Ok if a sum of elements of `x` may accumulate in `accum`: its dtype, or
+/// float32 for floats narrower than it (fp16, bf16, later fp8 and fp4).
+fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
+    let widened =
+        x.dtype.is_float() && x.dtype.size_of() < DType::F32.size_of() && accum == DType::F32;
+    match accum == x.dtype || widened {
+        true => Ok(()),
+        false => Err(format!(
+            "accumulates in the operand's dtype, or float32 for narrower floats: got accum_dtype {accum} for {x}"
+        )),
+    }
+}
+
+/// Ok, unless `x` is bfloat16: no device computes exp, log, sqrt, tanh or
+/// logistic in it (Metal's take and return float), and a program is run as
+/// traced, never in another dtype; it computes them in float32 itself.
+fn no_bf16_math(x: &TensorType) -> Result<(), String> {
+    match x.dtype {
+        DType::BF16 => Err(format!(
+            "has no bfloat16 kernel, got {x}: convert to float32 first (x.to(dtype=float32))"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The primitive with its parameters, as in a jaxpr:
 /// `reduce_sum[axes=(1,)]`.
 impl fmt::Display for Primitive {
@@ -379,20 +453,26 @@ impl fmt::Display for Primitive {
         f.write_str(self.name())?;
         match self {
             ConvertElementType { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
-            ReduceSum { axes } | ReduceMax { axes } => write!(f, "[axes={}]", Tuple(axes)),
+            ReduceSum { axes, accum_dtype } => {
+                write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
+            }
+            ReduceMax { axes } => write!(f, "[axes={}]", Tuple(axes)),
             DotGeneral {
                 lhs_contracting,
                 rhs_contracting,
                 lhs_batch,
                 rhs_batch,
-            } => write!(
-                f,
-                "[dimension_numbers=(({}, {}), ({}, {}))]",
-                Tuple(lhs_contracting),
-                Tuple(rhs_contracting),
-                Tuple(lhs_batch),
-                Tuple(rhs_batch)
-            ),
+                accum_dtype,
+            } => {
+                write!(
+                    f,
+                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype}]",
+                    Tuple(lhs_contracting),
+                    Tuple(rhs_contracting),
+                    Tuple(lhs_batch),
+                    Tuple(rhs_batch)
+                )
+            }
             Reshape { new_sizes } => write!(f, "[new_sizes={}]", Tuple(new_sizes)),
             BroadcastInDim {
                 shape,
@@ -414,6 +494,8 @@ impl fmt::Display for Primitive {
                 Tuple(start_indices)
             ),
             Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
+            FusionOutput { index, .. } => write!(f, "[index={index}]"),
+            Softmax { axis } => write!(f, "[axis={axis}]"),
             Full {
                 shape,
                 fill_value,

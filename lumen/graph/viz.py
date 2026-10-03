@@ -45,7 +45,7 @@ def type_text(dtype, shape):
 
 _SOURCES = [
     (r"^matmul_small_", "dot_general/mps.metal", "inline void matmul_sg_impl"),
-    (r"^matmul_(f16|bf16|f32)$", "dot_general/mps.metal", "inline void matmul_sg_impl"),
+    (r"^matmul_(f16|bf16|f32)(_f32)?$", "dot_general/mps.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(u64|i64)$", "dot_general/mps.metal", "inline void matmul_wide_impl"),
     (r"^matmul_", "dot_general/mps.metal", "inline void matmul_impl"),
     (r"^reduce_\w+_rows_", "reduce/mps.metal", "inline void reduce_rows"),
@@ -60,7 +60,7 @@ _SOURCES = [
     (r"^convert_", "elementwise/mps.metal", "#define CONVERT"),
     (r"^select_", "elementwise/mps.metal", "#define SELECT"),
     (r"^neg_", "elementwise/mps.metal", "#define NEG"),
-    (r"^(exp|log|rsqrt|tanh|logistic)_", "elementwise/mps.metal", "#define UNARY"),
+    (r"^(exp|log|sqrt|tanh|logistic)_", "elementwise/mps.metal", "#define UNARY"),
     (r"^(max|eq|lt)_", "elementwise/mps.metal", "#define ORDERED"),
     (r"^(add|sub|mul|div)_", "elementwise/mps.metal", "#define BINARY"),
 ]
@@ -137,7 +137,7 @@ def plan_view(plan, kernels):
 
     def node_for(buffer, dtype, shape):
         if buffer not in writer:
-            nodes.append({"id": len(nodes), "kind": "input" if buffer.startswith("in") else "buffer",
+            nodes.append({"id": len(nodes), "kind": "input" if buffer.startswith(("in", "s")) else "buffer",
                           "label": buffer, "type": type_text(dtype, shape), "buffer": buffer})
             writer[buffer] = nodes[-1]["id"]
         return writer[buffer]
@@ -148,7 +148,7 @@ def plan_view(plan, kernels):
         fusion = step["fusion"]
         node = {
             "id": len(nodes), "kind": "fusion" if fusion else "step", "step": i,
-            "label": step["primitive"], "text": step["text"], "type": type_text(dtype, shape), "buffer": out_buffer,
+            "label": step["label"], "text": step["text"], "type": type_text(dtype, shape), "buffer": out_buffer,
             "inputs": [[b, type_text(d, s)] for b, d, s in step["inputs"]],
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,
@@ -157,6 +157,8 @@ def plan_view(plan, kernels):
         for src, b in sources:
             edges.append([src, node["id"], b])
         writer[out_buffer] = node["id"]
+        for b, _, _ in step["extra_outputs"]:  # a multi-output fusion's other outputs
+            writer[b] = node["id"]
     for buffer in sorted((b for b in writer if b.startswith("out")), key=lambda b: int(b[3:])):
         src = writer[buffer]
         if nodes[src]["kind"] in ("input", "buffer"):

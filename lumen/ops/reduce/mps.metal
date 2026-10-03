@@ -1,13 +1,21 @@
 // The threads of a threadgroup that reduce together.
 #define REDUCE_THREADS 256
 
+// Each template reads its input as `in[i]`, i a row-major index of the
+// reduced tensor: `in` a pointer to it, or (a reduction fusion,
+// lumen/compiler/mps/codegen.rs) a value computing each element. It
+// accumulates in A, the output's type (reduce_sum's accum_dtype): the
+// input's, or float for half and bfloat, each element widened as read;
+// every level (a thread's, the threadgroup's, a split reduction's
+// partials) is of A.
+
 // Any axes, a thread per output: thread i reduces output i, at offset
 // `base` from its index over the kept dimensions, over its `count`
 // elements in the reference's (row-major) order.
-template <typename Op, typename T>
-inline void reduce(device const T *in,
-                   device T *out,
-                   T init,
+template <typename Op, typename A, typename In>
+inline void reduce(In in,
+                   device A *out,
+                   A init,
                    uint nk,
                    constant ulong *ksizes,
                    constant ulong *kstrides,
@@ -16,19 +24,18 @@ inline void reduce(device const T *in,
                    constant ulong *rstrides,
                    ulong count,
                    uint i) {
-    typedef typename acc<T>::type A;
     ulong base = offset_of(i, nk, ksizes, kstrides);
-    A r = A(init);
+    A r = init;
     for (ulong j = 0; j < count; ++j) {
         r = Op::apply(r, A(in[base + offset_of(j, nr, rsizes, rstrides)]));
     }
-    out[i] = T(r);
+    out[i] = r;
 }
 
-#define REDUCE(OP, FN, NAME, T)                                                             \
+#define REDUCE(OP, FN, NAME, T, A)                                                             \
     kernel void OP##_##NAME(device const T *in [[buffer(0)]],                               \
-                            device T *out [[buffer(1)]],                                    \
-                            constant T &init [[buffer(2)]],                                 \
+                            device A *out [[buffer(1)]],                                    \
+                            constant A &init [[buffer(2)]],                                 \
                             constant uint &nk [[buffer(3)]],                                \
                             constant ulong *ksizes [[buffer(4)]],                           \
                             constant ulong *kstrides [[buffer(5)]],                         \
@@ -37,7 +44,7 @@ inline void reduce(device const T *in,
                             constant ulong *rstrides [[buffer(8)]],                         \
                             constant ulong &count [[buffer(9)]],                            \
                             uint i [[thread_position_in_grid]]) {                           \
-        reduce<FN, T>(in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, i); \
+        reduce<FN, A>(in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, i); \
     }
 
 // As reduce, `lanes` threads an output (a power of two up to
@@ -45,10 +52,10 @@ inline void reduce(device const T *in,
 // output g * (REDUCE_THREADS / lanes) + t / lanes, then a tree over its
 // lanes. Neighbouring lanes read neighbouring reduced elements. The reduced
 // dimensions index in 32 bits (the input has fewer than 2^32 elements).
-template <typename Op, typename T>
-inline void reduce_grouped(device const T *in,
-                           device T *out,
-                           T init,
+template <typename Op, typename A, typename In>
+inline void reduce_grouped(In in,
+                           device A *out,
+                           A init,
                            uint nk,
                            constant ulong *ksizes,
                            constant ulong *kstrides,
@@ -58,12 +65,11 @@ inline void reduce_grouped(device const T *in,
                            uint count,
                            uint lanes,
                            uint outputs,
-                           threadgroup typename acc<T>::type *shared,
+                           threadgroup A *shared,
                            uint g,
                            uint t) {
-    typedef typename acc<T>::type A;
     uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;
-    A r = A(init);
+    A r = init;
     if (i < outputs) {
         ulong base = offset_of(i, nk, ksizes, kstrides);
         for (uint j = lane; j < count; j += lanes) {
@@ -78,14 +84,14 @@ inline void reduce_grouped(device const T *in,
         }
     }
     if (lane == 0 && i < outputs) {
-        out[i] = T(shared[t]);
+        out[i] = shared[t];
     }
 }
 
-#define GROUPED(OP, FN, NAME, T)                                                    \
+#define GROUPED(OP, FN, NAME, T, A)                                                    \
     kernel void OP##_grouped_##NAME(device const T *in [[buffer(0)]],               \
-                                    device T *out [[buffer(1)]],                    \
-                                    constant T &init [[buffer(2)]],                 \
+                                    device A *out [[buffer(1)]],                    \
+                                    constant A &init [[buffer(2)]],                 \
                                     constant uint &nk [[buffer(3)]],                \
                                     constant ulong *ksizes [[buffer(4)]],           \
                                     constant ulong *kstrides [[buffer(5)]],         \
@@ -97,8 +103,8 @@ inline void reduce_grouped(device const T *in,
                                     constant uint &outputs [[buffer(11)]],          \
                                     uint3 group [[threadgroup_position_in_grid]],   \
                                     uint3 tid [[thread_position_in_threadgroup]]) { \
-        threadgroup typename acc<T>::type shared[REDUCE_THREADS];                   \
-        reduce_grouped<FN, T>(in,                                                   \
+        threadgroup A shared[REDUCE_THREADS];                   \
+        reduce_grouped<FN, A>(in,                                                   \
                               out,                                                  \
                               init,                                                 \
                               nk,                                                   \
@@ -115,44 +121,50 @@ inline void reduce_grouped(device const T *in,
                               tid.y * 16 + tid.x);                                  \
     }
 
-#define REDUCE_SUM(NAME, T) REDUCE(reduce_sum, Add, NAME, T) GROUPED(reduce_sum, Add, NAME, T)
-#define REDUCE_MAX(NAME, T) REDUCE(reduce_max, Max, NAME, T) GROUPED(reduce_max, Max, NAME, T)
+// reduce_<op>[_grouped]_<dtype> accumulates in the dtype;
+// reduce_sum[_grouped]_<dtype>_f32 (half and bfloat) in float.
+#define REDUCE_SUM(NAME, T) REDUCE(reduce_sum, Add, NAME, T, T) GROUPED(reduce_sum, Add, NAME, T, T)
+#define REDUCE_SUM_F32(NAME, T) \
+    REDUCE(reduce_sum, Add, NAME##_f32, T, float) GROUPED(reduce_sum, Add, NAME##_f32, T, float)
+#define REDUCE_MAX(NAME, T) REDUCE(reduce_max, Max, NAME, T, T) GROUPED(reduce_max, Max, NAME, T, T)
 
+// The generated kernels include the templates alone.
+#ifndef TEMPLATES_ONLY
 FOR_NUMERIC(REDUCE_SUM)
+REDUCE_SUM_F32(f16, half)
+REDUCE_SUM_F32(bf16, bfloat)
 FOR_ALL(REDUCE_MAX)
+#endif
 
 // The input viewed as [A, count, B], reduced over the middle: rows when
 // B = 1 (contiguous), columns otherwise. With few outputs, `count` is split
 // into `chunks` of `chunk` elements reduced in parallel into partials (in
-// the accumulation type), which a second launch reduces (count = chunks).
-// I and O are the input and output element types: T, or the accumulation
-// type for partials.
+// A), which a second launch reduces (count = chunks).
 
 // Threadgroup (p, a) of REDUCE_THREADS reduces chunk p of row a
 // cooperatively, into out[a * chunks + p].
-template <typename Op, typename I, typename O>
-inline void reduce_rows(device const I *in,
-                        device O *out,
+template <typename Op, typename A, typename In>
+inline void reduce_rows(In in,
+                        device A *out,
                         ulong count,
                         ulong chunk,
-                        threadgroup typename acc<I>::type *shared,
+                        threadgroup A *shared,
                         uint3 group,
                         uint chunks,
                         uint t) {
-    typedef typename acc<I>::type A;
     ulong start = ulong(group.x) * chunk, end = start + chunk < count ? start + chunk : count;
-    device const I *row = in + ulong(group.y) * count;
+    ulong row = ulong(group.y) * count;
     // Four independent accumulators keep four loads in flight.
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start + t;
     for (; j + 3 * REDUCE_THREADS < end; j += 4 * REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(row[j]));
-        r1 = Op::apply(r1, A(row[j + REDUCE_THREADS]));
-        r2 = Op::apply(r2, A(row[j + 2 * REDUCE_THREADS]));
-        r3 = Op::apply(r3, A(row[j + 3 * REDUCE_THREADS]));
+        r0 = Op::apply(r0, A(in[row + j]));
+        r1 = Op::apply(r1, A(in[row + j + REDUCE_THREADS]));
+        r2 = Op::apply(r2, A(in[row + j + 2 * REDUCE_THREADS]));
+        r3 = Op::apply(r3, A(in[row + j + 3 * REDUCE_THREADS]));
     }
     for (; j < end; j += REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(row[j]));
+        r0 = Op::apply(r0, A(in[row + j]));
     }
     shared[t] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
     for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {
@@ -162,32 +174,31 @@ inline void reduce_rows(device const I *in,
         }
     }
     if (t == 0) {
-        out[ulong(group.y) * chunks + group.x] = O(shared[0]);
+        out[ulong(group.y) * chunks + group.x] = shared[0];
     }
 }
 
 // Thread i reduces column i % cols of chunk p of batch a, where i / cols =
 // a * chunks + p, stepping `cols` elements a row: neighbouring threads read
 // neighbouring addresses. Writes out[i].
-template <typename Op, typename I, typename O>
-inline void reduce_cols(device const I *in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
-    typedef typename acc<I>::type A;
+template <typename Op, typename A, typename In>
+inline void reduce_cols(In in, device A *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
     uint b = i % cols, ap = i / cols, a = ap / chunks, p = ap % chunks;
     ulong start = ulong(p) * chunk, end = start + chunk < count ? start + chunk : count;
-    device const I *column = in + ulong(a) * count * cols + b;
+    ulong column = ulong(a) * count * cols + b;
     // Four independent accumulators keep four loads in flight.
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start;
     for (; j + 3 < end; j += 4) {
-        r0 = Op::apply(r0, A(column[j * cols]));
-        r1 = Op::apply(r1, A(column[(j + 1) * cols]));
-        r2 = Op::apply(r2, A(column[(j + 2) * cols]));
-        r3 = Op::apply(r3, A(column[(j + 3) * cols]));
+        r0 = Op::apply(r0, A(in[column + j * cols]));
+        r1 = Op::apply(r1, A(in[column + (j + 1) * cols]));
+        r2 = Op::apply(r2, A(in[column + (j + 2) * cols]));
+        r3 = Op::apply(r3, A(in[column + (j + 3) * cols]));
     }
     for (; j < end; ++j) {
-        r0 = Op::apply(r0, A(column[j * cols]));
+        r0 = Op::apply(r0, A(in[column + j * cols]));
     }
-    out[i] = O(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
+    out[i] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
 }
 
 #define ROWS(KERNEL, FN, I, O)                                                                         \
@@ -199,8 +210,8 @@ inline void reduce_cols(device const I *in, device O *out, uint cols, ulong coun
                        uint3 groups [[threadgroups_per_grid]],                                         \
                        uint3 tid [[thread_position_in_threadgroup]],                                   \
                        uint3 size [[threads_per_threadgroup]]) {                                       \
-        threadgroup typename acc<I>::type shared[REDUCE_THREADS];                                      \
-        reduce_rows<FN, I, O>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x); \
+        threadgroup O shared[REDUCE_THREADS];                                      \
+        reduce_rows<FN, O>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x); \
     }
 
 #define COLS(KERNEL, FN, I, O)                                         \
@@ -211,21 +222,26 @@ inline void reduce_cols(device const I *in, device O *out, uint cols, ulong coun
                        constant ulong &chunk [[buffer(4)]],            \
                        constant uint &chunks [[buffer(5)]],            \
                        uint i [[thread_position_in_grid]]) {           \
-        reduce_cols<FN, I, O>(in, out, cols, count, chunk, chunks, i); \
+        reduce_cols<FN, O>(in, out, cols, count, chunk, chunks, i); \
     }
 
-// <op>_<layout>_<dtype> reduces T to T in one launch; the _partial and
-// _final kernels are a split reduction's two launches.
-#define LAYOUTS(OP, FN, NAME, T)                                 \
-    ROWS(OP##_rows_##NAME, FN, T, T)                             \
-    ROWS(OP##_rows_partial_##NAME, FN, T, typename acc<T>::type) \
-    ROWS(OP##_rows_final_##NAME, FN, typename acc<T>::type, T)   \
-    COLS(OP##_cols_##NAME, FN, T, T)                             \
-    COLS(OP##_cols_partial_##NAME, FN, T, typename acc<T>::type) \
-    COLS(OP##_cols_final_##NAME, FN, typename acc<T>::type, T)
+// <op>_<layout>_<dtype> reduces T to T: in one launch, or both of a split
+// reduction's (the partials, then them), accumulating in T.
+#define LAYOUTS(OP, FN, NAME, T)     \
+    ROWS(OP##_rows_##NAME, FN, T, T) \
+    COLS(OP##_cols_##NAME, FN, T, T)
 
 #define SUM_LAYOUTS(NAME, T) LAYOUTS(reduce_sum, Add, NAME, T)
+// Accumulating half and bfloat in float: their first launch (from T),
+// split reductions' second is float's (reduce_sum_<layout>_f32).
+#define SUM_LAYOUTS_F32(NAME, T)                     \
+    ROWS(reduce_sum_rows_##NAME##_f32, Add, T, float) \
+    COLS(reduce_sum_cols_##NAME##_f32, Add, T, float)
 #define MAX_LAYOUTS(NAME, T) LAYOUTS(reduce_max, Max, NAME, T)
 
+#ifndef TEMPLATES_ONLY
 FOR_NUMERIC(SUM_LAYOUTS)
+SUM_LAYOUTS_F32(f16, half)
+SUM_LAYOUTS_F32(bf16, bfloat)
 FOR_ALL(MAX_LAYOUTS)
+#endif

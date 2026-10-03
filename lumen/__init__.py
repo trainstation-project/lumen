@@ -31,7 +31,7 @@ factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
-from lumen import graph, ops, profiler, safetensors
+from lumen import graph, nn, ops, profiler, safetensors
 from lumen.graph import (
     compile,
     exp,
@@ -41,8 +41,9 @@ from lumen.graph import (
     maximum,
     minimum,
     prims,
-    rsqrt,
+    sqrt,
     sigmoid,
+    rms_norm,
     softmax,
     tanh,
     where,
@@ -85,6 +86,7 @@ __all__ = [
     "device",
     "graph",
     "mps",
+    "nn",
     "ops",
     "profiler",
     "safetensors",
@@ -101,5 +103,5 @@ __all__ = [
     "to_numpy", "from_numpy", "from_dlpack",
     # compiled execution
     "compile", "make_graph", "prims",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
+    "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
 ]

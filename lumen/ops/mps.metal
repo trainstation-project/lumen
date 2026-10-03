@@ -10,8 +10,10 @@
 // for dtype-agnostic ones (gather_4, ...). Semantics follow the reference executor
 // (lumen/ops/reference.rs): integers wrap, integer division by zero
 // gives -1, max propagates NaN, float-to-integer conversion saturates (NaN
-// to 0), and half and bfloat compute in float and round once per op. Metal
-// has no float64.
+// to 0), and every op computes in its operands' dtype: half in half,
+// bfloat in bfloat (no bfloat exp, log, sqrt, tanh or logistic: Metal's
+// compute in float, so the graph rejects them, lumen/graph/primitive.rs).
+// Metal has no float64.
 
 #include <metal_stdlib>
 
@@ -20,17 +22,6 @@ using namespace metal;
 // ---------------------------------------------------------------------
 // type traits
 // ---------------------------------------------------------------------
-
-// The type an op computes in: float for the 16-bit floats.
-template <typename T> struct acc {
-    typedef T type;
-};
-template <> struct acc<half> {
-    typedef float type;
-};
-template <> struct acc<bfloat> {
-    typedef float type;
-};
 
 template <typename T> inline bool is_float_t() { return false; }
 template <> inline bool is_float_t<half>() { return true; }
@@ -87,8 +78,10 @@ template <typename D, typename S> inline D from_int(S x) {
     return D(x);
 }
 
-inline float div_op(float x, float y) { return x / y; }
 template <typename A> inline A div_op(A x, A y) {
+    if (is_float_t<A>()) {
+        return x / y;
+    }
     if (y == A(0)) {
         return A(-1);
     }
@@ -98,8 +91,8 @@ template <typename A> inline A div_op(A x, A y) {
     return x / y;
 }
 
-inline float max_op(float x, float y) { return isnan(x) || isnan(y) ? x + y : fmax(x, y); }
-template <typename A> inline A max_op(A x, A y) { return x > y ? x : y; }
+// NaN propagates (x != x for a NaN; false for the other types).
+template <typename A> inline A max_op(A x, A y) { return x != x || y != y ? x + y : (x > y ? x : y); }
 
 // Binary ops shared by elementwise and reduce, as functors.
 struct Add {
@@ -136,23 +129,23 @@ struct Lt {
 };
 
 struct Exp {
-    static float apply(float x) { return exp(x); }
+    template <typename A> static A apply(A x) { return exp(x); }
 };
 
 struct Log {
-    static float apply(float x) { return log(x); }
+    template <typename A> static A apply(A x) { return log(x); }
 };
 
-struct Rsqrt {
-    static float apply(float x) { return rsqrt(x); }
+struct Sqrt {
+    template <typename A> static A apply(A x) { return sqrt(x); }
 };
 
 struct Tanh {
-    static float apply(float x) { return tanh(x); }
+    template <typename A> static A apply(A x) { return tanh(x); }
 };
 
 struct Logistic {
-    static float apply(float x) { return 1.0f / (1.0f + exp(-x)); }
+    template <typename A> static A apply(A x) { return A(1) / (A(1) + exp(-x)); }
 };
 
 // x converted to D: from_float for float sources, from_int for the rest.
@@ -226,4 +219,7 @@ inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint
 
 #define FOR_ALL(X) X(bool, bool) FOR_NUMERIC(X)
 #define FOR_FLOAT(X) X(f16, half) X(bf16, bfloat) X(f32, float)
+// The float dtypes with exp, log, sqrt and tanh: Metal's take and return
+// float for bfloat.
+#define FOR_MATH_FLOAT(X) X(f16, half) X(f32, float)
 #define FOR_BYTES(X) X(1, uchar) X(2, ushort) X(4, uint) X(8, ulong)

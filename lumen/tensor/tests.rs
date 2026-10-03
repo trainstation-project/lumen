@@ -810,3 +810,40 @@ mod meta {
         Tensor::zeros(&[2], meta(DType::F32)).to(Device::Cpu);
     }
 }
+
+mod to_dtype {
+    use crate::tensor::dtype::bf16;
+    use crate::{DType, Device, Tensor};
+
+    /// A conversion as `convert_element_type` converts (floats round,
+    /// integers truncate toward zero), on the tensor's device; the same
+    /// tensor when the dtype does not change; types alone on meta.
+    #[test]
+    fn converts_on_the_tensors_device() {
+        let x = Tensor::from_slice(&[1.0f32, 2.5, -3.7, 1e6], DType::F32);
+        let b = x.to_dtype(DType::BF16).unwrap();
+        assert_eq!(b.dtype(), DType::BF16);
+        let expected: Vec<bf16> = [1.0f32, 2.5, -3.703125, 999424.0]
+            .iter()
+            .map(|&v| bf16::from_f32(v))
+            .collect();
+        assert_eq!(b.to_vec::<bf16>(), expected);
+        assert_eq!(
+            x.to_dtype(DType::I32).unwrap().to_vec::<i32>(),
+            [1, 2, -3, 1_000_000]
+        );
+        assert!(x.to_dtype(DType::F32).unwrap().shares_storage_with(&x));
+        let meta = Tensor::zeros(&[2, 3], Device::Meta)
+            .to_dtype(DType::F16)
+            .unwrap();
+        assert_eq!(
+            (meta.device(), meta.dtype(), meta.shape()),
+            (Device::Meta, DType::F16, &[2, 3][..])
+        );
+        if crate::device::mps::is_available() {
+            let m = x.to(Device::Mps).to_dtype(DType::BF16).unwrap();
+            assert_eq!(m.device(), Device::Mps);
+            assert_eq!(m.to(Device::Cpu).to_vec::<bf16>(), expected);
+        }
+    }
+}

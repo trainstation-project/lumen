@@ -41,6 +41,7 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
         rhs_contracting,
         lhs_batch,
         rhs_batch,
+        ..
     } = p
     else {
         unreachable!("a dot_general")
@@ -78,6 +79,23 @@ pub(crate) fn collapsed(
     Some(out)
 }
 
+/// Whether dot_general `p` of operands of types `operands` can read its
+/// operand `k` in place at `strides` (in elements): if its dimensions
+/// collapse into matmul form at them.
+pub(crate) fn reads_strided(
+    p: &Primitive,
+    operands: [&TensorType; 2],
+    k: usize,
+    strides: &[usize],
+) -> bool {
+    let order = matmul_order(p, operands[0].shape.len(), operands[1].shape.len());
+    let (dims, split) = match k {
+        0 => (&order.lhs, order.lhs_split),
+        _ => (&order.rhs, order.rhs_split),
+    };
+    collapsed(operands[k], strides, dims, split).is_some()
+}
+
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -85,7 +103,7 @@ pub(crate) fn encode(
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let name = step.primitive.name();
+    let name = step.label;
     let order = matmul_order(&step.primitive, lhs.shape.len(), rhs.shape.len());
     // An operand read in place as a view of a larger buffer (a slice) has
     // its strides; any other is contiguous.
@@ -112,9 +130,14 @@ pub(crate) fn encode(
     );
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
+    // Accumulating in the operands' dtype, or float (`matmul_<dtype>_f32`).
+    let float = match out.dtype == lhs.dtype {
+        true => format!("{}", out.dtype),
+        false => format!("{}_{}", lhs.dtype, out.dtype),
+    };
     let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
-        (true, false) => (format!("matmul_{}", out.dtype), FLOAT_TILE),
-        (true, true) => (format!("matmul_small_{}", out.dtype), SMALL_TILE),
+        (true, false) => (format!("matmul_{float}"), FLOAT_TILE),
+        (true, true) => (format!("matmul_small_{float}"), SMALL_TILE),
         (false, _) if out.dtype.size_of() == 8 => (format!("matmul_{}", out.dtype), WIDE_TILE),
         (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
     };

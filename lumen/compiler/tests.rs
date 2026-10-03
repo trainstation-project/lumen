@@ -23,6 +23,7 @@ fn matmul() -> Primitive {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     }
 }
 

@@ -17,7 +17,7 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     let (x, out) = (&step.inputs[0].1, &step.output.1);
     let xs = contiguous_strides(&x.shape);
-    let (width, name) = (out.dtype.size_of(), step.primitive.name());
+    let (width, name) = (out.dtype.size_of(), step.label);
     let strides = match &step.primitive {
         Reshape { .. } => {
             return gather(width, &[out.numel()], &[1], inputs[0], output, keep, name);

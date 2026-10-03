@@ -448,6 +448,24 @@ impl Tensor {
         recorded(op, self.copy_to(device))
     }
 
+    /// This tensor's elements converted to `dtype`, in new storage on its
+    /// device (PyTorch: `Tensor.to(dtype)`), as the `convert_element_type`
+    /// primitive converts them: a one-step graph, compiled for the device
+    /// and run on its kernels. Itself if it is already `dtype`.
+    pub fn to_dtype(&self, dtype: DType) -> Result<Self, String> {
+        if dtype == self.dtype {
+            return Ok(self.clone());
+        }
+        let mut g = crate::graph::Graph::new();
+        let x = g.input(self.ty());
+        let convert = crate::graph::Primitive::ConvertElementType { new_dtype: dtype };
+        let y = g.apply(convert, &[x])?;
+        g.set_outputs(&[y])?;
+        let device = self.device();
+        let plan = crate::compiler::compile(&g, device)?;
+        Ok(plan.run_on(std::slice::from_ref(self), device)?.remove(0))
+    }
+
     /// [`to`](Self::to) without the profiler record: the storage range the
     /// view covers, copied to fresh storage on `device` with the copy ops
     /// (through the host between two devices).
@@ -611,8 +629,13 @@ impl Tensor {
                 src.dtype, src.shape, self.dtype, self.shape
             ));
         }
-        if self.device() == Device::Meta || src.device() == Device::Meta {
+        if src.device() == Device::Meta {
             return Err("copy_: meta tensors have no data".into());
+        }
+        if self.device() == Device::Meta {
+            // A placed parameter: into its memory.
+            self.copy_into_placements(src)?;
+            return Ok(self);
         }
         let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
         if self.is_contiguous() {

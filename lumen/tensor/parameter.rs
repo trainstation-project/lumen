@@ -1,10 +1,11 @@
-//! Parameters: meta tensors whose memory a compiled function places on its
-//! device (`lumen.compile`), never the caller. A parameter is placed the
-//! first time a compiled function uses it there, and every compiled function
-//! using it reads that placement, so they share it. Parameters the compiler
-//! wants side by side (dots it merges) are placed together, as one block
-//! ([`Tensor::pack`]). Placed memory starts zeroed; the caller copies the
-//! data in (`copy_`).
+//! Parameters: meta tensors a compiled function closes over (its weights),
+//! whose memory it places on its device (`lumen.compile`), never the
+//! caller. A parameter is placed when the first compiled function using it
+//! compiles there, and every compiled function using it reads that
+//! placement, so they share it. Parameters the compiler wants side by side
+//! (dots it merges) are placed together, as one block ([`Tensor::pack`]).
+//! Placed memory starts zeroed; `copy_` into the parameter writes its data
+//! there ([`Tensor::copy_into_placements`]).
 //!
 //! A parameter is a whole meta tensor: contiguous, over all of its storage
 //! (what the factories and safetensors give).
@@ -122,6 +123,20 @@ impl Tensor {
             start += n;
         }
         Ok(Some(block))
+    }
+
+    /// Copy `src` into this parameter's memory on every device it is placed
+    /// on (its part of a block, if packed into one).
+    pub(crate) fn copy_into_placements(&self, src: &Tensor) -> Result<(), String> {
+        let placed = self.storage().parameter.placed.lock();
+        let placed = placed.unwrap_or_else(PoisonError::into_inner).clone();
+        if !self.is_parameter() || placed.is_empty() {
+            return Err("copy_: a meta tensor has no memory until a compiled function using it compiles: compile it first (call it on meta tensors)".into());
+        }
+        for p in &placed {
+            p.tensor.copy_(src)?;
+        }
+        Ok(())
     }
 
     fn placement(&self, device: Device) -> Option<Placement> {

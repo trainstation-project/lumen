@@ -20,6 +20,10 @@ pub enum Buffer {
     Output(usize),
     /// The bytes at this offset in the workspace.
     Workspace(usize),
+    /// The caller's input `i`, a scalar a kernel takes by value (a runtime
+    /// scalar, [`PlanOptions::scalars`]): read on the host when its steps
+    /// are encoded, never copied to the device.
+    Scalar(usize),
 }
 
 impl fmt::Display for Buffer {
@@ -28,6 +32,7 @@ impl fmt::Display for Buffer {
             Buffer::Input(i) => write!(f, "in{i}"),
             Buffer::Output(i) => write!(f, "out{i}"),
             Buffer::Workspace(offset) => write!(f, "ws+{offset}"),
+            Buffer::Scalar(i) => write!(f, "s{i}"),
         }
     }
 }
@@ -46,11 +51,17 @@ pub struct View {
 #[derive(Debug, Clone)]
 pub struct Step {
     pub primitive: Primitive,
+    /// What the profiler and the graph page call it: its primitive's name,
+    /// unless the compiler names it (a merged dot, `3x dot_general`).
+    pub label: &'static str,
     pub inputs: Vec<(Buffer, TensorType)>,
     /// Each input's view of its buffer, if it reads one (else the whole
     /// buffer, contiguous).
     pub views: Vec<Option<View>>,
     pub output: (Buffer, TensorType),
+    /// A multi-output fusion's other outputs, in order (its
+    /// [`Primitive::FusionOutput`]s, which have no steps).
+    pub extra_outputs: Vec<(Buffer, TensorType)>,
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
@@ -83,6 +94,11 @@ pub struct PlanOptions {
     /// strides ([`Step::views`]). The device compiler picks them: slices
     /// read only by kernels that take strided operands.
     pub views: Vec<Var>,
+    /// Inputs passed to the kernels reading them by value (one-element
+    /// runtime scalars: `lumen.compile`'s floats): [`Buffer::Scalar`], no
+    /// memory of their own. The device compiler picks them: inputs only
+    /// kernels taking scalars by value read.
+    pub scalars: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +153,7 @@ impl Plan {
             }
         }
         let is_view = |v: Var| view[v].is_some();
+        let is_fusion_output = |p: &Primitive| matches!(p, Primitive::FusionOutput { .. });
 
         let mut live = vec![false; n];
         for &v in graph.outputs() {
@@ -153,7 +170,10 @@ impl Plan {
             .nodes()
             .iter()
             .filter(|node| {
-                live[node.output] && !is_reshape(&node.primitive) && !is_view(node.output)
+                live[node.output]
+                    && !is_reshape(&node.primitive)
+                    && !is_view(node.output)
+                    && !is_fusion_output(&node.primitive)
             })
             .collect();
 
@@ -161,7 +181,9 @@ impl Plan {
         let is_parameter = |i: usize| owned.is_none_or(|p| p[i]);
         let mut buffer: Vec<Option<Buffer>> = vec![None; n];
         for (i, &v) in graph.inputs().iter().enumerate() {
-            if is_parameter(i) {
+            if options.scalars.contains(&i) {
+                buffer[v] = Some(Buffer::Scalar(i));
+            } else if is_parameter(i) {
                 buffer[v] = Some(Buffer::Input(i));
             }
         }
@@ -188,6 +210,17 @@ impl Plan {
         }
         for &(_, v) in &copies {
             last[root[v]] = nodes.len();
+        }
+        // A fusion's other outputs are written by its step, its output's
+        // first; each its own value (`root`), read by later steps.
+        let mut extra: Vec<Vec<(usize, Var)>> = vec![Vec::new(); n];
+        for node in graph.nodes().iter().filter(|n| live[n.output]) {
+            if let Primitive::FusionOutput { index, .. } = node.primitive {
+                let fusion = node.inputs[0];
+                first[node.output] = first[root[fusion]];
+                last[node.output] = last[node.output].max(first[node.output]);
+                extra[fusion].push((index, node.output));
+            }
         }
         if owned.is_some() {
             // Inputs are copied in before the first step; outputs are read
@@ -300,9 +333,15 @@ impl Plan {
             .zip(scratch_at)
             .map(|(node, scratch)| Step {
                 primitive: node.primitive.clone(),
+                label: node.primitive.name(),
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
                 views: node.inputs.iter().map(|&v| view[v].clone()).collect(),
                 output: slot(node.output),
+                extra_outputs: {
+                    let mut outputs = extra[node.output].clone();
+                    outputs.sort_unstable();
+                    outputs.into_iter().map(|(_, v)| slot(v)).collect()
+                },
                 scratch,
             })
             .collect();
@@ -311,9 +350,11 @@ impl Plan {
                 primitive: Primitive::Reshape {
                     new_sizes: ty(v).shape,
                 },
+                label: "reshape",
                 inputs: vec![slot(v)],
                 views: vec![view[v].clone()],
                 output: (Buffer::Output(k), ty(v)),
+                extra_outputs: Vec::new(),
                 scratch: None,
             });
         }
@@ -331,6 +372,12 @@ impl Plan {
 
     pub fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    /// The steps, for a graph compiler to name ([`Step::label`]).
+    #[cfg(lumen_mps_linked)]
+    pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
+        &mut self.steps
     }
 
     pub fn workspace_bytes(&self) -> usize {
@@ -425,8 +472,10 @@ impl Plan {
         run.outputs(|| self.outputs.clone());
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
-        // A parameter read in place; contiguous if a step reads it (a packed
-        // one, a view of its block, is read as the block).
+        // A parameter is read in place: as it is if contiguous, or if every
+        // step reading it takes it at its strides (a parameter packed into a
+        // block another plan merged dots over is a strided view of it);
+        // else a contiguous copy.
         let read = |i: usize| {
             let at = Buffer::Input(i);
             self.outputs_at.contains(&at)
@@ -447,13 +496,17 @@ impl Plan {
                     view(offset, ty).copy_(t)?;
                     params.push(t.clone());
                 }
+                // Read on the host as its steps are encoded.
+                Buffer::Scalar(_) => params.push(t.to(Device::Cpu)),
                 _ if t.device() != device => {
                     return Err(format!(
                         "parameters must be on {device}, got {}",
                         t.device()
                     ));
                 }
-                _ if !read(i) => params.push(t.clone()),
+                _ if !read(i) || t.is_contiguous() || self.reads_strided(i, t.strides()) => {
+                    params.push(t.clone())
+                }
                 _ => params.push(dispatch_dtype!(t.dtype(), T => t.contiguous::<T>())),
             }
         }
@@ -464,10 +517,43 @@ impl Plan {
             .zip(&self.outputs)
             .map(|(at, ty)| match *at {
                 Buffer::Workspace(offset) => view(offset, ty),
-                Buffer::Input(i) => params[i].clone(),
+                Buffer::Input(i) | Buffer::Scalar(i) => params[i].clone(),
                 Buffer::Output(_) => unreachable!("an owned plan has no output buffers"),
             })
             .collect())
+    }
+
+    /// Whether every step reading parameter `i` reads it in place at
+    /// `strides` (dots in matmul form, on MPS), so that a strided one needs
+    /// no copy.
+    fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {
+        #[cfg(lumen_mps_linked)]
+        {
+            let at = Buffer::Input(i);
+            !self.outputs_at.contains(&at)
+                && self.steps.iter().all(|s| {
+                    let operands = s.inputs.iter().zip(&s.views).enumerate();
+                    let mut reads = operands.filter(|(_, ((b, _), _))| *b == at);
+                    reads.all(|(k, (_, view))| {
+                        let Primitive::DotGeneral { .. } = s.primitive else {
+                            return false;
+                        };
+                        let operands = [&s.inputs[0].1, &s.inputs[1].1];
+                        view.is_none()
+                            && crate::ops::dot_general::mps::reads_strided(
+                                &s.primitive,
+                                operands,
+                                k,
+                                strides,
+                            )
+                    })
+                })
+        }
+        #[cfg(not(lumen_mps_linked))]
+        {
+            let _ = (i, strides);
+            false
+        }
     }
 
     /// Check `inputs` against the plan's input types.
@@ -525,7 +611,7 @@ impl Plan {
         workspace: &Tensor,
     ) -> Result<(), String> {
         let tensor = |buffer: Buffer| match buffer {
-            Buffer::Input(i) => &inputs[i],
+            Buffer::Input(i) | Buffer::Scalar(i) => &inputs[i],
             Buffer::Output(i) => &outputs[i],
             Buffer::Workspace(_) => workspace,
         };
@@ -545,11 +631,37 @@ impl Plan {
             return Err("operands read as views run on MPS only".into());
         }
         for step in &self.steps {
-            let mut record = crate::profiler::record_op(step.primitive.name(), || {
+            // A strided input (a parameter [`run_in`](Self::run_in) reads in
+            // place) is read as a view at its strides.
+            let strided = |&(b, _): &(Buffer, TensorType)| match b {
+                Buffer::Input(i) if !inputs[i].is_contiguous() => Some(i),
+                _ => None,
+            };
+            let with_views;
+            let step = if step.inputs.iter().any(|s| strided(s).is_some()) {
+                let mut s = step.clone();
+                for (k, input) in step.inputs.iter().enumerate() {
+                    if let Some(i) = strided(input) {
+                        let strides = inputs[i].strides().to_vec();
+                        s.views[k] = Some(View { offset: 0, strides });
+                    }
+                }
+                with_views = s;
+                &with_views
+            } else {
+                step
+            };
+            let mut record = crate::profiler::record_op(step.label, || {
                 step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
             });
-            record.outputs(|| vec![step.output.1.clone()]);
-            // A view's first element is past its buffer's.
+            record.outputs(|| {
+                let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
+                std::iter::once(step.output.1.clone())
+                    .chain(extra)
+                    .collect()
+            });
+            // A view's first element is past its buffer's; a multi-output
+            // fusion's other outputs follow its inputs.
             let args: Vec<*const u8> = step
                 .inputs
                 .iter()
@@ -558,6 +670,7 @@ impl Plan {
                     let at = v.as_ref().map_or(0, |v| v.offset * s.1.dtype.size_of());
                     pointer(s).cast_const().wrapping_add(at)
                 })
+                .chain(step.extra_outputs.iter().map(|s| pointer(s).cast_const()))
                 .collect();
             let out = pointer(&step.output);
             let scratch = step.scratch.map_or(std::ptr::null_mut(), |(offset, _)| {
@@ -570,6 +683,7 @@ impl Plan {
                         .inputs
                         .iter()
                         .chain([&step.output])
+                        .chain(&step.extra_outputs)
                         .map(|&(b, _)| tensor(b).clone())
                         .collect();
                     if step.scratch.is_some() {
@@ -605,7 +719,11 @@ impl fmt::Display for Plan {
         write!(f, "plan (workspace {} bytes)", self.workspace_bytes)?;
         for step in &self.steps {
             let (out, ty) = &step.output;
-            write!(f, "\n    {out}:{ty} = {}", step.primitive)?;
+            write!(f, "\n    {out}:{ty}")?;
+            for (b, ty) in &step.extra_outputs {
+                write!(f, ", {b}:{ty}")?;
+            }
+            write!(f, " = {}", step.primitive)?;
             for ((b, _), v) in step.inputs.iter().zip(&step.views) {
                 write!(f, " {b}")?;
                 if let Some(View { offset, strides }) = v {
@@ -637,7 +755,7 @@ fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
                 | Neg
                 | Exp
                 | Log
-                | Rsqrt
+                | Sqrt
                 | Tanh
                 | Logistic
                 | ConvertElementType { .. }

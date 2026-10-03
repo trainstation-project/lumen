@@ -507,14 +507,29 @@ impl PyTensor {
         }))
     }
 
-    /// This tensor on `device` (a string or `lumen.device`); returns a view
-    /// of the same storage if it is already there (PyTorch: `Tensor.to`).
-    fn to(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let device = resolve_device(Some(device))?;
-        if device != core::Device::Meta {
-            has_data(&self.inner)?;
+    /// This tensor converted to `dtype` and/or on `device` (PyTorch:
+    /// `Tensor.to`). Returns a view of the same storage if nothing changes;
+    /// a conversion (as `convert_element_type` converts: floats round,
+    /// integers truncate) runs on the tensor's device, before any move.
+    #[pyo3(signature = (device = None, dtype = None))]
+    fn to(&self, device: Option<&Bound<'_, PyAny>>, dtype: Option<&str>) -> PyResult<Self> {
+        let device = device.map(|d| resolve_device(Some(d))).transpose()?;
+        let mut t = self.inner.clone();
+        if let Some(dtype) = dtype {
+            if t.device() != core::Device::Meta {
+                has_data(&t)?;
+            }
+            t = t
+                .to_dtype(parse_dtype(dtype)?)
+                .map_err(PyRuntimeError::new_err)?;
         }
-        Ok(Self::wrap(self.inner.to(device)))
+        if let Some(device) = device.filter(|&d| d != t.device()) {
+            if device != core::Device::Meta {
+                has_data(&t)?;
+            }
+            t = t.to(device);
+        }
+        Ok(Self::wrap(t))
     }
 
     /// Set every element to `value` in place and return the tensor

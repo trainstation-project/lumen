@@ -1,6 +1,7 @@
 use super::Primitive::*;
 use super::{Graph, Primitive, TensorType};
 use crate::ops::reference;
+use crate::tensor::dtype::bf16;
 use crate::{DType, Scalar, Tensor};
 
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
@@ -27,6 +28,12 @@ fn elementwise_is_strict() {
     assert!(infer(Add, &[x.clone(), ty(DType::F32, &[3])]).is_err());
     assert!(infer(Add, &[x.clone(), ty(DType::F16, &[2, 3])]).is_err());
     assert!(infer(Exp, &[ty(DType::I32, &[2])]).is_err());
+    // Nothing computes bfloat16 math as traced: convert it first.
+    for p in [Exp, Log, Sqrt, Tanh, Logistic, Softmax { axis: 0 }] {
+        let e = infer(p, &[ty(DType::BF16, &[2])]).unwrap_err();
+        assert!(e.contains("convert to float32"), "{e}");
+    }
+    assert!(infer(Neg, &[ty(DType::BF16, &[2])]).is_ok());
     assert!(infer(Add, &[ty(DType::Bool, &[2]), ty(DType::Bool, &[2])]).is_err());
     assert!(infer(Add, &[x]).is_err());
 }
@@ -80,12 +87,44 @@ fn concatenate_rules() {
 }
 
 #[test]
+fn softmax_rules() {
+    let x = ty(DType::F16, &[3, 5]);
+    let y = infer(Softmax { axis: 1 }, std::slice::from_ref(&x)).unwrap();
+    assert_eq!(y, x);
+    assert!(infer(Softmax { axis: 2 }, std::slice::from_ref(&x)).is_err());
+    assert!(infer(Softmax { axis: 0 }, &[ty(DType::I32, &[3])]).is_err());
+}
+
+#[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
-    let sum = ReduceSum { axes: vec![0, 2] };
+    let sum = ReduceSum {
+        axes: vec![0, 2],
+        accum_dtype: DType::F32,
+    };
     assert_eq!(infer(sum, std::slice::from_ref(&x)).unwrap().shape, [3]);
     assert!(infer(ReduceMax { axes: vec![3] }, std::slice::from_ref(&x)).is_err());
     assert!(infer(ReduceMax { axes: vec![1, 1] }, &[x]).is_err());
+    // A sum accumulates in its accum_dtype, its result's: the operand's,
+    // or float32 for narrower floats.
+    let sum = |accum_dtype| ReduceSum {
+        axes: vec![0],
+        accum_dtype,
+    };
+    let wide = infer(sum(DType::F32), &[ty(DType::BF16, &[4])]).unwrap();
+    assert_eq!(wide.dtype, DType::F32);
+    for (d, accum) in [
+        (DType::F32, DType::F16),
+        (DType::F32, DType::F64),
+        (DType::I8, DType::I32),
+    ] {
+        let e = infer(sum(accum), &[ty(d, &[4])]).unwrap_err();
+        assert!(e.contains("accum_dtype"), "{e}");
+    }
+    assert_eq!(
+        sum(DType::F32).to_string(),
+        "reduce_sum[axes=(0,) accum_dtype=f32]"
+    );
 }
 
 #[test]
@@ -96,10 +135,64 @@ fn dot_general_shape() {
         rhs_contracting: vec![1],
         lhs_batch: vec![0],
         rhs_batch: vec![0],
+        accum_dtype: DType::F32,
     };
     let (l, r) = (ty(DType::F32, &[5, 2, 3]), ty(DType::F32, &[5, 3, 4]));
     assert_eq!(infer(p.clone(), &[l.clone(), r]).unwrap().shape, [5, 2, 4]);
     assert!(infer(p, &[l.clone(), ty(DType::F32, &[5, 2, 4])]).is_err());
+}
+
+#[test]
+fn dot_general_accumulates_in_accum_dtype() {
+    let dot = |accum_dtype| DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype,
+    };
+    let operands = |d| [ty(d, &[2, 3]), ty(d, &[3, 4])];
+    // The result is of accum_dtype: the operands', or float32 for 16-bit
+    // floats; nothing else.
+    for (d, accum) in [
+        (DType::F32, DType::F32),
+        (DType::BF16, DType::BF16),
+        (DType::BF16, DType::F32),
+        (DType::F16, DType::F32),
+        (DType::I32, DType::I32),
+    ] {
+        assert_eq!(infer(dot(accum), &operands(d)).unwrap().dtype, accum);
+    }
+    for (d, accum) in [
+        (DType::F32, DType::F16),
+        (DType::F32, DType::F64),
+        (DType::BF16, DType::F16),
+        (DType::I8, DType::I32),
+    ] {
+        let e = infer(dot(accum), &operands(d)).unwrap_err();
+        assert!(e.contains("accum_dtype"), "{e}");
+    }
+    assert_eq!(
+        dot(DType::F32).to_string(),
+        "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32]"
+    );
+    // Each product and partial sum rounded to it: bfloat16 holds 1 + 2^-8
+    // as 1 (an addition lost), float32 does not.
+    let x = Tensor::from_slice(
+        &[bf16::from_f32(1.0), bf16::from_f32(1.0 / 256.0)],
+        DType::BF16,
+    )
+    .reshape(&[1, 2]);
+    let y = Tensor::from_slice(&[bf16::from_f32(1.0), bf16::from_f32(1.0)], DType::BF16)
+        .reshape(&[2, 1]);
+    assert_eq!(
+        run(dot(DType::BF16), &[x.clone(), y.clone()]).to_vec::<bf16>(),
+        [bf16::from_f32(1.0)]
+    );
+    assert_eq!(
+        run(dot(DType::F32), &[x, y]).to_vec::<f32>(),
+        [1.0 + 1.0 / 256.0]
+    );
 }
 
 #[test]
@@ -128,11 +221,19 @@ fn layout_primitives() {
 fn display_is_jaxpr_like() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[2, 3]));
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[x]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[x],
+        )
+        .unwrap();
     g.set_outputs(&[s]).unwrap();
     assert_eq!(
         g.to_string(),
-        "{ lambda %0:f32[2,3]. let\n    %1:f32[2] = reduce_sum[axes=(1,)] %0\n  in (%1) }"
+        "{ lambda %0:f32[2,3]. let\n    %1:f32[2] = reduce_sum[axes=(1,) accum_dtype=f32] %0\n  in (%1) }"
     );
     assert!(g.apply(Neg, &[7]).is_err());
 }
@@ -165,7 +266,15 @@ fn softmax_graph() {
     let m = g.apply(bcast.clone(), &[m]).unwrap();
     let e = g.apply(Sub, &[x, m]).unwrap();
     let e = g.apply(Exp, &[e]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     let s = g.apply(bcast, &[s]).unwrap();
     let y = g.apply(Div, &[e, s]).unwrap();
     g.set_outputs(&[y]).unwrap();
@@ -190,6 +299,7 @@ fn dot_general_values() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::I32,
     };
     let y = run(p, &[l, r]);
     assert_eq!(y.shape(), [2, 2]);
@@ -302,6 +412,7 @@ pub(crate) fn mlp() -> Graph {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let h = g.apply(matmul.clone(), &[x, w1]).unwrap();
     let zero = Full {
@@ -328,7 +439,15 @@ pub(crate) fn mlp() -> Graph {
     let m = g.apply(bcast.clone(), &[m]).unwrap();
     let e = g.apply(Sub, &[z, m]).unwrap();
     let e = g.apply(Exp, &[e]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     let s = g
         .apply(
             Reshape {
@@ -428,6 +547,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         donate: vec![0],
         parameters: None,
         views: Vec::new(),
+        scalars: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -493,6 +613,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
             donate: vec![0],
             parameters: None,
             views: Vec::new(),
+            scalars: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -509,7 +630,15 @@ fn kernel_scratch_is_placed_in_the_workspace() {
     let mut g = Graph::new();
     let x = g.input(TensorType::new(DType::F32, &[4, 64]));
     let e = g.apply(Exp, &[x]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     g.set_outputs(&[s]).unwrap();
     let options = super::PlanOptions {
         scratch: Some(|p, _, _| {
@@ -522,6 +651,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         donate: Vec::new(),
         parameters: None,
         views: Vec::new(),
+        scalars: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];
@@ -613,21 +743,42 @@ pub(crate) mod mps {
         })
     }
 
+    /// Values of 16-bit float `dtype` that sum exactly in it in any order:
+    /// -1, 0 or 1, one element in `period` nonzero (a sum of up to 128 of
+    /// them a sum of about 128 at most: integers both 16-bit floats hold).
+    /// They accumulate in their dtype, so another order than the
+    /// reference's rounds differently; on these, no order rounds.
+    pub(crate) fn exact_values(dtype: DType, shape: &[usize], seed: u64, period: usize) -> Tensor {
+        let x = data(shape, seed).to_vec::<f32>();
+        let v: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &f)| match i % period {
+                0 => (f / 2.0).round() as f64,
+                _ => 0.0,
+            })
+            .collect();
+        dispatch_dtype!(dtype, T => {
+            let v: Vec<T> = v.iter().map(|&f| T::from_scalar(Scalar::Float(f))).collect();
+            Tensor::from_slice(&v, dtype).reshape(shape)
+        })
+    }
+
     fn as_f64(t: &Tensor) -> Vec<f64> {
         dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
     }
 
     /// The graph compiled for MPS (fused, `crate::compiler::mps`) agrees
     /// with the reference on the CPU: exactly for integers and bools, within
-    /// the dtype's rounding for floats (Metal computes in float, the
-    /// reference in double).
+    /// the dtype's rounding for floats (Metal's math functions and the
+    /// reference's, in double, differ in the last place).
     pub(crate) fn check(g: &Graph, inputs: &[Tensor]) {
         check_within(g, inputs, 0.0);
     }
 
     /// [`check`], allowing floats a further `slack` of absolute error: the
     /// float accumulation error of a large sum.
-    fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
+    pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
         let plan = crate::compiler::compile(g, Device::Mps).unwrap();
@@ -657,12 +808,29 @@ pub(crate) mod mps {
     fn check_node_within(p: Primitive, types: &[TensorType], slack: f64) {
         let mut g = Graph::new();
         let vars: Vec<_> = types.iter().map(|ty| g.input(ty.clone())).collect();
-        let out = g.apply(p, &vars).unwrap();
+        let out = g.apply(p.clone(), &vars).unwrap();
         g.set_outputs(&[out]).unwrap();
+        // A 16-bit float sum or dot: on values it sums exactly.
+        let count: Option<usize> = match &p {
+            ReduceSum { axes, .. } => Some(axes.iter().map(|&d| types[0].shape[d]).product()),
+            DotGeneral {
+                lhs_contracting, ..
+            } => Some(lhs_contracting.iter().map(|&d| types[0].shape[d]).product()),
+            _ => None,
+        };
+        let exact = count.filter(|_| matches!(types[0].dtype, DType::F16 | DType::BF16));
         let inputs: Vec<Tensor> = types
             .iter()
             .enumerate()
-            .map(|(i, ty)| values(ty.dtype, &ty.shape, i as u64 + 1))
+            .map(|(i, ty)| match exact {
+                Some(count) => exact_values(
+                    ty.dtype,
+                    &ty.shape,
+                    i as u64 + 1,
+                    count.div_ceil(128).max(1),
+                ),
+                None => values(ty.dtype, &ty.shape, i as u64 + 1),
+            })
             .collect();
         check_within(&g, &inputs, slack);
     }
@@ -702,8 +870,9 @@ pub(crate) mod mps {
                 check_node(p, &two);
             }
             check_node(Neg, std::slice::from_ref(&x));
-            if dtype.is_float() {
-                for p in [Exp, Log, Rsqrt, Tanh, Logistic] {
+            // No bfloat16 kernels for these (graph rejects them).
+            if dtype.is_float() && dtype != DType::BF16 {
+                for p in [Exp, Log, Sqrt, Tanh, Logistic] {
                     check_node(p, std::slice::from_ref(&x));
                 }
             }
@@ -728,6 +897,27 @@ pub(crate) mod mps {
             let y = g.apply(ConvertElementType { new_dtype: to }, &[x]).unwrap();
             g.set_outputs(&[y]).unwrap();
             check(&g, std::slice::from_ref(&f));
+        }
+    }
+
+    /// 16-bit float dots accumulating in float32 (`matmul_<dtype>_f32`),
+    /// large and small tiles.
+    #[test]
+    fn widened_contractions() {
+        if !available() {
+            return;
+        }
+        for dtype in [DType::F16, DType::BF16] {
+            for (m, k, n) in [(37, 45, 29), (300, 70, 200)] {
+                let dot = DotGeneral {
+                    lhs_contracting: vec![1],
+                    rhs_contracting: vec![0],
+                    lhs_batch: vec![],
+                    rhs_batch: vec![],
+                    accum_dtype: DType::F32,
+                };
+                check_node(dot, &[ty(dtype, &[m, k]), ty(dtype, &[k, n])]);
+            }
         }
     }
 
@@ -761,11 +951,23 @@ pub(crate) mod mps {
                 check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
                 if dtype != DType::Bool {
                     // float32 accumulation error: about 1e-7 of the sum of
-                    // |x|, at most 4 an element.
+                    // |x|, at most 4 an element (16-bit floats sum exactly
+                    // representable values, check_node_within).
                     let count: usize = axes.iter().map(|&d| shape[d]).product();
                     let slack = 1e-6 * 4.0 * count as f64;
-                    let sum = ReduceSum { axes: axes.clone() };
+                    let sum = ReduceSum {
+                        axes: axes.clone(),
+                        accum_dtype: dtype,
+                    };
                     check_node_within(sum, std::slice::from_ref(&x), slack);
+                    // 16-bit floats accumulated in float32: on any values.
+                    if matches!(dtype, DType::F16 | DType::BF16) {
+                        let wide = ReduceSum {
+                            axes: axes.clone(),
+                            accum_dtype: DType::F32,
+                        };
+                        check_node_within(wide, std::slice::from_ref(&x), slack);
+                    }
                 }
             }
         }
@@ -781,7 +983,13 @@ pub(crate) mod mps {
             for axes in [vec![1], vec![0, 2], vec![0, 1, 2], vec![]] {
                 check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
                 if dtype != DType::Bool {
-                    check_node(ReduceSum { axes }, std::slice::from_ref(&x));
+                    check_node(
+                        ReduceSum {
+                            axes,
+                            accum_dtype: dtype,
+                        },
+                        std::slice::from_ref(&x),
+                    );
                 }
             }
             if dtype == DType::Bool {
@@ -793,6 +1001,7 @@ pub(crate) mod mps {
                 rhs_contracting: vec![1],
                 lhs_batch: vec![0],
                 rhs_batch: vec![0],
+                accum_dtype: dtype,
             };
             check_node(batched, &[ty(dtype, &[3, 2, 5]), ty(dtype, &[3, 5, 4])]);
             let two = DotGeneral {
@@ -800,6 +1009,7 @@ pub(crate) mod mps {
                 rhs_contracting: vec![2, 0],
                 lhs_batch: vec![],
                 rhs_batch: vec![],
+                accum_dtype: dtype,
             };
             check_node(two, &[ty(dtype, &[3, 2, 4]), ty(dtype, &[4, 5, 3])]);
             // The tiled kernel: sizes that are not multiples of its tiles,
@@ -809,6 +1019,7 @@ pub(crate) mod mps {
                 rhs_contracting: vec![rc],
                 lhs_batch: batch.clone(),
                 rhs_batch: batch,
+                accum_dtype: dtype,
             };
             check_node(
                 dot(1, 0, vec![]),
@@ -872,6 +1083,14 @@ pub(crate) mod mps {
                     limit_indices: limit.to_vec(),
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
+            }
+            // Softmax over the last dimension: rows shorter and longer than
+            // a threadgroup, one element, none.
+            if matches!(dtype, DType::F16 | DType::F32) {
+                for shape in [vec![4, 7], vec![3, 1000], vec![2, 3, 1], vec![0, 5]] {
+                    let axis = shape.len() - 1;
+                    check_node(Softmax { axis }, &[ty(dtype, &shape)]);
+                }
             }
             // Each dimension, operands of different sizes (one empty).
             for dimension in 0..3 {

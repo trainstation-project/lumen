@@ -5,12 +5,11 @@
 // `U` is the result's element type: T, or bool for comparisons.
 template <typename Op, typename T, typename U>
 inline void binary(device const T *a, device const T *b, device U *out, uint i) {
-    typedef typename acc<T>::type A;
-    out[i] = U(Op::apply(A(a[i]), A(b[i])));
+    out[i] = Op::apply(a[i], b[i]);
 }
 
 template <typename Op, typename T> inline void unary(device const T *in, device T *out, uint i) {
-    out[i] = T(Op::apply(float(in[i])));
+    out[i] = Op::apply(in[i]);
 }
 
 #define BINARY(OP, FN, NAME, T, U)                                 \
@@ -37,8 +36,7 @@ FOR_ALL(ORDERED)
 
 #define NEG(NAME, T)                                                                                            \
     kernel void neg_##NAME(device const T *x [[buffer(0)]], device T *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \
-        typedef typename acc<T>::type A;                                                                        \
-        FOR_EACH_ELEMENT(j, T) { out[j] = T(-A(x[j])); }                                                        \
+        FOR_EACH_ELEMENT(j, T) { out[j] = T(-x[j]); }                                                           \
     }
 
 FOR_NUMERIC(NEG)
@@ -48,14 +46,14 @@ FOR_NUMERIC(NEG)
         FOR_EACH_ELEMENT(j, T) { unary<FN, T>(in, out, j); }                                                      \
     }
 
-#define FLOATING(NAME, T)        \
-    UNARY(exp, Exp, NAME, T)     \
-    UNARY(log, Log, NAME, T)     \
-    UNARY(rsqrt, Rsqrt, NAME, T) \
-    UNARY(tanh, Tanh, NAME, T)   \
+#define FLOATING(NAME, T)      \
+    UNARY(exp, Exp, NAME, T)   \
+    UNARY(log, Log, NAME, T)   \
+    UNARY(sqrt, Sqrt, NAME, T) \
+    UNARY(tanh, Tanh, NAME, T) \
     UNARY(logistic, Logistic, NAME, T)
 
-FOR_FLOAT(FLOATING)
+FOR_MATH_FLOAT(FLOATING)
 
 #define CONVERT(SNAME, S, DNAME, D)                                                           \
     kernel void convert_##SNAME##_##DNAME(                                                    \

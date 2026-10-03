@@ -1,7 +1,8 @@
+use super::codegen::metal_type;
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
-use crate::graph::tests::mps::{available, check, values};
+use crate::graph::tests::mps::{available, check, check_within, exact_values, values};
 use crate::graph::tests::{data, mlp};
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::ops::reference;
@@ -11,8 +12,12 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
+/// `g` fused as the MPS compiler fuses it (its RMS norms one row kernel
+/// each, `rms_norm.rs`).
 fn fuse(g: &Graph) -> Graph {
-    fusion::fuse(g, |body| codegen::kernel(body).0)
+    fusion::fuse(g, &super::rms_norm::rms_norms(g), &[], |body, by_value| {
+        codegen::kernel(body, by_value).0
+    })
 }
 
 /// The fused graph's primitives, after checking it computes exactly what
@@ -79,8 +84,9 @@ fn fuses_elementwise_and_layout_chains() {
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
-    // relu's max and its zero; softmax's broadcast max, sub and exp; then
-    // its broadcast sum and divide.
+    // relu's max and its zero; softmax's max; its broadcast max, sub and
+    // exp with the sum, which writes the exp too; then its broadcast sum and
+    // divide.
     assert_eq!(
         fused_primitives(&mlp(), &inputs),
         [
@@ -89,7 +95,7 @@ fn reductions_and_contractions_are_boundaries() {
             "dot_general",
             "reduce_max",
             "fusion",
-            "reduce_sum",
+            "fusion_output",
             "fusion"
         ]
     );
@@ -97,7 +103,8 @@ fn reductions_and_contractions_are_boundaries() {
 
 #[test]
 fn only_cheap_values_are_recomputed() {
-    // exp has two users: computed once, not in each.
+    // exp has two users: computed once, not in each (in the first, which
+    // writes it for the other).
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8]));
     let e = apply(&mut g, Exp, &[x]);
@@ -106,7 +113,7 @@ fn only_cheap_values_are_recomputed() {
     g.set_outputs(&[a, b]).unwrap();
     assert_eq!(
         fused_primitives(&g, &[data(&[8], 1)]),
-        ["exp", "add", "mul"]
+        ["fusion", "fusion_output", "mul"]
     );
 
     // add has two users: copied into each.
@@ -185,7 +192,8 @@ fn fused_kernels_match_reference() {
         let p = apply(&mut g, Lt, &[s, iota]);
         let n = apply(&mut g, Neg, &[s]);
         let mut y = apply(&mut g, Select, &[p, m, n]);
-        if dtype.is_float() {
+        // (No bfloat16 logistic: the graph rejects it.)
+        if dtype.is_float() && dtype != DType::BF16 {
             y = apply(&mut g, Logistic, &[y]);
         }
         let r = apply(
@@ -211,7 +219,7 @@ fn fused_kernels_match_reference() {
         );
         g.set_outputs(&[t, i]).unwrap();
         // logistic, expensive and read twice, is stored: its convert runs alone.
-        let expected: &[&str] = if dtype.is_float() {
+        let expected: &[&str] = if dtype.is_float() && dtype != DType::BF16 {
             &["fusion", "fusion", "convert_element_type"]
         } else {
             &["fusion", "fusion"]
@@ -239,6 +247,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         rhs_contracting: vec![2, 0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -261,6 +270,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -277,7 +287,14 @@ fn mps_plans_hold_kernel_scratch() {
     }
     let mut g = Graph::new();
     let x = g.input(ty(DType::F16, &[4, 50_000]));
-    let s = apply(&mut g, ReduceSum { axes: vec![1] }, &[x]);
+    let s = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F16,
+        },
+        &[x],
+    );
     g.set_outputs(&[s]).unwrap();
     let plan = crate::compiler::compile(&g, crate::Device::Mps).unwrap();
     let (_, bytes) = plan.steps()[0].scratch.expect("partials in the workspace");
@@ -324,6 +341,140 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// A hierarchical reduction keeps its accumulation dtype at every level:
+/// each thread's accumulator, the threadgroup's tree, a split reduction's
+/// partials (its scratch, of that dtype) and the second launch over them;
+/// the input's dtype (a 16-bit float's, no float anywhere) or float32
+/// (reduce_sum's accum_dtype: elements widened as read, float throughout).
+/// In a row kernel (an RMS norm's) and softmax's too.
+#[test]
+fn hierarchical_reductions_keep_their_dtype() {
+    use crate::ops::reduce::mps::scratch_bytes;
+    // Whether `source` has the word `word` (not `bfloat`'s).
+    let mentions = |source: &str, word: &str| {
+        source
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == word)
+    };
+    for dtype in [DType::F16, DType::BF16] {
+        // Rows and columns split into partials, axes that are not
+        // consecutive (grouped), and rows in one launch.
+        for (shape, axes) in [
+            (vec![4, 200_000], vec![1]),
+            (vec![200_000, 4], vec![0]),
+            (vec![40, 7, 300], vec![0, 2]),
+            (vec![8, 300], vec![1]),
+        ] {
+            let wide = scratch_bytes(&ty(dtype, &shape), &axes, DType::F32);
+            assert_eq!(scratch_bytes(&ty(dtype, &shape), &axes, dtype) * 2, wide);
+            for accum_dtype in [dtype, DType::F32] {
+                let mut g = Graph::new();
+                let x = g.input(ty(dtype, &shape));
+                let p = apply(&mut g, Mul, &[x, x]);
+                let sum = ReduceSum {
+                    axes: axes.clone(),
+                    accum_dtype,
+                };
+                let r = apply(&mut g, sum, &[p]);
+                g.set_outputs(&[r]).unwrap();
+                let fused = fuse(&g);
+                let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+                    panic!("{fused}")
+                };
+                let source = codegen::kernel(body, &[]).1;
+                match accum_dtype {
+                    // Widened as read: the reduction is float throughout.
+                    DType::F32 => {
+                        let (t, a) = (metal_type(dtype), "float");
+                        // The template accumulating in float, writing float.
+                        for part in [
+                            format!("<Add, {a}>("),
+                            format!("device {a} *out"),
+                            format!("inline {t} operator[]"),
+                        ] {
+                            assert!(source.contains(&part), "{part}: {source}");
+                        }
+                    }
+                    _ => assert!(!mentions(&source, "float"), "{source}"),
+                }
+            }
+        }
+    }
+    // An RMS norm in float16: its row kernel, and softmax's kernel.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F16, &[8, 300]));
+    let sq = apply(&mut g, Mul, &[x, x]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F16,
+        },
+        &[sq],
+    );
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0],
+    };
+    let sum = apply(&mut g, b, &[sum]);
+    let norm = apply(&mut g, Sqrt, &[sum]);
+    let y = apply(&mut g, Div, &[x, norm]);
+    let s = apply(&mut g, Softmax { axis: 1 }, &[y]);
+    g.set_outputs(&[y, s]).unwrap();
+    let fused = fuse(&g);
+    for node in fused.nodes() {
+        if let Fusion { body, .. } = &node.primitive {
+            let source = codegen::kernel(body, &[]).1;
+            assert!(!mentions(&source, "float"), "{source}");
+        }
+    }
+}
+
+/// Dots sharing an operand merge only if they accumulate in the same
+/// dtype: `x @ w1` in float32 and `x @ w3` in bfloat16 stay two dots.
+#[test]
+fn dots_accumulating_in_other_dtypes_do_not_merge() {
+    let dot = |accum_dtype| DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype,
+    };
+    let dots = |accums: [DType; 3]| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::BF16, &[16, 32]));
+        let ws: Vec<Var> = (0..3)
+            .map(|_| g.input(ty(DType::BF16, &[32, 64])))
+            .collect();
+        let ys: Vec<Var> = ws
+            .iter()
+            .zip(accums)
+            .map(|(&w, a)| {
+                let y = apply(&mut g, dot(a), &[x, w]);
+                apply(&mut g, Neg, &[y])
+            })
+            .collect();
+        g.set_outputs(&ys).unwrap();
+        merge_dots(&g, &[false, true, true, true])
+    };
+    // All in float32: one dot of all three.
+    let (merged, packs) = dots([DType::F32; 3]);
+    assert_eq!(packs, [(vec![1, 2, 3], 1)], "{merged}");
+    // The float32 two merge; the bfloat16 one stays alone.
+    let (merged, packs) = dots([DType::F32, DType::BF16, DType::F32]);
+    assert_eq!(packs, [(vec![1, 3], 1)], "{merged}");
+    let accums: Vec<DType> = merged
+        .nodes()
+        .iter()
+        .filter_map(|n| match n.primitive {
+            DotGeneral { accum_dtype, .. } => Some(accum_dtype),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(accums, [DType::F32, DType::BF16], "{merged}");
+}
+
 /// Dots sharing `x` [16, 32] whose other operands are packable parameters
 /// become one dot of `x` and a block of them side by side (a new input),
 /// its result sliced back into each: no concatenation.
@@ -334,6 +485,7 @@ fn dots_sharing_an_operand_merge() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     // The gated MLP: relu(x @ w1) * (x @ w3) @ w2.
     let mut g = Graph::new();
@@ -428,6 +580,7 @@ fn owned_plans_read_packed_parameters() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[16, 32]));
@@ -496,6 +649,7 @@ fn dots_read_slices_in_place() {
         rhs_contracting: vec![rc],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let slice = |start: Vec<usize>, limit: Vec<usize>| Slice {
         start_indices: start,
@@ -554,5 +708,530 @@ fn dots_read_slices_in_place() {
         {
             assert!((e - a).abs() <= 1e-3 * (1.0 + e.abs()), "{e} vs {a}");
         }
+    }
+}
+
+/// A reduction fuses the primitives computing its input, in each of its
+/// layouts (rows, split rows, columns, other axes), for sums and maxima of
+/// several dtypes; its consumers read its output.
+#[test]
+fn reductions_fuse_their_inputs() {
+    for (shape, axes) in [
+        (vec![8, 300], vec![1]),
+        (vec![2, 70_000], vec![1]),
+        (vec![300, 5], vec![0]),
+        (vec![2, 40_000, 3], vec![1]),
+        (vec![4, 5, 6], vec![0, 2]),
+    ] {
+        for dtype in [DType::F32, DType::F16, DType::I32] {
+            for sum in [true, false] {
+                let mut g = Graph::new();
+                let x = g.input(ty(dtype, &shape));
+                let y = g.input(ty(dtype, &shape));
+                // A product, so the reduction reads two inputs, then `neg`.
+                let p = apply(&mut g, Mul, &[x, y]);
+                let n = apply(&mut g, Neg, &[p]);
+                let r = match sum {
+                    true => ReduceSum {
+                        axes: axes.clone(),
+                        accum_dtype: dtype,
+                    },
+                    false => ReduceMax { axes: axes.clone() },
+                };
+                let r = apply(&mut g, r, &[n]);
+                let out = apply(&mut g, Neg, &[r]);
+                g.set_outputs(&[out]).unwrap();
+                let fused = fuse(&g);
+                assert_eq!(names(&fused), ["fusion", "neg"], "{fused}");
+                if available() {
+                    // A float16 sum accumulates in float16: on values it
+                    // sums exactly in any order.
+                    let count: usize = axes.iter().map(|&d| shape[d]).product();
+                    let inputs = match dtype {
+                        DType::F16 if sum => {
+                            let period = count.div_ceil(128);
+                            [1, 2].map(|seed| exact_values(dtype, &shape, seed, period))
+                        }
+                        _ => [values(dtype, &shape, 1), values(dtype, &shape, 2)],
+                    };
+                    // Sums of many float32s: their accumulation error.
+                    let slack = if dtype == DType::F32 && sum { 1.0 } else { 0.0 };
+                    check_within(&g, &inputs, slack);
+                }
+            }
+        }
+    }
+}
+
+/// A value read by a reduction and by another fusion is computed in each
+/// when cheap; an expensive one (exp) with two readers is stored once.
+#[test]
+fn reduction_inputs_shared_with_other_readers() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 16]));
+    let half = Full {
+        shape: vec![4, 16],
+        fill_value: Scalar::Float(0.5),
+        dtype: DType::F32,
+    };
+    let half = apply(&mut g, half, &[]);
+    let s = apply(&mut g, Mul, &[x, half]);
+    let m = apply(&mut g, ReduceMax { axes: vec![1] }, &[s]);
+    let m = apply(
+        &mut g,
+        BroadcastInDim {
+            shape: vec![4, 16],
+            broadcast_dimensions: vec![0],
+        },
+        &[m],
+    );
+    let d = apply(&mut g, Sub, &[s, m]);
+    let e = apply(&mut g, Exp, &[d]);
+    let z = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[e],
+    );
+    let z = apply(
+        &mut g,
+        BroadcastInDim {
+            shape: vec![4, 16],
+            broadcast_dimensions: vec![0],
+        },
+        &[z],
+    );
+    let y = apply(&mut g, Div, &[e, z]);
+    g.set_outputs(&[y]).unwrap();
+    // The scale fuses into the max and into the sum, which also writes the
+    // exp (its input, which the division reads too): a multi-output fusion.
+    let fused = fused_primitives(&g, &[data(&[4, 16], 1)]);
+    assert_eq!(fused, ["fusion", "fusion", "fusion_output", "fusion"]);
+    if available() {
+        check(&g, &[values(DType::F32, &[4, 16], 1)]);
+    }
+}
+
+/// An expensive value read by two fusions is computed in the first, which
+/// writes it as another output (producer-consumer multi-output fusion):
+/// a reduction, in each layout, or a loop fusion; the later reader reads
+/// it. Not when a reader comes before the fusion that would compute it.
+#[test]
+fn multi_output_fusion() {
+    for (shape, axes) in [
+        (vec![8, 300], vec![1]),
+        (vec![2, 70_000], vec![1]),
+        (vec![300, 5], vec![0]),
+        (vec![4, 5, 6], vec![0, 2]),
+    ] {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &shape));
+        let y = g.input(ty(DType::F32, &shape));
+        let p = apply(&mut g, Mul, &[x, y]);
+        let e = apply(&mut g, Exp, &[p]);
+        let s = apply(
+            &mut g,
+            ReduceSum {
+                axes: axes.clone(),
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        );
+        let n = apply(&mut g, Neg, &[e]);
+        g.set_outputs(&[s, n]).unwrap();
+        let inputs = [data(&shape, 1), data(&shape, 2)];
+        let fused = fused_primitives(&g, &inputs);
+        assert_eq!(fused, ["fusion", "fusion_output", "neg"], "{shape:?}");
+        if available() {
+            check_within(&g, &inputs, 1.0);
+        }
+    }
+
+    // A loop fusion hosting it.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[64]));
+    let e = apply(&mut g, Exp, &[x]);
+    let a = apply(&mut g, Neg, &[e]);
+    let b = apply(&mut g, Tanh, &[e]);
+    g.set_outputs(&[a, b]).unwrap();
+    assert_eq!(
+        fused_primitives(&g, &[data(&[64], 1)]),
+        ["fusion", "fusion_output", "tanh"]
+    );
+    if available() {
+        check(&g, &[values(DType::F32, &[64], 1)]);
+    }
+
+    // A reader before the would-be host: the exp is stored on its own.
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let e = apply(&mut g, Exp, &[x]);
+    let first = apply(&mut g, ReduceMax { axes: vec![1] }, &[e]);
+    let t = apply(
+        &mut g,
+        Transpose {
+            permutation: vec![1, 0],
+        },
+        &[e],
+    );
+    let second = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![0],
+            accum_dtype: DType::F32,
+        },
+        &[t],
+    );
+    g.set_outputs(&[first, second]).unwrap();
+    // The max hosts it; the sum reads its transpose.
+    let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
+    assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
+}
+
+/// Softmax over the last dimension fuses the primitives computing its input
+/// into its kernel; over another dimension no kernel takes it (on MPS, an
+/// error), so it fuses nothing.
+#[test]
+fn softmax_fuses_its_input() {
+    let scaled = |axis: usize| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[8, 300]));
+        let half = Full {
+            shape: vec![8, 300],
+            fill_value: Scalar::Float(0.5),
+            dtype: DType::F32,
+        };
+        let half = apply(&mut g, half, &[]);
+        let s = apply(&mut g, Mul, &[x, half]);
+        let y = apply(&mut g, Softmax { axis }, &[s]);
+        g.set_outputs(&[y]).unwrap();
+        g
+    };
+    let inputs = [data(&[8, 300], 1)];
+    assert_eq!(fused_primitives(&scaled(1), &inputs), ["fusion"]);
+    assert_eq!(fused_primitives(&scaled(0), &inputs), ["fusion", "softmax"]);
+    if available() {
+        check(&scaled(1), &[values(DType::F32, &[8, 300], 1)]);
+        let on_mps = [inputs[0].to(crate::Device::Mps)];
+        let plan = crate::compiler::compile(&scaled(0), crate::Device::Mps).unwrap();
+        assert!(plan.run(&on_mps).unwrap_err().contains("last dimension"));
+    }
+}
+
+/// The pattern matcher: operands in order or (`either`) either order, a
+/// capture matching one value throughout, and exclusivity.
+#[test]
+fn patterns_match_graphs() {
+    use crate::compiler::pattern::{Matcher, bind, either, one_of, op};
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4]));
+    let y = g.input(ty(DType::F32, &[4]));
+    let e = apply(&mut g, Exp, &[x]);
+    let a = apply(&mut g, Add, &[y, e]);
+    let s = apply(&mut g, Sub, &[e, x]);
+    g.set_outputs(&[a, s]).unwrap();
+    let m = Matcher::new(&g);
+    let exp_of = |k| op(|p| matches!(p, Exp), [bind(k)]);
+    // add(y, exp(x)) matches add(exp(_), _) only in either order.
+    let strict = op(|p| matches!(p, Add), [exp_of(0), bind(1)]);
+    assert!(m.find(&strict, a, 2).is_none());
+    let found = m
+        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
+        .unwrap();
+    assert_eq!((found.get(0), found.get(1)), (x, y));
+    // sub(exp(x), x): one capture, one value; sub(exp(x), y) fails.
+    let same = op(|p| matches!(p, Sub), [exp_of(0), bind(0)]);
+    assert!(m.find(&same, s, 1).is_some());
+    let mut h = g.clone();
+    let other = apply(&mut h, Sub, &[e, y]);
+    assert!(Matcher::new(&h).find(&same, other, 1).is_none());
+    // one_of: the first alternative that matches, its captures alone.
+    let alternatives = one_of([op(|p| matches!(p, Mul), [bind(0), bind(1)]), same]);
+    let found = m.find(&alternatives, s, 2).unwrap();
+    assert_eq!((found.get(0), found.captures[1]), (x, None));
+    // exp is read outside the add: not exclusive.
+    let found = m
+        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
+        .unwrap();
+    assert!(!m.exclusive(&found));
+    assert_eq!(m.scalar(x), None);
+}
+
+/// An RMS norm written as its primitives (the weight's multiply and each
+/// other multiply in either order) is one fusion, a row kernel with its
+/// reduction inside; not when its values are read elsewhere, when it
+/// divides by anything but the size of the last dimension, or reduces
+/// another.
+#[test]
+fn rms_norms_are_one_row_kernel() {
+    // x * (1 / sqrt(sum(x * x, last) / n + eps)) [* w], with `flip` putting each
+    // multiply's operands the other way round, `n` the divisor, and `axis`
+    // the dimension reduced.
+    let build = |weighted: bool, flip: bool, n: f64, axis: usize, leak: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[8, 300]));
+        let w = g.input(ty(DType::F32, &[300]));
+        let pair = |a, b| if flip { [b, a] } else { [a, b] };
+        let sq = apply(&mut g, Mul, &[x, x]);
+        let sum = apply(
+            &mut g,
+            ReduceSum {
+                axes: vec![axis],
+                accum_dtype: DType::F32,
+            },
+            &[sq],
+        );
+        let mut kept = vec![8, 300];
+        kept[axis] = 1;
+        let sum = apply(
+            &mut g,
+            Reshape {
+                new_sizes: kept.clone(),
+            },
+            &[sum],
+        );
+        let scalar = |g: &mut Graph, v: f64| {
+            let c = Full {
+                shape: vec![],
+                fill_value: Scalar::Float(v),
+                dtype: DType::F32,
+            };
+            let c = apply(g, c, &[]);
+            let b = BroadcastInDim {
+                shape: kept.clone(),
+                broadcast_dimensions: vec![],
+            };
+            apply(g, b, &[c])
+        };
+        let n = scalar(&mut g, n);
+        let mean = apply(&mut g, Div, &[sum, n]);
+        let eps = scalar(&mut g, 1e-6);
+        let v = apply(&mut g, Add, &pair(mean, eps));
+        let s = apply(&mut g, Sqrt, &[v]);
+        let one = scalar(&mut g, 1.0);
+        let r = apply(&mut g, Div, &[one, s]);
+        let b = BroadcastInDim {
+            shape: vec![8, 300],
+            broadcast_dimensions: vec![0, 1],
+        };
+        let r = apply(&mut g, b, &[r]);
+        let mut y = apply(&mut g, Mul, &pair(x, r));
+        if weighted {
+            let b = BroadcastInDim {
+                shape: vec![8, 300],
+                broadcast_dimensions: vec![1],
+            };
+            let w = apply(&mut g, b, &[w]);
+            y = apply(&mut g, Mul, &pair(y, w));
+        }
+        let outputs = if leak { vec![y, mean] } else { vec![y] };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+    // One fusion (a row kernel, its reduction inside), checked against the
+    // unfused graph (the reference) by fused_primitives.
+    let inputs = [data(&[8, 300], 1), data(&[300], 2)];
+    let rewritten = |g: &Graph| fused_primitives(g, &inputs) == ["fusion"];
+    for weighted in [false, true] {
+        for flip in [false, true] {
+            let g = build(weighted, flip, 300.0, 1, false);
+            assert!(rewritten(&g), "weighted {weighted}, flipped {flip}");
+            if available() {
+                let inputs = [
+                    values(DType::F32, &[8, 300], 1),
+                    values(DType::F32, &[300], 2),
+                ];
+                check(&g, &inputs);
+            }
+        }
+    }
+    assert!(
+        !rewritten(&build(true, false, 300.0, 1, true)),
+        "a read intermediate"
+    );
+    assert!(
+        !rewritten(&build(true, false, 299.0, 1, false)),
+        "not a mean"
+    );
+    assert!(
+        !rewritten(&build(false, false, 8.0, 0, false)),
+        "not the last dimension"
+    );
+}
+
+/// An RMS norm without epsilon, written as a division
+/// (`x / sqrt(mean(x * x))`), is one fusion too.
+#[test]
+fn rms_norms_without_epsilon_are_one_row_kernel() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 300]));
+    let sq = apply(&mut g, Mul, &[x, x]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[sq],
+    );
+    let sum = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![8, 1],
+        },
+        &[sum],
+    );
+    let n = Full {
+        shape: vec![],
+        fill_value: Scalar::Float(300.0),
+        dtype: DType::F32,
+    };
+    let n = apply(&mut g, n, &[]);
+    let b = BroadcastInDim {
+        shape: vec![8, 1],
+        broadcast_dimensions: vec![],
+    };
+    let n = apply(&mut g, b, &[n]);
+    let mean = apply(&mut g, Div, &[sum, n]);
+    let s = apply(&mut g, Sqrt, &[mean]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let s = apply(&mut g, b, &[s]);
+    let y = apply(&mut g, Div, &[x, s]);
+    g.set_outputs(&[y]).unwrap();
+    assert_eq!(fused_primitives(&g, &[data(&[8, 300], 1)]), ["fusion"]);
+    if available() {
+        check(&g, &[values(DType::F32, &[8, 300], 1)]);
+    }
+}
+
+/// A fused division by a fused `sqrt` stays a division by a square root,
+/// as traced (no `rsqrt`, which skips the square root's rounding).
+#[test]
+fn division_by_sqrt_is_as_traced() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let y = g.input(ty(DType::F32, &[4, 8]));
+    let s = apply(&mut g, Sqrt, &[y]);
+    let q = apply(&mut g, Div, &[x, s]);
+    g.set_outputs(&[q]).unwrap();
+    let fused = fuse(&g);
+    let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+        panic!("{fused}")
+    };
+    let source = codegen::kernel(body, &[]).1;
+    assert!(
+        !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
+        "{source}"
+    );
+    if available() {
+        check(
+            &g,
+            &[data(&[4, 8], 1), Tensor::full(&[4, 8], 2.0, DType::F32)],
+        );
+    }
+
+    // Through a broadcast: x / broadcast(sqrt(m)), m [4, 1].
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let m = g.input(ty(DType::F32, &[4, 1]));
+    let s = apply(&mut g, Sqrt, &[m]);
+    let b = BroadcastInDim {
+        shape: vec![4, 8],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let s = apply(&mut g, b, &[s]);
+    let q = apply(&mut g, Div, &[x, s]);
+    g.set_outputs(&[q]).unwrap();
+    let fused = fuse(&g);
+    let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+        panic!("{fused}")
+    };
+    let source = codegen::kernel(body, &[]).1;
+    assert!(
+        !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
+        "{source}"
+    );
+    if available() {
+        let m = Tensor::from_slice(&[1.0f32, 4.0, 9.0, 16.0], DType::F32).reshape(&[4, 1]);
+        check(&g, &[data(&[4, 8], 1), m]);
+    }
+}
+
+/// The primitives computing an RMS norm's input (a residual add) fuse into
+/// its row kernel too; its weight, computed, is a kernel of its own.
+#[test]
+fn rms_norm_row_kernels_fuse_their_input() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 300]));
+    let y = g.input(ty(DType::F32, &[8, 300]));
+    let w = g.input(ty(DType::F32, &[300]));
+    let h = apply(&mut g, Add, &[x, y]);
+    let sq = apply(&mut g, Mul, &[h, h]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[sq],
+    );
+    let sum = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![8, 1],
+        },
+        &[sum],
+    );
+    let scalar = |g: &mut Graph, v: f64| {
+        let c = Full {
+            shape: vec![],
+            fill_value: Scalar::Float(v),
+            dtype: DType::F32,
+        };
+        let c = apply(g, c, &[]);
+        let b = BroadcastInDim {
+            shape: vec![8, 1],
+            broadcast_dimensions: vec![],
+        };
+        apply(g, b, &[c])
+    };
+    let n = scalar(&mut g, 300.0);
+    let mean = apply(&mut g, Div, &[sum, n]);
+    let s = apply(&mut g, Sqrt, &[mean]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let s = apply(&mut g, b, &[s]);
+    let normed = apply(&mut g, Div, &[h, s]);
+    let w2 = apply(&mut g, Exp, &[w]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![1],
+    };
+    let w2 = apply(&mut g, b, &[w2]);
+    let out = apply(&mut g, Mul, &[normed, w2]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [data(&[8, 300], 1), data(&[8, 300], 2), data(&[300], 3)];
+    let fused = fuse(&g);
+    let labels: Vec<_> = fused.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(labels.len(), 1, "{fused}");
+    assert!(
+        labels[0].starts_with("add -> mul -> reduce_sum"),
+        "{labels:?}"
+    );
+    assert_eq!(fused_primitives(&g, &inputs), ["fusion"]);
+    if available() {
+        let inputs: Vec<Tensor> = [vec![8, 300], vec![8, 300], vec![300]]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| values(DType::F32, s, i as u64 + 1))
+            .collect();
+        check(&g, &inputs);
     }
 }

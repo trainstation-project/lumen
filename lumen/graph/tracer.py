@@ -19,10 +19,11 @@ import functools
 import math
 
 from lumen._C import Graph, Plan, Tensor, _pack
+from lumen import nn
 from lumen.graph import prims
 
 __all__ = [
-    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "rsqrt", "tanh", "sigmoid", "softmax",
+    "TracedTensor", "compile", "make_graph", "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
 ]
 
 # The graphs being traced, innermost last.
@@ -40,11 +41,53 @@ def current_graph():
 # ---------------------------------------------------------------------
 
 
+def _weights(args):
+    """The weights of ``args``' modules (``lumen.nn.Module``), each tensor
+    once, in order: whole meta tensors."""
+    params = {}
+    for a in args:
+        if isinstance(a, nn.Module):
+            for _, t in nn._leaves(a, ""):
+                if not t._is_parameter:
+                    raise TypeError(f"a module's weights must be whole meta tensors, got a {t.device} tensor of shape {t.shape}")
+                params.setdefault(t.storage_id, t)
+    return list(params.values())
+
+
+def _scalars(args):
+    """The runtime scalars of ``args``: the float arguments, then the float
+    fields of the module arguments, in order."""
+    floats = [a for a in args if isinstance(a, float)]
+    return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
+
+
 def _trace(fn, args):
     """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
-    single tensor (rather than a tuple or list of them)."""
+    single tensor (rather than a tuple or list of them). The graph's inputs
+    are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
+    float32 inputs, weakly typed: each takes its tensor operand's dtype),
+    then the weights of the module arguments (``_weights``), each a whole
+    meta tensor."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
+
+    def scalar(_):
+        t = TracedTensor(graph, graph.input("float32", []))
+        t.weak = True
+        return t
+
+    traced = [scalar(a) if isinstance(a, float) else a for a in traced]
+    scalars = [scalar(v) for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
+    weights = {}
+    for t in _weights(args):
+        weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape))
+    module_scalars = iter(scalars)
+    traced = [
+        nn.map_tensors(a, lambda t: weights[t.storage_id], lambda _: next(module_scalars))
+        if isinstance(a, nn.Module)
+        else a
+        for a in traced
+    ]
     _TRACES.append(graph)
     try:
         out = fn(*traced)
@@ -59,13 +102,31 @@ def _trace(fn, args):
     return graph, single
 
 
+def _lift(x):
+    """``x`` as an operand of the graph being traced; a tensor the function
+    closes over is an error (it would be invisible to the graph)."""
+    if isinstance(x, Tensor) and _TRACES:
+        raise TypeError(
+            f"a compiled function cannot close over a tensor ({x.device}, shape {x.shape}): pass data as an argument, and weights in a lumen.nn.Module argument"
+        )
+    return x
+
+
 def _signature(args):
-    # Tensors are traced by dtype and shape, meta ones (parameters) apart
-    # from those with data; anything else is baked into the graph, so it
-    # must be hashable.
+    # Tensors are traced by dtype and shape (data or meta alike), floats as
+    # runtime scalars (their values change nothing), modules by their
+    # structure and which of their weights are one tensor; anything else is
+    # baked into the graph, so it must be hashable.
+    ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
+    shared = tuple(ids.index(i) for i in ids)
     return tuple(
-        (a.dtype, tuple(a.shape), a.device == "meta") if isinstance(a, Tensor) else ("static", a) for a in args
-    )
+        (a.dtype, tuple(a.shape))
+        if isinstance(a, Tensor)
+        else nn.structure(a)
+        if isinstance(a, (nn.Module, float))
+        else ("static", a)
+        for a in args
+    ) + (shared,)
 
 
 def _device(args, device):
@@ -83,105 +144,111 @@ def compile(fn, device=None):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
     and compiled into a static plan for ``device`` on its first call with
     each input signature (the tensor arguments' dtypes and shapes, and the
-    values of the other arguments), which every call then runs. ``device``
+    values of the other arguments but floats), which every call then runs.
+    Float arguments, and float fields of module arguments, are runtime
+    scalars, as in ``jax.jit``: inputs of the plan, whose values each call
+    passes (another value reuses the plan), weakly typed (each takes its
+    tensor operand's dtype). Ints and the rest are static. ``device``
     defaults to the first tensor argument with data's (the CPU without
     any).
 
     The compiled function owns its memory (XLA: buffer assignment over the
-    whole program). Its plan places every value, the tensor arguments with
-    data and the results included, in one workspace, allocated once: each
-    call copies those arguments in (from any device) and returns views of
-    the results, which the next call overwrites (``.clone()`` one to keep
-    it). Meta tensor arguments are parameters: never the caller's to
-    allocate, they are placed on the device the first time a compiled
-    function uses them, and every compiled function using them shares that
-    memory. Where dots that share an operand merge into one (``x @ w1`` and
-    ``x @ w3``), their parameters are placed side by side in one block,
-    read by the merged dot, never concatenated. Placed parameters start
-    zeroed: ``compiled.place(*args)`` places them without running and
-    returns each meta argument's memory, to copy data into (``copy_``).
+    whole program). Its plan places every value, its tensor arguments and
+    results included, in one workspace, allocated once: each call copies
+    the arguments in (from any device) and returns views of the results,
+    which the next call overwrites (``.clone()`` one to keep it).
 
-    With only meta tensors (and no ``device``), nothing runs: results are
-    meta tensors of the right types.
+    Its weights are the tensors of its ``lumen.nn.Module`` arguments (meta
+    tensors): never the caller's to allocate, they are placed on the device
+    when the first compiled function taking them compiles, and every
+    compiled function taking them shares that memory, read in place (a
+    module argument costs no copy). Where dots that share an operand merge
+    into one (``x @ w1`` and ``x @ w3``), their weights are placed side by side
+    in one block, read by the merged dot, never concatenated. A call with
+    meta tensor arguments compiles without running (meta results); then
+    ``model.load_state_dict`` (or ``w.copy_``) writes the weights' data into
+    their memory, once::
+
+        f = lumen.compile(lambda model, x: model(x), device="mps")
+        f(model, lumen.empty([seq, dim], device="meta"))  # compile: place weights
+        model.load_state_dict(lumen.safetensors.load_file("model.safetensors"))
+        y = f(model, x)  # each call copies x in
+
+    With only meta tensors and no ``device``, nothing is compiled for a
+    device: results are meta tensors of the right types.
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
     compile_device = device  # dump_graph's own `device` shadows it
-    # Per signature and device, the graph and its plans: each with its
-    # workspace (`None` on the meta device), tried in order.
+    # Per signature and device: the graph, whether `fn` returns one tensor,
+    # its plans, each with its workspace (`None` on the meta device), tried
+    # in order, and the number of tensor arguments (the graph's inputs
+    # before the weights).
     plans = {}
     latest = []
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
         workspace, whether ``fn`` returns a single tensor, and the plan's
-        inputs (the parameters placed, and their blocks)."""
+        inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
         key = _signature(args), target
-        if key not in plans:
-            graph, single = _trace(fn, args)
-            plans[key] = graph, single, []
-        graph, single, entries = plans[key]
-        latest[:] = [key]
+        # The arguments the plan copies in: tensors, then runtime scalars.
+        # The kernels take the scalars by value, read from the host on each
+        # call: a new value needs no new plan.
         tensors = [a for a in args if isinstance(a, Tensor)]
+        scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
+        tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
+        if key not in plans:
+            plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
+        graph, single, entries, _, _ = plans[key]
+        weights = _weights(args)
+        latest[:] = [key]
         if target == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, single, tensors
-        params = [i for i, t in enumerate(tensors) if t.device == "meta"]
-        for i in params:
-            if not tensors[i]._is_parameter:
-                raise TypeError(f"{fn.__name__}: a meta argument must be a whole tensor (a parameter), not a view")
+            return graph, entries[0][0], None, single, tensors + weights
+        params = list(range(len(tensors), len(tensors) + len(weights)))
+        inputs = tensors + weights
 
         def inputs_for(plan):
-            # The parameters in their blocks, if they are placed so (or not
+            # The weights in their blocks, if they are placed so (or not
             # yet placed), else None.
             blocks = []
             for positions, dimension in plan.packed:
-                block = _pack([tensors[i] for i in positions], dimension, target)
+                block = _pack([inputs[i] for i in positions], dimension, target)
                 if block is None:
                     return None
                 blocks.append(block)
-            placed = [t._placed(target) if t.device == "meta" else t for t in tensors]
-            return placed + blocks
+            return tensors + [w._placed(target) for w in weights] + blocks
 
         for plan, workspace in entries:
-            inputs = inputs_for(plan)
-            if inputs is not None:
-                return graph, plan, workspace, single, inputs
-        # A new plan: dots merged into blocks of parameters while none of
-        # theirs is placed yet; once they are placed otherwise, without.
+            placed = inputs_for(plan)
+            if placed is not None:
+                return graph, plan, workspace, single, placed
+        # A new plan: dots merged into blocks of weights while none of theirs
+        # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
-        plan = Plan(graph, target, parameters=params, packable=packable)
+        plan = Plan(graph, target, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         entries.append((plan, workspace))
-        inputs = inputs_for(plan)
-        if inputs is None:
-            plan = Plan(graph, target, parameters=params)
+        placed = inputs_for(plan)
+        if placed is None:
+            plan = Plan(graph, target, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
-            inputs = inputs_for(plan)
-        return graph, plan, workspace, single, inputs
+            placed = inputs_for(plan)
+        return graph, plan, workspace, single, placed
 
     @functools.wraps(fn)
     def compiled(*args):
-        _, plan, workspace, single, inputs = prepare(args)
-        if workspace is None:
-            outputs = plan.run(inputs, "meta")
+        graph, plan, workspace, single, inputs = prepare(args)
+        if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
+            # Compiled (and the weights placed); nothing to run.
+            outputs = [Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())]
         else:
             outputs = plan.run_in(workspace, inputs)
         return outputs[0] if single else tuple(outputs)
-
-    def place(*args):
-        """Place the meta arguments (parameters) as calls with ``args``'
-        signature use them, without running: each one's memory on the
-        device, in order, to copy its data into (``copy_``)."""
-        _, _, workspace, _, inputs = prepare(args)
-        if workspace is None:
-            raise ValueError(f"place: {fn.__name__} runs on the meta device: pass device= or a tensor with data")
-        tensors = [a for a in args if isinstance(a, Tensor)]
-        placed = [t for t, a in zip(inputs, tensors) if a.device == "meta"]
-        return placed[0] if len(placed) == 1 else tuple(placed)
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
@@ -195,19 +262,20 @@ def compile(fn, device=None):
             prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        (signature, target), = latest
-        graph, _, _ = plans[latest[0]]
-        tensors = [k for k in signature if k[0] != "static"]
+        ((_, target),) = latest
+        graph, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
-        # Kernels do not depend on the values: profile on ones, the
-        # parameters packed where the compiler merges dots.
-        params = [i for i, (_, _, meta) in enumerate(tensors) if meta]
-        plan = Plan(graph, target, parameters=params, packable=params)
-        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape, _ in tensors]
+        # Kernels do not depend on the values: profile on ones, the weights
+        # packed where the compiler merges dots.
+        types = [graph.type_of(v) for v in graph.inputs()]
+        params = list(range(n_tensors, len(types)))
+        plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
+        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:
-            shape = list(tensors[positions[0]][1])
-            shape[dimension] = sum(tensors[i][1][dimension] for i in positions)
-            inputs.append(Tensor.ones(shape, tensors[positions[0]][0], target))
+            dtype, shape = types[positions[0]]
+            shape = list(shape)
+            shape[dimension] = sum(types[i][1][dimension] for i in positions)
+            inputs.append(Tensor.ones(shape, dtype, target))
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         from lumen.graph import viz
 
@@ -217,7 +285,6 @@ def compile(fn, device=None):
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
-    compiled.place = place
     compiled.dump_graph = dump_graph
     return compiled
 
@@ -243,6 +310,13 @@ def _is_float(dtype):
     return "float" in dtype
 
 
+def _accum_dtype(dtype):
+    """The dtype sums of ``dtype`` accumulate in (matmul, sum, mean), their
+    result's: float32 for floats, or their own if wider (float64); integers
+    their own."""
+    return dtype if not _is_float(dtype) or dtype == "float64" else "float32"
+
+
 def _require_float(x, op):
     if not _is_float(x.dtype):
         raise TypeError(f"{op} needs a floating-point tensor, got {x.dtype}: convert it with .to(dtype)")
@@ -250,8 +324,10 @@ def _require_float(x, op):
 
 
 def _common_dtype(op, operands):
-    """The dtype the tensors among ``operands`` share."""
-    dtypes = sorted({x.dtype for x in operands if isinstance(x, TracedTensor)})
+    """The dtype the tensors among ``operands`` share (weakly typed ones,
+    runtime scalars, take the others')."""
+    tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
+    dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
         raise TypeError(f"{op} needs a tensor operand")
     if len(dtypes) > 1:
@@ -282,6 +358,12 @@ def _is_operand(x):
 def _as_tensor(x, dtype, op):
     """``x`` (a traced tensor of ``dtype``, or a Python scalar of its kind)
     as a traced tensor."""
+    x = _lift(x)
+    if isinstance(x, TracedTensor) and x.weak and x.dtype != dtype:
+        # A runtime scalar (float32): converted, as a Python float would be.
+        if not _is_float(dtype):
+            raise TypeError(f"{op} of a {dtype} tensor and a float: convert the tensor with .to(dtype)")
+        return x.to(dtype)
     if isinstance(x, TracedTensor):
         return x
     if not _is_operand(x):
@@ -319,8 +401,12 @@ def _operands(op, *operands):
 
 
 def _elementwise(prim, *operands):
-    """``prim`` on ``operands``, of one dtype, broadcast to a common shape."""
-    return prim(*_operands(prim.__name__.lstrip("_"), *operands))
+    """``prim`` on ``operands``, of one dtype, broadcast to a common shape:
+    weakly typed if every tensor among them is (``eps * 2``)."""
+    out = prim(*_operands(prim.__name__.lstrip("_"), *operands))
+    tensors = [x for x in operands if isinstance(x, TracedTensor)]
+    out.weak = bool(tensors) and all(x.weak for x in tensors)
+    return out
 
 
 def _dim(dim, ndim):
@@ -371,6 +457,7 @@ def _binary(prim, reflected=False):
     """An operator method: ``prim`` on the operands, promoted and broadcast."""
 
     def op(self, other):
+        other = _lift(other)
         if not _is_operand(other):
             return NotImplemented
         return _elementwise(prim, other, self) if reflected else _elementwise(prim, self, other)
@@ -388,11 +475,14 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "var", "dtype", "shape")
+    __slots__ = ("graph", "var", "dtype", "shape", "weak")
 
     def __init__(self, graph, var):
         self.graph = graph
         self.var = var
+        # A runtime scalar's (a float argument's): it takes its tensor
+        # operand's dtype, as a Python scalar does.
+        self.weak = False
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)
@@ -450,9 +540,11 @@ class TracedTensor:
         return prims.neg(self)
 
     def __matmul__(self, other):
+        other = _lift(other)
         return matmul(self, other) if isinstance(other, TracedTensor) else NotImplemented
 
     def __rmatmul__(self, other):
+        other = _lift(other)
         return matmul(other, self) if isinstance(other, TracedTensor) else NotImplemented
 
     def add(self, other):
@@ -502,8 +594,8 @@ class TracedTensor:
     def log(self):
         return prims.log(_require_float(self, "log"))
 
-    def rsqrt(self):
-        return prims.rsqrt(_require_float(self, "rsqrt"))
+    def sqrt(self):
+        return prims.sqrt(_require_float(self, "sqrt"))
 
     def tanh(self):
         return prims.tanh(_require_float(self, "tanh"))
@@ -551,11 +643,13 @@ class TracedTensor:
         return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(self.shape)))
 
     def sum(self, dim=None, keepdim=False, dtype=None):
-        """Sum over ``dim`` (all dimensions if None), in the tensor's dtype
-        (integers wrap) or ``dtype``."""
+        """Sum over ``dim`` (all dimensions if None) of the tensor (or it
+        converted to ``dtype``), accumulated in float32 for floats (their
+        own dtype if wider), the result's dtype; integers in theirs (they
+        wrap)."""
         x = self.to(dtype) if dtype else self
         dims = _dims(dim, self.ndim)
-        return self._keep(prims.reduce_sum(x, dims), dims, keepdim)
+        return self._keep(prims.reduce_sum(x, dims, _accum_dtype(x.dtype)), dims, keepdim)
 
     def mean(self, dim=None, keepdim=False, dtype=None):
         x = self.to(dtype) if dtype else self
@@ -575,12 +669,16 @@ class TracedTensor:
         ``amax(dim)``."""
         if other is None:
             return self.amax()
+        other = _lift(other)
         if isinstance(other, TracedTensor):
             return maximum(self, other)
         raise NotImplementedError("max(dim) returns indices, which lumen does not support yet; use amax(dim)")
 
     def softmax(self, dim, dtype=None):
         x = _require_float(self.to(dtype) if dtype else self, "softmax")
+        if _dim(dim, x.ndim) == x.ndim - 1:
+            # One primitive: one kernel (online softmax) on MPS.
+            return prims.softmax(x, x.ndim - 1)
         e = (x - x.amax(dim, keepdim=True)).exp()
         return e / e.sum(dim, keepdim=True)
 
@@ -746,6 +844,7 @@ class TracedTensor:
 
 
 def where(condition, input, other):
+    condition, input, other = _lift(condition), _lift(input), _lift(other)
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
     dtype = _common_dtype("where", (input, other))
@@ -756,7 +855,9 @@ def where(condition, input, other):
 
 def matmul(input, other):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
-    the dimensions before the last two are batch dimensions, broadcast."""
+    the dimensions before the last two are batch dimensions, broadcast. It
+    accumulates floats in float32 (float64 in float64), its result's dtype."""
+    input, other = _lift(input), _lift(other)
     _common_dtype("matmul", (input, other))
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
@@ -765,7 +866,9 @@ def matmul(input, other):
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
     b = tuple(range(len(batch)))
-    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)))
+    # Accumulated in float32 (or wider), the result's dtype: cast it back
+    # with .to(dtype) for a narrower result.
+    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), _accum_dtype(x.dtype))
     if input.ndim == 1:
         out = out.squeeze(-2)
     if other.ndim == 1:
@@ -789,8 +892,9 @@ def log(input):
     return input.log()
 
 
-def rsqrt(input):
-    return input.rsqrt()
+def sqrt(input):
+    return input.sqrt()
+
 
 
 def tanh(input):
@@ -803,3 +907,36 @@ def sigmoid(input):
 
 def softmax(input, dim, dtype=None):
     return input.softmax(dim, dtype)
+
+
+def rms_norm(input, normalized_shape, weight=None, eps=None):
+    """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
+    square over the last dimension (``normalized_shape``, its size),
+    ``input / sqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
+    defaults to the dtype's machine epsilon, as in torch. Traced as its
+    primitives, which the MPS compiler recognizes (as it does an RMS norm
+    written by hand) and runs as one kernel, with the ops computing
+    ``input`` fused in."""
+
+    x = _require_float(_lift(input), "rms_norm")
+    shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
+
+    if shape != list(x.shape[-1:]):
+        raise NotImplementedError(f"rms_norm normalizes the last dimension, of size {x.shape[-1:]}, got {shape}")
+
+    weight = _lift(weight)
+    if weight is not None and (weight.dtype != x.dtype or list(weight.shape) != shape):
+        raise TypeError(f"rms_norm: weight must be {x.dtype}{shape}, got {weight.dtype}{list(weight.shape)}")
+
+    if eps is None:
+        eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
+
+    # Normalized in the accumulation dtype (float32 for narrower floats, as
+    # its mean is), then cast back and scaled by the weight in x's dtype.
+    h = x.to(_accum_dtype(x.dtype))
+    y = (h / ((h * h).mean(-1, keepdim=True) + eps).sqrt()).to(x.dtype)
+
+    if weight is not None:
+        y = y * weight
+
+    return y

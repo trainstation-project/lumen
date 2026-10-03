@@ -50,6 +50,8 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
 /// The values of `graph`'s outputs, given its inputs'.
 fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
     let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
+    // A multi-output fusion's other outputs, by its value.
+    let mut extra: Vec<Vec<Values>> = vec![Vec::new(); graph.types.len()];
     for (&var, values) in graph.inputs().iter().zip(inputs) {
         env[var] = Some(values);
     }
@@ -64,12 +66,16 @@ fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
             })
             .collect();
         let types: Vec<&TensorType> = node.inputs.iter().map(|&v| graph.type_of(v)).collect();
-        env[node.output] = Some(eval(
-            &node.primitive,
-            &args,
-            &types,
-            graph.type_of(node.output),
-        ));
+        let value = match &node.primitive {
+            Primitive::Fusion { body, .. } if body.outputs().len() > 1 => {
+                let mut outputs = eval_graph(body, args.iter().map(|&v| v.clone()).collect());
+                extra[node.output] = outputs.split_off(1);
+                outputs.remove(0)
+            }
+            Primitive::FusionOutput { index, .. } => extra[node.inputs[0]][index - 1].clone(),
+            p => eval(p, &args, &types, graph.type_of(node.output)),
+        };
+        env[node.output] = Some(value);
     }
     graph
         .outputs()
@@ -290,14 +296,14 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             Int(x) => Int(x.iter().map(|&a| wrap(-a, dtype)).collect()),
             Float(x) => Float(x.iter().map(|&a| -a).collect()),
         },
-        Exp | Log | Rsqrt | Tanh | Logistic => {
+        Exp | Log | Sqrt | Tanh | Logistic => {
             let Float(x) = args[0] else {
                 unreachable!("float operand")
             };
             let f = |a: f64| match p {
                 Exp => a.exp(),
                 Log => a.ln(),
-                Rsqrt => 1.0 / a.sqrt(),
+                Sqrt => a.sqrt(),
                 Tanh => a.tanh(),
                 _ => 1.0 / (1.0 + (-a).exp()),
             };
@@ -319,7 +325,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!("cases of one dtype"),
             }
         }
-        ReduceSum { axes } | ReduceMax { axes } => {
+        ReduceSum { axes, .. } | ReduceMax { axes } => {
             let x = types[0];
             let init = match p {
                 ReduceSum { .. } if dtype.is_float() => Float(vec![0.0]),
@@ -350,10 +356,15 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 }
                 (Float(v), Float(init)) => {
                     let mut acc = vec![init[0]; out.numel()];
+                    // Accumulated in the dtype, rounding each step.
                     for (&t, &a) in target.iter().zip(v) {
-                        acc[t] = if sum { acc[t] + a } else { fmax(acc[t], a) };
+                        acc[t] = if sum {
+                            round(acc[t] + a, dtype)
+                        } else {
+                            fmax(acc[t], a)
+                        };
                     }
-                    Float(acc.into_iter().map(|a| round(a, dtype)).collect())
+                    Float(acc)
                 }
                 _ => unreachable!(),
             }
@@ -363,6 +374,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             rhs_contracting,
             lhs_batch,
             rhs_batch,
+            ..
         } => {
             let (lhs, rhs) = (types[0], types[1]);
             let lhs_free: Vec<usize> = free_dims(
@@ -424,7 +436,13 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 (Float(x), Float(y)) => Float(
                     terms
                         .iter()
-                        .map(|t| round(t.iter().map(|&(i, j)| x[i] * y[j]).sum(), dtype))
+                        // In the accumulation dtype (the result's), each
+                        // product and sum rounded to it.
+                        .map(|t| {
+                            t.iter().fold(0.0, |acc, &(i, j)| {
+                                round(acc + round(x[i] * y[j], dtype), dtype)
+                            })
+                        })
                         .collect(),
                 ),
                 _ => unreachable!("operands of one dtype"),
@@ -520,6 +538,30 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
         Fusion { body, .. } => {
             let inputs = args.iter().map(|&v| v.clone()).collect();
             eval_graph(body, inputs).remove(0)
+        }
+        FusionOutput { .. } => unreachable!("evaluated with its fusion (eval_graph)"),
+        // As softmax's primitives compute it, each rounding to the dtype.
+        Softmax { axis } => {
+            let Float(x) = args[0] else {
+                unreachable!("a float tensor")
+            };
+            let shape = &types[0].shape;
+            let n = shape[*axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            let mut y = vec![0.0; x.len()];
+            for row in 0..x.len().checked_div(n).unwrap_or(0) {
+                let (o, i) = (row / inner, row % inner);
+                let at = |k: usize| (o * n + k) * inner + i;
+                let m = (0..n).map(|k| x[at(k)]).fold(f64::NEG_INFINITY, fmax);
+                let e: Vec<f64> = (0..n)
+                    .map(|k| round(round(x[at(k)] - m, dtype).exp(), dtype))
+                    .collect();
+                let s = e.iter().fold(0.0, |s, &e| round(s + e, dtype));
+                for k in 0..n {
+                    y[at(k)] = round(e[k] / s, dtype);
+                }
+            }
+            Float(y)
         }
     }
 }

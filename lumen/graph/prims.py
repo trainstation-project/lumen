@@ -10,10 +10,10 @@ from lumen.graph import tracer
 
 __all__ = [
     "add", "sub", "mul", "div", "max", "eq", "lt",
-    "neg", "exp", "log", "rsqrt", "tanh", "logistic",
+    "neg", "exp", "log", "sqrt", "tanh", "logistic",
     "convert_element_type", "select",
     "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate",
+    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax",
     "full", "iota",
 ]
 
@@ -21,6 +21,7 @@ __all__ = [
 def bind(name, *operands, **params):
     """Record ``name(*operands, **params)`` in the graph being traced."""
     graph = tracer.current_graph()
+    operands = [tracer._lift(x) for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")
@@ -69,8 +70,8 @@ def log(x):
     return bind("log", x)
 
 
-def rsqrt(x):
-    return bind("rsqrt", x)
+def sqrt(x):
+    return bind("sqrt", x)
 
 
 def tanh(x):
@@ -89,23 +90,28 @@ def select(pred, on_true, on_false):
     return bind("select", pred, on_true, on_false)
 
 
-def reduce_sum(x, axes):
-    return bind("reduce_sum", x, axes=tuple(axes))
+def reduce_sum(x, axes, accum_dtype):
+    """The sum over ``axes``, accumulated in ``accum_dtype``, the result's
+    dtype: ``x``'s, or ``float32`` for floats narrower than it."""
+    return bind("reduce_sum", x, axes=tuple(axes), accum_dtype=accum_dtype)
 
 
 def reduce_max(x, axes):
     return bind("reduce_max", x, axes=tuple(axes))
 
 
-def dot_general(lhs, rhs, dimension_numbers):
+def dot_general(lhs, rhs, dimension_numbers, accum_dtype):
     """``dimension_numbers = ((lhs_contracting, rhs_contracting),
     (lhs_batch, rhs_batch))``; the result's dimensions are the batch
-    dimensions, then the free ones of ``lhs``, then those of ``rhs``."""
+    dimensions, then the free ones of ``lhs``, then those of ``rhs``. It
+    accumulates in ``accum_dtype``, the result's dtype: the operands', or
+    ``float32`` for floats narrower than it (``lax.dot_general``'s
+    ``preferred_element_type``)."""
     (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
     return bind(
         "dot_general", lhs, rhs,
         lhs_contracting=tuple(lhs_contracting), rhs_contracting=tuple(rhs_contracting),
-        lhs_batch=tuple(lhs_batch), rhs_batch=tuple(rhs_batch),
+        lhs_batch=tuple(lhs_batch), rhs_batch=tuple(rhs_batch), accum_dtype=accum_dtype,
     )
 
 
@@ -133,6 +139,12 @@ def concatenate(operands, dimension):
     """``operands`` one after another along ``dimension``, their other
     dimensions equal (``lax.concatenate``)."""
     return bind("concatenate", *operands, dimension=dimension)
+
+
+def softmax(x, axis):
+    """``exp(x - max) / sum(exp(x - max))`` along ``axis`` (``jax.nn.softmax``,
+    one primitive: one kernel, online softmax, on MPS for the last axis)."""
+    return bind("softmax", x, axis=axis)
 
 
 def full(shape, fill_value, dtype):
