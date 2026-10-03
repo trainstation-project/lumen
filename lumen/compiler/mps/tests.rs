@@ -1,7 +1,7 @@
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
-use crate::graph::tests::mps::{available, check, check_within, values};
+use crate::graph::tests::mps::{available, check, check_within, exact_values, values};
 use crate::graph::tests::{data, mlp};
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::ops::reference;
@@ -191,7 +191,8 @@ fn fused_kernels_match_reference() {
         let p = apply(&mut g, Lt, &[s, iota]);
         let n = apply(&mut g, Neg, &[s]);
         let mut y = apply(&mut g, Select, &[p, m, n]);
-        if dtype.is_float() {
+        // (No bfloat16 logistic: the graph rejects it.)
+        if dtype.is_float() && dtype != DType::BF16 {
             y = apply(&mut g, Logistic, &[y]);
         }
         let r = apply(
@@ -217,7 +218,7 @@ fn fused_kernels_match_reference() {
         );
         g.set_outputs(&[t, i]).unwrap();
         // logistic, expensive and read twice, is stored: its convert runs alone.
-        let expected: &[&str] = if dtype.is_float() {
+        let expected: &[&str] = if dtype.is_float() && dtype != DType::BF16 {
             &["fusion", "fusion", "convert_element_type"]
         } else {
             &["fusion", "fusion"]
@@ -245,6 +246,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         rhs_contracting: vec![2, 0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -267,6 +269,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -330,6 +333,51 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// Dots sharing an operand merge only if they accumulate in the same
+/// dtype: `x @ w1` in float32 and `x @ w3` in bfloat16 stay two dots.
+#[test]
+fn dots_accumulating_in_other_dtypes_do_not_merge() {
+    let dot = |accum_dtype| DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype,
+    };
+    let dots = |accums: [DType; 3]| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::BF16, &[16, 32]));
+        let ws: Vec<Var> = (0..3)
+            .map(|_| g.input(ty(DType::BF16, &[32, 64])))
+            .collect();
+        let ys: Vec<Var> = ws
+            .iter()
+            .zip(accums)
+            .map(|(&w, a)| {
+                let y = apply(&mut g, dot(a), &[x, w]);
+                apply(&mut g, Neg, &[y])
+            })
+            .collect();
+        g.set_outputs(&ys).unwrap();
+        merge_dots(&g, &[false, true, true, true])
+    };
+    // All in float32: one dot of all three.
+    let (merged, packs) = dots([DType::F32; 3]);
+    assert_eq!(packs, [(vec![1, 2, 3], 1)], "{merged}");
+    // The float32 two merge; the bfloat16 one stays alone.
+    let (merged, packs) = dots([DType::F32, DType::BF16, DType::F32]);
+    assert_eq!(packs, [(vec![1, 3], 1)], "{merged}");
+    let accums: Vec<DType> = merged
+        .nodes()
+        .iter()
+        .filter_map(|n| match n.primitive {
+            DotGeneral { accum_dtype, .. } => Some(accum_dtype),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(accums, [DType::F32, DType::BF16], "{merged}");
+}
+
 /// Dots sharing `x` [16, 32] whose other operands are packable parameters
 /// become one dot of `x` and a block of them side by side (a new input),
 /// its result sliced back into each: no concatenation.
@@ -340,6 +388,7 @@ fn dots_sharing_an_operand_merge() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     // The gated MLP: relu(x @ w1) * (x @ w3) @ w2.
     let mut g = Graph::new();
@@ -434,6 +483,7 @@ fn owned_plans_read_packed_parameters() {
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[16, 32]));
@@ -502,6 +552,7 @@ fn dots_read_slices_in_place() {
         rhs_contracting: vec![rc],
         lhs_batch: vec![],
         rhs_batch: vec![],
+        accum_dtype: DType::F32,
     };
     let slice = |start: Vec<usize>, limit: Vec<usize>| Slice {
         start_indices: start,
@@ -593,9 +644,18 @@ fn reductions_fuse_their_inputs() {
                 let fused = fuse(&g);
                 assert_eq!(names(&fused), ["fusion", "neg"], "{fused}");
                 if available() {
-                    let inputs = [values(dtype, &shape, 1), values(dtype, &shape, 2)];
-                    // Sums of many floats: their accumulation error.
-                    let slack = if dtype.is_float() && sum { 1.0 } else { 0.0 };
+                    // A float16 sum accumulates in float16: on values it
+                    // sums exactly in any order.
+                    let count: usize = axes.iter().map(|&d| shape[d]).product();
+                    let inputs = match dtype {
+                        DType::F16 if sum => {
+                            let period = count.div_ceil(128);
+                            [1, 2].map(|seed| exact_values(dtype, &shape, seed, period))
+                        }
+                        _ => [values(dtype, &shape, 1), values(dtype, &shape, 2)],
+                    };
+                    // Sums of many float32s: their accumulation error.
+                    let slack = if dtype == DType::F32 && sum { 1.0 } else { 0.0 };
                     check_within(&g, &inputs, slack);
                 }
             }
@@ -914,10 +974,10 @@ fn rms_norms_without_epsilon_are_one_row_kernel() {
     }
 }
 
-/// A fused division by a fused `sqrt` is generated as a multiplication by
-/// `rsqrt`, one instruction (so `1 / x.sqrt()` is one too).
+/// A fused division by a fused `sqrt` stays a division by a square root,
+/// as traced (no `rsqrt`, which skips the square root's rounding).
 #[test]
-fn division_by_sqrt_is_rsqrt() {
+fn division_by_sqrt_is_as_traced() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
     let y = g.input(ty(DType::F32, &[4, 8]));
@@ -930,7 +990,7 @@ fn division_by_sqrt_is_rsqrt() {
     };
     let source = codegen::kernel(body, &[]).1;
     assert!(
-        source.contains("rsqrt(") && !source.contains("Div::"),
+        !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
     );
     if available() {
@@ -958,7 +1018,7 @@ fn division_by_sqrt_is_rsqrt() {
     };
     let source = codegen::kernel(body, &[]).1;
     assert!(
-        source.contains("rsqrt(") && !source.contains("Div::"),
+        !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
     );
     if available() {

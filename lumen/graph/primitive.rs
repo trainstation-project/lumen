@@ -40,11 +40,15 @@ pub enum Primitive {
     },
     /// The result's dimensions are the batch dimensions, then the free
     /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
+    /// It accumulates in `accum_dtype`, the result's dtype: the operands',
+    /// or float32 for 16-bit float operands, whose products it holds
+    /// exactly (`lax.dot_general`'s `preferred_element_type`, required).
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
         lhs_batch: Vec<usize>,
         rhs_batch: Vec<usize>,
+        accum_dtype: DType,
     },
     Reshape {
         new_sizes: Vec<usize>,
@@ -186,6 +190,9 @@ impl Primitive {
                 if !matches!(self, Neg) && !x.dtype.is_float() {
                     return err(format!("takes a floating-point operand, got {x}"));
                 }
+                if !matches!(self, Neg) {
+                    no_bf16_math(x).map_err(prefix)?;
+                }
                 Ok(x.clone())
             }
             ConvertElementType { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
@@ -218,11 +225,19 @@ impl Primitive {
                 rhs_contracting,
                 lhs_batch,
                 rhs_batch,
+                accum_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
                 if lhs.dtype != rhs.dtype || lhs.dtype == DType::Bool {
                     return err(format!(
                         "operands must share a non-bool dtype, got {lhs} and {rhs}"
+                    ));
+                }
+                let accum = *accum_dtype;
+                let widened = matches!(lhs.dtype, DType::F16 | DType::BF16) && accum == DType::F32;
+                if accum != lhs.dtype && !widened {
+                    return err(format!(
+                        "accumulates in the operands' dtype, or float32 for 16-bit floats: got accum_dtype {accum} for {lhs}"
                     ));
                 }
                 let lhs_dims = [lhs_batch.as_slice(), lhs_contracting].concat();
@@ -244,7 +259,7 @@ impl Primitive {
                 let lhs_free = free_dims(lhs.shape.len(), &lhs_dims).map(|d| lhs.shape[d]);
                 let rhs_free = free_dims(rhs.shape.len(), &rhs_dims).map(|d| rhs.shape[d]);
                 let shape: Vec<usize> = batch.chain(lhs_free).chain(rhs_free).collect();
-                Ok(TensorType::new(lhs.dtype, &shape))
+                Ok(TensorType::new(accum, &shape))
             }
             Reshape { new_sizes } => {
                 let x = args[0];
@@ -333,6 +348,7 @@ impl Primitive {
                         "needs a float tensor and a dimension of it, got {x} and {axis}"
                     ));
                 }
+                no_bf16_math(x).map_err(prefix)?;
                 Ok(x.clone())
             }
             Iota {
@@ -396,6 +412,18 @@ impl fmt::Display for Tuple<'_> {
     }
 }
 
+/// Ok, unless `x` is bfloat16: no device computes exp, log, sqrt, tanh or
+/// logistic in it (Metal's take and return float), and a program is run as
+/// traced, never in another dtype; it computes them in float32 itself.
+fn no_bf16_math(x: &TensorType) -> Result<(), String> {
+    match x.dtype {
+        DType::BF16 => Err(format!(
+            "has no bfloat16 kernel, got {x}: convert to float32 first (x.to(dtype=float32))"
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The primitive with its parameters, as in a jaxpr:
 /// `reduce_sum[axes=(1,)]`.
 impl fmt::Display for Primitive {
@@ -413,14 +441,17 @@ impl fmt::Display for Primitive {
                 rhs_contracting,
                 lhs_batch,
                 rhs_batch,
-            } => write!(
-                f,
-                "[dimension_numbers=(({}, {}), ({}, {}))]",
-                Tuple(lhs_contracting),
-                Tuple(rhs_contracting),
-                Tuple(lhs_batch),
-                Tuple(rhs_batch)
-            ),
+                accum_dtype,
+            } => {
+                write!(
+                    f,
+                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype}]",
+                    Tuple(lhs_contracting),
+                    Tuple(rhs_contracting),
+                    Tuple(lhs_batch),
+                    Tuple(rhs_batch)
+                )
+            }
             Reshape { new_sizes } => write!(f, "[new_sizes={}]", Tuple(new_sizes)),
             BroadcastInDim {
                 shape,

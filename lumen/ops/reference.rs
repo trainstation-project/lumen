@@ -356,10 +356,15 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 }
                 (Float(v), Float(init)) => {
                     let mut acc = vec![init[0]; out.numel()];
+                    // Accumulated in the dtype, rounding each step.
                     for (&t, &a) in target.iter().zip(v) {
-                        acc[t] = if sum { acc[t] + a } else { fmax(acc[t], a) };
+                        acc[t] = if sum {
+                            round(acc[t] + a, dtype)
+                        } else {
+                            fmax(acc[t], a)
+                        };
                     }
-                    Float(acc.into_iter().map(|a| round(a, dtype)).collect())
+                    Float(acc)
                 }
                 _ => unreachable!(),
             }
@@ -369,6 +374,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             rhs_contracting,
             lhs_batch,
             rhs_batch,
+            ..
         } => {
             let (lhs, rhs) = (types[0], types[1]);
             let lhs_free: Vec<usize> = free_dims(
@@ -430,7 +436,13 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 (Float(x), Float(y)) => Float(
                     terms
                         .iter()
-                        .map(|t| round(t.iter().map(|&(i, j)| x[i] * y[j]).sum(), dtype))
+                        // In the accumulation dtype (the result's), each
+                        // product and sum rounded to it.
+                        .map(|t| {
+                            t.iter().fold(0.0, |acc, &(i, j)| {
+                                round(acc + round(x[i] * y[j], dtype), dtype)
+                            })
+                        })
                         .collect(),
                 ),
                 _ => unreachable!("operands of one dtype"),
@@ -544,7 +556,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 let e: Vec<f64> = (0..n)
                     .map(|k| round(round(x[at(k)] - m, dtype).exp(), dtype))
                     .collect();
-                let s = round(e.iter().sum(), dtype);
+                let s = e.iter().fold(0.0, |s, &e| round(s + e, dtype));
                 for k in 0..n {
                     y[at(k)] = round(e[k] / s, dtype);
                 }

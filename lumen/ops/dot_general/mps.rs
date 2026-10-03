@@ -41,6 +41,7 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
         rhs_contracting,
         lhs_batch,
         rhs_batch,
+        ..
     } = p
     else {
         unreachable!("a dot_general")
@@ -129,9 +130,14 @@ pub(crate) fn encode(
     );
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
+    // Accumulating in the operands' dtype, or float (`matmul_<dtype>_f32`).
+    let float = match out.dtype == lhs.dtype {
+        true => format!("{}", out.dtype),
+        false => format!("{}_{}", lhs.dtype, out.dtype),
+    };
     let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
-        (true, false) => (format!("matmul_{}", out.dtype), FLOAT_TILE),
-        (true, true) => (format!("matmul_small_{}", out.dtype), SMALL_TILE),
+        (true, false) => (format!("matmul_{float}"), FLOAT_TILE),
+        (true, true) => (format!("matmul_small_{float}"), SMALL_TILE),
         (false, _) if out.dtype.size_of() == 8 => (format!("matmul_{}", out.dtype), WIDE_TILE),
         (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
     };

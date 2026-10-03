@@ -44,25 +44,20 @@ pub(crate) enum Layout {
     /// Any axes, lanes of threads an output (`reduce_grouped`).
     Grouped,
     /// Consecutive axes, viewed as [a, count, b]: rows when b = 1
-    /// (`reduce_rows`), columns otherwise (`reduce_cols`); `split` into
+    /// (`reduce_rows`), columns otherwise (`reduce_cols`); split into
     /// partials, which a second launch reduces, when there are too few
     /// outputs to fill the GPU.
-    Rows {
-        split: bool,
-    },
-    Cols {
-        split: bool,
-    },
+    Rows,
+    Cols,
 }
 
 pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
     let mut reduced = axes.to_vec();
     reduced.sort_unstable();
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
-        let Split { b, chunks, .. } = split(x, &reduced);
-        return match b {
-            1 => Layout::Rows { split: chunks > 1 },
-            _ => Layout::Cols { split: chunks > 1 },
+        return match split(x, &reduced).b {
+            1 => Layout::Rows,
+            _ => Layout::Cols,
         };
     }
     match x.numel() <= u32::MAX as usize {
@@ -100,7 +95,7 @@ pub(crate) fn encode_reduction(
     let mut reduced = axes.clone();
     reduced.sort_unstable();
     let layout = layout(x, &reduced);
-    if let Layout::Rows { .. } | Layout::Cols { .. } = layout {
+    if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
             op_name, name, x, &reduced, fused, inputs, output, extra, scalars, scratch, keep,
         );
@@ -221,16 +216,6 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     }
 }
 
-/// The type a split reduction's partials have: float for the 16-bit
-/// floats, as the kernels accumulate.
-fn partial_dtype(dtype: DType) -> DType {
-    if matches!(dtype, DType::F16 | DType::BF16) {
-        DType::F32
-    } else {
-        dtype
-    }
-}
-
 /// The scratch a reduction of `x` over `axes` needs: a split reduction's
 /// partials (none for the others).
 pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
@@ -243,7 +228,7 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
     if chunks == 1 || a * b == 0 {
         return 0;
     }
-    a * chunks * b * partial_dtype(x.dtype).size_of()
+    a * chunks * b * x.dtype.size_of()
 }
 
 /// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]:
@@ -328,7 +313,7 @@ fn consecutive(
     }
     // The first launch writes every partial before the second reads them.
     let p = scratch.cast_const();
-    let kernel = first(format!("{op}_{layout}_partial_{dtype}"));
+    let kernel = first(format!("{op}_{layout}_{dtype}"));
     pass(
         kernel,
         inputs,
@@ -340,6 +325,6 @@ fn consecutive(
         chunks,
         keep.clone(),
     )?;
-    let kernel = format!("{op}_{layout}_final_{dtype}");
+    let kernel = format!("{op}_{layout}_{dtype}");
     pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep)
 }

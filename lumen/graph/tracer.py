@@ -856,7 +856,7 @@ def matmul(input, other):
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
     b = tuple(range(len(batch)))
-    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)))
+    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), x.dtype)
     if input.ndim == 1:
         out = out.squeeze(-2)
     if other.ndim == 1:

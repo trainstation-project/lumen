@@ -1,18 +1,3 @@
-//! Metal source for a loop fusion (XLA's loop emitter, see
-//! xla/backends/gpu/codegen/emitters/loop.cc): a kernel whose threads each
-//! take a few output elements, as the elementwise kernels do
-//! (`FOR_EACH_ELEMENT`), and compute each from the fusion's inputs.
-//!
-//! A value is computed at a row-major index of its shape. Elementwise ops
-//! read their operands at the same index; broadcast, transpose and reshape
-//! read theirs at the index they map it to (XLA's indexing maps), so they
-//! cost index arithmetic, not memory. Each (value, index) pair is computed
-//! once per element, into a local, and shapes are baked into the source as
-//! constants. Every op rounds to its dtype as its own kernel does, so a
-//! fusion computes what its primitives would; but a division by a fused
-//! `sqrt` is one `rsqrt` and a multiplication, skipping the square root's
-//! rounding.
-
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -120,7 +105,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             let args = arg(0, "ulong &count")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
             let call = format!(
-                "threadgroup float maxima[REDUCE_THREADS], sums[REDUCE_THREADS];
+                "threadgroup {t} maxima[REDUCE_THREADS], sums[REDUCE_THREADS];
     softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
             );
             return named(format!(
@@ -131,27 +116,18 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             ));
         }
     };
-    let shared = format!("threadgroup typename acc<{t}>::type shared[REDUCE_THREADS];");
-    let (out, args, call) = match reduce::layout(ty, axes) {
-        reduce::Layout::Rows { split } => {
-            let o = if split {
-                format!("typename acc<{t}>::type")
-            } else {
-                t.to_string()
-            };
+    let shared = format!("threadgroup {t} shared[REDUCE_THREADS];");
+    // The output (a split reduction's partials too) is of the input's type.
+    let (args, call) = match reduce::layout(ty, axes) {
+        reduce::Layout::Rows => {
             let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
             let call = format!(
-                "{shared}\n    reduce_rows<{op}, {t}, {o}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
+                "{shared}\n    reduce_rows<{op}, {t}, {t}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
             );
-            (o, args, call)
+            (args, call)
         }
-        reduce::Layout::Cols { split } => {
-            let o = if split {
-                format!("typename acc<{t}>::type")
-            } else {
-                t.to_string()
-            };
+        reduce::Layout::Cols => {
             let args = [
                 arg(0, "uint &cols"),
                 arg(1, "ulong &count"),
@@ -161,8 +137,8 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             .join(", ")
                 + ", uint i [[thread_position_in_grid]]";
             let call =
-                format!("reduce_cols<{op}, {t}, {o}>(input, out, cols, count, chunk, chunks, i);");
-            (o, args, call)
+                format!("reduce_cols<{op}, {t}, {t}>(input, out, cols, count, chunk, chunks, i);");
+            (args, call)
         }
         reduce::Layout::Grouped => {
             let args = [
@@ -182,14 +158,14 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             let call = format!(
                 "{shared}\n    reduce_grouped<{op}, {t}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x);"
             );
-            (t.to_string(), args, call)
+            (args, call)
         }
         reduce::Layout::Generic => unreachable!("reduction fusions read fewer than 2^32 elements"),
     };
     named(format!(
         "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
         emitter.lines,
-        io_params(body, by_value, &out).0,
+        io_params(body, by_value, t).0,
         members.join(", "),
     ))
 }
@@ -259,10 +235,10 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
 
 /// The kernel of a fusion with reductions inside (a normalization over the
 /// last dimension, `rms_norm.rs`): a threadgroup a row of the output. A
-/// pass over the row for each reduction, in order, accumulating it (in
-/// float, combined in threadgroup memory); then one writing the output.
+/// pass over the row for each reduction, in order, accumulating it (in its
+/// dtype, combined in threadgroup memory); then one writing the output.
 /// Values the same across the row (the reductions', constants, and what
-/// they compute alone: `rsqrt(mean + eps)`) are computed once a row.
+/// they compute alone: `sqrt(mean + eps)`) are computed once a row.
 fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
@@ -311,14 +287,14 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
             "a reduction of rows"
         );
         let op = functor_of_reduction(&r.primitive);
-        let a = format!("typename acc<{}>::type", metal_type(x.dtype));
+        let a = metal_type(x.dtype);
         (e.lines, e.hoisted) = (String::new(), String::new());
         (e.values, e.indices) = (HashMap::new(), HashMap::new());
         let value = e.value(r.inputs[0], "j".into());
         let rt = metal_type(body.type_of(r.output).dtype);
         write!(
             source,
-            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        acc{k} = {op}::apply(acc{k}, {a}({value}));\n    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = {rt}(shared{k}[0]);\n",
+            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n{}        acc{k} = {op}::apply(acc{k}, {value});\n    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = shared{k}[0];\n",
             hoisted(&e.hoisted),
             e.lines
         )
@@ -452,37 +428,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Whether value `v` is a `sqrt` this fusion computes, perhaps through
-    /// layout primitives (reshape, broadcast_in_dim, transpose, slice).
-    fn sqrt_through_layout(&self, v: Var) -> bool {
-        use Primitive::*;
-        match self.producer.get(&v).map(|&i| &self.body.nodes()[i]) {
-            Some(n) if matches!(n.primitive, Sqrt) => true,
-            Some(n)
-                if matches!(
-                    n.primitive,
-                    Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. }
-                ) =>
-            {
-                self.sqrt_through_layout(n.inputs[0])
-            }
-            _ => false,
-        }
-    }
-
-    /// `1 / v` at `idx`, as `rsqrt` of the square root's operand, where `v` is
-    /// a `sqrt` through layout primitives ([`Self::sqrt_through_layout`]).
-    fn rsqrt_of(&mut self, v: Var, idx: String) -> String {
-        let node = &self.body.nodes()[self.producer[&v]];
-        match node.primitive {
-            Primitive::Sqrt => format!("rsqrt(float({}))", self.value(node.inputs[0], idx)),
-            _ => {
-                let i = self.operand_index(node, idx);
-                self.rsqrt_of(node.inputs[0], i)
-            }
-        }
-    }
-
     /// The local holding value `v` at row-major index `idx` of its shape: in
     /// a row kernel, a value the same across the row whatever the index,
     /// computed once (into `hoisted`, before the loops).
@@ -530,34 +475,23 @@ impl<'a> Emitter<'a> {
             }
             Some(&i) => {
                 let node = &body.nodes()[i];
-                let x = node.inputs.first().copied();
-                // The operands' element type, and the type ops compute in.
-                let operand = x.map(|x| body.type_of(x).dtype).unwrap_or(ty.dtype);
-                let a = acc_type(operand);
                 use Primitive::*;
                 match &node.primitive {
-                    // x / sqrt(y), the sqrt computed here (perhaps through
-                    // layout primitives): x * rsqrt(y), one instruction where
-                    // they were two (XLA's algebraic simplifier: A / sqrt(B)
-                    // => A * rsqrt(B)).
-                    Div if self.sqrt_through_layout(node.inputs[1]) => {
-                        let x = self.value(node.inputs[0], idx.clone());
-                        let r = self.rsqrt_of(node.inputs[1], idx);
-                        format!("{t}({a}({x}) * {a}({r}))")
-                    }
                     Add | Sub | Mul | Div | Max | Eq | Lt => {
                         let (x, y) = (
                             self.value(node.inputs[0], idx.clone()),
                             self.value(node.inputs[1], idx),
                         );
                         let op = functor(&node.primitive);
-                        format!("{t}({op}::apply({a}({x}), {a}({y})))")
+                        format!("{op}::apply({x}, {y})")
                     }
-                    Neg => format!("{t}(-{a}({}))", self.value(node.inputs[0], idx)),
+                    // Integers wrap (C promotes them to int first).
+                    Neg if ty.dtype.is_float() => format!("-{}", self.value(node.inputs[0], idx)),
+                    Neg => format!("{t}(-{})", self.value(node.inputs[0], idx)),
                     Exp | Log | Sqrt | Tanh | Logistic => {
                         let x = self.value(node.inputs[0], idx);
                         let op = functor(&node.primitive);
-                        format!("{t}({op}::apply(float({x})))")
+                        format!("{op}::apply({x})")
                     }
                     ConvertElementType { .. } => {
                         format!("convert_value<{t}>({})", self.value(node.inputs[0], idx))
@@ -715,14 +649,6 @@ fn metal_type(dtype: DType) -> &'static str {
         DType::BF16 => "bfloat",
         DType::F32 => "float",
         DType::F64 => unreachable!("Metal has no float64"),
-    }
-}
-
-/// The type `dtype`'s ops compute in (`acc` in lumen/ops/mps.metal).
-fn acc_type(dtype: DType) -> &'static str {
-    match dtype {
-        DType::F16 | DType::BF16 => "float",
-        _ => metal_type(dtype),
     }
 }
 

@@ -98,15 +98,18 @@ def reduce_max(x, axes):
     return bind("reduce_max", x, axes=tuple(axes))
 
 
-def dot_general(lhs, rhs, dimension_numbers):
+def dot_general(lhs, rhs, dimension_numbers, accum_dtype):
     """``dimension_numbers = ((lhs_contracting, rhs_contracting),
     (lhs_batch, rhs_batch))``; the result's dimensions are the batch
-    dimensions, then the free ones of ``lhs``, then those of ``rhs``."""
+    dimensions, then the free ones of ``lhs``, then those of ``rhs``. It
+    accumulates in ``accum_dtype``, the result's dtype: the operands', or
+    ``float32`` for 16-bit float operands (``lax.dot_general``'s
+    ``preferred_element_type``)."""
     (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
     return bind(
         "dot_general", lhs, rhs,
         lhs_contracting=tuple(lhs_contracting), rhs_contracting=tuple(rhs_contracting),
-        lhs_batch=tuple(lhs_batch), rhs_batch=tuple(rhs_batch),
+        lhs_batch=tuple(lhs_batch), rhs_batch=tuple(rhs_batch), accum_dtype=accum_dtype,
     )
 
 

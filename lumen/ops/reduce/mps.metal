@@ -20,13 +20,13 @@ inline void reduce(In in,
                    constant ulong *rstrides,
                    ulong count,
                    uint i) {
-    typedef typename acc<T>::type A;
+    typedef T A;
     ulong base = offset_of(i, nk, ksizes, kstrides);
-    A r = A(init);
+    A r = init;
     for (ulong j = 0; j < count; ++j) {
-        r = Op::apply(r, A(in[base + offset_of(j, nr, rsizes, rstrides)]));
+        r = Op::apply(r, in[base + offset_of(j, nr, rsizes, rstrides)]);
     }
-    out[i] = T(r);
+    out[i] = r;
 }
 
 #define REDUCE(OP, FN, NAME, T)                                                             \
@@ -62,16 +62,16 @@ inline void reduce_grouped(In in,
                            uint count,
                            uint lanes,
                            uint outputs,
-                           threadgroup typename acc<T>::type *shared,
+                           threadgroup T *shared,
                            uint g,
                            uint t) {
-    typedef typename acc<T>::type A;
+    typedef T A;
     uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;
-    A r = A(init);
+    A r = init;
     if (i < outputs) {
         ulong base = offset_of(i, nk, ksizes, kstrides);
         for (uint j = lane; j < count; j += lanes) {
-            r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));
+            r = Op::apply(r, in[base + offset_of32(j, nr, rsizes, rstrides)]);
         }
     }
     shared[t] = r;
@@ -82,7 +82,7 @@ inline void reduce_grouped(In in,
         }
     }
     if (lane == 0 && i < outputs) {
-        out[i] = T(shared[t]);
+        out[i] = shared[t];
     }
 }
 
@@ -101,7 +101,7 @@ inline void reduce_grouped(In in,
                                     constant uint &outputs [[buffer(11)]],          \
                                     uint3 group [[threadgroup_position_in_grid]],   \
                                     uint3 tid [[thread_position_in_threadgroup]]) { \
-        threadgroup typename acc<T>::type shared[REDUCE_THREADS];                   \
+        threadgroup T shared[REDUCE_THREADS];                   \
         reduce_grouped<FN, T>(in,                                                   \
                               out,                                                  \
                               init,                                                 \
@@ -131,9 +131,8 @@ FOR_ALL(REDUCE_MAX)
 // The input viewed as [A, count, B], reduced over the middle: rows when
 // B = 1 (contiguous), columns otherwise. With few outputs, `count` is split
 // into `chunks` of `chunk` elements reduced in parallel into partials (in
-// the accumulation type), which a second launch reduces (count = chunks).
-// I and O are the input and output element types: T, or the accumulation
-// type for partials.
+// the input's type), which a second launch reduces (count = chunks).
+// I and O are the input and output element types.
 
 // Threadgroup (p, a) of REDUCE_THREADS reduces chunk p of row a
 // cooperatively, into out[a * chunks + p].
@@ -142,24 +141,24 @@ inline void reduce_rows(In in,
                         device O *out,
                         ulong count,
                         ulong chunk,
-                        threadgroup typename acc<I>::type *shared,
+                        threadgroup I *shared,
                         uint3 group,
                         uint chunks,
                         uint t) {
-    typedef typename acc<I>::type A;
+    typedef I A;
     ulong start = ulong(group.x) * chunk, end = start + chunk < count ? start + chunk : count;
     ulong row = ulong(group.y) * count;
     // Four independent accumulators keep four loads in flight.
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start + t;
     for (; j + 3 * REDUCE_THREADS < end; j += 4 * REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(in[row + j]));
-        r1 = Op::apply(r1, A(in[row + j + REDUCE_THREADS]));
-        r2 = Op::apply(r2, A(in[row + j + 2 * REDUCE_THREADS]));
-        r3 = Op::apply(r3, A(in[row + j + 3 * REDUCE_THREADS]));
+        r0 = Op::apply(r0, in[row + j]);
+        r1 = Op::apply(r1, in[row + j + REDUCE_THREADS]);
+        r2 = Op::apply(r2, in[row + j + 2 * REDUCE_THREADS]);
+        r3 = Op::apply(r3, in[row + j + 3 * REDUCE_THREADS]);
     }
     for (; j < end; j += REDUCE_THREADS) {
-        r0 = Op::apply(r0, A(in[row + j]));
+        r0 = Op::apply(r0, in[row + j]);
     }
     shared[t] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
     for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {
@@ -169,7 +168,7 @@ inline void reduce_rows(In in,
         }
     }
     if (t == 0) {
-        out[ulong(group.y) * chunks + group.x] = O(shared[0]);
+        out[ulong(group.y) * chunks + group.x] = shared[0];
     }
 }
 
@@ -178,7 +177,7 @@ inline void reduce_rows(In in,
 // neighbouring addresses. Writes out[i].
 template <typename Op, typename I, typename O, typename In>
 inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i) {
-    typedef typename acc<I>::type A;
+    typedef I A;
     uint b = i % cols, ap = i / cols, a = ap / chunks, p = ap % chunks;
     ulong start = ulong(p) * chunk, end = start + chunk < count ? start + chunk : count;
     ulong column = ulong(a) * count * cols + b;
@@ -186,15 +185,15 @@ inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chun
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
     ulong j = start;
     for (; j + 3 < end; j += 4) {
-        r0 = Op::apply(r0, A(in[column + j * cols]));
-        r1 = Op::apply(r1, A(in[column + (j + 1) * cols]));
-        r2 = Op::apply(r2, A(in[column + (j + 2) * cols]));
-        r3 = Op::apply(r3, A(in[column + (j + 3) * cols]));
+        r0 = Op::apply(r0, in[column + j * cols]);
+        r1 = Op::apply(r1, in[column + (j + 1) * cols]);
+        r2 = Op::apply(r2, in[column + (j + 2) * cols]);
+        r3 = Op::apply(r3, in[column + (j + 3) * cols]);
     }
     for (; j < end; ++j) {
-        r0 = Op::apply(r0, A(in[column + j * cols]));
+        r0 = Op::apply(r0, in[column + j * cols]);
     }
-    out[i] = O(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
+    out[i] = Op::apply(Op::apply(r0, r1), Op::apply(r2, r3));
 }
 
 #define ROWS(KERNEL, FN, I, O)                                                                         \
@@ -206,7 +205,7 @@ inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chun
                        uint3 groups [[threadgroups_per_grid]],                                         \
                        uint3 tid [[thread_position_in_threadgroup]],                                   \
                        uint3 size [[threads_per_threadgroup]]) {                                       \
-        threadgroup typename acc<I>::type shared[REDUCE_THREADS];                                      \
+        threadgroup I shared[REDUCE_THREADS];                                      \
         reduce_rows<FN, I, O>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x); \
     }
 
@@ -221,15 +220,11 @@ inline void reduce_cols(In in, device O *out, uint cols, ulong count, ulong chun
         reduce_cols<FN, I, O>(in, out, cols, count, chunk, chunks, i); \
     }
 
-// <op>_<layout>_<dtype> reduces T to T in one launch; the _partial and
-// _final kernels are a split reduction's two launches.
-#define LAYOUTS(OP, FN, NAME, T)                                 \
-    ROWS(OP##_rows_##NAME, FN, T, T)                             \
-    ROWS(OP##_rows_partial_##NAME, FN, T, typename acc<T>::type) \
-    ROWS(OP##_rows_final_##NAME, FN, typename acc<T>::type, T)   \
-    COLS(OP##_cols_##NAME, FN, T, T)                             \
-    COLS(OP##_cols_partial_##NAME, FN, T, typename acc<T>::type) \
-    COLS(OP##_cols_final_##NAME, FN, typename acc<T>::type, T)
+// <op>_<layout>_<dtype> reduces T to T: in one launch, or both of a split
+// reduction's (the partials, then them), accumulating in T.
+#define LAYOUTS(OP, FN, NAME, T)     \
+    ROWS(OP##_rows_##NAME, FN, T, T) \
+    COLS(OP##_cols_##NAME, FN, T, T)
 
 #define SUM_LAYOUTS(NAME, T) LAYOUTS(reduce_sum, Add, NAME, T)
 #define MAX_LAYOUTS(NAME, T) LAYOUTS(reduce_max, Max, NAME, T)

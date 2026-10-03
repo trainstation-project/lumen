@@ -6,8 +6,9 @@
 //! placed side by side in one block ([`crate::Tensor::pack`]), read by the
 //! merged dot as a new input.
 //!
-//! Dots merge if they have the same dimension numbers and the same operand
-//! on the same side, and their other operands are distinct packable
+//! Dots merge if they have the same dimension numbers and accumulation
+//! dtype (the same primitive: one kernel accumulates in one dtype) and the
+//! same operand on the same side, and their other operands are distinct packable
 //! parameters, read by that dot alone, differing only in their last free
 //! dimension (the one they are side by side along). Only dots whose results
 //! are read by primitives that fuse, or dots (and are not outputs), merge:
@@ -191,6 +192,7 @@ fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
         rhs_contracting,
         lhs_batch,
         rhs_batch,
+        ..
     } = p
     else {
         unreachable!("a dot")

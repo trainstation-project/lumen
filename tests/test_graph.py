@@ -261,7 +261,8 @@ def test_mps_kernels_match_cpu(dtype):
 
     def block(x, wq, wk, w1):
         scores = (x @ wq) @ (x @ wk).t() * 0.25
-        h = x + scores.softmax(-1) @ x
+        # Softmax in float32 (bfloat16 has no exp).
+        h = x + scores.float().softmax(-1).to(dtype=x.dtype) @ x
         return (h @ w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
 
     arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
@@ -508,7 +509,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     except RuntimeError as e:
         pytest.skip(str(e))
     # A contraction out of matmul form: a transpose step, then the matmul.
-    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())))  # noqa: E731
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
@@ -787,7 +788,7 @@ def test_rms_norm(device):
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_sqrt(device):
     """sqrt is a primitive (rsqrt is not: write 1 / x.sqrt()); on MPS a fused
-    division by a fused sqrt is one rsqrt instruction."""
+    division by a fused sqrt stays a sqrt and a division, as traced."""
     x = rand(8, 16) ** 2 + 0.1
     try:
         t = lumen.from_numpy(x).to(device)
@@ -803,7 +804,9 @@ def test_sqrt(device):
     if device == "mps":
         for f in (lambda a: 1.0 / a.sqrt(), lambda a: a / a.sum(-1, keepdim=True).sqrt()):
             *_, last = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
-            assert last["label"].endswith("div") and "rsqrt(" in last["fusion"]["source"]
+            source = last["fusion"]["source"]
+            assert last["label"].endswith("div") and "rsqrt(" not in source
+            assert "Sqrt::apply" in source and "Div::apply" in source
 
 class ScaledNorm(lumen.nn.Module):
     weight: lumen.Tensor
@@ -852,3 +855,30 @@ def test_float_fields_are_runtime_scalars(device):
     if device == "mps":
         assert len(plan.steps()) == 1
         assert "constant float &in1" in step["fusion"]["source"]  # eps, by value
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_programs_run_in_their_dtypes(device):
+    """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
+    tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
+    its required accum_dtype (float32 for 16-bit floats, written in the
+    program), its result's dtype."""
+    try:
+        x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    for f in (lambda a: a.exp(), lambda a: a.sqrt(), lambda a: a.softmax(-1), lambda a: a.tanh()):
+        with pytest.raises(ValueError, match="convert to float32"):
+            lumen.compile(f)(x)
+    out = lumen.compile(lambda a: a.float().exp())(x)
+    assert out.dtype == "float32"
+    with pytest.raises(TypeError):
+        prims.dot_general(x, x, (((1,), (1,)), ((), ())))
+    w = lumen.from_numpy(rand(8, 3, seed=1)).to(device).to(dtype="bfloat16")
+    dot = lambda a, b, d: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d)  # noqa: E731
+    wide = lumen.compile(lambda a, b: dot(a, b, "float32"))(x, w)
+    assert wide.dtype == "float32"
+    a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
+    np.testing.assert_allclose(lumen.to_numpy(wide), a @ b, rtol=1e-6, atol=1e-6)
+    assert lumen.compile(lambda a, b: dot(a, b, "bfloat16"))(x, w).dtype == "bfloat16"
+    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
