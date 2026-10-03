@@ -188,7 +188,7 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
 
 /// `label` as a `&'static str`, as profiled names are: each distinct label
 /// is leaked once, however many graphs fuse it.
-fn intern(label: String) -> &'static str {
+pub(super) fn intern(label: String) -> &'static str {
     static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
     let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(&interned) = labels.get(label.as_str()) {

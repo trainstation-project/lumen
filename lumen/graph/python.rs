@@ -275,6 +275,7 @@ impl PyPlan {
                 let d = primitive_dict(py, &step.primitive)?;
                 d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
                 d.set_item("output", typed(&step.output))?;
+                d.set_item("label", step.label)?;
                 let views = step
                     .views
                     .iter()

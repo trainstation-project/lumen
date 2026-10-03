@@ -621,6 +621,15 @@ def test_dots_sharing_an_operand_merge(device):
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
         assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
+        # Named for the dots it computes, in the plan and the profiler.
+        assert plan.steps()[0]["label"] == "2x dot_general"
+        from lumen.profiler import ProfilerActivity, profile
+
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+            f(model, lumen.from_numpy(x))
+            lumen.mps.synchronize()
+        names = {(e["kind"], e["name"]) for e in prof.events()}
+        assert {("op", "2x dot_general"), ("gpu", "2x dot_general")} <= names
     else:
         assert plan.packed == [] and steps.count("dot_general") == 2
 
@@ -659,6 +668,7 @@ def test_attention_projections_merge_into_one_matmul():
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
     assert [s["primitive"] for s in steps].count("dot_general") == 3
+    assert [s["label"] for s in steps if s["primitive"] == "dot_general"] == ["3x dot_general", "dot_general", "dot_general"]
     assert "slice" not in [s["primitive"] for s in steps]
     views = [v for s in steps for v in s["views"] if v is not None]
     assert views == [(0, [96, 1]), (64, [96, 1])]

@@ -46,6 +46,9 @@ pub struct View {
 #[derive(Debug, Clone)]
 pub struct Step {
     pub primitive: Primitive,
+    /// What the profiler and the graph page call it: its primitive's name,
+    /// unless the compiler names it (a merged dot, `3x dot_general`).
+    pub label: &'static str,
     pub inputs: Vec<(Buffer, TensorType)>,
     /// Each input's view of its buffer, if it reads one (else the whole
     /// buffer, contiguous).
@@ -300,6 +303,7 @@ impl Plan {
             .zip(scratch_at)
             .map(|(node, scratch)| Step {
                 primitive: node.primitive.clone(),
+                label: node.primitive.name(),
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
                 views: node.inputs.iter().map(|&v| view[v].clone()).collect(),
                 output: slot(node.output),
@@ -311,6 +315,7 @@ impl Plan {
                 primitive: Primitive::Reshape {
                     new_sizes: ty(v).shape,
                 },
+                label: "reshape",
                 inputs: vec![slot(v)],
                 views: vec![view[v].clone()],
                 output: (Buffer::Output(k), ty(v)),
@@ -331,6 +336,12 @@ impl Plan {
 
     pub fn steps(&self) -> &[Step] {
         &self.steps
+    }
+
+    /// The steps, for a graph compiler to name ([`Step::label`]).
+    #[cfg(lumen_mps_linked)]
+    pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
+        &mut self.steps
     }
 
     pub fn workspace_bytes(&self) -> usize {
@@ -602,7 +613,7 @@ impl Plan {
             } else {
                 step
             };
-            let mut record = crate::profiler::record_op(step.primitive.name(), || {
+            let mut record = crate::profiler::record_op(step.label, || {
                 step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
             });
             record.outputs(|| vec![step.output.1.clone()]);

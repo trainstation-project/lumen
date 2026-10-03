@@ -20,7 +20,7 @@ use std::ffi::{CString, c_char};
 use self::merge_dots::merge_dots;
 use super::Options;
 use crate::Tensor;
-use crate::graph::plan::Step;
+use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{elementwise_grid, launch_step, scratch_bytes, u32_arg};
@@ -83,6 +83,21 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         views: dot_views(&fused),
     };
     let mut plan = Plan::compile_with(&fused, &plan);
+    // A dot reading a block of N packed weights computes N dots: named
+    // `Nx dot_general`.
+    let first_block = fused.inputs().len() - packed.len();
+    for step in plan.steps_mut() {
+        if !matches!(step.primitive, Primitive::DotGeneral { .. }) {
+            continue;
+        }
+        let block = step.inputs.iter().find_map(|(b, _)| match *b {
+            Buffer::Input(i) if i >= first_block => Some(i - first_block),
+            _ => None,
+        });
+        if let Some(k) = block {
+            step.label = fusion::intern(format!("{}x dot_general", packed[k].0.len()));
+        }
+    }
     plan.packed = packed;
     Ok(plan)
 }
@@ -214,7 +229,7 @@ pub(crate) fn encode(
     };
     if let Some(root) = codegen::reduction_root(body) {
         let x = body.type_of(root.inputs[0]);
-        let label = step.primitive.name();
+        let label = step.label;
         return crate::ops::reduce::mps::encode_reduction(
             &root.primitive,
             x,

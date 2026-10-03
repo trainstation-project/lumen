@@ -20,7 +20,7 @@ pub(crate) fn encode(
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let x = &step.inputs[0].1;
-    let name = step.primitive.name();
+    let name = step.label;
     encode_reduction(
         &step.primitive,
         x,

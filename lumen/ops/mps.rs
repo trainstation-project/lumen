@@ -171,7 +171,7 @@ pub(crate) fn launch_step(
 ) -> Result<(), String> {
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
-    launch(kernel, &buffers, args, grid, keep, step.primitive.name())
+    launch(kernel, &buffers, args, grid, keep, step.label)
 }
 
 /// Launch `kernel` over `grid`, recorded in the profiler as `name`.

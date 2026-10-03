@@ -148,7 +148,7 @@ def plan_view(plan, kernels):
         fusion = step["fusion"]
         node = {
             "id": len(nodes), "kind": "fusion" if fusion else "step", "step": i,
-            "label": step["primitive"], "text": step["text"], "type": type_text(dtype, shape), "buffer": out_buffer,
+            "label": step["label"], "text": step["text"], "type": type_text(dtype, shape), "buffer": out_buffer,
             "inputs": [[b, type_text(d, s)] for b, d, s in step["inputs"]],
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,

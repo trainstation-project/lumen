@@ -102,7 +102,7 @@ pub(crate) fn encode(
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let name = step.primitive.name();
+    let name = step.label;
     let order = matmul_order(&step.primitive, lhs.shape.len(), rhs.shape.len());
     // An operand read in place as a view of a larger buffer (a slice) has
     // its strides; any other is contiguous.
