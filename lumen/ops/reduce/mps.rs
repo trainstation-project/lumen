@@ -22,6 +22,7 @@ pub(crate) fn encode(
     let x = &step.inputs[0].1;
     let name = step.label;
     encode_reduction(
+        step,
         &step.primitive,
         x,
         None,
@@ -73,6 +74,7 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
 /// `name`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_reduction(
+    step: &Step,
     op: &Primitive,
     x: &TensorType,
     fused: Option<&str>,
@@ -100,7 +102,8 @@ pub(crate) fn encode_reduction(
     let layout = layout(x, &reduced);
     if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
-            op_name, name, x, accum, &reduced, fused, inputs, output, extra, scalars, scratch, keep,
+            step, op_name, name, x, accum, &reduced, fused, inputs, output, extra, scalars,
+            scratch, keep,
         );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
@@ -260,7 +263,8 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usi
 /// writing its `extra` outputs), else `op`'s own (reading `inputs[0]`).
 #[allow(clippy::too_many_arguments)]
 fn consecutive(
-    op: &str,
+    step: &Step,
+    op: &'static str,
     name: &'static str,
     x: &TensorType,
     accum: DType,
@@ -293,7 +297,8 @@ fn consecutive(
                 count,
                 chunk,
                 chunks: usize,
-                keep| {
+                keep,
+                name: &'static str| {
         let mut buffers = srcs.to_vec();
         buffers.push(dst);
         buffers.extend(extra);
@@ -325,7 +330,7 @@ fn consecutive(
     if chunks == 1 {
         let kernel = first(format!("{op}_{layout}_{dtype}"));
         return pass(
-            kernel, inputs, output, extra, scalars, count, count, 1, keep,
+            kernel, inputs, output, extra, scalars, count, count, 1, keep, name,
         );
     }
     if scratch.is_null() {
@@ -334,7 +339,18 @@ fn consecutive(
         ));
     }
     // The first launch writes every partial before the second reads them.
+    // Each is profiled with its own types (the step's inputs to partials,
+    // then those to its output), the second as its op (`reduce_sum`).
     let p = scratch.cast_const();
+    let partials = TensorType::new(accum, &[a, chunks, b]);
+    crate::profiler::launch_types(|| {
+        let inputs = step.inputs.iter().map(|(_, ty)| ty.clone()).collect();
+        let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
+        (
+            inputs,
+            std::iter::once(partials.clone()).chain(extra).collect(),
+        )
+    });
     let kernel = first(format!("{op}_{layout}_{dtype}"));
     pass(
         kernel,
@@ -346,8 +362,10 @@ fn consecutive(
         chunk,
         chunks,
         keep.clone(),
+        name,
     )?;
     // The partials, of the accumulation dtype, reduced in it.
     let kernel = format!("{op}_{layout}_{accum}");
-    pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep)
+    crate::profiler::launch_types(|| (vec![partials.clone()], vec![step.output.1.clone()]));
+    pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep, op)
 }

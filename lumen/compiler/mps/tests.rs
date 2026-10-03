@@ -248,6 +248,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -271,6 +272,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
@@ -440,6 +442,7 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype,
+        output_dtype: accum_dtype,
     };
     let dots = |accums: [DType; 3]| {
         let mut g = Graph::new();
@@ -486,6 +489,7 @@ fn dots_sharing_an_operand_merge() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     // The gated MLP: relu(x @ w1) * (x @ w3) @ w2.
     let mut g = Graph::new();
@@ -581,6 +585,7 @@ fn owned_plans_read_packed_parameters() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[16, 32]));
@@ -650,6 +655,7 @@ fn dots_read_slices_in_place() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let slice = |start: Vec<usize>, limit: Vec<usize>| Slice {
         start_indices: start,

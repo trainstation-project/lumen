@@ -8,6 +8,7 @@ import pytest
 
 import lumen
 from lumen import prims
+from lumen.profiler import ProfilerActivity, profile
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
@@ -260,14 +261,10 @@ def test_mps_kernels_match_cpu(dtype):
         pytest.skip(str(e))
 
     def block(x, wq, wk, w1):
-        # Matmuls accumulate in float32: each cast back to x's dtype.
-        def mm(a, b):
-            return (a @ b).to(dtype=x.dtype)
-
-        scores = mm(mm(x, wq), mm(x, wk).t()) * 0.25
+        scores = (x @ wq) @ (x @ wk).t() * 0.25
         # Softmax in float32 (bfloat16 has no exp).
-        h = x + mm(scores.float().softmax(-1).to(dtype=x.dtype), x)
-        return mm(h, w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
+        h = x + scores.float().softmax(-1).to(dtype=x.dtype) @ x
+        return (h @ w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
 
     arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
     cpu = [lumen.from_numpy(a) for a in arrays]
@@ -513,7 +510,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     except RuntimeError as e:
         pytest.skip(str(e))
     # A contraction out of matmul form: a transpose step, then the matmul.
-    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype)  # noqa: E731
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype, a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
@@ -866,7 +863,8 @@ def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
-    program; `@`, sum and mean always float32), its result's dtype."""
+    program; `@`, sum and mean always float32). A dot returns its required
+    output_dtype (`@`: its inputs'), a sum its accum_dtype."""
     try:
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
@@ -879,14 +877,23 @@ def test_programs_run_in_their_dtypes(device):
     with pytest.raises(TypeError):
         prims.dot_general(x, x, (((1,), (1,)), ((), ())))
     w = lumen.from_numpy(rand(8, 3, seed=1)).to(device).to(dtype="bfloat16")
-    dot = lambda a, b, d: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d)  # noqa: E731
-    wide = lumen.compile(lambda a, b: dot(a, b, "float32"))(x, w)
-    assert wide.dtype == "float32"
+    dot = lambda a, b, d, o: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d, o)  # noqa: E731
     a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
+    # Accumulated in float32, written in float32, or rounded once to the
+    # operands' bfloat16.
+    wide = lumen.compile(lambda a, b: dot(a, b, "float32", "float32"))(x, w)
+    assert wide.dtype == "float32"
     np.testing.assert_allclose(lumen.to_numpy(wide), a @ b, rtol=1e-6, atol=1e-6)
-    assert lumen.compile(lambda a, b: dot(a, b, "bfloat16"))(x, w).dtype == "bfloat16"
-    # `@` accumulates floats in float32.
-    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "float32"
+    narrow = lumen.compile(lambda a, b: dot(a, b, "float32", "bfloat16"))(x, w)
+    assert narrow.dtype == "bfloat16"
+    np.testing.assert_allclose(lumen.to_numpy(narrow.to(dtype="float32")), a @ b, rtol=2**-8, atol=2**-8)
+    assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
+    with pytest.raises(ValueError, match="output_dtype"):
+        lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
+    # `@` accumulates floats in float32, its result of the inputs' dtype.
+    graph = lumen.make_graph(lambda a, b: a @ b)(x, w)
+    assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
+    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
     # So do sum and mean: read as bfloat16, accumulated in float32, with no
     # convert in the graph.
     graph = lumen.make_graph(lambda a: a.sum(-1))(x)
@@ -937,3 +944,33 @@ def test_upcast_rms_norm_is_one_kernel(n):
         y = f(norm, lumen.from_numpy(x).to(dtype="bfloat16"))
         out[device] = lumen.to_numpy(y.to(dtype="float32"))
     np.testing.assert_allclose(out["mps"], out["cpu"], rtol=2**-7, atol=2**-7)
+
+
+@pytest.mark.mps
+def test_split_reduction_converts_its_input_once():
+    """``x.float().sum(-1)`` of bfloat16 rows too long for one launch is two:
+    the fused kernel converts each element once and writes float32
+    partials; the second, the plain float32 kernel, sums those partials,
+    converting nothing (a second convert of float32 values would change
+    no value, so it is checked by what each launch runs)."""
+    try:
+        x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(lambda a: a.float().sum(-1))
+    graph = lumen.make_graph(lambda a: a.float().sum(-1))(x)
+    (step,) = lumen.graph.Plan(graph, "mps").steps()
+    assert step["label"] == "convert_element_type -> reduce_sum" and step["scratch"] is not None
+    source = step["fusion"]["source"]
+    assert source.count("convert_value<float>") == 1, source
+    assert "device float *out" in source and "device const bfloat *in0" in source, source
+    f(x)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        out = f(x)
+        lumen.mps.synchronize()
+    first, last = [e for e in prof.events() if e["kind"] == "gpu"]
+    assert first["kernel"] == step["fusion"]["kernel"]
+    # The second reads the float32 partials with the plain float32 kernel.
+    assert last["kernel"] == "reduce_sum_rows_f32"
+    assert last["inputs"] == first["outputs"] and last["inputs"][0][0] == "float32"
+    np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))

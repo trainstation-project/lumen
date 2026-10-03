@@ -151,8 +151,8 @@ inline void matmul_wide_impl(device const T *lhs,
 }
 
 // The float dtypes on simdgroup matrices, operands of T accumulating in A
-// (T, or float for half and bfloat: dot_general's accum_dtype, the
-// output's): a threadgroup of 256 threads (8 SIMD groups in a 4x2 grid)
+// (T, or float for half and bfloat: dot_general's accum_dtype), the output
+// of O (T or A: its output_dtype), each element rounded to it once: a threadgroup of 256 threads (8 SIMD groups in a 4x2 grid)
 // computes a BM x BN output tile (for 128x64, each SIMD group a 32x32 block
 // of it as 4x2 8x8 accumulators). BMx16 and 16xBN operand tiles are staged
 // in threadgroup memory as T, zero-padded past the edges; each thread loads a fixed column of them, and
@@ -160,10 +160,10 @@ inline void matmul_wide_impl(device const T *lhs,
 // sums over k in increasing order of 8-element blocks.
 #define SG_BK 16
 #define SG_COLS 2 // SIMD groups across the tile
-template <typename T, typename A, uint BM, uint BN>
+template <typename T, typename A, typename O, uint BM, uint BN>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
-                           device A *out,
+                           device O *out,
                            constant ulong *p,
                            threadgroup T *lt,
                            threadgroup T *rt,
@@ -233,7 +233,7 @@ inline void matmul_sg_impl(device const T *lhs,
     // of A in lt (which holds at least 8 x 64 floats), from which its lanes
     // write two elements each.
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
-    device A *o = out + group.z * M * N;
+    device O *o = out + group.z * M * N;
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) {
             simdgroup_store(c[i][j], stage, 8);
@@ -241,7 +241,7 @@ inline void matmul_sg_impl(device const T *lhs,
             for (uint e = lane; e < 64; e += 32) {
                 ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
                 if (m < M && n < N) {
-                    o[m * N + n] = stage[e];
+                    o[m * N + n] = O(stage[e]);
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -249,8 +249,8 @@ inline void matmul_sg_impl(device const T *lhs,
     }
 }
 
-#define MATMUL_ARGS(T, A)                                                                              \
-    device const T *lhs [[buffer(0)]], device const T *rhs [[buffer(1)]], device A *out [[buffer(2)]], \
+#define MATMUL_ARGS(T, O)                                                                              \
+    device const T *lhs [[buffer(0)]], device const T *rhs [[buffer(1)]], device O *out [[buffer(2)]], \
         constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]],                 \
         uint3 tid [[thread_position_in_threadgroup]]
 
@@ -266,22 +266,25 @@ inline void matmul_sg_impl(device const T *lhs,
         matmul_wide_impl<T>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
-#define MATMUL_SG(KERNEL, T, A, BM, BN)                                                                           \
+#define MATMUL_SG(KERNEL, T, A, O, BM, BN)                                                                        \
     kernel void KERNEL(                                                                                           \
-        MATMUL_ARGS(T, A), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
+        MATMUL_ARGS(T, O), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
         threadgroup T lt[BM * SG_BK], rt[SG_BK * BN];                                                             \
-        matmul_sg_impl<T, A, BM, BN>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);              \
+        matmul_sg_impl<T, A, O, BM, BN>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);           \
     }
 
 // matmul_<dtype> on 128x64 tiles, and matmul_small_<dtype> on 64x64 tiles
-// for matmuls with too few 128x64 tiles to fill the GPU; accumulating in
-// the operands' dtype, or (matmul_<dtype>_f32) in float.
-#define MATMUL_FLOAT(NAME, T)               \
-    MATMUL_SG(matmul_##NAME, T, T, 128, 64) \
-    MATMUL_SG(matmul_small_##NAME, T, T, 64, 64)
-#define MATMUL_WIDENED(NAME, T)                         \
-    MATMUL_SG(matmul_##NAME##_f32, T, float, 128, 64) \
-    MATMUL_SG(matmul_small_##NAME##_f32, T, float, 64, 64)
+// for matmuls with too few 128x64 tiles to fill the GPU: in the operands'
+// dtype throughout; matmul[_small]_<dtype>_f32_<output> accumulating in
+// float, writing the operands' dtype or float.
+#define MATMUL_FLOAT(NAME, T)                  \
+    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64) \
+    MATMUL_SG(matmul_small_##NAME, T, T, T, 64, 64)
+#define MATMUL_WIDENED(NAME, T)                                           \
+    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64)          \
+    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 64, 64)     \
+    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)         \
+    MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 64, 64)
 
 MATMUL(u8, uchar)
 MATMUL(u16, ushort)

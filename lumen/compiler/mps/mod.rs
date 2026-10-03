@@ -150,6 +150,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
                 lhs_batch,
                 rhs_batch,
                 accum_dtype,
+                output_dtype,
             } => {
                 let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
                 let order = matmul_order(p, lhs.shape.len(), rhs.shape.len());
@@ -193,6 +194,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
                     lhs_batch: lb,
                     rhs_batch: rb,
                     accum_dtype: *accum_dtype,
+                    output_dtype: *output_dtype,
                 }
             }
             p => p.clone(),
@@ -304,6 +306,7 @@ pub(crate) fn encode(
             );
         }
         return crate::ops::reduce::mps::encode_reduction(
+            step,
             &root.primitive,
             x,
             Some(name),

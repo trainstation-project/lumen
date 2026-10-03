@@ -101,7 +101,8 @@ unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f6
         let to_ns = |t: f64| (p.profiler_ns as f64 + (t - p.host_seconds) * 1e9).max(0.0) as u64;
         let (start, end) = (to_ns(gpu_start), to_ns(gpu_end));
         let kernel = Some(p.kernel.clone());
-        crate::profiler::record_kernel_in(p.context, p.name, kernel, Device::Mps, start, end);
+        let context = p.context.clone();
+        crate::profiler::record_kernel_in(context, p.name, kernel, Device::Mps, start, end);
     }
     drop(submission); // may free the tensors' blocks
     *FINISHED.lock().unwrap_or_else(|e| e.into_inner()) += 1;

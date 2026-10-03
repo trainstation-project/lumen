@@ -130,10 +130,11 @@ pub(crate) fn encode(
     );
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
-    // Accumulating in the operands' dtype, or float (`matmul_<dtype>_f32`).
-    let float = match out.dtype == lhs.dtype {
-        true => format!("{}", out.dtype),
-        false => format!("{}_{}", lhs.dtype, out.dtype),
+    // Of the operands' dtype throughout (`matmul_<dtype>`), or accumulating
+    // in float, writing the operands' or float (`matmul_bf16_f32_bf16`).
+    let float = match (lhs.dtype, out.dtype) {
+        (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
+        (d, o) => format!("{d}_{}_{o}", accum_dtype(&step.primitive)),
     };
     let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
         (true, false) => (format!("matmul_{float}"), FLOAT_TILE),
@@ -151,6 +152,14 @@ pub(crate) fn encode(
         keep,
         name,
     )
+}
+
+/// The dtype dot_general `p` accumulates in.
+fn accum_dtype(p: &Primitive) -> crate::DType {
+    let DotGeneral { accum_dtype, .. } = p else {
+        unreachable!("a dot_general")
+    };
+    *accum_dtype
 }
 
 /// `dims` (each a size and stride, outermost first) as one dimension of

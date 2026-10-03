@@ -136,6 +136,7 @@ fn dot_general_shape() {
         lhs_batch: vec![0],
         rhs_batch: vec![0],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let (l, r) = (ty(DType::F32, &[5, 2, 3]), ty(DType::F32, &[5, 3, 4]));
     assert_eq!(infer(p.clone(), &[l.clone(), r]).unwrap().shape, [5, 2, 4]);
@@ -144,54 +145,62 @@ fn dot_general_shape() {
 
 #[test]
 fn dot_general_accumulates_in_accum_dtype() {
-    let dot = |accum_dtype| DotGeneral {
+    let dot = |accum_dtype, output_dtype| DotGeneral {
         lhs_contracting: vec![1],
         rhs_contracting: vec![0],
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype,
+        output_dtype,
     };
     let operands = |d| [ty(d, &[2, 3]), ty(d, &[3, 4])];
-    // The result is of accum_dtype: the operands', or float32 for 16-bit
-    // floats; nothing else.
-    for (d, accum) in [
-        (DType::F32, DType::F32),
-        (DType::BF16, DType::BF16),
-        (DType::BF16, DType::F32),
-        (DType::F16, DType::F32),
-        (DType::I32, DType::I32),
+    // It accumulates in the operands' dtype, or float32 for narrower
+    // floats, and outputs the operands' dtype or the accumulation's.
+    for (d, accum, output) in [
+        (DType::F32, DType::F32, DType::F32),
+        (DType::BF16, DType::BF16, DType::BF16),
+        (DType::BF16, DType::F32, DType::BF16),
+        (DType::BF16, DType::F32, DType::F32),
+        (DType::F16, DType::F32, DType::F16),
+        (DType::I32, DType::I32, DType::I32),
     ] {
-        assert_eq!(infer(dot(accum), &operands(d)).unwrap().dtype, accum);
+        assert_eq!(
+            infer(dot(accum, output), &operands(d)).unwrap().dtype,
+            output
+        );
     }
-    for (d, accum) in [
-        (DType::F32, DType::F16),
-        (DType::F32, DType::F64),
-        (DType::BF16, DType::F16),
-        (DType::I8, DType::I32),
+    for (d, accum, output, word) in [
+        (DType::F32, DType::F16, DType::F32, "accum_dtype"),
+        (DType::F32, DType::F64, DType::F32, "accum_dtype"),
+        (DType::BF16, DType::F16, DType::BF16, "accum_dtype"),
+        (DType::I8, DType::I32, DType::I8, "accum_dtype"),
+        (DType::BF16, DType::F32, DType::F16, "output_dtype"),
+        (DType::BF16, DType::BF16, DType::F32, "output_dtype"),
     ] {
-        let e = infer(dot(accum), &operands(d)).unwrap_err();
-        assert!(e.contains("accum_dtype"), "{e}");
+        let e = infer(dot(accum, output), &operands(d)).unwrap_err();
+        assert!(e.contains(word), "{e}");
     }
     assert_eq!(
-        dot(DType::F32).to_string(),
-        "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32]"
+        dot(DType::F32, DType::BF16).to_string(),
+        "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=bf16]"
     );
-    // Each product and partial sum rounded to it: bfloat16 holds 1 + 2^-8
-    // as 1 (an addition lost), float32 does not.
-    let x = Tensor::from_slice(
-        &[bf16::from_f32(1.0), bf16::from_f32(1.0 / 256.0)],
-        DType::BF16,
-    )
-    .reshape(&[1, 2]);
-    let y = Tensor::from_slice(&[bf16::from_f32(1.0), bf16::from_f32(1.0)], DType::BF16)
-        .reshape(&[2, 1]);
+    // Each product and partial sum rounded to accum_dtype, the result to
+    // output_dtype once: bfloat16 holds 1 + 2^-8 as 1 (each 2^-8 added is
+    // lost); float32 adds both, 1 + 2^-7, which bfloat16 holds too.
+    let b = |v: f32| bf16::from_f32(v);
+    let x =
+        Tensor::from_slice(&[b(1.0), b(1.0 / 256.0), b(1.0 / 256.0)], DType::BF16).reshape(&[1, 3]);
+    let y = Tensor::from_slice(&[b(1.0); 3], DType::BF16).reshape(&[3, 1]);
+    let pair = [x, y];
     assert_eq!(
-        run(dot(DType::BF16), &[x.clone(), y.clone()]).to_vec::<bf16>(),
-        [bf16::from_f32(1.0)]
+        run(dot(DType::BF16, DType::BF16), &pair).to_vec::<bf16>(),
+        [b(1.0)]
     );
+    let narrow = run(dot(DType::F32, DType::BF16), &pair).to_vec::<bf16>();
+    assert_eq!(narrow, [b(1.0 + 1.0 / 128.0)]);
     assert_eq!(
-        run(dot(DType::F32), &[x, y]).to_vec::<f32>(),
-        [1.0 + 1.0 / 256.0]
+        run(dot(DType::F32, DType::F32), &pair).to_vec::<f32>(),
+        [1.0 + 1.0 / 128.0]
     );
 }
 
@@ -300,6 +309,7 @@ fn dot_general_values() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::I32,
+        output_dtype: DType::I32,
     };
     let y = run(p, &[l, r]);
     assert_eq!(y.shape(), [2, 2]);
@@ -413,6 +423,7 @@ pub(crate) fn mlp() -> Graph {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
+        output_dtype: DType::F32,
     };
     let h = g.apply(matmul.clone(), &[x, w1]).unwrap();
     let zero = Full {
@@ -900,21 +911,26 @@ pub(crate) mod mps {
         }
     }
 
-    /// 16-bit float dots accumulating in float32 (`matmul_<dtype>_f32`),
-    /// large and small tiles.
+    /// 16-bit float dots accumulating in float32, written in their dtype or
+    /// float32 (`matmul_<dtype>_f32_<output>`), large and small tiles.
     #[test]
     fn widened_contractions() {
         if !available() {
             return;
         }
         for dtype in [DType::F16, DType::BF16] {
-            for (m, k, n) in [(37, 45, 29), (300, 70, 200)] {
+            // Written in the operands' dtype, and in float32.
+            for ((m, k, n), output_dtype) in [(37, 45, 29), (300, 70, 200)]
+                .into_iter()
+                .flat_map(|s| [(s, dtype), (s, DType::F32)])
+            {
                 let dot = DotGeneral {
                     lhs_contracting: vec![1],
                     rhs_contracting: vec![0],
                     lhs_batch: vec![],
                     rhs_batch: vec![],
                     accum_dtype: DType::F32,
+                    output_dtype,
                 };
                 check_node(dot, &[ty(dtype, &[m, k]), ty(dtype, &[k, n])]);
             }
@@ -1002,6 +1018,7 @@ pub(crate) mod mps {
                 lhs_batch: vec![0],
                 rhs_batch: vec![0],
                 accum_dtype: dtype,
+                output_dtype: dtype,
             };
             check_node(batched, &[ty(dtype, &[3, 2, 5]), ty(dtype, &[3, 5, 4])]);
             let two = DotGeneral {
@@ -1010,6 +1027,7 @@ pub(crate) mod mps {
                 lhs_batch: vec![],
                 rhs_batch: vec![],
                 accum_dtype: dtype,
+                output_dtype: dtype,
             };
             check_node(two, &[ty(dtype, &[3, 2, 4]), ty(dtype, &[4, 5, 3])]);
             // The tiled kernel: sizes that are not multiples of its tiles,
@@ -1020,6 +1038,7 @@ pub(crate) mod mps {
                 lhs_batch: batch.clone(),
                 rhs_batch: batch,
                 accum_dtype: dtype,
+                output_dtype: dtype,
             };
             check_node(
                 dot(1, 0, vec![]),
