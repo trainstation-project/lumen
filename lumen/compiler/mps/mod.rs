@@ -306,6 +306,7 @@ pub(crate) fn encode(
             );
         }
         return crate::ops::reduce::mps::encode_reduction(
+            step,
             &root.primitive,
             x,
             Some(name),

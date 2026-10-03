@@ -153,6 +153,29 @@ thread_local! {
     /// Ids of the ops and ranges open on this thread, innermost last.
     static STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static THREAD_ID: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
+    /// The next device launch's own types, where they are not its op's.
+    static LAUNCH_TYPES: RefCell<Option<IoTypes>> = const { RefCell::new(None) };
+}
+
+/// A launch's inputs' and outputs' types.
+type IoTypes = (Vec<TensorType>, Vec<TensorType>);
+
+/// Record the next device launch on this thread with these input and
+/// output types (`types` is only called with `record_shapes`) instead of
+/// its op's: an op that launches several kernels, each reading and writing
+/// other values (a split reduction: the input to partials, then them to
+/// the output).
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+pub(crate) fn launch_types(types: impl FnOnce() -> IoTypes) {
+    if flags() & SHAPES != 0 {
+        LAUNCH_TYPES.with(|t| *t.borrow_mut() = Some(types()));
+    }
+}
+
+/// Drop [`launch_types`] set for a launch that did not happen.
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+pub(crate) fn clear_launch_types() {
+    LAUNCH_TYPES.with(|t| t.borrow_mut().take());
 }
 
 /// The profiler clock: nanoseconds since the first time it was read.
@@ -237,7 +260,7 @@ pub fn stop() -> Result<Profile, String> {
     let mut events = session.events;
     // Events are pushed as they end; order them by start for readers.
     events.sort_by_key(|e| (e.start_ns, e.id));
-    // Device work has the types of the op that issued it.
+    // Device work has the types of the op that issued it, unless its own.
     type Types = (Vec<TensorType>, Vec<TensorType>, Vec<DType>);
     let types: std::collections::HashMap<u64, Types> = events
         .iter()
@@ -246,7 +269,11 @@ pub fn stop() -> Result<Profile, String> {
         .collect();
     for e in events.iter_mut().filter(|e| e.kind == EventKind::Gpu) {
         if let Some((inputs, outputs, accum)) = e.parent.and_then(|p| types.get(&p)) {
-            (e.inputs, e.outputs, e.accum) = (inputs.clone(), outputs.clone(), accum.clone());
+            // A launch with types of its own ([`launch_types`]) keeps them.
+            if e.inputs.is_empty() && e.outputs.is_empty() {
+                (e.inputs, e.outputs) = (inputs.clone(), outputs.clone());
+            }
+            e.accum = accum.clone();
         }
     }
     Ok(Profile::new(events, session.config))
@@ -448,21 +475,25 @@ pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_
 
 /// Who submitted device work, captured at submission, for work whose times
 /// arrive later (asynchronous MPS and CUDA work).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct GpuContext {
     session: u64,
     parent: Option<u64>,
     thread: u64,
+    /// The launch's own types ([`launch_types`]), if not its op's.
+    types: Option<IoTypes>,
 }
 
 /// The current op's context for device work on `device`, if the session
 /// times it.
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
+    let types = LAUNCH_TYPES.with(|t| t.borrow_mut().take());
     device_enabled(device).then(|| GpuContext {
         session: SESSION.load(Ordering::Relaxed),
         parent: current_parent(),
         thread: thread_id(),
+        types,
     })
 }
 
@@ -488,6 +519,8 @@ pub(crate) fn record_kernel_in(
     start_ns: u64,
     end_ns: u64,
 ) {
+    // Its own types, if set; else its op's, given it when the session ends.
+    let (inputs, outputs) = context.types.unwrap_or_default();
     push(
         context.session,
         Event {
@@ -499,8 +532,8 @@ pub(crate) fn record_kernel_in(
             thread: context.thread,
             parent: context.parent,
             device,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
+            inputs,
+            outputs,
             accum: Vec::new(),
             bytes: 0,
             addr: 0,

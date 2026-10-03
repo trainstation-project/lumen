@@ -266,7 +266,7 @@ pub(crate) fn stop() {
             continue;
         };
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
-        if let Some(&context) = context {
+        if let Some(context) = context.cloned() {
             let device = Device::Cuda(device as usize);
             super::record_gpu_in(context, &name, device, to_ns(start), to_ns(end));
         }

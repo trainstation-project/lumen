@@ -8,6 +8,7 @@ import pytest
 
 import lumen
 from lumen import prims
+from lumen.profiler import ProfilerActivity, profile
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
@@ -943,3 +944,33 @@ def test_upcast_rms_norm_is_one_kernel(n):
         y = f(norm, lumen.from_numpy(x).to(dtype="bfloat16"))
         out[device] = lumen.to_numpy(y.to(dtype="float32"))
     np.testing.assert_allclose(out["mps"], out["cpu"], rtol=2**-7, atol=2**-7)
+
+
+@pytest.mark.mps
+def test_split_reduction_converts_its_input_once():
+    """``x.float().sum(-1)`` of bfloat16 rows too long for one launch is two:
+    the fused kernel converts each element once and writes float32
+    partials; the second, the plain float32 kernel, sums those partials,
+    converting nothing (a second convert of float32 values would change
+    no value, so it is checked by what each launch runs)."""
+    try:
+        x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(lambda a: a.float().sum(-1))
+    graph = lumen.make_graph(lambda a: a.float().sum(-1))(x)
+    (step,) = lumen.graph.Plan(graph, "mps").steps()
+    assert step["label"] == "convert_element_type -> reduce_sum" and step["scratch"] is not None
+    source = step["fusion"]["source"]
+    assert source.count("convert_value<float>") == 1, source
+    assert "device float *out" in source and "device const bfloat *in0" in source, source
+    f(x)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        out = f(x)
+        lumen.mps.synchronize()
+    first, last = [e for e in prof.events() if e["kind"] == "gpu"]
+    assert first["kernel"] == step["fusion"]["kernel"]
+    # The second reads the float32 partials with the plain float32 kernel.
+    assert last["kernel"] == "reduce_sum_rows_f32"
+    assert last["inputs"] == first["outputs"] and last["inputs"][0][0] == "float32"
+    np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))

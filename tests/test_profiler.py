@@ -246,3 +246,26 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
         prof.export_chrome_trace(str(path))
         text = path.read_text()
         assert '"Accum type":["f32"]' in text and '"Accum type":["bf16"]' in text
+
+
+@pytest.mark.mps
+def test_split_reduction_launches_record_their_own_types():
+    """A split reduction is two launches, each profiled with what it reads
+    and writes: the step's input to partials (of the accumulation dtype),
+    then those partials to the output, named after its op."""
+    try:
+        x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(lambda a: a.sum(-1))
+    f(x)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(x)
+        lumen.mps.synchronize()
+    first, last = [e for e in prof.events() if e["kind"] == "gpu"]
+    (partials,) = first["outputs"]
+    assert first["inputs"] == [("bfloat16", [4, 200_000])]
+    assert partials[0] == "float32" and partials[1][0] == 4 and partials[1][1] > 1
+    assert last["name"] == "reduce_sum" and last["kernel"] == "reduce_sum_rows_f32"
+    assert last["inputs"] == [partials] and last["outputs"] == [("float32", [4])]
+    assert first["accum"] == last["accum"] == ["float32"]
