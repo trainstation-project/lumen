@@ -22,7 +22,7 @@ use super::Options;
 use crate::Tensor;
 use crate::graph::plan::Step;
 use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
-use crate::ops::dot_general::mps::{collapsed, matmul_order};
+use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{elementwise_grid, launch_step, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 
@@ -168,7 +168,7 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
         let (Primitive::Slice { .. }, &[x]) = (&node.primitive, node.inputs.as_slice()) else {
             continue;
         };
-        let (v, ty) = (node.output, graph.type_of(node.output));
+        let v = node.output;
         if graph.outputs().contains(&v) || views.contains(&x) {
             continue;
         }
@@ -179,11 +179,8 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
             let Primitive::DotGeneral { .. } = n.primitive else {
                 return false;
             };
-            let rank = |k: usize| graph.type_of(n.inputs[k]).shape.len();
-            let order = matmul_order(&n.primitive, rank(0), rank(1));
-            let as_lhs = collapsed(ty, &strides, &order.lhs, order.lhs_split).is_some();
-            let as_rhs = collapsed(ty, &strides, &order.rhs, order.rhs_split).is_some();
-            (n.inputs[0] != v || as_lhs) && (n.inputs[1] != v || as_rhs)
+            let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
+            (0..2).all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
         });
         if read && in_place {
             views.push(v);

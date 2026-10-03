@@ -597,3 +597,29 @@ def test_attention_projections_merge_into_one_matmul():
     assert "slice" not in [s["primitive"] for s in steps]
     views = [v for s in steps for v in s["views"] if v is not None]
     assert views == [(0, [96, 1]), (64, [96, 1])]
+
+
+@pytest.mark.mps
+def test_packed_parameters_are_read_in_place_elsewhere():
+    """A parameter another function packed into a block (a strided view of
+    it) is read in place by the matmuls of a function using it alone, at
+    its strides: no copy per call."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    w1, w3 = lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta")
+    x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
+    gated = lumen.compile(lambda x, w1, w3: (x @ w1).relu() * (x @ w3), device="mps")
+    p1, p3 = gated.place(lumen.from_numpy(x), w1, w3)
+    assert p1.shares_storage_with(p3) and not p1.is_contiguous()
+    p1.copy_(lumen.from_numpy(w1v))
+    p3.copy_(lumen.from_numpy(w3v))
+    alone = lumen.compile(lambda x, w: x @ w, device="mps")
+    alone(lumen.from_numpy(x), w1)
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        out = alone(lumen.from_numpy(x), w1)
+    np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
+    assert "lumen::to_vec" not in {e["name"] for e in prof.events()}  # no host copy of w1

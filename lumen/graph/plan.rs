@@ -425,8 +425,10 @@ impl Plan {
         run.outputs(|| self.outputs.clone());
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
-        // A parameter read in place; contiguous if a step reads it (a packed
-        // one, a view of its block, is read as the block).
+        // A parameter is read in place: as it is if contiguous, or if every
+        // step reading it takes it at its strides (a parameter packed into a
+        // block another plan merged dots over is a strided view of it);
+        // else a contiguous copy.
         let read = |i: usize| {
             let at = Buffer::Input(i);
             self.outputs_at.contains(&at)
@@ -453,7 +455,9 @@ impl Plan {
                         t.device()
                     ));
                 }
-                _ if !read(i) => params.push(t.clone()),
+                _ if !read(i) || t.is_contiguous() || self.reads_strided(i, t.strides()) => {
+                    params.push(t.clone())
+                }
                 _ => params.push(dispatch_dtype!(t.dtype(), T => t.contiguous::<T>())),
             }
         }
@@ -468,6 +472,39 @@ impl Plan {
                 Buffer::Output(_) => unreachable!("an owned plan has no output buffers"),
             })
             .collect())
+    }
+
+    /// Whether every step reading parameter `i` reads it in place at
+    /// `strides` (dots in matmul form, on MPS), so that a strided one needs
+    /// no copy.
+    fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {
+        #[cfg(lumen_mps_linked)]
+        {
+            let at = Buffer::Input(i);
+            !self.outputs_at.contains(&at)
+                && self.steps.iter().all(|s| {
+                    let operands = s.inputs.iter().zip(&s.views).enumerate();
+                    let mut reads = operands.filter(|(_, ((b, _), _))| *b == at);
+                    reads.all(|(k, (_, view))| {
+                        let Primitive::DotGeneral { .. } = s.primitive else {
+                            return false;
+                        };
+                        let operands = [&s.inputs[0].1, &s.inputs[1].1];
+                        view.is_none()
+                            && crate::ops::dot_general::mps::reads_strided(
+                                &s.primitive,
+                                operands,
+                                k,
+                                strides,
+                            )
+                    })
+                })
+        }
+        #[cfg(not(lumen_mps_linked))]
+        {
+            let _ = (i, strides);
+            false
+        }
     }
 
     /// Check `inputs` against the plan's input types.
@@ -545,6 +582,26 @@ impl Plan {
             return Err("operands read as views run on MPS only".into());
         }
         for step in &self.steps {
+            // A strided input (a parameter [`run_in`](Self::run_in) reads in
+            // place) is read as a view at its strides.
+            let strided = |&(b, _): &(Buffer, TensorType)| match b {
+                Buffer::Input(i) if !inputs[i].is_contiguous() => Some(i),
+                _ => None,
+            };
+            let with_views;
+            let step = if step.inputs.iter().any(|s| strided(s).is_some()) {
+                let mut s = step.clone();
+                for (k, input) in step.inputs.iter().enumerate() {
+                    if let Some(i) = strided(input) {
+                        let strides = inputs[i].strides().to_vec();
+                        s.views[k] = Some(View { offset: 0, strides });
+                    }
+                }
+                with_views = s;
+                &with_views
+            } else {
+                step
+            };
             let mut record = crate::profiler::record_op(step.primitive.name(), || {
                 step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
             });

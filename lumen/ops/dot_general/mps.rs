@@ -78,6 +78,23 @@ pub(crate) fn collapsed(
     Some(out)
 }
 
+/// Whether dot_general `p` of operands of types `operands` can read its
+/// operand `k` in place at `strides` (in elements): if its dimensions
+/// collapse into matmul form at them.
+pub(crate) fn reads_strided(
+    p: &Primitive,
+    operands: [&TensorType; 2],
+    k: usize,
+    strides: &[usize],
+) -> bool {
+    let order = matmul_order(p, operands[0].shape.len(), operands[1].shape.len());
+    let (dims, split) = match k {
+        0 => (&order.lhs, order.lhs_split),
+        _ => (&order.rhs, order.rhs_split),
+    };
+    collapsed(operands[k], strides, dims, split).is_some()
+}
+
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
