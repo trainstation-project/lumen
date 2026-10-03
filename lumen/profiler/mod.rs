@@ -35,6 +35,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::device::Device;
+use crate::graph::TensorType;
 
 /// What a session records (PyTorch: `ProfilerActivity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,7 +54,8 @@ pub struct ProfilerConfig {
     pub activities: Vec<Activity>,
     /// Record allocations and frees (PyTorch: `profile_memory`).
     pub profile_memory: bool,
-    /// Record the shapes each op was called with (PyTorch: `record_shapes`).
+    /// Record the dtype and shape of each op's inputs and outputs (PyTorch:
+    /// `record_shapes`, which records the inputs').
     pub record_shapes: bool,
 }
 
@@ -96,8 +98,10 @@ pub struct Event {
     pub parent: Option<u64>,
     /// `Cpu` for ops; the memory's or GPU's device otherwise.
     pub device: Device,
-    /// Input shapes, with `record_shapes`.
-    pub shapes: Vec<Vec<usize>>,
+    /// The op's inputs' and outputs' types (dtype and shape), with
+    /// `record_shapes`.
+    pub inputs: Vec<TensorType>,
+    pub outputs: Vec<TensorType>,
     /// Memory events: bytes allocated (positive) or freed (negative).
     pub bytes: i64,
     /// Memory events: the block's address.
@@ -171,7 +175,7 @@ pub(crate) fn memory_enabled() -> bool {
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn device_enabled(device: Device) -> bool {
     let bit = match device {
-        Device::Cpu => return false,
+        Device::Cpu | Device::Meta => return false,
         Device::Cuda(_) => CUDA,
         Device::Mps => MPS,
     };
@@ -228,6 +232,17 @@ pub fn stop() -> Result<Profile, String> {
     let mut events = session.events;
     // Events are pushed as they end; order them by start for readers.
     events.sort_by_key(|e| (e.start_ns, e.id));
+    // Device work has the types of the op that issued it.
+    let types: std::collections::HashMap<u64, (Vec<TensorType>, Vec<TensorType>)> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::Op)
+        .map(|e| (e.id, (e.inputs.clone(), e.outputs.clone())))
+        .collect();
+    for e in events.iter_mut().filter(|e| e.kind == EventKind::Gpu) {
+        if let Some((inputs, outputs)) = e.parent.and_then(|p| types.get(&p)) {
+            (e.inputs, e.outputs) = (inputs.clone(), outputs.clone());
+        }
+    }
     Ok(Profile::new(events, session.config))
 }
 
@@ -267,13 +282,14 @@ struct OpenRange {
     kind: EventKind,
     start_ns: u64,
     parent: Option<u64>,
-    shapes: Vec<Vec<usize>>,
+    /// `None` without `record_shapes`.
+    types: Option<(Vec<TensorType>, Vec<TensorType>)>,
 }
 
 fn open_range(
     name: impl FnOnce() -> String,
     kind: EventKind,
-    shapes: impl FnOnce() -> Vec<Vec<usize>>,
+    inputs: impl FnOnce() -> Vec<TensorType>,
 ) -> RecordGuard {
     let bits = flags();
     if bits & CPU == 0 {
@@ -290,12 +306,18 @@ fn open_range(
             kind,
             start_ns: now_ns(),
             parent,
-            shapes: if bits & SHAPES != 0 {
-                shapes()
-            } else {
-                Vec::new()
-            },
+            types: (bits & SHAPES != 0).then(|| (inputs(), Vec::new())),
         }),
+    }
+}
+
+impl RecordGuard {
+    /// Record the op's outputs' types (with `record_shapes`; `outputs` is
+    /// only called then), once it has them.
+    pub(crate) fn outputs(&mut self, outputs: impl FnOnce() -> Vec<TensorType>) {
+        if let Some((_, out)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
+            *out = outputs();
+        }
     }
 }
 
@@ -313,6 +335,7 @@ impl Drop for RecordGuard {
             }
         });
         let thread = thread_id();
+        let (inputs, outputs) = open.types.unwrap_or_default();
         push(
             open.session,
             Event {
@@ -324,7 +347,8 @@ impl Drop for RecordGuard {
                 thread,
                 parent: open.parent,
                 device: Device::Cpu,
-                shapes: open.shapes,
+                inputs,
+                outputs,
                 bytes: 0,
                 addr: 0,
                 total_allocated: 0,
@@ -341,13 +365,14 @@ pub fn record_function(name: impl Into<String>) -> RecordGuard {
     open_range(|| name.into(), EventKind::UserRange, Vec::new)
 }
 
-/// Time a lumen op until the guard drops; `shapes` is only called with
-/// `record_shapes`.
+/// Time a lumen op until the guard drops, given its inputs' types (only
+/// called with `record_shapes`); its outputs' go to
+/// [`RecordGuard::outputs`].
 pub(crate) fn record_op(
     name: &'static str,
-    shapes: impl FnOnce() -> Vec<Vec<usize>>,
+    inputs: impl FnOnce() -> Vec<TensorType>,
 ) -> RecordGuard {
-    open_range(|| name.to_owned(), EventKind::Op, shapes)
+    open_range(|| name.to_owned(), EventKind::Op, inputs)
 }
 
 // ---------------- memory and device hooks ----------------
@@ -381,7 +406,8 @@ pub(crate) fn report_memory(
             thread,
             parent,
             device,
-            shapes: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
             bytes,
             addr,
             total_allocated,
@@ -456,7 +482,8 @@ pub(crate) fn record_kernel_in(
             thread: context.thread,
             parent: context.parent,
             device,
-            shapes: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
             bytes: 0,
             addr: 0,
             total_allocated: 0,

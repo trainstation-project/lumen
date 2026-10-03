@@ -18,7 +18,7 @@ import builtins
 import functools
 import math
 
-from lumen._C import Graph, Plan, Tensor
+from lumen._C import Graph, Plan, Tensor, _pack
 from lumen.graph import prims
 
 __all__ = [
@@ -60,66 +60,172 @@ def _trace(fn, args):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape, and compiled for their device;
-    # anything else is baked into the graph, so it must be hashable.
-    return tuple((a.dtype, tuple(a.shape), str(a.device)) if isinstance(a, Tensor) else ("static", a) for a in args)
+    # Tensors are traced by dtype and shape, meta ones (parameters) apart
+    # from those with data; anything else is baked into the graph, so it
+    # must be hashable.
+    return tuple(
+        (a.dtype, tuple(a.shape), a.device == "meta") if isinstance(a, Tensor) else ("static", a) for a in args
+    )
 
 
-def compile(fn):
+def _device(args, device):
+    """Where a function of ``args`` runs: ``device``, or the first tensor
+    argument with data's, or the meta device if all are meta (nothing
+    runs), or the CPU."""
+    if device is not None:
+        return str(device)
+    tensors = [a for a in args if isinstance(a, Tensor)]
+    data = [a for a in tensors if a.device != "meta"]
+    return str(data[0].device) if data else ("meta" if tensors else "cpu")
+
+
+def compile(fn, device=None):
     """``fn`` compiled (``torch.compile``, ``jax.jit``): traced into a graph
-    and compiled into a static plan for the tensor arguments' device on its
-    first call with each input signature (the tensor arguments' dtypes,
-    shapes and devices, and the values of the other arguments), which every
-    call then runs. Results are on the first tensor argument's device.
+    and compiled into a static plan for ``device`` on its first call with
+    each input signature (the tensor arguments' dtypes and shapes, and the
+    values of the other arguments), which every call then runs. ``device``
+    defaults to the first tensor argument with data's (the CPU without
+    any).
+
+    The compiled function owns its memory (XLA: buffer assignment over the
+    whole program). Its plan places every value, the tensor arguments with
+    data and the results included, in one workspace, allocated once: each
+    call copies those arguments in (from any device) and returns views of
+    the results, which the next call overwrites (``.clone()`` one to keep
+    it). Meta tensor arguments are parameters: never the caller's to
+    allocate, they are placed on the device the first time a compiled
+    function uses them, and every compiled function using them shares that
+    memory. Where dots that share an operand merge into one (``x @ w1`` and
+    ``x @ w3``), their parameters are placed side by side in one block,
+    read by the merged dot, never concatenated. Placed parameters start
+    zeroed: ``compiled.place(*args)`` places them without running and
+    returns each meta argument's memory, to copy data into (``copy_``).
+
+    With only meta tensors (and no ``device``), nothing runs: results are
+    meta tensors of the right types.
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
+    compile_device = device  # dump_graph's own `device` shadows it
+    # Per signature and device, the graph and its plans: each with its
+    # workspace (`None` on the meta device), tried in order.
     plans = {}
     latest = []
 
-    def entry(args):
-        key = _signature(args)
+    def prepare(args):
+        """The plan for ``args`` and its inputs: the graph, the plan, its
+        workspace, whether ``fn`` returns a single tensor, and the plan's
+        inputs (the parameters placed, and their blocks)."""
+        target = _device(args, device)
+        key = _signature(args), target
         if key not in plans:
             graph, single = _trace(fn, args)
-            device = next((a.device for a in args if isinstance(a, Tensor)), None)
-            plans[key] = graph, Plan(graph, device), single
+            plans[key] = graph, single, []
+        graph, single, entries = plans[key]
         latest[:] = [key]
-        return plans[key]
+        tensors = [a for a in args if isinstance(a, Tensor)]
+        if target == "meta":
+            if not entries:
+                entries.append((Plan(graph, "meta"), None))
+            return graph, entries[0][0], None, single, tensors
+        params = [i for i, t in enumerate(tensors) if t.device == "meta"]
+        for i in params:
+            if not tensors[i]._is_parameter:
+                raise TypeError(f"{fn.__name__}: a meta argument must be a whole tensor (a parameter), not a view")
+
+        def inputs_for(plan):
+            # The parameters in their blocks, if they are placed so (or not
+            # yet placed), else None.
+            blocks = []
+            for positions, dimension in plan.packed:
+                block = _pack([tensors[i] for i in positions], dimension, target)
+                if block is None:
+                    return None
+                blocks.append(block)
+            placed = [t._placed(target) if t.device == "meta" else t for t in tensors]
+            return placed + blocks
+
+        for plan, workspace in entries:
+            inputs = inputs_for(plan)
+            if inputs is not None:
+                return graph, plan, workspace, single, inputs
+        # A new plan: dots merged into blocks of parameters while none of
+        # theirs is placed yet; once they are placed otherwise, without.
+        packable = params if not entries else []
+        plan = Plan(graph, target, parameters=params, packable=packable)
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        entries.append((plan, workspace))
+        inputs = inputs_for(plan)
+        if inputs is None:
+            plan = Plan(graph, target, parameters=params)
+            entries[-1] = plan, workspace
+            inputs = inputs_for(plan)
+        return graph, plan, workspace, single, inputs
 
     @functools.wraps(fn)
     def compiled(*args):
-        _, plan, single = entry(args)
-        outputs = plan.run([a for a in args if isinstance(a, Tensor)])
+        _, plan, workspace, single, inputs = prepare(args)
+        if workspace is None:
+            outputs = plan.run(inputs, "meta")
+        else:
+            outputs = plan.run_in(workspace, inputs)
         return outputs[0] if single else tuple(outputs)
 
-    def dump_graph(path, *args, runs=5, json_path=None, fragment=False):
+    def place(*args):
+        """Place the meta arguments (parameters) as calls with ``args``'
+        signature use them, without running: each one's memory on the
+        device, in order, to copy its data into (``copy_``)."""
+        _, _, workspace, _, inputs = prepare(args)
+        if workspace is None:
+            raise ValueError(f"place: {fn.__name__} runs on the meta device: pass device= or a tensor with data")
+        tensors = [a for a in args if isinstance(a, Tensor)]
+        placed = [t for t, a in zip(inputs, tensors) if a.device == "meta"]
+        return placed[0] if len(placed) == 1 else tuple(placed)
+
+    def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
-        latest call's) to ``path`` as an HTML page, profiled over ``runs``
-        runs on new tensors of the signature's types; ``json_path`` also
-        gets the page's data, which is returned. ``fragment`` leaves out the
-        doctype, for a host that wraps the page (a published artifact)."""
+        latest call's; meta tensors trace it without data) to ``path`` as an
+        HTML page, compiled for and profiled on ``device`` (default: the
+        function's) over ``runs`` runs on new tensors of the signature's
+        types; ``json_path`` also gets the page's data, which is returned.
+        ``fragment`` leaves out the doctype, for a host that wraps the page
+        (a published artifact)."""
         if args:
-            entry(args)
+            prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        key = latest[0]
-        graph, plan, _ = plans[key]
-        # Kernels do not depend on the values: profile on ones.
-        inputs = [Tensor.ones(list(shape), dtype, device) for dtype, shape, device in (k for k in key if k[0] != "static")]
+        (signature, target), = latest
+        graph, _, _ = plans[latest[0]]
+        tensors = [k for k in signature if k[0] != "static"]
+        target = str(device or compile_device or (target if target != "meta" else "cpu"))
+        # Kernels do not depend on the values: profile on ones, the
+        # parameters packed where the compiler merges dots.
+        params = [i for i, (_, _, meta) in enumerate(tensors) if meta]
+        plan = Plan(graph, target, parameters=params, packable=params)
+        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape, _ in tensors]
+        for positions, dimension in plan.packed:
+            shape = list(tensors[positions[0]][1])
+            shape[dimension] = sum(tensors[i][1][dimension] for i in positions)
+            inputs.append(Tensor.ones(shape, tensors[positions[0]][0], target))
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         from lumen.graph import viz
 
-        data = viz.collect(graph, plan, inputs, title=fn.__name__, runs=runs)
+        data = viz.collect(
+            graph, plan, inputs, title=fn.__name__, runs=runs, device=target, run=lambda: plan.run_in(workspace, inputs)
+        )
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
+    compiled.place = place
     compiled.dump_graph = dump_graph
     return compiled
 
 
 def make_graph(fn):
     """A function returning the graph ``fn`` traces to on the given
-    arguments (``jax.make_jaxpr``); ``print`` it to read it."""
+    arguments (``jax.make_jaxpr``), which may be meta tensors; ``print`` it
+    to read it."""
 
     @functools.wraps(fn)
     def graph(*args):
@@ -551,6 +657,87 @@ class TracedTensor:
 
     def matmul(self, other):
         return matmul(self, other)
+
+    # -- indexing and splitting ----------------------------------------------
+
+    def _slice(self, starts, limits):
+        if list(starts) == [0] * self.ndim and list(limits) == list(self.shape):
+            return self
+        return prims.slice(self, starts, limits)
+
+    def __getitem__(self, key):
+        """Basic indexing (torch, NumPy): integers (which drop their
+        dimension), slices with unit steps, and one ``...``."""
+        key = key if isinstance(key, tuple) else (key,)
+        ellipses = [i for i, k in enumerate(key) if k is Ellipsis]
+        if len(ellipses) > 1:
+            raise IndexError("an index can only have a single ellipsis ('...')")
+        if len(key) - len(ellipses) > self.ndim:
+            raise IndexError(f"too many indices for tensor of dimension {self.ndim}")
+        at = ellipses[0] if ellipses else len(key)
+        fill = (slice(None),) * (self.ndim - (len(key) - len(ellipses)))
+        key = key[:at] + fill + key[at + len(ellipses):]
+        starts, limits, shape = [], [], []
+        for d, (k, n) in enumerate(zip(key, self.shape)):
+            if isinstance(k, slice):
+                start, stop, step = k.indices(n)
+                if step != 1:
+                    raise NotImplementedError("slices with steps other than 1 are not supported")
+                starts.append(start)
+                limits.append(builtins.max(start, stop))
+                shape.append(limits[-1] - start)
+            elif isinstance(k, int) and not isinstance(k, bool):
+                if not -n <= k < n:
+                    raise IndexError(f"index {k} is out of bounds for dimension {d} with size {n}")
+                starts.append(k % n)
+                limits.append(k % n + 1)
+            else:
+                raise TypeError(f"indices must be integers, slices or '...', got {type(k).__name__}")
+        out = self._slice(starts, limits)
+        return out if tuple(shape) == out.shape else out.reshape(shape)
+
+    def narrow(self, dim, start, length):
+        """The ``length`` elements of dimension ``dim`` from ``start``."""
+        d = _dim(dim, self.ndim)
+        n = self.shape[d]
+        start = start + n if start < 0 else start
+        if not (0 <= start and length >= 0 and start + length <= n):
+            raise IndexError(f"narrow: [{start}, {start + length}) is not within dimension {d} of size {n}")
+        starts = [0] * self.ndim
+        limits = list(self.shape)
+        starts[d], limits[d] = start, start + length
+        return self._slice(starts, limits)
+
+    def split(self, split_size_or_sections, dim=0):
+        """Pieces along ``dim`` (torch): of ``split_size_or_sections``
+        elements each (the last may be smaller), or of the given sizes."""
+        d = _dim(dim, self.ndim)
+        n = self.shape[d]
+        if isinstance(split_size_or_sections, int):
+            size = split_size_or_sections
+            if size <= 0:
+                raise RuntimeError(f"split expects split_size be positive, but got split_size={size}")
+            sizes = [builtins.min(size, n - start) for start in range(0, n, size)] or [0]
+        else:
+            sizes = list(split_size_or_sections)
+            if sum(sizes) != n:
+                raise RuntimeError(
+                    f"split_with_sizes expects split_sizes to sum exactly to {n} (input tensor's size at "
+                    f"dimension {d}), but got split_sizes={sizes}"
+                )
+        pieces, start = [], 0
+        for size in sizes:
+            pieces.append(self.narrow(d, start, size))
+            start += size
+        return tuple(pieces)
+
+    def chunk(self, chunks, dim=0):
+        """Up to ``chunks`` equal pieces along ``dim`` (torch: each of
+        ``ceil(size / chunks)`` elements, the last possibly smaller)."""
+        if chunks <= 0:
+            raise RuntimeError(f"chunk expects `chunks` to be greater than 0, got: {chunks}")
+        n = self.shape[_dim(dim, self.ndim)]
+        return self.split(builtins.max(-(-n // chunks), 1), dim)
 
 
 # ---------------------------------------------------------------------

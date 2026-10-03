@@ -79,15 +79,16 @@ def source_of(kernel):
 # ---------------------------------------------------------------------
 
 
-def profile_steps(plan, inputs, runs):
+def profile_steps(plan, run, runs, device):
     """For each step of ``plan``, its kernels in launch order as ``[name,
-    median GPU us]`` over ``runs`` runs on ``inputs``."""
-    sync = lumen.mps.synchronize if any(str(t.device) == "mps" for t in inputs) else (lambda: None)
-    plan.run(inputs)
+    median GPU us]`` over ``runs`` calls of ``run`` (running it) on
+    ``device``."""
+    sync = lumen.mps.synchronize if device == "mps" else (lambda: None)
+    run()
     sync()
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         for _ in range(runs):
-            plan.run(inputs)
+            run()
             sync()
     events = prof.events()
     by_parent = {}
@@ -183,14 +184,19 @@ def graph_view(graph, unfused, kernels):
             "inputs": [[f"%{v}", type_text(*graph.type_of(v))] for v in node["inputs"]], "kernels": [], "fusion": None,
         }
         # The unfused plan's steps are the live nodes in graph order (it may
-        # drop dead ones and alias reshapes): match the next step of this
-        # primitive and output type.
-        if s < len(steps) and steps[s]["primitive"] == node["primitive"] and list(steps[s]["output"][1:]) == [dtype, list(shape)]:
-            entry["kernels"] = _kernel_entries(kernels[s] if s < len(kernels) else [])
-            entry["buffer"] = steps[s]["output"][0]
-            s += 1
+        # drop dead ones and alias reshapes), plus steps the device's
+        # compiler added (a transpose putting a dot_general's operand in
+        # matmul form): those go with the node after them.
+        added = []
+        for t in range(s, len(steps)):
+            if steps[t]["primitive"] == node["primitive"] and list(steps[t]["output"][1:]) == [dtype, list(shape)]:
+                added += [k for u in range(s, t + 1) for k in (kernels[u] if u < len(kernels) else [])]
+                entry["kernels"] = _kernel_entries(added)
+                entry["buffer"] = steps[t]["output"][0]
+                s = t + 1
+                break
         else:
-            entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, or dead)"
+            entry["note"] = "no kernel of its own in the unfused plan (an aliasing reshape, a repeat of an earlier node, or dead)"
         nodes.append(entry)
         of_var[node["output"]] = entry["id"]
         for v in node["inputs"]:
@@ -207,21 +213,26 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
-def collect(graph, plan, inputs, title, runs=5):
+def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
     """Everything the page shows, as a JSON-able dict: ``graph``, its
-    ``plan`` (fused, for the inputs' device) and its unfused plan, both
-    profiled on ``inputs``."""
-    device = str(inputs[0].device) if inputs else "cpu"
-    unfused = Plan(graph)
-    timed = device != "cpu"
-    fused_kernels = profile_steps(plan, inputs, runs) if timed else []
-    unfused_kernels = profile_steps(unfused, inputs, runs) if timed else []
+    ``plan`` (fused, for ``device``, default the inputs') and its unfused
+    plan, both profiled on ``inputs`` on that device (the graph's, then any
+    the plan adds), ``plan`` by ``run`` if given (else ``plan.run``)."""
+    device = device or (str(inputs[0].device) if inputs else "cpu")
+    # The unfused plan for the same device: its steps are the graph's
+    # primitives (after the device's rewrites), each its own kernel.
+    unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False)
+    timed = device not in ("cpu", "meta")
+    graph_inputs = inputs[: len(graph.inputs())]
+    run = run or (lambda: plan.run(inputs, device))
+    fused_kernels = profile_steps(plan, run, runs, device) if timed else []
+    unfused_kernels = profile_steps(unfused, lambda: unfused.run(graph_inputs, device), runs, device) if timed else []
     files = sorted({k["file"] for view in (fused_kernels, unfused_kernels) for step in view for k in _kernel_entries(step) if k["file"]})
     return {
         "title": title,
         "device": device,
         "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "inputs": [type_text(t.dtype, t.shape) for t in inputs],
+        "inputs": [type_text(*graph.type_of(v)) for v in graph.inputs()],
         "graph_text": str(graph),
         "fused_text": str(plan),
         "unfused_text": str(unfused),

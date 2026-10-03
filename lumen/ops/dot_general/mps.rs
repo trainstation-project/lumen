@@ -1,16 +1,16 @@
 //! dot_general on MPS (`mps.metal`) as a tiled matmul: each operand's
 //! batch, free and contracting dimensions collapse into one each (any
-//! matmul, batched or with transposed operands), or, where they do not, the
-//! operand is first gathered into a contiguous copy in that order.
+//! matmul, batched or with transposed operands). The MPS compiler
+//! ([`crate::compiler::mps`]) puts an operand whose dimensions do not into
+//! that order with a transpose first, so this never copies.
 
-use crate::graph::Primitive::DotGeneral;
+use crate::Tensor;
+use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
 use crate::graph::plan::Step;
 use crate::graph::primitive::free_dims;
-use crate::ops::layout::mps::gather;
 use crate::ops::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
-use crate::{Device, Tensor, TensorOptions};
 
 /// The output tile of a threadgroup (`mps.metal`): 128 x 64 for the float
 /// kernels and 64 x 64 for their `_small` variants, which matmuls with
@@ -23,50 +23,93 @@ const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
 
-pub(crate) fn encode(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    mut keep: Vec<Tensor>,
-) -> Result<(), String> {
+/// A dot_general's operands' dimensions in matmul order, lhs [batch, free,
+/// contracting] and rhs [batch, contracting, free], and where each splits
+/// into those three groups.
+pub(crate) struct MatmulOrder {
+    pub lhs: Vec<usize>,
+    pub rhs: Vec<usize>,
+    pub lhs_split: (usize, usize),
+    pub rhs_split: (usize, usize),
+}
+
+/// [`MatmulOrder`] of dot_general `p` on operands of ranks `lhs_rank` and
+/// `rhs_rank`.
+pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> MatmulOrder {
     let DotGeneral {
         lhs_contracting,
         rhs_contracting,
         lhs_batch,
         rhs_batch,
-    } = &step.primitive
+    } = p
     else {
         unreachable!("a dot_general")
     };
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let name = step.primitive.name();
-    // The operands' dimensions in matmul order: lhs [batch, free,
-    // contracting], rhs [batch, contracting, free].
     let lhs_used = [lhs_batch.as_slice(), lhs_contracting].concat();
     let rhs_used = [rhs_batch.as_slice(), rhs_contracting].concat();
-    let lhs_free: Vec<usize> = free_dims(lhs.shape.len(), &lhs_used).collect();
-    let rhs_free: Vec<usize> = free_dims(rhs.shape.len(), &rhs_used).collect();
-    let lhs_order = [lhs_batch.as_slice(), &lhs_free, lhs_contracting].concat();
-    let rhs_order = [rhs_batch.as_slice(), rhs_contracting, &rhs_free].concat();
+    let lhs_free: Vec<usize> = free_dims(lhs_rank, &lhs_used).collect();
+    let rhs_free: Vec<usize> = free_dims(rhs_rank, &rhs_used).collect();
     let (nb, nk) = (lhs_batch.len(), lhs_contracting.len());
+    MatmulOrder {
+        lhs: [lhs_batch.as_slice(), &lhs_free, lhs_contracting].concat(),
+        rhs: [rhs_batch.as_slice(), rhs_contracting, &rhs_free].concat(),
+        lhs_split: (nb, nb + lhs_free.len()),
+        rhs_split: (nb, nb + nk),
+    }
+}
+
+/// The dimensions of `ty`, laid out at `strides` (in elements), in
+/// `order`, split at `(i, j)`, as three strided dimensions (`order[..i]`,
+/// `order[i..j]`, `order[j..]` each collapsed into one), if they collapse:
+/// their strides.
+pub(crate) fn collapsed(
+    ty: &TensorType,
+    strides: &[usize],
+    order: &[usize],
+    (i, j): (usize, usize),
+) -> Option<[usize; 3]> {
+    let mut out = [0; 3];
+    for (k, group) in [&order[..i], &order[i..j], &order[j..]]
+        .into_iter()
+        .enumerate()
+    {
+        out[k] = collapse(group.iter().map(|&d| (ty.shape[d], strides[d])))?.1;
+    }
+    Some(out)
+}
+
+pub(crate) fn encode(
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+    let name = step.primitive.name();
+    let order = matmul_order(&step.primitive, lhs.shape.len(), rhs.shape.len());
+    // An operand read in place as a view of a larger buffer (a slice) has
+    // its strides; any other is contiguous.
+    let strides = |k: usize, order, split| {
+        let ty = &step.inputs[k].1;
+        let layout = step.views[k]
+            .as_ref()
+            .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone());
+        collapsed(ty, &layout, order, split).ok_or_else(|| {
+            format!("{name}: an operand is not in matmul form: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))")
+        })
+    };
+    let [lsb, lsm, lsk] = strides(0, &order.lhs, order.lhs_split)?;
+    let [rsb, rsk, rsn] = strides(1, &order.rhs, order.rhs_split)?;
     let size =
         |ty: &TensorType, dims: &[usize]| dims.iter().map(|&d| ty.shape[d]).product::<usize>();
-    let (b, m, n, k) = (
-        size(lhs, lhs_batch),
-        size(lhs, &lhs_free),
-        size(rhs, &rhs_free),
-        size(lhs, lhs_contracting),
+    let (b, m) = (
+        size(lhs, &order.lhs[..order.lhs_split.0]),
+        size(lhs, &order.lhs[order.lhs_split.0..order.lhs_split.1]),
     );
-    let (lp, [lsb, lsm, lsk]) = operand(
-        lhs,
-        &lhs_order,
-        nb,
-        nb + lhs_free.len(),
-        inputs[0],
-        &mut keep,
-        name,
-    )?;
-    let (rp, [rsb, rsk, rsn]) = operand(rhs, &rhs_order, nb, nb + nk, inputs[1], &mut keep, name)?;
+    let (k, n) = (
+        size(lhs, &order.lhs[order.lhs_split.1..]),
+        size(rhs, &order.rhs[order.rhs_split.1..]),
+    );
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
     let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
@@ -79,54 +122,12 @@ pub(crate) fn encode(
     let p = [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn];
     launch(
         &kernel,
-        &[lp, rp, output.cast_const()],
+        &[inputs[0], inputs[1], output.cast_const()],
         &[dims_arg(p)],
         grid,
         keep,
         name,
     )
-}
-
-/// The operand `ty` at `ptr` with its dimensions in `order`, as three
-/// strided dimensions: `order[..i]`, `order[i..j]` and `order[j..]`, each
-/// collapsed into one. Where they do not collapse, gathers the operand into
-/// a contiguous copy in `order` (kept alive in `keep`) and returns that.
-fn operand(
-    ty: &TensorType,
-    order: &[usize],
-    i: usize,
-    j: usize,
-    ptr: *const u8,
-    keep: &mut Vec<Tensor>,
-    name: &'static str,
-) -> Result<(*const u8, [usize; 3]), String> {
-    let strides = contiguous_strides(&ty.shape);
-    let groups = [&order[..i], &order[i..j], &order[j..]];
-    let collapsed: Option<Vec<(usize, usize)>> = groups
-        .iter()
-        .map(|g| collapse(g.iter().map(|&d| (ty.shape[d], strides[d]))))
-        .collect();
-    if let Some(c) = collapsed {
-        return Ok((ptr, [c[0].1, c[1].1, c[2].1]));
-    }
-    let options = TensorOptions::new().dtype(ty.dtype).device(Device::Mps);
-    // SAFETY: the gather writes every element before the matmul reads it.
-    let copy = unsafe { Tensor::empty(&[ty.numel()], options) };
-    keep.push(copy.clone());
-    let shape: Vec<usize> = order.iter().map(|&d| ty.shape[d]).collect();
-    let from: Vec<usize> = order.iter().map(|&d| strides[d]).collect();
-    gather(
-        ty.dtype.size_of(),
-        &shape,
-        &from,
-        ptr,
-        copy.data_ptr(),
-        keep.clone(),
-        name,
-    )?;
-    let inner = |g: &[usize]| g.iter().map(|&d| ty.shape[d]).product::<usize>();
-    let (s1, s2) = (inner(groups[1]), inner(groups[2]));
-    Ok((copy.data_ptr().cast_const(), [s1 * s2, s2, 1]))
 }
 
 /// `dims` (each a size and stride, outermost first) as one dimension of

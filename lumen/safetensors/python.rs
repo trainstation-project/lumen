@@ -114,8 +114,15 @@ impl PySafeOpen {
         Ok(self.file()?.metadata().metadata().cloned())
     }
 
-    fn get_tensor(&self, name: &str) -> PyResult<PyTensor> {
-        let t = self.file()?.tensor(name, self.device).map_err(to_py)?;
+    /// Tensor `name`, on `device` (default: the file's): on `"meta"`, from
+    /// the header alone, nothing read.
+    #[pyo3(signature = (name, device = None))]
+    fn get_tensor(&self, name: &str, device: Option<&Bound<'_, PyAny>>) -> PyResult<PyTensor> {
+        let device = match device {
+            Some(d) if !d.is_none() => resolve_device(Some(d))?,
+            _ => self.device,
+        };
+        let t = self.file()?.tensor(name, device).map_err(to_py)?;
         Ok(PyTensor::wrap(t))
     }
 

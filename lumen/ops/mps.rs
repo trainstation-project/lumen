@@ -8,8 +8,8 @@
 
 use std::ffi::{CString, c_char, c_void};
 
-use crate::graph::Primitive;
 use crate::graph::plan::Step;
+use crate::graph::{Primitive, TensorType};
 use crate::stream::mps::{self, Completion};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
@@ -33,11 +33,14 @@ unsafe extern "C" {
 }
 
 /// Encode `step` reading `inputs` and writing `output` (null for a value
-/// with no elements), keeping `keep` alive until the GPU has run it.
+/// with no elements), with the workspace bytes the planner set aside for its
+/// kernel at `scratch` (null if none; see [`scratch_bytes`]), keeping `keep`
+/// alive until the GPU has run it.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
+    scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     use Primitive::*;
@@ -48,6 +51,15 @@ pub(crate) fn encode(
             step.primitive.name()
         ));
     }
+
+    if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
+        return super::reduce::mps::encode(step, inputs, output, scratch, keep);
+    }
+
+    if let Concatenate { .. } = step.primitive {
+        return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
+    }
+
     let encode = match step.primitive {
         Add
         | Sub
@@ -64,13 +76,27 @@ pub(crate) fn encode(
         | Logistic
         | ConvertElementType { .. }
         | Select => super::elementwise::mps::encode,
-        ReduceSum { .. } | ReduceMax { .. } => super::reduce::mps::encode,
+        ReduceSum { .. } | ReduceMax { .. } | Concatenate { .. } => unreachable!("encoded above"),
         DotGeneral { .. } => super::dot_general::mps::encode,
-        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } => super::layout::mps::encode,
+        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
+            super::layout::mps::encode
+        }
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => crate::compiler::mps::encode,
     };
     encode(step, inputs, output, keep)
+}
+
+/// The workspace bytes a step's MPS kernel needs while it runs, which the
+/// planner sets aside ([`crate::graph::PlanOptions::scratch`]): a split
+/// reduction's partials.
+pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
+    match p {
+        Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes } => {
+            super::reduce::mps::scratch_bytes(inputs[0], axes)
+        }
+        _ => 0,
+    }
 }
 
 pub(crate) fn u32_arg(v: u32) -> Vec<u8> {

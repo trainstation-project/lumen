@@ -8,7 +8,9 @@ use super::scalar::Scalar;
 use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
+use crate::graph::TensorType;
 use crate::ops::copy::{copy_d2h, copy_h2d};
+use crate::profiler::RecordGuard;
 
 /// The device `options` name, CPU if unset.
 fn device_of(options: &TensorOptions) -> Device {
@@ -54,12 +56,12 @@ impl Tensor {
     /// # Panics
     /// If the device is not available.
     pub unsafe fn empty(size: &[usize], options: impl Into<TensorOptions>) -> Self {
-        let _op = crate::profiler::record_op(op_name!("empty"), || vec![size.to_vec()]);
+        let op = crate::profiler::record_op(op_name!("empty"), Vec::new);
         let options = options.into();
         let dtype = options.dtype_opt().unwrap_or(DEFAULT_DTYPE);
         let numel: usize = size.iter().product();
         let storage = Storage::new(numel * dtype.size_of(), device_of(&options));
-        Self::wrap(Arc::new(storage), dtype, size)
+        recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
     /// An uninitialized contiguous tensor like `self`: same dtype, shape and
@@ -82,19 +84,19 @@ impl Tensor {
 
     /// A tensor of zeros (PyTorch: `at::zeros`).
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
-        let _op = crate::profiler::record_op(op_name!("zeros"), || vec![size.to_vec()]);
+        let op = crate::profiler::record_op(op_name!("zeros"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
         crate::ops::fill::fill_op(&t, Scalar::Int(0));
-        t
+        recorded(op, t)
     }
 
     /// A tensor of ones (PyTorch: `at::ones`; float32 unless the options
     /// say otherwise).
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
-        let _op = crate::profiler::record_op(op_name!("ones"), || vec![size.to_vec()]);
+        let op = crate::profiler::record_op(op_name!("ones"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
         crate::ops::fill::fill_op(&t, Scalar::Int(1));
-        t
+        recorded(op, t)
     }
 
     /// A tensor filled with `fill_value` (PyTorch: `at::full`). Without a
@@ -105,43 +107,45 @@ impl Tensor {
         fill_value: impl Into<Scalar>,
         options: impl Into<TensorOptions>,
     ) -> Self {
-        let _op = crate::profiler::record_op(op_name!("full"), || vec![size.to_vec()]);
+        let op = crate::profiler::record_op(op_name!("full"), Vec::new);
         let (fill_value, options) = (fill_value.into(), options.into());
         let dtype = options
             .dtype_opt()
             .unwrap_or_else(|| fill_value.inferred_dtype());
-        Self::filled(size, fill_value, options.dtype(dtype))
+        recorded(op, Self::filled(size, fill_value, options.dtype(dtype)))
     }
 
     /// `[0, 1, ..., ceil(end) - 1]` (PyTorch: `at::arange(end, options)`).
     /// Without a dtype in `options`, it is inferred from `end` like
     /// [`full`](Self::full).
     pub fn arange(end: impl Into<Scalar>, options: impl Into<TensorOptions>) -> Self {
-        let _op = crate::profiler::record_op(op_name!("arange"), Vec::new);
+        let op = crate::profiler::record_op(op_name!("arange"), Vec::new);
         let (end, options) = (end.into(), options.into());
         let dtype = options.dtype_opt().unwrap_or_else(|| end.inferred_dtype());
         let n = end.to_f64().ceil().max(0.0) as i64;
-        dispatch_dtype!(dtype, T => {
+        let t = dispatch_dtype!(dtype, T => {
             let data: Vec<T> = (0..n).map(|i| T::from_scalar(Scalar::Int(i))).collect();
             Self::from_values(&data, device_of(&options))
-        })
+        });
+        recorded(op, t)
     }
 
     /// A 1-D tensor holding a copy of `data` (PyTorch: `torch::tensor`).
     /// The dtype is `T`'s unless `options` sets one, in which case the
     /// values are converted; reshape for more dimensions.
     pub fn from_slice<T: Element>(data: &[T], options: impl Into<TensorOptions>) -> Self {
-        let _op = crate::profiler::record_op(op_name!("from_slice"), || vec![vec![data.len()]]);
+        let op = crate::profiler::record_op(op_name!("from_slice"), Vec::new);
         let options = options.into();
         let device = device_of(&options);
-        match options.dtype_opt() {
+        let t = match options.dtype_opt() {
             None => Self::from_values(data, device),
             Some(dtype) if dtype == T::DTYPE => Self::from_values(data, device),
             Some(dtype) => dispatch_dtype!(dtype, U => {
                 let data: Vec<U> = data.iter().map(|v| U::from_scalar(v.to_scalar())).collect();
                 Self::from_values(&data, device)
             }),
-        }
+        };
+        recorded(op, t)
     }
 
     /// A tensor of `value` converted to the options' dtype (default
@@ -177,6 +181,9 @@ impl Tensor {
     /// [`copy_h2d`]. Same data-race caveat as [`set`](Self::set).
     fn write<T: Element>(&self, data: &[T]) {
         self.check_dtype::<T>();
+        if self.device() == Device::Meta {
+            return;
+        }
         if self.device() != Device::Cpu {
             return copy_h2d(self, &Self::host(data));
         }
@@ -271,6 +278,35 @@ impl Tensor {
         }
     }
 
+    /// A contiguous `dtype` view of `shape` at `byte_offset` into this
+    /// contiguous byte tensor (a plan's workspace), which must hold it at an
+    /// offset aligned for `dtype`.
+    pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
+        let start = self.offset * self.dtype.size_of() + byte_offset;
+        let size = dtype.size_of();
+        let numel: usize = shape.iter().product();
+        assert!(
+            self.is_contiguous() && start.is_multiple_of(size),
+            "an aligned view"
+        );
+        assert!(
+            byte_offset + numel * size <= self.nbytes(),
+            "a view within the tensor"
+        );
+        Tensor {
+            storage: self.storage.clone(),
+            dtype,
+            shape: shape.to_vec(),
+            strides: contiguous_strides(shape),
+            offset: start / size,
+        }
+    }
+
+    /// This tensor's type: its dtype and shape.
+    pub(crate) fn ty(&self) -> TensorType {
+        TensorType::new(self.dtype, &self.shape)
+    }
+
     pub fn is_contiguous(&self) -> bool {
         self.strides == contiguous_strides(&self.shape)
     }
@@ -282,9 +318,7 @@ impl Tensor {
     /// Reshape. Only valid on contiguous tensors (PyTorch `Tensor::view`);
     /// call [`Tensor::contiguous`] first if needed.
     pub fn reshape(&self, shape: &[usize]) -> Self {
-        let _op = crate::profiler::record_op(op_name!("reshape"), || {
-            vec![self.shape.clone(), shape.to_vec()]
-        });
+        let op = crate::profiler::record_op(op_name!("reshape"), || vec![self.ty()]);
         assert!(
             self.is_contiguous(),
             "reshape requires a contiguous tensor; call .contiguous() first"
@@ -297,18 +331,19 @@ impl Tensor {
             self.shape,
             self.numel()
         );
-        Tensor {
+        let t = Tensor {
             storage: Arc::clone(&self.storage),
             dtype: self.dtype,
             shape: shape.to_vec(),
             strides: contiguous_strides(shape),
             offset: self.offset,
-        }
+        };
+        recorded(op, t)
     }
 
     /// Narrow `dim` to `[start, start + len)` — a view with a bumped offset.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Self {
-        let _op = crate::profiler::record_op(op_name!("narrow"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("narrow"), || vec![self.ty()]);
         assert!(dim < self.ndim(), "dim {dim} out of range");
         assert!(
             start + len <= self.shape[dim],
@@ -318,28 +353,28 @@ impl Tensor {
         let mut t = self.clone();
         t.offset += start * self.strides[dim];
         t.shape[dim] = len;
-        t
+        recorded(op, t)
     }
 
     /// Index one dimension, removing it (`t.select(0, i)` == `t[i]`).
     pub fn select(&self, dim: usize, index: usize) -> Self {
-        let _op = crate::profiler::record_op(op_name!("select"), || vec![self.shape.clone()]);
-        self.narrow(dim, index, 1).squeeze_dim(dim)
+        let op = crate::profiler::record_op(op_name!("select"), || vec![self.ty()]);
+        recorded(op, self.narrow(dim, index, 1).squeeze_dim(dim))
     }
 
     /// Transpose two dims by swapping sizes/strides (PyTorch: `transpose`).
     pub fn transpose(&self, a: usize, b: usize) -> Self {
-        let _op = crate::profiler::record_op(op_name!("transpose"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("transpose"), || vec![self.ty()]);
         assert!(a < self.ndim() && b < self.ndim(), "dim out of range");
         let mut t = self.clone();
         t.shape.swap(a, b);
         t.strides.swap(a, b);
-        t
+        recorded(op, t)
     }
 
     /// Permute all dims (PyTorch: `permute`, JAX: `lax.transpose`).
     pub fn permute(&self, dims: &[usize]) -> Self {
-        let _op = crate::profiler::record_op(op_name!("permute"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("permute"), || vec![self.ty()]);
         assert_eq!(dims.len(), self.ndim(), "permute must list every dim");
         let mut seen = vec![false; self.ndim()];
         let mut t = self.clone();
@@ -352,20 +387,20 @@ impl Tensor {
             t.shape[new] = self.shape[old];
             t.strides[new] = self.strides[old];
         }
-        t
+        recorded(op, t)
     }
 
     pub fn squeeze_dim(&self, dim: usize) -> Self {
-        let _op = crate::profiler::record_op(op_name!("squeeze_dim"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("squeeze_dim"), || vec![self.ty()]);
         assert_eq!(self.shape[dim], 1, "cannot squeeze dim {dim} of size != 1");
         let mut t = self.clone();
         t.shape.remove(dim);
         t.strides.remove(dim);
-        t
+        recorded(op, t)
     }
 
     pub fn unsqueeze(&self, dim: usize) -> Self {
-        let _op = crate::profiler::record_op(op_name!("unsqueeze"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("unsqueeze"), || vec![self.ty()]);
         assert!(dim <= self.ndim(), "dim out of range");
         let mut t = self.clone();
         let stride = if dim < self.ndim() {
@@ -375,7 +410,7 @@ impl Tensor {
         };
         t.shape.insert(dim, 1);
         t.strides.insert(dim, stride);
-        t
+        recorded(op, t)
     }
 
     // ------------------------------------------------------------------
@@ -386,15 +421,19 @@ impl Tensor {
     /// (PyTorch: `Tensor::contiguous`; JAX arrays are always "contiguous"
     /// in this sense since layout is opaque).
     pub fn contiguous<T: Element>(&self) -> Self {
-        let _op = crate::profiler::record_op(op_name!("contiguous"), || vec![self.shape.clone()]);
+        let op = crate::profiler::record_op(op_name!("contiguous"), || vec![self.ty()]);
         if self.is_contiguous() {
-            return self.clone();
+            return recorded(op, self.clone());
+        }
+        if self.device() == Device::Meta {
+            // SAFETY: meta storage holds no data.
+            return recorded(op, unsafe { self.empty_like() });
         }
         let values = self.to_vec::<T>();
         // SAFETY: the write below covers every element.
         let t = unsafe { self.empty_like() };
         t.write(&values);
-        t
+        recorded(op, t)
     }
 
     /// This tensor on `device` (PyTorch: `Tensor::to`). Returns `self`
@@ -405,8 +444,8 @@ impl Tensor {
     /// # Panics
     /// If `device` is not available.
     pub fn to(&self, device: Device) -> Self {
-        let _op = crate::profiler::record_op(op_name!("to"), || vec![self.shape.clone()]);
-        self.copy_to(device)
+        let op = crate::profiler::record_op(op_name!("to"), || vec![self.ty()]);
+        recorded(op, self.copy_to(device))
     }
 
     /// [`to`](Self::to) without the profiler record: the storage range the
@@ -416,17 +455,22 @@ impl Tensor {
         if device == self.device() {
             return self.clone();
         }
+        assert!(
+            self.device() != Device::Meta,
+            "cannot copy a meta tensor to {device}: meta tensors have no data"
+        );
         if device != Device::Cpu && self.device() != Device::Cpu {
             return self.copy_to(Device::Cpu).copy_to(device);
         }
         let span = self.span();
-        // SAFETY: the copy below covers every element of the span.
+        // SAFETY: the copy below covers every element of the span (none, on
+        // the meta device).
         let options = TensorOptions::new().dtype(self.dtype).device(device);
         let out = unsafe { Self::empty(&span.shape, options) };
-        if device == Device::Cpu {
-            copy_d2h(&out, &span);
-        } else {
-            copy_h2d(&out, &span);
+        match device {
+            Device::Meta => {}
+            Device::Cpu => copy_d2h(&out, &span),
+            _ => copy_h2d(&out, &span),
         }
         Tensor {
             storage: out.storage,
@@ -439,13 +483,14 @@ impl Tensor {
 
     /// Copy the logical contents out in row-major order.
     pub fn to_vec<T: Element>(&self) -> Vec<T> {
-        let _op = crate::profiler::record_op(op_name!("to_vec"), || vec![self.shape.clone()]);
+        let _op = crate::profiler::record_op(op_name!("to_vec"), || vec![self.ty()]);
         self.check_dtype::<T>();
         self.values()
     }
 
     /// [`to_vec`](Self::to_vec) without the profiler record or dtype check.
     fn values<T: Element>(&self) -> Vec<T> {
+        assert!(self.device() != Device::Meta, "meta tensors have no data");
         let mut out = Vec::with_capacity(self.numel());
         if self.numel() == 0 {
             return out;
@@ -521,7 +566,7 @@ impl Tensor {
     }
 
     pub fn get<T: Element>(&self, index: &[usize]) -> T {
-        let _op = crate::profiler::record_op(op_name!("get"), || vec![self.shape.clone()]);
+        let _op = crate::profiler::record_op(op_name!("get"), || vec![self.ty()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
         self.element(off).values::<T>()[0]
@@ -535,7 +580,8 @@ impl Tensor {
     /// the caller must ensure no data races (single-threaded or externally
     /// synchronized use).
     pub fn set<T: Element>(&self, index: &[usize], value: T) {
-        let _op = crate::profiler::record_op(op_name!("set"), || vec![self.shape.clone()]);
+        let mut op = crate::profiler::record_op(op_name!("set"), || vec![self.ty()]);
+        op.outputs(|| vec![self.ty()]);
         self.check_dtype::<T>();
         let off = self.physical_offset(index);
         self.element(off).write(&[value]);
@@ -547,14 +593,62 @@ impl Tensor {
     ///
     /// Runs the `fill_` kernel for the tensor's device (see [`crate::ops`]).
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
-        let _op = crate::profiler::record_op(op_name!("fill_"), || vec![self.shape.clone()]);
+        let mut op = crate::profiler::record_op(op_name!("fill_"), || vec![self.ty()]);
+        op.outputs(|| vec![self.ty()]);
         crate::ops::fill::fill_op(self, value.into());
         self
     }
 
+    /// Copy `src`'s elements (of this view's dtype and shape, on any
+    /// device) into this view (PyTorch: `Tensor::copy_`). Writes through to
+    /// aliases, with the same data-race caveat as [`set`](Self::set).
+    pub fn copy_(&self, src: &Tensor) -> Result<&Self, String> {
+        let mut op = crate::profiler::record_op(op_name!("copy_"), || vec![src.ty(), self.ty()]);
+        op.outputs(|| vec![self.ty()]);
+        if src.dtype != self.dtype || src.shape != self.shape {
+            return Err(format!(
+                "copy_: cannot copy {}{:?} into {}{:?}",
+                src.dtype, src.shape, self.dtype, self.shape
+            ));
+        }
+        if self.device() == Device::Meta || src.device() == Device::Meta {
+            return Err("copy_: meta tensors have no data".into());
+        }
+        let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
+        if self.is_contiguous() {
+            copy_h2d(self, &host);
+            return Ok(self);
+        }
+        if !matches!(self.device(), Device::Cpu | Device::Mps) {
+            return Err(format!(
+                "copy_: a strided view on {} is not supported",
+                self.device()
+            ));
+        }
+        // A strided view of host-accessible memory: element by element.
+        self.storage.synchronize();
+        let size = self.dtype.size_of();
+        let mut k = 0;
+        for_each_index(&self.shape, |idx| {
+            let at = flat_offset(&idx, &self.strides) * size;
+            // SAFETY: the element is in bounds of the view's storage (host
+            // accessible), and of the host tensor's `numel` elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    host.data_ptr().add(k * size),
+                    self.data_ptr().add(at),
+                    size,
+                )
+            };
+            k += 1;
+        });
+        Ok(self)
+    }
+
     /// Set every element to zero (PyTorch: `Tensor::zero_`).
     pub fn zero_(&self) -> &Self {
-        let _op = crate::profiler::record_op(op_name!("zero_"), || vec![self.shape.clone()]);
+        let mut op = crate::profiler::record_op(op_name!("zero_"), || vec![self.ty()]);
+        op.outputs(|| vec![self.ty()]);
         self.fill_(Scalar::Int(0))
     }
 }
@@ -562,6 +656,12 @@ impl Tensor {
 // ----------------------------------------------------------------------
 // Stride helpers
 // ----------------------------------------------------------------------
+
+/// `t`, recorded as the output of `op` (a profiled op).
+fn recorded(mut op: RecordGuard, t: Tensor) -> Tensor {
+    op.outputs(|| vec![t.ty()]);
+    t
+}
 
 /// Row-major (C-contiguous) strides for `shape`.
 pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
@@ -574,6 +674,13 @@ pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
 
 impl std::fmt::Display for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.device() == Device::Meta {
+            return write!(
+                f,
+                "Tensor(shape={:?}, dtype={}, device=meta)",
+                self.shape, self.dtype
+            );
+        }
         match self.dtype {
             DType::F32 => self.fmt_typed::<f32>(f),
             DType::F64 => self.fmt_typed::<f64>(f),

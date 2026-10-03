@@ -325,3 +325,275 @@ def test_dump_graph(tmp_path):
     # Another signature, traced for the dump.
     data = f.dump_graph(tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16"))
     assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
+
+
+# ---------------------------------------------------------------------
+# specs and making tensors by running functions (JAX's design)
+# ---------------------------------------------------------------------
+
+
+def test_meta_tensors_have_no_data():
+    x = lumen.empty([2, 3], device="meta")
+    assert (x.device, x.shape, x.dtype) == ("meta", [2, 3], "float32")
+    assert repr(x) == "Tensor(shape=[2, 3], dtype=f32, device=meta)"
+    assert lumen.ones([2, 3], device="meta").device == "meta"  # nothing filled
+    assert lumen.tensor([1.0, 2.0]).to("meta").shape == [2]  # data dropped
+    assert x.transpose(0, 1).contiguous().shape == [3, 2]  # views, no copies
+    for read in (x.tolist, lambda: x.to("cpu"), lambda: x[0, 0], lambda: lumen.to_numpy(x), x.__dlpack__):
+        with pytest.raises(RuntimeError, match="no data"):
+            read()
+
+
+def test_tracing_and_running_on_meta_tensors():
+    def f(x, w):
+        return (x @ w).relu(), x.sum(-1)
+
+    x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
+    assert "dot_general" in str(lumen.make_graph(f)(x, w))
+    # A compiled function runs nothing on meta tensors: meta results, of
+    # the types real ones would have (shape inference).
+    y, s = lumen.compile(f)(x, w)
+    assert (y.device, y.shape, s.shape) == ("meta", [8, 16], [8])
+    assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
+
+
+def test_compiled_init_runs_once_per_call(tmp_path):
+    calls = []
+
+    def init():
+        calls.append(1)
+        return lumen.full([2, 3], 0.5) + lumen.arange(3)
+
+    make = lumen.compile(init)
+    a = make().clone()
+    b = make()
+    assert calls == [1]  # traced once; each call runs the plan
+    # Results are views of the function's workspace, which each call reuses.
+    assert a.tolist() == b.tolist() == [[0.5, 1.5, 2.5]] * 2 and b.shares_storage_with(make())
+    data = make.dump_graph(tmp_path / "init.html")
+    assert data["inputs"] == [] and data["device"] == "cpu"
+
+
+@pytest.mark.mps
+def test_compiled_init_on_device(tmp_path):
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    make = lumen.compile(lambda: (lumen.ones([4, 8]) * 2.0, lumen.arange(8)), device="mps")
+    w, i = make()
+    assert (w.device, i.device) == ("mps", "mps")
+    assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
+    # Tensor arguments with data are copied in, from any device.
+    assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
+    # Profiled on the device it creates tensors on.
+    data = make.dump_graph(tmp_path / "init.html")
+    assert data["device"] == "mps" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+    # Meta tensors trace a dump with no data; it is profiled on `device`.
+    f = lumen.compile(lambda x, w: x @ w)
+    meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
+    data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
+    assert data["device"] == "mps" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
+    assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+
+
+# ---------------------------------------------------------------------
+# memory: parameters, the workspace and planned scratch (XLA buffer
+# assignment)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_parameters_are_placed_once_and_shared(device):
+    """Meta arguments are parameters: placed (zeroed) on the device by the
+    first compiled function using them, shared by every other, filled by
+    copying into what ``place`` returns."""
+    w, b = lumen.empty([4, 3], device="meta"), lumen.empty([3], device="meta")
+    f = lumen.compile(lambda x, w, b: x @ w + b, device=device)
+    x = rand(2, 4)
+    try:
+        pw, pb = f.place(lumen.from_numpy(x), w, b)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    assert (pw.device, pw.shape) == (device, [4, 3]) and pw.tolist() == [[0.0] * 3] * 4
+    wv, bv = rand(4, 3, seed=1), rand(3, seed=2)
+    pw.copy_(lumen.from_numpy(wv))
+    pb.copy_(lumen.from_numpy(bv))
+    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), w, b)), x @ wv + bv, rtol=1e-5, atol=1e-5)
+    # Another function reads the same memory.
+    g = lumen.compile(lambda w: w * 2.0, device=device)
+    np.testing.assert_allclose(lumen.to_numpy(g(w)), wv * 2, rtol=1e-6)
+    assert g.place(w).shares_storage_with(pw)
+    with pytest.raises(TypeError, match="whole tensor"):
+        g(lumen.empty([4, 6], device="meta").narrow(1, 0, 3))
+
+
+def test_results_are_views_of_the_workspace():
+    f = lumen.compile(lambda x: x * 2.0)
+    a = f(lumen.ones([3]))
+    assert a.tolist() == [2.0] * 3
+    b = f(lumen.full([3], 5.0))
+    assert a.shares_storage_with(b) and a.tolist() == [10.0] * 3  # overwritten
+    assert not a.clone().shares_storage_with(b)
+
+
+@pytest.mark.mps
+def test_mps_plans_put_copies_and_scratch_in_the_workspace():
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    # A contraction out of matmul form: a transpose step, then the matmul.
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())))  # noqa: E731
+    graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
+    steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
+    assert steps == ["transpose", "transpose", "dot_general"]
+    # A split reduction's partials are scratch in the workspace.
+    graph = lumen.make_graph(lambda x: x.sum(-1))(lumen.zeros([4, 50_000]))
+    plan = lumen.graph.Plan(graph, "mps")
+    offset, size = plan.steps()[0]["scratch"]
+    assert size > 0 and plan.workspace_bytes >= offset + size
+    x = lumen.ones([4, 50_000], device="mps")
+    assert plan.run([x])[0].tolist() == [50_000.0] * 4
+
+
+# ---------------------------------------------------------------------
+# indexing and splitting (prims.slice)
+# ---------------------------------------------------------------------
+
+
+def test_indexing_and_splitting_follow_numpy():
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    t = lumen.from_numpy(x)
+    cases = {
+        lambda x: x[1]: x[1],
+        lambda x: x[:, 1:3]: x[:, 1:3],
+        lambda x: x[..., -1]: x[..., -1],
+        lambda x: x[0, ..., 1:]: x[0, ..., 1:],
+        lambda x: x[-1, -2, -3]: x[-1, -2, -3],
+        lambda x: x[:, :, 2:2]: x[:, :, 2:2],
+        lambda x: x[:, 5:]: x[:, 5:],
+        lambda x: x.narrow(2, 1, 2): x[:, :, 1:3],
+        lambda x: x.narrow(-1, -3, 2): x[:, :, 1:3],
+    }
+    for fn, expected in cases.items():
+        out = run(fn, t)
+        assert out.shape == expected.shape and np.array_equal(out, expected)
+    assert [p.shape for p in lumen.compile(lambda x: x.split(3, 2))(t)] == [[2, 3, 3], [2, 3, 1]]
+    assert [p.shape for p in lumen.compile(lambda x: x.split([1, 3], -1))(t)] == [[2, 3, 1], [2, 3, 3]]
+    assert [p.shape for p in lumen.compile(lambda x: x.chunk(2, 1))(t)] == [[2, 2, 4], [2, 1, 4]]
+    a, b = run(lambda x: x.chunk(2, -1), t)
+    assert np.array_equal(a, x[..., :2]) and np.array_equal(b, x[..., 2:])
+    errors = [
+        (lambda x: x[2], IndexError, "out of bounds"),
+        (lambda x: x[0, 0, 0, 0], IndexError, "too many indices"),
+        (lambda x: x[..., ...], IndexError, "single ellipsis"),
+        (lambda x: x[::2], NotImplementedError, "steps"),
+        (lambda x: x[True], TypeError, "indices must be"),
+        (lambda x: x.split([1, 1], 2), RuntimeError, "sum exactly to 4"),
+        (lambda x: x.narrow(2, 3, 2), IndexError, "narrow"),
+    ]
+    for fn, error, message in errors:
+        with pytest.raises(error, match=message):
+            lumen.compile(fn)(t)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_packed_weights_are_one_matmul(device):
+    """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
+    matmul, its halves read in place by the fused gate on MPS."""
+    x, w13 = rand(16, 32), rand(32, 128, seed=1)
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, w13)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def gated(x, w13):
+        gate, up = (x @ w13).chunk(2, -1)
+        return gate.relu() * up
+
+    out = lumen.to_numpy(lumen.compile(gated)(*args))
+    h = x @ w13
+    np.testing.assert_allclose(out, np.maximum(h[:, :64], 0) * h[:, 64:], rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(gated)(*args)
+    steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
+    if device == "mps":
+        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice -> slice")
+    assert steps.count("dot_general") == 1
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_concatenate(device):
+    a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
+    try:
+        args = [lumen.from_numpy(v).to(device) for v in (a, b, c)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    out = lumen.to_numpy(lumen.compile(lambda *xs: prims.concatenate(xs, 1))(*args))
+    assert np.array_equal(out, np.concatenate([a, b, c], 1))
+    with pytest.raises(ValueError, match="all dimensions but 0"):
+        lumen.compile(lambda *xs: prims.concatenate(xs, 0))(*args)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_dots_sharing_an_operand_merge(device):
+    """relu(x @ w1) * (x @ w3) with parameters w1 and w3: on MPS, one matmul
+    of x and a block holding w1 and w3 side by side (XLA's DotMerger, with
+    the parameters placed together instead of concatenated)."""
+    x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
+    w1, w3 = lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta")
+
+    def gated(x, w1, w3):
+        return (x @ w1).relu() * (x @ w3)
+
+    f = lumen.compile(gated, device=device)
+    try:
+        p1, p3 = f.place(lumen.from_numpy(x), w1, w3)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    p1.copy_(lumen.from_numpy(w1v))
+    p3.copy_(lumen.from_numpy(w3v))
+    out = lumen.to_numpy(f(lumen.from_numpy(x), w1, w3))
+    np.testing.assert_allclose(out, np.maximum(x @ w1v, 0) * (x @ w3v), rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(gated)(lumen.from_numpy(x), w1, w3)
+    plan = lumen.graph.Plan(graph, device, parameters=[1, 2], packable=[1, 2])
+    steps = [s["primitive"] for s in plan.steps()]
+    if device == "mps":
+        assert plan.packed == [([1, 2], 1)] and p1.shares_storage_with(p3)
+        assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
+    else:
+        assert plan.packed == [] and steps.count("dot_general") == 2
+
+
+@pytest.mark.mps
+def test_attention_projections_merge_into_one_matmul():
+    """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
+    of the three weights; the matmuls reading q and v read them in place,
+    strided views of its result, and k's transpose fuses its slice."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def attention(x, wq, wk, wv):
+        q, k, v = x @ wq, x @ wk, x @ wv
+        return (q @ k.t()).softmax(-1) @ v
+
+    weights = [lumen.empty([32, 32], device="meta") for _ in range(3)]
+    values = [rand(32, 32, seed=i + 1) / 4 for i in range(3)]
+    x = rand(16, 32)
+    f = lumen.compile(attention, device="mps")
+    for p, v in zip(f.place(lumen.from_numpy(x), *weights), values):
+        p.copy_(lumen.from_numpy(v))
+    q, k, v = (x @ w for w in values)
+    s = np.exp(q @ k.T - (q @ k.T).max(-1, keepdims=True))
+    expected = (s / s.sum(-1, keepdims=True)) @ v
+    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), *weights)), expected, rtol=1e-4, atol=1e-4)
+    graph = lumen.make_graph(attention)(lumen.from_numpy(x), *weights)
+    plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    steps = plan.steps()
+    assert plan.packed == [([1, 2, 3], 1)]
+    assert [s["primitive"] for s in steps].count("dot_general") == 3
+    assert "slice" not in [s["primitive"] for s in steps]
+    views = [v for s in steps for v in s["views"] if v is not None]
+    assert views == [(0, [96, 1]), (64, [96, 1])]

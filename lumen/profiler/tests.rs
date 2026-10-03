@@ -6,6 +6,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use super::*;
+use crate::graph::TensorType;
 use crate::{DType, Tensor};
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -139,21 +140,70 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
 }
 
 #[test]
-fn shapes_are_recorded_only_with_record_shapes() {
-    let shapes = |record_shapes| {
+fn types_are_recorded_only_with_record_shapes() {
+    let types = |record_shapes| {
         let p = profile(
             ProfilerConfig {
                 record_shapes,
                 ..cpu()
             },
             || {
-                let _ = Tensor::zeros(&[2, 3], DType::F32);
+                let _ = Tensor::zeros(&[2, 3], DType::I32).reshape(&[3, 2]);
             },
         );
-        one(&p, "lumen::zeros").shapes.clone()
+        let (zeros, reshape) = (one(&p, "lumen::zeros"), one(&p, "lumen::reshape"));
+        (
+            zeros.inputs.clone(),
+            zeros.outputs.clone(),
+            reshape.inputs.clone(),
+            reshape.outputs.clone(),
+        )
     };
-    assert_eq!(shapes(true), vec![vec![2, 3]]);
-    assert!(shapes(false).is_empty());
+    let ty = |shape: &[usize]| TensorType::new(DType::I32, shape);
+    assert_eq!(
+        types(true),
+        (
+            vec![],
+            vec![ty(&[2, 3])],
+            vec![ty(&[2, 3])],
+            vec![ty(&[3, 2])]
+        )
+    );
+    assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
+}
+
+/// Device work shows the types of the op that issued it, in the events and
+/// on the device side of the trace.
+#[test]
+fn device_events_have_their_ops_types() {
+    let config = ProfilerConfig {
+        activities: vec![Activity::Cpu, Activity::Cuda],
+        record_shapes: true,
+        ..cpu()
+    };
+    let ty = |shape: &[usize]| TensorType::new(DType::F16, shape);
+    let p = profile(config, || {
+        let mut op = record_op("lumen::matmul", || vec![ty(&[2, 3]), ty(&[3, 4])]);
+        op.outputs(|| vec![ty(&[2, 4])]);
+        let t = now_ns();
+        record_gpu("matmul_kernel", Device::Cuda(0), t, t + 1000);
+    });
+    let kernel = one(&p, "matmul_kernel");
+    assert_eq!(kernel.inputs, [ty(&[2, 3]), ty(&[3, 4])]);
+    assert_eq!(kernel.outputs, [ty(&[2, 4])]);
+    let trace = p.chrome_trace();
+    let line = trace
+        .split("},{")
+        .find(|e| e.contains("\"cat\":\"kernel\""))
+        .expect("the kernel's event");
+    assert!(
+        line.contains("\"Input Dims\":[[2,3],[3,4]],\"Input type\":[\"f16\",\"f16\"]"),
+        "{line}"
+    );
+    assert!(
+        line.contains("\"Output Dims\":[[2,4]],\"Output type\":[\"f16\"]"),
+        "{line}"
+    );
 }
 
 #[test]
@@ -447,7 +497,7 @@ fn chrome_trace_has_pytorchs_event_layout() {
     };
     let p = profile(config, || {
         let _r = record_function("quote \" and \\ backslash");
-        let _t = Tensor::zeros(&[3], DType::F32);
+        Tensor::zeros(&[3], DType::F32).fill_(1.0);
         let t = now_ns();
         record_gpu("Memcpy DtoH", Device::Cuda(0), t, t + 2000);
     });
@@ -461,7 +511,8 @@ fn chrome_trace_has_pytorchs_event_layout() {
         "\"Bytes\":12",
         "\"cat\":\"gpu_memcpy\",\"name\":\"Memcpy DtoH\"",
         "\"cat\":\"ac2g\"",
-        "\"Input Dims\":[[3]]",
+        "\"Output Dims\":[[3]],\"Output type\":[\"f32\"]",
+        "\"Input Dims\":[[3]],\"Input type\":[\"f32\"]",
         "\"args\":{\"name\":\"CUDA 0\"}",
     ] {
         assert!(trace.contains(needle), "missing {needle} in\n{trace}");
@@ -669,4 +720,47 @@ mod cuda {
         let p = profile(cpu(), || drop(Tensor::from_slice(&[1u8; 16], on_gpu)));
         assert!(named(&p, "Memcpy HtoD").is_empty());
     }
+}
+
+#[test]
+fn ranges_are_annotated_on_the_gpu_timeline() {
+    let config = ProfilerConfig {
+        activities: vec![Activity::Cpu, Activity::Cuda],
+        ..cpu()
+    };
+    let p = profile(config, || {
+        let _model = record_function("model");
+        let t = now_ns();
+        {
+            let _layer = record_function("layer");
+            record_gpu("kernel_a", Device::Cuda(0), t + 100, t + 300);
+        }
+        record_gpu("kernel_b", Device::Cuda(0), t + 400, t + 900);
+    });
+    let trace = p.chrome_trace();
+    let annotations: Vec<&str> = trace
+        .lines()
+        .filter(|l| l.contains("\"gpu_user_annotation\""))
+        .collect();
+    assert_eq!(annotations.len(), 2, "{trace}");
+    // "model" spans both kernels; "layer" only its own.
+    let model = annotations
+        .iter()
+        .find(|l| l.contains("\"name\":\"model\""))
+        .unwrap();
+    assert!(model.contains("\"dur\":0.800"), "{model}");
+    let layer = annotations
+        .iter()
+        .find(|l| l.contains("\"name\":\"layer\""))
+        .unwrap();
+    assert!(layer.contains("\"dur\":0.200"), "{layer}");
+    // On their own track, named, beside the kernels' (which may overlap).
+    assert!(
+        annotations.iter().all(|l| l.contains("\"tid\":8")),
+        "{trace}"
+    );
+    assert!(
+        trace.contains("\"args\":{\"name\":\"annotations\"}"),
+        "{trace}"
+    );
 }

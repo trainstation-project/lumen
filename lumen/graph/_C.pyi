@@ -26,10 +26,36 @@ class Plan:
     """A graph compiled for execution by ``device``'s graph compiler (on
     MPS, with its elementwise ops fused), with its memory planned."""
 
-    def __init__(self, graph: Graph, device: Optional[DeviceLike] = None) -> None: ...
+    def __init__(
+        self,
+        graph: Graph,
+        device: Optional[DeviceLike] = None,
+        fuse: bool = True,
+        donate: Sequence[int] = (),
+        parameters: Optional[Sequence[int]] = None,
+        packable: Sequence[int] = (),
+    ) -> None:
+        """Fused where ``device`` fuses (unless ``fuse`` is false), with outputs
+        written into the inputs at positions ``donate`` where they fit. With
+        ``parameters`` (input positions), an executable that owns its memory
+        (``run_in``), those inputs its parameters, the ``packable`` ones of
+        them packed into blocks where dots merge (``packed``)."""
     @property
     def workspace_bytes(self) -> int: ...
+    @property
+    def packed(self) -> list[tuple[list[int], int]]:
+        """The inputs the compiler added after the graph's: each the block
+        of these parameter inputs side by side along a dimension."""
+    def run_in(self, workspace: Tensor, inputs: Sequence[Tensor]) -> list[Tensor]:
+        """Run in ``workspace`` (uint8, at least ``workspace_bytes``): inputs
+        that are not parameters copied in, parameters read in place; the
+        outputs are views valid until the next run in it."""
     def steps(self) -> list[dict[str, Any]]:
         """Each step, as ``Graph.nodes``, with ``inputs`` and ``output`` as
-        ``(buffer, dtype, shape)``."""
-    def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...
+        ``(buffer, dtype, shape)``, ``views`` as each input's ``(element
+        offset, strides)`` in its buffer if it reads it as a strided view (a
+        slice; else None), and its kernel's ``scratch`` in the workspace as
+        ``(offset, bytes)`` (or None)."""
+    def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
+        """Run on ``device`` (where the inputs must be), or else the inputs'
+        device (the CPU without inputs)."""

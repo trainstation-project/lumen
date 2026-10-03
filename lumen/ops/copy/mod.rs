@@ -26,6 +26,8 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Cuda => Some(cuda::copy_h2d),
         #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
+        // Meta tensors have no data to copy (`Tensor::copy_to`).
+        DispatchKey::Meta => None,
     }
 }
 
@@ -41,6 +43,7 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Cuda => Some(cuda::copy_d2h),
         #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
+        DispatchKey::Meta => None,
     }
 }
 

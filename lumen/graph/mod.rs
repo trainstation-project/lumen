@@ -14,7 +14,7 @@ pub(crate) mod tests;
 
 use std::fmt;
 
-pub use plan::Plan;
+pub use plan::{Plan, PlanOptions};
 pub use primitive::Primitive;
 
 use crate::DType;

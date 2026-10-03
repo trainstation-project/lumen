@@ -41,6 +41,7 @@ from lumen.tensor._C import (
     Scalar as Scalar,
     Tensor as Tensor,
     _from_dlpack as _from_dlpack,
+    _pack as _pack,
     _to_dlpack as _to_dlpack,
     _to_dlpack_versioned as _to_dlpack_versioned,
 )
@@ -57,7 +58,7 @@ class device:
 
     def __new__(cls, device: Union[str, "device"], index: Optional[int] = None) -> "device": ...
     @property
-    def type(self) -> Literal["cpu", "mps", "cuda"]: ...
+    def type(self) -> Literal["cpu", "mps", "cuda", "meta"]: ...
     @property
     def index(self) -> Optional[int]: ...
     def __eq__(self, other: object, /) -> bool: ...

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::parameter::Parameter;
 use crate::allocator::{Allocator, DataPtr, allocator_for};
 use crate::device::Device;
 
@@ -18,6 +19,9 @@ pub struct Storage {
     id: usize,
     data: DataPtr,
     device: Device,
+    /// A meta storage's parameter source and placements
+    /// ([`super::parameter`]).
+    pub(crate) parameter: Parameter,
 }
 
 /// The allocator for `device`, panicking if it is unavailable (PyTorch
@@ -49,6 +53,7 @@ impl Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data: DataPtr::allocate(allocator, nbytes),
             device,
+            parameter: Parameter::default(),
         }
     }
 
@@ -78,6 +83,7 @@ impl Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
             data,
             device,
+            parameter: Parameter::default(),
         }
     }
 

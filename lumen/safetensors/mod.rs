@@ -72,6 +72,8 @@ pub enum Error {
     UnsupportedDtype(String, String),
     /// A tensor to save is not contiguous.
     NotContiguous(String),
+    /// A tensor to save is on the meta device: it has no data.
+    MetaTensor(String),
     /// The host is big-endian (the format, and these reads, are not).
     BigEndian,
 }
@@ -104,6 +106,10 @@ impl fmt::Display for Error {
             NotContiguous(name) => write!(
                 f,
                 "tensor `{name}` is not contiguous: save contiguous tensors (call .contiguous() on it first)"
+            ),
+            MetaTensor(name) => write!(
+                f,
+                "tensor `{name}` is on the meta device: it has no data to save"
             ),
             BigEndian => write!(f, "safetensors files are little-endian; this host is not"),
         }
@@ -479,6 +485,9 @@ fn prepare<'a>(
     let mut offset = 0;
     let mut infos = Vec::with_capacity(order.len());
     for &(name, t) in &order {
+        if t.device() == Device::Meta {
+            return Err(Error::MetaTensor(name.to_owned()));
+        }
         if !t.is_contiguous() {
             return Err(Error::NotContiguous(name.to_owned()));
         }
@@ -505,7 +514,8 @@ fn prepare<'a>(
 /// Whether the host can read and write `device`'s memory directly.
 fn host_accessible(device: Device) -> bool {
     match device {
-        Device::Cpu => true,
+        // Meta tensors are made in place too, though nothing is written.
+        Device::Cpu | Device::Meta => true,
         #[cfg(lumen_mps_linked)]
         Device::Mps => true,
         _ => false,
@@ -623,7 +633,7 @@ pub fn read_metadata(buffer: &[u8]) -> Result<(usize, Metadata), Error> {
 
 /// A new tensor for `info` on `device`, its bytes written by `fill`:
 /// directly into its storage on host-accessible devices, else through the
-/// CPU.
+/// CPU; on the meta device, nothing is read.
 fn load_tensor(
     name: &str,
     info: &TensorInfo,
@@ -643,8 +653,12 @@ fn load_tensor(
         Device::Cpu
     };
     let options = TensorOptions::new().dtype(dtype).device(host);
-    // SAFETY: `fill` writes every byte before the tensor is returned.
+    // SAFETY: `fill` writes every byte before the tensor is returned (a meta
+    // tensor has none).
     let t = unsafe { Tensor::empty(&info.shape, options) };
+    if host == Device::Meta {
+        return Ok(t);
+    }
     let n = info.data_offsets.1 - info.data_offsets.0;
     if n > 0 {
         // SAFETY: a new contiguous tensor's n bytes, in host-writable memory

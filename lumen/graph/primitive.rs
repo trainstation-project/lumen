@@ -59,6 +59,17 @@ pub enum Primitive {
     Transpose {
         permutation: Vec<usize>,
     },
+    /// The elements from `start_indices` up to `limit_indices` (exclusive),
+    /// per dimension (`lax.slice`, unit strides).
+    Slice {
+        start_indices: Vec<usize>,
+        limit_indices: Vec<usize>,
+    },
+    /// The operands one after another along `dimension`, their other
+    /// dimensions equal (`lax.concatenate`).
+    Concatenate {
+        dimension: usize,
+    },
     Full {
         shape: Vec<usize>,
         fill_value: Scalar,
@@ -106,6 +117,8 @@ impl Primitive {
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
+            Slice { .. } => "slice",
+            Concatenate { .. } => "concatenate",
             Full { .. } => "full",
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
@@ -121,6 +134,7 @@ impl Primitive {
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } => 2,
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
+            Concatenate { .. } => args.len().max(1),
             _ => 1,
         };
         if args.len() != arity {
@@ -251,6 +265,49 @@ impl Primitive {
                 let shape: Vec<usize> = permutation.iter().map(|&d| x.shape[d]).collect();
                 Ok(TensorType::new(x.dtype, &shape))
             }
+            Slice {
+                start_indices,
+                limit_indices,
+            } => {
+                let x = args[0];
+                let rank = x.shape.len();
+                if start_indices.len() != rank || limit_indices.len() != rank {
+                    return err(format!(
+                        "start_indices {start_indices:?} and limit_indices {limit_indices:?} need one index per dimension of {:?}",
+                        x.shape
+                    ));
+                }
+                let mut shape = Vec::with_capacity(rank);
+                for (d, (&s, &l)) in start_indices.iter().zip(limit_indices).enumerate() {
+                    if s > l || l > x.shape[d] {
+                        return err(format!(
+                            "dimension {d}: [{s}, {l}) is not within its size {}",
+                            x.shape[d]
+                        ));
+                    }
+                    shape.push(l - s);
+                }
+                Ok(TensorType::new(x.dtype, &shape))
+            }
+            Concatenate { dimension } => {
+                let x = args[0];
+                if *dimension >= x.shape.len() {
+                    return err(format!("dimension {dimension} is not a dimension of {x}"));
+                }
+                let mut shape = x.shape.clone();
+                shape[*dimension] = 0;
+                for y in args {
+                    let others_equal = y.shape.len() == x.shape.len()
+                        && (0..x.shape.len()).all(|d| d == *dimension || y.shape[d] == x.shape[d]);
+                    if y.dtype != x.dtype || !others_equal {
+                        return err(format!(
+                            "operands must share a dtype and all dimensions but {dimension}, got {x} and {y}"
+                        ));
+                    }
+                    shape[*dimension] += y.shape[*dimension];
+                }
+                Ok(TensorType::new(x.dtype, &shape))
+            }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             Iota {
                 dtype,
@@ -347,6 +404,16 @@ impl fmt::Display for Primitive {
                 Tuple(shape)
             ),
             Transpose { permutation } => write!(f, "[permutation={}]", Tuple(permutation)),
+            Slice {
+                start_indices,
+                limit_indices,
+            } => write!(
+                f,
+                "[limit_indices={} start_indices={}]",
+                Tuple(limit_indices),
+                Tuple(start_indices)
+            ),
+            Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
             Full {
                 shape,
                 fill_value,

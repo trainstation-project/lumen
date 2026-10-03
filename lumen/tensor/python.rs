@@ -2,7 +2,7 @@
 //! `lumen._C` by [`crate::python`].
 
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
@@ -162,7 +162,18 @@ fn tensor_from_flat(
 // scalar / list conversion back to Python
 // ---------------------------------------------------------------------
 
+/// Errors for a meta tensor, which has no data to read.
+fn has_data(t: &Tensor) -> PyResult<()> {
+    if t.device() == core::Device::Meta {
+        return Err(PyRuntimeError::new_err(
+            "meta tensors have no data: make the tensor by running a function (lumen.compile) or loading it",
+        ));
+    }
+    Ok(())
+}
+
 fn scalar_to_py(py: Python<'_>, t: &Tensor, index: &[usize]) -> PyResult<Py<PyAny>> {
+    has_data(t)?;
     Ok(match t.dtype() {
         DType::F32 => t.get::<f32>(index).into_py_any(py)?,
         DType::F64 => t.get::<f64>(index).into_py_any(py)?,
@@ -216,10 +227,15 @@ where
     if shape.len() <= 1 {
         return Ok(PyList::new(py, flat.iter().copied())?.into_any().unbind());
     }
+    // By row index: a zero-size inner dimension still has shape[0] rows.
     let stride: usize = shape[1..].iter().product();
     let mut rows = Vec::with_capacity(shape[0]);
-    for chunk in flat.chunks(stride) {
-        rows.push(build_nested(py, chunk, &shape[1..])?);
+    for i in 0..shape[0] {
+        rows.push(build_nested(
+            py,
+            &flat[i * stride..(i + 1) * stride],
+            &shape[1..],
+        )?);
     }
     Ok(PyList::new(py, rows)?.into_any().unbind())
 }
@@ -494,7 +510,11 @@ impl PyTensor {
     /// This tensor on `device` (a string or `lumen.device`); returns a view
     /// of the same storage if it is already there (PyTorch: `Tensor.to`).
     fn to(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(Self::wrap(self.inner.to(resolve_device(Some(device))?)))
+        let device = resolve_device(Some(device))?;
+        if device != core::Device::Meta {
+            has_data(&self.inner)?;
+        }
+        Ok(Self::wrap(self.inner.to(device)))
     }
 
     /// Set every element to `value` in place and return the tensor
@@ -509,6 +529,44 @@ impl PyTensor {
     fn zero_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf.inner.zero_();
         slf
+    }
+
+    /// Copy `src`'s elements (same dtype and shape, any device) into this
+    /// tensor in place and return it (PyTorch: `Tensor.copy_`): how data
+    /// gets into a placed parameter.
+    fn copy_<'py>(slf: PyRef<'py, Self>, src: PyRef<'_, Self>) -> PyResult<PyRef<'py, Self>> {
+        slf.inner.copy_(&src.inner).map_err(PyValueError::new_err)?;
+        Ok(slf)
+    }
+
+    /// A copy of this tensor in new storage on its device (PyTorch:
+    /// `Tensor.clone`): how to keep a compiled function's result past its
+    /// next call.
+    fn clone(&self) -> PyResult<Self> {
+        has_data(&self.inner)?;
+        let options = TensorOptions::new()
+            .dtype(self.inner.dtype())
+            .device(self.inner.device());
+        // SAFETY: the copy below writes every element.
+        let t = unsafe { Tensor::empty(self.inner.shape(), options) };
+        t.copy_(&self.inner).map_err(PyValueError::new_err)?;
+        Ok(Self::wrap(t))
+    }
+
+    /// Whether this can be a parameter of a compiled function: a whole
+    /// meta tensor (`lumen/tensor/parameter.rs`).
+    #[getter]
+    fn _is_parameter(&self) -> bool {
+        self.inner.is_parameter()
+    }
+
+    /// This parameter's memory on `device`, placed (zeroed) on first use.
+    fn _placed(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let device = resolve_device(Some(device))?;
+        self.inner
+            .placed(device)
+            .map(Self::wrap)
+            .map_err(PyValueError::new_err)
     }
 
     /// The address of the first element in the device's address space
@@ -535,6 +593,7 @@ impl PyTensor {
 
     /// Nested-list copy of the logical contents (row-major).
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        has_data(&self.inner)?;
         let shape = self.inner.shape();
         match self.inner.dtype() {
             DType::F32 => build_nested(py, &self.inner.to_vec::<f32>(), shape),
@@ -618,8 +677,23 @@ impl PyTensor {
     }
 }
 
+/// The parameters `members` side by side along `dimension` in one block on
+/// `device` (placed so if none is placed yet), or `None` if they are placed
+/// otherwise (`lumen/tensor/parameter.rs`).
+#[pyfunction]
+fn _pack(
+    members: Vec<PyRef<'_, PyTensor>>,
+    dimension: usize,
+    device: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyTensor>> {
+    let members: Vec<Tensor> = members.iter().map(|t| t.inner.clone()).collect();
+    let block = Tensor::pack(&members, dimension, resolve_device(Some(device))?);
+    Ok(block.map_err(PyValueError::new_err)?.map(PyTensor::wrap))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
+    m.add_function(wrap_pyfunction!(_pack, m)?)?;
     m.add_function(wrap_pyfunction!(_to_dlpack, m)?)?;
     m.add_function(wrap_pyfunction!(_to_dlpack_versioned, m)?)?;
     m.add_function(wrap_pyfunction!(_from_dlpack, m)?)

@@ -156,6 +156,70 @@ impl Emitter<'_> {
                         let i = self.index(gather_index(&idx, &ty.shape, &strides));
                         return self.value(node.inputs[0], i);
                     }
+                    // The operand's element at the index plus the start.
+                    Slice { start_indices, .. } => {
+                        let x = body.type_of(node.inputs[0]);
+                        let x_strides = contiguous_strides(&x.shape);
+                        let start: usize = start_indices
+                            .iter()
+                            .zip(&x_strides)
+                            .map(|(s, st)| s * st)
+                            .sum();
+                        let i = gather_index(&idx, &ty.shape, &x_strides);
+                        let i = self.index(format!("{start} + {i}"));
+                        return self.value(node.inputs[0], i);
+                    }
+                    // The operand holding the coordinate along `dimension`,
+                    // each read only in its own branch (another's index
+                    // would be out of its bounds).
+                    Concatenate { dimension } => {
+                        let d = *dimension;
+                        let span = contiguous_strides(&ty.shape)[d];
+                        let mut c = idx.clone();
+                        if span != 1 {
+                            c = format!("{c} / {span}u");
+                        }
+                        let outer = ty.shape[..d].iter().product::<usize>();
+                        if outer != 1 {
+                            c = format!("({c}) % {}u", ty.shape[d]);
+                        }
+                        let c = self.index(c);
+                        let name = format!("v{}", self.values.len());
+                        writeln!(self.lines, "        {t} {name};").unwrap();
+                        self.values.insert(key, name.clone());
+                        let mut start = 0;
+                        for (k, &x) in node.inputs.iter().enumerate() {
+                            let n = body.type_of(x).shape[d];
+                            let branch = match k {
+                                0 => format!("if ({c} < {}u)", start + n),
+                                _ if k + 1 == node.inputs.len() => "else".into(),
+                                _ => format!("else if ({c} < {}u)", start + n),
+                            };
+                            writeln!(self.lines, "        {branch} {{").unwrap();
+                            let saved = (self.values.clone(), self.indices.clone());
+                            let mut terms = Vec::new();
+                            if outer != 1 {
+                                terms.push(format!(
+                                    "({idx} / {}u) * {}u",
+                                    span * ty.shape[d],
+                                    span * n
+                                ));
+                            }
+                            terms.push(match span {
+                                1 => format!("{c} - {start}u"),
+                                _ => format!("({c} - {start}u) * {span}u"),
+                            });
+                            if span != 1 {
+                                terms.push(format!("{idx} % {span}u"));
+                            }
+                            let i = self.index(terms.join(" + "));
+                            let v = self.value(x, i);
+                            writeln!(self.lines, "        {name} = {v};\n        }}").unwrap();
+                            (self.values, self.indices) = saved;
+                            start += n;
+                        }
+                        return name;
+                    }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
                     Iota { dimension, .. } => {
                         let mut strides = vec![0; ty.shape.len()];

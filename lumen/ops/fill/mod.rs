@@ -35,6 +35,8 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
         #[cfg(not(lumen_mps_linked))]
         DispatchKey::Mps => None,
         DispatchKey::Cuda => None,
+        // Nothing to write.
+        DispatchKey::Meta => Some(|_, _| {}),
     }
 }
 

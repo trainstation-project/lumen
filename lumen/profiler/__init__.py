@@ -112,7 +112,8 @@ class EventList(list):
 class profile:
     """Profile the code in a ``with`` block (PyTorch:
     ``torch.profiler.profile``). ``activities`` defaults to CPU plus every
-    usable device, as in PyTorch."""
+    usable device, as in PyTorch. ``record_shapes`` records the dtype and
+    shape of each op's inputs and outputs (PyTorch records the inputs')."""
 
     def __init__(self, activities=None, profile_memory=False, record_shapes=False):
         if activities is None:
@@ -148,7 +149,9 @@ class profile:
     def events(self):
         """Every recorded event as a dict (``name``, ``kind`` = op /
         user_range / memory / gpu, ``start_us``, ``duration_us``, ``thread``,
-        ``parent``, ``device``, ``shapes``, ``bytes``, ...), by start time."""
+        ``parent``, ``device``, ``inputs`` and ``outputs`` (with
+        ``record_shapes``: each a list of ``(dtype, shape)``), ``bytes``,
+        ...), by start time."""
         return self._profile().events()
 
     def key_averages(self):

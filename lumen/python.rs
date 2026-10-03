@@ -48,6 +48,7 @@ enum DeviceType {
     Cpu,
     Mps,
     Cuda,
+    Meta,
 }
 
 impl DeviceType {
@@ -56,8 +57,9 @@ impl DeviceType {
             "cpu" => Ok(DeviceType::Cpu),
             "mps" => Ok(DeviceType::Mps),
             "cuda" => Ok(DeviceType::Cuda),
+            "meta" => Ok(DeviceType::Meta),
             other => Err(PyValueError::new_err(format!(
-                "Expected one of cpu, mps, cuda device type at start of device string: {other}"
+                "Expected one of cpu, mps, cuda, meta device type at start of device string: {other}"
             ))),
         }
     }
@@ -67,6 +69,7 @@ impl DeviceType {
             DeviceType::Cpu => "cpu",
             DeviceType::Mps => "mps",
             DeviceType::Cuda => "cuda",
+            DeviceType::Meta => "meta",
         }
     }
 }
@@ -104,8 +107,10 @@ impl PyDevice {
             }
             Some(i) => Some(i as usize),
         };
-        // The core has a single CPU and a single Metal device.
-        if matches!(kind, DeviceType::Cpu | DeviceType::Mps) && index.is_some_and(|i| i != 0) {
+        // The core has a single CPU, Metal and meta device.
+        if matches!(kind, DeviceType::Cpu | DeviceType::Mps | DeviceType::Meta)
+            && index.is_some_and(|i| i != 0)
+        {
             return Err(PyValueError::new_err(format!(
                 "{} device index must be 0, got {}",
                 kind.name(),
@@ -140,6 +145,7 @@ impl PyDevice {
             DeviceType::Cpu => core::Device::Cpu,
             DeviceType::Mps => core::Device::Mps,
             DeviceType::Cuda => core::Device::Cuda(self.index.unwrap_or(0)),
+            DeviceType::Meta => core::Device::Meta,
         }
     }
 }
