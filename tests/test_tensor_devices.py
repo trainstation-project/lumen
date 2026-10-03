@@ -4,7 +4,6 @@ import pytest
 
 import lumen
 
-
 # Device cases carry a marker (select them with `-m mps`, `-m cuda`) and
 # skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)

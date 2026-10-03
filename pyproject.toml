@@ -6,7 +6,8 @@ build-backend = "maturin"
 name = "lumen"
 version = "0.1.0"
 description = "A minimal tensor library prototype with a Rust core"
-requires-python = ">=3.9"
+# The CuTe DSL (the `cuda` extra) needs 3.10.
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 # CUDA's fill_ is a CuTe DSL kernel (lumen/ops/fill/cuda.py), imported
@@ -18,6 +19,8 @@ cuda = [
     # Its compiled kernels are called from Rust through TVM-FFI's C ABI.
     "apache-tvm-ffi; sys_platform == 'linux'",
 ]
+# `make style`: the pre-commit hooks (.pre-commit-config.yaml).
+dev = ["pre-commit"]
 
 [tool.maturin]
 # Mixed Rust/Python project in one folder: the crate, built with the
@@ -28,6 +31,11 @@ module-name = "lumen._C"
 python-source = "."
 features = ["python"]
 exclude = ["lumen/**/*.rs", "lumen/**/*.mm"]
+
+[tool.isort]
+# Agree with black (.pre-commit-config.yaml), so the two hooks settle.
+profile = "black"
+line_length = 119
 
 [tool.pytest.ini_options]
 # Device test cases; see tests/test_tensor_devices.py and the Makefile.

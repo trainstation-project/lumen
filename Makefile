@@ -66,3 +66,9 @@ miri:
 
 clean:
 	cargo clean
+
+update-precommit:
+	uv run --extra dev --no-default-groups pre-commit autoupdate
+
+style:
+	uv run --extra dev --no-default-groups pre-commit run --all-files

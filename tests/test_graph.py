@@ -154,7 +154,11 @@ def test_no_implicit_dtype_changes():
         (lambda i, f: i + f, (i, f), "dtypes float32 and int64"),
         (lambda h, f: lumen.maximum(h, f), (half, lumen.tensor([0.0])), "dtypes float16 and float32"),
         (lambda f, h: lumen.where(f > 0, f, h), (lumen.tensor([1.0]), half), "dtypes float16 and float32"),
-        (lambda h, f: h @ f, (lumen.zeros([2, 2], dtype="float16"), lumen.zeros([2, 2])), "dtypes float16 and float32"),
+        (
+            lambda h, f: h @ f,
+            (lumen.zeros([2, 2], dtype="float16"), lumen.zeros([2, 2])),
+            "dtypes float16 and float32",
+        ),
         (lambda i: i + 1.5, (i,), "int64 tensor and the float 1.5"),
         (lambda b: b + 1, (lumen.tensor([True]),), "bool tensor and the int 1"),
         (lambda i: i / 2, (i,), "true division"),
@@ -168,7 +172,9 @@ def test_no_implicit_dtype_changes():
 
 def test_broadcasting():
     a, b = rand(4, 1, 3), rand(5, 1, seed=1)
-    np.testing.assert_allclose(run(lambda a, b: a * b - a, lumen.from_numpy(a), lumen.from_numpy(b)), a * b - a, rtol=1e-6)
+    np.testing.assert_allclose(
+        run(lambda a, b: a * b - a, lumen.from_numpy(a), lumen.from_numpy(b)), a * b - a, rtol=1e-6
+    )
     with pytest.raises(RuntimeError, match="broadcastable"):
         lumen.compile(lambda a, b: a + b)(lumen.zeros([2]), lumen.zeros([3]))
 
@@ -285,7 +291,9 @@ def test_plan():
     assert "reshape" not in str(plan)
     assert plan.workspace_bytes == 3 * 1024
     x = rand(16, 16)
-    np.testing.assert_allclose(lumen.to_numpy(plan.run([lumen.from_numpy(x)])[0]), np.tanh(np.exp(x) + 1).ravel(), rtol=1e-6)
+    np.testing.assert_allclose(
+        lumen.to_numpy(plan.run([lumen.from_numpy(x)])[0]), np.tanh(np.exp(x) + 1).ravel(), rtol=1e-6
+    )
     with pytest.raises(ValueError, match="must be f32"):
         plan.run([lumen.zeros([16, 16], dtype="float64")])
 
@@ -336,9 +344,15 @@ def test_dump_graph(tmp_path):
     assert page.startswith("<!doctype html>") and "<title>&lt;lambda&gt; · lumen graph</title>" in page
     assert data["inputs"] == ["f32[2,3]", "f32[3,4]"] and data["device"] == "cpu"
     assert [n["label"] for n in data["views"]["traced"]["nodes"] if n["kind"] == "node"] == [
-        "dot_general", "full", "broadcast_in_dim", "max"]
+        "dot_general",
+        "full",
+        "broadcast_in_dim",
+        "max",
+    ]
     # Another signature, traced for the dump.
-    data = f.dump_graph(tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16"))
+    data = f.dump_graph(
+        tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16")
+    )
     assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
 
 
@@ -481,7 +495,9 @@ def test_module_weights_are_placed_once_and_shared(device):
     first = model.layers[0]
     np.testing.assert_allclose(lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2, rtol=1e-5, atol=1e-5)
     first.w.copy_(lumen.from_numpy(values["layers.0.w"] + 1))
-    np.testing.assert_allclose(lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2 + x.sum(-1, keepdims=True), rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(
+        lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2 + x.sum(-1, keepdims=True), rtol=1e-5, atol=1e-4
+    )
     # Another model of the same structure reuses the plan, with its weights.
     other = Affine(meta(4, 4), meta(4))
     g(other, meta(2, 4))
@@ -677,7 +693,11 @@ def test_attention_projections_merge_into_one_matmul():
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
     assert [s["primitive"] for s in steps].count("dot_general") == 3
-    assert [s["label"] for s in steps if s["primitive"] == "dot_general"] == ["3x dot_general", "dot_general", "dot_general"]
+    assert [s["label"] for s in steps if s["primitive"] == "dot_general"] == [
+        "3x dot_general",
+        "dot_general",
+        "dot_general",
+    ]
     assert "slice" not in [s["primitive"] for s in steps]
     views = [v for s in steps for v in s["views"] if v is not None]
     assert views == [(0, [96, 1]), (64, [96, 1])]
@@ -713,6 +733,7 @@ def test_packed_weights_are_read_in_place_elsewhere():
     np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}  # no host copy of w1
 
+
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_softmax_is_one_primitive(device):
     """softmax over the last dimension traces to one primitive: on MPS one
@@ -731,11 +752,17 @@ def test_softmax_is_one_primitive(device):
     assert [n["primitive"] for n in graph.nodes()][-1] == "softmax"
     s = x * 0.5
     e = np.exp(s - s.max(-1, keepdims=True))
-    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(scaled)(t)), e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(
+        lumen.to_numpy(lumen.compile(scaled)(t)), e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7
+    )
     if device == "mps":
-        assert [s["label"] for s in lumen.graph.Plan(graph, "mps").steps()] == ["full -> broadcast_in_dim -> mul -> softmax"]
+        assert [s["label"] for s in lumen.graph.Plan(graph, "mps").steps()] == [
+            "full -> broadcast_in_dim -> mul -> softmax"
+        ]
     e0 = np.exp(x - x.max(0, keepdims=True))
-    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(
+        lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7
+    )
     assert "softmax" not in [n["primitive"] for n in lumen.make_graph(lambda t: t.softmax(0))(t).nodes()]
 
 
@@ -769,9 +796,13 @@ def test_rms_norm(device):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(g)(X)), expected(x, None, 2.0**-23), rtol=1e-5, atol=1e-6)
     assert "rms_norm" not in [n["primitive"] for n in lumen.make_graph(f)(X, W).nodes()]
     by_hand = lambda a, b: b * (a / (1e-6 + (a * a).mean(-1, keepdim=True)).sqrt())  # noqa: E731
-    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(
+        lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6
+    )
     if device == "mps":
-        steps = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()]  # noqa: E731
+        steps = lambda f: [
+            s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+        ]  # noqa: E731
         # One kernel each: a fusion with its reduction inside (a row kernel).
         for g in (f, by_hand):
             (label,) = steps(g)
@@ -813,6 +844,7 @@ def test_sqrt(device):
         (step,) = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
         source = step["fusion"]["source"]
         assert "Sqrt::apply" in source and "Div::apply" in source and "rsqrt(" not in source
+
 
 class ScaledNorm(lumen.nn.Module):
     weight: lumen.Tensor
@@ -940,7 +972,9 @@ def test_upcast_rms_norm_is_one_kernel(n):
     except RuntimeError as e:
         pytest.skip(str(e))
     weight = lumen.empty([n], dtype="bfloat16", device="meta")
-    graph = lumen.make_graph(lambda m, a: m(a))(UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta"))
+    graph = lumen.make_graph(lambda m, a: m(a))(
+        UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
+    )
     (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     source = step["fusion"]["source"]
     assert step["label"].endswith("div -> convert_element_type -> broadcast_in_dim -> mul"), step["label"]

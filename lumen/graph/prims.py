@@ -9,12 +9,32 @@ already share a shape and dtype: broadcasting is the torch-like layer's job
 from lumen.graph import tracer
 
 __all__ = [
-    "add", "sub", "mul", "div", "max", "eq", "lt",
-    "neg", "exp", "log", "sqrt", "tanh", "logistic",
-    "convert_element_type", "select",
-    "reduce_sum", "reduce_max", "dot_general",
-    "reshape", "broadcast_in_dim", "transpose", "slice", "concatenate", "softmax",
-    "full", "iota",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "max",
+    "eq",
+    "lt",
+    "neg",
+    "exp",
+    "log",
+    "sqrt",
+    "tanh",
+    "logistic",
+    "convert_element_type",
+    "select",
+    "reduce_sum",
+    "reduce_max",
+    "dot_general",
+    "reshape",
+    "broadcast_in_dim",
+    "transpose",
+    "slice",
+    "concatenate",
+    "softmax",
+    "full",
+    "iota",
 ]
 
 
@@ -109,10 +129,15 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
     ``accum_dtype``), each element rounded to it once."""
     (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
     return bind(
-        "dot_general", lhs, rhs,
-        lhs_contracting=tuple(lhs_contracting), rhs_contracting=tuple(rhs_contracting),
-        lhs_batch=tuple(lhs_batch), rhs_batch=tuple(rhs_batch),
-        accum_dtype=accum_dtype, output_dtype=output_dtype,
+        "dot_general",
+        lhs,
+        rhs,
+        lhs_contracting=tuple(lhs_contracting),
+        rhs_contracting=tuple(rhs_contracting),
+        lhs_batch=tuple(lhs_batch),
+        rhs_batch=tuple(rhs_batch),
+        accum_dtype=accum_dtype,
+        output_dtype=output_dtype,
     )
 
 

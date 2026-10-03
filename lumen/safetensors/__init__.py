@@ -16,9 +16,7 @@ A file of a dtype lumen does not have (float8, ...) raises ``ValueError``.
 
 import os
 
-from lumen._C import Tensor
-from lumen._C import _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize
-from lumen._C import safe_open
+from lumen._C import Tensor, _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open
 
 __all__ = ["save", "save_file", "load", "load_file", "safe_open"]
 

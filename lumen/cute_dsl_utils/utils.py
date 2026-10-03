@@ -18,9 +18,7 @@ def get_powers_of_2(start: int, end: int) -> list[int]:
     return output
 
 
-def get_fake_cute_tensor(
-    dtype: str, shape: tuple[int], divisibility: int = 1, leading_dim: int = -1
-) -> cute.Tensor:
+def get_fake_cute_tensor(dtype: str, shape: tuple[int], divisibility: int = 1, leading_dim: int = -1) -> cute.Tensor:
     """A compile-time stand-in for a real tensor of ``dtype`` and ``shape``.
 
     The strides are partly symbolic (everything but the leading dimension),
@@ -30,10 +28,7 @@ def get_fake_cute_tensor(
         leading_dim = len(shape) + leading_dim
 
     element = get_cute_dtype(dtype)
-    stride = tuple(
-        1 if i == leading_dim else cute.sym_int64(divisibility=divisibility)
-        for i in range(len(shape))
-    )
+    stride = tuple(1 if i == leading_dim else cute.sym_int64(divisibility=divisibility) for i in range(len(shape)))
 
     return cute.runtime.make_fake_tensor(
         element,

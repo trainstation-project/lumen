@@ -106,9 +106,7 @@ def test_chrome_trace_is_valid_json_in_pytorchs_layout(tmp_path):
     events = trace["traceEvents"]
     ops = [e for e in events if e.get("cat") == "cpu_op"]
     assert any(e["name"] == "lumen::arange" and e["ph"] == "X" for e in ops)
-    assert any(
-        e.get("cat") == "user_annotation" and e["name"] == 'name with "quotes"' for e in events
-    )
+    assert any(e.get("cat") == "user_annotation" and e["name"] == 'name with "quotes"' for e in events)
     memory = [e for e in events if e["name"] == "[memory]"]
     assert memory and set(memory[0]["args"]) >= {
         "Device Type",

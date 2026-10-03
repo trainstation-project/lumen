@@ -17,9 +17,18 @@ def test_dtype_constants():
     assert lumen.int64 == "int64"
     assert lumen.bool == "bool"
     assert set(lumen.dtypes) == {
-        "float16", "bfloat16", "float32", "float64",
-        "int8", "int16", "int32", "int64",
-        "uint8", "uint16", "uint32", "uint64",
+        "float16",
+        "bfloat16",
+        "float32",
+        "float64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
         "bool",
     }
     # every advertised dtype actually works

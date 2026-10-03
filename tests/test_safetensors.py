@@ -8,8 +8,21 @@ import lumen
 from lumen.safetensors import load, load_file, safe_open, save, save_file
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
-DTYPES = ["bool", "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64",
-          "float16", "bfloat16", "float32", "float64"]
+DTYPES = [
+    "bool",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+]
 
 
 def tensors():

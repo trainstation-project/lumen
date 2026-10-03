@@ -19,7 +19,6 @@ import pytest
 import lumen
 from lumen import _C
 
-
 # Device cases carry a marker, and skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)

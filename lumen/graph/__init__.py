@@ -17,6 +17,7 @@ primitive ops (bindings in ``lumen/graph/python.rs``) and runs the graph.
 
 from lumen._C import Graph, Plan
 
+# isort: off
 # The tracer first: it imports prims, whose functions its class body uses.
 from lumen.graph.tracer import (
     TracedTensor,
@@ -27,16 +28,33 @@ from lumen.graph.tracer import (
     matmul,
     maximum,
     minimum,
-    sqrt,
     rms_norm,
     sigmoid,
     softmax,
+    sqrt,
     tanh,
     where,
 )
 from lumen.graph import prims
 
+# isort: on
+
 __all__ = [
-    "Graph", "Plan", "TracedTensor", "compile", "make_graph", "prims",
-    "where", "matmul", "maximum", "minimum", "exp", "log", "sqrt", "tanh", "sigmoid", "softmax", "rms_norm",
+    "Graph",
+    "Plan",
+    "TracedTensor",
+    "compile",
+    "make_graph",
+    "prims",
+    "where",
+    "matmul",
+    "maximum",
+    "minimum",
+    "exp",
+    "log",
+    "sqrt",
+    "tanh",
+    "sigmoid",
+    "softmax",
+    "rms_norm",
 ]
