@@ -31,7 +31,7 @@ factory function, which takes precedence over the package of that name.
 """
 
 from lumen._C import __version__, device
-from lumen import graph, ops, profiler, safetensors
+from lumen import graph, nn, ops, profiler, safetensors
 from lumen.graph import (
     compile,
     exp,
@@ -85,6 +85,7 @@ __all__ = [
     "device",
     "graph",
     "mps",
+    "nn",
     "ops",
     "profiler",
     "safetensors",

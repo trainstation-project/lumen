@@ -611,8 +611,13 @@ impl Tensor {
                 src.dtype, src.shape, self.dtype, self.shape
             ));
         }
-        if self.device() == Device::Meta || src.device() == Device::Meta {
+        if src.device() == Device::Meta {
             return Err("copy_: meta tensors have no data".into());
+        }
+        if self.device() == Device::Meta {
+            // A placed parameter: into its memory.
+            self.copy_into_placements(src)?;
+            return Ok(self);
         }
         let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
         if self.is_contiguous() {

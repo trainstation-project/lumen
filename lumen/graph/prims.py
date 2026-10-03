@@ -21,6 +21,7 @@ __all__ = [
 def bind(name, *operands, **params):
     """Record ``name(*operands, **params)`` in the graph being traced."""
     graph = tracer.current_graph()
+    operands = [tracer._lift(x) for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")

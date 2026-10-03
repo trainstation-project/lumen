@@ -1,6 +1,8 @@
 """Compiled execution: tracing with lumen.compile, the torch-like API on
 traced tensors, and the strict primitives (lumen/graph/)."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -403,29 +405,80 @@ def test_compiled_init_on_device(tmp_path):
 # ---------------------------------------------------------------------
 
 
+class Affine(lumen.nn.Module):
+    w: lumen.Tensor
+    b: lumen.Tensor
+
+    def __call__(self, x):
+        return x @ self.w + self.b
+
+
+class Stack(lumen.nn.Module):
+    """Submodules in a list, a weight shared by two of them, and a static
+    field."""
+
+    layers: list
+    scale: float
+
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x) * self.scale
+        return x
+
+
+def meta(*shape):
+    return lumen.empty(list(shape), device="meta")
+
+
+def test_modules_are_frozen_dataclasses_of_weights():
+    shared = meta(4)
+    m = Stack([Affine(meta(4, 4), shared), Affine(meta(4, 4), shared)], 0.5)
+    assert [n for n, _ in m.named_parameters()] == ["layers.0.w", "layers.0.b", "layers.1.w"]
+    assert m.parameters()[1] is shared
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        m.scale = 1.0
+    with pytest.raises(ValueError, match="compile it first"):
+        m.load_state_dict({n: lumen.zeros(t.shape) for n, t in m.named_parameters()})
+    with pytest.raises(KeyError, match="missing"):
+        m.load_state_dict({})
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS])
-def test_parameters_are_placed_once_and_shared(device):
-    """Meta arguments are parameters: placed (zeroed) on the device by the
-    first compiled function using them, shared by every other, filled by
-    copying into what ``place`` returns."""
-    w, b = lumen.empty([4, 3], device="meta"), lumen.empty([3], device="meta")
-    f = lumen.compile(lambda x, w, b: x @ w + b, device=device)
-    x = rand(2, 4)
+def test_module_weights_are_placed_once_and_shared(device):
+    """A module argument's tensors are the function's weights: placed
+    (zeroed) on the device when it compiles (a call on meta tensors, which
+    runs nothing), filled by load_state_dict, shared by every function
+    taking the module; each call copies the tensor arguments alone."""
+    shared = meta(4)
+    model = Stack([Affine(meta(4, 4), shared), Affine(meta(4, 4), shared)], 0.5)
+    f = lumen.compile(lambda model, x: model(x), device=device)
     try:
-        pw, pb = f.place(lumen.from_numpy(x), w, b)
+        y = f(model, meta(2, 4))
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert (pw.device, pw.shape) == (device, [4, 3]) and pw.tolist() == [[0.0] * 3] * 4
-    wv, bv = rand(4, 3, seed=1), rand(3, seed=2)
-    pw.copy_(lumen.from_numpy(wv))
-    pb.copy_(lumen.from_numpy(bv))
-    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), w, b)), x @ wv + bv, rtol=1e-5, atol=1e-5)
-    # Another function reads the same memory.
-    g = lumen.compile(lambda w: w * 2.0, device=device)
-    np.testing.assert_allclose(lumen.to_numpy(g(w)), wv * 2, rtol=1e-6)
-    assert g.place(w).shares_storage_with(pw)
-    with pytest.raises(TypeError, match="whole tensor"):
-        g(lumen.empty([4, 6], device="meta").narrow(1, 0, 3))
+    assert (y.device, y.shape) == ("meta", [2, 4])
+    values = {n: rand(*t.shape, seed=i + 1) for i, (n, t) in enumerate(model.named_parameters())}
+    model.load_state_dict({n: lumen.from_numpy(v) for n, v in values.items()})
+    x = rand(2, 4)
+    h = (x @ values["layers.0.w"] + values["layers.0.b"]) * 0.5
+    expected = (h @ values["layers.1.w"] + values["layers.0.b"]) * 0.5
+    np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-5, atol=1e-5)
+    # Another function reads the same memory; a new copy_ reaches it.
+    g = lumen.compile(lambda layer, x: layer(x), device=device)
+    first = model.layers[0]
+    np.testing.assert_allclose(lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2, rtol=1e-5, atol=1e-5)
+    first.w.copy_(lumen.from_numpy(values["layers.0.w"] + 1))
+    np.testing.assert_allclose(lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2 + x.sum(-1, keepdims=True), rtol=1e-5, atol=1e-4)
+    # Another model of the same structure reuses the plan, with its weights.
+    other = Affine(meta(4, 4), meta(4))
+    g(other, meta(2, 4))
+    other.load_state_dict({"w": lumen.from_numpy(np.eye(4, dtype=np.float32)), "b": lumen.zeros([4])})
+    np.testing.assert_allclose(lumen.to_numpy(g(other, lumen.from_numpy(x))), x, rtol=1e-6)
+    # Closing over a tensor is an error; a module's weights must be meta.
+    with pytest.raises(TypeError, match="cannot close over a tensor"):
+        lumen.compile(lambda x: x @ first.w, device=device)(lumen.from_numpy(x))
+    with pytest.raises(TypeError, match="whole meta tensors"):
+        g(Affine(lumen.zeros([4, 4]), lumen.zeros([4])), lumen.from_numpy(x))
 
 
 def test_results_are_views_of_the_workspace():
@@ -535,34 +588,47 @@ def test_concatenate(device):
         lumen.compile(lambda *xs: prims.concatenate(xs, 0))(*args)
 
 
+class Gated(lumen.nn.Module):
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x):
+        return (x @ self.w1).relu() * (x @ self.w3)
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_dots_sharing_an_operand_merge(device):
-    """relu(x @ w1) * (x @ w3) with parameters w1 and w3: on MPS, one matmul
-    of x and a block holding w1 and w3 side by side (XLA's DotMerger, with
-    the parameters placed together instead of concatenated)."""
+    """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
+    x and a block holding w1 and w3 side by side (XLA's DotMerger, with the
+    weights placed together instead of concatenated)."""
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
-    w1, w3 = lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta")
-
-    def gated(x, w1, w3):
-        return (x @ w1).relu() * (x @ w3)
-
-    f = lumen.compile(gated, device=device)
+    model = Gated(meta(32, 64), meta(32, 64))
+    f = lumen.compile(lambda model, x: model(x), device=device)
     try:
-        p1, p3 = f.place(lumen.from_numpy(x), w1, w3)
+        f(model, meta(16, 32))
     except RuntimeError as e:
         pytest.skip(str(e))
-    p1.copy_(lumen.from_numpy(w1v))
-    p3.copy_(lumen.from_numpy(w3v))
-    out = lumen.to_numpy(f(lumen.from_numpy(x), w1, w3))
+    model.load_state_dict({"w1": lumen.from_numpy(w1v), "w3": lumen.from_numpy(w3v)})
+    out = lumen.to_numpy(f(model, lumen.from_numpy(x)))
     np.testing.assert_allclose(out, np.maximum(x @ w1v, 0) * (x @ w3v), rtol=1e-5, atol=1e-5)
-    graph = lumen.make_graph(gated)(lumen.from_numpy(x), w1, w3)
+    graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
     plan = lumen.graph.Plan(graph, device, parameters=[1, 2], packable=[1, 2])
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
-        assert plan.packed == [([1, 2], 1)] and p1.shares_storage_with(p3)
+        assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
         assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
     else:
         assert plan.packed == [] and steps.count("dot_general") == 2
+
+
+class Attention(lumen.nn.Module):
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        q, k, v = x @ self.wq, x @ self.wk, x @ self.wv
+        return (q @ k.t()).softmax(-1) @ v
 
 
 @pytest.mark.mps
@@ -574,22 +640,17 @@ def test_attention_projections_merge_into_one_matmul():
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-
-    def attention(x, wq, wk, wv):
-        q, k, v = x @ wq, x @ wk, x @ wv
-        return (q @ k.t()).softmax(-1) @ v
-
-    weights = [lumen.empty([32, 32], device="meta") for _ in range(3)]
+    model = Attention(meta(32, 32), meta(32, 32), meta(32, 32))
+    f = lumen.compile(lambda model, x: model(x), device="mps")
+    f(model, meta(16, 32))
     values = [rand(32, 32, seed=i + 1) / 4 for i in range(3)]
+    model.load_state_dict({n: lumen.from_numpy(v) for n, v in zip(("wq", "wk", "wv"), values)})
     x = rand(16, 32)
-    f = lumen.compile(attention, device="mps")
-    for p, v in zip(f.place(lumen.from_numpy(x), *weights), values):
-        p.copy_(lumen.from_numpy(v))
     q, k, v = (x @ w for w in values)
     s = np.exp(q @ k.T - (q @ k.T).max(-1, keepdims=True))
     expected = (s / s.sum(-1, keepdims=True)) @ v
-    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), *weights)), expected, rtol=1e-4, atol=1e-4)
-    graph = lumen.make_graph(attention)(lumen.from_numpy(x), *weights)
+    np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-4, atol=1e-4)
+    graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
     plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
@@ -599,27 +660,32 @@ def test_attention_projections_merge_into_one_matmul():
     assert views == [(0, [96, 1]), (64, [96, 1])]
 
 
+class Linear(lumen.nn.Module):
+    w: lumen.Tensor
+
+    def __call__(self, x):
+        return x @ self.w
+
+
 @pytest.mark.mps
-def test_packed_parameters_are_read_in_place_elsewhere():
-    """A parameter another function packed into a block (a strided view of
-    it) is read in place by the matmuls of a function using it alone, at
-    its strides: no copy per call."""
+def test_packed_weights_are_read_in_place_elsewhere():
+    """A weight another function packed into a block (a strided view of it)
+    is read in place by the matmuls of a function using it alone, at its
+    strides: no copy per call."""
     from lumen.profiler import ProfilerActivity, profile
 
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    w1, w3 = lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta")
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
-    gated = lumen.compile(lambda x, w1, w3: (x @ w1).relu() * (x @ w3), device="mps")
-    p1, p3 = gated.place(lumen.from_numpy(x), w1, w3)
-    assert p1.shares_storage_with(p3) and not p1.is_contiguous()
-    p1.copy_(lumen.from_numpy(w1v))
-    p3.copy_(lumen.from_numpy(w3v))
-    alone = lumen.compile(lambda x, w: x @ w, device="mps")
-    alone(lumen.from_numpy(x), w1)
+    gated = Gated(meta(32, 64), meta(32, 64))
+    run = lumen.compile(lambda model, x: model(x), device="mps")
+    run(gated, meta(16, 32))
+    gated.load_state_dict({"w1": lumen.from_numpy(w1v), "w3": lumen.from_numpy(w3v)})
+    alone = Linear(gated.w1)
+    run(alone, lumen.from_numpy(x))
     with profile(activities=[ProfilerActivity.CPU]) as prof:
-        out = alone(lumen.from_numpy(x), w1)
+        out = run(alone, lumen.from_numpy(x))
     np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}  # no host copy of w1

@@ -19,6 +19,7 @@ import functools
 import math
 
 from lumen._C import Graph, Plan, Tensor, _pack
+from lumen import nn
 from lumen.graph import prims
 
 __all__ = [
@@ -40,11 +41,30 @@ def current_graph():
 # ---------------------------------------------------------------------
 
 
+def _weights(args):
+    """The weights of ``args``' modules (``lumen.nn.Module``), each tensor
+    once, in order: whole meta tensors."""
+    params = {}
+    for a in args:
+        if isinstance(a, nn.Module):
+            for _, t in nn._leaves(a, ""):
+                if not t._is_parameter:
+                    raise TypeError(f"a module's weights must be whole meta tensors, got a {t.device} tensor of shape {t.shape}")
+                params.setdefault(t.storage_id, t)
+    return list(params.values())
+
+
 def _trace(fn, args):
     """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
-    single tensor (rather than a tuple or list of them)."""
+    single tensor (rather than a tuple or list of them). The graph's inputs
+    are the tensor arguments, then the weights of the module arguments
+    (``_weights``), each a whole meta tensor."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
+    weights = {}
+    for t in _weights(args):
+        weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape))
+    traced = [nn.map_tensors(a, lambda t: weights[t.storage_id]) if isinstance(a, nn.Module) else a for a in traced]
     _TRACES.append(graph)
     try:
         out = fn(*traced)
@@ -59,13 +79,26 @@ def _trace(fn, args):
     return graph, single
 
 
+def _lift(x):
+    """``x`` as an operand of the graph being traced; a tensor the function
+    closes over is an error (it would be invisible to the graph)."""
+    if isinstance(x, Tensor) and _TRACES:
+        raise TypeError(
+            f"a compiled function cannot close over a tensor ({x.device}, shape {x.shape}): pass data as an argument, and weights in a lumen.nn.Module argument"
+        )
+    return x
+
+
 def _signature(args):
-    # Tensors are traced by dtype and shape, meta ones (parameters) apart
-    # from those with data; anything else is baked into the graph, so it
-    # must be hashable.
+    # Tensors are traced by dtype and shape (data or meta alike), modules by
+    # their structure and which of their weights are one tensor; anything
+    # else is baked into the graph, so it must be hashable.
+    ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
+    shared = tuple(ids.index(i) for i in ids)
     return tuple(
-        (a.dtype, tuple(a.shape), a.device == "meta") if isinstance(a, Tensor) else ("static", a) for a in args
-    )
+        (a.dtype, tuple(a.shape)) if isinstance(a, Tensor) else nn.structure(a) if isinstance(a, nn.Module) else ("static", a)
+        for a in args
+    ) + (shared,)
 
 
 def _device(args, device):
@@ -88,100 +121,97 @@ def compile(fn, device=None):
     any).
 
     The compiled function owns its memory (XLA: buffer assignment over the
-    whole program). Its plan places every value, the tensor arguments with
-    data and the results included, in one workspace, allocated once: each
-    call copies those arguments in (from any device) and returns views of
-    the results, which the next call overwrites (``.clone()`` one to keep
-    it). Meta tensor arguments are parameters: never the caller's to
-    allocate, they are placed on the device the first time a compiled
-    function uses them, and every compiled function using them shares that
-    memory. Where dots that share an operand merge into one (``x @ w1`` and
-    ``x @ w3``), their parameters are placed side by side in one block,
-    read by the merged dot, never concatenated. Placed parameters start
-    zeroed: ``compiled.place(*args)`` places them without running and
-    returns each meta argument's memory, to copy data into (``copy_``).
+    whole program). Its plan places every value, its tensor arguments and
+    results included, in one workspace, allocated once: each call copies
+    the arguments in (from any device) and returns views of the results,
+    which the next call overwrites (``.clone()`` one to keep it).
 
-    With only meta tensors (and no ``device``), nothing runs: results are
-    meta tensors of the right types.
+    Its weights are the tensors of its ``lumen.nn.Module`` arguments (meta
+    tensors): never the caller's to allocate, they are placed on the device
+    when the first compiled function taking them compiles, and every
+    compiled function taking them shares that memory, read in place (a
+    module argument costs no copy). Where dots that share an operand merge
+    into one (``x @ w1`` and ``x @ w3``), their weights are placed side by side
+    in one block, read by the merged dot, never concatenated. A call with
+    meta tensor arguments compiles without running (meta results); then
+    ``model.load_state_dict`` (or ``w.copy_``) writes the weights' data into
+    their memory, once::
+
+        f = lumen.compile(lambda model, x: model(x), device="mps")
+        f(model, lumen.empty([seq, dim], device="meta"))  # compile: place weights
+        model.load_state_dict(lumen.safetensors.load_file("model.safetensors"))
+        y = f(model, x)  # each call copies x in
+
+    With only meta tensors and no ``device``, nothing is compiled for a
+    device: results are meta tensors of the right types.
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
     compile_device = device  # dump_graph's own `device` shadows it
-    # Per signature and device, the graph and its plans: each with its
-    # workspace (`None` on the meta device), tried in order.
+    # Per signature and device: the graph, whether `fn` returns one tensor,
+    # its plans, each with its workspace (`None` on the meta device), tried
+    # in order, and the number of tensor arguments (the graph's inputs
+    # before the weights).
     plans = {}
     latest = []
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
         workspace, whether ``fn`` returns a single tensor, and the plan's
-        inputs (the parameters placed, and their blocks)."""
+        inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
         key = _signature(args), target
-        if key not in plans:
-            graph, single = _trace(fn, args)
-            plans[key] = graph, single, []
-        graph, single, entries = plans[key]
-        latest[:] = [key]
         tensors = [a for a in args if isinstance(a, Tensor)]
+        if key not in plans:
+            plans[key] = (*_trace(fn, args), [], len(tensors))
+        graph, single, entries, _ = plans[key]
+        weights = _weights(args)
+        latest[:] = [key]
         if target == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, single, tensors
-        params = [i for i, t in enumerate(tensors) if t.device == "meta"]
-        for i in params:
-            if not tensors[i]._is_parameter:
-                raise TypeError(f"{fn.__name__}: a meta argument must be a whole tensor (a parameter), not a view")
+            return graph, entries[0][0], None, single, tensors + weights
+        params = list(range(len(tensors), len(tensors) + len(weights)))
+        inputs = tensors + weights
 
         def inputs_for(plan):
-            # The parameters in their blocks, if they are placed so (or not
+            # The weights in their blocks, if they are placed so (or not
             # yet placed), else None.
             blocks = []
             for positions, dimension in plan.packed:
-                block = _pack([tensors[i] for i in positions], dimension, target)
+                block = _pack([inputs[i] for i in positions], dimension, target)
                 if block is None:
                     return None
                 blocks.append(block)
-            placed = [t._placed(target) if t.device == "meta" else t for t in tensors]
-            return placed + blocks
+            return tensors + [w._placed(target) for w in weights] + blocks
 
         for plan, workspace in entries:
-            inputs = inputs_for(plan)
-            if inputs is not None:
-                return graph, plan, workspace, single, inputs
-        # A new plan: dots merged into blocks of parameters while none of
-        # theirs is placed yet; once they are placed otherwise, without.
+            placed = inputs_for(plan)
+            if placed is not None:
+                return graph, plan, workspace, single, placed
+        # A new plan: dots merged into blocks of weights while none of theirs
+        # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
         plan = Plan(graph, target, parameters=params, packable=packable)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         entries.append((plan, workspace))
-        inputs = inputs_for(plan)
-        if inputs is None:
+        placed = inputs_for(plan)
+        if placed is None:
             plan = Plan(graph, target, parameters=params)
             entries[-1] = plan, workspace
-            inputs = inputs_for(plan)
-        return graph, plan, workspace, single, inputs
+            placed = inputs_for(plan)
+        return graph, plan, workspace, single, placed
 
     @functools.wraps(fn)
     def compiled(*args):
-        _, plan, workspace, single, inputs = prepare(args)
-        if workspace is None:
-            outputs = plan.run(inputs, "meta")
+        graph, plan, workspace, single, inputs = prepare(args)
+        if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
+            # Compiled (and the weights placed); nothing to run.
+            outputs = [Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())]
         else:
             outputs = plan.run_in(workspace, inputs)
         return outputs[0] if single else tuple(outputs)
-
-    def place(*args):
-        """Place the meta arguments (parameters) as calls with ``args``'
-        signature use them, without running: each one's memory on the
-        device, in order, to copy its data into (``copy_``)."""
-        _, _, workspace, _, inputs = prepare(args)
-        if workspace is None:
-            raise ValueError(f"place: {fn.__name__} runs on the meta device: pass device= or a tensor with data")
-        tensors = [a for a in args if isinstance(a, Tensor)]
-        placed = [t for t, a in zip(inputs, tensors) if a.device == "meta"]
-        return placed[0] if len(placed) == 1 else tuple(placed)
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
@@ -195,19 +225,20 @@ def compile(fn, device=None):
             prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        (signature, target), = latest
-        graph, _, _ = plans[latest[0]]
-        tensors = [k for k in signature if k[0] != "static"]
+        ((_, target),) = latest
+        graph, _, _, n_tensors = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
-        # Kernels do not depend on the values: profile on ones, the
-        # parameters packed where the compiler merges dots.
-        params = [i for i, (_, _, meta) in enumerate(tensors) if meta]
+        # Kernels do not depend on the values: profile on ones, the weights
+        # packed where the compiler merges dots.
+        types = [graph.type_of(v) for v in graph.inputs()]
+        params = list(range(n_tensors, len(types)))
         plan = Plan(graph, target, parameters=params, packable=params)
-        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape, _ in tensors]
+        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:
-            shape = list(tensors[positions[0]][1])
-            shape[dimension] = sum(tensors[i][1][dimension] for i in positions)
-            inputs.append(Tensor.ones(shape, tensors[positions[0]][0], target))
+            dtype, shape = types[positions[0]]
+            shape = list(shape)
+            shape[dimension] = sum(types[i][1][dimension] for i in positions)
+            inputs.append(Tensor.ones(shape, dtype, target))
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         from lumen.graph import viz
 
@@ -217,7 +248,6 @@ def compile(fn, device=None):
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
-    compiled.place = place
     compiled.dump_graph = dump_graph
     return compiled
 
@@ -251,7 +281,7 @@ def _require_float(x, op):
 
 def _common_dtype(op, operands):
     """The dtype the tensors among ``operands`` share."""
-    dtypes = sorted({x.dtype for x in operands if isinstance(x, TracedTensor)})
+    dtypes = sorted({x.dtype for x in map(_lift, operands) if isinstance(x, TracedTensor)})
     if not dtypes:
         raise TypeError(f"{op} needs a tensor operand")
     if len(dtypes) > 1:
@@ -282,6 +312,7 @@ def _is_operand(x):
 def _as_tensor(x, dtype, op):
     """``x`` (a traced tensor of ``dtype``, or a Python scalar of its kind)
     as a traced tensor."""
+    x = _lift(x)
     if isinstance(x, TracedTensor):
         return x
     if not _is_operand(x):
@@ -371,6 +402,7 @@ def _binary(prim, reflected=False):
     """An operator method: ``prim`` on the operands, promoted and broadcast."""
 
     def op(self, other):
+        other = _lift(other)
         if not _is_operand(other):
             return NotImplemented
         return _elementwise(prim, other, self) if reflected else _elementwise(prim, self, other)
@@ -450,9 +482,11 @@ class TracedTensor:
         return prims.neg(self)
 
     def __matmul__(self, other):
+        other = _lift(other)
         return matmul(self, other) if isinstance(other, TracedTensor) else NotImplemented
 
     def __rmatmul__(self, other):
+        other = _lift(other)
         return matmul(other, self) if isinstance(other, TracedTensor) else NotImplemented
 
     def add(self, other):
@@ -575,6 +609,7 @@ class TracedTensor:
         ``amax(dim)``."""
         if other is None:
             return self.amax()
+        other = _lift(other)
         if isinstance(other, TracedTensor):
             return maximum(self, other)
         raise NotImplementedError("max(dim) returns indices, which lumen does not support yet; use amax(dim)")
@@ -746,6 +781,7 @@ class TracedTensor:
 
 
 def where(condition, input, other):
+    condition, input, other = _lift(condition), _lift(input), _lift(other)
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
     dtype = _common_dtype("where", (input, other))
@@ -757,6 +793,7 @@ def where(condition, input, other):
 def matmul(input, other):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
     the dimensions before the last two are batch dimensions, broadcast."""
+    input, other = _lift(input), _lift(other)
     _common_dtype("matmul", (input, other))
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
