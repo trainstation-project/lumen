@@ -19,6 +19,8 @@ use crate::graph::{Graph, Node, Primitive, Var};
 pub(crate) enum Pattern {
     /// Any value, captured as `.0`; one captured before must be the same.
     Bind(usize),
+    /// A value any of these patterns matches: the first that does.
+    OneOf(Vec<Pattern>),
     /// A value a node defines whose primitive passes `test`, its operands
     /// matching `operands`, in order (or, if `either`, in either order: a
     /// commutative primitive's), its value captured as `bind` if given.
@@ -44,6 +46,11 @@ pub(crate) fn op<const N: usize>(test: fn(&Primitive) -> bool, operands: [Patter
         either: false,
         bind: None,
     }
+}
+
+/// A value any of `patterns` matches (the first that does).
+pub(crate) fn one_of<const N: usize>(patterns: [Pattern; N]) -> Pattern {
+    Pattern::OneOf(patterns.into())
 }
 
 /// As [`op`], two operands matching in either order.
@@ -131,6 +138,14 @@ impl<'a> Matcher<'a> {
 
     fn matches(&self, pattern: &Pattern, v: Var, m: &mut Match) -> bool {
         match pattern {
+            Pattern::OneOf(patterns) => patterns.iter().any(|p| {
+                let saved = m.clone();
+                let found = self.matches(p, v, m);
+                if !found {
+                    *m = saved;
+                }
+                found
+            }),
             Pattern::Bind(k) => match m.captures[*k] {
                 Some(bound) => bound == v,
                 None => {

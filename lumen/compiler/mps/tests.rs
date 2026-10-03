@@ -763,7 +763,7 @@ fn rms_norm_fuses_its_input() {
 /// capture matching one value throughout, and exclusivity.
 #[test]
 fn patterns_match_graphs() {
-    use crate::compiler::pattern::{Matcher, bind, either, op};
+    use crate::compiler::pattern::{Matcher, bind, either, one_of, op};
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4]));
     let y = g.input(ty(DType::F32, &[4]));
@@ -786,7 +786,14 @@ fn patterns_match_graphs() {
     let mut h = g.clone();
     let other = apply(&mut h, Sub, &[e, y]);
     assert!(Matcher::new(&h).find(&same, other, 1).is_none());
+    // one_of: the first alternative that matches, its captures alone.
+    let alternatives = one_of([op(|p| matches!(p, Mul), [bind(0), bind(1)]), same]);
+    let found = m.find(&alternatives, s, 2).unwrap();
+    assert_eq!((found.get(0), found.captures[1]), (x, None));
     // exp is read outside the add: not exclusive.
+    let found = m
+        .find(&either(|p| matches!(p, Add), [exp_of(0), bind(1)]), a, 2)
+        .unwrap();
     assert!(!m.exclusive(&found));
     assert_eq!(m.scalar(x), None);
 }
@@ -893,4 +900,50 @@ fn rms_norms_are_rewritten() {
         !rewritten(&build(false, false, 8.0, 0, false)),
         "not the last dimension"
     );
+}
+
+/// An RMS norm without epsilon (`rsqrt(mean(x * x))`) is one too, with
+/// epsilon 0.
+#[test]
+fn rms_norms_without_epsilon_are_rewritten() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 300]));
+    let sq = apply(&mut g, Mul, &[x, x]);
+    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let sum = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![8, 1],
+        },
+        &[sum],
+    );
+    let n = Full {
+        shape: vec![],
+        fill_value: Scalar::Float(300.0),
+        dtype: DType::F32,
+    };
+    let n = apply(&mut g, n, &[]);
+    let b = BroadcastInDim {
+        shape: vec![8, 1],
+        broadcast_dimensions: vec![],
+    };
+    let n = apply(&mut g, b, &[n]);
+    let mean = apply(&mut g, Div, &[sum, n]);
+    let r = apply(&mut g, Rsqrt, &[mean]);
+    let b = BroadcastInDim {
+        shape: vec![8, 300],
+        broadcast_dimensions: vec![0, 1],
+    };
+    let r = apply(&mut g, b, &[r]);
+    let y = apply(&mut g, Mul, &[r, x]);
+    g.set_outputs(&[y]).unwrap();
+    let rewritten = super::rms_norm::rewrite_rms_norm(&g);
+    let norm = rewritten
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.primitive, RmsNorm { .. }));
+    assert_eq!(norm.map(|n| &n.primitive), Some(&RmsNorm { epsilon: 0.0 }));
+    if available() {
+        check(&g, &[values(DType::F32, &[8, 300], 1)]);
+    }
 }

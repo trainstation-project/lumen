@@ -4,7 +4,7 @@
 //! order), times a weight or not,
 //!
 //! ```text
-//! r = rsqrt(sum(x * x) / n + eps)  over the last dimension, of size n
+//! r = rsqrt(sum(x * x) / n [+ eps])  over the last dimension, of size n
 //! y = x * broadcast(r)  [* broadcast(weight)]
 //! ```
 //!
@@ -13,7 +13,7 @@
 //! between ([`Matcher::exclusive`]).
 
 use crate::DType;
-use crate::compiler::pattern::{Match, Matcher, Pattern, bind, either, op};
+use crate::compiler::pattern::{Match, Matcher, Pattern, bind, either, one_of, op};
 use crate::graph::{Graph, Primitive, Var};
 
 // Captures.
@@ -29,23 +29,29 @@ const CAPTURES: usize = 7;
 /// The RMS norm of `x` without its weight: `x * broadcast(rsqrt(..))`.
 fn normalized() -> Pattern {
     use Primitive::*;
-    let mean = op(
-        |p| matches!(p, Div),
-        [
-            op(
-                |p| matches!(p, Reshape { .. }),
-                [op(
-                    |p| matches!(p, ReduceSum { .. }),
-                    [either(|p| matches!(p, Mul), [bind(X), bind(X)])],
-                )
-                .bind(SUM)],
-            ),
-            bind(N),
-        ],
-    );
+    let mean = || {
+        op(
+            |p| matches!(p, Div),
+            [
+                op(
+                    |p| matches!(p, Reshape { .. }),
+                    [op(
+                        |p| matches!(p, ReduceSum { .. }),
+                        [either(|p| matches!(p, Mul), [bind(X), bind(X)])],
+                    )
+                    .bind(SUM)],
+                ),
+                bind(N),
+            ],
+        )
+    };
+    // Plus epsilon, or not (epsilon 0).
     let rsqrt = op(
         |p| matches!(p, Rsqrt),
-        [either(|p| matches!(p, Add), [mean, bind(EPS)])],
+        [one_of([
+            either(|p| matches!(p, Add), [mean(), bind(EPS)]),
+            mean(),
+        ])],
     );
     either(
         |p| matches!(p, Mul),
@@ -145,5 +151,9 @@ fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<f64> {
         && matcher.scalar(m.get(N)) == Some(n as f64)
         && weight_ok
         && matcher.exclusive(m);
-    ok.then(|| matcher.scalar(m.get(EPS))).flatten()
+    let epsilon = match m.captures[EPS] {
+        Some(eps) => matcher.scalar(eps),
+        None => Some(0.0),
+    };
+    ok.then_some(epsilon).flatten()
 }
