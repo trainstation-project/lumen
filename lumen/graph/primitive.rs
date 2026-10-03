@@ -102,12 +102,6 @@ pub enum Primitive {
         label: &'static str,
         body: Graph,
     },
-    /// `exp(x - max) / sum(exp(x - max))` along `axis`: what `softmax`
-    /// traces to, as one primitive (XLA's softmax rewriter matches it so),
-    /// which the MPS compiler rewrites it into and runs as one kernel.
-    Softmax {
-        axis: usize,
-    },
     /// Output `index` (of type `ty`) of its operand's fusion, whose body
     /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
     /// value the fusion's kernel writes too, which no step computes.
@@ -148,21 +142,19 @@ impl Primitive {
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
-            Softmax { .. } => "softmax",
         }
     }
 
     /// The type of the result of applying this primitive to operands of
     /// types `args`, or why it cannot be applied.
     /// The dtypes this primitive accumulates in, given its `output`
-    /// dtype: a dot's and a sum's `accum_dtype`, a max's and softmax's
-    /// dtype; a fusion's, each of its body's reductions' and dots', in
+    /// dtype: a dot's and a sum's `accum_dtype`, a max's dtype; a fusion's, each of its body's reductions' and dots', in
     /// order. None for the others, which accumulate nothing.
     pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
         use Primitive::*;
         match self {
             DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => vec![*accum_dtype],
-            ReduceMax { .. } | Softmax { .. } => vec![output],
+            ReduceMax { .. } => vec![output],
             Fusion { body, .. } => body
                 .nodes()
                 .iter()
@@ -371,16 +363,6 @@ impl Primitive {
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             FusionOutput { ty, .. } => Ok(ty.clone()),
-            Softmax { axis } => {
-                let x = args[0];
-                if !x.dtype.is_float() || *axis >= x.shape.len() {
-                    return err(format!(
-                        "needs a float tensor and a dimension of it, got {x} and {axis}"
-                    ));
-                }
-                no_bf16_math(x).map_err(prefix)?;
-                Ok(x.clone())
-            }
             Iota {
                 dtype,
                 shape,
@@ -521,7 +503,6 @@ impl fmt::Display for Primitive {
             ),
             Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
             FusionOutput { index, .. } => write!(f, "[index={index}]"),
-            Softmax { axis } => write!(f, "[axis={axis}]"),
             Full {
                 shape,
                 fill_value,

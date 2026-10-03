@@ -339,7 +339,7 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
 /// partials (its scratch, of that dtype) and the second launch over them;
 /// the input's dtype (a 16-bit float's, no float anywhere) or float32
 /// (reduce_sum's accum_dtype: elements widened as read, float throughout).
-/// In a row kernel (an RMS norm's) and softmax's too.
+/// In row kernels too (an RMS norm's, a softmax's).
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
     use crate::ops::reduce::mps::scratch_bytes;
@@ -393,7 +393,7 @@ fn hierarchical_reductions_keep_their_dtype() {
             }
         }
     }
-    // An RMS norm in float16: its row kernel, and softmax's kernel.
+    // An RMS norm in float16, then a softmax written out of it: row kernels.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F16, &[8, 300]));
     let sq = apply(&mut g, Mul, &[x, x]);
@@ -409,10 +409,20 @@ fn hierarchical_reductions_keep_their_dtype() {
         shape: vec![8, 300],
         broadcast_dimensions: vec![0],
     };
-    let sum = apply(&mut g, b, &[sum]);
+    let sum = apply(&mut g, b.clone(), &[sum]);
     let norm = apply(&mut g, Sqrt, &[sum]);
     let y = apply(&mut g, Div, &[x, norm]);
-    let s = apply(&mut g, Softmax { axis: 1 }, &[y]);
+    let m = apply(&mut g, ReduceMax { axes: vec![1] }, &[y]);
+    let m = apply(&mut g, b.clone(), &[m]);
+    let d = apply(&mut g, Sub, &[y, m]);
+    let e = apply(&mut g, Exp, &[d]);
+    let sum = ReduceSum {
+        axes: vec![1],
+        accum_dtype: DType::F16,
+    };
+    let z = apply(&mut g, sum, &[e]);
+    let z = apply(&mut g, b, &[z]);
+    let s = apply(&mut g, Div, &[e, z]);
     g.set_outputs(&[y, s]).unwrap();
     let fused = fuse(&g);
     for node in fused.nodes() {
@@ -959,36 +969,6 @@ fn multi_output_fusion() {
     // The max hosts it; the sum reads its transpose.
     let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
     assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
-}
-
-/// Softmax over the last dimension fuses the primitives computing its input
-/// into its kernel; over another dimension no kernel takes it (on MPS, an
-/// error), so it fuses nothing.
-#[test]
-fn softmax_fuses_its_input() {
-    let scaled = |axis: usize| {
-        let mut g = Graph::new();
-        let x = g.input(ty(DType::F32, &[8, 300]));
-        let half = Full {
-            shape: vec![8, 300],
-            fill_value: Scalar::Float(0.5),
-            dtype: DType::F32,
-        };
-        let half = apply(&mut g, half, &[]);
-        let s = apply(&mut g, Mul, &[x, half]);
-        let y = apply(&mut g, Softmax { axis }, &[s]);
-        g.set_outputs(&[y]).unwrap();
-        g
-    };
-    let inputs = [data(&[8, 300], 1)];
-    assert_eq!(fused_primitives(&scaled(1), &inputs), ["fusion"]);
-    assert_eq!(fused_primitives(&scaled(0), &inputs), ["fusion", "softmax"]);
-    if available() {
-        check(&scaled(1), &[values(DType::F32, &[8, 300], 1)]);
-        let on_mps = [inputs[0].to(crate::Device::Mps)];
-        let plan = crate::compiler::compile(&scaled(0), crate::Device::Mps).unwrap();
-        assert!(plan.run(&on_mps).unwrap_err().contains("last dimension"));
-    }
 }
 
 /// An RMS norm written as its primitives (the weight's multiply and each

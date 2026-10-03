@@ -703,10 +703,11 @@ class TracedTensor:
         raise NotImplementedError("max(dim) returns indices, which lumen does not support yet; use amax(dim)")
 
     def softmax(self, dim, dtype=None):
+        """``exp(x - max) / sum(exp(x - max))`` along ``dim``, traced as those
+        primitives: over the last dimension, the MPS compiler runs them as one
+        row kernel (a chain of normalization diamonds,
+        ``compiler/mps/diamonds.rs``)."""
         x = _require_float(self.to(dtype) if dtype else self, "softmax")
-        if _dim(dim, x.ndim) == x.ndim - 1:
-            # One primitive: one kernel (online softmax) on MPS.
-            return prims.softmax(x, x.ndim - 1)
         e = (x - x.amax(dim, keepdim=True)).exp()
         return e / e.sum(dim, keepdim=True)
 

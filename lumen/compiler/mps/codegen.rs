@@ -47,8 +47,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     (name, source)
 }
 
-/// The reduction or softmax a fusion with `body` computes, if its root is
-/// one (an input fusion, XLA's reduce input fusion): the fused primitives
+/// The reduction a fusion with `body` computes, if its root is one (an input fusion, XLA's reduce input fusion): the fused primitives
 /// compute its input.
 pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     use Primitive::*;
@@ -64,7 +63,6 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
         let node = &nodes[producer[v]?];
         match &node.primitive {
             ReduceSum { .. } | ReduceMax { .. } => return Some(node),
-            Softmax { .. } if v == body.outputs()[0] => return Some(node),
             p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => {
                 let mut rest = node
                     .inputs
@@ -88,10 +86,9 @@ pub(crate) fn has_epilogue(body: &Graph) -> bool {
     reduction_root(body).is_some_and(|r| r.output != body.outputs()[0])
 }
 
-/// The kernel of a reduction (or softmax) fusion: the reduction's template
+/// The kernel of a reduction fusion: the reduction's template
 /// (`ops/reduce/mps.metal`) for its layout ([`reduce::layout`], as its
-/// encoder launches it), or softmax's (`ops/softmax/mps.metal`), reading an
-/// input whose `operator[]` computes each element of the reduced value from
+/// encoder launches it), reading an input whose `operator[]` computes each element of the reduced value from
 /// the fusion's inputs, as the loop emitter computes an output element. A
 /// split reduction's kernel writes the partials, which the reduction's own
 /// final kernel reduces.
@@ -151,21 +148,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     let (op, axes) = match &root.primitive {
         Primitive::ReduceSum { axes, .. } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
-        _ => {
-            // Softmax over the last dimension: a threadgroup a row.
-            let args = arg(0, "ulong &count")
-                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
-            let call = format!(
-                "threadgroup {t} maxima[REDUCE_THREADS], sums[REDUCE_THREADS];
-    softmax_rows<{t}>(input, out, count, maxima, sums, group.x, tid.y * 16 + tid.x);"
-            );
-            return named(format!(
-                "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
-                emitter.lines,
-                io_params(body, by_value, t).0,
-                members.join(", "),
-            ));
-        }
+        p => unreachable!("{p} is not a reduction"),
     };
     // Accumulated in the output's type (reduce_sum's accum_dtype), as are a
     // split reduction's partials: each element widened as read. The

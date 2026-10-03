@@ -104,7 +104,7 @@ pub struct Event {
     pub inputs: Vec<TensorType>,
     pub outputs: Vec<TensorType>,
     /// The dtypes the op accumulates in, with `record_shapes`: a dot's or
-    /// sum's `accum_dtype`, a max's or softmax's dtype; a fusion's, each
+    /// sum's `accum_dtype`, a max's dtype; a fusion's, each
     /// of its reductions' (none for elementwise ops).
     pub accum: Vec<DType>,
     /// Memory events: bytes allocated (positive) or freed (negative).

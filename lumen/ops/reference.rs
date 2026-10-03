@@ -542,29 +542,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             eval_graph(body, inputs).remove(0)
         }
         FusionOutput { .. } => unreachable!("evaluated with its fusion (eval_graph)"),
-        // As softmax's primitives compute it, each rounding to the dtype.
-        Softmax { axis } => {
-            let Float(x) = args[0] else {
-                unreachable!("a float tensor")
-            };
-            let shape = &types[0].shape;
-            let n = shape[*axis];
-            let inner: usize = shape[axis + 1..].iter().product();
-            let mut y = vec![0.0; x.len()];
-            for row in 0..x.len().checked_div(n).unwrap_or(0) {
-                let (o, i) = (row / inner, row % inner);
-                let at = |k: usize| (o * n + k) * inner + i;
-                let m = (0..n).map(|k| x[at(k)]).fold(f64::NEG_INFINITY, fmax);
-                let e: Vec<f64> = (0..n)
-                    .map(|k| round(round(x[at(k)] - m, dtype).exp(), dtype))
-                    .collect();
-                let s = e.iter().fold(0.0, |s, &e| round(s + e, dtype));
-                for k in 0..n {
-                    y[at(k)] = round(e[k] / s, dtype);
-                }
-            }
-            Float(y)
-        }
     }
 }
 

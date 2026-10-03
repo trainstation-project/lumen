@@ -33,13 +33,11 @@ unsafe extern "C" {
 }
 
 /// The shared definitions the generated kernels use (functors, conversions,
-/// `FOR_EACH_ELEMENT`, the reduction and softmax templates without their
-/// kernels).
+/// `FOR_EACH_ELEMENT`, the reduction templates without their kernels).
 const PRELUDE: &str = concat!(
     include_str!("../../ops/mps.metal"),
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
-    include_str!("../../ops/softmax/mps.metal"),
 );
 
 /// `graph` canonicalized, fused (with `options.fuse`) and planned, its
@@ -294,17 +292,6 @@ pub(crate) fn encode(
     if let Some(root) = codegen::reduction_root(body) {
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
-        if let Primitive::Softmax { .. } = root.primitive {
-            return crate::ops::softmax::mps::encode_softmax(
-                x,
-                Some(name),
-                label,
-                inputs,
-                output,
-                &scalars,
-                keep,
-            );
-        }
         // A split reduction's second launch, the fusion's own if it has an
         // epilogue to apply.
         let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));

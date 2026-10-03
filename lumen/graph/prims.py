@@ -32,7 +32,6 @@ __all__ = [
     "transpose",
     "slice",
     "concatenate",
-    "softmax",
     "full",
     "iota",
 ]
@@ -165,12 +164,6 @@ def concatenate(operands, dimension):
     """``operands`` one after another along ``dimension``, their other
     dimensions equal (``lax.concatenate``)."""
     return bind("concatenate", *operands, dimension=dimension)
-
-
-def softmax(x, axis):
-    """``exp(x - max) / sum(exp(x - max))`` along ``axis`` (``jax.nn.softmax``,
-    one primitive: one kernel, online softmax, on MPS for the last axis)."""
-    return bind("softmax", x, axis=axis)
 
 
 def full(shape, fill_value, dtype):
