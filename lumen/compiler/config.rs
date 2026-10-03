@@ -2,8 +2,8 @@
 //! is compiled (Python: `lumen.config.compiler`). Each compile takes a
 //! snapshot ([`config`]) into its [`Options`](super::Options). The
 //! defaults run every program exactly as traced, but for `online_softmax`
-//! (on: a softmax's max and sum in one pass, its rounding not the
-//! program's); turn it off to run softmax as traced too.
+//! and `flash_attention` (on: rounding not the program's); turn them off
+//! to run softmax and attention as traced too.
 
 use std::sync::{PoisonError, RwLock};
 
@@ -31,6 +31,12 @@ pub struct CompilerConfig {
     /// default; not what the program computes (its rounding differs), so
     /// off runs softmax exactly as traced.
     pub online_softmax: bool,
+    /// Run attention (`softmax(q @ k^T * scale [masked]) @ v`, however
+    /// written, `F.scaled_dot_product_attention` too) as one flash-attention
+    /// kernel: the scores never reach memory. On by default; not what the
+    /// program computes (an online softmax across key blocks, `P` not
+    /// normalized before `P @ V`), so off runs it exactly as traced.
+    pub flash_attention: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
@@ -46,6 +52,7 @@ impl Default for CompilerConfig {
             reduction_epilogues: true,
             multi_output_fusion: true,
             online_softmax: true,
+            flash_attention: true,
             row_cache: 8,
         }
     }

@@ -8,6 +8,7 @@
 //! allocates. A fusion step runs its kernel ([`encode`]); the rest run the
 //! primitives' kernels ([`crate::ops::mps`]).
 
+mod attention;
 mod codegen;
 mod diamonds;
 mod fusion;
@@ -39,6 +40,7 @@ const PRELUDE: &str = concat!(
     include_str!("../../ops/mps.metal"),
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
+    include_str!("attention.metal"),
 );
 
 /// `graph` canonicalized, fused (as `options.config` says) and planned, its
@@ -51,8 +53,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         false => (graph.clone(), Vec::new()),
     };
     let graph = &merged;
-    let graph = canonicalize_dots(graph);
     let mut kernels = BTreeMap::new();
+    // Attention as one flash-attention kernel, matched before dots are
+    // put in matmul form (which would copy its operands).
+    let mut attention_kernels = BTreeMap::new();
+    let graph = match config.fuse && config.flash_attention {
+        true => attention::fuse(graph, |body| {
+            let a = attention::of_body(body).expect("an attention");
+            let (name, source) = codegen::attention_kernel(body, &a);
+            attention_kernels.insert(name.clone(), source);
+            name
+        }),
+        false => graph.clone(),
+    };
+    let graph = canonicalize_dots(&graph);
     // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
     // position (the passes keep inputs in order): those every step reading
     // them is a fusion of; any other, a buffer.
@@ -91,6 +105,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         scalars.clear();
         graph
     };
+    kernels.extend(attention_kernels);
     if !kernels.is_empty() {
         let source: String = std::iter::once(PRELUDE)
             .chain(kernels.values().map(String::as_str))
@@ -286,6 +301,19 @@ pub(crate) fn encode(
         }
     }
     let inputs = device.as_slice();
+    // An attention: a threadgroup a tile of queries (or a query, decoding)
+    // of each batch index.
+    if let Some(a) = attention::of_body(body) {
+        let batch: usize = a.batch.iter().product();
+        let queries = match codegen::decodes(&a) {
+            true => a.sq,
+            false => a.sq.div_ceil(64),
+        };
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        let grid = Grid::Groups([queries, batch, 1]);
+        return launch(name, &buffers, &[], grid, keep, step.label);
+    }
     // A row kernel: a threadgroup a row of the last dimension.
     if !codegen::row_reductions(body).is_empty() {
         let out = &step.output.1;

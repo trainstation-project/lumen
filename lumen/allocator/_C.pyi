@@ -4,8 +4,8 @@
 class CompilerConfig:
     """The graph compilers' flags; use the ``lumen.config.compiler`` instance.
     Read when a graph is compiled; the defaults run every program exactly as
-    traced, but for ``online_softmax`` (on: set it off for softmax as
-    traced)."""
+    traced, but for ``online_softmax`` and ``flash_attention`` (on: set them
+    off for softmax and attention as traced)."""
 
     fuse: bool
     merge_dots: bool
@@ -13,6 +13,7 @@ class CompilerConfig:
     reduction_epilogues: bool
     multi_output_fusion: bool
     online_softmax: bool
+    flash_attention: bool
     row_cache: int
     def reset(self) -> None: ...
 
