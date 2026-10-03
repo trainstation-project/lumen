@@ -17,6 +17,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char};
+use std::sync::{Mutex, PoisonError};
 
 use self::merge_dots::merge_dots;
 use super::Options;
@@ -40,11 +41,12 @@ const PRELUDE: &str = concat!(
     include_str!("../../ops/reduce/mps.metal"),
 );
 
-/// `graph` canonicalized, fused (with `options.fuse`) and planned, its
+/// `graph` canonicalized, fused (as `options.config` says) and planned, its
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+    let config = &options.config;
     // Merging needs fusion: the merged dot's readers read its slices.
-    let (merged, packed) = match options.fuse {
+    let (merged, packed) = match config.fuse && config.merge_dots {
         true => merge_dots(graph, &options.packable),
         false => (graph.clone(), Vec::new()),
     };
@@ -57,14 +59,18 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut scalars: Vec<usize> = (0..graph.inputs().len())
         .filter(|&i| options.scalars.get(i) == Some(&true))
         .collect();
-    let fused = if options.fuse {
-        // RMS norms: each one fusion, its reduction inside.
-        let rows = diamonds::diamonds(&graph);
+    let fused = if config.fuse {
+        // Normalization diamonds: each chain one fusion, its reductions
+        // inside.
+        let rows = match config.normalization_diamonds {
+            true => diamonds::diamonds(&graph),
+            false => Vec::new(),
+        };
         loop {
             kernels.clear();
             let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
-            let fused = fusion::fuse(&graph, &rows, &vars, |body, by_value| {
-                let (name, source) = codegen::kernel(body, by_value);
+            let fused = fusion::fuse(&graph, &rows, &vars, config, |body, by_value| {
+                let (name, source) = codegen::kernel(body, by_value, config);
                 kernels.insert(name.clone(), source);
                 name
             });
@@ -96,6 +102,8 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         if status != 0 {
             return Err(format!("compiling the fused MPS kernels failed ({status})"));
         }
+        let mut sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+        sources.extend(kernels);
     }
     // The blocks it added are parameters too.
     let parameters = options.parameters.clone().map(|mut p| {
@@ -239,11 +247,16 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
     views
 }
 
-/// The Metal source of the kernel a fusion with `body` runs, as
-/// [`compile`] generates it.
+/// Each generated kernel's Metal source (without the shared prelude), by
+/// name, as compiled.
+static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// The Metal source fusion kernel `name` was compiled from (without the
+/// shared prelude), if it was.
 #[cfg(feature = "python")]
-pub(crate) fn fusion_source(body: &Graph, by_value: &[bool]) -> String {
-    codegen::kernel(body, by_value).1
+pub(crate) fn fusion_source(name: &str) -> Option<String> {
+    let sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+    sources.get(name).cloned()
 }
 
 /// Encode fusion `step`: its kernel, compiled with its graph, over the

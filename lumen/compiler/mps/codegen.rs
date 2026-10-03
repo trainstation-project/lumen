@@ -3,6 +3,7 @@ use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::fusion;
+use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
@@ -12,10 +13,10 @@ use crate::{DType, Scalar};
 /// The fusion kernel for `body`: its name and Metal source. The name is a
 /// hash of the source, so identical fusions share one kernel. The inputs
 /// `by_value` marks (runtime scalars; none if empty) it takes by value.
-pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
+pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -> (String, String) {
     let rows = row_reductions(body);
     if !rows.is_empty() {
-        return row_kernel(body, by_value, &rows);
+        return row_kernel(body, by_value, &rows, config);
     }
     if let Some(root) = reduction_root(body) {
         return reduction(body, by_value, root);
@@ -304,7 +305,12 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
 /// values a pass needs that an earlier one computed at the same index
 /// (`x`, or `x.float()`, for an RMS norm's output) are kept in its
 /// registers, each in its own dtype: the row is read once.
-fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String, String) {
+fn row_kernel(
+    body: &Graph,
+    by_value: &[bool],
+    reductions: &[&Node],
+    config: &CompilerConfig,
+) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
     let n = *out_type.shape.last().expect("a dimension");
@@ -343,15 +349,26 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
             )
         }
     };
+    // The passes over the row: each reduction's, but (`online_softmax`) a
+    // softmax's max and its sum of exp(x - max) one pass, by the index of
+    // their first reduction.
+    let (mut passes, mut k) = (Vec::new(), 0);
+    while k < reductions.len() {
+        let online = config.online_softmax
+            && k + 1 < reductions.len()
+            && softmax_pair(body, reductions[k], reductions[k + 1]);
+        passes.push((k, online));
+        k += 1 + usize::from(online);
+    }
     // Each pass's root, and the values kept for later passes: each with
     // the pass computing it.
-    let roots: Vec<Var> = reductions
+    let roots: Vec<Var> = passes
         .iter()
-        .map(|r| r.inputs[0])
+        .map(|&(k, _)| reductions[k].inputs[0])
         .chain([out])
         .collect();
     let per_thread = n.div_ceil(reduce::REDUCE_THREADS);
-    let kept = match per_thread <= MAX_CACHED {
+    let kept = match per_thread <= config.row_cache {
         true => kept_values(body, &e.invariant, &roots),
         false => Vec::new(),
     };
@@ -393,7 +410,8 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
         }
         (value, stores)
     };
-    for (k, r) in reductions.iter().enumerate() {
+    for (p, &(k, online)) in passes.iter().enumerate() {
+        let r = reductions[k];
         let x = body.type_of(r.inputs[0]);
         assert_eq!(
             (x.shape.last(), body.type_of(r.output).numel()),
@@ -404,7 +422,23 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
         // Accumulated in the reduction's output type (reduce_sum's
         // accum_dtype): each element widened as read.
         let a = metal_type(body.type_of(r.output).dtype);
-        let (value, stores) = pass(&mut e, k);
+        let (value, stores) = pass(&mut e, p);
+        if online {
+            // The max m and s = sum(exp(x - m)) together, s rescaled as m
+            // grows, then the threadgroup's pairs combined.
+            let sum = reductions[k + 1];
+            write!(
+                source,
+                "{}    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];\n    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
+                hoisted(&e.hoisted),
+                e.lines,
+                k + 1
+            )
+            .unwrap();
+            e.row_locals.insert(r.output, format!("r{k}"));
+            e.row_locals.insert(sum.output, format!("r{}", k + 1));
+            continue;
+        }
         let value = match body.type_of(r.output).dtype == x.dtype {
             true => value,
             false => format!("{a}({value})"),
@@ -418,7 +452,7 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
         .unwrap();
         e.row_locals.insert(r.output, format!("r{k}"));
     }
-    let (value, _) = pass(&mut e, reductions.len());
+    let (value, _) = pass(&mut e, passes.len());
     write!(
         source,
         "{}{header}{}        out[j] = {value};\n    }}\n",
@@ -432,9 +466,45 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
     ))
 }
 
-/// The most elements of a row a row kernel's thread keeps values of in
-/// registers (rows of up to 8 x `REDUCE_THREADS`).
-const MAX_CACHED: usize = 8;
+/// Whether row reductions `max` then `sum` are a softmax's: the max of
+/// some `x`, then, in its dtype, the sum of `exp(x - max)` (the max
+/// broadcast back along the row), which one online pass computes.
+fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
+    use Primitive::*;
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let node = |v: Var| producer.get(&v).copied();
+    let dtype = body.type_of(max.output).dtype;
+    let (
+        ReduceMax { axes: a },
+        ReduceSum {
+            axes: b,
+            accum_dtype,
+        },
+    ) = (&max.primitive, &sum.primitive)
+    else {
+        return false;
+    };
+    // The max, back through the broadcast (and the keepdim reshape) of it.
+    let of_max = |mut v: Var| loop {
+        if v == max.output {
+            return true;
+        }
+        match node(v) {
+            Some(n) if matches!(n.primitive, BroadcastInDim { .. } | Reshape { .. }) => {
+                v = n.inputs[0]
+            }
+            _ => return false,
+        }
+    };
+    let exp = node(sum.inputs[0]).filter(|n| matches!(n.primitive, Exp));
+    let sub = exp
+        .and_then(|e| node(e.inputs[0]))
+        .filter(|n| matches!(n.primitive, Sub));
+    a == b
+        && *accum_dtype == dtype
+        && body.type_of(sum.inputs[0]).dtype == dtype
+        && sub.is_some_and(|d| d.inputs[0] == max.inputs[0] && of_max(d.inputs[1]))
+}
 
 /// The values a row kernel keeps in registers across its passes, each
 /// with the first pass computing it: of the values at a pass's own index

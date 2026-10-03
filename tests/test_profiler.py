@@ -5,6 +5,7 @@ import json
 import pytest
 
 import lumen
+import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function
 
 
@@ -84,7 +85,7 @@ def test_record_shapes():
 
 
 def test_plans_record_their_steps_types():
-    f = lumen.compile(lambda x, y: (x * y).sum(-1))
+    f = lumen.compile(lambda x, y: F.sum(x * y, -1))
     x, y = lumen.ones([2, 3], dtype="int32"), lumen.ones([2, 3], dtype="int32")
     f(x, y)
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
@@ -199,7 +200,7 @@ def test_kernels_record_their_steps_types():
         x = lumen.ones([4, 8], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    f = lumen.compile(lambda x: (x * 2.0).exp())
+    f = lumen.compile(lambda x: F.exp(x * 2.0))
     f(x)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(x)
@@ -219,7 +220,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     except RuntimeError as e:
         pytest.skip(str(e))
     b = lumen.ones([8, 16], device=device).to(dtype="bfloat16")
-    f = lumen.compile(lambda a, b: ((a @ b).float().sum(-1), a.amax(-1), a * 2.0))
+    f = lumen.compile(lambda a, b: (F.sum((a @ b).float(), -1), F.amax(a, -1), a * 2.0))
     f(a, b)
     activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
     with profile(activities=activities, record_shapes=True) as prof:
@@ -255,7 +256,7 @@ def test_split_reduction_launches_record_their_own_types():
         x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
     except RuntimeError as e:
         pytest.skip(str(e))
-    f = lumen.compile(lambda a: a.float().sum(-1))
+    f = lumen.compile(lambda a: F.sum(a.float(), -1))
     f(x)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(x)

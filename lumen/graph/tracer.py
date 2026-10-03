@@ -1,4 +1,4 @@
-"""Tracing, and the torch-like API on traced tensors.
+"""Tracing, and traced tensors.
 
 ``lumen.compile(fn)`` runs ``fn`` once per input signature with a
 ``TracedTensor`` standing in for each input tensor, recording the ops it
@@ -6,12 +6,15 @@ applies into a graph (JAX: a jaxpr), which then runs as a whole. Only
 traced tensors have ops: a ``lumen.Tensor`` holds data, and the graph is
 the only thing that computes with it.
 
-The methods and functions here follow PyTorch (names, broadcasting,
-``dim``/``keepdim``), and each is a composition of the strict primitives in
-``lumen.graph.prims``. Unlike PyTorch, no op changes a dtype the user did
-not ask for: operands must share a dtype (a Python scalar takes its tensor
-operand's, and must be of its kind), and floating-point functions take
-floating-point tensors. Convert with ``.to(dtype)``, or an op's ``dtype=``.
+A traced tensor has PyTorch's operators (``+ - * / @ == < []``, ``-x``),
+layout methods (``reshape``, ``permute``, ``transpose``, ...) and dtype
+casts (``to``, ``float``, ...); every other op is a function in
+``lumen.functional`` (``import lumen.functional as F``). Each is a
+composition of the strict primitives in ``lumen.graph.prims``. Unlike
+PyTorch, no op changes a dtype the user did not ask for: operands must
+share a dtype (a Python scalar takes its tensor operand's, and must be of
+its kind), and floating-point functions take floating-point tensors.
+Convert with ``.to(dtype)``.
 """
 
 import builtins
@@ -19,24 +22,13 @@ import functools
 import math
 
 from lumen import nn
-from lumen._C import Graph, Plan, Tensor, _pack
+from lumen._C import Graph, Plan, Tensor, _pack, config
 from lumen.graph import prims
 
 __all__ = [
     "TracedTensor",
     "compile",
     "make_graph",
-    "where",
-    "matmul",
-    "maximum",
-    "minimum",
-    "exp",
-    "log",
-    "sqrt",
-    "tanh",
-    "sigmoid",
-    "softmax",
-    "rms_norm",
 ]
 
 # The graphs being traced, innermost last.
@@ -210,7 +202,8 @@ def compile(fn, device=None):
         workspace, whether ``fn`` returns a single tensor, and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
-        key = _signature(args), target
+        # The compiler's flags too: a plan compiled with others is not reused.
+        key = _signature(args), target, repr(config.compiler)
         # The arguments the plan copies in: tensors, then runtime scalars.
         # The kernels take the scalars by value, read from the host on each
         # call: a new value needs no new plan.
@@ -281,7 +274,7 @@ def compile(fn, device=None):
             prepare(args)
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        ((_, target),) = latest
+        ((_, target, _),) = latest
         graph, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
@@ -568,71 +561,16 @@ class TracedTensor:
         return prims.neg(self)
 
     def __matmul__(self, other):
+        from lumen.functional import matmul  # it imports this module
+
         other = _lift(other)
         return matmul(self, other) if isinstance(other, TracedTensor) else NotImplemented
 
     def __rmatmul__(self, other):
+        from lumen.functional import matmul  # it imports this module
+
         other = _lift(other)
         return matmul(other, self) if isinstance(other, TracedTensor) else NotImplemented
-
-    def add(self, other):
-        return self + other
-
-    def sub(self, other):
-        return self - other
-
-    def mul(self, other):
-        return self * other
-
-    def div(self, other):
-        return self / other
-
-    def neg(self):
-        return -self
-
-    def eq(self, other):
-        return self == other
-
-    def ne(self, other):
-        return self != other
-
-    def lt(self, other):
-        return self < other
-
-    def le(self, other):
-        return self <= other
-
-    def gt(self, other):
-        return self > other
-
-    def ge(self, other):
-        return self >= other
-
-    def maximum(self, other):
-        return maximum(self, other)
-
-    def minimum(self, other):
-        return minimum(self, other)
-
-    # -- elementwise functions -------------------------------------------
-
-    def exp(self):
-        return prims.exp(_require_float(self, "exp"))
-
-    def log(self):
-        return prims.log(_require_float(self, "log"))
-
-    def sqrt(self):
-        return prims.sqrt(_require_float(self, "sqrt"))
-
-    def tanh(self):
-        return prims.tanh(_require_float(self, "tanh"))
-
-    def sigmoid(self):
-        return prims.logistic(_require_float(self, "sigmoid"))
-
-    def relu(self):
-        return _elementwise(prims.max, self, 0)
 
     # -- dtype conversion --------------------------------------------------
 
@@ -662,59 +600,6 @@ class TracedTensor:
 
     def bool(self):
         return self.to("bool")
-
-    # -- reductions ----------------------------------------------------------
-
-    def _keep(self, out, dims, keepdim):
-        if not keepdim:
-            return out
-        return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(self.shape)))
-
-    def sum(self, dim=None, keepdim=False):
-        """Sum over ``dim`` (all dimensions if None), accumulated in the
-        tensor's dtype, the result's (integers wrap): for another, convert
-        first (``x.float().sum()``); a cast of the result after it runs in
-        the reduction's kernel."""
-        dims = _dims(dim, self.ndim)
-        return self._keep(prims.reduce_sum(self, dims, self.dtype), dims, keepdim)
-
-    def mean(self, dim=None, keepdim=False):
-        """Mean over ``dim`` (all dimensions if None), in the tensor's
-        dtype, as :meth:`sum`."""
-        if not _is_float(self.dtype):
-            raise RuntimeError(f"mean(): input dtype must be floating point, got {self.dtype}")
-        dims = _dims(dim, self.ndim)
-        count = math.prod(self.shape[d] for d in dims)
-        return self.sum(dims, keepdim) / count
-
-    def amax(self, dim=(), keepdim=False):
-        dims = _dims(dim, self.ndim)
-        return self._keep(prims.reduce_max(self, dims), dims, keepdim)
-
-    def max(self, other=None, keepdim=False):
-        """``max()`` over every element, or the elementwise ``max(other)``.
-        ``max(dim)``, which also returns indices, is not supported: use
-        ``amax(dim)``."""
-        if other is None:
-            return self.amax()
-        other = _lift(other)
-        if isinstance(other, TracedTensor):
-            return maximum(self, other)
-        raise NotImplementedError("max(dim) returns indices, which lumen does not support yet; use amax(dim)")
-
-    def softmax(self, dim, dtype=None):
-        """``exp(x - max) / sum(exp(x - max))`` along ``dim``, traced as those
-        primitives: over the last dimension, the MPS compiler runs them as one
-        row kernel (a chain of normalization diamonds,
-        ``compiler/mps/diamonds.rs``)."""
-        x = _require_float(self.to(dtype) if dtype else self, "softmax")
-        e = (x - x.amax(dim, keepdim=True)).exp()
-        return e / e.sum(dim, keepdim=True)
-
-    def log_softmax(self, dim, dtype=None):
-        x = _require_float(self.to(dtype) if dtype else self, "log_softmax")
-        shifted = x - x.amax(dim, keepdim=True)
-        return shifted - shifted.exp().sum(dim, keepdim=True).log()
 
     # -- shape -------------------------------------------------------------
 
@@ -783,9 +668,6 @@ class TracedTensor:
 
     def broadcast_to(self, shape):
         return self.expand(shape)
-
-    def matmul(self, other):
-        return matmul(self, other)
 
     # -- indexing and splitting ----------------------------------------------
 
@@ -867,107 +749,3 @@ class TracedTensor:
             raise RuntimeError(f"chunk expects `chunks` to be greater than 0, got: {chunks}")
         n = self.shape[_dim(dim, self.ndim)]
         return self.split(builtins.max(-(-n // chunks), 1), dim)
-
-
-# ---------------------------------------------------------------------
-# functions (torch.where, torch.matmul, ...)
-# ---------------------------------------------------------------------
-
-
-def where(condition, input, other):
-    condition, input, other = _lift(condition), _lift(input), _lift(other)
-    if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
-        raise TypeError("where expected condition to be a bool tensor")
-    dtype = _common_dtype("where", (input, other))
-    input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
-    shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
-    return prims.select(*(_broadcast_to(t, shape) for t in (condition, input, other)))
-
-
-def matmul(input, other):
-    """``input @ other`` with torch's rules: 1-d operands are vectors, and
-    the dimensions before the last two are batch dimensions, broadcast. It
-    accumulates floats in float32 (float64 in float64); its result is of
-    the inputs' dtype."""
-    input, other = _lift(input), _lift(other)
-    _common_dtype("matmul", (input, other))
-    if input.ndim == 0 or other.ndim == 0:
-        raise RuntimeError("both arguments to matmul need to be at least 1D")
-    x = input.unsqueeze(0) if input.ndim == 1 else input
-    y = other.unsqueeze(-1) if other.ndim == 1 else other
-    batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
-    x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
-    b = tuple(range(len(batch)))
-    # Accumulated in float32 (or wider), the result in the inputs' dtype.
-    dims = (((len(b) + 1,), (len(b),)), (b, b))
-    out = prims.dot_general(x, y, dims, _accum_dtype(x.dtype), x.dtype)
-    if input.ndim == 1:
-        out = out.squeeze(-2)
-    if other.ndim == 1:
-        out = out.squeeze(-1)
-    return out
-
-
-def maximum(input, other):
-    return _elementwise(prims.max, input, other)
-
-
-def minimum(input, other):
-    return _elementwise(_min, input, other)
-
-
-def exp(input):
-    return input.exp()
-
-
-def log(input):
-    return input.log()
-
-
-def sqrt(input):
-    return input.sqrt()
-
-
-def tanh(input):
-    return input.tanh()
-
-
-def sigmoid(input):
-    return input.sigmoid()
-
-
-def softmax(input, dim, dtype=None):
-    return input.softmax(dim, dtype)
-
-
-def rms_norm(input, normalized_shape, weight=None, eps=None):
-    """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
-    square over the last dimension (``normalized_shape``, its size),
-    ``input / sqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
-    defaults to the dtype's machine epsilon, as in torch. Traced as its
-    primitives, which the MPS compiler recognizes (as it does an RMS norm
-    written by hand) and runs as one kernel, with the ops computing
-    ``input`` fused in."""
-
-    x = _require_float(_lift(input), "rms_norm")
-    shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
-
-    if shape != list(x.shape[-1:]):
-        raise NotImplementedError(f"rms_norm normalizes the last dimension, of size {x.shape[-1:]}, got {shape}")
-
-    weight = _lift(weight)
-    if weight is not None and (weight.dtype != x.dtype or list(weight.shape) != shape):
-        raise TypeError(f"rms_norm: weight must be {x.dtype}{shape}, got {weight.dtype}{list(weight.shape)}")
-
-    if eps is None:
-        eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
-
-    # Normalized in the accumulation dtype (float32 for narrower floats, as
-    # its mean is), then cast back and scaled by the weight in x's dtype.
-    h = x.to(_accum_dtype(x.dtype))
-    y = (h / ((h * h).mean(-1, keepdim=True) + eps).sqrt()).to(x.dtype)
-
-    if weight is not None:
-        y = y * weight
-
-    return y

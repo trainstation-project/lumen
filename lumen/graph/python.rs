@@ -155,7 +155,7 @@ impl PyGraph {
             .nodes()
             .iter()
             .map(|node| {
-                let d = primitive_dict(py, &node.primitive, &[])?;
+                let d = primitive_dict(py, &node.primitive)?;
                 d.set_item("inputs", node.inputs.clone())?;
                 d.set_item("output", node.output)?;
                 Ok(d)
@@ -203,11 +203,11 @@ impl PyPlan {
     /// `packable` (not yet placed) packed into blocks where dots merge
     /// (`packed`).
     #[new]
-    #[pyo3(signature = (graph, device = None, fuse = true, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new()))]
+    #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new()))]
     fn new(
         graph: PyRef<'_, PyGraph>,
         device: Option<&Bound<'_, PyAny>>,
-        fuse: bool,
+        fuse: Option<bool>,
         donate: Vec<usize>,
         parameters: Option<Vec<usize>>,
         packable: Vec<usize>,
@@ -225,8 +225,12 @@ impl PyPlan {
             )));
         }
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
+        // The compiler's flags (`lumen.config.compiler`), `fuse` overriding
+        // its own.
+        let mut config = crate::compiler::config::config();
+        config.fuse = fuse.unwrap_or(config.fuse);
         let options = crate::compiler::Options {
-            fuse,
+            config,
             donate,
             parameters: parameters.as_deref().map(mask),
             packable: mask(&packable),
@@ -278,13 +282,7 @@ impl PyPlan {
             .steps()
             .iter()
             .map(|step| {
-                // Its fusion's kernel takes these inputs by value.
-                let by_value: Vec<bool> = step
-                    .inputs
-                    .iter()
-                    .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
-                    .collect();
-                let d = primitive_dict(py, &step.primitive, &by_value)?;
+                let d = primitive_dict(py, &step.primitive)?;
                 d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
                 d.set_item("output", typed(&step.output))?;
                 let extra: Vec<_> = step.extra_outputs.iter().map(typed).collect();
@@ -329,13 +327,9 @@ impl PyPlan {
 
 /// `p` as a dict: `primitive`, its name; `text`, it with its parameters;
 /// and `fusion`, for a fusion, a dict of its `kernel` name, its `body`
-/// graph's text and the kernel's Metal `source` (None off macOS), else
-/// None.
-fn primitive_dict<'py>(
-    py: Python<'py>,
-    p: &Primitive,
-    by_value: &[bool],
-) -> PyResult<Bound<'py, PyDict>> {
+/// graph's text and the Metal `source` the kernel was compiled from (None
+/// off macOS), else None.
+fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
     match p {
@@ -345,15 +339,9 @@ fn primitive_dict<'py>(
             fusion.set_item("kernel", name)?;
             fusion.set_item("body", body.to_string())?;
             #[cfg(lumen_mps_linked)]
-            fusion.set_item(
-                "source",
-                crate::compiler::mps::fusion_source(body, by_value),
-            )?;
+            fusion.set_item("source", crate::compiler::mps::fusion_source(name))?;
             #[cfg(not(lumen_mps_linked))]
-            {
-                let _ = by_value;
-                fusion.set_item("source", py.None())?;
-            }
+            fusion.set_item("source", py.None())?;
             d.set_item("fusion", fusion)?;
         }
         p => {

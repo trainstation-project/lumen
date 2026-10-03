@@ -311,15 +311,17 @@ def write(data, path, json_path=None, fragment=False):
 
 
 def _examples():
+    import lumen.functional as F
+
     def attention(x, wq, wk, wv, w1, w2):
         """Single-head attention, then an MLP, each with a residual."""
         q, k, v = x @ wq, x @ wk, x @ wv
         scores = (q @ k.t()) * (1.0 / q.shape[-1] ** 0.5)
-        x = x + scores.softmax(-1) @ v
-        return x + (x @ w1).relu() @ w2
+        x = x + F.softmax(scores, -1) @ v
+        return x + F.relu(x @ w1) @ w2
 
     def mlp(x, w1, w2):
-        return ((x @ w1).relu() @ w2).softmax(-1)
+        return F.softmax(F.relu(x @ w1) @ w2, -1)
 
     seq, dim, hidden = 128, 256, 1024
     return {

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import lumen
+import lumen.functional as F
 from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
 
@@ -30,7 +31,7 @@ def rand(*shape, dtype=np.float32, seed=0):
 
 
 def test_graph_text():
-    graph = lumen.make_graph(lambda x: x.exp().sum(-1))(lumen.zeros([2, 3]))
+    graph = lumen.make_graph(lambda x: F.sum(F.exp(x), -1))(lumen.zeros([2, 3]))
     assert str(graph) == (
         "{ lambda %0:f32[2,3]. let\n"
         "    %1:f32[2,3] = exp %0\n"
@@ -78,7 +79,7 @@ def test_ops_need_a_trace():
 
 def test_data_dependent_control_flow_is_rejected():
     def f(x):
-        return x if x.sum() > 0 else -x
+        return x if F.sum(x) > 0 else -x
 
     with pytest.raises(TypeError, match="control flow"):
         lumen.compile(f)(lumen.ones([2]))
@@ -144,16 +145,16 @@ def test_no_implicit_dtype_changes():
     assert run(lambda b: b == True, lumen.tensor([True, False])).tolist() == [True, False]  # noqa: E712
     # Sums stay in the tensor's dtype (integers wrap): convert for another.
     u8 = lumen.tensor([200, 100], dtype="uint8")
-    assert run(lambda x: x.sum(), u8).tolist() == 44
-    assert run(lambda x: x.long().sum(), u8).tolist() == 300
+    assert run(lambda x: F.sum(x), u8).tolist() == 44
+    assert run(lambda x: F.sum(x.long()), u8).tolist() == 300
     # Explicit conversions are how dtypes change.
-    assert run(lambda i: i.float().exp(), i).dtype == np.float32
+    assert run(lambda i: F.exp(i.float()), i).dtype == np.float32
     assert run(lambda i, f: i.to(f.dtype) + f, i, f).tolist() == [2.0, 4.0]
-    assert run(lambda i: i.softmax(0, dtype="float32"), i).dtype == np.float32
+    assert run(lambda i: F.softmax(i.float(), 0), i).dtype == np.float32
     errors = [
         (lambda i, f: i + f, (i, f), "dtypes float32 and int64"),
-        (lambda h, f: lumen.maximum(h, f), (half, lumen.tensor([0.0])), "dtypes float16 and float32"),
-        (lambda f, h: lumen.where(f > 0, f, h), (lumen.tensor([1.0]), half), "dtypes float16 and float32"),
+        (lambda h, f: F.maximum(h, f), (half, lumen.tensor([0.0])), "dtypes float16 and float32"),
+        (lambda f, h: F.where(f > 0, f, h), (lumen.tensor([1.0]), half), "dtypes float16 and float32"),
         (
             lambda h, f: h @ f,
             (lumen.zeros([2, 2], dtype="float16"), lumen.zeros([2, 2])),
@@ -162,8 +163,8 @@ def test_no_implicit_dtype_changes():
         (lambda i: i + 1.5, (i,), "int64 tensor and the float 1.5"),
         (lambda b: b + 1, (lumen.tensor([True]),), "bool tensor and the int 1"),
         (lambda i: i / 2, (i,), "true division"),
-        (lambda i: i.exp(), (i,), "exp needs a floating-point tensor"),
-        (lambda i: i.softmax(0), (i,), "softmax needs a floating-point tensor"),
+        (lambda i: F.exp(i), (i,), "exp needs a floating-point tensor"),
+        (lambda i: F.softmax(i, 0), (i,), "softmax needs a floating-point tensor"),
     ]
     for fn, args, message in errors:
         with pytest.raises(TypeError, match=message):
@@ -192,26 +193,28 @@ def test_matmul(a_shape, b_shape):
 def test_reductions():
     x = rand(2, 3, 4)
     t = lumen.from_numpy(x)
-    np.testing.assert_allclose(run(lambda x: x.sum(), t), x.sum(), rtol=1e-5)
-    np.testing.assert_allclose(run(lambda x: x.sum((0, -1), keepdim=True), t), x.sum((0, 2), keepdims=True), rtol=1e-5)
-    np.testing.assert_allclose(run(lambda x: x.mean(1), t), x.mean(1), rtol=1e-5)
-    np.testing.assert_array_equal(run(lambda x: x.amax(-1), t), x.max(-1))
-    np.testing.assert_array_equal(run(lambda x: x.max(), t), x.max())
+    np.testing.assert_allclose(run(lambda x: F.sum(x), t), x.sum(), rtol=1e-5)
+    np.testing.assert_allclose(
+        run(lambda x: F.sum(x, (0, -1), keepdim=True), t), x.sum((0, 2), keepdims=True), rtol=1e-5
+    )
+    np.testing.assert_allclose(run(lambda x: F.mean(x, 1), t), x.mean(1), rtol=1e-5)
+    np.testing.assert_array_equal(run(lambda x: F.amax(x, -1), t), x.max(-1))
+    np.testing.assert_array_equal(run(lambda x: F.max(x), t), x.max())
     with pytest.raises(RuntimeError, match="floating point"):
-        lumen.compile(lambda x: x.mean())(lumen.tensor([1, 2]))
+        lumen.compile(lambda x: F.mean(x))(lumen.tensor([1, 2]))
 
 
 def test_softmax_and_friends():
     x = rand(3, 5)
     e = np.exp(x - x.max(-1, keepdims=True))
     t = lumen.from_numpy(x)
-    np.testing.assert_allclose(run(lambda x: x.softmax(-1), t), e / e.sum(-1, keepdims=True), rtol=1e-5)
-    np.testing.assert_allclose(run(lambda x: lumen.softmax(x, dim=0).sum(0), t), np.ones(5), rtol=1e-5)
+    np.testing.assert_allclose(run(lambda x: F.softmax(x, -1), t), e / e.sum(-1, keepdims=True), rtol=1e-5)
+    np.testing.assert_allclose(run(lambda x: F.sum(F.softmax(x, dim=0), 0), t), np.ones(5), rtol=1e-5)
     np.testing.assert_allclose(
-        run(lambda x: x.log_softmax(1), t), np.log(e / e.sum(-1, keepdims=True)), rtol=1e-5, atol=1e-6
+        run(lambda x: F.log_softmax(x, 1), t), np.log(e / e.sum(-1, keepdims=True)), rtol=1e-5, atol=1e-6
     )
-    np.testing.assert_allclose(run(lambda x: x.sigmoid(), t), 1 / (1 + np.exp(-x)), rtol=1e-5)
-    np.testing.assert_array_equal(run(lambda x: x.relu(), t), np.maximum(x, 0))
+    np.testing.assert_allclose(run(lambda x: F.sigmoid(x), t), 1 / (1 + np.exp(-x)), rtol=1e-5)
+    np.testing.assert_array_equal(run(lambda x: F.relu(x), t), np.maximum(x, 0))
 
 
 def test_comparisons_and_where():
@@ -219,10 +222,10 @@ def test_comparisons_and_where():
     tx, ty = lumen.from_numpy(x), lumen.from_numpy(y)
     for op in ("__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__"):
         np.testing.assert_array_equal(run(lambda a, b: getattr(a, op)(b), tx, ty), getattr(x, op)(y))
-    np.testing.assert_array_equal(run(lambda a, b: lumen.where(a > b, a, 0.0), tx, ty), np.where(x > y, x, 0.0))
-    np.testing.assert_array_equal(run(lumen.minimum, tx, ty), np.minimum(x, y))
+    np.testing.assert_array_equal(run(lambda a, b: F.where(a > b, a, 0.0), tx, ty), np.where(x > y, x, 0.0))
+    np.testing.assert_array_equal(run(F.minimum, tx, ty), np.minimum(x, y))
     nan = lumen.tensor([float("nan"), 1.0])
-    assert np.isnan(run(lumen.maximum, nan, lumen.tensor([0.0, 0.0]))[0])
+    assert np.isnan(run(F.maximum, nan, lumen.tensor([0.0, 0.0]))[0])
 
 
 def test_shape_methods():
@@ -243,7 +246,7 @@ def test_shape_methods():
     with pytest.raises(RuntimeError, match="invalid for input of size 24"):
         lumen.compile(lambda x: x.reshape(5, -1))(t)
     with pytest.raises(IndexError, match="Dimension out of range"):
-        lumen.compile(lambda x: x.sum(3))(t)
+        lumen.compile(lambda x: F.sum(x, 3))(t)
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
@@ -269,8 +272,8 @@ def test_mps_kernels_match_cpu(dtype):
     def block(x, wq, wk, w1):
         scores = (x @ wq) @ (x @ wk).t() * 0.25
         # Softmax in float32 (bfloat16 has no exp).
-        h = x + scores.float().softmax(-1).to(dtype=x.dtype) @ x
-        return (h @ w1).relu().mean(-1), h.amax(0), lumen.where(h > 0, h, -h).sum()
+        h = x + F.softmax(scores.float(), -1).to(dtype=x.dtype) @ x
+        return F.mean(F.relu(h @ w1), -1), F.amax(h, 0), F.sum(F.where(h > 0, h, -h))
 
     arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
     cpu = [lumen.from_numpy(a) for a in arrays]
@@ -284,7 +287,7 @@ def test_mps_kernels_match_cpu(dtype):
 
 
 def test_plan():
-    graph = lumen.make_graph(lambda x: (x.exp() + 1).reshape(-1).tanh())(lumen.zeros([16, 16]))
+    graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
     plan = lumen.graph.Plan(graph)
     # add reads exp and the broadcast 1 and writes a third 1 KiB buffer; the
     # 0-d constant fits in exp's gap, and the reshape costs nothing.
@@ -299,7 +302,7 @@ def test_plan():
 
 
 def test_graph_and_plan_describe_themselves():
-    graph = lumen.make_graph(lambda x: (x * 2.0).exp().sum(-1))(lumen.zeros([2, 3]))
+    graph = lumen.make_graph(lambda x: F.sum(F.exp(x * 2.0), -1))(lumen.zeros([2, 3]))
     nodes = graph.nodes()
     assert [n["primitive"] for n in nodes] == ["full", "broadcast_in_dim", "mul", "exp", "reduce_sum"]
     assert nodes[-1]["text"] == "reduce_sum[axes=(1,) accum_dtype=f32]" and nodes[-1]["fusion"] is None
@@ -317,7 +320,7 @@ def test_mps_plan_steps_and_profiled_kernels():
         pytest.skip(str(e))
     from lumen.profiler import ProfilerActivity, profile
 
-    graph = lumen.make_graph(lambda x: (x * 2.0 + 1.0).tanh().sum(-1))(x)
+    graph = lumen.make_graph(lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1))(x)
     plan = lumen.graph.Plan(graph, "mps")
     # One step: the reduction fused with the ops computing its input.
     (step,) = plan.steps()
@@ -335,7 +338,7 @@ def test_mps_plan_steps_and_profiled_kernels():
 
 
 def test_dump_graph(tmp_path):
-    f = lumen.compile(lambda x, w: (x @ w).relu())
+    f = lumen.compile(lambda x, w: F.relu(x @ w))
     with pytest.raises(RuntimeError, match="call <lambda> first"):
         f.dump_graph(tmp_path / "none.html")
     f(lumen.zeros([2, 3]), lumen.zeros([3, 4]))
@@ -375,7 +378,7 @@ def test_meta_tensors_have_no_data():
 
 def test_tracing_and_running_on_meta_tensors():
     def f(x, w):
-        return (x @ w).relu(), x.sum(-1)
+        return F.relu(x @ w), F.sum(x, -1)
 
     x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
     assert "dot_general" in str(lumen.make_graph(f)(x, w))
@@ -531,7 +534,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
     # A split reduction's partials are scratch in the workspace.
-    graph = lumen.make_graph(lambda x: x.sum(-1))(lumen.zeros([4, 50_000]))
+    graph = lumen.make_graph(lambda x: F.sum(x, -1))(lumen.zeros([4, 50_000]))
     plan = lumen.graph.Plan(graph, "mps")
     offset, size = plan.steps()[0]["scratch"]
     assert size > 0 and plan.workspace_bytes >= offset + size
@@ -592,7 +595,7 @@ def test_packed_weights_are_one_matmul(device):
 
     def gated(x, w13):
         gate, up = (x @ w13).chunk(2, -1)
-        return gate.relu() * up
+        return F.relu(gate) * up
 
     out = lumen.to_numpy(lumen.compile(gated)(*args))
     h = x @ w13
@@ -622,7 +625,7 @@ class Gated(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
-        return (x @ self.w1).relu() * (x @ self.w3)
+        return F.relu(x @ self.w1) * (x @ self.w3)
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -666,7 +669,7 @@ class Attention(lumen.nn.Module):
 
     def __call__(self, x):
         q, k, v = x @ self.wq, x @ self.wk, x @ self.wv
-        return (q @ k.t()).softmax(-1) @ v
+        return F.softmax(q @ k.t(), -1) @ v
 
 
 @pytest.mark.mps
@@ -747,7 +750,7 @@ def test_softmax_traces_to_its_primitives(device):
         pytest.skip(str(e))
 
     def scaled(t):
-        return (t * 0.5).softmax(-1)
+        return F.softmax(t * 0.5, -1)
 
     graph = lumen.make_graph(scaled)(t)
     primitives = [n["primitive"] for n in graph.nodes()]
@@ -762,7 +765,10 @@ def test_softmax_traces_to_its_primitives(device):
         assert step["fusion"] is not None and step["label"].startswith("full -> broadcast_in_dim -> mul")
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(
-        lumen.to_numpy(lumen.compile(lambda t: t.softmax(0))(t)), e0 / e0.sum(0, keepdims=True), rtol=1e-5, atol=1e-7
+        lumen.to_numpy(lumen.compile(lambda t: F.softmax(t, 0))(t)),
+        e0 / e0.sum(0, keepdims=True),
+        rtol=1e-5,
+        atol=1e-7,
     )
 
 
@@ -771,12 +777,12 @@ class Norm(lumen.nn.Module):
     eps: float
 
     def __call__(self, x):
-        return lumen.rms_norm(x, self.weight.shape, self.weight, self.eps)
+        return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_rms_norm(device):
-    """lumen.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
+    """F.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
     as primitives, which the MPS compiler recognizes, as it does an RMS norm
     written by hand, and fuses into one kernel (its reduction inside) with
     the ops computing its input."""
@@ -790,12 +796,12 @@ def test_rms_norm(device):
         y = x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         return y * w if w is not None else y
 
-    f = lambda a, b: lumen.rms_norm(a + 1.0, 300, b, 1e-6)  # noqa: E731
+    f = lambda a, b: F.rms_norm(a + 1.0, 300, b, 1e-6)  # noqa: E731
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected(x + 1, w, 1e-6), rtol=1e-5, atol=1e-6)
-    g = lambda a: lumen.rms_norm(a, [300])  # noqa: E731  (eps: float32's machine epsilon)
+    g = lambda a: F.rms_norm(a, [300])  # noqa: E731  (eps: float32's machine epsilon)
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(g)(X)), expected(x, None, 2.0**-23), rtol=1e-5, atol=1e-6)
     assert "rms_norm" not in [n["primitive"] for n in lumen.make_graph(f)(X, W).nodes()]
-    by_hand = lambda a, b: b * (a / (1e-6 + (a * a).mean(-1, keepdim=True)).sqrt())  # noqa: E731
+    by_hand = lambda a, b: b * (a / F.sqrt(1e-6 + F.mean(a * a, -1, keepdim=True)))  # noqa: E731
     np.testing.assert_allclose(
         lumen.to_numpy(lumen.compile(by_hand)(X, W)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6
     )
@@ -809,7 +815,7 @@ def test_rms_norm(device):
             assert "reduce_sum" in label and "sqrt" in label, label
         assert steps(f)[0].startswith("full -> broadcast_in_dim -> add -> mul -> reduce_sum")
     with pytest.raises(NotImplementedError, match="last dimension"):
-        lumen.make_graph(lambda a: lumen.rms_norm(a, (8, 300)))(X)
+        lumen.make_graph(lambda a: F.rms_norm(a, (8, 300)))(X)
     norm = Norm(lumen.empty([300], device="meta"), 1e-6)
     step = lumen.compile(lambda m, a: m(a), device=device)
     step(norm, lumen.empty([8, 300], device="meta"))
@@ -819,28 +825,27 @@ def test_rms_norm(device):
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_sqrt(device):
-    """sqrt is a primitive (rsqrt is not: write 1 / x.sqrt()); on MPS a fused
+    """sqrt is a primitive (rsqrt is not: write 1 / F.sqrt(x)); on MPS a fused
     division by a fused sqrt stays a sqrt and a division, as traced."""
     x = rand(8, 16) ** 2 + 0.1
     try:
         t = lumen.from_numpy(x).to(device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert not hasattr(lumen, "rsqrt") and not hasattr(lumen.graph.TracedTensor, "rsqrt")
+    assert not hasattr(F, "rsqrt") and not hasattr(lumen.graph.TracedTensor, "rsqrt")
     for f, expected in [
-        (lambda a: a.sqrt(), np.sqrt(x)),
-        (lambda a: lumen.sqrt(a), np.sqrt(x)),
-        (lambda a: 3.0 / a.sqrt(), 3 / np.sqrt(x)),
+        (lambda a: F.sqrt(a), np.sqrt(x)),
+        (lambda a: 3.0 / F.sqrt(a), 3 / np.sqrt(x)),
     ]:
         np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(t)), expected, rtol=1e-6)
     if device == "mps":
-        (step,) = lumen.graph.Plan(lumen.make_graph(lambda a: 1.0 / a.sqrt())(t), "mps").steps()
+        (step,) = lumen.graph.Plan(lumen.make_graph(lambda a: 1.0 / F.sqrt(a))(t), "mps").steps()
         source = step["fusion"]["source"]
         assert step["label"].endswith("div") and "rsqrt(" not in source
         assert "Sqrt::apply" in source and "Div::apply" in source
         # A division by the sqrt of a row's sum (a diamond: one row kernel)
         # stays a sqrt, once a row, and a division.
-        f = lambda a: a / a.sum(-1, keepdim=True).sqrt()  # noqa: E731
+        f = lambda a: a / F.sqrt(F.sum(a, -1, keepdim=True))  # noqa: E731
         (step,) = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
         source = step["fusion"]["source"]
         assert "Sqrt::apply" in source and "Div::apply" in source and "rsqrt(" not in source
@@ -851,7 +856,7 @@ class ScaledNorm(lumen.nn.Module):
     eps: float
 
     def __call__(self, x):
-        return self.weight * (x / ((x * x).mean(-1, keepdim=True) + self.eps).sqrt())
+        return self.weight * (x / F.sqrt(F.mean(x * x, -1, keepdim=True) + self.eps))
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -907,10 +912,10 @@ def test_programs_run_in_their_dtypes(device):
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
         pytest.skip(str(e))
-    for f in (lambda a: a.exp(), lambda a: a.sqrt(), lambda a: a.softmax(-1), lambda a: a.tanh()):
+    for f in (F.exp, F.sqrt, lambda a: F.softmax(a, -1), F.tanh):
         with pytest.raises(ValueError, match="convert to float32"):
             lumen.compile(f)(x)
-    out = lumen.compile(lambda a: a.float().exp())(x)
+    out = lumen.compile(lambda a: F.exp(a.float()))(x)
     assert out.dtype == "float32"
     with pytest.raises(TypeError):
         prims.dot_general(x, x, (((1,), (1,)), ((), ())))
@@ -933,17 +938,17 @@ def test_programs_run_in_their_dtypes(device):
     assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
     assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
     # Sum and mean follow their input's dtype: bfloat16 sums in bfloat16; a
-    # float32 sum is written as one (x.float().sum()), its cast back the
+    # float32 sum is written as one (F.sum(x.float())), its cast back the
     # reduction's epilogue.
-    graph = lumen.make_graph(lambda a: a.sum(-1))(x)
+    graph = lumen.make_graph(lambda a: F.sum(a, -1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]
     assert "accum_dtype=bf16" in str(graph)
-    assert lumen.compile(lambda a: a.sum(-1))(x).dtype == "bfloat16"
-    assert lumen.compile(lambda a: a.mean())(x).dtype == "bfloat16"
-    total = lumen.compile(lambda a: a.float().sum(-1))(x)
+    assert lumen.compile(lambda a: F.sum(a, -1))(x).dtype == "bfloat16"
+    assert lumen.compile(lambda a: F.mean(a))(x).dtype == "bfloat16"
+    total = lumen.compile(lambda a: F.sum(a.float(), -1))(x)
     assert total.dtype == "float32"
     np.testing.assert_allclose(lumen.to_numpy(total), a.sum(-1), rtol=1e-6, atol=1e-6)
-    back = lumen.compile(lambda a: a.float().sum(-1).bfloat16())(x)
+    back = lumen.compile(lambda a: F.sum(a.float(), -1).bfloat16())(x)
     assert back.dtype == "bfloat16"
     np.testing.assert_allclose(lumen.to_numpy(back.to(dtype="float32")), a.sum(-1), rtol=2**-8, atol=2**-8)
 
@@ -956,7 +961,7 @@ class UpcastNorm(lumen.nn.Module):
 
     def __call__(self, x):
         h = x.float()
-        h = h / ((h * h).mean(-1, keepdim=True) + self.eps).sqrt()
+        h = h / F.sqrt(F.mean(h * h, -1, keepdim=True) + self.eps)
         return self.weight * h.to(dtype=x.dtype)
 
 
@@ -995,7 +1000,7 @@ def test_upcast_rms_norm_is_one_kernel(n):
 
 @pytest.mark.mps
 def test_split_reduction_converts_its_input_once():
-    """``x.float().sum(-1)`` of bfloat16 rows too long for one launch is two:
+    """``F.sum(x.float(), -1)`` of bfloat16 rows too long for one launch is two:
     the fused kernel converts each element once and writes float32
     partials; the second, the plain float32 kernel, sums those partials,
     converting nothing (a second convert of float32 values would change
@@ -1004,8 +1009,8 @@ def test_split_reduction_converts_its_input_once():
         x = lumen.ones([4, 200_000], device="mps").to(dtype="bfloat16")
     except RuntimeError as e:
         pytest.skip(str(e))
-    f = lumen.compile(lambda a: a.float().sum(-1))
-    graph = lumen.make_graph(lambda a: a.float().sum(-1))(x)
+    f = lumen.compile(lambda a: F.sum(a.float(), -1))
+    graph = lumen.make_graph(lambda a: F.sum(a.float(), -1))(x)
     (step,) = lumen.graph.Plan(graph, "mps").steps()
     assert step["label"] == "convert_element_type -> reduce_sum" and step["scratch"] is not None
     source = step["fusion"]["source"]
@@ -1024,17 +1029,17 @@ def test_split_reduction_converts_its_input_once():
 
 
 def _layer_norm(a, w):
-    xc = a - a.mean(-1, keepdim=True)
-    return xc / ((xc * xc).mean(-1, keepdim=True) + 1e-5).sqrt() * w
+    xc = a - F.mean(a, -1, keepdim=True)
+    return xc / F.sqrt(F.mean(xc * xc, -1, keepdim=True) + 1e-5) * w
 
 
 @pytest.mark.parametrize(
     "f",
     [
-        lambda a, w: a / ((a * a).mean(-1, keepdim=True) + 1e-6).sqrt() * w,
-        lambda a, w: a / ((a * a).sum(-1, keepdim=True) + 1e-6).sqrt() * w,
-        lambda a, w: a * (1.0 / ((a * a).mean(-1, keepdim=True)).sqrt()),
-        lambda a, w: (lambda e: e / e.sum(-1, keepdim=True))((a - a.amax(-1, keepdim=True)).exp()),
+        lambda a, w: a / F.sqrt(F.mean(a * a, -1, keepdim=True) + 1e-6) * w,
+        lambda a, w: a / F.sqrt(F.sum(a * a, -1, keepdim=True) + 1e-6) * w,
+        lambda a, w: a * (1.0 / F.sqrt(F.mean(a * a, -1, keepdim=True))),
+        lambda a, w: (lambda e: e / F.sum(e, -1, keepdim=True))(F.exp(a - F.amax(a, -1, keepdim=True))),
         _layer_norm,
     ],
     ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"],
@@ -1053,3 +1058,23 @@ def test_normalizations_are_one_row_kernel(f):
     assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
+
+
+def test_ops_are_functions():
+    """The ops are functions in lumen.functional (``import lumen.functional
+    as F``), as torch's are; a traced tensor keeps only its operators, layout
+    and dtype casts, and lumen itself re-exports no op."""
+    ops = ["exp", "log", "sqrt", "tanh", "sigmoid", "relu", "sum", "mean", "amax", "max", "softmax"]
+    ops += ["log_softmax", "rms_norm", "matmul", "where", "maximum", "minimum", "add", "mul", "div", "eq", "gt"]
+    for name in ops:
+        assert callable(getattr(F, name)) and name in F.__all__
+        assert not hasattr(lumen.graph.TracedTensor, name), name
+        assert not hasattr(lumen, name), name
+    for name in ["reshape", "permute", "transpose", "t", "unsqueeze", "flatten", "split", "to", "float", "__add__"]:
+        assert hasattr(lumen.graph.TracedTensor, name), name
+    assert lumen.functional is F
+    # Operators and functions record the same primitives.
+    a = lumen.zeros([2, 3])
+    by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
+    by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t()))(a)
+    assert str(by_operator) == str(by_function)

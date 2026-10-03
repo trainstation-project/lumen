@@ -16,8 +16,11 @@ wraps:
   ``torch.profiler``.
 * ``lumen.graph`` (``lumen/graph/``) — compiled execution:
   ``lumen.compile`` traces a function into a graph of primitive ops
-  (``lumen.prims``, modeled on ``jax.lax``), with a torch-like API on the
-  traced tensors (``x @ w``, ``x.softmax(-1)``, ``lumen.where``, ...).
+  (``lumen.prims``, modeled on ``jax.lax``); traced tensors have PyTorch's
+  operators (``x @ w``), layout and dtype casts.
+* ``lumen.functional`` (``import lumen.functional as F``) — the ops, as
+  functions, as ``torch`` and ``torch.nn.functional`` have them
+  (``F.softmax(x, -1)``, ``F.sum``, ``F.where``, ``F.rms_norm``, ...).
 * ``lumen.ops`` (``lumen/ops.py``) — registering device kernels written in
   Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
 * ``lumen.safetensors`` (``lumen/safetensors/``) — ``save_file``,
@@ -30,25 +33,10 @@ Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
 """
 
-from lumen import graph, nn, ops, profiler, safetensors
+from lumen import functional, graph, nn, ops, profiler, safetensors
 from lumen._C import __version__, device
 from lumen.allocator import config
-from lumen.graph import (
-    compile,
-    exp,
-    log,
-    make_graph,
-    matmul,
-    maximum,
-    minimum,
-    prims,
-    rms_norm,
-    sigmoid,
-    softmax,
-    sqrt,
-    tanh,
-    where,
-)
+from lumen.graph import compile, make_graph, prims
 from lumen.stream import cuda, mps
 from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
 from lumen.tensor import (
@@ -121,15 +109,5 @@ __all__ = [
     "compile",
     "make_graph",
     "prims",
-    "where",
-    "matmul",
-    "maximum",
-    "minimum",
-    "exp",
-    "log",
-    "sqrt",
-    "tanh",
-    "sigmoid",
-    "softmax",
-    "rms_norm",
+    "functional",
 ]

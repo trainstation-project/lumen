@@ -17,6 +17,7 @@ use std::sync::{Mutex, PoisonError};
 
 use super::diamonds::Row;
 use crate::DType;
+use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
@@ -90,11 +91,13 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// root's fusion has its reductions and inner nodes inside (a row kernel,
 /// `codegen.rs`), where any other reduction is a root.
 /// `scalars` are inputs a kernel takes by value (runtime scalars): `kernel`
-/// is told which of a body's inputs are.
+/// is told which of a body's inputs are. `config` says which of the
+/// fusions below to make (`reduction_epilogues`, `multi_output_fusion`).
 pub(crate) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
+    config: &CompilerConfig,
     mut kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
     let nodes = graph.nodes();
@@ -160,7 +163,8 @@ pub(crate) fn fuse(
             node.primitive,
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
         );
-        if !live[i] || !fusible[i] || !reduction || rows.iter().any(|r| r.reductions.contains(&i)) {
+        let in_row = rows.iter().any(|r| r.reductions.contains(&i));
+        if !config.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
             continue;
         }
         let (mut r, mut end) = (i, None);
@@ -217,7 +221,8 @@ pub(crate) fn fuse(
     // fusion that is itself hosted.
     let mut host: Vec<Option<usize>> = vec![None; nodes.len()];
     for (i, node) in nodes.iter().enumerate().rev() {
-        let candidate = live[i]
+        let candidate = config.multi_output_fusion
+            && live[i]
             && root[i]
             && fusible[i]
             && !is_reduction(node)

@@ -1,5 +1,6 @@
-//! `lumen.config`: bindings for [`crate::allocator::config`], registered
-//! into `lumen._C` by [`crate::python`].
+//! `lumen.config`: bindings for [`crate::allocator::config`] (and, as
+//! `lumen.config.compiler`, [`crate::compiler::config`]), registered into
+//! `lumen._C` by [`crate::python`].
 
 use pyo3::prelude::*;
 
@@ -28,6 +29,13 @@ impl Config {
     #[setter]
     fn set_static_allocator_bytes(&self, nbytes: usize) {
         core::allocator::config::set_static_allocator_bytes(nbytes);
+    }
+
+    /// The graph compilers' flags (``lumen.config.compiler.online_softmax``,
+    /// ...), read when a graph is compiled.
+    #[getter]
+    fn compiler(&self) -> core::compiler::python::PyCompilerConfig {
+        core::compiler::python::PyCompilerConfig
     }
 
     fn __repr__(&self) -> String {

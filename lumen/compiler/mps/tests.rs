@@ -1,6 +1,7 @@
 use super::codegen::metal_type;
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
+use crate::compiler::CompilerConfig;
 use crate::graph::Primitive::*;
 use crate::graph::tests::mps::{available, check, check_within, exact_values, values};
 use crate::graph::tests::{data, mlp};
@@ -15,9 +16,14 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 /// `g` fused as the MPS compiler fuses it (its normalization diamonds one
 /// row kernel each, `diamonds.rs`).
 fn fuse(g: &Graph) -> Graph {
-    fusion::fuse(g, &super::diamonds::diamonds(g), &[], |body, by_value| {
-        codegen::kernel(body, by_value).0
-    })
+    let config = CompilerConfig::default();
+    fusion::fuse(
+        g,
+        &super::diamonds::diamonds(g),
+        &[],
+        &config,
+        |body, by_value| codegen::kernel(body, by_value, &config).0,
+    )
 }
 
 /// The fused graph's primitives, after checking it computes exactly what
@@ -374,7 +380,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let Fusion { body, .. } = &fused.nodes()[0].primitive else {
                     panic!("{fused}")
                 };
-                let source = codegen::kernel(body, &[]).1;
+                let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
                 match accum_dtype {
                     // Widened as read: the reduction is float throughout.
                     DType::F32 => {
@@ -427,7 +433,7 @@ fn hierarchical_reductions_keep_their_dtype() {
     let fused = fuse(&g);
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source = codegen::kernel(body, &[]).1;
+            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
             assert!(!mentions(&source, "float"), "{source}");
         }
     }
@@ -771,7 +777,7 @@ fn reductions_fuse_their_inputs() {
     }
 }
 
-/// `x.float().sum().bfloat16()` and a mean (`/ n`) cast back: one fusion,
+/// `F.sum(x.float()).bfloat16()` and a mean (`/ n`) cast back: one fusion,
 /// the reduction in float32 and the division and cast its epilogue. One
 /// launch applies it as it writes; a split reduction's partials stay
 /// float32, its second launch (the fusion's `_final` kernel) applying it.
@@ -827,7 +833,7 @@ fn reductions_apply_their_epilogue() {
                 panic!("{fused}")
             };
             assert!(super::codegen::has_epilogue(body));
-            let source = codegen::kernel(body, &[]).1;
+            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
             assert!(source.contains("operator()(float r)"), "{source}");
             assert_eq!(source.contains("_final("), split, "{source}");
             if available() {
@@ -1136,7 +1142,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body, &[]).1;
+    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
@@ -1164,7 +1170,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body, &[]).1;
+    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
