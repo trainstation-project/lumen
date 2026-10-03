@@ -675,8 +675,9 @@ class Attention(lumen.nn.Module):
 @pytest.mark.mps
 def test_attention_projections_merge_into_one_matmul():
     """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
-    of the three weights; the matmuls reading q and v read them in place,
-    strided views of its result, and k's transpose fuses its slice."""
+    of the three weights; the attention (one flash-attention kernel) reads
+    them in place. As traced, the matmuls reading q and v read them in
+    place, strided views of its result, and k's transpose fuses its slice."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -692,7 +693,18 @@ def test_attention_projections_merge_into_one_matmul():
     expected = (s / s.sum(-1, keepdims=True)) @ v
     np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-4, atol=1e-4)
     graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
+    # The attention one kernel (flash attention) reading q, k and v where
+    # the merged matmul writes them.
     plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    merged, attention = plan.steps()
+    assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
+    assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
+    # As traced: its matmuls read q and v as strided views.
+    lumen.config.compiler.flash_attention = False
+    try:
+        plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    finally:
+        lumen.config.compiler.reset()
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
     assert [s["primitive"] for s in steps].count("dot_general") == 3

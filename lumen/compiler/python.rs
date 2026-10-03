@@ -8,7 +8,7 @@ use super::config::{self, CompilerConfig};
 /// The graph compilers' flags (``lumen.config.compiler``), read when a
 /// graph is compiled: ``lumen.compile`` compiles again once they change.
 /// The defaults run every program exactly as traced, but for
-/// ``online_softmax`` (on).
+/// ``online_softmax`` and ``flash_attention`` (on).
 #[pyclass(name = "CompilerConfig", module = "lumen")]
 pub(crate) struct PyCompilerConfig;
 
@@ -61,6 +61,10 @@ flags! {
     /// softmax; on by default): not what the program computes, its rounding
     /// differs; off runs softmax exactly as traced.
     online_softmax, set_online_softmax: bool;
+    /// Attention, however written, as one flash-attention kernel (on by
+    /// default): not what the program computes, its rounding differs; off
+    /// runs attention exactly as traced.
+    flash_attention, set_flash_attention: bool;
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).
     row_cache, set_row_cache: usize;

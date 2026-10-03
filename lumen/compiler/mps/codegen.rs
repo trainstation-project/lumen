@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use super::attention::{Access, Attention};
 use super::fusion;
 use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -934,4 +935,98 @@ fn constant(dtype: DType, value: Scalar) -> String {
             )
         }
     }
+}
+
+/// The kernel of an attention fusion (`attention.rs`): its name and Metal
+/// source, instantiating `flash_attention`, or for few queries
+/// `attention_decode` (`attention.metal`), with an indexer of its
+/// operands' strides. Its buffers: the body's inputs, then `out`.
+pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
+    let input = |base: Var| {
+        let k = body.inputs().iter().position(|&v| v == base);
+        format!("in{}", k.expect("an input of the body"))
+    };
+    // Each operand's batch index's offset (its index split over the batch
+    // dimensions, the last fastest), and its row and column strides.
+    let index = |name: &str, acc: &Access| {
+        let up = name.to_uppercase();
+        let mut code = format!(
+            "    static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;\n    inline ulong {name}(uint b) const {{\n        ulong o = {}ul;\n",
+            acc.row, acc.col, acc.offset
+        );
+        if !a.batch.is_empty() {
+            code += "        uint rest = b;\n";
+        }
+        for (k, (&size, &(stride, div))) in a.batch.iter().zip(&acc.batch).enumerate().rev() {
+            let last = k == 0;
+            let idx = match last {
+                true => "rest".to_string(),
+                false => format!("(rest % {size}u)"),
+            };
+            if stride != 0 {
+                let idx = match div {
+                    1 => idx,
+                    _ => format!("({idx} / {div}u)"),
+                };
+                writeln!(code, "        o += ulong({idx}) * {stride}ul;").unwrap();
+            }
+            if !last {
+                writeln!(code, "        rest /= {size}u;").unwrap();
+            }
+        }
+        code += "        return o;\n    }";
+        code
+    };
+    let ix = format!(
+        "struct NAME_ix {{\n{}\n{}\n{}\n{}\n}};\n\n",
+        index("q", &a.q),
+        index("k", &a.k),
+        index("v", &a.v),
+        index("o", &a.out)
+    );
+    let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
+    let mut params: Vec<String> = (0..body.inputs().len())
+        .map(|k| format!("device const {t} *in{k} [[buffer({k})]]"))
+        .collect();
+    params.push(format!(
+        "device {o} *out [[buffer({})]]",
+        body.inputs().len()
+    ));
+    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
+    let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
+    let scale = constant(DType::F32, Scalar::Float(a.scale));
+    let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
+    let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
+    let call = match decodes(a) {
+        true => format!(
+            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, {scale}, {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x);"
+        ),
+        false => {
+            let bk = key_block(a);
+            format!(
+                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, {scale}, {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x);"
+            )
+        }
+    };
+    named(format!(
+        "{ix}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        params.join(", ")
+    ))
+}
+
+/// Whether attention `a` takes the decoding kernel: few queries (a
+/// threadgroup each), not tiles of them.
+pub(crate) fn decodes(a: &Attention) -> bool {
+    a.sq <= 8
+}
+
+/// The keys a flash-attention threadgroup stages at once: the most of 32,
+/// 16 or 8 whose K and V blocks fit in 28 KB of threadgroup memory.
+fn key_block(a: &Attention) -> usize {
+    let t = a.dtype.size_of();
+    let bytes = |bk: usize| bk * (a.h + a.hv) * t;
+    [32, 16, 8]
+        .into_iter()
+        .find(|&bk| bytes(bk) <= 28 << 10)
+        .unwrap_or(8)
 }

@@ -66,10 +66,11 @@ def _labels(f, *args, device="mps"):
 
 
 def test_compiler_flags_defaults(compiler):
-    """Every program runs as traced, but for online softmax (on)."""
+    """Every program runs as traced, but for online softmax and flash
+    attention (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
-    assert compiler.online_softmax is True and compiler.row_cache == 8
+    assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
