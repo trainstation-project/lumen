@@ -703,4 +703,13 @@ fn ranges_are_annotated_on_the_gpu_timeline() {
         .find(|l| l.contains("\"name\":\"layer\""))
         .unwrap();
     assert!(layer.contains("\"dur\":0.200"), "{layer}");
+    // On their own track, named, beside the kernels' (which may overlap).
+    assert!(
+        annotations.iter().all(|l| l.contains("\"tid\":8")),
+        "{trace}"
+    );
+    assert!(
+        trace.contains("\"args\":{\"name\":\"annotations\"}"),
+        "{trace}"
+    );
 }

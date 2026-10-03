@@ -10,7 +10,9 @@
 //!   on a process per device, linked to the issuing op by an `ac2g` flow;
 //! - each `record_function` range again on the device's timeline, category
 //!   `gpu_user_annotation` (Kineto's), spanning the GPU work issued inside
-//!   it: from its first kernel's start to its last's end.
+//!   it: from its first kernel's start to its last's end. On a track of its
+//!   own beside the kernels', since kernels may overlap (Metal runs
+//!   independent ones concurrently) and could not nest under it.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -20,6 +22,9 @@ use crate::device::Device;
 
 /// Stream id GPU events are drawn on (Kineto's default stream is 7).
 const GPU_TID: u64 = 7;
+
+/// Track of the `record_function` ranges on a device's timeline.
+const ANNOTATION_TID: u64 = 8;
 
 /// Process id of `device`'s timeline: the real pid for the CPU, so traces
 /// from several processes stay apart, and a fixed id per device.
@@ -180,7 +185,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
     spans.sort_by_key(|&((id, _), (start, _))| (start, id));
     for ((id, device), (start, end)) in spans {
         out.push(format!(
-            "{{\"ph\":\"X\",\"cat\":\"gpu_user_annotation\",\"name\":{},\"pid\":{},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"External id\":{id}}}}}",
+            "{{\"ph\":\"X\",\"cat\":\"gpu_user_annotation\",\"name\":{},\"pid\":{},\"tid\":{ANNOTATION_TID},\"ts\":{},\"dur\":{},\"args\":{{\"External id\":{id}}}}}",
             json_str(&by_id[&id].name),
             pid(device),
             us(start),
@@ -197,6 +202,12 @@ pub(crate) fn trace(events: &[Event]) -> String {
             pid(device),
             json_str(&process_name(device)),
         ));
+        for (tid, name) in [(GPU_TID, "stream 7"), (ANNOTATION_TID, "annotations")] {
+            out.push(format!(
+                "{{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":{},\"tid\":{tid},\"args\":{{\"name\":\"{name}\"}}}}",
+                pid(device),
+            ));
+        }
     }
     format!(
         "{{\"schemaVersion\":1,\"displayTimeUnit\":\"ms\",\"traceEvents\":[\n{}\n]}}\n",
