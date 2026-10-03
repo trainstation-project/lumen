@@ -339,11 +339,14 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
         )
     }) {
         Some(root) => {
-            let (Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes }) = &root.primitive
+            let (Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes }) =
+                &root.primitive
             else {
                 unreachable!("a reduction")
             };
-            crate::ops::reduce::mps::scratch_bytes(body.type_of(root.inputs[0]), axes)
+            let x = body.type_of(root.inputs[0]);
+            let accum = body.type_of(root.output).dtype;
+            crate::ops::reduce::mps::scratch_bytes(x, axes, accum)
         }
         None => 0,
     }

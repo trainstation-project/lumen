@@ -90,8 +90,10 @@ def select(pred, on_true, on_false):
     return bind("select", pred, on_true, on_false)
 
 
-def reduce_sum(x, axes):
-    return bind("reduce_sum", x, axes=tuple(axes))
+def reduce_sum(x, axes, accum_dtype):
+    """The sum over ``axes``, accumulated in ``accum_dtype``, the result's
+    dtype: ``x``'s, or ``float32`` for floats narrower than it."""
+    return bind("reduce_sum", x, axes=tuple(axes), accum_dtype=accum_dtype)
 
 
 def reduce_max(x, axes):

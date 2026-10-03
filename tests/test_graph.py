@@ -33,7 +33,7 @@ def test_graph_text():
     assert str(graph) == (
         "{ lambda %0:f32[2,3]. let\n"
         "    %1:f32[2,3] = exp %0\n"
-        "    %2:f32[2] = reduce_sum[axes=(1,)] %1\n"
+        "    %2:f32[2] = reduce_sum[axes=(1,) accum_dtype=f32] %1\n"
         "  in (%2) }"
     )
 
@@ -297,7 +297,7 @@ def test_graph_and_plan_describe_themselves():
     graph = lumen.make_graph(lambda x: (x * 2.0).exp().sum(-1))(lumen.zeros([2, 3]))
     nodes = graph.nodes()
     assert [n["primitive"] for n in nodes] == ["full", "broadcast_in_dim", "mul", "exp", "reduce_sum"]
-    assert nodes[-1]["text"] == "reduce_sum[axes=(1,)]" and nodes[-1]["fusion"] is None
+    assert nodes[-1]["text"] == "reduce_sum[axes=(1,) accum_dtype=f32]" and nodes[-1]["fusion"] is None
     assert graph.inputs() == [0] and graph.outputs() == [nodes[-1]["output"]]
     steps = lumen.graph.Plan(graph).steps()
     assert steps[-1]["output"] == ("out0", "float32", [2])
@@ -866,7 +866,7 @@ def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
-    program; `@` always float32), its result's dtype."""
+    program; `@`, sum and mean always float32), its result's dtype."""
     try:
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
@@ -887,6 +887,13 @@ def test_programs_run_in_their_dtypes(device):
     assert lumen.compile(lambda a, b: dot(a, b, "bfloat16"))(x, w).dtype == "bfloat16"
     # `@` accumulates floats in float32.
     assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "float32"
+    # So do sum and mean: read as bfloat16, accumulated in float32, with no
+    # convert in the graph.
+    graph = lumen.make_graph(lambda a: a.sum(-1))(x)
+    assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]
+    total = lumen.compile(lambda a: a.sum(-1))(x)
+    assert total.dtype == "float32" and lumen.compile(lambda a: a.mean())(x).dtype == "float32"
+    np.testing.assert_allclose(lumen.to_numpy(total), a.sum(-1), rtol=1e-6, atol=1e-6)
 
 
 class UpcastNorm(lumen.nn.Module):

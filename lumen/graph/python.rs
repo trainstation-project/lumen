@@ -46,6 +46,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
         "select" => Select,
         "reduce_sum" => ReduceSum {
             axes: dims("axes")?,
+            accum_dtype: dtype("accum_dtype")?,
         },
         "reduce_max" => ReduceMax {
             axes: dims("axes")?,

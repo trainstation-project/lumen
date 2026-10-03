@@ -310,6 +310,13 @@ def _is_float(dtype):
     return "float" in dtype
 
 
+def _accum_dtype(dtype):
+    """The dtype sums of ``dtype`` accumulate in (matmul, sum, mean), their
+    result's: float32 for floats, or their own if wider (float64); integers
+    their own."""
+    return dtype if not _is_float(dtype) or dtype == "float64" else "float32"
+
+
 def _require_float(x, op):
     if not _is_float(x.dtype):
         raise TypeError(f"{op} needs a floating-point tensor, got {x.dtype}: convert it with .to(dtype)")
@@ -636,11 +643,13 @@ class TracedTensor:
         return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(self.shape)))
 
     def sum(self, dim=None, keepdim=False, dtype=None):
-        """Sum over ``dim`` (all dimensions if None), in the tensor's dtype
-        (integers wrap) or ``dtype``."""
+        """Sum over ``dim`` (all dimensions if None) of the tensor (or it
+        converted to ``dtype``), accumulated in float32 for floats (their
+        own dtype if wider), the result's dtype; integers in theirs (they
+        wrap)."""
         x = self.to(dtype) if dtype else self
         dims = _dims(dim, self.ndim)
-        return self._keep(prims.reduce_sum(x, dims), dims, keepdim)
+        return self._keep(prims.reduce_sum(x, dims, _accum_dtype(x.dtype)), dims, keepdim)
 
     def mean(self, dim=None, keepdim=False, dtype=None):
         x = self.to(dtype) if dtype else self
@@ -857,11 +866,9 @@ def matmul(input, other):
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
     b = tuple(range(len(batch)))
-    # Floats accumulate in float32, or their own dtype if wider (float64):
-    # the result's dtype (cast it back with .to(dtype) for a narrower
-    # result); integers in their own dtype.
-    accum = x.dtype if not _is_float(x.dtype) or x.dtype == "float64" else "float32"
-    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), accum)
+    # Accumulated in float32 (or wider), the result's dtype: cast it back
+    # with .to(dtype) for a narrower result.
+    out = prims.dot_general(x, y, (((len(b) + 1,), (len(b),)), (b, b)), _accum_dtype(x.dtype))
     if input.ndim == 1:
         out = out.squeeze(-2)
     if other.ndim == 1:
@@ -924,7 +931,10 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
     if eps is None:
         eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
 
-    y = x / ((x * x).mean(-1, keepdim=True) + eps).sqrt()
+    # Normalized in the accumulation dtype (float32 for narrower floats, as
+    # its mean is), then cast back and scaled by the weight in x's dtype.
+    h = x.to(_accum_dtype(x.dtype))
+    y = (h / ((h * h).mean(-1, keepdim=True) + eps).sqrt()).to(x.dtype)
 
     if weight is not None:
         y = y * weight

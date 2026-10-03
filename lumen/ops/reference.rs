@@ -325,7 +325,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!("cases of one dtype"),
             }
         }
-        ReduceSum { axes } | ReduceMax { axes } => {
+        ReduceSum { axes, .. } | ReduceMax { axes } => {
             let x = types[0];
             let init = match p {
                 ReduceSum { .. } if dtype.is_float() => Float(vec![0.0]),

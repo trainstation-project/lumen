@@ -1,3 +1,4 @@
+use super::codegen::metal_type;
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
@@ -286,7 +287,14 @@ fn mps_plans_hold_kernel_scratch() {
     }
     let mut g = Graph::new();
     let x = g.input(ty(DType::F16, &[4, 50_000]));
-    let s = apply(&mut g, ReduceSum { axes: vec![1] }, &[x]);
+    let s = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F16,
+        },
+        &[x],
+    );
     g.set_outputs(&[s]).unwrap();
     let plan = crate::compiler::compile(&g, crate::Device::Mps).unwrap();
     let (_, bytes) = plan.steps()[0].scratch.expect("partials in the workspace");
@@ -333,10 +341,12 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
-/// A hierarchical reduction keeps its dtype at every level: each thread's
-/// accumulator, the threadgroup's tree, a split reduction's partials (its
-/// scratch, 2 bytes each for 16-bit floats) and the second launch over
-/// them; in a row kernel (an RMS norm's), and in softmax's.
+/// A hierarchical reduction keeps its accumulation dtype at every level:
+/// each thread's accumulator, the threadgroup's tree, a split reduction's
+/// partials (its scratch, of that dtype) and the second launch over them;
+/// the input's dtype (a 16-bit float's, no float anywhere) or float32
+/// (reduce_sum's accum_dtype: elements widened as read, float throughout).
+/// In a row kernel (an RMS norm's) and softmax's too.
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
     use crate::ops::reduce::mps::scratch_bytes;
@@ -355,26 +365,53 @@ fn hierarchical_reductions_keep_their_dtype() {
             (vec![40, 7, 300], vec![0, 2]),
             (vec![8, 300], vec![1]),
         ] {
-            let wide = scratch_bytes(&ty(DType::F32, &shape), &axes);
-            assert_eq!(scratch_bytes(&ty(dtype, &shape), &axes) * 2, wide);
-            let mut g = Graph::new();
-            let x = g.input(ty(dtype, &shape));
-            let p = apply(&mut g, Mul, &[x, x]);
-            let r = apply(&mut g, ReduceSum { axes }, &[p]);
-            g.set_outputs(&[r]).unwrap();
-            let fused = fuse(&g);
-            let Fusion { body, .. } = &fused.nodes()[0].primitive else {
-                panic!("{fused}")
-            };
-            let source = codegen::kernel(body, &[]).1;
-            assert!(!mentions(&source, "float"), "{source}");
+            let wide = scratch_bytes(&ty(dtype, &shape), &axes, DType::F32);
+            assert_eq!(scratch_bytes(&ty(dtype, &shape), &axes, dtype) * 2, wide);
+            for accum_dtype in [dtype, DType::F32] {
+                let mut g = Graph::new();
+                let x = g.input(ty(dtype, &shape));
+                let p = apply(&mut g, Mul, &[x, x]);
+                let sum = ReduceSum {
+                    axes: axes.clone(),
+                    accum_dtype,
+                };
+                let r = apply(&mut g, sum, &[p]);
+                g.set_outputs(&[r]).unwrap();
+                let fused = fuse(&g);
+                let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+                    panic!("{fused}")
+                };
+                let source = codegen::kernel(body, &[]).1;
+                match accum_dtype {
+                    // Widened as read: the reduction is float throughout.
+                    DType::F32 => {
+                        let (t, a) = (metal_type(dtype), "float");
+                        // The template accumulating in float, writing float.
+                        for part in [
+                            format!("<Add, {a}>("),
+                            format!("device {a} *out"),
+                            format!("inline {t} operator[]"),
+                        ] {
+                            assert!(source.contains(&part), "{part}: {source}");
+                        }
+                    }
+                    _ => assert!(!mentions(&source, "float"), "{source}"),
+                }
+            }
         }
     }
     // An RMS norm in float16: its row kernel, and softmax's kernel.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F16, &[8, 300]));
     let sq = apply(&mut g, Mul, &[x, x]);
-    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F16,
+        },
+        &[sq],
+    );
     let b = BroadcastInDim {
         shape: vec![8, 300],
         broadcast_dimensions: vec![0],
@@ -695,7 +732,10 @@ fn reductions_fuse_their_inputs() {
                 let p = apply(&mut g, Mul, &[x, y]);
                 let n = apply(&mut g, Neg, &[p]);
                 let r = match sum {
-                    true => ReduceSum { axes: axes.clone() },
+                    true => ReduceSum {
+                        axes: axes.clone(),
+                        accum_dtype: dtype,
+                    },
                     false => ReduceMax { axes: axes.clone() },
                 };
                 let r = apply(&mut g, r, &[n]);
@@ -747,7 +787,14 @@ fn reduction_inputs_shared_with_other_readers() {
     );
     let d = apply(&mut g, Sub, &[s, m]);
     let e = apply(&mut g, Exp, &[d]);
-    let z = apply(&mut g, ReduceSum { axes: vec![1] }, &[e]);
+    let z = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[e],
+    );
     let z = apply(
         &mut g,
         BroadcastInDim {
@@ -784,7 +831,14 @@ fn multi_output_fusion() {
         let y = g.input(ty(DType::F32, &shape));
         let p = apply(&mut g, Mul, &[x, y]);
         let e = apply(&mut g, Exp, &[p]);
-        let s = apply(&mut g, ReduceSum { axes: axes.clone() }, &[e]);
+        let s = apply(
+            &mut g,
+            ReduceSum {
+                axes: axes.clone(),
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        );
         let n = apply(&mut g, Neg, &[e]);
         g.set_outputs(&[s, n]).unwrap();
         let inputs = [data(&shape, 1), data(&shape, 2)];
@@ -822,7 +876,14 @@ fn multi_output_fusion() {
         },
         &[e],
     );
-    let second = apply(&mut g, ReduceSum { axes: vec![0] }, &[t]);
+    let second = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![0],
+            accum_dtype: DType::F32,
+        },
+        &[t],
+    );
     g.set_outputs(&[first, second]).unwrap();
     // The max hosts it; the sum reads its transpose.
     let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
@@ -914,7 +975,14 @@ fn rms_norms_are_one_row_kernel() {
         let w = g.input(ty(DType::F32, &[300]));
         let pair = |a, b| if flip { [b, a] } else { [a, b] };
         let sq = apply(&mut g, Mul, &[x, x]);
-        let sum = apply(&mut g, ReduceSum { axes: vec![axis] }, &[sq]);
+        let sum = apply(
+            &mut g,
+            ReduceSum {
+                axes: vec![axis],
+                accum_dtype: DType::F32,
+            },
+            &[sq],
+        );
         let mut kept = vec![8, 300];
         kept[axis] = 1;
         let sum = apply(
@@ -1000,7 +1068,14 @@ fn rms_norms_without_epsilon_are_one_row_kernel() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8, 300]));
     let sq = apply(&mut g, Mul, &[x, x]);
-    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[sq],
+    );
     let sum = apply(
         &mut g,
         Reshape {
@@ -1097,7 +1172,14 @@ fn rms_norm_row_kernels_fuse_their_input() {
     let w = g.input(ty(DType::F32, &[300]));
     let h = apply(&mut g, Add, &[x, y]);
     let sq = apply(&mut g, Mul, &[h, h]);
-    let sum = apply(&mut g, ReduceSum { axes: vec![1] }, &[sq]);
+    let sum = apply(
+        &mut g,
+        ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        },
+        &[sq],
+    );
     let sum = apply(
         &mut g,
         Reshape {

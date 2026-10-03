@@ -132,7 +132,7 @@ fn rms_norm(graph: &Graph, matcher: &Matcher, m: &Match) -> Option<()> {
         }
     };
     let ok = matches!(x.dtype, DType::F16 | DType::BF16 | DType::F32)
-        && sum.primitive == (Primitive::ReduceSum { axes: vec![last] })
+        && matches!(&sum.primitive, Primitive::ReduceSum { axes, .. } if *axes == [last])
         && r.shape == kept
         && matcher.scalar(m.get(N)) == Some(n as f64)
         && m.captures[ONE].is_none_or(|one| matcher.scalar(one) == Some(1.0))

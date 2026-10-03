@@ -100,8 +100,9 @@ pub(crate) fn encode(
 /// reduction's partials.
 pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
     match p {
-        Primitive::ReduceSum { axes } | Primitive::ReduceMax { axes } => {
-            super::reduce::mps::scratch_bytes(inputs[0], axes)
+        Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+            let accum = super::reduce::mps::accum_dtype(p, inputs[0].dtype);
+            super::reduce::mps::scratch_bytes(inputs[0], axes, accum)
         }
         Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
         _ => 0,

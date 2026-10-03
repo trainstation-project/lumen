@@ -98,10 +98,33 @@ fn softmax_rules() {
 #[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
-    let sum = ReduceSum { axes: vec![0, 2] };
+    let sum = ReduceSum {
+        axes: vec![0, 2],
+        accum_dtype: DType::F32,
+    };
     assert_eq!(infer(sum, std::slice::from_ref(&x)).unwrap().shape, [3]);
     assert!(infer(ReduceMax { axes: vec![3] }, std::slice::from_ref(&x)).is_err());
     assert!(infer(ReduceMax { axes: vec![1, 1] }, &[x]).is_err());
+    // A sum accumulates in its accum_dtype, its result's: the operand's,
+    // or float32 for narrower floats.
+    let sum = |accum_dtype| ReduceSum {
+        axes: vec![0],
+        accum_dtype,
+    };
+    let wide = infer(sum(DType::F32), &[ty(DType::BF16, &[4])]).unwrap();
+    assert_eq!(wide.dtype, DType::F32);
+    for (d, accum) in [
+        (DType::F32, DType::F16),
+        (DType::F32, DType::F64),
+        (DType::I8, DType::I32),
+    ] {
+        let e = infer(sum(accum), &[ty(d, &[4])]).unwrap_err();
+        assert!(e.contains("accum_dtype"), "{e}");
+    }
+    assert_eq!(
+        sum(DType::F32).to_string(),
+        "reduce_sum[axes=(0,) accum_dtype=f32]"
+    );
 }
 
 #[test]
@@ -198,11 +221,19 @@ fn layout_primitives() {
 fn display_is_jaxpr_like() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[2, 3]));
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[x]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[x],
+        )
+        .unwrap();
     g.set_outputs(&[s]).unwrap();
     assert_eq!(
         g.to_string(),
-        "{ lambda %0:f32[2,3]. let\n    %1:f32[2] = reduce_sum[axes=(1,)] %0\n  in (%1) }"
+        "{ lambda %0:f32[2,3]. let\n    %1:f32[2] = reduce_sum[axes=(1,) accum_dtype=f32] %0\n  in (%1) }"
     );
     assert!(g.apply(Neg, &[7]).is_err());
 }
@@ -235,7 +266,15 @@ fn softmax_graph() {
     let m = g.apply(bcast.clone(), &[m]).unwrap();
     let e = g.apply(Sub, &[x, m]).unwrap();
     let e = g.apply(Exp, &[e]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     let s = g.apply(bcast, &[s]).unwrap();
     let y = g.apply(Div, &[e, s]).unwrap();
     g.set_outputs(&[y]).unwrap();
@@ -400,7 +439,15 @@ pub(crate) fn mlp() -> Graph {
     let m = g.apply(bcast.clone(), &[m]).unwrap();
     let e = g.apply(Sub, &[z, m]).unwrap();
     let e = g.apply(Exp, &[e]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     let s = g
         .apply(
             Reshape {
@@ -583,7 +630,15 @@ fn kernel_scratch_is_placed_in_the_workspace() {
     let mut g = Graph::new();
     let x = g.input(TensorType::new(DType::F32, &[4, 64]));
     let e = g.apply(Exp, &[x]).unwrap();
-    let s = g.apply(ReduceSum { axes: vec![1] }, &[e]).unwrap();
+    let s = g
+        .apply(
+            ReduceSum {
+                axes: vec![1],
+                accum_dtype: DType::F32,
+            },
+            &[e],
+        )
+        .unwrap();
     g.set_outputs(&[s]).unwrap();
     let options = super::PlanOptions {
         scratch: Some(|p, _, _| {
@@ -757,7 +812,7 @@ pub(crate) mod mps {
         g.set_outputs(&[out]).unwrap();
         // A 16-bit float sum or dot: on values it sums exactly.
         let count: Option<usize> = match &p {
-            ReduceSum { axes } => Some(axes.iter().map(|&d| types[0].shape[d]).product()),
+            ReduceSum { axes, .. } => Some(axes.iter().map(|&d| types[0].shape[d]).product()),
             DotGeneral {
                 lhs_contracting, ..
             } => Some(lhs_contracting.iter().map(|&d| types[0].shape[d]).product()),
@@ -900,8 +955,19 @@ pub(crate) mod mps {
                     // representable values, check_node_within).
                     let count: usize = axes.iter().map(|&d| shape[d]).product();
                     let slack = 1e-6 * 4.0 * count as f64;
-                    let sum = ReduceSum { axes: axes.clone() };
+                    let sum = ReduceSum {
+                        axes: axes.clone(),
+                        accum_dtype: dtype,
+                    };
                     check_node_within(sum, std::slice::from_ref(&x), slack);
+                    // 16-bit floats accumulated in float32: on any values.
+                    if matches!(dtype, DType::F16 | DType::BF16) {
+                        let wide = ReduceSum {
+                            axes: axes.clone(),
+                            accum_dtype: DType::F32,
+                        };
+                        check_node_within(wide, std::slice::from_ref(&x), slack);
+                    }
                 }
             }
         }
@@ -917,7 +983,13 @@ pub(crate) mod mps {
             for axes in [vec![1], vec![0, 2], vec![0, 1, 2], vec![]] {
                 check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
                 if dtype != DType::Bool {
-                    check_node(ReduceSum { axes }, std::slice::from_ref(&x));
+                    check_node(
+                        ReduceSum {
+                            axes,
+                            accum_dtype: dtype,
+                        },
+                        std::slice::from_ref(&x),
+                    );
                 }
             }
             if dtype == DType::Bool {

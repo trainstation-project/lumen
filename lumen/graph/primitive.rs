@@ -32,8 +32,12 @@ pub enum Primitive {
     },
     /// `select(pred, on_true, on_false)`, elementwise.
     Select,
+    /// The sum over `axes`, accumulated in `accum_dtype`, the result's
+    /// dtype: the operand's, or float32 for floats narrower than it (each
+    /// element widened exactly), as [`Primitive::DotGeneral`].
     ReduceSum {
         axes: Vec<usize>,
+        accum_dtype: DType,
     },
     ReduceMax {
         axes: Vec<usize>,
@@ -209,17 +213,22 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            ReduceSum { axes } | ReduceMax { axes } => {
+            ReduceSum { axes, .. } | ReduceMax { axes } => {
                 let x = args[0];
                 check_dims(axes, x.shape.len(), "axes").map_err(prefix)?;
-                if matches!(self, ReduceSum { .. }) && x.dtype == DType::Bool {
-                    return err("does not take bool operands".into());
+                let mut dtype = x.dtype;
+                if let ReduceSum { accum_dtype, .. } = self {
+                    if x.dtype == DType::Bool {
+                        return err("does not take bool operands".into());
+                    }
+                    check_accum(x, *accum_dtype).map_err(prefix)?;
+                    dtype = *accum_dtype;
                 }
                 let shape: Vec<usize> = (0..x.shape.len())
                     .filter(|d| !axes.contains(d))
                     .map(|d| x.shape[d])
                     .collect();
-                Ok(TensorType::new(x.dtype, &shape))
+                Ok(TensorType::new(dtype, &shape))
             }
             DotGeneral {
                 lhs_contracting,
@@ -234,16 +243,8 @@ impl Primitive {
                         "operands must share a non-bool dtype, got {lhs} and {rhs}"
                     ));
                 }
+                check_accum(lhs, *accum_dtype).map_err(prefix)?;
                 let accum = *accum_dtype;
-                // Floats narrower than float32 may widen to it.
-                let widened = lhs.dtype.is_float()
-                    && lhs.dtype.size_of() < DType::F32.size_of()
-                    && accum == DType::F32;
-                if accum != lhs.dtype && !widened {
-                    return err(format!(
-                        "accumulates in the operands' dtype, or float32 for narrower floats: got accum_dtype {accum} for {lhs}"
-                    ));
-                }
                 let lhs_dims = [lhs_batch.as_slice(), lhs_contracting].concat();
                 let rhs_dims = [rhs_batch.as_slice(), rhs_contracting].concat();
                 check_dims(&lhs_dims, lhs.shape.len(), "lhs dimensions").map_err(prefix)?;
@@ -416,6 +417,19 @@ impl fmt::Display for Tuple<'_> {
     }
 }
 
+/// Ok if a sum of elements of `x` may accumulate in `accum`: its dtype, or
+/// float32 for floats narrower than it (fp16, bf16, later fp8 and fp4).
+fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
+    let widened =
+        x.dtype.is_float() && x.dtype.size_of() < DType::F32.size_of() && accum == DType::F32;
+    match accum == x.dtype || widened {
+        true => Ok(()),
+        false => Err(format!(
+            "accumulates in the operand's dtype, or float32 for narrower floats: got accum_dtype {accum} for {x}"
+        )),
+    }
+}
+
 /// Ok, unless `x` is bfloat16: no device computes exp, log, sqrt, tanh or
 /// logistic in it (Metal's take and return float), and a program is run as
 /// traced, never in another dtype; it computes them in float32 itself.
@@ -439,7 +453,10 @@ impl fmt::Display for Primitive {
         f.write_str(self.name())?;
         match self {
             ConvertElementType { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
-            ReduceSum { axes } | ReduceMax { axes } => write!(f, "[axes={}]", Tuple(axes)),
+            ReduceSum { axes, accum_dtype } => {
+                write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
+            }
+            ReduceMax { axes } => write!(f, "[axes={}]", Tuple(axes)),
             DotGeneral {
                 lhs_contracting,
                 rhs_contracting,

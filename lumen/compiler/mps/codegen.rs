@@ -98,7 +98,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     let first_arg = io_params(body, by_value, t).1;
     let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", first_arg + k);
     let (op, axes) = match &root.primitive {
-        Primitive::ReduceSum { axes } => ("Add", axes),
+        Primitive::ReduceSum { axes, .. } => ("Add", axes),
         Primitive::ReduceMax { axes } => ("Max", axes),
         _ => {
             // Softmax over the last dimension: a threadgroup a row.
@@ -116,14 +116,16 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             ));
         }
     };
-    let shared = format!("threadgroup {t} shared[REDUCE_THREADS];");
-    // The output (a split reduction's partials too) is of the input's type.
+    // Accumulated in the output's type (reduce_sum's accum_dtype), as are a
+    // split reduction's partials: each element widened as read.
+    let a = metal_type(body.type_of(root.output).dtype);
+    let shared = format!("threadgroup {a} shared[REDUCE_THREADS];");
     let (args, call) = match reduce::layout(ty, axes) {
         reduce::Layout::Rows => {
             let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
             let call = format!(
-                "{shared}\n    reduce_rows<{op}, {t}, {t}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
+                "{shared}\n    reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x);"
             );
             (args, call)
         }
@@ -137,12 +139,12 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             .join(", ")
                 + ", uint i [[thread_position_in_grid]]";
             let call =
-                format!("reduce_cols<{op}, {t}, {t}>(input, out, cols, count, chunk, chunks, i);");
+                format!("reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i);");
             (args, call)
         }
         reduce::Layout::Grouped => {
             let args = [
-                arg(0, &format!("{t} &init")),
+                arg(0, &format!("{a} &init")),
                 arg(1, "uint &nk"),
                 arg(2, "ulong *ksizes"),
                 arg(3, "ulong *kstrides"),
@@ -156,7 +158,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             .join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
             let call = format!(
-                "{shared}\n    reduce_grouped<{op}, {t}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x);"
+                "{shared}\n    reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x);"
             );
             (args, call)
         }
@@ -165,7 +167,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     named(format!(
         "struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n",
         emitter.lines,
-        io_params(body, by_value, t).0,
+        io_params(body, by_value, a).0,
         members.join(", "),
     ))
 }
@@ -341,12 +343,17 @@ fn row_kernel(body: &Graph, by_value: &[bool], reductions: &[&Node]) -> (String,
             "a reduction of rows"
         );
         let op = functor_of_reduction(&r.primitive);
-        let a = metal_type(x.dtype);
+        // Accumulated in the reduction's output type (reduce_sum's
+        // accum_dtype): each element widened as read.
+        let a = metal_type(body.type_of(r.output).dtype);
         let (value, stores) = pass(&mut e, k);
-        let rt = metal_type(body.type_of(r.output).dtype);
+        let value = match body.type_of(r.output).dtype == x.dtype {
+            true => value,
+            false => format!("{a}({value})"),
+        };
         write!(
             source,
-            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {rt} r{k} = shared{k}[0];\n",
+            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n",
             hoisted(&e.hoisted),
             e.lines
         )
@@ -737,7 +744,7 @@ fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
 }
 
 /// The Metal type of `dtype`'s elements.
-fn metal_type(dtype: DType) -> &'static str {
+pub(super) fn metal_type(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool => "bool",
         DType::U8 => "uchar",

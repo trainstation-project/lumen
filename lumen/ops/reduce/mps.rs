@@ -84,10 +84,13 @@ pub(crate) fn encode_reduction(
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let (ReduceSum { axes } | ReduceMax { axes }) = op else {
+    let (ReduceSum { axes, .. } | ReduceMax { axes }) = op else {
         unreachable!("a reduction")
     };
-    let (op_name, dtype) = (op.name(), x.dtype);
+    let (op_name, accum) = (op.name(), accum_dtype(op, x.dtype));
+    // Kernels are named after the input's dtype, then the accumulation's
+    // if another (reduce_sum_rows_bf16_f32).
+    let dtype = kernel_dtype(x.dtype, accum);
     let kernel = |own: String| fused.map_or(own, str::to_owned);
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
@@ -97,7 +100,7 @@ pub(crate) fn encode_reduction(
     let layout = layout(x, &reduced);
     if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
-            op_name, name, x, &reduced, fused, inputs, output, extra, scalars, scratch, keep,
+            op_name, name, x, accum, &reduced, fused, inputs, output, extra, scalars, scratch, keep,
         );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
@@ -107,14 +110,14 @@ pub(crate) fn encode_reduction(
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
     let init = match op {
         ReduceSum { .. } => Scalar::Int(0),
-        _ => lowest(dtype),
+        _ => lowest(accum),
     };
     let count: usize = reduced.iter().map(|&d| x.shape[d]).product();
     let outputs: usize = kept.iter().map(|&d| x.shape[d]).product();
     let reduced_sizes = reduced.iter().map(|&d| x.shape[d]);
     let reduced_strides = reduced.iter().map(|&d| strides[d]);
     let mut args = vec![
-        element_arg(dtype, init),
+        element_arg(accum, init),
         u32_arg(kept.len() as u32),
         dims_arg(kept.iter().map(|&d| x.shape[d])),
         dims_arg(kept.iter().map(|&d| strides[d])),
@@ -123,7 +126,7 @@ pub(crate) fn encode_reduction(
     let (kernel, grid) = if let Layout::Grouped = layout {
         // About 32 bytes a lane: enough lanes to read the elements
         // coalesced, few enough that each lane's loads stay in flight.
-        let per_lane = (LANE_BYTES / dtype.size_of()).max(1);
+        let per_lane = (LANE_BYTES / x.dtype.size_of()).max(1);
         let lanes = count
             .div_ceil(per_lane)
             .next_power_of_two()
@@ -216,9 +219,27 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     }
 }
 
-/// The scratch a reduction of `x` over `axes` needs: a split reduction's
-/// partials (none for the others).
-pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
+/// The dtype reduction `op` of elements of `dtype` accumulates in, its
+/// result's: reduce_sum's `accum_dtype`, else `dtype`.
+pub(crate) fn accum_dtype(op: &Primitive, dtype: DType) -> DType {
+    match op {
+        ReduceSum { accum_dtype, .. } => *accum_dtype,
+        _ => dtype,
+    }
+}
+
+/// The dtype part of a reduction kernel's name: `x`'s, then the
+/// accumulation's if another (`bf16_f32`).
+fn kernel_dtype(x: DType, accum: DType) -> String {
+    match x == accum {
+        true => x.to_string(),
+        false => format!("{x}_{accum}"),
+    }
+}
+
+/// The scratch a reduction of `x` over `axes`, accumulating in `accum`,
+/// needs: a split reduction's partials, of `accum` (none for the others).
+pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usize {
     let mut reduced = axes.to_vec();
     reduced.sort_unstable();
     if !reduced.windows(2).all(|w| w[1] == w[0] + 1) {
@@ -228,7 +249,7 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize]) -> usize {
     if chunks == 1 || a * b == 0 {
         return 0;
     }
-    a * chunks * b * x.dtype.size_of()
+    a * chunks * b * accum.size_of()
 }
 
 /// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]:
@@ -242,6 +263,7 @@ fn consecutive(
     op: &str,
     name: &'static str,
     x: &TensorType,
+    accum: DType,
     reduced: &[usize],
     fused: Option<&str>,
     inputs: &[*const u8],
@@ -258,7 +280,7 @@ fn consecutive(
         chunks,
         chunk,
     } = split(x, reduced);
-    let (dtype, rows) = (x.dtype, b == 1);
+    let (dtype, rows) = (kernel_dtype(x.dtype, accum), b == 1);
     if a * b == 0 {
         return Ok(());
     }
@@ -325,6 +347,7 @@ fn consecutive(
         chunks,
         keep.clone(),
     )?;
-    let kernel = format!("{op}_{layout}_{dtype}");
+    // The partials, of the accumulation dtype, reduced in it.
+    let kernel = format!("{op}_{layout}_{accum}");
     pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep)
 }
