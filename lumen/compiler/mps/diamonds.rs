@@ -233,7 +233,10 @@ impl<'a> Finder<'a> {
         let along = axes.as_slice() == [last]
             && self.graph.type_of(x).shape == ty.shape
             && self.graph.type_of(nodes[b].output).shape == ty.shape
-            && !broadcast_dimensions.contains(&last)
+            && broadcast_dimensions.iter().enumerate().all(|(k, &d)| {
+                // Along the last dimension only from a size-1 one (keepdim).
+                d != last || self.graph.type_of(nodes[b].inputs[0]).shape[k] == 1
+            })
             && self.graph.type_of(nodes[b].inputs[0]).numel() == rows;
         let single =
             |n: usize| self.readers[nodes[n].output].len() == 1 && !self.output[nodes[n].output];
@@ -257,10 +260,7 @@ impl<'a> Finder<'a> {
         // Then further back, through elementwise nodes read only inside it
         // (a softmax's exp, read by its sum and its division): its producer
         // can be an earlier diamond's root.
-        loop {
-            let Some(k) = self.producer[producer] else {
-                break;
-            };
+        while let Some(k) = self.producer[producer] {
             let node = &nodes[k];
             let mut inside = inner.clone();
             inside.push(i);

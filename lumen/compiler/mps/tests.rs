@@ -84,20 +84,11 @@ fn fuses_elementwise_and_layout_chains() {
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
-    // relu's max and its zero; softmax's max; its broadcast max, sub and
-    // exp with the sum, which writes the exp too; then its broadcast sum and
-    // divide.
+    // relu's max and its zero; then the softmax written out, a chain of
+    // two diamonds (its max, then its sum): one row kernel.
     assert_eq!(
         fused_primitives(&mlp(), &inputs),
-        [
-            "dot_general",
-            "fusion",
-            "dot_general",
-            "reduce_max",
-            "fusion",
-            "fusion_output",
-            "fusion"
-        ]
+        ["dot_general", "fusion", "dot_general", "fusion"]
     );
 }
 
@@ -836,10 +827,11 @@ fn reductions_apply_their_epilogue() {
     }
 }
 
-/// A value read by a reduction and by another fusion is computed in each
-/// when cheap; an expensive one (exp) with two readers is stored once.
+/// A softmax written out, its values read by its two reductions and its
+/// division (the scaled input, the exp): a chain of diamonds, one row
+/// kernel, nothing stored between them.
 #[test]
-fn reduction_inputs_shared_with_other_readers() {
+fn softmax_written_out_is_one_row_kernel() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 16]));
     let half = Full {
@@ -878,10 +870,16 @@ fn reduction_inputs_shared_with_other_readers() {
     );
     let y = apply(&mut g, Div, &[e, z]);
     g.set_outputs(&[y]).unwrap();
-    // The scale fuses into the max and into the sum, which also writes the
-    // exp (its input, which the division reads too): a multi-output fusion.
+    // A softmax written out: a chain of two diamonds (the max, then the sum
+    // of the exp the division reads too), with the scale: one row kernel,
+    // both reductions inside.
     let fused = fused_primitives(&g, &[data(&[4, 16], 1)]);
-    assert_eq!(fused, ["fusion", "fusion", "fusion_output", "fusion"]);
+    assert_eq!(fused, ["fusion"]);
+    let fused = fuse(&g);
+    let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+        unreachable!("a fusion")
+    };
+    assert_eq!(codegen::row_reductions(body).len(), 2);
     if available() {
         check(&g, &[values(DType::F32, &[4, 16], 1)]);
     }
@@ -1085,8 +1083,9 @@ fn rms_norms_are_one_row_kernel() {
         !rewritten(&build(true, false, 300.0, 1, true)),
         "a read intermediate"
     );
+    // Any divisor (a sum's scale, not a mean's) is a diamond too.
     assert!(
-        !rewritten(&build(true, false, 299.0, 1, false)),
+        rewritten(&build(true, false, 299.0, 1, false)),
         "not a mean"
     );
     assert!(
