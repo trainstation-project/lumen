@@ -184,3 +184,24 @@ def test_ones_is_float32_by_default_like_torch():
     assert Tensor.ones([2]).tolist() == [1.0, 1.0]
     assert lumen.ones([2], dtype=lumen.int64).dtype == "int64"
     assert lumen.ones([2], dtype=lumen.bool).tolist() == [True, True]
+
+
+def test_to_converts_dtypes_and_moves():
+    """``to(device=None, dtype=None)``: a conversion as
+    ``convert_element_type`` converts, on the tensor's device; the same
+    storage when nothing changes."""
+    x = lumen.tensor([1.0, 2.5, -3.7, 1e6])
+    b = x.to(dtype=lumen.bfloat16)
+    assert b.dtype == "bfloat16" and b.to(dtype="float32").tolist() == [1.0, 2.5, -3.703125, 999424.0]
+    assert x.to(dtype="int32").tolist() == [1, 2, -3, 1000000]
+    assert x.to(dtype="float32").shares_storage_with(x) and x.to("cpu").shares_storage_with(x)
+    meta = x.to("meta", "float16")
+    assert (meta.device, meta.dtype) == ("meta", "float16")
+    with pytest.raises(ValueError, match="device"):
+        x.to("float16")  # a device, positionally
+    try:
+        m = x.to("mps", lumen.float16)
+    except RuntimeError:
+        return
+    assert (m.device, m.dtype) == ("mps", "float16")
+    assert m.to("cpu", "float32").tolist() == [1.0, 2.5, -3.69921875, float("inf")]

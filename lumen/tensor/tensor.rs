@@ -448,6 +448,24 @@ impl Tensor {
         recorded(op, self.copy_to(device))
     }
 
+    /// This tensor's elements converted to `dtype`, in new storage on its
+    /// device (PyTorch: `Tensor.to(dtype)`), as the `convert_element_type`
+    /// primitive converts them: a one-step graph, compiled for the device
+    /// and run on its kernels. Itself if it is already `dtype`.
+    pub fn to_dtype(&self, dtype: DType) -> Result<Self, String> {
+        if dtype == self.dtype {
+            return Ok(self.clone());
+        }
+        let mut g = crate::graph::Graph::new();
+        let x = g.input(self.ty());
+        let convert = crate::graph::Primitive::ConvertElementType { new_dtype: dtype };
+        let y = g.apply(convert, &[x])?;
+        g.set_outputs(&[y])?;
+        let device = self.device();
+        let plan = crate::compiler::compile(&g, device)?;
+        Ok(plan.run_on(std::slice::from_ref(self), device)?.remove(0))
+    }
+
     /// [`to`](Self::to) without the profiler record: the storage range the
     /// view covers, copied to fresh storage on `device` with the copy ops
     /// (through the host between two devices).
