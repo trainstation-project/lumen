@@ -155,6 +155,45 @@ impl PyGraph {
         map
     }
 
+    /// The attentions traced so far (the compiler's matcher, as it runs
+    /// them as flash attention), each a dict: its dots' operands `q`, `k`,
+    /// `v` (values), its `scores` (the first dot's) and `out` (the second
+    /// dot's), the softmax's `max` and `sum`, the score's `chain`
+    /// (`("round", dtype)` or `("mul", c, dtype)`, in order, from the dot's
+    /// rounding), the `causal` offset (key `j` seen by query `i` iff
+    /// `j <= i + causal`) or None, and its `members`: the values it
+    /// computes from the operands to the output.
+    fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        use crate::compiler::attention::{Score, traced};
+        let nodes = self.inner.nodes();
+        traced(&self.inner)
+            .into_iter()
+            .map(|(a, members)| {
+                let d = PyDict::new(py);
+                let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
+                d.set_item("q", d1.inputs[0])?;
+                d.set_item("k", d1.inputs[1])?;
+                d.set_item("v", d2.inputs[1])?;
+                d.set_item("scores", d1.output)?;
+                d.set_item("out", d2.output)?;
+                d.set_item("max", a.max)?;
+                d.set_item("sum", a.sum)?;
+                let chain: Vec<Bound<'py, PyAny>> = a
+                    .scores
+                    .iter()
+                    .map(|s| match *s {
+                        Score::Round(t) => ("round", dtype_name(t)).into_pyobject(py).map(|t| t.into_any()),
+                        Score::Mul(c, t) => ("mul", c, dtype_name(t)).into_pyobject(py).map(|t| t.into_any()),
+                    })
+                    .collect::<PyResult<_>>()?;
+                d.set_item("chain", chain)?;
+                d.set_item("causal", a.causal)?;
+                d.set_item("members", members)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// See [`crate::graph::Graph::precision_warnings`].
     fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()

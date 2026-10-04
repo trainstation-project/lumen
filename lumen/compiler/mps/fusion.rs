@@ -13,6 +13,7 @@
 //! consumers read its output. Contractions are never fused.
 
 use super::diamonds::Row;
+pub(super) use crate::compiler::{constant, elementwise};
 use crate::DType;
 use crate::compiler::CompilerConfig;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
@@ -488,44 +489,3 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
     false
 }
 
-/// Whether `p` computes each element from its operands' elements at the
-/// same index.
-pub(super) fn elementwise(p: &Primitive) -> bool {
-    use Primitive::*;
-    matches!(
-        p,
-        Add | Sub
-            | Mul
-            | Div
-            | Max
-            | Eq
-            | Lt
-            | Neg
-            | Exp
-            | Log
-            | Sqrt
-            | Tanh
-            | Logistic
-            | Cast { .. }
-            | Select
-    )
-}
-
-/// Whether value `v` is the same everywhere and known when compiling: a
-/// `full`, perhaps through elementwise and layout primitives of such
-/// values (no input, iota or reduction).
-pub(super) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
-    use Primitive::*;
-    let Some(p) = producer[v] else {
-        return false;
-    };
-    let node = &graph.nodes()[p];
-    match node.primitive {
-        Full { .. } => true,
-        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
-            constant(graph, producer, node.inputs[0])
-        }
-        ref p if elementwise(p) => node.inputs.iter().all(|&u| constant(graph, producer, u)),
-        _ => false,
-    }
-}

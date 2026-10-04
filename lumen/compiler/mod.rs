@@ -9,6 +9,9 @@
 //! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.
 
+// Used by the MPS backend (its fusions) and the tracer (`Graph.attentions`).
+#[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
+pub(crate) mod attention;
 pub mod config;
 mod cse;
 #[cfg(lumen_mps_linked)]
@@ -19,7 +22,7 @@ pub(crate) mod python;
 mod tests;
 
 use crate::Device;
-use crate::graph::{Graph, Plan, PlanOptions};
+use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
 
 pub use config::CompilerConfig;
 
@@ -83,4 +86,48 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
 /// The positions `mask` holds.
 fn positions(mask: &[bool]) -> Vec<usize> {
     (0..mask.len()).filter(|&i| mask[i]).collect()
+}
+
+/// Whether `p` computes each element from its operands' elements at the
+/// same index.
+#[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
+pub(crate) fn elementwise(p: &Primitive) -> bool {
+    use Primitive::*;
+    matches!(
+        p,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | Cast { .. }
+            | Select
+    )
+}
+
+/// Whether value `v` is the same everywhere and known when compiling: a
+/// `full`, perhaps through elementwise and layout primitives of such
+/// values (no input, iota or reduction).
+#[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
+pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
+    use Primitive::*;
+    let Some(p) = producer[v] else {
+        return false;
+    };
+    let node = &graph.nodes()[p];
+    match node.primitive {
+        Full { .. } => true,
+        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
+            constant(graph, producer, node.inputs[0])
+        }
+        ref p if elementwise(p) => node.inputs.iter().all(|&u| constant(graph, producer, u)),
+        _ => false,
+    }
 }

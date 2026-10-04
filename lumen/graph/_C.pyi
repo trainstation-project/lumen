@@ -18,6 +18,11 @@ class Graph:
     def type_of(self, var: int) -> tuple[str, list[int]]: ...
     def inputs(self) -> list[int]: ...
     def outputs(self) -> list[int]: ...
+    def attentions(self) -> list[dict[str, Any]]:
+        """The attentions traced so far, as the compiler matches them: each
+        dot's operands, output, the softmax's max and sum, the score chain,
+        the causal offset and the values it computes."""
+
     def prune(self) -> list[int | None]:
         """Remove the nodes no output depends on; each value's new number,
         or None if removed."""

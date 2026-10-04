@@ -8,7 +8,6 @@
 //! allocates. A fusion step runs its kernel ([`encode`]); the rest run the
 //! primitives' kernels ([`crate::ops::mps`]).
 
-mod attention;
 mod codegen;
 mod diamonds;
 mod fusion;
@@ -24,6 +23,7 @@ use self::merge_dots::merge_dots;
 use super::Options;
 use crate::Tensor;
 use crate::graph::plan::{Buffer, Step};
+use crate::compiler::attention;
 use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, scratch_bytes, u32_arg};
