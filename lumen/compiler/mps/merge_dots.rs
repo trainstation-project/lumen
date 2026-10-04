@@ -37,10 +37,22 @@ struct Group {
 /// among those `packable`) side by side along a dimension.
 pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<usize>, usize)>) {
     let nodes = graph.nodes();
-    // Each packable input read by one node alone: its position.
+    // Each packable input read by one node alone: its position. A
+    // concatenate of packable inputs alone does not count: if they merge,
+    // in its order and dimension, it is their block (a backward's, of the
+    // weights its dot's merged dots read, `lumen/autograd/dots.py`).
+    let is_packable = |v: Var| {
+        let i = graph.inputs().iter().position(|&i| i == v);
+        i.is_some_and(|i| packable.get(i) == Some(&true))
+    };
+    let of_inputs = |node: &Node| {
+        matches!(node.primitive, Primitive::Concatenate { .. })
+            && node.inputs.iter().all(|&v| is_packable(v))
+    };
     let mut reads = vec![0; graph.types.len()];
     for &v in nodes
         .iter()
+        .filter(|node| !of_inputs(node))
         .flat_map(|node| &node.inputs)
         .chain(graph.outputs())
     {
@@ -118,6 +130,9 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
     }
 
     let mut packs = Vec::new();
+    // Each merged group's block: its operands in order, its dimension, its
+    // input.
+    let mut blocks: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
     for &v in graph.inputs() {
@@ -143,6 +158,7 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
             ));
             let mut operands = [map[g.shared]; 2];
             operands[1 - g.side] = out.input(block);
+            blocks.push((others.clone(), g.dimension, operands[1 - g.side]));
             let result = out
                 .apply(g.primitive.clone(), &operands)
                 .expect("the dots' dimension numbers");
@@ -173,6 +189,16 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
             continue;
         }
         if merged[i] {
+            continue;
+        }
+        // A concatenate of a merged group's operands, as they are side by
+        // side: their block.
+        if let Primitive::Concatenate { dimension } = node.primitive
+            && let Some((_, _, block)) = blocks
+                .iter()
+                .find(|(others, d, _)| *others == node.inputs && *d == dimension)
+        {
+            map[node.output] = *block;
             continue;
         }
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();

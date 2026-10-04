@@ -435,3 +435,69 @@ def test_attention_read_elsewhere_keeps_autodiff():
         return F.sum(p @ q.transpose(1, 2)) + F.sum(p)
 
     assert "log" not in str(lumen.make_graph(lumen.grad(loss))(q))
+
+
+class _QKV(lumen.nn.Module):
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        return F.sum(F.relu(x @ self.wq) * (x @ self.wk) + (x @ self.wv))
+
+
+def _qkv_step(m, x):
+    loss = m(x)
+    loss.backward()
+    return loss, x.grad, [p.grad for p in m.parameters()]
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_dots_sharing_an_operand_are_differentiated_as_one(device):
+    """x @ wq, x @ wk, x @ wv run as one dot (merge_dots); before autodiff
+    they become one node (lumen/autograd/dots.py), differentiated as that
+    dot: x's gradient one dot of the cotangents side by side and the
+    weights' block, the weights' one dot. The weights' gradients and the
+    loss are exactly the unmerged ones; x's, one rounding instead of
+    three."""
+    rng = np.random.default_rng(0)
+    ws = [rng.standard_normal((32, 16)).astype(np.float32) * 0.1 for _ in range(3)]
+    x = rng.standard_normal((8, 32)).astype(np.float32)
+    results = []
+    for merge in (True, False):
+        lumen.config.compiler.merge_dots = merge
+        try:
+            model = _QKV(*(lumen.empty([32, 16], device="meta") for _ in range(3)))
+            f = lumen.compile(_qkv_step, device=device)
+            try:
+                f(model, lumen.empty([8, 32], device="meta"))
+            except RuntimeError as e:
+                pytest.skip(str(e))
+            model.load_state_dict(dict(zip(["wq", "wk", "wv"], map(lumen.from_numpy, ws))))
+            loss, gx, gw = f(model, lumen.from_numpy(x).to(device))
+            results.append([lumen.to_numpy(t) for t in (loss, gx, *gw)])
+            graph = str(lumen.make_graph(_qkv_step)(model, lumen.from_numpy(x)))
+            assert ("concatenate" in graph) == merge
+        finally:
+            lumen.config.compiler.reset()
+    (loss, gx, *gw), (loss_, gx_, *gw_) = results
+    np.testing.assert_array_equal(loss, loss_)
+    for a, b in zip(gw, gw_):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.mps
+def test_merged_dots_backward_plan():
+    """On MPS: the forward one dot of the packed weights; the cotangents
+    written side by side by the kernel writing them (the concatenate
+    fused, no copy); x's gradient one dot of the same block; the weights'
+    one dot."""
+    model = _QKV(*(lumen.empty([256, 128], device="meta") for _ in range(3)))
+    graph = lumen.make_graph(_qkv_step)(model, lumen.empty([64, 256], device="meta"))
+    params = list(range(1, len(graph.inputs())))
+    plan = lumen.graph.Plan(graph, "mps", parameters=params, packable=params)
+    labels = [s["label"] for s in plan.steps()]
+    assert plan.packed == [([1, 2, 3], 1)]
+    assert labels.count("3x dot_general") == 2 and "concatenate" not in labels, labels
+    assert any(label.endswith("→ concatenate") for label in labels), labels

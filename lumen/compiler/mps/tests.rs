@@ -1328,3 +1328,43 @@ fn rms_norm_row_kernels_fuse_their_input() {
         check(&g, &inputs);
     }
 }
+
+/// Dots whose epilogues meet (`relu(x @ w1) * (x @ w2) + (x @ w3)`): each
+/// node joins one dot's epilogue alone, the other dots' values its inputs,
+/// so no fusion computes two dots; as the reference computes it.
+#[test]
+fn dots_epilogues_do_not_overlap() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 16]));
+    let ws: Vec<Var> = (0..3).map(|_| g.input(ty(DType::F32, &[16, 12]))).collect();
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let ys: Vec<Var> = ws
+        .iter()
+        .map(|&w| apply(&mut g, dot.clone(), &[x, w]))
+        .collect();
+    let zero = Full {
+        shape: vec![8, 12],
+        fill_value: Scalar::Float(0.0),
+        dtype: DType::F32,
+    };
+    let zero = apply(&mut g, zero, &[]);
+    let r = apply(&mut g, Max, &[ys[0], zero]);
+    let m = apply(&mut g, Mul, &[r, ys[1]]);
+    let out = apply(&mut g, Add, &[m, ys[2]]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [
+        data(&[8, 16], 1),
+        data(&[16, 12], 2),
+        data(&[16, 12], 3),
+        data(&[16, 12], 4),
+    ];
+    let names = fused_primitives(&g, &inputs);
+    assert_eq!(names, ["dot_general", "dot_general", "fusion"], "{names:?}");
+}
