@@ -547,6 +547,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
     let options = super::PlanOptions {
         scratch: None,
         donate: vec![0],
+        donate_into: Vec::new(),
         parameters: None,
         views: Vec::new(),
         scalars: Vec::new(),
@@ -613,6 +614,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
         &super::PlanOptions {
             scratch: None,
             donate: vec![0],
+            donate_into: Vec::new(),
             parameters: None,
             views: Vec::new(),
             scalars: Vec::new(),
@@ -625,6 +627,43 @@ fn donated_inputs_hold_outputs_written_in_place() {
         .filter(|b| !matches!(b, Buffer::Workspace(_)))
         .collect();
     assert_eq!(outputs, [Buffer::Output(0), Buffer::Input(0)], "{plan}");
+}
+
+/// An input donated to one output (`donate_into`) holds that output alone:
+/// another of its type, which could take its memory (the input's last
+/// reader), takes new memory; without the pairing it would take the input's.
+#[test]
+fn inputs_donated_into_an_output_hold_it_alone() {
+    let ty = TensorType::new(DType::F32, &[2, 3]);
+    // new = exp(w), then later = w * w (w's last reader); new is w's.
+    let mut g = Graph::new();
+    let w = g.input(ty.clone());
+    let new = g.apply(Exp, &[w]).unwrap();
+    let later = g.apply(Mul, &[w, w]).unwrap();
+    g.set_outputs(&[later, new]).unwrap();
+    // Where each output is written: the step writing it's buffer.
+    let at = |options: &super::PlanOptions| {
+        let plan = Plan::compile_with(&g, options);
+        let written: Vec<Buffer> = plan.steps().iter().map(|s| s.output.0).collect();
+        (plan, written)
+    };
+    let (plan, written) = at(&super::PlanOptions {
+        donate: vec![0],
+        ..Default::default()
+    });
+    assert!(written.contains(&Buffer::Input(0)), "{plan}");
+    let (plan, written) = at(&super::PlanOptions {
+        donate_into: vec![(0, 1)],
+        ..Default::default()
+    });
+    assert!(!written.contains(&Buffer::Input(0)), "{plan}");
+    // new written before w's last read: it cannot take w's memory either.
+    let input = data(&[2, 3], 1);
+    let expected = reference::run(&g, std::slice::from_ref(&input)).unwrap();
+    let result = plan.run(std::slice::from_ref(&input)).unwrap();
+    for (e, r) in expected.iter().zip(&result) {
+        assert_eq!(e.to_vec::<f32>(), r.to_vec::<f32>());
+    }
 }
 
 #[test]
@@ -651,6 +690,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
             }
         }),
         donate: Vec::new(),
+        donate_into: Vec::new(),
         parameters: None,
         views: Vec::new(),
         scalars: Vec::new(),

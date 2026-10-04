@@ -153,8 +153,10 @@ def _trace(fn, args):
     ]
 
     sources = {}
+    arguments = [t for t in traced if isinstance(t, TracedTensor) and not t.weak]
     assigned = {sid: t.var for sid, t in weights.items()}
     assigned_scalars = [t.var for t in scalars]
+    assigned_arguments = [t.var for t in arguments]
     # Recorded from the start, for ``.backward()``.
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
@@ -175,15 +177,17 @@ def _trace(fn, args):
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
-    # A weight or a module's float ``fn`` assigned (``w.copy_(value)``):
-    # its new value is an output too, written back after each run (the
-    # float on the host).
+    # A weight, a module's float or a tensor argument ``fn`` assigned
+    # (``w.copy_(value)``, or through a view of it): its new value is an
+    # output too, written back after each run (the float on the host).
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
     written_scalars = [k for k, t in enumerate(scalars) if t.var != assigned_scalars[k]]
+    written_arguments = [k for k, t in enumerate(arguments) if t.var != assigned_arguments[k]]
     graph.set_outputs(
         [o.var for o in outputs]
         + [list(weights.values())[k].var for k in written]
         + [scalars[k].var for k in written_scalars]
+        + [arguments[k].var for k in written_arguments]
     )
     # Without the values no output depends on (an autodiff transform's
     # tangents its transpose does not read).
@@ -204,7 +208,7 @@ def _trace(fn, args):
             warnings.warn_explicit(message, UserWarning, *where)
         else:
             warnings.warn(message)
-    return graph, out, (written, written_scalars)
+    return graph, out, (written, written_scalars, written_arguments)
 
 
 def _lift(x):
@@ -340,17 +344,19 @@ def compile(fn, device=None):
         # A new plan: dots merged into blocks of weights while none of theirs
         # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
-        # The weights it assigns, donated: each new value written over its
-        # weight where nothing reads the old one after (in place: a cache's
-        # dynamic_update_slice), not copied back.
-        written, _ = plans[key][2]
-        donate = [len(tensors) + k for k in written]
-        plan = Plan(graph, target, donate=donate, parameters=params, packable=packable, scalars=scalars)
+        # The weights it assigns, each donated to its new value (an output
+        # after those it returns): written over the weight where nothing
+        # reads the old one after (in place: a cache's dynamic_update_slice),
+        # not copied back; no other output is written there.
+        written, written_scalars, written_arguments = plans[key][2]
+        returned = len(graph.outputs()) - len(written) - len(written_scalars) - len(written_arguments)
+        donate = [(len(tensors) + w, returned + j) for j, w in enumerate(written)]
+        plan = Plan(graph, target, donate_into=donate, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         entries.append((plan, workspace))
         placed = inputs_for(plan)
         if placed is None:
-            plan = Plan(graph, target, donate=donate, parameters=params, scalars=scalars)
+            plan = Plan(graph, target, donate_into=donate, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
             placed = inputs_for(plan)
         return graph, plan, workspace, out, placed
@@ -372,7 +378,7 @@ def compile(fn, device=None):
             # The weights it assigned, written back (functionalized: as
             # torch.compile does a mutation).
             weights = _weights(args)
-            written, written_scalars = plans[latest[0]][2]
+            written, written_scalars, written_arguments = plans[latest[0]][2]
             target = latest[0][1]
             for k, value in zip(written, outputs):
                 # Written over its memory already (donated), or copied.
@@ -383,6 +389,9 @@ def compile(fn, device=None):
             for k, value in zip(written_scalars, outputs):
                 (v,) = value.tolist()  # a 0-d tensor lists its one element
                 nn._set_float(args, k, float(v))
+            arguments = [a for a in args if isinstance(a, Tensor)]
+            for k, value in zip(written_arguments, outputs):
+                arguments[k].copy_(value)
         return result
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
@@ -621,16 +630,103 @@ def _true_div(x, y):
     return prims.div(_require_float(x, "true division (/)"), y)
 
 
+def _view(x, out, op):
+    """``out``, ``op`` (a reshape, permute or slice) of ``x``, as a view of
+    ``x``'s base: it reads the base's assignments (``copy_``), and its own
+    reach the base."""
+    base = x._base if x._base is not None else x
+    out._base, out._ops, out._seen = base, x._ops + (op,), base._version
+    return out
+
+
+def _strides(x):
+    """``x``'s strides as torch's view of its base (contiguous) would have
+    them: its ops' strides from the base's."""
+    base = x._base if x._base is not None else x
+    shape = list(base.shape)
+    strides = [math.prod(shape[d + 1 :]) for d in range(len(shape))]
+    for op in x._ops:
+        if op[0] == "reshape":
+            strides, shape = _reshape_strides(shape, strides, op[1]), list(op[1])
+        elif op[0] == "permute":
+            strides, shape = [strides[d] for d in op[1]], [shape[d] for d in op[1]]
+        else:
+            shape = [limit - start for start, limit in zip(op[1], op[2])]
+    return strides
+
+
+def _reshape_strides(shape, strides, new_shape):
+    """The strides of a view of ``new_shape`` of a tensor of ``shape`` at
+    ``strides``, or None if there is none (torch: ``computeStride``)."""
+    if not shape:
+        return [1] * len(new_shape)
+    if math.prod(shape) == 0:
+        return [math.prod(new_shape[d + 1 :]) for d in range(len(new_shape))]
+    new_strides = [0] * len(new_shape)
+    view_d = len(new_shape) - 1
+    # The stride of the last dimension of the chunk being matched (a run
+    # of contiguous dimensions), and the elements matched on each side.
+    chunk_stride, tensor_numel, view_numel = strides[-1], 1, 1
+    for d in range(len(shape) - 1, -1, -1):
+        tensor_numel *= shape[d]
+        if d == 0 or (shape[d - 1] != 1 and strides[d - 1] != tensor_numel * chunk_stride):
+            while view_d >= 0 and (view_numel < tensor_numel or new_shape[view_d] == 1):
+                new_strides[view_d] = view_numel * chunk_stride
+                view_numel *= new_shape[view_d]
+                view_d -= 1
+            if view_numel != tensor_numel:
+                return None
+            if d > 0:
+                chunk_stride, tensor_numel, view_numel = strides[d - 1], 1, 1
+    return new_strides if view_d == -1 else None
+
+
+def _apply(x, op):
+    """``op`` of ``x``: a view op, as recorded by ``_view``."""
+    if op[0] == "reshape":
+        return prims.reshape(x, op[1])
+    if op[0] == "permute":
+        return prims.transpose(x, op[1])
+    return prims.slice(x, op[1], op[2])
+
+
+def _derive(base, ops):
+    """The view ``ops`` derive from ``base``'s current value."""
+    for op in ops:
+        base = _apply(base, op)
+    return base
+
+
+def _scatter(x, ops, value):
+    """``x`` with the part ``ops`` derive from it replaced by ``value``: a
+    reshape's back, a permute's inverse, a slice's written at its start
+    (``dynamic_update_slice``)."""
+    if not ops:
+        return value
+    op = ops[0]
+    new = _scatter(_apply(x, op), ops[1:], value)
+    if op[0] == "reshape":
+        return prims.reshape(new, x.shape)
+    if op[0] == "permute":
+        return prims.transpose(new, sorted(range(len(op[1])), key=op[1].__getitem__))
+    return prims.dynamic_update_slice(x, new, op[1])
+
+
 class TracedTensor:
     """A value of the graph being traced, standing in for a tensor inside a
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "var", "dtype", "shape", "weak", "grad")
+    __slots__ = ("graph", "_var", "dtype", "shape", "weak", "grad", "_base", "_ops", "_seen", "_version")
 
     def __init__(self, graph, var):
         self.graph = graph
-        self.var = var
+        self._var = var
+        # A view's (torch's: ``reshape``, ``permute``, indexing): the tensor
+        # it is a view of and the ops deriving it from that, the base's
+        # version its value is of; a base's, how often it was assigned
+        # (``copy_``, its own or a view's).
+        self._base, self._ops, self._seen, self._version = None, (), 0, 0
         # A runtime scalar's (a float argument's): it takes its tensor
         # operand's dtype, as a Python scalar does.
         self.weak = False
@@ -639,6 +735,16 @@ class TracedTensor:
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)
+
+    @property
+    def var(self):
+        """Its value in the graph. A view's is derived again from its base's
+        once the base, or another of its views, is assigned (``copy_``),
+        as torch's view of a tensor modified in place reads the change."""
+        base = self._base
+        if base is not None and self._seen != base._version:
+            self._var, self._seen = _derive(base, self._ops).var, base._version
+        return self._var
 
     def __repr__(self):
         return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)})"
@@ -694,14 +800,147 @@ class TracedTensor:
 
     def copy_(self, value):
         """Assign ``value`` (of its type) to it, in place (torch's ``copy_``):
-        every reference to it reads ``value`` from here on. A module's
-        weight so assigned is written back into the weight after each call
-        of the compiled function (an optimizer's step)."""
+        every reference to it reads ``value`` from here on, and so does
+        every view of the same tensor (a view's part of its base). A
+        module's weight or a tensor argument so assigned is written back
+        into it after each call of the compiled function (an optimizer's
+        step)."""
         value = _lift(value)
         if not isinstance(value, TracedTensor) or (value.dtype, value.shape) != (self.dtype, self.shape):
             raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
-        self.var = value.var
+        # Functionalized (torch.compile's): a view's assignment is its
+        # base's, the view's part of it replaced (each view of the base
+        # derived again when read).
+        base = self._base
+        if base is None:
+            self._var = value.var
+            self._version += 1
+        else:
+            base._var = _scatter(base, self._ops, value).var
+            base._version += 1
+            self._var, self._seen = value.var, base._version
         return self
+
+    # -- in place (functionalized: each an out-of-place op, then ``copy_``) --
+
+    def _assign(self, value, op):
+        """Assign ``value``, ``op`` of it computed out of place, as torch's
+        in-place ``op``: of its shape (the other operand broadcast to it,
+        never it to the other's) and dtype."""
+        if value.shape != self.shape:
+            raise RuntimeError(
+                f"{op}: output with shape {list(self.shape)} doesn't match the broadcast shape {list(value.shape)}"
+            )
+        if value.dtype != self.dtype:
+            raise TypeError(f"{op}: result type {value.dtype} can't be cast to the desired output type {self.dtype}")
+        return self.copy_(value)
+
+    def add_(self, other, alpha=1):
+        return self._assign(self + (other if alpha == 1 else other * alpha), "add_")
+
+    def sub_(self, other, alpha=1):
+        return self._assign(self - (other if alpha == 1 else other * alpha), "sub_")
+
+    def mul_(self, other):
+        return self._assign(self * other, "mul_")
+
+    def div_(self, other):
+        return self._assign(self / other, "div_")
+
+    def neg_(self):
+        return self._assign(-self, "neg_")
+
+    def exp_(self):
+        return self._assign(prims.exp(_require_float(self, "exp_")), "exp_")
+
+    def log_(self):
+        return self._assign(prims.log(_require_float(self, "log_")), "log_")
+
+    def sqrt_(self):
+        return self._assign(prims.sqrt(_require_float(self, "sqrt_")), "sqrt_")
+
+    def tanh_(self):
+        return self._assign(prims.tanh(_require_float(self, "tanh_")), "tanh_")
+
+    def sigmoid_(self):
+        return self._assign(prims.logistic(_require_float(self, "sigmoid_")), "sigmoid_")
+
+    def relu_(self):
+        return self._assign(_elementwise(prims.max, self, 0), "relu_")
+
+    def clamp_(self, min=None, max=None):
+        if min is None and max is None:
+            raise RuntimeError("clamp_: at least one of 'min' or 'max' must not be None")
+        value = self if min is None else _elementwise(prims.max, self, min)
+        value = value if max is None else _elementwise(_min, value, max)
+        return self._assign(value, "clamp_")
+
+    def clamp_min_(self, min):
+        return self.clamp_(min=min)
+
+    def clamp_max_(self, max):
+        return self.clamp_(max=max)
+
+    def zero_(self):
+        return self.fill_(False if self.dtype == "bool" else 0)
+
+    def fill_(self, value):
+        value = _as_tensor(value, self.dtype, "fill_")
+        if value.shape != ():
+            raise RuntimeError(
+                f"fill_ only supports 0-dimension value tensor but got tensor with {value.ndim} dimensions."
+            )
+        return self._assign(_broadcast_to(value, self.shape), "fill_")
+
+    def masked_fill_(self, mask, value):
+        """``value`` where ``mask`` (a bool tensor broadcast to it)."""
+        mask = _lift(mask)
+        if not isinstance(mask, TracedTensor) or mask.dtype != "bool":
+            raise TypeError("masked_fill_ only supports boolean masks")
+        value = _broadcast_to(_as_tensor(value, self.dtype, "masked_fill_"), self.shape)
+        mask = _broadcast_to(mask, _broadcast_shapes(mask.shape, self.shape))
+        return self._assign(prims.select(mask, value, self), "masked_fill_")
+
+    # ``x += y``: in place (torch's), not ``x = x + y``.
+    def __iadd__(self, other):
+        return self.add_(other)
+
+    def __isub__(self, other):
+        return self.sub_(other)
+
+    def __imul__(self, other):
+        return self.mul_(other)
+
+    def __itruediv__(self, other):
+        return self.div_(other)
+
+    def __setitem__(self, key, value):
+        """``x[key] = value``: the indexed view of it assigned ``value`` (a
+        Python scalar, or a tensor of its dtype broadcast to the view)."""
+        view = self[key]
+        # ``y[k] += v``: Python's ``t = y[k]; t += v; y[k] = t``, t already
+        # written through (the same part of the same base, up to date).
+        base = view._base
+        if isinstance(value, TracedTensor) and value is not view and base is not None:
+            if value._base is base and value._ops == view._ops and value._seen == base._version:
+                return
+        value = _as_tensor(value, self.dtype, "index assignment")
+        if value.dtype != self.dtype:
+            raise TypeError(f"index assignment: got a {value.dtype} value for a {self.dtype} tensor")
+        # As torch: the value's leading size-1 dimensions dropped, then it
+        # broadcast to the view.
+        shape = value.shape
+        while len(shape) > view.ndim and shape[0] == 1:
+            shape = shape[1:]
+        try:
+            fits = len(shape) <= view.ndim and _broadcast_shapes(shape, view.shape) == view.shape
+        except RuntimeError:
+            fits = False
+        if not fits:
+            raise RuntimeError(
+                f"shape mismatch: value tensor of shape {list(value.shape)} cannot be broadcast to indexing result of shape {list(view.shape)}"
+            )
+        view.copy_(_broadcast_to(value.reshape(shape), view.shape))
 
     def backward(self, gradient=None):
         """Its gradient (``gradient``: its cotangent; for a scalar, 1 by
@@ -783,7 +1022,15 @@ class TracedTensor:
             shape[shape.index(-1)] = self.numel() // known
         if math.prod(shape) != self.numel():
             raise RuntimeError(f"shape '{shape}' is invalid for input of size {self.numel()}")
-        return self if tuple(shape) == self.shape else prims.reshape(self, shape)
+        if tuple(shape) == self.shape:
+            return self
+        out = prims.reshape(self, shape)
+        # As torch's: a view where its strides allow (adding or dropping
+        # size-1 dimensions, merging contiguous ones), else a copy (of a
+        # permuted tensor, say).
+        if _reshape_strides(self.shape, _strides(self), shape) is None:
+            return out
+        return _view(self, out, ("reshape", tuple(shape)))
 
     view = reshape
 
@@ -805,7 +1052,7 @@ class TracedTensor:
         dims = [_dim(d, self.ndim) for d in _sizes(dims)]
         if sorted(dims) != list(range(self.ndim)):
             raise RuntimeError(f"permute: {dims} is not a permutation of the dimensions of a {self.ndim}-d tensor")
-        return self if dims == sorted(dims) else prims.transpose(self, dims)
+        return self if dims == sorted(dims) else _view(self, prims.transpose(self, dims), ("permute", tuple(dims)))
 
     def transpose(self, dim0, dim1):
         dims = list(range(self.ndim))
@@ -843,7 +1090,7 @@ class TracedTensor:
     def _slice(self, starts, limits):
         if list(starts) == [0] * self.ndim and list(limits) == list(self.shape):
             return self
-        return prims.slice(self, starts, limits)
+        return _view(self, prims.slice(self, starts, limits), ("slice", tuple(starts), tuple(limits)))
 
     def __getitem__(self, key):
         """Basic indexing (torch, NumPy): integers (which drop their

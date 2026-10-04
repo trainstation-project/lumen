@@ -268,7 +268,8 @@ impl PyPlan {
     /// `packable` (not yet placed) packed into blocks where dots merge
     /// (`packed`).
     #[new]
-    #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new()))]
+    #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new(), donate_into = Vec::new()))]
+    #[allow(clippy::too_many_arguments)] // Python's keyword arguments
     fn new(
         graph: PyRef<'_, PyGraph>,
         device: Option<&Bound<'_, PyAny>>,
@@ -277,10 +278,12 @@ impl PyPlan {
         parameters: Option<Vec<usize>>,
         packable: Vec<usize>,
         scalars: Vec<usize>,
+        donate_into: Vec<(usize, usize)>,
     ) -> PyResult<Self> {
         let n = graph.inner.inputs().len();
         let all = donate
             .iter()
+            .chain(donate_into.iter().map(|(i, _)| i))
             .chain(parameters.iter().flatten())
             .chain(&packable)
             .chain(&scalars);
@@ -297,6 +300,7 @@ impl PyPlan {
         let options = crate::compiler::Options {
             config,
             donate,
+            donate_into,
             parameters: parameters.as_deref().map(mask),
             packable: mask(&packable),
             scalars: mask(&scalars),

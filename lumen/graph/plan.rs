@@ -82,6 +82,11 @@ pub struct PlanOptions {
     /// input's type may be written into its buffer, in place, rather than
     /// into new memory, once nothing reads the input any more.
     pub donate: Vec<usize>,
+    /// Inputs donated to one output each, `(input, output)`: that output
+    /// may be written into the input's buffer, and no other may (a weight's
+    /// memory holds its new value alone, which `lumen.compile` writes back
+    /// into it).
+    pub donate_into: Vec<(usize, usize)>,
     /// Plan an executable that owns its memory ([`Plan::run_in`]): the
     /// inputs not marked here and every output placed in the workspace too,
     /// the inputs copied in on each run and the outputs views of it. Those
@@ -263,7 +268,9 @@ impl Plan {
         // writes, or as a dynamic_update_slice's operand: in place). An
         // owned plan's too: a parameter's new value, written there.
         let mut aliases = vec![None; graph.outputs().len()];
+        let paired = |i: usize| options.donate_into.iter().any(|&(j, _)| j == i);
         let mut donors: Vec<usize> = options.donate.clone();
+        donors.extend(options.donate_into.iter().map(|&(i, _)| i));
         for (k, &v) in graph.outputs().iter().enumerate() {
             let unplaced = match owned {
                 None => buffer[v] == Some(Buffer::Output(k)),
@@ -279,7 +286,8 @@ impl Plan {
                 let read_later =
                     last[u] > first[v] || (read_by_writer && !reads_in_place(writer, u, &root));
                 let is_output = graph.outputs().iter().any(|&o| root[o] == u);
-                ty(u) == ty(v) && !read_later && !is_output
+                let its = !paired(i) || options.donate_into.contains(&(i, k));
+                ty(u) == ty(v) && !read_later && !is_output && its
             };
             if let Some(pos) = donors.iter().position(fits) {
                 let i = donors.remove(pos);
