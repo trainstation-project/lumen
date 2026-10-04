@@ -4,6 +4,7 @@ mode (``jvp``), linearize, transpose (``backward_pass``), and reverse mode
 
 import functools
 
+from lumen.autograd import rules
 from lumen.autograd.core import (
     UndefinedPrimal,
     _accumulate,
@@ -105,6 +106,12 @@ def linearize(fn, *primals):
     the tangent of each output (by var). JAX's ``ad.linearize``."""
     leaves = _check("linearize", primals)
     out, tape = _record(fn, *primals)
+    return out, _linearize_tape(tape, leaves)
+
+
+def _linearize_tape(tape, leaves):
+    """The linear program of the nodes ``tape`` recorded, at ``leaves``:
+    ``(seeds, linear, linear_vars, tangents)``, as :func:`linearize`."""
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
     _, lin_tape = _record(_jvp_tape, tape, tangents, True)
@@ -115,7 +122,22 @@ def linearize(fn, *primals):
         if any(v in linear_vars for v in node[1]):
             linear_vars.update(node[3] if node[0] == _FUNCTION else [node[3]])
             linear.append(node)
-    return out, (seeds, linear, linear_vars, tangents)
+    return seeds, linear, linear_vars, tangents
+
+
+def backward(out, ct, tape, leaves):
+    """The gradient of each of ``leaves`` (None for one ``out`` does not
+    depend on), ``out``'s cotangent ``ct``, through the nodes ``tape``
+    recorded (``TracedTensor.backward``)."""
+
+    if (ct.dtype, ct.shape) != (out.dtype, out.shape):
+        raise TypeError(f"backward: a gradient must have its value's type, got {ct.dtype}{list(ct.shape)} for {out!r}")
+
+    seeds, linear, linear_vars, tangents = _linearize_tape(tape, leaves)
+    t = tangents.get(out.var)
+    cts = backward_pass(linear, linear_vars, {t: ct.var} if t in linear_vars else {})
+
+    return [_value(cts[seeds[p.var]]) if seeds.get(p.var) in cts else None for p in leaves]
 
 
 def backward_pass(linear, linear_vars, cts):

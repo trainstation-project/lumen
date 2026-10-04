@@ -315,3 +315,36 @@ def test_function_takes_keyword_arguments():
 
     t = lumen.compile(tangent)(*map(lumen.from_numpy, (x, w, s, b)))
     np.testing.assert_allclose(lumen.to_numpy(t), b * w * s)
+
+
+def test_tensor_backward():
+    """loss.backward() inside a compiled function: the gradients of its
+    tensor arguments and weights in their .grad, as lumen.grad computes
+    them; a second backward adds to them; a non-scalar takes its gradient."""
+    w1, w2, x = (a.astype(np.float32) for a in arrays((4, 8), (8, 3), (2, 4)))
+    model = _MLP(lumen.empty([4, 8], device="meta"), lumen.empty([8, 3], device="meta"))
+
+    def step(model, x):
+        loss = model(x)
+        loss.backward()
+        return loss, model.w1.grad, model.w2.grad, x.grad
+
+    step = lumen.compile(step, device="cpu")
+    step(model, lumen.empty([2, 4], device="meta"))
+    model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
+    _, g1, g2, gx = step(model, lumen.from_numpy(x))
+    want = lumen.compile(lumen.grad(lambda m, x: m(x), (0, 1)), device="cpu")(model, lumen.from_numpy(x))
+    for got, w in zip((g1, g2, gx), (want[0].w1, want[0].w2, want[1])):
+        np.testing.assert_allclose(lumen.to_numpy(got), lumen.to_numpy(w), rtol=1e-6, atol=1e-6)
+
+    def twice(x, c):
+        y = F.exp(x)
+        F.sum(y).backward()
+        y.backward(c)
+        return x.grad
+
+    (x,), (c,) = arrays((3,)), arrays((3,), seed=1)
+    got = lumen.compile(twice)(lumen.from_numpy(x), lumen.from_numpy(c))
+    np.testing.assert_allclose(lumen.to_numpy(got), np.exp(x) * (1 + c))
+    with pytest.raises(RuntimeError, match="non-scalar"):
+        lumen.make_graph(lambda x: F.exp(x).backward())(lumen.from_numpy(x))

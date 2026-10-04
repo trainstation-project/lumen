@@ -654,6 +654,7 @@ class TracedTensor:
         from lumen.autograd.transforms import backward  # it imports this module
 
         tape, leaves = _BACKWARD[-1]
+
         if gradient is None:
             if self.shape != () or not _is_float(self.dtype):
                 raise RuntimeError(f"backward: a gradient is needed for a non-scalar output, got {self!r}")
