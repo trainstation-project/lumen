@@ -1349,3 +1349,48 @@ def test_copy_into_a_modules_float_is_written_back():
 
     with pytest.raises(TypeError, match="tuple"):
         lumen.compile(assign_tuple, device="cpu")(steps)
+
+
+class _ReluMLP(lumen.nn.Module):
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        return F.relu(x @ self.w1) @ self.w2
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_writes_values_the_backward_reads():
+    """In a training step relu's backward reads x @ w1: the relu still runs
+    in the matmul's kernel, which writes x @ w1 too (XLA's GELU_AUX); the
+    step agrees exactly with the unfused one."""
+    rng = np.random.default_rng(0)
+    w1, w2 = (rng.standard_normal(s).astype(np.float32) * 0.1 for s in ((64, 96), (96, 32)))
+    x = rng.standard_normal((48, 64)).astype(np.float32)
+
+    def step(m, x):
+        loss = F.sum(F.tanh(m(x)))
+        loss.backward()
+        return loss, [p.grad for p in m.parameters()]
+
+    results = []
+    for epilogues in (True, False):
+        lumen.config.compiler.contraction_epilogues = epilogues
+        try:
+            model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
+            f = lumen.compile(step, device="mps")
+            try:
+                f(model, lumen.empty([48, 64], device="meta"))
+            except RuntimeError as e:
+                pytest.skip(str(e))
+            model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
+            loss, grads = f(model, lumen.from_numpy(x).to("mps"))
+            results.append([lumen.to_numpy(t) for t in (loss, *grads)])
+            plan = lumen.graph.Plan(lumen.make_graph(step)(model, lumen.from_numpy(x)), "mps")
+            labels = [s["label"] for s in plan.steps()]
+            if epilogues:
+                assert "dot_general → max" in labels, labels
+        finally:
+            lumen.config.compiler.reset()
+    for a, b in zip(*results):
+        np.testing.assert_array_equal(a, b)

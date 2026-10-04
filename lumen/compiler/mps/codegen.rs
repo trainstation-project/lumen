@@ -1225,6 +1225,13 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let mut e = Emitter::new(body, by_value);
     e.invariant[dot.output] = true;
     e.row_locals.insert(dot.output, "r".into());
+    // The epilogue's values read outside it (the fusion's other outputs:
+    // the dot's, an activation's input), stored at the output's index.
+    let mut stores = String::new();
+    for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        let value = e.value(v, "j".into());
+        writeln!(stores, "        out{}[i] = {value};", k + 1).unwrap();
+    }
     let value = e.value(out, "j".into());
     let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
@@ -1235,6 +1242,10 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         }
         members.push(format!("in{k}"));
     }
+    for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        writeln!(fields, "    device {} *out{};", metal_type(body.type_of(v).dtype), k + 1).unwrap();
+        members.push(format!("out{}", k + 1));
+    }
     let operand = |v: Var| {
         let k = body.inputs().iter().position(|&i| i == v);
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
@@ -1244,7 +1255,7 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
     let mut source = format!(
-        "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}        return {value};\n    }}\n}};\n",
+        "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
         e.hoisted, e.lines
     );
     for (suffix, bm, bn) in [("", 128, 64), ("_small", 64, 64)] {

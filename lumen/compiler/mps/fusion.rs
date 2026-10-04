@@ -21,6 +21,10 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 /// Buffers a Metal kernel binds (31), less the output and the element count.
 const MAX_INPUTS: usize = 29;
 
+/// The values of a contraction's epilogue read outside it that its kernel
+/// writes too, at most.
+const MAX_AUX: usize = 4;
+
 /// Whether `node` can be computed an element at a time inside a fusion.
 pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
@@ -189,13 +193,16 @@ pub(crate) fn fuse(
     // A contraction's epilogue (XLA's GEMM epilogue fusion): the
     // elementwise primitives after a float dot reading it or each other
     // (reading anything else too: a bias, a residual; a silu reads its
-    // input twice), none read outside them but the last, computed in its
-    // kernel as it writes each output; the epilogue's last primitive is
-    // the fusion's root, the dot inside it (its operands read as they are).
+    // input twice), computed in its kernel as it writes each output; the
+    // epilogue's last primitive is the fusion's root, the dot inside it
+    // (its operands read as they are). Its values read outside it (the
+    // dot's, an activation's input, for a training step's backward) are
+    // written by the kernel too (XLA's GELU_AUX), hosted by its fusion.
     // Not for a dot reading a slice in place (a strided view, `dot_views`).
     let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut in_epilogue = vec![false; nodes.len()];
+    let mut dot_aux: Vec<Option<usize>> = vec![None; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let float = |v: Var| {
             matches!(
@@ -216,7 +223,8 @@ pub(crate) fn fuse(
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
         // The epilogue grown in order: its nodes (`taken`, their values
         // `after`), the values depending on the dot (no other operand may),
-        // and the longest one closed (only its last node read outside it).
+        // and the longest one whose values read outside it (but its last's)
+        // are few and read after it: those it writes too.
         let mut taken = vec![i];
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);
         (after[node.output], depends[node.output]) = (true, true);
@@ -233,19 +241,26 @@ pub(crate) fn fuse(
             }
             taken.push(u);
             after[un.output] = true;
-            let inside = |&k: &usize| {
+            let outside = |&k: &usize| {
                 let v = nodes[k].output;
-                !is_output[v] && users[v].iter().all(|w| taken.contains(w))
+                is_output[v] || users[v].iter().any(|w| !taken.contains(w))
             };
-            if taken[..taken.len() - 1].iter().all(inside) {
-                end = Some(taken.clone());
+            let aux: Vec<usize> = taken[..taken.len() - 1].iter().copied().filter(outside).collect();
+            let read_after = aux
+                .iter()
+                .all(|&k| users[nodes[k].output].iter().all(|&w| taken.contains(&w) || w > u));
+            if read_after && aux.len() <= MAX_AUX {
+                end = Some((taken.clone(), aux));
             }
         }
-        if let Some(taken) = end {
+        if let Some((taken, aux)) = end {
             let end = *taken.last().expect("a node");
             (dot_end[i], dot_of[end]) = (Some(end), Some(i));
             for &k in &taken[1..taken.len() - 1] {
                 in_epilogue[k] = true;
+            }
+            for k in aux {
+                dot_aux[k] = Some(end);
             }
         }
     }
@@ -285,7 +300,8 @@ pub(crate) fn fuse(
     // elementwise primitives); every other reader comes after it and reads
     // the stored output. Later nodes first, so a value is not hosted by a
     // fusion that is itself hosted.
-    let mut host: Vec<Option<usize>> = vec![None; nodes.len()];
+    // A contraction's epilogue's values read outside it: its fusion's.
+    let mut host: Vec<Option<usize>> = dot_aux;
     for (i, node) in nodes.iter().enumerate().rev() {
         let candidate = config.multi_output_fusion
             && live[i]
@@ -293,7 +309,9 @@ pub(crate) fn fuse(
             && fusible[i]
             && !is_reduction(node)
             && !is_output[node.output]
-            && expensive(graph, node);
+            && expensive(graph, node)
+            // A contraction's epilogue's end is its fusion's, never hosted.
+            && dot_of[i].is_none();
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
@@ -317,7 +335,9 @@ pub(crate) fn fuse(
     let fusions = loop {
         let fusions: Vec<Option<(Vec<usize>, Vec<Var>)>> = (0..nodes.len())
             .map(|i| {
-                let hosted = |p: usize| root[p] && host[p] != Some(i);
+                // A value another fusion writes (a root's, or one a
+                // contraction's epilogue hosts) is read, not computed.
+                let hosted = |p: usize| (root[p] || host[p].is_some()) && host[p] != Some(i);
                 (live[i] && root[i] && fusible[i] && host[i].is_none())
                     .then(|| members(graph, &producer, hosted, i))
             })
