@@ -8,6 +8,8 @@
 //! - **dynamic**: kernels added at runtime with [`Op::register`] (PyTorch:
 //!   `TORCH_LIBRARY_IMPL`), for keys the op has no built-in kernel for.
 
+#[cfg(lumen_mps_linked)]
+pub(crate) mod attention;
 pub mod copy;
 pub mod dot_general;
 pub mod dummy_op;

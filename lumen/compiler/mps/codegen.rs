@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use super::attention::{Access, Attention, Backward, Score};
 use super::fusion;
+use crate::ops::attention::{Access, Attention, Backward, Score};
 use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
@@ -973,7 +973,7 @@ fn constant(dtype: DType, value: Scalar) -> String {
     }
 }
 
-/// The kernel of an attention fusion (`attention.rs`): its name and Metal
+/// The kernel of an attention fusion (`ops/attention`): its name and Metal
 /// source, instantiating `flash_attention`, or for few queries
 /// `attention_decode` (`ops/attention/mps.metal`), with an indexer of its
 /// operands' strides. Its buffers: the body's inputs, then `out`.
@@ -1108,7 +1108,7 @@ fn score_functor(scores: &[Score]) -> String {
     format!("struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n")
 }
 
-/// The kernel of an attention backward's fusion (`attention.rs`'s
+/// The kernel of an attention backward's fusion (`ops/attention`'s
 /// [`Backward`]): its name and Metal source, instantiating
 /// `flash_attention_dkdv` (a fusion of dV and dK: its buffers the body's
 /// inputs, then dV and dK) or `flash_attention_dq` (then dQ).

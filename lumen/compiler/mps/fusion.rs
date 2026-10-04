@@ -490,7 +490,7 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
 
 /// Whether `p` computes each element from its operands' elements at the
 /// same index.
-pub(super) fn elementwise(p: &Primitive) -> bool {
+pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
     matches!(
         p,
@@ -514,7 +514,7 @@ pub(super) fn elementwise(p: &Primitive) -> bool {
 /// Whether value `v` is the same everywhere and known when compiling: a
 /// `full`, perhaps through elementwise and layout primitives of such
 /// values (no input, iota or reduction).
-pub(super) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
+pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     use Primitive::*;
     let Some(p) = producer[v] else {
         return false;
