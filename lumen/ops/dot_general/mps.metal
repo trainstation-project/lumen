@@ -152,14 +152,12 @@ inline void matmul_wide_impl(device const T *lhs,
 
 // The float dtypes on simdgroup matrices, operands of T accumulating in A
 // (T, or float for half and bfloat: dot_general's accum_dtype), the output
-// of O (T or A: its output_dtype), each element rounded to it once: a threadgroup of 256 threads (8 SIMD groups in a 4x2 grid)
-// computes a BM x BN output tile (for 128x64, each SIMD group a 32x32 block
-// of it as 4x2 8x8 accumulators). BMx16 and 16xBN operand tiles are staged
-// in threadgroup memory as T, zero-padded past the edges; each thread loads a fixed column of them, and
-// loads the next k step's while the current one is multiplied. Each output
-// sums over k in increasing order of 8-element blocks. Each output is
-// written as epi(it, its flat index): Same for the primitive's kernels; a
-// fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out.
+// of O (T or A: its output_dtype), each element rounded to it once: a threadgroup of 256 threads (8 SIMD groups in a
+// 4x2 grid) computes a BM x BN output tile (for 128x64, each SIMD group a 32x32 block of it as 4x2 8x8 accumulators).
+// BMx16 and 16xBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
+// fixed column of them, and loads the next k step's while the current one is multiplied. Each output sums over k in
+// increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
+// kernels; a fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out.
 #define SG_BK 16
 #define SG_COLS 2 // SIMD groups across the tile
 template <typename T, typename A, typename O, uint BM, uint BN, typename Out = O, typename Epi = Same>
@@ -258,13 +256,13 @@ inline void matmul_sg_impl(device const T *lhs,
         uint3 tid [[thread_position_in_threadgroup]]
 
 #define MATMUL(NAME, T)                                          \
-    kernel void matmul_##NAME(MATMUL_ARGS(T, T)) {                  \
+    kernel void matmul_##NAME(MATMUL_ARGS(T, T)) {               \
         threadgroup T lt[MM_TILE * MM_TK], rt[MM_TK * MM_TILE];  \
         matmul_impl<T>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
 #define MATMUL_WIDE(NAME, T)                                          \
-    kernel void matmul_##NAME(MATMUL_ARGS(T, T)) {                       \
+    kernel void matmul_##NAME(MATMUL_ARGS(T, T)) {                    \
         threadgroup T lt[WIDE_TILE * MM_TK], rt[MM_TK * WIDE_TILE];   \
         matmul_wide_impl<T>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
@@ -283,10 +281,10 @@ inline void matmul_sg_impl(device const T *lhs,
 #define MATMUL_FLOAT(NAME, T)                  \
     MATMUL_SG(matmul_##NAME, T, T, T, 128, 64) \
     MATMUL_SG(matmul_small_##NAME, T, T, T, 64, 64)
-#define MATMUL_WIDENED(NAME, T)                                           \
-    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64)          \
-    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 64, 64)     \
-    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)         \
+#define MATMUL_WIDENED(NAME, T)                                      \
+    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64)      \
+    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 64, 64) \
+    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)     \
     MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 64, 64)
 
 // The generated kernels include the templates alone.

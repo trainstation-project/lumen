@@ -35,7 +35,7 @@ inline void reduce(In in,
     out[i] = epi(r);
 }
 
-#define REDUCE(OP, FN, NAME, T, A)                                                             \
+#define REDUCE(OP, FN, NAME, T, A)                                                          \
     kernel void OP##_##NAME(device const T *in [[buffer(0)]],                               \
                             device A *out [[buffer(1)]],                                    \
                             constant A &init [[buffer(2)]],                                 \
@@ -92,7 +92,7 @@ inline void reduce_grouped(In in,
     }
 }
 
-#define GROUPED(OP, FN, NAME, T, A)                                                    \
+#define GROUPED(OP, FN, NAME, T, A)                                                 \
     kernel void OP##_grouped_##NAME(device const T *in [[buffer(0)]],               \
                                     device A *out [[buffer(1)]],                    \
                                     constant A &init [[buffer(2)]],                 \
@@ -107,7 +107,7 @@ inline void reduce_grouped(In in,
                                     constant uint &outputs [[buffer(11)]],          \
                                     uint3 group [[threadgroup_position_in_grid]],   \
                                     uint3 tid [[thread_position_in_threadgroup]]) { \
-        threadgroup A shared[REDUCE_THREADS];                   \
+        threadgroup A shared[REDUCE_THREADS];                                       \
         reduce_grouped<FN, A>(in,                                                   \
                               out,                                                  \
                               init,                                                 \
@@ -207,27 +207,27 @@ inline void reduce_cols(
     out[i] = epi(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
 }
 
-#define ROWS(KERNEL, FN, I, O)                                                                         \
-    kernel void KERNEL(device const I *in [[buffer(0)]],                                               \
-                       device O *out [[buffer(1)]],                                                    \
-                       constant ulong &count [[buffer(2)]],                                            \
-                       constant ulong &chunk [[buffer(3)]],                                            \
-                       uint3 group [[threadgroup_position_in_grid]],                                   \
-                       uint3 groups [[threadgroups_per_grid]],                                         \
-                       uint3 tid [[thread_position_in_threadgroup]],                                   \
-                       uint3 size [[threads_per_threadgroup]]) {                                       \
-        threadgroup O shared[REDUCE_THREADS];                                      \
+#define ROWS(KERNEL, FN, I, O)                                                                      \
+    kernel void KERNEL(device const I *in [[buffer(0)]],                                            \
+                       device O *out [[buffer(1)]],                                                 \
+                       constant ulong &count [[buffer(2)]],                                         \
+                       constant ulong &chunk [[buffer(3)]],                                         \
+                       uint3 group [[threadgroup_position_in_grid]],                                \
+                       uint3 groups [[threadgroups_per_grid]],                                      \
+                       uint3 tid [[thread_position_in_threadgroup]],                                \
+                       uint3 size [[threads_per_threadgroup]]) {                                    \
+        threadgroup O shared[REDUCE_THREADS];                                                       \
         reduce_rows<FN, O>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x); \
     }
 
-#define COLS(KERNEL, FN, I, O)                                         \
-    kernel void KERNEL(device const I *in [[buffer(0)]],               \
-                       device O *out [[buffer(1)]],                    \
-                       constant uint &cols [[buffer(2)]],              \
-                       constant ulong &count [[buffer(3)]],            \
-                       constant ulong &chunk [[buffer(4)]],            \
-                       constant uint &chunks [[buffer(5)]],            \
-                       uint i [[thread_position_in_grid]]) {           \
+#define COLS(KERNEL, FN, I, O)                                      \
+    kernel void KERNEL(device const I *in [[buffer(0)]],            \
+                       device O *out [[buffer(1)]],                 \
+                       constant uint &cols [[buffer(2)]],           \
+                       constant ulong &count [[buffer(3)]],         \
+                       constant ulong &chunk [[buffer(4)]],         \
+                       constant uint &chunks [[buffer(5)]],         \
+                       uint i [[thread_position_in_grid]]) {        \
         reduce_cols<FN, O>(in, out, cols, count, chunk, chunks, i); \
     }
 
@@ -240,7 +240,7 @@ inline void reduce_cols(
 #define SUM_LAYOUTS(NAME, T) LAYOUTS(reduce_sum, Add, NAME, T)
 // Accumulating half and bfloat in float: their first launch (from T),
 // split reductions' second is float's (reduce_sum_<layout>_f32).
-#define SUM_LAYOUTS_F32(NAME, T)                     \
+#define SUM_LAYOUTS_F32(NAME, T)                      \
     ROWS(reduce_sum_rows_##NAME##_f32, Add, T, float) \
     COLS(reduce_sum_cols_##NAME##_f32, Add, T, float)
 #define MAX_LAYOUTS(NAME, T) LAYOUTS(reduce_max, Max, NAME, T)

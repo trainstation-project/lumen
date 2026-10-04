@@ -41,7 +41,15 @@ template <typename T> inline thread vec<T, 2> &frag(thread simdgroup_matrix<T, 8
 // matrices into float; each row's running max m and sum l (online
 // softmax) over its 4 lanes; O rescaled, then O += P V. Blocks past the
 // last row's causal limit are skipped.
-template <typename T, typename O, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Out = O, typename Epi = Same>
+template <typename T,
+          typename O,
+          uint D,
+          uint DV,
+          uint BK,
+          bool CAUSAL,
+          typename Ix,
+          typename Out = O,
+          typename Epi = Same>
 inline void flash_attention(device const T *q,
                             device const T *k,
                             device const T *v,
@@ -72,14 +80,11 @@ inline void flash_attention(device const T *q,
     simdgroup_matrix<T, 8, 8> qm[D / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
         uint d = c * 8 + fc;
-        frag(qm[c]) = in_rows ? vec<T, 2>(q[row * Ix::Q_ROW + d * Ix::Q_COL],
-                                                       q[row * Ix::Q_ROW + (d + 1) * Ix::Q_COL])
-                                          : vec<T, 2>(0);
+        frag(qm[c]) = in_rows ? vec<T, 2>(q[row * Ix::Q_ROW + d * Ix::Q_COL], q[row * Ix::Q_ROW + (d + 1) * Ix::Q_COL])
+                              : vec<T, 2>(0);
     }
     simdgroup_matrix<float, 8, 8> om[DV / 8];
-    ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
-        om[c] = simdgroup_matrix<float, 8, 8>(0);
-    }
+    ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { om[c] = simdgroup_matrix<float, 8, 8>(0); }
     // Row `row`'s running max and sum, the same in each of its 4 lanes.
     float m = -INFINITY, l = 0;
     // The keys any of this threadgroup's rows sees.
@@ -136,9 +141,7 @@ inline void flash_attention(device const T *q,
         l = l * factor + sum;
         m = m_new;
         // O rescaled, then O += P V.
-        ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
-            frag(om[c]) *= factor;
-        }
+        ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { frag(om[c]) *= factor; }
         ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> vm;
@@ -192,9 +195,7 @@ inline void attention_decode(device const T *q,
         uint d = lane + 32 * n;
         qv[n] = d < D ? float(q[i * Ix::Q_ROW + d * Ix::Q_COL]) : 0.0f;
     }
-    ATTN_UNROLL for (uint n = 0; n < VN; ++n) {
-        ov[n] = 0;
-    }
+    ATTN_UNROLL for (uint n = 0; n < VN; ++n) { ov[n] = 0; }
     float m = -INFINITY, l = 0;
     uint last = sk;
     if (CAUSAL) {
