@@ -45,9 +45,6 @@ fmt-check:
 # 21.1.6 on PATH (`pip install clang-format==21.1.6`).
 CPP_SOURCES := $(shell find lumen -name '*.mm' -o -name '*.metal' -o -name '*.h')
 
-clang-format:
-	clang-format -i --style=file:.clang-format $(CPP_SOURCES)
-
 clang-format-check:
 	clang-format --dry-run --Werror --style=file:.clang-format $(CPP_SOURCES)
 
@@ -72,3 +69,4 @@ update-precommit:
 
 style:
 	uv run --extra dev --no-default-groups pre-commit run --all-files
+	clang-format -i --style=file:.clang-format $(CPP_SOURCES)

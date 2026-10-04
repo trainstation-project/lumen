@@ -5,7 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use super::attention::{Access, Attention};
 use super::fusion;
 use crate::compiler::CompilerConfig;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
@@ -82,6 +82,41 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
             _ => return None,
         }
     }
+}
+
+/// The names a reduction fusion's two launches (a split reduction's) are
+/// profiled as: the primitives each computes, as the fusion's label names
+/// all of them. The first, the reduction's input and the reduction (into
+/// partials); the second, the reduction (of the partials) and its epilogue,
+/// with the constants it reads.
+pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
+    let root = reduction_root(body).expect("a reduction fusion");
+    let nodes = body.nodes();
+    let mut producer = vec![None; body.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+    }
+    // The epilogue: the values from the output back to the reduction's.
+    let mut epilogue = vec![false; nodes.len()];
+    let mut stack = vec![body.outputs()[0]];
+    while let Some(v) = stack.pop() {
+        match producer[v] {
+            Some(i) if v != root.output && !epilogue[i] => {
+                epilogue[i] = true;
+                stack.extend(&nodes[i].inputs);
+            }
+            _ => {}
+        }
+    }
+    let names = |second: bool| {
+        let names = nodes
+            .iter()
+            .enumerate()
+            .filter(|&(i, n)| n.output == root.output || epilogue[i] == second);
+        let names: Vec<&str> = names.map(|(_, n)| n.primitive.name()).collect();
+        fusion::intern(names.join(FUSION_SEPARATOR))
+    };
+    (names(false), names(true))
 }
 
 /// Whether the fusion with `body` is a reduction with an epilogue: its

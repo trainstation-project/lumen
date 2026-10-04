@@ -270,3 +270,42 @@ def test_split_reduction_launches_record_their_own_types():
     assert last["name"] == "reduce_sum" and last["kernel"] == "reduce_sum_rows_f32"
     assert last["inputs"] == [partials] and last["outputs"] == [("float32", [4])]
     assert first["accum"] == last["accum"] == ["float32"]
+
+
+@pytest.mark.mps
+def test_launches_are_named_after_what_they_compute():
+    """A step's event keeps its whole label; each of its launches is named
+    after the primitives it runs: a split reduction with an epilogue (the
+    cast back of ``x.float().sum()``) converts and sums into partials in
+    its first launch, sums those and casts in its second. One launch is
+    the step's."""
+    sep = lumen._C.FUSION_SEPARATOR
+    try:
+        x = lumen.ones([1024, 1024], device="mps").to(dtype="bfloat16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    step = sep.join(["convert_element_type", "reduce_sum", "convert_element_type"])
+    for f, launches in [
+        (
+            lambda a: F.sum(a.float()).bfloat16(),
+            [
+                (sep.join(["convert_element_type", "reduce_sum"]), ("bfloat16", [1024, 1024]), "float32"),
+                (sep.join(["reduce_sum", "convert_element_type"]), "float32", ("bfloat16", [])),
+            ],
+        ),
+        (lambda a: F.sum(a.float(), -1).bfloat16(), [(step, ("bfloat16", [1024, 1024]), ("bfloat16", [1024]))]),
+    ]:
+        g = lumen.compile(f)
+        g(x)
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+            g(x)
+            lumen.mps.synchronize()
+        (op,) = [e for e in prof.events() if e["kind"] == "op" and "reduce_sum" in e["name"]]
+        assert op["name"] == step
+        gpu = [e for e in prof.events() if e["kind"] == "gpu"]
+        assert [k["name"] for k in gpu] == [name for name, _, _ in launches]
+        assert all(k["parent"] == op["id"] for k in gpu)
+        for k, (_, read, written) in zip(gpu, launches):
+            (inp,), (out,) = k["inputs"], k["outputs"]
+            assert inp == read if isinstance(read, tuple) else inp[0] == read, (k["name"], inp)
+            assert out == written if isinstance(written, tuple) else out[0] == written, (k["name"], out)

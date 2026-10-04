@@ -190,7 +190,7 @@ pub(crate) fn launch(
         Grid::Groups(sizes) => (sizes, true),
     };
     if sizes.contains(&0) {
-        crate::profiler::clear_launch_types();
+        crate::profiler::clear_next_launch();
         return Ok(());
     }
     let c_name = CString::new(kernel).expect("kernel names have no NUL");

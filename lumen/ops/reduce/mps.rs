@@ -27,6 +27,7 @@ pub(crate) fn encode(
         x,
         None,
         None,
+        (name, name),
         name,
         &inputs[..1],
         output,
@@ -80,6 +81,7 @@ pub(crate) fn encode_reduction(
     x: &TensorType,
     fused: Option<&str>,
     last: Option<&str>,
+    launches: (&'static str, &'static str),
     name: &'static str,
     inputs: &[*const u8],
     output: *mut u8,
@@ -104,8 +106,8 @@ pub(crate) fn encode_reduction(
     let layout = layout(x, &reduced);
     if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
-            step, op_name, name, x, accum, &reduced, fused, last, inputs, output, extra, scalars,
-            scratch, keep,
+            step, op_name, name, x, accum, &reduced, fused, last, launches, inputs, output, extra,
+            scalars, scratch, keep,
         );
     }
     // Other axes: a power-of-two number of lanes per output, indexing the
@@ -269,7 +271,9 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usi
 /// partials (in `scratch`, which the planner set aside), then the partials.
 /// The first launch is the kernel `fused` if given (reading `inputs`, and
 /// writing its `extra` outputs), else `op`'s own (reading `inputs[0]`); a
-/// split reduction's second, `last` if given, else `op`'s own.
+/// split reduction's second, `last` if given, else `op`'s own. A split
+/// reduction's two launches are profiled as `launches`: the primitives
+/// each computes.
 #[allow(clippy::too_many_arguments)]
 fn consecutive(
     step: &Step,
@@ -280,6 +284,7 @@ fn consecutive(
     reduced: &[usize],
     fused: Option<&str>,
     last: Option<&str>,
+    launches: (&'static str, &'static str),
     inputs: &[*const u8],
     output: *mut u8,
     extra: &[*const u8],
@@ -349,11 +354,12 @@ fn consecutive(
         ));
     }
     // The first launch writes every partial before the second reads them.
-    // Each is profiled with its own types (the step's inputs to partials,
-    // then those to its output), the second as its op (`reduce_sum`).
+    // Each is profiled as what it computes (`launches`), reading and
+    // writing its own types: the step's inputs to partials, then those to
+    // its output.
     let p = scratch.cast_const();
     let partials = TensorType::new(accum, &[a, chunks, b]);
-    crate::profiler::launch_types(|| {
+    crate::profiler::next_launch(launches.0, || {
         let inputs = step.inputs.iter().map(|(_, ty)| ty.clone()).collect();
         let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
         (
@@ -377,6 +383,19 @@ fn consecutive(
     // The partials, of the accumulation dtype, reduced in it: by `last` if
     // given (a fusion's, which applies its epilogue).
     let kernel = last.map_or_else(|| format!("{op}_{layout}_{accum}"), str::to_owned);
-    crate::profiler::launch_types(|| (vec![partials.clone()], vec![step.output.1.clone()]));
-    pass(kernel, &[p], output, &[], &[], chunks, chunks, 1, keep, op)
+    crate::profiler::next_launch(launches.1, || {
+        (vec![partials.clone()], vec![step.output.1.clone()])
+    });
+    pass(
+        kernel,
+        &[p],
+        output,
+        &[],
+        &[],
+        chunks,
+        chunks,
+        1,
+        keep,
+        name,
+    )
 }
