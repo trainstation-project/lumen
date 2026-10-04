@@ -74,7 +74,7 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     def value(*a):
         return float(lumen.to_numpy(run(*map(lumen.from_numpy, a))))
 
-    g = lumen.to_numpy(lumen.grad(f, argnum)(*map(lumen.from_numpy, xs)))
+    g = lumen.to_numpy(lumen.compile(lumen.grad(f, argnum))(*map(lumen.from_numpy, xs)))
     # Through float32, a coarser difference.
     eps, tol = (1e-2, 1e-3) if name == "cast" else (1e-6, 1e-6)
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
@@ -103,7 +103,7 @@ def test_value_and_grad_and_argnums():
     def f(x, y):
         return F.sum(x * x * y)
 
-    value, (gx, gy) = lumen.value_and_grad(f, (0, 1))(lumen.from_numpy(x), lumen.from_numpy(y))
+    value, (gx, gy) = lumen.compile(lumen.value_and_grad(f, (0, 1)))(lumen.from_numpy(x), lumen.from_numpy(y))
     np.testing.assert_allclose(lumen.to_numpy(value), (x * x * y).sum())
     np.testing.assert_allclose(lumen.to_numpy(gx), 2 * x * y)
     np.testing.assert_allclose(lumen.to_numpy(gy), x * x)
@@ -112,7 +112,7 @@ def test_value_and_grad_and_argnums():
 def test_grad_of_grad():
     """A derivative's derivative: the transformation of a transformation."""
     (x,) = arrays((4,))
-    second = lumen.grad(lambda x: F.sum(lumen.grad(lambda y: F.sum(y * y * y))(x)))
+    second = lumen.compile(lumen.grad(lambda x: F.sum(lumen.grad(lambda y: F.sum(y * y * y))(x))))
     np.testing.assert_allclose(lumen.to_numpy(second(lumen.from_numpy(x))), 6 * x)
 
 
@@ -168,8 +168,9 @@ def test_transforms_check_their_inputs():
     x = lumen.empty([3], device="meta")
     with pytest.raises(TypeError, match="float scalar"):
         lumen.make_graph(lumen.grad(lambda x: x * 2.0))(x)
-    with pytest.raises(RuntimeError, match="while tracing"):
-        lumen.vjp(lambda x: x, x)
+    for transform in (lambda: lumen.vjp(lambda x: x, x), lambda: lumen.grad(lambda x: F.sum(x))(x)):
+        with pytest.raises(RuntimeError, match="while tracing"):
+            transform()
 
 
 class _Exp(lumen.autograd.Function):
@@ -221,17 +222,17 @@ def test_function_has_its_own_derivative():
     """lumen.autograd.Function: forward is not differentiated; backward is
     its derivative, through the rest of the program, for each output."""
     x, y = arrays((5,), (5,))
-    g = lumen.grad(lambda x: F.sum(_Exp.apply(x) * x))(lumen.from_numpy(x))
+    g = lumen.compile(lumen.grad(lambda x: F.sum(_Exp.apply(x) * x)))(lumen.from_numpy(x))
     np.testing.assert_allclose(lumen.to_numpy(g), np.exp(x) * x + np.exp(x))
 
     def f(x, y):
         a, b = _ScaledSplit.apply(x * y, 3.0)
         return F.sum(a * b)
 
-    g = lumen.grad(f)(lumen.from_numpy(x), lumen.from_numpy(y))
+    g = lumen.compile(lumen.grad(f))(lumen.from_numpy(x), lumen.from_numpy(y))
     a, b = x * y * 3.0, x * y + 1.0
     np.testing.assert_allclose(lumen.to_numpy(g), (b * 6.0 + a) * y)
-    g = lumen.grad(lambda x: F.sum(_StraightThrough.apply(x * 3.0) * x))(lumen.from_numpy(x))
+    g = lumen.compile(lumen.grad(lambda x: F.sum(_StraightThrough.apply(x * 3.0) * x)))(lumen.from_numpy(x))
     np.testing.assert_allclose(lumen.to_numpy(g), 3.0 * x + np.trunc(3.0 * x))
 
 
@@ -244,13 +245,14 @@ def test_function_forward_mode_and_grad_of_grad():
         return lumen.jvp(lambda a: _StraightThrough.apply(a) * 2.0, (x,), (t,))[1]
 
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(lumen.from_numpy(x), lumen.from_numpy(t))), 2 * t)
-    second = lumen.grad(lambda x: F.sum(lumen.grad(lambda y: F.sum(_Exp.apply(y)))(x)))
+    second = lumen.compile(lumen.grad(lambda x: F.sum(lumen.grad(lambda y: F.sum(_Exp.apply(y)))(x))))
     np.testing.assert_allclose(lumen.to_numpy(second(lumen.from_numpy(x))), np.exp(x))
 
 
-def test_function_runs_outside_a_trace_and_checks_backward():
+def test_function_runs_while_tracing_and_checks_backward():
     (x,) = arrays((3,))
-    np.testing.assert_allclose(lumen.to_numpy(_Exp.apply(lumen.from_numpy(x))), np.exp(x))
+    with pytest.raises(RuntimeError, match="only while tracing"):
+        _Exp.apply(lumen.from_numpy(x))
 
     class Wrong(lumen.autograd.Function):
         @staticmethod
@@ -262,38 +264,54 @@ def test_function_runs_outside_a_trace_and_checks_backward():
             return F.sum(grad)
 
     with pytest.raises(TypeError, match=r"Wrong.backward: returned float64\[\] for float64\[3\]"):
-        lumen.grad(lambda x: F.sum(Wrong.apply(x)))(lumen.from_numpy(x))
+        lumen.compile(lumen.grad(lambda x: F.sum(Wrong.apply(x))))(lumen.from_numpy(x))
 
 
 class _Affine(lumen.autograd.Function):
-    """``x * w + b``: keyword arguments, a default, a keyword-only one."""
+    """``(x * w + b) * scale``: keyword arguments, a default, keyword-only
+    ones (a tensor, a float)."""
 
     @staticmethod
-    def forward(ctx, x, w, b=None, *, shift=0.0):
-        ctx.save_for_backward(x, w)
+    def forward(ctx, x, w, b=None, *, scale, shift=0.0):
+        ctx.save_for_backward(x, w, scale)
         y = x * w + shift
-        return y if b is None else y + b
+        return (y if b is None else y + b) * scale
 
     @staticmethod
     def backward(ctx, grad):
-        x, w = ctx.saved_tensors
-        return grad * w, grad * x, grad
+        x, w, scale = ctx.saved_tensors
+        g = grad * scale
+        return g * w, {"w": g * x, "b": g, "scale": grad * (x * w)}
+
+    @staticmethod
+    def jvp(ctx, tx, tw, tb, *, scale, shift):
+        # Tangents of x alone here (None for the others).
+        x, w, s = ctx.saved_tensors
+        return tx * w * s
 
 
 def test_function_takes_keyword_arguments():
-    """Arguments bind to forward's parameters, however passed: backward
-    returns a gradient per positional parameter (defaults included);
-    keyword-only ones are not differentiated."""
-    x, w, b = arrays((4,), (4,), (4,))
+    """Arguments bind to forward's parameters, however passed; backward
+    returns gradients positionally and by name (keyword-only ones too);
+    jvp takes tangents so."""
+    x, w, b, s = arrays((4,), (4,), (4,), (4,))
 
-    def f(x, w, b):
-        return F.sum(_Affine.apply(x, b=b, w=w, shift=2.0) * x)
+    def f(x, w, b, s):
+        return F.sum(_Affine.apply(x, b=b, w=w, scale=s, shift=2.0) * x)
 
-    gx, gw, gb = lumen.grad(f, (0, 1, 2))(*map(lumen.from_numpy, (x, w, b)))
-    np.testing.assert_allclose(lumen.to_numpy(gx), x * w + 2.0 + b + x * w)
-    np.testing.assert_allclose(lumen.to_numpy(gw), x * x)
-    np.testing.assert_allclose(lumen.to_numpy(gb), x)
-    out = _Affine.apply(lumen.from_numpy(x), w=lumen.from_numpy(w), shift=1.0)
-    np.testing.assert_allclose(lumen.to_numpy(out), x * w + 1.0)
-    with pytest.raises(TypeError, match="keyword-only 'shift'"):
-        lumen.make_graph(lambda x: _Affine.apply(x, x, shift=x))(lumen.from_numpy(x))
+    gx, gw, gb, gs = lumen.compile(lumen.grad(f, (0, 1, 2, 3)))(*map(lumen.from_numpy, (x, w, b, s)))
+    y = x * w + 2.0 + b
+    np.testing.assert_allclose(lumen.to_numpy(gx), y * s + x * w * s)
+    np.testing.assert_allclose(lumen.to_numpy(gw), x * s * x)
+    np.testing.assert_allclose(lumen.to_numpy(gb), x * s)
+    # As written, backward's "scale" gradient leaves out shift and b.
+    np.testing.assert_allclose(lumen.to_numpy(gs), x * x * w)
+    affine = lumen.compile(lambda x, w, s: _Affine.apply(x, w=w, scale=s, shift=1.0))
+    out = affine(*map(lumen.from_numpy, (x, w, s)))
+    np.testing.assert_allclose(lumen.to_numpy(out), (x * w + 1.0) * s)
+
+    def tangent(x, w, s, tx):
+        return lumen.jvp(lambda x: _Affine.apply(x, w, scale=s), (x,), (tx,))[1]
+
+    t = lumen.compile(tangent)(*map(lumen.from_numpy, (x, w, s, b)))
+    np.testing.assert_allclose(lumen.to_numpy(t), b * w * s)
