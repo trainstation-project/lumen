@@ -177,12 +177,20 @@ impl Graph {
                             let (name, fix) = match node.primitive {
                                 DotGeneral { .. } => (
                                     "dot_general",
-                                    format!("pass output_dtype={accum_dtype} (F.matmul(x, y, accum_dtype, output_dtype))"),
+                                    format!(
+                                        "pass output_dtype={accum_dtype} (F.matmul(x, y, accum_dtype, output_dtype))"
+                                    ),
                                 ),
-                                _ => ("reduce_sum", format!("cast its input to {accum_dtype} first")),
+                                _ => (
+                                    "reduce_sum",
+                                    format!("cast its input to {accum_dtype} first"),
+                                ),
                             };
-                            let operands: Vec<String> =
-                                node.inputs.iter().map(|&i| self.types[i].to_string()).collect();
+                            let operands: Vec<String> = node
+                                .inputs
+                                .iter()
+                                .map(|&i| self.types[i].to_string())
+                                .collect();
                             let message = format!(
                                 "{name}({}) -> {} accumulates in {accum_dtype} but outputs {narrow}, then \
                                  {name} {sep} {} casts it back to {wide}: the rounding loses precision; {fix} \
@@ -194,7 +202,8 @@ impl Graph {
                             );
                             warnings.push((node.output, reader.output, message));
                         }
-                        DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {}
+                        DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {
+                        }
                         _ if wide == narrow && !seen[reader.output] => {
                             seen[reader.output] = true;
                             stack.push((reader.output, path));

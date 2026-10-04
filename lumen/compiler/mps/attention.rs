@@ -195,8 +195,8 @@ pub(crate) fn fuse(
         let name = kernel(&body);
         // Profiled as the attention, then its epilogue's primitives:
         // `flash_attention → reshape → add`.
-        let label = std::iter::once("flash_attention")
-            .chain(chain.iter().map(|&n| graph.label(&nodes[n])));
+        let label =
+            std::iter::once("flash_attention").chain(chain.iter().map(|&n| graph.label(&nodes[n])));
         let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
@@ -322,10 +322,7 @@ impl<'a> Matcher<'a> {
     /// `v` through a cast read only once, if it is one.
     fn uncast(&self, v: Var) -> Var {
         match self.node(v) {
-            Some(n)
-                if matches!(n.primitive, Primitive::Cast { .. })
-                    && self.single(v) =>
-            {
+            Some(n) if matches!(n.primitive, Primitive::Cast { .. }) && self.single(v) => {
                 n.inputs[0]
             }
             _ => v,
@@ -471,10 +468,16 @@ impl<'a> Matcher<'a> {
         // The kernel accumulates the dots, and computes the softmax, in
         // float32.
         let f32 = |p: &Primitive| match p {
-            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => *accum_dtype == DType::F32,
+            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => {
+                *accum_dtype == DType::F32
+            }
             _ => false,
         };
-        let (dot1, dot2, sum) = (&s.primitive, &nodes[i].primitive, &self.node(sum)?.primitive);
+        let (dot1, dot2, sum) = (
+            &s.primitive,
+            &nodes[i].primitive,
+            &self.node(sum)?.primitive,
+        );
         if ty(x).dtype != DType::F32 || !f32(dot1) || !f32(dot2) || !f32(sum) {
             return None;
         }
@@ -625,8 +628,7 @@ impl<'a> Matcher<'a> {
             BroadcastInDim { .. } | Reshape { .. } | Cast { .. } => {
                 let (ci, cj, c) = self.affine(n.inputs[0], nb)?;
                 // Only constants are broadcast: an index would move.
-                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0))
-                    .then_some((ci, cj, c))
+                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0)).then_some((ci, cj, c))
             }
             Add | Sub => {
                 let (a, b) = (self.affine(n.inputs[0], nb)?, self.affine(n.inputs[1], nb)?);

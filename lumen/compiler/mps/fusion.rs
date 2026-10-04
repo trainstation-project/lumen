@@ -404,7 +404,6 @@ pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]
     intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
 
-
 /// The nodes of the fusion rooted at node `root_node` and the values it
 /// reads, each in graph order: the root and, from it, every fusible
 /// producer that is not a `root` (for this fusion: one it hosts is not).
