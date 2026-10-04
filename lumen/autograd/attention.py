@@ -92,7 +92,10 @@ class _Attention(Function):
         lse = prims.broadcast_in_dim(prims.reshape(lse, batch + [1, sq]), batch + [sk, sq], per_query)
         pt = prims.exp(prims.sub(st, lse))
         g = do if do.dtype == dtype else prims.cast(do, dtype)
-        d = prims.reduce_sum(do.to(accum) * o.to(accum), (nb + 1,), accum)
+        # A dot over the value head, accumulated in float32 (dO has O's
+        # dtype): no rounded value widened.
+        rows = tuple(range(nb + 1))
+        d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum, accum)
         d = prims.broadcast_in_dim(prims.reshape(d, batch + [1, sq]), batch + [sk, sq], per_query)
         # dP^T = V dO^T; dS^T = P^T (dP^T - D) * scale.
         dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum, accum)

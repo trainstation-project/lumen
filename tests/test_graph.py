@@ -1394,3 +1394,16 @@ def test_matmul_epilogue_writes_values_the_backward_reads():
             lumen.config.compiler.reset()
     for a, b in zip(*results):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.mps
+def test_concatenate_runs_unfused():
+    """With fusion off, a concatenate (alone a fusion on MPS) still runs."""
+    try:
+        a = lumen.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3)).to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    graph = lumen.make_graph(lambda a: prims.concatenate([a, a * 2.0], 1))(a)
+    plan = lumen.graph.Plan(graph, "mps", fuse=False)
+    (out,) = plan.run([a])
+    np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))

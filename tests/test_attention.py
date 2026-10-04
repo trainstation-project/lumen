@@ -2,6 +2,8 @@
 causal), and the MPS compiler running attention, however written, as one
 flash-attention kernel (lumen/compiler/mps/attention.rs, attention.metal)."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -357,3 +359,17 @@ def test_log_sum_exp_is_written_only_for_training():
 
     assert "float *lse" not in source(forward)
     assert "float *lse" in source(lumen.grad(lambda q, k, v: F.sum(forward(q, k, v).float()), (0, 1, 2)))
+
+
+def test_flash_attention_training_has_no_precision_warning():
+    """In bf16, flash attention's backward rounds nothing to bf16 only to
+    widen it (D = rowsum(dO * O) a dot accumulating in float32): no
+    precision warning."""
+    m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 16, 4, 32], [1, 16, 2, 32], [1, 16, 2, 32])]
+
+    def loss(q, k, v):
+        return F.sum(F.flash_attention(q, k, v, is_causal=True))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        lumen.make_graph(lumen.grad(loss, (0, 1, 2)))(*m)

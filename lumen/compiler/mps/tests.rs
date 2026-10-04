@@ -1368,3 +1368,33 @@ fn dots_epilogues_do_not_overlap() {
     let names = fused_primitives(&g, &inputs);
     assert_eq!(names, ["dot_general", "dot_general", "fusion"], "{names:?}");
 }
+
+/// A dot with no free dimension on either side (a dot product per batch
+/// index, attention's backward `D`) is a product and a sum, not a matmul:
+/// as the reference computes the dot (XLA's DotStrengthReduction).
+#[test]
+fn vector_dots_are_reduced() {
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::F32, &[4, 6, 16]));
+    let b = g.input(ty(DType::F32, &[4, 6, 16]));
+    let dot = DotGeneral {
+        lhs_contracting: vec![2],
+        rhs_contracting: vec![2],
+        lhs_batch: vec![0, 1],
+        rhs_batch: vec![0, 1],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let d = apply(&mut g, dot, &[a, b]);
+    g.set_outputs(&[d]).unwrap();
+    let reduced = super::dot_strength::reduce_vector_dots(&g);
+    let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
+    let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
+    let want = reference::run(&g, &inputs).unwrap();
+    let got = reference::run(&reduced, &inputs).unwrap();
+    let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
+    for (w, g) in want.iter().zip(&got) {
+        assert!((w - g).abs() <= 1e-5 * w.abs().max(1.0), "{w} {g}");
+    }
+}
