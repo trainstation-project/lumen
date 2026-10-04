@@ -5,19 +5,19 @@ from lumen.autograd.core import UndefinedPrimal, _full, defjvp, deflinear, primi
 from lumen.graph import prims, tracer
 
 deflinear(
-    "add",
+    prims.add,
     lambda ct, x, y: [ct if isinstance(x, UndefinedPrimal) else None, ct if isinstance(y, UndefinedPrimal) else None],
 )
 deflinear(
-    "sub",
+    prims.sub,
     lambda ct, x, y: [
         ct if isinstance(x, UndefinedPrimal) else None,
         prims.neg(ct) if isinstance(y, UndefinedPrimal) else None,
     ],
 )
-deflinear("neg", lambda ct, x: [prims.neg(ct)])
-deflinear("cast", lambda ct, x, new_dtype: [prims.cast(ct, x.dtype)])
-deflinear("reshape", lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
+deflinear(prims.neg, lambda ct, x: [prims.neg(ct)])
+deflinear(prims.cast, lambda ct, x, new_dtype: [prims.cast(ct, x.dtype)])
+deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
 
 
 def _transpose_transpose(ct, x, permutation):
@@ -25,7 +25,7 @@ def _transpose_transpose(ct, x, permutation):
     return [prims.transpose(ct, inverse)]
 
 
-deflinear("transpose", _transpose_transpose)
+deflinear(prims.transpose, _transpose_transpose)
 
 
 def _reduce_sum_transpose(ct, x, axes, accum_dtype):
@@ -34,7 +34,7 @@ def _reduce_sum_transpose(ct, x, axes, accum_dtype):
     return [prims.broadcast_in_dim(ct, x.shape, kept)]
 
 
-deflinear("reduce_sum", _reduce_sum_transpose)
+deflinear(prims.reduce_sum, _reduce_sum_transpose)
 
 
 def _broadcast_in_dim_transpose(ct, x, shape, broadcast_dimensions):
@@ -48,7 +48,7 @@ def _broadcast_in_dim_transpose(ct, x, shape, broadcast_dimensions):
     return [prims.reshape(ct, x.shape)]
 
 
-deflinear("broadcast_in_dim", _broadcast_in_dim_transpose)
+deflinear(prims.broadcast_in_dim, _broadcast_in_dim_transpose)
 
 
 def _slice_transpose(ct, x, start_indices, limit_indices):
@@ -64,7 +64,7 @@ def _slice_transpose(ct, x, start_indices, limit_indices):
     return [ct]
 
 
-deflinear("slice", _slice_transpose)
+deflinear(prims.slice, _slice_transpose)
 
 
 def _concatenate_transpose(ct, *operands, dimension):
@@ -82,7 +82,7 @@ def _concatenate_transpose(ct, *operands, dimension):
     return cts
 
 
-deflinear("concatenate", _concatenate_transpose)
+deflinear(prims.concatenate, _concatenate_transpose)
 
 
 def _select_jvp(primals, tangents, out, **params):
@@ -102,11 +102,11 @@ def _select_transpose(ct, pred, x, y):
     ]
 
 
-primitive_jvps["select"] = _select_jvp
-primitive_transposes["select"] = _select_transpose
+primitive_jvps[prims.select] = _select_jvp
+primitive_transposes[prims.select] = _select_transpose
 
 # Bilinear: linear in each operand, the other fixed.
-defjvp("mul", lambda t, out, x, y: prims.mul(t, y), lambda t, out, x, y: prims.mul(x, t))
+defjvp(prims.mul, lambda t, out, x, y: prims.mul(t, y), lambda t, out, x, y: prims.mul(x, t))
 
 
 def _mul_transpose(ct, x, y):
@@ -115,10 +115,12 @@ def _mul_transpose(ct, x, y):
     return [None, prims.mul(x, ct)]
 
 
-primitive_transposes["mul"] = _mul_transpose
+primitive_transposes[prims.mul] = _mul_transpose
 # d(x / y) = dx / y - dy * (out / y): linear in the numerator.
-defjvp("div", lambda t, out, x, y: prims.div(t, y), lambda t, out, x, y: prims.mul(t, prims.neg(prims.div(out, y))))
-primitive_transposes["div"] = lambda ct, x, y: [prims.div(ct, y), None]
+defjvp(
+    prims.div, lambda t, out, x, y: prims.div(t, y), lambda t, out, x, y: prims.mul(t, prims.neg(prims.div(out, y)))
+)
+primitive_transposes[prims.div] = lambda ct, x, y: [prims.div(ct, y), None]
 
 
 def _max_share(x, y):
@@ -127,12 +129,14 @@ def _max_share(x, y):
     return prims.select(prims.lt(y, x), one, prims.select(prims.eq(x, y), half, zero))
 
 
-defjvp("max", lambda t, out, x, y: prims.mul(t, _max_share(x, y)), lambda t, out, x, y: prims.mul(t, _max_share(y, x)))
-defjvp("exp", lambda t, out, x: prims.mul(t, out))
-defjvp("log", lambda t, out, x: prims.div(t, x))
-defjvp("sqrt", lambda t, out, x: prims.div(t, prims.add(out, out)))
-defjvp("tanh", lambda t, out, x: prims.mul(t, prims.sub(_full(out, 1), prims.mul(out, out))))
-defjvp("logistic", lambda t, out, x: prims.mul(t, prims.mul(out, prims.sub(_full(out, 1), out))))
+defjvp(
+    prims.max, lambda t, out, x, y: prims.mul(t, _max_share(x, y)), lambda t, out, x, y: prims.mul(t, _max_share(y, x))
+)
+defjvp(prims.exp, lambda t, out, x: prims.mul(t, out))
+defjvp(prims.log, lambda t, out, x: prims.div(t, x))
+defjvp(prims.sqrt, lambda t, out, x: prims.div(t, prims.add(out, out)))
+defjvp(prims.tanh, lambda t, out, x: prims.mul(t, prims.sub(_full(out, 1), prims.mul(out, out))))
+defjvp(prims.logistic, lambda t, out, x: prims.mul(t, prims.mul(out, prims.sub(_full(out, 1), out))))
 
 
 def _reduce_max_jvp(t, out, x, axes):
@@ -143,7 +147,7 @@ def _reduce_max_jvp(t, out, x, axes):
     return prims.div(prims.reduce_sum(prims.mul(t, where), axes, x.dtype), count)
 
 
-defjvp("reduce_max", _reduce_max_jvp)
+defjvp(prims.reduce_max, _reduce_max_jvp)
 
 
 def _dot(x, y, dims, params, output_dtype):
@@ -157,7 +161,7 @@ def _dot_dims(params):
 
 
 defjvp(
-    "dot_general",
+    prims.dot_general,
     lambda t, out, x, y, **p: _dot(t, y, _dot_dims(p), p, p["output_dtype"]),
     lambda t, out, x, y, **p: _dot(x, t, _dot_dims(p), p, p["output_dtype"]),
 )
@@ -196,4 +200,4 @@ def _dot_general_transpose(ct, x, y, **p):
     return [None, _dot_transpose_lhs(ct, y, x, ((yc, xc), (yb, xb)), p, swap_ans=True)]
 
 
-primitive_transposes["dot_general"] = _dot_general_transpose
+primitive_transposes[prims.dot_general] = _dot_general_transpose

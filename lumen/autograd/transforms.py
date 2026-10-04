@@ -50,12 +50,13 @@ def _jvp_tape(tape, tangents, linearizing=False):
         if all(t is None for t in ts) or not _is_float(graph.type_of(out)[0]):
             continue
 
-        if name not in primitive_jvps:
+        primitive = getattr(prims, name, None)
+        if primitive not in primitive_jvps:
             raise NotImplementedError(f"{name} has no JVP rule")
 
         ts = [_value(t) if t is not None else None for t in ts]
 
-        t = primitive_jvps[name]([_value(v) for v in inputs], ts, _value(out), **params)
+        t = primitive_jvps[primitive]([_value(v) for v in inputs], ts, _value(out), **params)
         if t is not None:
             tangents[out] = t.var
 
@@ -157,9 +158,10 @@ def backward_pass(linear, linear_vars, cts):
             UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0]) if v in linear_vars else _value(v)
             for v in inputs
         ]
-        if name not in primitive_transposes:
+        primitive = getattr(prims, name, None)
+        if primitive not in primitive_transposes:
             raise NotImplementedError(f"{name} has no transpose rule")
-        for v, c in zip(inputs, primitive_transposes[name](_value(ct), *operands, **params)):
+        for v, c in zip(inputs, primitive_transposes[primitive](_value(ct), *operands, **params)):
             if c is not None and v in linear_vars:
                 _accumulate(cts, v, c)
     return cts

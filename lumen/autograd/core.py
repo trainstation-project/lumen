@@ -7,10 +7,11 @@ import functools
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
-# name -> rule(primals, tangents, out, **params): the tangent of `out`
-# (None: zero), given the operands' (None: zero).
+# Keyed by primitive, its ``prims`` function (JAX: by ``Primitive``).
+# primitive -> rule(primals, tangents, out, **params): the tangent of
+# `out` (None: zero), given the operands' (None: zero).
 primitive_jvps = {}
-# name -> rule(ct, *operands, **params) for a linear primitive: the
+# primitive -> rule(ct, *operands, **params) for a linear primitive: the
 # cotangent of each operand (None for one it is not linear in), given
 # its output's, its linear operands UndefinedPrimal.
 primitive_transposes = {}
@@ -43,26 +44,27 @@ def _sum(xs):
     return functools.reduce(prims.add, xs) if xs else None
 
 
-def defjvp(name, *rules):
-    """``name``'s JVP: the sum over its operands with a tangent of
-    ``rule(t, out, *primals, **params)`` (JAX's ``defjvp2``)."""
+def defjvp(primitive, *rules):
+    """``primitive``'s JVP (``prims.exp``): the sum over its operands with
+    a tangent of ``rule(t, out, *primals, **params)`` (JAX's ``defjvp2``)."""
 
     def jvp(primals, tangents, out, **params):
         return _sum(rule(t, out, *primals, **params) for rule, t in zip(rules, tangents) if rule and t is not None)
 
-    primitive_jvps[name] = jvp
+    primitive_jvps[primitive] = jvp
 
 
-def deflinear(name, transpose_rule):
-    """``name`` is linear in all its operands: its JVP is itself, on the
-    tangents (zeros for those without); ``transpose_rule``, its transpose."""
+def deflinear(primitive, transpose_rule):
+    """``primitive`` (``prims.neg``) is linear in all its operands: its JVP
+    is itself, on the tangents (zeros for those without);
+    ``transpose_rule``, its transpose."""
 
     def jvp(primals, tangents, out, **params):
         tangents = [t if t is not None else _full(p, 0) for p, t in zip(primals, tangents)]
-        return prims.bind(name, *tangents, **params)
+        return prims.bind(primitive.__name__, *tangents, **params)
 
-    primitive_jvps[name] = jvp
-    primitive_transposes[name] = transpose_rule
+    primitive_jvps[primitive] = jvp
+    primitive_transposes[primitive] = transpose_rule
 
 
 def _value(var):
