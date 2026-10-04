@@ -168,17 +168,18 @@ function kindOf(n) {
 document.getElementById("legend").innerHTML = KINDS.map(([k, l]) => `<span><i style="background:var(--k-${k})"></i>${l}</span>`).join("");
 
 // ---------------------------------------------------------------- layout
-// A node's label (a fusion's is its primitives, `a -> b -> c`, as the
-// profiler names it) in lines of up to LABEL_CHARS characters, broken after
-// an arrow.
+// A node's label (a fusion's is its primitives joined by
+// DATA.fusion_separator, `a → b → c`, as the profiler names it) in lines of
+// up to LABEL_CHARS characters, broken after a separator.
 const LABEL_CHARS = 44, LINE = 16;
 function lines(n) {
   if (n._lines) return n._lines;
   const out = [];
-  for (const part of n.label.split(" -> ")) {
+  const sep = DATA.fusion_separator;
+  for (const part of n.label.split(sep)) {
     const last = out.length - 1;
-    if (last >= 0 && out[last].length + 4 + part.length <= LABEL_CHARS) out[last] += ` -> ${part}`;
-    else { if (last >= 0) out[last] += " ->"; out.push(part); }
+    if (last >= 0 && out[last].length + sep.length + part.length <= LABEL_CHARS) out[last] += sep + part;
+    else { if (last >= 0) out[last] += sep.trimEnd(); out.push(part); }
   }
   return (n._lines = out.map(l => (l.length > LABEL_CHARS + 3 ? l.slice(0, LABEL_CHARS + 2) + "…" : l)));
 }

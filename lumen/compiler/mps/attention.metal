@@ -10,7 +10,9 @@
 //
 // Scores, the softmax and the output accumulate in float; the
 // probabilities are rounded to T for p v, as the traced program rounds
-// them. A causal mask lets query i see key j iff j <= i + offset.
+// them. A causal mask lets query i see key j iff j <= i + offset. Each
+// output is written as epi(it, its flat index): Same, or a fusion's
+// epilogue (codegen.rs), writing Out.
 
 // Query rows a SIMD group takes, SIMD groups a threadgroup has (256
 // threads), and so query rows a threadgroup takes.
@@ -39,11 +41,11 @@ template <typename T> inline thread vec<T, 2> &frag(thread simdgroup_matrix<T, 8
 // matrices into float; each row's running max m and sum l (online
 // softmax) over its 4 lanes; O rescaled, then O += P V. Blocks past the
 // last row's causal limit are skipped.
-template <typename T, typename O, uint D, uint DV, uint BK, bool CAUSAL, typename Ix>
+template <typename T, typename O, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Out = O, typename Epi = Same>
 inline void flash_attention(device const T *q,
                             device const T *k,
                             device const T *v,
-                            device O *out,
+                            device Out *out,
                             Ix ix,
                             uint sq,
                             uint sk,
@@ -55,11 +57,13 @@ inline void flash_attention(device const T *q,
                             uint b,
                             uint sg,
                             uint lane,
-                            uint t) {
+                            uint t,
+                            Epi epi = Epi()) {
     q += ix.q(b);
     k += ix.k(b);
     v += ix.v(b);
-    out += ix.o(b);
+    const ulong ob = ix.o(b);
+    out += ob;
     const uint r0 = qblock * ATTN_BQ + sg * ATTN_ROWS;
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = r0 + fr;
@@ -148,8 +152,9 @@ inline void flash_attention(device const T *q,
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
             float2 o = frag(om[c]) / l;
             uint d = c * 8 + fc;
-            out[row * Ix::O_ROW + d * Ix::O_COL] = O(o.x);
-            out[row * Ix::O_ROW + (d + 1) * Ix::O_COL] = O(o.y);
+            uint e0 = row * Ix::O_ROW + d * Ix::O_COL, e1 = row * Ix::O_ROW + (d + 1) * Ix::O_COL;
+            out[e0] = epi(O(o.x), ob + e0);
+            out[e1] = epi(O(o.y), ob + e1);
         }
     }
 }
@@ -158,11 +163,11 @@ inline void flash_attention(device const T *q,
 // b, its SIMD groups every 8th key, each lane a 32nd of the head
 // dimension; each SIMD group's running max, sum and output, then theirs
 // combined.
-template <typename T, typename O, uint D, uint DV, bool CAUSAL, typename Ix>
+template <typename T, typename O, uint D, uint DV, bool CAUSAL, typename Ix, typename Out = O, typename Epi = Same>
 inline void attention_decode(device const T *q,
                              device const T *k,
                              device const T *v,
-                             device O *out,
+                             device Out *out,
                              Ix ix,
                              uint sk,
                              float scale,
@@ -174,12 +179,14 @@ inline void attention_decode(device const T *q,
                              uint b,
                              uint sg,
                              uint lane,
-                             uint t) {
+                             uint t,
+                             Epi epi = Epi()) {
     constexpr uint QN = (D + 31) / 32, VN = (DV + 31) / 32;
     q += ix.q(b);
     k += ix.k(b);
     v += ix.v(b);
-    out += ix.o(b);
+    const ulong ob = ix.o(b);
+    out += ob;
     float qv[QN], ov[VN];
     ATTN_UNROLL for (uint n = 0; n < QN; ++n) {
         uint d = lane + 32 * n;
@@ -240,6 +247,7 @@ inline void attention_decode(device const T *q,
         for (uint g = 0; g < ATTN_GROUPS; ++g) {
             o += maxima[g] == -INFINITY ? 0.0f : os[g * DV + d] * exp(maxima[g] - mm);
         }
-        out[i * Ix::O_ROW + d * Ix::O_COL] = O(o / total);
+        uint e = i * Ix::O_ROW + d * Ix::O_COL;
+        out[e] = epi(O(o / total), ob + e);
     }
 }

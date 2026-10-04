@@ -11,11 +11,6 @@
 // a primitive's kernel; a reduction fusion's epilogue (the elementwise
 // primitives after it, lumen/compiler/mps/codegen.rs), writing O.
 
-// The identity epilogue.
-struct Same {
-    template <typename T> T operator()(T x) const { return x; }
-};
-
 // Any axes, a thread per output: thread i reduces output i, at offset
 // `base` from its index over the kept dimensions, over its `count`
 // elements in the reference's (row-major) order.

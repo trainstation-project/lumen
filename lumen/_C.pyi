@@ -11,6 +11,7 @@ from typing import Literal, Optional, Union, final
 from lumen.allocator._C import CompilerConfig as CompilerConfig
 from lumen.allocator._C import Config as Config
 from lumen.allocator._C import config as config
+from lumen.graph._C import FUSION_SEPARATOR as FUSION_SEPARATOR
 from lumen.graph._C import Graph as Graph
 from lumen.graph._C import Plan as Plan
 from lumen.ops._C import _dummy_op as _dummy_op

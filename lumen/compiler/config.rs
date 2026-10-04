@@ -21,6 +21,11 @@ pub struct CompilerConfig {
     /// Fuse the elementwise primitives after a reduction (a cast, a mean's
     /// division) into its kernel.
     pub reduction_epilogues: bool,
+    /// Fuse the elementwise primitives after a contraction (a dot's: a
+    /// bias, a residual, an activation, a cast; an attention's, through
+    /// reshapes) into its kernel, applied as it writes each output (XLA's
+    /// GEMM epilogue fusion).
+    pub contraction_epilogues: bool,
     /// Compute an expensive value read by several fusions in the first,
     /// written as another output of its kernel (XLA's MultiOutputFusion),
     /// rather than in a kernel of its own.
@@ -50,6 +55,7 @@ impl Default for CompilerConfig {
             merge_dots: true,
             normalization_diamonds: true,
             reduction_epilogues: true,
+            contraction_epilogues: true,
             multi_output_fusion: true,
             online_softmax: true,
             flash_attention: true,

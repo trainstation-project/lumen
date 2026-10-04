@@ -228,9 +228,11 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
         if device == "mps":
             lumen.mps.synchronize()
     ops = {e["name"]: e for e in prof.events() if e["kind"] == "op"}
-    dot = ops["dot_general"]
+    # The dot (on MPS with its epilogue, the cast to float32, fused in).
+    (dot,) = [e for n, e in ops.items() if n.startswith("dot_general")]
     assert dot["inputs"] == [("bfloat16", [4, 8]), ("bfloat16", [8, 16])]
-    assert dot["accum"] == ["float32"] and dot["outputs"] == [("bfloat16", [4, 16])]
+    out = "float32" if device == "mps" else "bfloat16"
+    assert dot["accum"] == ["float32"] and dot["outputs"] == [(out, [4, 16])]
     (total,) = [e for n, e in ops.items() if n.endswith("reduce_sum")]
     assert total["accum"] == ["float32"] and total["outputs"] == [("float32", [4])]
     (peak,) = [e for n, e in ops.items() if n.endswith("reduce_max")]

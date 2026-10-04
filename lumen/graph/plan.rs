@@ -534,18 +534,24 @@ impl Plan {
                 && self.steps.iter().all(|s| {
                     let operands = s.inputs.iter().zip(&s.views).enumerate();
                     let mut reads = operands.filter(|(_, ((b, _), _))| *b == at);
-                    reads.all(|(k, (_, view))| {
-                        let Primitive::DotGeneral { .. } = s.primitive else {
-                            return false;
-                        };
-                        let operands = [&s.inputs[0].1, &s.inputs[1].1];
-                        view.is_none()
-                            && crate::ops::dot_general::mps::reads_strided(
-                                &s.primitive,
-                                operands,
-                                k,
-                                strides,
-                            )
+                    reads.all(|(k, (_, view))| match &s.primitive {
+                        Primitive::DotGeneral { .. } => {
+                            let operands = [&s.inputs[0].1, &s.inputs[1].1];
+                            view.is_none()
+                                && crate::ops::dot_general::mps::reads_strided(
+                                    &s.primitive,
+                                    operands,
+                                    k,
+                                    strides,
+                                )
+                        }
+                        // A contraction with its epilogue reads its dot's
+                        // operands as the dot does.
+                        Primitive::Fusion { body, .. } => {
+                            view.is_none()
+                                && crate::compiler::mps::fusion_reads_strided(body, k, strides)
+                        }
+                        _ => false,
                     })
                 })
         }

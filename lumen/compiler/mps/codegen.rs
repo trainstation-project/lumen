@@ -15,6 +15,9 @@ use crate::{DType, Scalar};
 /// hash of the source, so identical fusions share one kernel. The inputs
 /// `by_value` marks (runtime scalars; none if empty) it takes by value.
 pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -> (String, String) {
+    if let Some(dot) = gemm_dot(body) {
+        return gemm_kernel(body, by_value, dot);
+    }
     let rows = row_reductions(body);
     if !rows.is_empty() {
         return row_kernel(body, by_value, &rows, config);
@@ -985,11 +988,46 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         index("o", &a.out)
     );
     let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
-    let mut params: Vec<String> = (0..body.inputs().len())
-        .map(|k| format!("device const {t} *in{k} [[buffer({k})]]"))
+    // The epilogue, if the fusion has one (its output is not the
+    // attention's): from the attention's value `r` at the output's flat
+    // index, as the loop emitter computes an element (reading the fusion's
+    // other inputs there).
+    let out = body.outputs()[0];
+    let root = body.nodes()[a.root].output;
+    let w = metal_type(body.type_of(out).dtype);
+    let (epilogue, epi) = match out == root {
+        true => (String::new(), String::new()),
+        false => {
+            let mut e = Emitter::new(body, &[]);
+            e.invariant[root] = true;
+            e.row_locals.insert(root, "r".into());
+            let value = e.value(out, "j".into());
+            let mut fields = String::new();
+            for (k, &v) in body.inputs().iter().enumerate() {
+                let vt = metal_type(body.type_of(v).dtype);
+                writeln!(fields, "    device const {vt} *in{k};").unwrap();
+            }
+            let members: Vec<String> = (0..body.inputs().len()).map(|k| format!("in{k}")).collect();
+            (
+                format!(
+                    "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}        return {value};\n    }}\n}};\n\n",
+                    e.hoisted, e.lines
+                ),
+                format!(", NAME_epi{{{}}}", members.join(", ")),
+            )
+        }
+    };
+    let mut params: Vec<String> = body
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| {
+            let vt = metal_type(body.type_of(v).dtype);
+            format!("device const {vt} *in{k} [[buffer({k})]]")
+        })
         .collect();
     params.push(format!(
-        "device {o} *out [[buffer({})]]",
+        "device {w} *out [[buffer({})]]",
         body.inputs().len()
     ));
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
@@ -999,17 +1037,17 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
         true => format!(
-            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, {scale}, {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x);"
+            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, NAME_ix, {w}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, {scale}, {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
             format!(
-                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, {scale}, {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x);"
+                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, NAME_ix, {w}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, {scale}, {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
     named(format!(
-        "{ix}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        "{ix}{epilogue}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
         params.join(", ")
     ))
 }
@@ -1029,4 +1067,66 @@ fn key_block(a: &Attention) -> usize {
         .into_iter()
         .find(|&bk| bytes(bk) <= 28 << 10)
         .unwrap_or(8)
+}
+
+/// The dot of a fusion with `body`, if it has one: a contraction with its
+/// epilogue (the elementwise primitives after it, `fusion.rs`).
+pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
+    body.nodes()
+        .iter()
+        .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+}
+
+/// The kernel of a contraction with its epilogue: the matmul template
+/// (`ops/dot_general/mps.metal`, on its large and, as `NAME_small`, small
+/// tiles, as its encoder launches it), writing each output through a
+/// functor computing the epilogue from the dot's value `r` and the
+/// output's flat index, as the loop emitter computes an element (reading
+/// the fusion's other inputs, a bias, a residual, at it).
+fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
+        unreachable!("a dot")
+    };
+    let out = body.outputs()[0];
+    let (t, a) = (
+        metal_type(body.type_of(dot.inputs[0]).dtype),
+        metal_type(accum_dtype),
+    );
+    let (o, w) = (
+        metal_type(body.type_of(dot.output).dtype),
+        metal_type(body.type_of(out).dtype),
+    );
+    let mut e = Emitter::new(body, by_value);
+    e.invariant[dot.output] = true;
+    e.row_locals.insert(dot.output, "r".into());
+    let value = e.value(out, "j".into());
+    let (mut fields, mut members) = (String::new(), Vec::new());
+    for (k, &v) in body.inputs().iter().enumerate() {
+        let vt = metal_type(body.type_of(v).dtype);
+        match by_value.get(k) == Some(&true) {
+            true => writeln!(fields, "    {vt} in{k};").unwrap(),
+            false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
+        }
+        members.push(format!("in{k}"));
+    }
+    let operand = |v: Var| {
+        let k = body.inputs().iter().position(|&i| i == v);
+        format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
+    };
+    let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
+    let (params, first) = io_params(body, by_value, w);
+    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
+    let members = members.join(", ");
+    let mut source = format!(
+        "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}        return {value};\n    }}\n}};\n",
+        e.hoisted, e.lines
+    );
+    for (suffix, bm, bn) in [("", 128, 64), ("_small", 64, 64)] {
+        write!(
+            source,
+            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[{bm} * SG_BK], rt[SG_BK * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {w}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
+        )
+        .unwrap();
+    }
+    named(source)
 }

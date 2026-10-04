@@ -96,28 +96,35 @@ pub(crate) fn reads_strided(
     collapsed(operands[k], strides, dims, split).is_some()
 }
 
-pub(crate) fn encode(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let name = step.label;
-    let order = matmul_order(&step.primitive, lhs.shape.len(), rhs.shape.len());
-    // An operand read in place as a view of a larger buffer (a slice) has
-    // its strides; any other is contiguous.
-    let strides = |k: usize, order, split| {
-        let ty = &step.inputs[k].1;
-        let layout = step.views[k]
-            .as_ref()
-            .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone());
-        collapsed(ty, &layout, order, split).ok_or_else(|| {
-            format!("{name}: an operand is not in matmul form: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))")
-        })
+/// How a dot's matmul launches: on the small tiles or not, its grid, and
+/// its dimension arguments (`p` in `mps.metal`).
+pub(crate) struct MatmulLaunch {
+    pub small: bool,
+    pub grid: Grid,
+    pub p: [usize; 9],
+}
+
+/// The launch of dot_general `prim` of `lhs` and `rhs`, read at
+/// `lhs_strides` and `rhs_strides` (in elements), writing `out`.
+pub(crate) fn plan_matmul(
+    prim: &Primitive,
+    lhs: &TensorType,
+    rhs: &TensorType,
+    out: &TensorType,
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    name: &str,
+) -> Result<MatmulLaunch, String> {
+    let order = matmul_order(prim, lhs.shape.len(), rhs.shape.len());
+    let not_matmul = || {
+        format!(
+            "{name}: an operand is not in matmul form: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))"
+        )
     };
-    let [lsb, lsm, lsk] = strides(0, &order.lhs, order.lhs_split)?;
-    let [rsb, rsk, rsn] = strides(1, &order.rhs, order.rhs_split)?;
+    let [lsb, lsm, lsk] =
+        collapsed(lhs, lhs_strides, &order.lhs, order.lhs_split).ok_or_else(not_matmul)?;
+    let [rsb, rsk, rsn] =
+        collapsed(rhs, rhs_strides, &order.rhs, order.rhs_split).ok_or_else(not_matmul)?;
     let size =
         |ty: &TensorType, dims: &[usize]| dims.iter().map(|&d| ty.shape[d]).product::<usize>();
     let (b, m) = (
@@ -130,25 +137,60 @@ pub(crate) fn encode(
     );
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
+    let (tm, tn) = match (out.dtype.is_float(), small) {
+        (true, false) => FLOAT_TILE,
+        (true, true) => SMALL_TILE,
+        (false, _) if out.dtype.size_of() == 8 => WIDE_TILE,
+        (false, _) => INT_TILE,
+    };
+    Ok(MatmulLaunch {
+        small,
+        grid: Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]),
+        p: [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn],
+    })
+}
+
+pub(crate) fn encode(
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+    let name = step.label;
+    // An operand read in place as a view of a larger buffer (a slice) has
+    // its strides; any other is contiguous.
+    let strides = |k: usize| {
+        let ty = &step.inputs[k].1;
+        step.views[k]
+            .as_ref()
+            .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone())
+    };
+    let launch_ = plan_matmul(
+        &step.primitive,
+        lhs,
+        rhs,
+        out,
+        &strides(0),
+        &strides(1),
+        name,
+    )?;
     // Of the operands' dtype throughout (`matmul_<dtype>`), or accumulating
     // in float, writing the operands' or float (`matmul_bf16_f32_bf16`).
     let float = match (lhs.dtype, out.dtype) {
         (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
         (d, o) => format!("{d}_{}_{o}", accum_dtype(&step.primitive)),
     };
-    let (kernel, (tm, tn)) = match (out.dtype.is_float(), small) {
-        (true, false) => (format!("matmul_{float}"), FLOAT_TILE),
-        (true, true) => (format!("matmul_small_{float}"), SMALL_TILE),
-        (false, _) if out.dtype.size_of() == 8 => (format!("matmul_{}", out.dtype), WIDE_TILE),
-        (false, _) => (format!("matmul_{}", out.dtype), INT_TILE),
+    let kernel = match (out.dtype.is_float(), launch_.small) {
+        (true, false) => format!("matmul_{float}"),
+        (true, true) => format!("matmul_small_{float}"),
+        (false, _) => format!("matmul_{}", out.dtype),
     };
-    let grid = Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]);
-    let p = [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn];
     launch(
         &kernel,
         &[inputs[0], inputs[1], output.cast_const()],
-        &[dims_arg(p)],
-        grid,
+        &[dims_arg(launch_.p)],
+        launch_.grid,
         keep,
         name,
     )

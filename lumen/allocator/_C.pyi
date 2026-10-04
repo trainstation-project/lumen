@@ -11,6 +11,7 @@ class CompilerConfig:
     merge_dots: bool
     normalization_diamonds: bool
     reduction_epilogues: bool
+    contraction_epilogues: bool
     multi_output_fusion: bool
     online_softmax: bool
     flash_attention: bool
