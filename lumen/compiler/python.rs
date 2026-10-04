@@ -75,7 +75,7 @@ flags! {
     /// traced.
     split_k, set_split_k: bool;
     /// Run every kernel deterministically (off by default: a kernel may add
-    /// atomically, in no fixed order: attention's backward's dQ).
+    /// atomically, in no fixed order: attention's backward's dQ, split-K).
     deterministic, set_deterministic: bool;
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).

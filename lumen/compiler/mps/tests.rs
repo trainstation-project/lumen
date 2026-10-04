@@ -1423,7 +1423,7 @@ fn skinny_dots_split_their_contraction() {
     };
     // 4 tiles: 16 chunks of 256 (32 would be chunks of 128).
     let g = build(4, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g);
+    let split = super::split_k::split_k(&g, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
@@ -1441,18 +1441,35 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
     // Rounded to bfloat16 once, after the sum.
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16));
+    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
+    // Atomically: the dot and the sum one fusion (its kernel adds the
+    // chunks' products to the output).
+    let split = super::split_k::split_k(&g, true);
+    let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(
+        names,
+        ["reshape", "reshape", "dot_general (split-K)"],
+        "{split}"
+    );
+    let Primitive::Fusion { body, .. } = &split.nodes()[2].primitive else {
+        unreachable!("a fusion")
+    };
+    assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
+    let got = reference::run(&split, &inputs).unwrap()[0].to_vec::<f32>();
+    for (w, g) in want.iter().zip(&got) {
+        assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
+    }
     // Many tiles, or a short contraction: as it is.
     for g in [
         build(1024, 1024, 1024, DType::F32),
         build(4, 256, 300, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g);
+        let split = super::split_k::split_k(&g, false);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }

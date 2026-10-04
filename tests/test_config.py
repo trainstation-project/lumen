@@ -126,10 +126,11 @@ def test_compiler_flags_change_what_compiles(compiler):
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_agrees(compiler, dtype):
     """With ``split_k`` (the default) a matmul of few output tiles and a long
-    contraction (a decode step's) is one dot of the chunks' partials and
-    their sum in float32 (rounded to bfloat16 once, after it); it agrees
-    with the dot as traced (off) to rounding. One of many tiles is not
-    split."""
+    contraction (a decode step's) is one kernel adding its chunks' products
+    to its float32 output atomically (``deterministic``: one dot of the
+    chunks' partials, then their sum), rounded to bfloat16 once, after it;
+    each agrees with the dot as traced (off) to rounding. One of many tiles
+    is not split."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     try:
@@ -138,15 +139,20 @@ def test_split_k_agrees(compiler, dtype):
         pytest.skip(str(e))
     f = lambda x, w: x @ w  # noqa: E731
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
-    rounded = {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
-    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    cast = "cast(float32 -> bfloat16)"
+    atomic = {"float32": ["dot_general (split-K)"], "bfloat16": ["dot_general (split-K)", cast]}[dtype]
+    assert _labels(f, x, w) == atomic
     split = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    compiler.deterministic = True
+    rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
+    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    ordered = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.split_k = False
     assert _labels(f, x, w) == ["dot_general"]
     traced = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
-    np.testing.assert_allclose(split, want, atol=tol)
-    np.testing.assert_allclose(traced, want, atol=tol)
+    for got in (split, ordered, traced):
+        np.testing.assert_allclose(got, want, atol=tol)
     compiler.reset()
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, big, big) == ["dot_general"]

@@ -98,7 +98,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let graph = super::simplify::simplify_with(&graph, true);
     let graph = dot_strength::reduce_vector_dots(&graph);
     let graph = match config.split_k {
-        true => split_k::split_k(&graph),
+        true => split_k::split_k(&graph, !config.deterministic),
         false => graph,
     };
     let graph = canonicalize_dots(&graph);
@@ -453,6 +453,49 @@ pub(crate) fn encode(
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
     }
+    // A split dot whose chunks are added atomically: its output zeroed,
+    // then a threadgroup a 64x64 tile of a chunk (`matmul_atomic`).
+    if let Some(dot) = split_k::atomic_dot(body) {
+        let ty = |v: Var| body.type_of(v);
+        let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
+        let plan = crate::ops::dot_general::mps::plan_matmul(
+            &dot.primitive,
+            lhs,
+            rhs,
+            ty(dot.output),
+            &contiguous_strides(&lhs.shape),
+            &contiguous_strides(&rhs.shape),
+            step.label,
+        )?;
+        let Grid::Groups([_, _, chunks]) = plan.grid else {
+            unreachable!("a matmul's grid")
+        };
+        let [m, n] = [plan.p[0], plan.p[1]];
+        let zero = [
+            element_arg(DType::F32, Scalar::Float(0.0)),
+            u32_arg((m * n) as u32),
+        ];
+        let fill = elementwise_grid(m * n, DType::F32);
+        launch(
+            "fill_4",
+            &[output.cast_const()],
+            &zero,
+            fill,
+            Vec::new(),
+            step.label,
+        )?;
+        let kernel = format!("matmul_atomic_{}", lhs.dtype);
+        let grid = Grid::Groups([n.div_ceil(64), m.div_ceil(64), chunks]);
+        let buffers = [inputs[0], inputs[1], output.cast_const()];
+        return launch(
+            &kernel,
+            &buffers,
+            &[dims_arg(plan.p)],
+            grid,
+            keep,
+            step.label,
+        );
+    }
     // A contraction with its epilogue: the matmul's launch (on the small
     // tiles, `NAME_small`, as the primitive's would be).
     if let Some(dot) = codegen::gemm_dot(body) {
@@ -542,6 +585,9 @@ pub(crate) fn encode(
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's
 /// split reduction's partials ([`crate::ops::reduce::mps::scratch_bytes`]).
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
+    if split_k::atomic_dot(body).is_some() {
+        return 0;
+    }
     match codegen::reduction_root(body).filter(|r| {
         matches!(
             r.primitive,

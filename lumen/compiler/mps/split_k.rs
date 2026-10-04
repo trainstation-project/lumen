@@ -6,9 +6,14 @@
 //! dtype, a sum adds them in it, and a cast rounds to the dot's output
 //! dtype once. Not what the program computes (the partials are added in
 //! another order): `lumen.config.compiler.split_k`.
+//!
+//! With `atomic` (unless `lumen.config.compiler.deterministic`), the dot
+//! and its sum are one fusion ([`atomic_dot`]): its kernel adds each
+//! chunk's products to the float32 output (zeroed first) atomically, in no
+//! fixed order, rather than writing them for a sum to read back.
 
 use crate::DType;
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::dot_general::mps::SMALL_TILE;
 
 /// Dots of fewer output tiles (of the small matmul kernel's) are split.
@@ -22,8 +27,8 @@ const MAX_SPLIT: usize = 32;
 const MIN_CHUNK: usize = 256;
 
 /// `graph` with each dot of few output tiles and a long contraction split
-/// along it.
-pub(crate) fn split_k(graph: &Graph) -> Graph {
+/// along it, its chunks added atomically if `atomic`.
+pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
         nodes
@@ -37,7 +42,8 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
     }
     for node in nodes {
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let mut apply = |p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");
+        let apply =
+            |out: &mut Graph, p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");
         let Primitive::DotGeneral {
             lhs_contracting,
             rhs_contracting,
@@ -47,7 +53,7 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
             ..
         } = &node.primitive
         else {
-            map[node.output] = apply(node.primitive.clone(), &inputs);
+            map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
             continue;
         };
         let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
@@ -66,7 +72,7 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
             _ => None,
         };
         let Some((l, r, s)) = split else {
-            map[node.output] = apply(node.primitive.clone(), &inputs);
+            map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
             continue;
         };
         // Contracting dimension d as [S, K / S]: S a batch dimension.
@@ -76,8 +82,8 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
             shape.splice(d..=d, [s, k / s]);
             Primitive::Reshape { new_sizes: shape }
         };
-        let a = apply(reshaped(&lhs.shape, l), &[inputs[0]]);
-        let b = apply(reshaped(&rhs.shape, r), &[inputs[1]]);
+        let a = apply(&mut out, reshaped(&lhs.shape, l), &[inputs[0]]);
+        let b = apply(&mut out, reshaped(&rhs.shape, r), &[inputs[1]]);
         let dot = Primitive::DotGeneral {
             lhs_contracting: vec![l + 1],
             rhs_contracting: vec![r + 1],
@@ -86,14 +92,32 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
             accum_dtype: DType::F32,
             output_dtype: DType::F32,
         };
-        let partials = apply(dot, &[a, b]);
         let sum = Primitive::ReduceSum {
             axes: vec![0],
             accum_dtype: DType::F32,
         };
-        let mut value = apply(sum, &[partials]);
+        let mut value = match atomic {
+            true => {
+                let mut body = Graph::new();
+                let ins = [a, b].map(|v| body.input(out.type_of(v).clone()));
+                let partials = body.apply(dot, &ins).expect("well typed");
+                let sum = body.apply(sum, &[partials]).expect("well typed");
+                body.set_outputs(&[sum]).expect("its value");
+                let fusion = Primitive::Fusion {
+                    name: "split_k".into(),
+                    label: "dot_general (split-K)",
+                    body,
+                };
+                out.apply(fusion, &[a, b]).expect("well typed")
+            }
+            false => {
+                let partials = apply(&mut out, dot, &[a, b]);
+                apply(&mut out, sum, &[partials])
+            }
+        };
         if *output_dtype != DType::F32 {
             value = apply(
+                &mut out,
                 Primitive::Cast {
                     new_dtype: *output_dtype,
                 },
@@ -105,6 +129,20 @@ pub(crate) fn split_k(graph: &Graph) -> Graph {
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// The dot of a fusion's `body` if it is a split dot whose chunks are added
+/// atomically (see [`split_k`]): the dot, then the sum over its chunks.
+pub(crate) fn atomic_dot(body: &Graph) -> Option<&Node> {
+    match body.nodes() {
+        [dot, sum] => {
+            let split = matches!(dot.primitive, Primitive::DotGeneral { .. })
+                && matches!(&sum.primitive, Primitive::ReduceSum { axes, .. } if axes == &[0])
+                && sum.inputs == [dot.output];
+            split.then_some(dot)
+        }
+        _ => None,
+    }
 }
 
 /// The chunks to split the contraction of an `m` by `k` by `n` matmul
