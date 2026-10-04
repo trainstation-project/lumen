@@ -362,7 +362,7 @@ function showCode(n) {
     if (!tabs.length && n.fusion.source) tabs.push([n.fusion.kernel, "generated Metal", n.fusion.source, null]);
     tabs.push(["body", "the fused primitives, as a graph", n.fusion.body, null]);
   }
-  if (tabs.length && DATA.prelude) tabs.push(["prelude", "lumen/ops/mps.metal: the definitions every kernel shares", DATA.prelude, null]);
+  if (tabs.length && DATA.prelude) tabs.push(["prelude", "lumen/ops/mps/kernels.metal: the definitions every kernel shares", DATA.prelude, null]);
   if (!tabs.length) { c.appendChild(h("div", "empty", n.kind === "input" || n.kind === "output" ? "Inputs and outputs have no kernel." : "No kernel source for this node.")); return; }
   const bar = h("div", "code-tabs"); bar.setAttribute("role", "tablist");
   const head = h("div", "code-head"), body = h("div");

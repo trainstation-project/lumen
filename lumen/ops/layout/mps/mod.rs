@@ -1,4 +1,4 @@
-//! Layout primitives on MPS (`mps.metal`): a plan's reshapes (copies; the
+//! Layout primitives on MPS (`kernels.metal`): a plan's reshapes (copies; the
 //! others alias their operand), broadcast_in_dim, transpose and slice, as a
 //! dtype-agnostic gather: a tiled transpose where the output's innermost
 //! dimension would read the input at a stride.

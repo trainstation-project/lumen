@@ -1,4 +1,4 @@
-//! reduce_sum and reduce_max on MPS (`mps.metal`). Consecutive axes are a
+//! reduce_sum and reduce_max on MPS (`kernels.metal`). Consecutive axes are a
 //! view [a, count, b] reduced over the middle: rows when b = 1, columns
 //! otherwise, split into chunks when there are too few outputs to fill
 //! the GPU. Other axes take a generic kernel, with up to a threadgroup
@@ -167,7 +167,7 @@ pub(crate) fn encode_reduction(
 }
 
 /// The threads of a threadgroup that reduce together (`REDUCE_THREADS` in
-/// `mps.metal`): a [`Grid::Groups`] threadgroup.
+/// `kernels.metal`): a [`Grid::Groups`] threadgroup.
 pub(crate) const REDUCE_THREADS: usize = 256;
 
 /// The bytes of input each lane of a grouped reduction takes.

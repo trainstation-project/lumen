@@ -1,4 +1,4 @@
-//! dot_general on MPS (`mps.metal`) as a tiled matmul: each operand's
+//! dot_general on MPS (`kernels.metal`) as a tiled matmul: each operand's
 //! batch, free and contracting dimensions collapse into one each (any
 //! matmul, batched or with transposed operands). The MPS compiler
 //! ([`crate::compiler::mps`]) puts an operand whose dimensions do not into
@@ -12,7 +12,7 @@ use crate::graph::primitive::free_dims;
 use crate::ops::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
-/// The output tile of a threadgroup (`mps.metal`): 128 x 64 for the float
+/// The output tile of a threadgroup (`kernels.metal`): 128 x 64 for the float
 /// kernels and 64 x 64 for their `_small` variants, which matmuls with
 /// fewer than `SMALL_TILES` of the large tiles (or whose M fills less than
 /// half of the last) take; 64 x 64 (`MM_TILE`) for the 8- to 32-bit integer
@@ -97,7 +97,7 @@ pub(crate) fn reads_strided(
 }
 
 /// How a dot's matmul launches: on the small tiles or not, its grid, and
-/// its dimension arguments (`p` in `mps.metal`).
+/// its dimension arguments (`p` in `kernels.metal`).
 pub(crate) struct MatmulLaunch {
     pub small: bool,
     pub grid: Grid,

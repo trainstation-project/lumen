@@ -1,4 +1,4 @@
-//! Elementwise primitives on MPS (`mps.metal`): one kernel per op and
+//! Elementwise primitives on MPS (`kernels.metal`): one kernel per op and
 //! dtype, named after the primitive, each thread taking a few elements.
 
 use crate::Tensor;

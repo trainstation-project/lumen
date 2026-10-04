@@ -2,7 +2,7 @@
 // *.metal): type traits, scalar conversions, op functors, index helpers and
 // the dtype lists that instantiate kernels. build.rs concatenates this file
 // and the op files into one source, compiled at runtime into one library;
-// lumen/ops/mps.mm launches its kernels. The MPS graph compiler
+// lumen/ops/mps/shim.mm launches its kernels. The MPS graph compiler
 // (lumen/compiler/mps) also prepends it to the fused kernels it generates.
 //
 // Kernels are templates instantiated per op and dtype, named after the
@@ -166,7 +166,7 @@ template <typename D> inline D convert_value(float x) { return from_float<D>(x);
 // thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:
 // thread i of `threads` takes i, i + threads, ..., so each load across a
 // SIMD group is contiguous. Launched over ceil(n / per_thread<T>())
-// threads (lumen/ops/*/mps.rs). ELEMENTWISE_ARGS are the kernel
+// threads (lumen/ops/*/mps/mod.rs). ELEMENTWISE_ARGS are the kernel
 // parameters the loop needs, after the kernel's buffers.
 #define BYTES_PER_THREAD 16
 template <typename T> constexpr uint per_thread() {

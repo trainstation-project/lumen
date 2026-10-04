@@ -1,4 +1,4 @@
-//! Factory primitives on MPS (`mps.metal`): full, a dtype-agnostic fill a
+//! Factory primitives on MPS (`kernels.metal`): full, a dtype-agnostic fill a
 //! few elements a thread, and iota, a thread per element on an inner x size
 //! x outer grid whose y coordinate is the value.
 

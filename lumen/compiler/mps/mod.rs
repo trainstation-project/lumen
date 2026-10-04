@@ -30,18 +30,18 @@ use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, scratch_bytes, u
 use crate::tensor::contiguous_strides;
 
 unsafe extern "C" {
-    // In lumen/ops/mps.mm.
+    // In lumen/ops/mps/shim.mm.
     fn lumen_mps_compile_kernels(source: *const c_char) -> i32;
 }
 
 /// The shared definitions the generated kernels use (functors, conversions,
 /// `FOR_EACH_ELEMENT`, the reduction templates without their kernels).
 const PRELUDE: &str = concat!(
-    include_str!("../../ops/mps.metal"),
+    include_str!("../../ops/mps/kernels.metal"),
     "\n#define TEMPLATES_ONLY\n",
-    include_str!("../../ops/reduce/mps.metal"),
-    include_str!("../../ops/dot_general/mps.metal"),
-    include_str!("../../ops/attention/mps.metal"),
+    include_str!("../../ops/reduce/mps/kernels.metal"),
+    include_str!("../../ops/dot_general/mps/kernels.metal"),
+    include_str!("../../ops/attention/mps/kernels.metal"),
 );
 
 /// `graph` canonicalized, fused (as `options.config` says) and planned, its

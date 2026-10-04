@@ -1,8 +1,8 @@
-// dot_general as a matmul: lumen/ops/dot_general/mps.rs collapses the
+// dot_general as a matmul: lumen/ops/dot_general/mps/mod.rs collapses the
 // batch, free and contracting dimensions of each operand into one (copying
 // an operand into that order first where they do not collapse).
 //
-// Compiled after lumen/ops/mps.metal, which build.rs puts first
+// Compiled after lumen/ops/mps/kernels.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
 // A dot_general in matmul form, out[b, m, n] = sum_k lhs[b, m, k] *

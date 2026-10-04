@@ -390,7 +390,7 @@ mod device_kernels {
     //! `Device::Mps` while keeping its bytes in a side table at addresses the
     //! host could not touch. That device modelled "MPS but not unified", which
     //! is no longer representable: MPS means unified memory (see
-    //! `ops/copy/mps.rs`), so host-addressability follows from the device. The
+    //! `ops/copy/mps/mod.rs`), so host-addressability follows from the device. The
     //! allocator keeps nothing but allocate/free for it to override.
     //!
     //! So the tests below run on the real CPU device, where the same

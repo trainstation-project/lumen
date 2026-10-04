@@ -125,7 +125,7 @@ pub(crate) fn has_epilogue(body: &Graph) -> bool {
 }
 
 /// The kernel of a reduction fusion: the reduction's template
-/// (`ops/reduce/mps.metal`) for its layout ([`reduce::layout`], as its
+/// (`ops/reduce/mps/kernels.metal`) for its layout ([`reduce::layout`], as its
 /// encoder launches it), reading an input whose `operator[]` computes each element of the reduced value from
 /// the fusion's inputs, as the loop emitter computes an output element. A
 /// split reduction's kernel writes the partials, which the reduction's own
@@ -245,7 +245,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     };
     // A split reduction with an epilogue: its second launch, reducing the
     // partials (of the accumulation dtype) and applying the epilogue, with
-    // the arguments of the primitive's kernels (ops/reduce/mps.metal).
+    // the arguments of the primitive's kernels (ops/reduce/mps/kernels.metal).
     let last = match (&epilogue, split, reduce::layout(ty, axes)) {
         (Some(_), true, reduce::Layout::Rows) => format!(
             "\nkernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant ulong &count [[buffer(2)]], constant ulong &chunk [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]) {{\n    threadgroup {a} shared[REDUCE_THREADS];\n    reduce_rows<{op}, {a}>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());\n}}\n"
@@ -276,7 +276,7 @@ fn named(source: String) -> (String, String) {
 /// A fusion kernel's buffer parameters: `body`'s inputs (those `by_value`
 /// marks aside), `out` (of Metal type `out`) and a multi-output fusion's
 /// other outputs (`out1`, ...), as device buffers; then its by-value
-/// inputs, as constants (`setBytes`, `ops/mps.rs`). The parameters (each
+/// inputs, as constants (`setBytes`, `ops/mps/mod.rs`). The parameters (each
 /// followed by a comma), and the index the kernel's own arguments start
 /// at.
 fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
@@ -927,7 +927,7 @@ pub(super) fn metal_type(dtype: DType) -> &'static str {
     }
 }
 
-/// The functor of an elementwise op in lumen/ops/mps.metal.
+/// The functor of an elementwise op in lumen/ops/mps/kernels.metal.
 fn functor(p: &Primitive) -> &'static str {
     use Primitive::*;
     match p {
@@ -975,7 +975,7 @@ fn constant(dtype: DType, value: Scalar) -> String {
 
 /// The kernel of an attention fusion (`ops/attention`): its name and Metal
 /// source, instantiating `flash_attention`, or for few queries
-/// `attention_decode` (`ops/attention/mps.metal`), with an indexer of its
+/// `attention_decode` (`ops/attention/mps/kernels.metal`), with an indexer of its
 /// operands' strides. Its buffers: the body's inputs, then `out`.
 pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
     let input = |base: Var| {
@@ -1194,7 +1194,7 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
 }
 
 /// The kernel of a contraction with its epilogue: the matmul template
-/// (`ops/dot_general/mps.metal`, on its large and, as `NAME_small`, small
+/// (`ops/dot_general/mps/kernels.metal`, on its large and, as `NAME_small`, small
 /// tiles, as its encoder launches it), writing each output through a
 /// functor computing the epilogue from the dot's value `r` and the
 /// output's flat index, as the loop emitter computes an element (reading

@@ -2,7 +2,7 @@
 ``lumen.compile(fn).dump_graph(path)``. The page shows the fused plan and
 the traced graph as node graphs, and for every node its types, buffers, the
 kernels it launched (with GPU time) and their Metal source, generated
-(fusions) or hand-written (``lumen/ops/<op>/mps.metal``).
+(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``).
 
 From the command line, for a function and inputs of the given types:
 
@@ -54,25 +54,25 @@ def type_text(dtype, shape):
 # ---------------------------------------------------------------------
 
 _SOURCES = [
-    (r"^matmul_small_", "dot_general/mps.metal", "inline void matmul_sg_impl"),
-    (r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$", "dot_general/mps.metal", "inline void matmul_sg_impl"),
-    (r"^matmul_(u64|i64)$", "dot_general/mps.metal", "inline void matmul_wide_impl"),
-    (r"^matmul_", "dot_general/mps.metal", "inline void matmul_impl"),
-    (r"^reduce_\w+_rows_", "reduce/mps.metal", "inline void reduce_rows"),
-    (r"^reduce_\w+_cols_", "reduce/mps.metal", "inline void reduce_cols"),
-    (r"^reduce_\w+_grouped_", "reduce/mps.metal", "inline void reduce_grouped"),
-    (r"^reduce_", "reduce/mps.metal", "inline void reduce("),
-    (r"^gather_", "layout/mps.metal", "#define GATHER"),
-    (r"^transpose_", "layout/mps.metal", "#define TRANSPOSE"),
-    (r"^fill_(strided_)?u\d+$", "fill/mps.metal", "inline void fill"),
-    (r"^fill_\d$", "factory/mps.metal", "#define FULL"),
-    (r"^iota_", "factory/mps.metal", "#define IOTA"),
-    (r"^convert_", "elementwise/mps.metal", "#define CONVERT"),
-    (r"^select_", "elementwise/mps.metal", "#define SELECT"),
-    (r"^neg_", "elementwise/mps.metal", "#define NEG"),
-    (r"^(exp|log|sqrt|tanh|logistic)_", "elementwise/mps.metal", "#define UNARY"),
-    (r"^(max|eq|lt)_", "elementwise/mps.metal", "#define ORDERED"),
-    (r"^(add|sub|mul|div)_", "elementwise/mps.metal", "#define BINARY"),
+    (r"^matmul_small_", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
+    (r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
+    (r"^matmul_(u64|i64)$", "dot_general/mps/kernels.metal", "inline void matmul_wide_impl"),
+    (r"^matmul_", "dot_general/mps/kernels.metal", "inline void matmul_impl"),
+    (r"^reduce_\w+_rows_", "reduce/mps/kernels.metal", "inline void reduce_rows"),
+    (r"^reduce_\w+_cols_", "reduce/mps/kernels.metal", "inline void reduce_cols"),
+    (r"^reduce_\w+_grouped_", "reduce/mps/kernels.metal", "inline void reduce_grouped"),
+    (r"^reduce_", "reduce/mps/kernels.metal", "inline void reduce("),
+    (r"^gather_", "layout/mps/kernels.metal", "#define GATHER"),
+    (r"^transpose_", "layout/mps/kernels.metal", "#define TRANSPOSE"),
+    (r"^fill_(strided_)?u\d+$", "fill/mps/kernels.metal", "inline void fill"),
+    (r"^fill_\d$", "factory/mps/kernels.metal", "#define FULL"),
+    (r"^iota_", "factory/mps/kernels.metal", "#define IOTA"),
+    (r"^convert_", "elementwise/mps/kernels.metal", "#define CONVERT"),
+    (r"^select_", "elementwise/mps/kernels.metal", "#define SELECT"),
+    (r"^neg_", "elementwise/mps/kernels.metal", "#define NEG"),
+    (r"^(exp|log|sqrt|tanh|logistic)_", "elementwise/mps/kernels.metal", "#define UNARY"),
+    (r"^(max|eq|lt)_", "elementwise/mps/kernels.metal", "#define ORDERED"),
+    (r"^(add|sub|mul|div)_", "elementwise/mps/kernels.metal", "#define BINARY"),
 ]
 
 
@@ -288,7 +288,7 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
         "workspace": {"fused": plan.workspace_bytes, "unfused": unfused.workspace_bytes},
         "views": {"fused": plan_view(plan, fused_kernels), "traced": graph_view(graph, unfused, unfused_kernels)},
         "sources": {f: (OPS / f).read_text() for f in files},
-        "prelude": (OPS / "mps.metal").read_text(),
+        "prelude": (OPS / "mps" / "kernels.metal").read_text(),
     }
 
 
