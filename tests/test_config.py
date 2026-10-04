@@ -159,6 +159,44 @@ def test_split_k_agrees(compiler, dtype):
 
 
 @pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_split_k_then_silu(compiler, dtype):
+    """SiLU after a matmul of few output tiles and a long contraction: not
+    split, it is the matmul's epilogue (one kernel); split, it needs every
+    chunk's products: with ``deterministic``, the epilogue of the
+    ``reduce_sum`` of the dot's partials (reading the sum twice); atomically,
+    a kernel after the split dot's. Each agrees with SiLU of the exact
+    product to rounding."""
+    rng = np.random.default_rng(0)
+    a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
+    try:
+        x, w = (lumen.from_numpy(t).to("mps").to(dtype=dtype) for t in (a, b))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def f(x, w):
+        y = F.matmul(x, w, accum_dtype=lumen.float32, output_dtype=lumen.float32)
+        return (y * F.sigmoid(y)).to(dtype=x.dtype)
+
+    y = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
+    want = y / (1 + np.exp(-y))
+    silu = "logistic → mul" + {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
+    plans = {
+        "unsplit": ["dot_general → " + silu],
+        "atomic": ["dot_general (split-K)", silu],
+        "deterministic": ["dot_general", "reduce_sum → " + silu],
+    }
+    tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
+    for mode, plan in plans.items():
+        compiler.reset()
+        compiler.split_k = mode != "unsplit"
+        compiler.deterministic = mode == "deterministic"
+        assert _labels(f, x, w) == plan, mode
+        got = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+        np.testing.assert_allclose(got, want, atol=tol, err_msg=mode)
+
+
+@pytest.mark.mps
 @pytest.mark.parametrize("n", [300, 65536])
 def test_online_softmax_agrees(compiler, n):
     """With ``online_softmax`` (the default) a softmax's max and sum are one

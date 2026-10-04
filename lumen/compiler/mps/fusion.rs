@@ -153,13 +153,15 @@ pub(crate) fn fuse(
     let rows = rows.as_slice();
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     // A reduction's epilogue: the elementwise primitives (and reshapes
-    // between them) after it, each its only reader, reading it and
-    // constants alone (a cast of the result, a mean's division): computed
-    // in its kernel, as it writes each output (a split reduction's second
-    // launch). The epilogue's last primitive is the fusion's root, by
-    // index, with its reduction's.
+    // between them) after it, reading its value, each other and constants
+    // alone (a cast of the result, a mean's division, a SiLU reading it
+    // twice): computed in its kernel, as it writes each output (a split
+    // reduction's second launch). The epilogue's last primitive is the
+    // fusion's root, by index, with its reduction's; its others are read in
+    // it alone, computed there.
     let mut epilogue: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut ends: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut in_reduction_epilogue = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let reduction = matches!(
             node.primitive,
@@ -169,25 +171,39 @@ pub(crate) fn fuse(
         if !config.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
             continue;
         }
-        let (mut r, mut end) = (i, None);
-        while let [u] = users[nodes[r].output][..] {
-            let v = nodes[r].output;
-            let step = elementwise(&nodes[u].primitive)
-                || matches!(nodes[u].primitive, Primitive::Reshape { .. });
-            let reads = nodes[u]
+        // Grown in order (`taken`, their values `after`), ending at the
+        // last elementwise primitive before which every value is read in
+        // it alone.
+        let (mut taken, mut after, mut end) = (vec![i], vec![false; n], None);
+        after[node.output] = true;
+        for (u, un) in nodes.iter().enumerate().skip(i + 1) {
+            if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
+                continue;
+            }
+            let step =
+                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+            let reads = un
                 .inputs
                 .iter()
-                .all(|&x| x == v || constant(graph, &producer, x));
-            if is_output[v] || !fusible[u] || !step || !reads {
+                .all(|&x| after[x] || constant(graph, &producer, x));
+            if !fusible[u] || !step || !reads {
                 break;
             }
-            r = u;
-            if elementwise(&nodes[u].primitive) {
+            taken.push(u);
+            after[un.output] = true;
+            let inside = taken[..taken.len() - 1].iter().all(|&t| {
+                let v = nodes[t].output;
+                !is_output[v] && users[v].iter().all(|r| taken.contains(r))
+            });
+            if inside && elementwise(&un.primitive) {
                 end = Some(u);
             }
         }
         if let Some(end) = end {
             (epilogue[end], ends[i]) = (Some(i), Some(end));
+            for &t in taken.iter().filter(|&&t| t != i && t < end) {
+                in_reduction_epilogue[t] = true;
+            }
         }
     }
     // A contraction's epilogue (XLA's GEMM epilogue fusion): the
@@ -292,8 +308,9 @@ pub(crate) fn fuse(
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
-            // A dot with an epilogue is computed in its end's fusion.
-            if dot_end[i].is_some() || in_epilogue[i] {
+            // A dot or reduction with an epilogue is computed in its end's
+            // fusion.
+            if dot_end[i].is_some() || in_epilogue[i] || in_reduction_epilogue[i] {
                 return false;
             }
             // A row fusion's inner nodes are computed in it alone.

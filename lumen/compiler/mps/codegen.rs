@@ -62,26 +62,23 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
         producer[node.output] = Some(i);
     }
     // From the output back through its epilogue (elementwise primitives and
-    // reshapes of one value and constants) to a reduction.
-    let mut v = body.outputs()[0];
-    loop {
-        let node = &nodes[producer[v]?];
+    // reshapes of the reduction's value, each other's and constants: a
+    // SiLU's reads it twice) to the one reduction.
+    let (mut found, mut stack) = (None, vec![body.outputs()[0]]);
+    while let Some(v) = stack.pop() {
+        let i = producer[v]?;
+        let node = &nodes[i];
         match &node.primitive {
-            ReduceSum { .. } | ReduceMax { .. } => return Some(node),
-            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => {
-                let mut rest = node
-                    .inputs
+            ReduceSum { .. } | ReduceMax { .. } if found.is_none_or(|f| f == i) => found = Some(i),
+            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => stack.extend(
+                node.inputs
                     .iter()
-                    .filter(|&&u| !fusion::constant(body, &producer, u));
-                let next = *rest.next()?;
-                if rest.any(|&u| u != next) {
-                    return None;
-                }
-                v = next;
-            }
+                    .filter(|&&u| !fusion::constant(body, &producer, u)),
+            ),
             _ => return None,
         }
     }
+    found.map(|i| &nodes[i])
 }
 
 /// The names a reduction fusion's two launches (a split reduction's) are
