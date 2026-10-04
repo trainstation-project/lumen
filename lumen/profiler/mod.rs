@@ -153,29 +153,40 @@ thread_local! {
     /// Ids of the ops and ranges open on this thread, innermost last.
     static STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static THREAD_ID: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
-    /// The next device launch's own types, where they are not its op's.
-    static LAUNCH_TYPES: RefCell<Option<IoTypes>> = const { RefCell::new(None) };
+    /// The next device launch's own name and types ([`next_launch`]).
+    static NEXT_LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
 }
 
 /// A launch's inputs' and outputs' types.
 type IoTypes = (Vec<TensorType>, Vec<TensorType>);
 
-/// Record the next device launch on this thread with these input and
-/// output types (`types` is only called with `record_shapes`) instead of
-/// its op's: an op that launches several kernels, each reading and writing
-/// other values (a split reduction: the input to partials, then them to
-/// the output).
+/// What one device launch of an op computes, where it is not the whole op
+/// (an op that launches several kernels: a split reduction's partials,
+/// then those to its output): its name (the primitives it runs) and, with
+/// `record_shapes`, the types it reads and writes.
+#[derive(Debug, Clone)]
+pub(crate) struct Launch {
+    name: &'static str,
+    types: Option<IoTypes>,
+}
+
+/// Record the next device launch on this thread as `name`, reading and
+/// writing `types` (only called with `record_shapes`), rather than as its
+/// op: the op's event keeps the op's name and types, and the launch's,
+/// nested in it, are its own. Launches with none set are their op's.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-pub(crate) fn launch_types(types: impl FnOnce() -> IoTypes) {
-    if flags() & SHAPES != 0 {
-        LAUNCH_TYPES.with(|t| *t.borrow_mut() = Some(types()));
+pub(crate) fn next_launch(name: &'static str, types: impl FnOnce() -> IoTypes) {
+    let bits = flags();
+    if bits & (MPS | CUDA) != 0 {
+        let types = (bits & SHAPES != 0).then(types);
+        NEXT_LAUNCH.with(|l| *l.borrow_mut() = Some(Launch { name, types }));
     }
 }
 
-/// Drop [`launch_types`] set for a launch that did not happen.
+/// Drop a [`next_launch`] for a launch that did not happen.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-pub(crate) fn clear_launch_types() {
-    LAUNCH_TYPES.with(|t| t.borrow_mut().take());
+pub(crate) fn clear_next_launch() {
+    NEXT_LAUNCH.with(|l| l.borrow_mut().take());
 }
 
 /// The profiler clock: nanoseconds since the first time it was read.
@@ -269,7 +280,7 @@ pub fn stop() -> Result<Profile, String> {
         .collect();
     for e in events.iter_mut().filter(|e| e.kind == EventKind::Gpu) {
         if let Some((inputs, outputs, accum)) = e.parent.and_then(|p| types.get(&p)) {
-            // A launch with types of its own ([`launch_types`]) keeps them.
+            // A launch with types of its own ([`next_launch`]) keeps them.
             if e.inputs.is_empty() && e.outputs.is_empty() {
                 (e.inputs, e.outputs) = (inputs.clone(), outputs.clone());
             }
@@ -480,20 +491,20 @@ pub(crate) struct GpuContext {
     session: u64,
     parent: Option<u64>,
     thread: u64,
-    /// The launch's own types ([`launch_types`]), if not its op's.
-    types: Option<IoTypes>,
+    /// The launch's own name and types ([`next_launch`]), if not its op's.
+    launch: Option<Launch>,
 }
 
 /// The current op's context for device work on `device`, if the session
 /// times it.
 #[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
 pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
-    let types = LAUNCH_TYPES.with(|t| t.borrow_mut().take());
+    let launch = NEXT_LAUNCH.with(|l| l.borrow_mut().take());
     device_enabled(device).then(|| GpuContext {
         session: SESSION.load(Ordering::Relaxed),
         parent: current_parent(),
         thread: thread_id(),
-        types,
+        launch,
     })
 }
 
@@ -519,8 +530,13 @@ pub(crate) fn record_kernel_in(
     start_ns: u64,
     end_ns: u64,
 ) {
-    // Its own types, if set; else its op's, given it when the session ends.
-    let (inputs, outputs) = context.types.unwrap_or_default();
+    // Its own name and types, if set; else its op's (types given it when
+    // the session ends).
+    let (name, types) = match context.launch {
+        Some(Launch { name, types }) => (name, types),
+        None => (name, None),
+    };
+    let (inputs, outputs) = types.unwrap_or_default();
     push(
         context.session,
         Event {

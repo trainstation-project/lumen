@@ -403,6 +403,7 @@ pub(crate) fn encode(
             x,
             Some(name),
             last.as_deref(),
+            codegen::split_launches(body),
             label,
             inputs,
             output,
