@@ -20,6 +20,7 @@ Convert with ``.to(dtype)``.
 import builtins
 import functools
 import math
+import warnings
 
 from lumen import nn
 from lumen._C import Graph, Plan, Tensor, _pack, config
@@ -68,13 +69,14 @@ def _scalars(args):
     return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
 
 
-def _trace(fn, args):
+def _trace(fn, args, stacklevel):
     """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
     single tensor (rather than a tuple or list of them). The graph's inputs
     are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
-    meta tensor."""
+    meta tensor. Precision warnings are attributed ``stacklevel`` frames
+    up (the user's call)."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
 
@@ -108,6 +110,8 @@ def _trace(fn, args):
         if not isinstance(o, TracedTensor) or o.graph is not graph:
             raise TypeError(f"a compiled function must return tensors computed from its inputs, got {o!r}")
     graph.set_outputs([o.var for o in outputs])
+    for message in graph.precision_warnings():
+        warnings.warn(message, stacklevel=stacklevel)
     return graph, single
 
 
@@ -211,7 +215,7 @@ def compile(fn, device=None):
         scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
-            plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
+            plans[key] = (*_trace(fn, args, 4), [], len(tensors), scalars)
         graph, single, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
@@ -314,7 +318,7 @@ def make_graph(fn):
 
     @functools.wraps(fn)
     def graph(*args):
-        return _trace(fn, args)[0]
+        return _trace(fn, args, 3)[0]
 
     return graph
 
