@@ -48,6 +48,9 @@ _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # last: each node bound while one is open, ``(name, input vars, params,
 # output var)``, is appended to each.
 _TAPES = []
+# Each trace's whole tape and the tensors ``.backward()`` differentiates
+# with respect to (its tensor arguments and weights), innermost last.
+_BACKWARD = []
 
 
 def _record(name, inputs, params, var):
@@ -146,14 +149,25 @@ def _trace(fn, args):
         )
         for a in traced
     ]
+
     sources = {}
+    # Recorded from the start, for ``.backward()``.
+    tape = []
+    leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
+
     _TRACES.append(graph)
     _SOURCES.append(sources)
+    _TAPES.append(tape)
+    _BACKWARD.append((tape, leaves))
+
     try:
         out = fn(*traced)
     finally:
         _TRACES.pop()
         _SOURCES.pop()
+        _TAPES.pop()
+        _BACKWARD.pop()
+
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
@@ -566,7 +580,7 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "var", "dtype", "shape", "weak")
+    __slots__ = ("graph", "var", "dtype", "shape", "weak", "grad")
 
     def __init__(self, graph, var):
         self.graph = graph
@@ -574,6 +588,8 @@ class TracedTensor:
         # A runtime scalar's (a float argument's): it takes its tensor
         # operand's dtype, as a Python scalar does.
         self.weak = False
+        # Its gradient, once ``.backward()`` computed one (torch's ``.grad``).
+        self.grad = None
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)
@@ -629,6 +645,28 @@ class TracedTensor:
 
     def __neg__(self):
         return prims.neg(self)
+
+    def backward(self, gradient=None):
+        """Its gradient (``gradient``: its cotangent; for a scalar, 1 by
+        default) with respect to the traced function's tensor arguments and
+        its modules' weights, added to their ``.grad`` (``torch.Tensor.backward``,
+        within the trace: return them). As ``lumen.grad`` computes it."""
+        from lumen.autograd.transforms import backward  # it imports this module
+
+        tape, leaves = _BACKWARD[-1]
+        if gradient is None:
+            if self.shape != () or not _is_float(self.dtype):
+                raise RuntimeError(f"backward: a gradient is needed for a non-scalar output, got {self!r}")
+
+            gradient = prims.full((), 1.0, self.dtype)
+
+        for leaf, g in zip(leaves, backward(self, gradient, list(tape), leaves)):
+            if g is not None:
+                # gradient accumulation
+                if leaf.grad is not None:
+                    g = leaf.grad + g
+
+                leaf.grad = g
 
     def __matmul__(self, other):
         """F.matmul, accumulating floats in float32 (float64 in float64),
