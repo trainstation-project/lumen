@@ -1090,3 +1090,109 @@ def test_ops_are_functions():
     by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
     by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t()))(a)
     assert str(by_operator) == str(by_function)
+
+
+class _ScaledMatmul(lumen.nn.Module):
+    w: lumen.Tensor
+    s: float
+
+    def __call__(self, x):
+        return (x @ self.w) * self.s
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize(
+    "f, shapes, dtype",
+    [
+        (lambda x, w, y: F.relu(x @ w + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
+        (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
+        (lambda x, w, y: F.relu(x @ w).float(), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
+        (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
+    ],
+    ids=["bias relu", "batched residual", "relu cast", "times exp(y)"],
+)
+def test_matmul_epilogues_fuse(f, shapes, dtype):
+    """The elementwise primitives after a matmul (a bias, a residual, an
+    activation, a cast, a product with another fused value) run in its
+    kernel as it writes each output (``contraction_epilogues``): one step,
+    exactly the unfused plan's result."""
+    rng = np.random.default_rng(0)
+    try:
+        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    (step,) = lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()
+    assert step["label"].startswith("dot_general ->"), step["label"]
+    fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        assert len(lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
+        unfused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
+    finally:
+        lumen.config.compiler.reset()
+    np.testing.assert_array_equal(fused, unfused)
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_takes_runtime_scalars_by_value():
+    """A module's float in a matmul's epilogue is a kernel argument: a new
+    value runs the same kernel."""
+    rng = np.random.default_rng(0)
+    w, x = rng.standard_normal((32, 48)).astype(np.float32), rng.standard_normal((16, 32)).astype(np.float32)
+    weight = lumen.empty([32, 48], device="meta")
+    f = lumen.compile(lambda m, a: m(a), device="mps")
+    try:
+        f(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    _ScaledMatmul(weight, 0.5).load_state_dict({"w": lumen.from_numpy(w)})
+    for s in (0.5, 3.0):
+        out = lumen.to_numpy(f(_ScaledMatmul(weight, s), lumen.from_numpy(x)))
+        np.testing.assert_allclose(out, (x @ w) * s, rtol=1e-5, atol=1e-5)
+    graph = lumen.make_graph(lambda m, a: m(a))(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
+    (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
+    assert ("s1", "float32", []) in step["inputs"] and "constant float &in" in step["fusion"]["source"]
+
+
+class _Gated(lumen.nn.Module):
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x):
+        return F.relu(x @ self.w1) * (x @ self.w3)
+
+
+class _Relu(lumen.nn.Module):
+    w1: lumen.Tensor
+
+    def __call__(self, x):
+        return F.relu(x @ self.w1)
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_reads_packed_weights_in_place():
+    """A weight placed side by side with another (where dots merge) is a
+    strided view; a matmul with its epilogue reads it in place, as the
+    matmul alone does: no copy each call."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    w1, w3 = lumen.empty([32, 48], device="meta"), lumen.empty([32, 48], device="meta")
+    gated, relu = lumen.compile(lambda m, x: m(x), device="mps"), lumen.compile(lambda m, x: m(x), device="mps")
+    try:
+        gated(_Gated(w1, w3), lumen.empty([16, 32], device="meta"))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    relu(_Relu(w1), lumen.empty([16, 32], device="meta"))
+    rng = np.random.default_rng(0)
+    w = rng.standard_normal((32, 48)).astype(np.float32)
+    _Gated(w1, w3).load_state_dict({"w1": lumen.from_numpy(w), "w3": lumen.from_numpy(w)})
+    x = rng.standard_normal((16, 32)).astype(np.float32)
+    xt = lumen.from_numpy(x).to("mps")
+    np.testing.assert_allclose(lumen.to_numpy(relu(_Relu(w1), xt)), np.maximum(x @ w, 0), rtol=1e-5, atol=1e-5)
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        relu(_Relu(w1), xt)
+    ops = [e for e in prof.events() if e["kind"] == "op"]
+    assert any(e["name"].startswith("dot_general ->") for e in ops)
+    # (x, copied into the workspace, is made contiguous; the weight never.)
+    copied = [e["inputs"] for e in ops if e["name"] == "lumen::contiguous"]
+    assert [("float32", [32, 48])] not in copied, copied

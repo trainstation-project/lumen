@@ -157,20 +157,23 @@ inline void matmul_wide_impl(device const T *lhs,
 // of it as 4x2 8x8 accumulators). BMx16 and 16xBN operand tiles are staged
 // in threadgroup memory as T, zero-padded past the edges; each thread loads a fixed column of them, and
 // loads the next k step's while the current one is multiplied. Each output
-// sums over k in increasing order of 8-element blocks.
+// sums over k in increasing order of 8-element blocks. Each output is
+// written as epi(it, its flat index): Same for the primitive's kernels; a
+// fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out.
 #define SG_BK 16
 #define SG_COLS 2 // SIMD groups across the tile
-template <typename T, typename A, typename O, uint BM, uint BN>
+template <typename T, typename A, typename O, uint BM, uint BN, typename Out = O, typename Epi = Same>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
-                           device O *out,
+                           device Out *out,
                            constant ulong *p,
                            threadgroup T *lt,
                            threadgroup T *rt,
                            uint3 group,
                            uint flat,
                            uint sg,
-                           uint lane) {
+                           uint lane,
+                           Epi epi = Epi()) {
     constexpr uint FM = BM / (8 / SG_COLS) / 8, FN = BN / SG_COLS / 8;
     constexpr uint LA = BM * SG_BK / 256, LB = SG_BK * BN / 256; // elements a thread loads
     constexpr uint RA = 256 / SG_BK, RB = 256 / BN;              // rows apart
@@ -233,7 +236,7 @@ inline void matmul_sg_impl(device const T *lhs,
     // of A in lt (which holds at least 8 x 64 floats), from which its lanes
     // write two elements each.
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
-    device O *o = out + group.z * M * N;
+    device Out *o = out + group.z * M * N;
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) {
             simdgroup_store(c[i][j], stage, 8);
@@ -241,7 +244,7 @@ inline void matmul_sg_impl(device const T *lhs,
             for (uint e = lane; e < 64; e += 32) {
                 ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
                 if (m < M && n < N) {
-                    o[m * N + n] = O(stage[e]);
+                    o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -286,6 +289,8 @@ inline void matmul_sg_impl(device const T *lhs,
     MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)         \
     MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 64, 64)
 
+// The generated kernels include the templates alone.
+#ifndef TEMPLATES_ONLY
 MATMUL(u8, uchar)
 MATMUL(u16, ushort)
 MATMUL(u32, uint)
@@ -297,3 +302,4 @@ MATMUL_WIDE(i64, long)
 FOR_FLOAT(MATMUL_FLOAT)
 MATMUL_WIDENED(f16, half)
 MATMUL_WIDENED(bf16, bfloat)
+#endif

@@ -23,6 +23,14 @@ using namespace metal;
 // type traits
 // ---------------------------------------------------------------------
 
+// The identity epilogue: what a kernel writes, as computed (a generated
+// kernel's epilogue computes the elementwise primitives after it, given
+// the value and, with `j`, its flat index in the output).
+struct Same {
+    template <typename T> T operator()(T x) const { return x; }
+    template <typename T> T operator()(T x, ulong j) const { return x; }
+};
+
 template <typename T> inline bool is_float_t() { return false; }
 template <> inline bool is_float_t<half>() { return true; }
 template <> inline bool is_float_t<bfloat>() { return true; }

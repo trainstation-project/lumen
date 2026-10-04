@@ -26,7 +26,7 @@ use crate::Tensor;
 use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
-use crate::ops::mps::{Grid, elementwise_grid, launch, scratch_bytes, u32_arg};
+use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 
 unsafe extern "C" {
@@ -40,6 +40,7 @@ const PRELUDE: &str = concat!(
     include_str!("../../ops/mps.metal"),
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
+    include_str!("../../ops/dot_general/mps.metal"),
     include_str!("attention.metal"),
 );
 
@@ -57,8 +58,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     // Attention as one flash-attention kernel, matched before dots are
     // put in matmul form (which would copy its operands).
     let mut attention_kernels = BTreeMap::new();
+    let scalar_vars: Vec<Var> = (0..graph.inputs().len())
+        .filter(|&i| options.scalars.get(i) == Some(&true))
+        .map(|i| graph.inputs()[i])
+        .collect();
     let graph = match config.fuse && config.flash_attention {
-        true => attention::fuse(graph, |body| {
+        true => attention::fuse(graph, config.contraction_epilogues, &scalar_vars, |body| {
             let a = attention::of_body(body).expect("an attention");
             let (name, source) = codegen::attention_kernel(body, &a);
             attention_kernels.insert(name.clone(), source);
@@ -262,6 +267,27 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
     views
 }
 
+/// Whether a fusion with `body` reads its input `k` in place at `strides`
+/// (in elements): a contraction with its epilogue, whose dot alone reads it,
+/// in matmul form at them.
+pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
+    let (Some(dot), Some(&v)) = (codegen::gemm_dot(body), body.inputs().get(k)) else {
+        return false;
+    };
+    let side = dot.inputs.iter().position(|&u| u == v);
+    let only = body
+        .nodes()
+        .iter()
+        .all(|n| std::ptr::eq(n, dot) || !n.inputs.contains(&v));
+    let operands = [body.type_of(dot.inputs[0]), body.type_of(dot.inputs[1])];
+    match side {
+        Some(side) if only && dot.inputs[0] != dot.inputs[1] => {
+            crate::ops::dot_general::mps::reads_strided(&dot.primitive, operands, side, strides)
+        }
+        _ => false,
+    }
+}
+
 /// Each generated kernel's Metal source (without the shared prelude), by
 /// name, as compiled.
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
@@ -313,6 +339,41 @@ pub(crate) fn encode(
         buffers.push(output.cast_const());
         let grid = Grid::Groups([queries, batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
+    }
+    // A contraction with its epilogue: the matmul's launch (on the small
+    // tiles, `NAME_small`, as the primitive's would be).
+    if let Some(dot) = codegen::gemm_dot(body) {
+        let ty = |v: Var| body.type_of(v);
+        let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
+        // An operand read in place as a view (a parameter packed with
+        // others, `Plan::reads_strided`) has its strides; any other is
+        // contiguous.
+        let strides = |v: Var| {
+            let k = body.inputs().iter().position(|&i| i == v);
+            k.and_then(|k| step.views[k].as_ref()).map_or_else(
+                || contiguous_strides(&ty(v).shape),
+                |view| view.strides.clone(),
+            )
+        };
+        let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
+        let plan = crate::ops::dot_general::mps::plan_matmul(
+            &dot.primitive,
+            lhs,
+            rhs,
+            ty(dot.output),
+            &ls,
+            &rs,
+            step.label,
+        )?;
+        let kernel = match plan.small {
+            true => format!("{name}_small"),
+            false => name.clone(),
+        };
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        buffers.extend(extra);
+        let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
+        return launch(&kernel, &buffers, &args, plan.grid, keep, step.label);
     }
     // A row kernel: a threadgroup a row of the last dimension.
     if !codegen::row_reductions(body).is_empty() {

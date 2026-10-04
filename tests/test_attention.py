@@ -169,3 +169,38 @@ def test_scaled_dot_product_attention_checks_its_operands():
         call(m(1, 4, 2, 8), m(1, 4, 2, 8, dtype="float16"), m(1, 4, 2, 8))
     with pytest.raises(TypeError, match="floating-point"):
         call(m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"))
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize(
+    "f, sq",
+    [
+        (lambda q, k, v, x, b: x + F.scaled_dot_product_attention(q, k, v).reshape(-1, 128), 96),
+        (
+            lambda q, k, v, x, b: (
+                F.scaled_dot_product_attention(q, k, v, is_causal=True).reshape(-1, 128) * 2.0 + b
+            ).to(dtype="float16"),
+            96,
+        ),
+        (lambda q, k, v, x, b: x + F.scaled_dot_product_attention(q, k, v, is_causal=True).reshape(-1, 128), 1),
+    ],
+    ids=["residual", "scale bias cast", "decode residual"],
+)
+def test_attention_epilogues_fuse(f, sq):
+    """The elementwise primitives after an attention, through reshapes (a
+    residual, a bias, a scale, a cast), run in its kernel as it writes each
+    output (``contraction_epilogues``): one step, agreeing with the CPU and
+    with the unfused plan."""
+    shapes = [(1, sq, 4, 32), (1, 96, 4, 32), (1, 96, 4, 32), (sq, 128), (128,)]
+    ts, arrays = tensors("mps", "float32", *shapes)
+    assert steps(f, *ts) == ["flash_attention"]
+    got = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)).to(dtype="float32"))
+    np.testing.assert_allclose(got, want, rtol=1e-3, atol=1e-3)
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        assert len(steps(f, *ts)) == 2
+        unfused = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
+    finally:
+        lumen.config.compiler.reset()
+    np.testing.assert_allclose(got, unfused, rtol=1e-6, atol=1e-6)

@@ -54,6 +54,10 @@ flags! {
     normalization_diamonds, set_normalization_diamonds: bool;
     /// Fuse the elementwise primitives after a reduction into its kernel.
     reduction_epilogues, set_reduction_epilogues: bool;
+    /// Fuse the elementwise primitives after a contraction (a dot, an
+    /// attention: a bias, a residual, an activation, a cast) into its
+    /// kernel.
+    contraction_epilogues, set_contraction_epilogues: bool;
     /// Compute an expensive value several fusions read in the first, as
     /// another output of its kernel.
     multi_output_fusion, set_multi_output_fusion: bool;

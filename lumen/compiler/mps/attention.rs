@@ -88,28 +88,44 @@ pub(crate) fn attentions(graph: &Graph) -> Vec<Attention> {
     found
 }
 
-/// The attention a fusion's `body` computes, if it is one (its output an
-/// attention's, of the body's inputs).
+/// The attention a fusion's `body` computes, if it is one: its output the
+/// attention's, or its epilogue's (the elementwise primitives and reshapes
+/// after it, applied as it writes each output).
 pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
-    let out = body.outputs()[0];
-    attentions(body)
-        .into_iter()
-        .find(|a| body.nodes()[a.root].output == out)
+    attentions(body).into_iter().next()
 }
 
 /// `graph` with each attention replaced by a fusion of its nodes (inputs:
 /// the buffers it reads), its kernel named by `kernel`; the nodes it
-/// replaces are left dead.
-pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> Graph {
-    let found = attentions(graph);
+/// replaces are left dead. With `epilogues`, the fusion takes the
+/// elementwise primitives and reshapes after the attention too, each the
+/// only reader of the one before (a residual add, a cast): its output's
+/// flat index is the attention's; their other operands (not runtime
+/// `scalars`) are read there, through broadcasts, reshapes, casts and
+/// constants (which the fusion computes), from buffers it takes as inputs.
+pub(crate) fn fuse(
+    graph: &Graph,
+    epilogues: bool,
+    scalars: &[Var],
+    mut kernel: impl FnMut(&Graph) -> String,
+) -> Graph {
+    let m = Matcher::new(graph);
+    // Each attention, its epilogue's last node, and the buffers its
+    // epilogue reads.
+    let found: Vec<(Attention, usize, Vec<Var>)> = attentions(graph)
+        .into_iter()
+        .map(|a| {
+            let (end, leaves) = match epilogues {
+                true => m.epilogue(a.root, scalars),
+                false => (a.root, Vec::new()),
+            };
+            (a, end, leaves)
+        })
+        .collect();
     if found.is_empty() {
         return graph.clone();
     }
     let nodes = graph.nodes();
-    let mut producer = vec![None; graph.types.len()];
-    for (i, n) in nodes.iter().enumerate() {
-        producer[n.output] = Some(i);
-    }
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -117,16 +133,16 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
     }
     for (i, node) in nodes.iter().enumerate() {
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let Some(a) = found.iter().find(|a| a.root == i) else {
+        let Some((a, _, leaves)) = found.iter().find(|(_, end, _)| *end == i) else {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
             continue;
         };
-        // The fusion's body: every node from the output back to the
-        // buffers it reads (its inputs).
+        // The fusion's inputs: the buffers it reads; its body, every node
+        // from its output back to them.
         let mut bases: Vec<Var> = Vec::new();
-        for b in [a.q.base, a.k.base, a.v.base] {
+        for &b in [a.q.base, a.k.base, a.v.base].iter().chain(leaves) {
             if !bases.contains(&b) {
                 bases.push(b);
             }
@@ -140,7 +156,7 @@ pub(crate) fn fuse(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> G
             members.push(n);
             for &v in &nodes[n].inputs {
                 if !bases.contains(&v) {
-                    stack.push(producer[v].expect("a value the attention computes"));
+                    stack.push(m.producer[v].expect("a value the attention computes"));
                 }
             }
         }
@@ -186,6 +202,62 @@ struct Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
+    /// The epilogue after node `root`: its last node (`root` if none), and
+    /// the values its other operands read (the fusion's inputs), as
+    /// [`fuse`] takes it.
+    fn epilogue(&self, root: usize, scalars: &[Var]) -> (usize, Vec<Var>) {
+        use Primitive::*;
+        let nodes = self.graph.nodes();
+        let (mut end, mut leaves) = (root, Vec::new());
+        loop {
+            let v = nodes[end].output;
+            let [u] = self.readers[v][..] else { break };
+            let n = &nodes[u];
+            let step =
+                super::fusion::elementwise(&n.primitive) || matches!(n.primitive, Reshape { .. });
+            if self.output[v] || !step {
+                break;
+            }
+            let mut found = Vec::new();
+            let others = n.inputs.iter().filter(|&&x| x != v);
+            if !others
+                .into_iter()
+                .all(|&x| self.leaves(x, scalars, &mut found))
+            {
+                break;
+            }
+            for leaf in found {
+                if !leaves.contains(&leaf) {
+                    leaves.push(leaf);
+                }
+            }
+            end = u;
+        }
+        (end, leaves)
+    }
+
+    /// Whether operand `v` of an epilogue can be read at its output's
+    /// index, adding the buffers it reads to `leaves`: a value (not a
+    /// runtime scalar), or broadcasts, reshapes, casts and constants of
+    /// such.
+    fn leaves(&self, v: Var, scalars: &[Var], leaves: &mut Vec<Var>) -> bool {
+        use Primitive::*;
+        let Some(n) = self.node(v) else {
+            leaves.push(v);
+            return !scalars.contains(&v);
+        };
+        match n.primitive {
+            Full { .. } | Iota { .. } => true,
+            BroadcastInDim { .. } | Reshape { .. } | ConvertElementType { .. } => {
+                self.leaves(n.inputs[0], scalars, leaves)
+            }
+            _ => {
+                leaves.push(v);
+                true
+            }
+        }
+    }
+
     fn new(graph: &'a Graph) -> Self {
         let nodes = graph.nodes();
         let n = graph.types.len();

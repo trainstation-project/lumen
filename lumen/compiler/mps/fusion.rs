@@ -188,11 +188,53 @@ pub(crate) fn fuse(
             (epilogue[end], ends[i]) = (Some(i), Some(end));
         }
     }
+    // A contraction's epilogue (XLA's GEMM epilogue fusion): the
+    // elementwise primitives after a float dot, each its only reader
+    // (reading anything else too: a bias, a residual), computed in its
+    // kernel as it writes each output; the epilogue's last primitive is the
+    // fusion's root, the dot inside it (its operands read as they are).
+    // Not for a dot reading a slice in place (a strided view, `dot_views`).
+    let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        let float = |v: Var| {
+            matches!(
+                graph.type_of(v).dtype,
+                DType::F16 | DType::BF16 | DType::F32
+            )
+        };
+        let sliced = |v: Var| {
+            producer[v].is_some_and(|p| matches!(nodes[p].primitive, Primitive::Slice { .. }))
+        };
+        let dot = matches!(node.primitive, Primitive::DotGeneral { .. })
+            && node.inputs.iter().all(|&v| float(v) && !sliced(v))
+            && float(node.output);
+        if !config.contraction_epilogues || !live[i] || !dot {
+            continue;
+        }
+        // Nothing a row fusion computes (a normalization's scale).
+        let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
+        let (mut r, mut end) = (i, None);
+        while let [u] = users[nodes[r].output][..] {
+            let fuses = fusible[u] && elementwise(&nodes[u].primitive) && !in_row(u);
+            if is_output[nodes[r].output] || !fuses {
+                break;
+            }
+            (r, end) = (u, Some(u));
+        }
+        if let Some(end) = end {
+            (dot_end[i], dot_of[end]) = (Some(end), Some(i));
+        }
+    }
     let mut root: Vec<bool> = nodes
         .iter()
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
+            // A dot with an epilogue is computed in its end's fusion.
+            if dot_end[i].is_some() {
+                return false;
+            }
             // A row fusion's inner nodes are computed in it alone.
             if rows
                 .iter()
@@ -204,6 +246,7 @@ pub(crate) fn fuse(
             !fusible[i]
                 || (is_reduction(node) && !inside)
                 || epilogue[i].is_some()
+                || dot_of[i].is_some()
                 || row_root(i)
                 || is_output[node.output]
                 || users.iter().any(|&u| !fusible[u])
@@ -237,6 +280,7 @@ pub(crate) fn fuse(
         if root[fusion]
             && fusible[first]
             && !row_root(first)
+            && dot_of[fusion].is_none()
             && host[fusion].is_none()
             && at_index(graph, &producer, &root, first, node.output)
         {

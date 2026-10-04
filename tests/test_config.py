@@ -70,6 +70,7 @@ def test_compiler_flags_defaults(compiler):
     attention (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
+    assert compiler.contraction_epilogues is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)

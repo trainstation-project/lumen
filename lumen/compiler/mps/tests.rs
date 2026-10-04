@@ -90,11 +90,13 @@ fn fuses_elementwise_and_layout_chains() {
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
-    // relu's max and its zero; then the softmax written out, a chain of
-    // two diamonds (its max, then its sum): one row kernel.
+    // The first matmul with relu (its max and zero) in its epilogue; the
+    // second (read by both of the softmax's reductions: no epilogue); then
+    // the softmax written out, a chain of two diamonds (its max, then its
+    // sum): one row kernel.
     assert_eq!(
         fused_primitives(&mlp(), &inputs),
-        ["dot_general", "fusion", "dot_general", "fusion"]
+        ["fusion", "dot_general", "fusion"]
     );
 }
 
@@ -649,6 +651,78 @@ fn owned_plans_read_packed_parameters() {
         for (e, a) in expected.iter().zip(out[0].to(Device::Cpu).to_vec::<f32>()) {
             assert!((e - a).abs() <= 1e-4 * (1.0 + e.abs()), "{e} vs {a}");
         }
+    }
+}
+
+/// A float dot's epilogue (XLA's GEMM epilogue fusion): the elementwise
+/// primitives after it, each its only reader (a bias added, relu), fused
+/// into its kernel, applied as it writes each output; not when its value
+/// is read twice, and not with `contraction_epilogues` off.
+#[test]
+fn dots_fuse_their_epilogue() {
+    let build = |read_twice: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[40, 24]));
+        let w = g.input(ty(DType::F32, &[24, 72]));
+        let bias = g.input(ty(DType::F32, &[72]));
+        let dot = DotGeneral {
+            lhs_contracting: vec![1],
+            rhs_contracting: vec![0],
+            lhs_batch: vec![],
+            rhs_batch: vec![],
+            accum_dtype: DType::F32,
+            output_dtype: DType::F32,
+        };
+        let y = apply(&mut g, dot, &[x, w]);
+        let b = BroadcastInDim {
+            shape: vec![40, 72],
+            broadcast_dimensions: vec![1],
+        };
+        let b = apply(&mut g, b, &[bias]);
+        let s = apply(&mut g, Add, &[y, b]);
+        let zero = Full {
+            shape: vec![40, 72],
+            fill_value: Scalar::Float(0.0),
+            dtype: DType::F32,
+        };
+        let zero = apply(&mut g, zero, &[]);
+        let r = apply(&mut g, Max, &[s, zero]);
+        let outputs = if read_twice { vec![r, y] } else { vec![r] };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+    let inputs = [data(&[40, 24], 1), data(&[24, 72], 2), data(&[72], 3)];
+    let g = build(false);
+    assert_eq!(fused_primitives(&g, &inputs), ["fusion"]);
+    let fused = fuse(&g);
+    let Fusion { body, label, .. } = &fused.nodes()[0].primitive else {
+        panic!("{fused}")
+    };
+    assert!(label.starts_with("dot_general"), "{label}");
+    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+    assert!(
+        source.contains("matmul_sg_impl") && source.contains("_small("),
+        "{source}"
+    );
+    assert_eq!(
+        fused_primitives(&build(true), &inputs),
+        ["dot_general", "fusion"]
+    );
+    let config = CompilerConfig {
+        contraction_epilogues: false,
+        ..CompilerConfig::default()
+    };
+    let unfused = fusion::fuse(
+        &g,
+        &super::diamonds::diamonds(&g),
+        &[],
+        &config,
+        |body, by_value| codegen::kernel(body, by_value, &config).0,
+    );
+    assert_eq!(names(&unfused), ["dot_general", "fusion"]);
+    if available() {
+        check(&g, &inputs);
+        check(&build(true), &inputs);
     }
 }
 
