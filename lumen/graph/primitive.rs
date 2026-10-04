@@ -46,6 +46,14 @@ pub enum Primitive {
     ReduceMax {
         axes: Vec<usize>,
     },
+    /// The inclusive cumulative sum along `axis` (from its end if
+    /// `reverse`), accumulated in `accum_dtype`, the result's dtype, as
+    /// [`Primitive::ReduceSum`] (`lax.cumsum`).
+    Cumsum {
+        axis: usize,
+        reverse: bool,
+        accum_dtype: DType,
+    },
     /// The result's dimensions are the batch dimensions, then the free
     /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
     /// It accumulates in `accum_dtype`: the operands', or float32 for
@@ -137,6 +145,7 @@ impl Primitive {
             Select => "select",
             ReduceSum { .. } => "reduce_sum",
             ReduceMax { .. } => "reduce_max",
+            Cumsum { .. } => "cumsum",
             DotGeneral { .. } => "dot_general",
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
@@ -158,7 +167,9 @@ impl Primitive {
     pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
         use Primitive::*;
         match self {
-            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => vec![*accum_dtype],
+            DotGeneral { accum_dtype, .. }
+            | ReduceSum { accum_dtype, .. }
+            | Cumsum { accum_dtype, .. } => vec![*accum_dtype],
             ReduceMax { .. } => vec![output],
             Fusion { body, .. } => body
                 .nodes()
@@ -229,6 +240,17 @@ impl Primitive {
                     return err(format!("cases must have the same type, got {x} and {y}"));
                 }
                 Ok(x.clone())
+            }
+            Cumsum {
+                axis, accum_dtype, ..
+            } => {
+                let x = args[0];
+                check_dims(&[*axis], x.shape.len(), "axis").map_err(prefix)?;
+                if x.dtype == DType::Bool {
+                    return err("does not take bool operands".into());
+                }
+                check_accum(x, *accum_dtype).map_err(prefix)?;
+                Ok(TensorType::new(*accum_dtype, &x.shape))
             }
             ReduceSum { axes, .. } | ReduceMax { axes } => {
                 let x = args[0];
@@ -469,6 +491,15 @@ impl fmt::Display for Primitive {
                 write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
             }
             ReduceMax { axes } => write!(f, "[axes={}]", Tuple(axes)),
+            Cumsum {
+                axis,
+                reverse,
+                accum_dtype,
+            } => write!(
+                f,
+                "[axis={axis} reverse={} accum_dtype={accum_dtype}]",
+                if *reverse { "True" } else { "False" }
+            ),
             DotGeneral {
                 lhs_contracting,
                 rhs_contracting,

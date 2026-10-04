@@ -243,7 +243,7 @@ pub(crate) fn accum_dtype(op: &Primitive, dtype: DType) -> DType {
 
 /// The dtype part of a reduction kernel's name: `x`'s, then the
 /// accumulation's if another (`bf16_f32`).
-fn kernel_dtype(x: DType, accum: DType) -> String {
+pub(crate) fn kernel_dtype(x: DType, accum: DType) -> String {
     match x == accum {
         true => x.to_string(),
         false => format!("{x}_{accum}"),

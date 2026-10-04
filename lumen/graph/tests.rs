@@ -1181,6 +1181,49 @@ pub(crate) mod mps {
         check(&mlp(), &inputs);
     }
 
+    /// cumsum on MPS agrees with the reference, along each kind of axis
+    /// (a row a threadgroup, a column or short row a thread; lines too few
+    /// to fill the GPU split into chunks, scanned in three launches), either
+    /// way: exactly for integers (wrapping), to float32 rounding for floats
+    /// (half and bfloat accumulated in float32).
+    #[test]
+    fn cumsum_runs_on_mps() {
+        if !available() {
+            return;
+        }
+        let cases: [(&[usize], usize); 6] = [
+            (&[4, 1000], 1),
+            (&[1, 70_000], 1),
+            (&[3000, 3], 0),
+            (&[3, 50, 7], 1),
+            (&[2, 9000, 2], 1),
+            (&[8, 3], 1),
+        ];
+        let dtypes = DTYPES[1..9].iter().map(|&d| (d, d)).chain([
+            (DType::F32, DType::F32),
+            (DType::F16, DType::F32),
+            (DType::BF16, DType::F32),
+        ]);
+        for (dtype, accum_dtype) in dtypes {
+            for &(shape, axis) in &cases {
+                for reverse in [false, true] {
+                    let mut g = Graph::new();
+                    let x = g.input(ty(dtype, shape));
+                    let scan = Cumsum {
+                        axis,
+                        reverse,
+                        accum_dtype,
+                    };
+                    let y = g.apply(scan, &[x]).unwrap();
+                    g.set_outputs(&[y]).unwrap();
+                    // Float rounding of a sum of `n` values of up to 2.
+                    let slack = shape[axis] as f64 * 2.0 * f64::from(f32::EPSILON);
+                    check_within(&g, &[values(dtype, shape, 1)], slack);
+                }
+            }
+        }
+    }
+
     #[test]
     fn rejects_float64_and_mixed_devices() {
         if !available() {
