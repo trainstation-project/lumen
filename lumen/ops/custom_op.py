@@ -21,11 +21,11 @@ argument is the argument's own memory where nothing reads its old value
 after the call, else a copy of it (PyTorch: ``auto_functionalized``,
 reinplaced where it can be).
 
-    lumen.mps.compile(AXPY_METAL_SOURCE)  # kernel void mylib_axpy(...)
+    kernel = lumen.mps.compile(AXPY_METAL_SOURCE)  # kernel void axpy(...)
 
     @lumen.ops.custom_op("mylib::axpy", mutates_args=("y",))
     def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
-        lumen.mps.launch("mylib_axpy", [x, y], [np.float32(a)], grid=(y.numel,))
+        lumen.mps.launch(kernel, [x, y], [np.float32(a)], grid=(y.numel,))
 
     @lumen.compile
     def step(x, y):

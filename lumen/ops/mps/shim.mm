@@ -78,7 +78,7 @@ int lumen_mps_compile_kernels(const char *source) {
         NSError *error = nil;
         id<MTLLibrary> lib = compile([NSString stringWithUTF8String:source], &error);
         if (lib == nil) {
-            NSLog(@"lumen: compiling generated MPS kernels failed: %@", error);
+            NSLog(@"lumen: compiling MPS kernel source failed: %@", error);
             return -1;
         }
         for (NSString *name in lib.functionNames) {
@@ -98,6 +98,49 @@ int lumen_mps_compile_kernels(const char *source) {
             (*cache)[name.UTF8String] = pso;
             os_unfair_lock_unlock(&cache_lock);
         }
+    }
+    return 0;
+}
+
+// Compile Metal `source` (a user's: lumen.mps.compile) and add a pipeline
+// for its kernel `name` (or its only kernel, if `name` is null) under `key`,
+// for lumen_mps_launch_kernel. Writes the kernel's name into `chosen` (or,
+// if there is no such kernel, or several and no `name`, the source's kernel
+// names, comma-separated). Returns 0, or -1 if the source does not compile
+// (Metal's error logged), -2 if the pipeline cannot be made, -3 if `name` is
+// null and the source has several kernels, -4 if it has none named `name`.
+int lumen_mps_compile_kernel(const char *source, const char *name, const char *key, char *chosen, size_t len) {
+    @autoreleasepool {
+        NSError *error = nil;
+        id<MTLLibrary> lib = compile([NSString stringWithUTF8String:source], &error);
+        if (lib == nil) {
+            NSLog(@"lumen: compiling MPS kernel source failed: %@", error);
+            return -1;
+        }
+        NSArray<NSString *> *names = lib.functionNames;
+        NSString *want = name != nullptr ? [NSString stringWithUTF8String:name] : nil;
+        int status = 0;
+        if (want == nil && names.count != 1) {
+            status = -3;
+        } else if (want == nil) {
+            want = names.firstObject;
+        } else if (![names containsObject:want]) {
+            status = -4;
+        }
+        NSString *written = status == 0 ? want : [names componentsJoinedByString:@", "];
+        strlcpy(chosen, written.UTF8String, len);
+        if (status != 0) {
+            return status;
+        }
+        id<MTLFunction> fn = [lib newFunctionWithName:want];
+        id<MTLComputePipelineState> pso = [lib.device newComputePipelineStateWithFunction:fn error:&error];
+        if (pso == nil) {
+            NSLog(@"lumen: creating the MPS pipeline %@ failed: %@", want, error);
+            return -2;
+        }
+        os_unfair_lock_lock(&cache_lock);
+        (*cache)[key] = pso;
+        os_unfair_lock_unlock(&cache_lock);
     }
     return 0;
 }

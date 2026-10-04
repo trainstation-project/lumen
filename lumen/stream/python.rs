@@ -66,7 +66,13 @@ fn _cuda_stream_wait(index: usize, stream: usize) -> PyResult<()> {
 #[cfg(lumen_mps_linked)]
 unsafe extern "C" {
     // In lumen/ops/mps/shim.mm and lumen/allocator/mps/mps_shim.mm.
-    fn lumen_mps_compile_kernels(source: *const std::ffi::c_char) -> i32;
+    fn lumen_mps_compile_kernel(
+        source: *const std::ffi::c_char,
+        name: *const std::ffi::c_char,
+        key: *const std::ffi::c_char,
+        chosen: *mut std::ffi::c_char,
+        len: usize,
+    ) -> i32;
     fn lumen_mps_buffer_pointer(ptr: *const u8, offset: *mut usize) -> usize;
 }
 
@@ -80,31 +86,67 @@ fn mps() -> PyResult<()> {
     }
 }
 
-/// Compile Metal `source`, adding its kernels to those `_mps_launch` launches
-/// by name (a name already added keeps its kernel).
+/// Compiled kernels so far: each one's key is new.
+static COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Compile Metal `source`'s kernel `name` (or its only one): its key, for
+/// `_mps_launch` (its own, so kernels of one name never collide), and name.
 #[pyfunction]
-fn _mps_compile(source: &str) -> PyResult<()> {
+#[pyo3(signature = (source, name = None))]
+fn _mps_compile(source: &str, name: Option<&str>) -> PyResult<(String, String)> {
     mps()?;
-    #[cfg(lumen_mps_linked)]
-    {
-        let source =
-            std::ffi::CString::new(source).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if unsafe { lumen_mps_compile_kernels(source.as_ptr()) } != 0 {
-            return Err(PyRuntimeError::new_err(
-                "compiling the Metal source failed (Metal's error is in the log)",
-            ));
-        }
-    }
-    #[cfg(not(lumen_mps_linked))]
-    let _ = source;
-    Ok(())
+    let n = COMPILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    compile_kernel(source, name, &format!("lumen.mps.compile#{n}"))
 }
 
-/// Encode kernel `name` into the MPS stream over `grid` (threads, or
-/// threadgroups of 16x16 if `groups`), its buffers `tensors`' memory in
-/// order (each from its first element), then `args`' bytes.
+#[cfg(lumen_mps_linked)]
+fn compile_kernel(source: &str, name: Option<&str>, key: &str) -> PyResult<(String, String)> {
+    use std::ffi::{CStr, CString};
+    let c = |s: &str| CString::new(s).map_err(|e| PyValueError::new_err(e.to_string()));
+    let (source, wanted, c_key) = (c(source)?, name.map(c).transpose()?, c(key)?);
+    let mut chosen = vec![0 as std::ffi::c_char; 4096];
+    let status = unsafe {
+        lumen_mps_compile_kernel(
+            source.as_ptr(),
+            wanted.as_ref().map_or(std::ptr::null(), |w| w.as_ptr()),
+            c_key.as_ptr(),
+            chosen.as_mut_ptr(),
+            chosen.len(),
+        )
+    };
+    let chosen = unsafe { CStr::from_ptr(chosen.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    match status {
+        0 => Ok((key.to_owned(), chosen)),
+        -1 => Err(PyRuntimeError::new_err(
+            "compiling the Metal source failed (Metal's error is in the log)",
+        )),
+        -2 => Err(PyRuntimeError::new_err(format!(
+            "making the Metal pipeline of {chosen} failed (Metal's error is in the log)"
+        ))),
+        -3 => Err(PyValueError::new_err(format!(
+            "the Metal source has several kernels ({chosen}): name the one to compile"
+        ))),
+        _ => Err(PyValueError::new_err(format!(
+            "the Metal source has no kernel named {:?}: it has {chosen}",
+            name.unwrap_or_default()
+        ))),
+    }
+}
+
+#[cfg(not(lumen_mps_linked))]
+fn compile_kernel(_source: &str, _name: Option<&str>, _key: &str) -> PyResult<(String, String)> {
+    Err(PyRuntimeError::new_err("lumen was built without MPS"))
+}
+
+/// Encode kernel `key` (from `_mps_compile`; profiled as `name`) into the MPS
+/// stream over `grid` (threads, or threadgroups of 16x16 if `groups`), its
+/// buffers `tensors`' memory in order (each from its first element), then
+/// `args`' bytes.
 #[pyfunction]
 fn _mps_launch(
+    key: &str,
     name: &str,
     tensors: Vec<PyRef<'_, PyTensor>>,
     args: Vec<Vec<u8>>,
@@ -136,10 +178,10 @@ fn _mps_launch(
             Grid::Threads(grid)
         };
         let label = core::graph::intern(name.to_owned());
-        launch(name, &buffers, &args, grid, keep, label).map_err(PyRuntimeError::new_err)?;
+        launch(key, &buffers, &args, grid, keep, label).map_err(PyRuntimeError::new_err)?;
     }
     #[cfg(not(lumen_mps_linked))]
-    let _ = (tensors, args, grid, groups);
+    let _ = (key, tensors, args, grid, groups);
     Ok(())
 }
 
