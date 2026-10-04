@@ -185,7 +185,7 @@ fn algebraic_simplification() {
 
 /// A transpose of a dot swapping its free dimensions (a weight's gradient
 /// from autodiff) is the dot of its operands swapped, no copy, with
-/// `swap_dots` (the MPS compiler's, after matching attention); not without
+/// `matched` (the MPS compiler's, after matching attention); not without
 /// it, nor when the dot is read twice.
 #[test]
 fn transposes_of_dots_swap_their_operands() {
@@ -216,4 +216,94 @@ fn transposes_of_dots_swap_their_operands() {
     );
     let twice = super::simplify::simplify_with(&build(true), true);
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
+}
+
+/// With `matched`, a transpose moves past the elementwise primitives
+/// reading it (and a constant, made in the shape before it): one transpose,
+/// last (XLA's `ReshapeMover`); not without it.
+#[test]
+fn rearranges_move_past_elementwise_primitives() {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2, 3]));
+    let y = g.input(ty(&[2, 3]));
+    let two = apply(&mut g, full(&[3, 2], 2.0), &[]);
+    let t = Transpose {
+        permutation: vec![1, 0],
+    };
+    let tx = apply(&mut g, t.clone(), &[x]);
+    let ty_ = apply(&mut g, t, &[y]);
+    let a = apply(&mut g, Add, &[tx, ty_]);
+    let a = apply(&mut g, Mul, &[a, two]);
+    let a = apply(&mut g, Exp, &[a]);
+    g.set_outputs(&[a]).unwrap();
+    let moved = super::simplify::simplify_with(&g, true);
+    assert_eq!(
+        names(&moved),
+        ["add", "full", "mul", "exp", "transpose"],
+        "{moved}"
+    );
+    same_values(&g, &moved, &[data(&[2, 3], 1), data(&[2, 3], 2)]);
+    assert_eq!(
+        names(&super::simplify::simplify(&g)),
+        ["full", "transpose", "transpose", "add", "mul", "exp"]
+    );
+}
+
+/// With `matched`, a widening cast moves after the layout primitives
+/// reading it (a concatenate's constant cast too, if exact), and a
+/// narrowing one before them (XLA's `ConvertMover`): they move the bfloat16
+/// values.
+#[test]
+fn casts_move_past_layout_primitives() {
+    let cast = |dtype| Cast { new_dtype: dtype };
+    let widened = |g: &mut Graph| {
+        let x = g.input(ty(&[2, 3]));
+        let b = apply(g, cast(DType::BF16), &[x]);
+        apply(g, cast(DType::F32), &[b])
+    };
+    let inputs = [data(&[2, 3], 1)];
+    // Widening, then a reshape: the reshape first.
+    let mut g = Graph::new();
+    let w = widened(&mut g);
+    let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[w]);
+    g.set_outputs(&[r]).unwrap();
+    let moved = super::simplify::simplify_with(&g, true);
+    assert_eq!(names(&moved), ["cast", "reshape", "cast"], "{moved}");
+    same_values(&g, &moved, &inputs);
+    // A transpose and a slice, then narrowing: the cast first.
+    let mut g = Graph::new();
+    let y = g.input(ty(&[2, 3]));
+    let t = Transpose {
+        permutation: vec![1, 0],
+    };
+    let t = apply(&mut g, t, &[y]);
+    let slice = Slice {
+        start_indices: vec![0, 0],
+        limit_indices: vec![2, 2],
+    };
+    let s = apply(&mut g, slice, &[t]);
+    let n = apply(&mut g, cast(DType::BF16), &[s]);
+    let o = apply(&mut g, cast(DType::F32), &[n]);
+    g.set_outputs(&[o]).unwrap();
+    let moved = super::simplify::simplify_with(&g, true);
+    assert_eq!(
+        names(&moved),
+        ["cast", "transpose", "slice", "cast"],
+        "{moved}"
+    );
+    same_values(&g, &moved, &inputs);
+    // A concatenate with a constant: moved if it is exact in bfloat16.
+    for (value, want) in [
+        (1.0, vec!["cast", "full", "concatenate", "cast"]),
+        (0.1, vec!["cast", "cast", "full", "concatenate"]),
+    ] {
+        let mut g = Graph::new();
+        let w = widened(&mut g);
+        let c = apply(&mut g, full(&[2, 3], value), &[]);
+        let cat = apply(&mut g, Concatenate { dimension: 0 }, &[w, c]);
+        g.set_outputs(&[cat]).unwrap();
+        let moved = super::simplify::simplify_with(&g, true);
+        assert_eq!(names(&moved), want, "{moved}");
+        same_values(&g, &moved, &inputs);
+    }
 }

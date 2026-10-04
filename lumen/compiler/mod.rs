@@ -71,6 +71,8 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         #[cfg(lumen_mps_linked)]
         Device::Mps => mps::compile(graph, options),
         _ => {
+            // No attention to match: the rewrites changing it too.
+            let graph = &simplify::simplify_with(graph, true);
             let plan = PlanOptions {
                 scratch: None,
                 donate: options.donate.clone(),
