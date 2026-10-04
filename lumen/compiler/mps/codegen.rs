@@ -1224,14 +1224,15 @@ fn backward_block(b: &Backward) -> usize {
 }
 
 /// The queries the dK, dV and dQ kernel of an attention backward stages at
-/// once: the most of 32, 16 or 8 whose Q and dO blocks, with its key
-/// block's K and dS^T (`ATTN_BQ` keys), fit in 28 KB of threadgroup memory;
-/// none if none do (the backward then takes two kernels).
+/// once: the most of 32 or 16 whose Q and dO blocks, with its key block's
+/// K and dS^T (`ATTN_BQ` keys), fit in 28 KB of threadgroup memory; none if
+/// neither does (the backward then takes two kernels: on blocks of 8, one
+/// is no faster).
 pub(crate) fn backward_block_with_dq(b: &Backward) -> Option<usize> {
     const KEYS: usize = 64; // ATTN_BQ
     let t = b.dtype.size_of();
     let bytes = |n: usize| n * (b.h + b.hv) * t + 2 * n * 4 + KEYS * b.h * t + KEYS * n * t;
-    [32, 16, 8].into_iter().find(|&n| bytes(n) <= 28 << 10)
+    [32, 16].into_iter().find(|&n| bytes(n) <= 28 << 10)
 }
 
 /// Whether attention `a` takes the decoding kernel: few queries (a

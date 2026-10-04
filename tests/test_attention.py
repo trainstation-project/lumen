@@ -266,7 +266,7 @@ def backward_kernels(h, hv, dtype, deterministic=False):
     blocks fit in threadgroup memory (codegen.rs's
     ``backward_block_with_dq``) and not ``deterministic``; else two."""
     t = {"float32": 4, "bfloat16": 2}[dtype]
-    fits = any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16, 8))
+    fits = any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16))
     if fits and not deterministic:
         return ["flash_attention_backward(dk, dv, dq)"]
     return ["flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"]

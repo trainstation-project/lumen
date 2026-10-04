@@ -3,7 +3,8 @@
 //! snapshot ([`config`]) into its [`Options`](super::Options). The
 //! defaults run every program exactly as traced, but for `online_softmax`,
 //! `flash_attention` and `split_k` (on: rounding not the program's); turn
-//! them off to run softmax, attention and dots as traced too.
+//! them off to run softmax, attention and dots as traced too. Kernels may
+//! add atomically (in no fixed order) unless `deterministic`.
 
 use std::sync::{PoisonError, RwLock};
 

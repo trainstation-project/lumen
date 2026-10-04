@@ -72,7 +72,7 @@ def test_compiler_flags_defaults(compiler):
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
-    assert compiler.split_k is True
+    assert compiler.split_k is True and compiler.deterministic is False
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
