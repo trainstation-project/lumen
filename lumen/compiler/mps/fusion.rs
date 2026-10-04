@@ -189,13 +189,15 @@ pub(crate) fn fuse(
         }
     }
     // A contraction's epilogue (XLA's GEMM epilogue fusion): the
-    // elementwise primitives after a float dot, each its only reader
-    // (reading anything else too: a bias, a residual), computed in its
-    // kernel as it writes each output; the epilogue's last primitive is the
-    // fusion's root, the dot inside it (its operands read as they are).
+    // elementwise primitives after a float dot reading it or each other
+    // (reading anything else too: a bias, a residual; a silu reads its
+    // input twice), none read outside them but the last, computed in its
+    // kernel as it writes each output; the epilogue's last primitive is
+    // the fusion's root, the dot inside it (its operands read as they are).
     // Not for a dot reading a slice in place (a strided view, `dot_views`).
     let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut in_epilogue = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let float = |v: Var| {
             matches!(
@@ -214,16 +216,39 @@ pub(crate) fn fuse(
         }
         // Nothing a row fusion computes (a normalization's scale).
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
-        let (mut r, mut end) = (i, None);
-        while let [u] = users[nodes[r].output][..] {
-            let fuses = fusible[u] && elementwise(&nodes[u].primitive) && !in_row(u);
-            if is_output[nodes[r].output] || !fuses {
+        // The epilogue grown in order: its nodes (`taken`, their values
+        // `after`), the values depending on the dot (no other operand may),
+        // and the longest one closed (only its last node read outside it).
+        let mut taken = vec![i];
+        let (mut after, mut depends) = (vec![false; n], vec![false; n]);
+        (after[node.output], depends[node.output]) = (true, true);
+        let mut end = None;
+        for (u, un) in nodes.iter().enumerate().skip(i + 1) {
+            depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
+            if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
+                continue;
+            }
+            let fuses = fusible[u] && elementwise(&un.primitive) && !in_row(u);
+            let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
+            if !fuses || !reads {
                 break;
             }
-            (r, end) = (u, Some(u));
+            taken.push(u);
+            after[un.output] = true;
+            let inside = |&k: &usize| {
+                let v = nodes[k].output;
+                !is_output[v] && users[v].iter().all(|w| taken.contains(w))
+            };
+            if taken[..taken.len() - 1].iter().all(inside) {
+                end = Some(taken.clone());
+            }
         }
-        if let Some(end) = end {
+        if let Some(taken) = end {
+            let end = *taken.last().expect("a node");
             (dot_end[i], dot_of[end]) = (Some(end), Some(i));
+            for &k in &taken[1..taken.len() - 1] {
+                in_epilogue[k] = true;
+            }
         }
     }
     let mut root: Vec<bool> = nodes
@@ -232,7 +257,7 @@ pub(crate) fn fuse(
         .map(|(i, node)| {
             let users = &users[node.output];
             // A dot with an epilogue is computed in its end's fusion.
-            if dot_end[i].is_some() {
+            if dot_end[i].is_some() || in_epilogue[i] {
                 return false;
             }
             // A row fusion's inner nodes are computed in it alone.

@@ -91,7 +91,8 @@ def mul(input, other):
 
 
 def div(input, other):
-    """True division: floating-point operands."""
+    """True division: floating-point operands. By a scalar (a Python
+    number, a runtime scalar), traced as a product with its reciprocal."""
     return _true_div(input, other)
 
 
@@ -279,27 +280,37 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
 # ---------------------------------------------------------------------
 
 
-def matmul(input, other):
+def matmul(input, other, accum_dtype, output_dtype):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
     the dimensions before the last two are batch dimensions, broadcast. It
-    accumulates floats in float32 (float64 in float64); its result is of
-    the inputs' dtype."""
-    input, other = _lift(input), _lift(other)
+    accumulates in ``accum_dtype``, its result of ``output_dtype``. ``@``
+    infers them: floats accumulate in float32 (float64 in float64), the
+    result of the inputs' dtype."""
+
+    input = _lift(input)
+    other = _lift(other)
+
     _common_dtype("matmul", (input, other))
+
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
+
     x = input.unsqueeze(0) if input.ndim == 1 else input
     y = other.unsqueeze(-1) if other.ndim == 1 else other
+
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
+
     b = tuple(range(len(batch)))
-    # Accumulated in float32 (or wider), the result in the inputs' dtype.
     dims = (((len(b) + 1,), (len(b),)), (b, b))
-    out = prims.dot_general(x, y, dims, _accum_dtype(x.dtype), x.dtype)
+
+    out = prims.dot_general(x, y, dims, accum_dtype, output_dtype)
     if input.ndim == 1:
         out = out.squeeze(-2)
+
     if other.ndim == 1:
         out = out.squeeze(-1)
+
     return out
 
 
@@ -319,33 +330,49 @@ def scaled_dot_product_attention(query, key, value, scale=None, is_causal=False)
     the inputs' dtype times ``value``. The MPS compiler runs them as one
     flash-attention kernel (``lumen.config.compiler.flash_attention``), as
     it does attention written out."""
-    q, k, v = _lift(query), _lift(key), _lift(value)
+
+    q = _lift(query)
+    k = _lift(key)
+    v = _lift(value)
+
     for name, t in (("query", q), ("key", k), ("value", v)):
         if not isinstance(t, TracedTensor) or t.ndim != 4:
             raise ValueError(f"scaled_dot_product_attention: {name} must be a [B, S, N, H] tensor, got {t!r}")
+
     _require_float(q, "scaled_dot_product_attention")
     _common_dtype("scaled_dot_product_attention", (q, k, v))
-    (b, sq, n, h), (_, sk, nkv, hv) = q.shape, v.shape
+
+    b, sq, n, h = q.shape
+    _, sk, nkv, hv = v.shape
+
     if k.shape[:3] != (b, sk, nkv) or v.shape[0] != b or k.shape[3] != h or n % nkv:
         raise ValueError(
             "scaled_dot_product_attention: shapes "
             f"{list(q.shape)}, {list(k.shape)}, {list(v.shape)} are not [B, Sq, N, H], [B, Sk, Nkv, H], [B, Sk, Nkv, Hv] "
             "with N a multiple of Nkv"
         )
+
     if nkv != n:
         # Each key and value head, for its group of query heads.
         g = n // nkv
         k = k.unsqueeze(3).expand(b, sk, nkv, g, h).reshape(b, sk, n, h)
         v = v.unsqueeze(3).expand(b, sk, nkv, g, hv).reshape(b, sk, n, hv)
+
     accum = _accum_dtype(q.dtype)
+    if scale is None:
+        scale = 1.0 / math.sqrt(h)
+
     # [B, N, Sq, Sk], in the accumulation dtype.
     s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
-    s = s * (1.0 / math.sqrt(h) if scale is None else scale)
+    s = s * scale
+
     if is_causal:
         rows = prims.iota("int64", s.shape, 2)
         cols = prims.iota("int64", s.shape, 3)
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
+
     p = softmax(s, -1).to(q.dtype)
     # [B, N, Sq, Hv], then [B, Sq, N, Hv].
     o = prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
+
     return o.permute(0, 2, 1, 3)

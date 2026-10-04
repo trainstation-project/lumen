@@ -16,7 +16,12 @@
 //! s = dot_general(q', k')              [batch..., Sq, Sk], contracting the head dimension
 //! ```
 //!
-//! and an output transpose, if that is the only reader. `q'`, `k'` and
+//! and an output transpose, if that is the only reader. The kernel computes
+//! as traced: the scores as `s`'s dtype rounds them, then each cast and the
+//! scale in its own dtype ([`Score`]); both dots accumulate, and the
+//! softmax computes, in float32 (as the kernel does), or it is not matched.
+//! The softmax is online and the probabilities are rounded to `p'`'s dtype
+//! before they are normalized (flash attention's reordering). `q'`, `k'` and
 //! `v'` are read where they come from, through transposes, slices,
 //! broadcasts and reshapes (a grouped-query expansion of `k` and `v`, the
 //! slices of a merged dot): each a strided view of a buffer, its head index
@@ -62,14 +67,24 @@ pub(crate) struct Attention {
     pub sk: usize,
     pub h: usize,
     pub hv: usize,
-    /// What the scores are multiplied by (positive).
-    pub scale: f64,
+    /// What each score (`q k^T` in float) goes through, in order, before
+    /// the softmax.
+    pub scores: Vec<Score>,
     /// A causal mask: key `j` is seen by query `i` iff `j <= i + offset`.
     pub causal: Option<i64>,
     /// q, k and v's dtype (the probabilities', rounded for `p @ v`), and
     /// the output's.
     pub dtype: DType,
     pub out_dtype: DType,
+}
+
+/// A step of the scores' way to the softmax, as traced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Score {
+    /// Rounded to a dtype (the first dot's output, a cast).
+    Round(DType),
+    /// Multiplied by a positive constant, in a dtype.
+    Mul(f64, DType),
 }
 
 /// The largest head dimension the kernels keep a row of in registers.
@@ -413,26 +428,29 @@ impl<'a> Matcher<'a> {
             return None;
         }
         // Back to the scores: casts, a scale, a causal mask.
-        let (mut v, mut scale, mut causal) = (x, 1.0, None);
+        let (mut v, mut scale, mut causal) = (x, None, None);
+        let mut scores = Vec::new();
         let s = loop {
             let n = self.node(v)?;
             if v != x && !self.single(v) {
                 return None;
             }
+            let dtype = ty(n.output).dtype;
             match &n.primitive {
                 DotGeneral { .. } => break n,
-                ConvertElementType { .. } => v = n.inputs[0],
-                Mul if scale == 1.0 => {
+                ConvertElementType { .. } => {
+                    scores.push(Score::Round(dtype));
+                    v = n.inputs[0];
+                }
+                Mul if scale.is_none() => {
                     let (a, b) = (n.inputs[0], n.inputs[1]);
                     let (c, rest) = match self.scalar(b) {
                         Some(c) => (c, a),
                         None => (self.scalar(a)?, b),
                     };
-                    (scale, v) = (c, rest);
-                }
-                Div if scale == 1.0 => {
-                    scale = 1.0 / self.scalar(n.inputs[1])?;
-                    v = n.inputs[0];
+                    scale = Some(c);
+                    scores.push(Score::Mul(c, dtype));
+                    v = rest;
                 }
                 Select if causal.is_none() => {
                     if self.scalar(n.inputs[2]) != Some(f64::NEG_INFINITY) {
@@ -444,7 +462,20 @@ impl<'a> Matcher<'a> {
                 _ => return None,
             }
         };
-        if !(scale > 0.0 && scale.is_finite()) {
+        // A positive scale keeps the mask's -inf where it is.
+        if scale.is_some_and(|c| !(c > 0.0 && c.is_finite())) {
+            return None;
+        }
+        scores.push(Score::Round(ty(s.output).dtype));
+        scores.reverse();
+        // The kernel accumulates the dots, and computes the softmax, in
+        // float32.
+        let f32 = |p: &Primitive| match p {
+            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => *accum_dtype == DType::F32,
+            _ => false,
+        };
+        let (dot1, dot2, sum) = (&s.primitive, &nodes[i].primitive, &self.node(sum)?.primitive);
+        if ty(x).dtype != DType::F32 || !f32(dot1) || !f32(dot2) || !f32(sum) {
             return None;
         }
         let DotGeneral {
@@ -536,7 +567,7 @@ impl<'a> Matcher<'a> {
             sk,
             h,
             hv,
-            scale,
+            scores,
             causal,
             dtype,
             out_dtype: ty(nodes[root].output).dtype,

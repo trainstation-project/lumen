@@ -487,6 +487,13 @@ def _binary(prim, reflected=False):
 
 
 def _true_div(x, y):
+    # By a scalar (a Python number, a runtime scalar): times its reciprocal.
+    if isinstance(y, (int, float)) and not isinstance(y, bool) and y != 0:
+        return _elementwise(prims.mul, _require_float(x, "true division (/)"), 1 / y)
+    if isinstance(y, TracedTensor) and y.weak and not getattr(x, "weak", True):
+        r = _true_div(1.0, y)
+        r.weak = True
+        return _elementwise(prims.mul, _require_float(x, "true division (/)"), r)
     x, y = _operands("div", x, y)
     return prims.div(_require_float(x, "true division (/)"), y)
 
@@ -561,16 +568,19 @@ class TracedTensor:
         return prims.neg(self)
 
     def __matmul__(self, other):
+        """F.matmul, accumulating floats in float32 (float64 in float64),
+        its result of the operands' dtype."""
         from lumen.functional import matmul  # it imports this module
 
         other = _lift(other)
-        return matmul(self, other) if isinstance(other, TracedTensor) else NotImplemented
+        if not isinstance(other, TracedTensor):
+            return NotImplemented
+        dtype = _common_dtype("matmul", (self, other))
+        return matmul(self, other, _accum_dtype(dtype), dtype)
 
     def __rmatmul__(self, other):
-        from lumen.functional import matmul  # it imports this module
-
         other = _lift(other)
-        return matmul(other, self) if isinstance(other, TracedTensor) else NotImplemented
+        return TracedTensor.__matmul__(other, self) if isinstance(other, TracedTensor) else NotImplemented
 
     # -- dtype conversion --------------------------------------------------
 

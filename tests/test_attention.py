@@ -7,6 +7,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
+from lumen import prims
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 
@@ -206,3 +207,42 @@ def test_attention_epilogues_fuse(f, sq):
     finally:
         lumen.config.compiler.reset()
     np.testing.assert_allclose(got, unfused, rtol=1e-6, atol=1e-6)
+
+
+def _sources(f, *args):
+    plan = lumen.graph.Plan(lumen.make_graph(f)(*args), "mps")
+    return {s["label"]: (s.get("fusion") or {}).get("source", "") for s in plan.steps()}
+
+
+@pytest.mark.mps
+def test_attention_computes_its_scores_as_traced():
+    """The kernel rounds the scores as traced: ``_written``'s ``q @ k^T`` to
+    bf16, its scale in bf16, then cast to float32 for the softmax;
+    F.scaled_dot_product_attention's in float32."""
+    m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 4, 64, 32], [1, 2, 64, 32], [1, 4, 64, 32])]
+    source = _sources(_written, *m)["flash_attention"]
+    assert "convert_value<float>(Mul::apply(convert_value<bfloat>(s), as_type<bfloat>" in source, source
+    m = [lumen.empty([1, 64, 4, 32], dtype="bfloat16", device="meta")] * 3
+    source = _sources(F.scaled_dot_product_attention, *m)["flash_attention"]
+    assert "(convert_value<float>(s), as_type<float>" in source, source
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize(
+    "f",
+    [
+        # The softmax in f16.
+        lambda q, k, v: F.softmax(q.half() @ k.half().transpose(-1, -2), -1).to(dtype=q.dtype) @ v,
+        # The scores accumulated in bf16.
+        lambda q, k, v: F.softmax(
+            prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
+        ).to(dtype=q.dtype)
+        @ v,
+    ],
+    ids=["f16 softmax", "bf16 accumulation"],
+)
+def test_attention_the_kernel_cannot_compute_as_traced_runs_as_traced(f):
+    """Attention computing in a precision other than the kernel's (float32
+    softmax and accumulation) is not matched: it runs as traced."""
+    m = [lumen.empty([1, 4, 64, 32], dtype="bfloat16", device="meta")] * 3
+    assert "flash_attention" not in _sources(f, *m)

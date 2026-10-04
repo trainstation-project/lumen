@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use super::attention::{Access, Attention};
+use super::attention::{Access, Attention, Score};
 use super::fusion;
 use crate::compiler::CompilerConfig;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
@@ -1067,22 +1067,32 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     ));
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
-    let scale = constant(DType::F32, Scalar::Float(a.scale));
+    // Each score as traced: rounded, cast and scaled, each in its dtype.
+    let mut score = "s".to_string();
+    for step in &a.scores {
+        score = match *step {
+            Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
+            Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
+        };
+    }
+    let score = format!(
+        "struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n"
+    );
     let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
         true => format!(
-            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, NAME_ix, {w}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, {scale}, {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
             format!(
-                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, NAME_ix, {w}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, {scale}, {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
     named(format!(
-        "{ix}{epilogue}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        "{ix}{score}{epilogue}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
         params.join(", ")
     ))
 }

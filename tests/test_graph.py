@@ -1088,7 +1088,7 @@ def test_ops_are_functions():
     # Operators and functions record the same primitives.
     a = lumen.zeros([2, 3])
     by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
-    by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t()))(a)
+    by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t(), "float32", "float32"))(a)
     assert str(by_operator) == str(by_function)
 
 
@@ -1108,8 +1108,9 @@ class _ScaledMatmul(lumen.nn.Module):
         (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
         (lambda x, w, y: F.relu(x @ w).float(), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
         (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
+        (lambda x, w, y: _silu((x @ w).float()).to(dtype=x.dtype), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
     ],
-    ids=["bias relu", "batched residual", "relu cast", "times exp(y)"],
+    ids=["bias relu", "batched residual", "relu cast", "times exp(y)", "silu in float32"],
 )
 def test_matmul_epilogues_fuse(f, shapes, dtype):
     """The elementwise primitives after a matmul (a bias, a residual, an
@@ -1131,6 +1132,36 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
     finally:
         lumen.config.compiler.reset()
     np.testing.assert_array_equal(fused, unfused)
+
+
+def _silu(h):
+    return h * F.sigmoid(h)
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_reads_the_rounded_output():
+    """A fused epilogue reads the matmul's output as its dtype rounds it
+    (bf16, then cast up for a silu in float32), as traced; silu of the
+    float32 accumulator is a dot_general with output_dtype float32."""
+    rng = np.random.default_rng(0)
+    try:
+        x, w = (
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype="bfloat16")
+            for s in ((64, 96), (96, 80))
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    dims = (((1,), (0,)), ((), ()))
+    rounded = lumen.compile(lambda x, w: _silu((x @ w).float()).to(dtype=x.dtype))(x, w)
+    accum = lumen.compile(lambda x, w: _silu(prims.dot_general(x, w, dims, "float32", "float32")).to(dtype=x.dtype))(
+        x, w
+    )
+    # As traced: the bf16 product, then silu in float32 (numpy, from the
+    # unfused plan's matmul).
+    h = lumen.to_numpy(lumen.compile(lambda x, w: (x @ w).float())(x, w)).astype(np.float64)
+    rounded, accum = (lumen.to_numpy(t.to(dtype="float32")) for t in (rounded, accum))
+    np.testing.assert_allclose(rounded, h / (1 + np.exp(-h)), rtol=1e-2, atol=1e-2)
+    assert not np.array_equal(rounded, accum)
 
 
 @pytest.mark.mps
@@ -1196,3 +1227,33 @@ def test_matmul_epilogue_reads_packed_weights_in_place():
     # (x, copied into the workspace, is made contiguous; the weight never.)
     copied = [e["inputs"] for e in ops if e["name"] == "lumen::contiguous"]
     assert [("float32", [32, 48])] not in copied, copied
+
+
+def test_division_by_a_scalar_is_a_product_with_its_reciprocal():
+    """``x / c`` (a Python number, or a runtime scalar) traces as
+    ``x * (1 / c)``; by zero, and of tensors, it stays a division."""
+    x = lumen.from_numpy(np.random.default_rng(0).standard_normal(1000).astype(np.float32))
+    graph = str(lumen.make_graph(lambda x: x / 3)(x))
+    assert "mul" in graph and "div" not in graph, graph
+    out = lumen.to_numpy(lumen.compile(lambda x: x / 3)(x))
+    np.testing.assert_array_equal(out, lumen.to_numpy(x) * np.float32(1 / 3))
+    graph = str(lumen.make_graph(lambda x, s: x / s)(x, 3.0))
+    assert graph.count("div") == 1 and "mul" in graph, graph
+    assert "div" in str(lumen.make_graph(lambda x: x / 0.0)(x))
+    assert "div" in str(lumen.make_graph(lambda x: x / x)(x))
+
+
+def test_matmul_takes_accum_and_output_dtypes():
+    """F.matmul takes ``accum_dtype`` and ``output_dtype`` (required); ``@``
+    infers them (float32 accumulation, the inputs' dtype)."""
+    x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
+    y = lumen.empty([8, 3], dtype="bfloat16", device="meta")
+    assert "accum_dtype=f32 output_dtype=bf16" in str(lumen.make_graph(lambda x, y: x @ y)(x, y))
+    g = lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", "float32"))(x, y)
+    assert "accum_dtype=f32 output_dtype=f32" in str(g)
+    g = lumen.make_graph(lambda x, y: F.matmul(x, y, "bfloat16", "bfloat16"))(x, y)
+    assert "accum_dtype=bf16 output_dtype=bf16" in str(g)
+    with pytest.raises(TypeError, match="output_dtype"):
+        lumen.make_graph(lambda x, y: F.matmul(x, y))(x, y)
+    a, b = (lumen.ones(s, dtype="bfloat16") for s in ([4, 8], [8, 3]))
+    assert lumen.compile(lambda x, y: F.matmul(x, y, "float32", "float32"))(a, b).dtype == "float32"

@@ -655,9 +655,9 @@ fn owned_plans_read_packed_parameters() {
 }
 
 /// A float dot's epilogue (XLA's GEMM epilogue fusion): the elementwise
-/// primitives after it, each its only reader (a bias added, relu), fused
-/// into its kernel, applied as it writes each output; not when its value
-/// is read twice, and not with `contraction_epilogues` off.
+/// primitives after it (a bias added, relu), fused into its kernel,
+/// applied as it writes each output; not when its value is also an
+/// output, and not with `contraction_epilogues` off.
 #[test]
 fn dots_fuse_their_epilogue() {
     let build = |read_twice: bool| {
