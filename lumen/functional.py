@@ -91,9 +91,8 @@ def mul(input, other):
 
 
 def div(input, other):
-    """True division: floating-point operands. By a Python number whose
-    reciprocal is a normal number of the tensor's dtype, traced as a
-    product with its reciprocal."""
+    """True division: floating-point operands. By a scalar (a Python
+    number, a runtime scalar), traced as a product with its reciprocal."""
     return _true_div(input, other)
 
 

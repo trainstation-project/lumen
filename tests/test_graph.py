@@ -1231,7 +1231,7 @@ def test_matmul_epilogue_reads_packed_weights_in_place():
 
 def test_division_by_a_scalar_is_a_product_with_its_reciprocal():
     """``x / c`` (a Python number, or a runtime scalar) traces as
-    ``x * (1 / c)``; ``x / y`` of tensors stays a division."""
+    ``x * (1 / c)``; by zero, and of tensors, it stays a division."""
     x = lumen.from_numpy(np.random.default_rng(0).standard_normal(1000).astype(np.float32))
     graph = str(lumen.make_graph(lambda x: x / 3)(x))
     assert "mul" in graph and "div" not in graph, graph
@@ -1239,4 +1239,5 @@ def test_division_by_a_scalar_is_a_product_with_its_reciprocal():
     np.testing.assert_array_equal(out, lumen.to_numpy(x) * np.float32(1 / 3))
     graph = str(lumen.make_graph(lambda x, s: x / s)(x, 3.0))
     assert graph.count("div") == 1 and "mul" in graph, graph
+    assert "div" in str(lumen.make_graph(lambda x: x / 0.0)(x))
     assert "div" in str(lumen.make_graph(lambda x: x / x)(x))
