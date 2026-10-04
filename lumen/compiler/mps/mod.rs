@@ -84,6 +84,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph,
     };
+    // Now the attention's are matched (its kernels' layouts): transposes of
+    // dots (a weight's gradient) as the dots swapped, reshapes, transposes
+    // and casts moved.
+    let graph = super::simplify::simplify_with(&graph, true);
     let graph = canonicalize_dots(&dot_strength::reduce_vector_dots(&graph));
     // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
     // position (the passes keep inputs in order): those every step reading
