@@ -479,8 +479,10 @@ fn plan_matches_reference() {
 
 #[test]
 fn plan_reuses_workspace() {
-    // x → exp → exp → ... (10 times): only two intermediates are ever
-    // live at once, so the workspace holds two, not nine.
+    // x → tanh → tanh → ... (10 times): each tanh writes over its operand,
+    // which dies there (in place, XLA's CanShareOperandBufferWithUser), all
+    // in the output's memory (the first from x, the input): no workspace,
+    // not nine intermediates (nor two, reused).
     let mut g = Graph::new();
     let mut v = g.input(ty(DType::F32, &[256]));
     for _ in 0..10 {
@@ -488,7 +490,7 @@ fn plan_reuses_workspace() {
     }
     g.set_outputs(&[v]).unwrap();
     let plan = check_against_reference(&g, &[data(&[256], 4)]);
-    assert_eq!(plan.workspace_bytes(), 2 * 1024);
+    assert_eq!(plan.workspace_bytes(), 0, "{plan}");
 }
 
 #[test]
@@ -540,6 +542,78 @@ fn owned_plans_place_inputs_and_outputs_in_the_workspace() {
     assert_eq!(first[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]); // overwritten
     let small = Tensor::zeros(&[plan.workspace_bytes() - 1], DType::U8);
     assert!(plan.run_in(&small, &[w.clone(), w.clone()]).is_err());
+}
+
+/// XLA's CanShareOperandBufferWithUser: a step writes over an operand of its
+/// type that dies there, if it reads it at the element it writes
+/// (elementwise); never one read later, a transpose's (other elements), a
+/// cast's to another dtype (other bytes), nor the caller's input.
+#[test]
+fn steps_write_over_operands_that_die_there() {
+    let ty = |shape: &[usize]| TensorType::new(DType::F32, shape);
+    // The buffer `step` (by primitive name) writes, and those it reads.
+    let at = |plan: &Plan, name: &str| {
+        let step = plan
+            .steps()
+            .iter()
+            .find(|s| s.primitive.name() == name)
+            .unwrap();
+        (
+            step.output.0,
+            step.inputs.iter().map(|i| i.0).collect::<Vec<_>>(),
+        )
+    };
+    let build = |second: Primitive, read_later: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty(&[3, 3]));
+        let e = g.apply(Exp, &[x]).unwrap();
+        let y = g.apply(second, &[e]).unwrap();
+        let z = g.apply(Neg, &[y]).unwrap();
+        let mut outputs = vec![z];
+        if read_later {
+            outputs.push(g.apply(Log, &[e]).unwrap());
+        }
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+    let input = [data(&[3, 3], 1)];
+    // tanh over exp's value, which dies there: in place.
+    let plan = check_against_reference(&build(Tanh, false), &input);
+    let (out, ins) = at(&plan, "tanh");
+    assert_eq!(ins, [out], "{plan}");
+    // exp's value read after: tanh writes new memory.
+    let plan = check_against_reference(&build(Tanh, true), &input);
+    let (out, ins) = at(&plan, "tanh");
+    assert_ne!(ins, [out], "{plan}");
+    // A transpose reads other elements; a cast to bf16 other bytes.
+    let transpose = Transpose {
+        permutation: vec![1, 0],
+    };
+    let plan = check_against_reference(&build(transpose, false), &input);
+    let (out, ins) = at(&plan, "transpose");
+    assert_ne!(ins, [out], "{plan}");
+    let mut g = Graph::new();
+    let x = g.input(ty(&[3, 3]));
+    let e = g.apply(Exp, &[x]).unwrap();
+    let c = g
+        .apply(
+            Cast {
+                new_dtype: DType::BF16,
+            },
+            &[e],
+        )
+        .unwrap();
+    g.set_outputs(&[c]).unwrap();
+    let plan = Plan::compile(&g);
+    let (out, ins) = at(&plan, "cast");
+    assert_ne!(ins, [out], "{plan}");
+    // The caller's input: exp writes the output's memory, never x's.
+    let (out, ins) = at(&plan, "exp");
+    assert_eq!(
+        (ins, out),
+        (vec![Buffer::Input(0)], Buffer::Workspace(0)),
+        "{plan}"
+    );
 }
 
 /// A plan of `g` donating its first input, and the output's buffer.

@@ -109,6 +109,12 @@ def _plan(f, *shapes, **options):
     return str(lumen.graph.Plan(lumen.make_graph(f)(*args), "cpu", **options))
 
 
+def _in_place(plan):
+    """Whether the plan's dynamic_update_slice writes its operand's memory."""
+    (line,) = [line for line in plan.splitlines() if "dynamic_update_slice" in line]
+    return line.split(":")[0].strip() == line.split("dynamic_update_slice ")[1].split()[0]
+
+
 def test_dynamic_update_slice_in_place():
     """Its value is its operand's memory, the update written there alone,
     where nothing reads the operand after it: a value it computes, or a
@@ -120,12 +126,12 @@ def test_dynamic_update_slice_in_place():
     assert "out0:f32[4,6] = dynamic_update_slice out0 " in plan, plan
     # x * 2 read later: copied, kept.
     plan = _plan(lambda x, u, i: (prims.dynamic_update_slice(x * 2.0, u, (i, 0)), x * 2.0 + 1.0), *shapes)
-    assert "out0:f32[4,6] = dynamic_update_slice ws+" in plan, plan
+    assert not _in_place(plan), plan
     # A reshape of x * 2 (another name for its memory) read later: copied.
     plan = _plan(
         lambda x, u, i: (lambda e: (prims.dynamic_update_slice(e, u, (i, 0)), e.reshape(24) * 3.0))(x * 2.0), *shapes
     )
-    assert "out0:f32[4,6] = dynamic_update_slice ws+" in plan, plan
+    assert not _in_place(plan), plan
     # An input: in place only donated.
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x, u, (i, 0)), *shapes)
     assert "out0:f32[4,6] = dynamic_update_slice in0 " in plan, plan

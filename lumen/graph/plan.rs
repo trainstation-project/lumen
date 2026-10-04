@@ -216,6 +216,43 @@ impl Plan {
                     root[out] = r;
                 }
             }
+            // Any other step (XLA's CanShareOperandBufferWithUser): its value
+            // may be an operand's bytes, of its type, where that operand dies
+            // here and it reads it in place (elementwise on it; a fusion whose
+            // uses of it are, transitively). In place, no new memory. An
+            // output a donated input of its type may take is left to donation
+            // (below), as XLA's buffer assignment honors input-output aliases
+            // first.
+            let step = !matches!(
+                node.primitive,
+                Primitive::DynamicUpdateSlice
+                    | Primitive::CustomCall { .. }
+                    | Primitive::Reshape { .. }
+                    | Primitive::FusionOutput { .. }
+            );
+            let donated = graph.outputs().iter().enumerate().any(|(k, &o)| {
+                o == node.output
+                    && (options
+                        .donate
+                        .iter()
+                        .any(|&i| graph.type_of(graph.inputs()[i]) == graph.type_of(o))
+                        || options.donate_into.iter().any(|&(_, j)| j == k))
+            });
+            if step && live[node.output] && !donated {
+                for &u in &node.inputs {
+                    let r = root[u];
+                    let mine = |v: Var| root[v] == r;
+                    let free = graph.type_of(u) == graph.type_of(node.output)
+                        && !callers(r)
+                        && !graph.outputs().iter().any(|&o| mine(o))
+                        && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&w| w > t))
+                        && reads_in_place(graph, node, node.output, r, &root);
+                    if free {
+                        root[node.output] = r;
+                        break;
+                    }
+                }
+            }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
                 && options.views.contains(&node.output)
             {
@@ -920,16 +957,27 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
         )
     };
     match &node.primitive {
+        // Every use of it in the body, and of what those compute, elementwise
+        // (XLA's AreTransitiveUsesElementwiseOrTuple): each output element
+        // read from its own index alone.
         Fusion { body, .. } => node
             .inputs
             .iter()
             .zip(body.inputs())
             .filter(|&(&v, _)| root[v] == r)
             .all(|(_, &b)| {
-                body.nodes()
-                    .iter()
-                    .filter(|n| n.inputs.contains(&b))
-                    .all(|n| elementwise(&n.primitive))
+                let (mut stack, mut seen) = (vec![b], vec![false; body.types.len()]);
+                while let Some(v) = stack.pop() {
+                    for n in body.nodes().iter().filter(|n| n.inputs.contains(&v)) {
+                        if !elementwise(&n.primitive) {
+                            return false;
+                        }
+                        if !std::mem::replace(&mut seen[n.output], true) {
+                            stack.push(n.output);
+                        }
+                    }
+                }
+                true
             }),
         // Its operand alone, in place.
         DynamicUpdateSlice => node.inputs[1..].iter().all(|&v| root[v] != r),
