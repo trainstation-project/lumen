@@ -72,9 +72,12 @@ class Module:
 
 def _leaves(x, path):
     """``(path, tensor)`` for each tensor in ``x`` (a module, a list or
-    tuple, or a tensor), recursively."""
+    tuple, or a tensor), recursively: inside a compiled function, its
+    traced weights (not its floats, runtime scalars)."""
+    from lumen.graph.tracer import TracedTensor  # it imports this module
+
     prefix = f"{path}." if path else ""
-    if isinstance(x, Tensor):
+    if isinstance(x, Tensor) or (isinstance(x, TracedTensor) and not x.weak):
         yield path, x
     elif isinstance(x, Module):
         for f in dataclasses.fields(x):

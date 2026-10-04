@@ -187,6 +187,13 @@ def _trace(fn, args):
     # tangents its transpose does not read).
     renumbered = graph.prune()
     sources = {renumbered[v]: s for v, s in sources.items() if renumbered[v] is not None}
+    grads = [t.grad for t in leaves if t.grad is not None]
+    if grads and all(renumbered[g.var] is None for g in grads):
+        warnings.warn(
+            "backward() computed gradients the compiled function does not use: it is pruned. "
+            "Return them (x.grad, [p.grad for p in model.parameters()]) or use them (opt.step())",
+            stacklevel=3,
+        )
     for var, cast, message in graph.precision_warnings():
         where, cast_at = sources.get(var), sources.get(cast)
         if cast_at and cast_at != where:
