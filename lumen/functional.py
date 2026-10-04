@@ -280,27 +280,37 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
 # ---------------------------------------------------------------------
 
 
-def matmul(input, other):
+def matmul(input, other, accum_dtype, output_dtype):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
     the dimensions before the last two are batch dimensions, broadcast. It
-    accumulates floats in float32 (float64 in float64); its result is of
-    the inputs' dtype."""
-    input, other = _lift(input), _lift(other)
+    accumulates in ``accum_dtype``, its result of ``output_dtype``. ``@``
+    infers them: floats accumulate in float32 (float64 in float64), the
+    result of the inputs' dtype."""
+
+    input = _lift(input)
+    other = _lift(other)
+
     _common_dtype("matmul", (input, other))
+
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
+
     x = input.unsqueeze(0) if input.ndim == 1 else input
     y = other.unsqueeze(-1) if other.ndim == 1 else other
+
     batch = _broadcast_shapes(x.shape[:-2], y.shape[:-2])
     x, y = _broadcast_to(x, batch + x.shape[-2:]), _broadcast_to(y, batch + y.shape[-2:])
+
     b = tuple(range(len(batch)))
-    # Accumulated in float32 (or wider), the result in the inputs' dtype.
     dims = (((len(b) + 1,), (len(b),)), (b, b))
-    out = prims.dot_general(x, y, dims, _accum_dtype(x.dtype), x.dtype)
+
+    out = prims.dot_general(x, y, dims, accum_dtype, output_dtype)
     if input.ndim == 1:
         out = out.squeeze(-2)
+
     if other.ndim == 1:
         out = out.squeeze(-1)
+
     return out
 
 

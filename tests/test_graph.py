@@ -1088,7 +1088,7 @@ def test_ops_are_functions():
     # Operators and functions record the same primitives.
     a = lumen.zeros([2, 3])
     by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
-    by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t()))(a)
+    by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t(), "float32", "float32"))(a)
     assert str(by_operator) == str(by_function)
 
 
@@ -1241,3 +1241,19 @@ def test_division_by_a_scalar_is_a_product_with_its_reciprocal():
     assert graph.count("div") == 1 and "mul" in graph, graph
     assert "div" in str(lumen.make_graph(lambda x: x / 0.0)(x))
     assert "div" in str(lumen.make_graph(lambda x: x / x)(x))
+
+
+def test_matmul_takes_accum_and_output_dtypes():
+    """F.matmul takes ``accum_dtype`` and ``output_dtype`` (required); ``@``
+    infers them (float32 accumulation, the inputs' dtype)."""
+    x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
+    y = lumen.empty([8, 3], dtype="bfloat16", device="meta")
+    assert "accum_dtype=f32 output_dtype=bf16" in str(lumen.make_graph(lambda x, y: x @ y)(x, y))
+    g = lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", "float32"))(x, y)
+    assert "accum_dtype=f32 output_dtype=f32" in str(g)
+    g = lumen.make_graph(lambda x, y: F.matmul(x, y, "bfloat16", "bfloat16"))(x, y)
+    assert "accum_dtype=bf16 output_dtype=bf16" in str(g)
+    with pytest.raises(TypeError, match="output_dtype"):
+        lumen.make_graph(lambda x, y: F.matmul(x, y))(x, y)
+    a, b = (lumen.ones(s, dtype="bfloat16") for s in ([4, 8], [8, 3]))
+    assert lumen.compile(lambda x, y: F.matmul(x, y, "float32", "float32"))(a, b).dtype == "float32"
