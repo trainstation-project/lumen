@@ -80,6 +80,29 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
 
 
+@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("name", list(CASES))
+def test_torch_and_jax_styles_agree(name, device):
+    """loss.backward() and .grad (torch) give exactly lumen.grad's (jax)
+    gradients: the same transformation of the same program."""
+    f, shapes = CASES[name]
+    dtype = np.float64 if device == "cpu" else np.float32
+    if device == "mps" and name in ("dot_general", "cast"):
+        pytest.skip("float64 on the CPU only")
+    try:
+        xs = [lumen.from_numpy(a.astype(dtype)).to(device) for a in arrays(*shapes)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def torch_style(x, y):
+        f(x, y).backward()
+        return x.grad, y.grad
+
+    jax_style = lumen.grad(f, (0, 1))
+    for got, want in zip(lumen.compile(torch_style)(*xs), lumen.compile(jax_style)(*xs)):
+        np.testing.assert_array_equal(lumen.to_numpy(got), lumen.to_numpy(want))
+
+
 @pytest.mark.mps
 @pytest.mark.parametrize("name", ["matmul", "softmax", "rms_norm", "attention", "slice concatenate"])
 def test_grad_on_mps_agrees_with_the_cpu(name):
