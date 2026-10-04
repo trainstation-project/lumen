@@ -182,8 +182,12 @@ impl PyGraph {
                     .scores
                     .iter()
                     .map(|s| match *s {
-                        Score::Round(t) => ("round", dtype_name(t)).into_pyobject(py).map(|t| t.into_any()),
-                        Score::Mul(c, t) => ("mul", c, dtype_name(t)).into_pyobject(py).map(|t| t.into_any()),
+                        Score::Round(t) => ("round", dtype_name(t))
+                            .into_pyobject(py)
+                            .map(|t| t.into_any()),
+                        Score::Mul(c, t) => ("mul", c, dtype_name(t))
+                            .into_pyobject(py)
+                            .map(|t| t.into_any()),
                     })
                     .collect::<PyResult<_>>()?;
                 d.set_item("chain", chain)?;

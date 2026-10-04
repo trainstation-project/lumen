@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::compiler::attention::{Access, Attention, Backward, Score};
 use super::fusion;
 use crate::compiler::CompilerConfig;
+use crate::compiler::attention::{Access, Attention, Backward, Score};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
@@ -1115,7 +1115,9 @@ fn score_functor(scores: &[Score]) -> String {
             Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
         };
     }
-    format!("struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n")
+    format!(
+        "struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n"
+    )
 }
 
 /// The kernel of an attention backward's fusion (`ops/attention`'s
@@ -1129,11 +1131,18 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     };
     let ix = format!(
         "struct NAME_ix {{\n{}\n}};\n\n",
-        [("q", &b.q), ("k", &b.k), ("v", &b.v), ("g", &b.d_o), ("lse", &b.lse), ("delta", &b.delta)]
-            .iter()
-            .map(|(name, acc)| ix_method(name, acc, &b.batch))
-            .collect::<Vec<_>>()
-            .join("\n")
+        [
+            ("q", &b.q),
+            ("k", &b.k),
+            ("v", &b.v),
+            ("g", &b.d_o),
+            ("lse", &b.lse),
+            ("delta", &b.delta)
+        ]
+        .iter()
+        .map(|(name, acc)| ix_method(name, acc, &b.batch))
+        .collect::<Vec<_>>()
+        .join("\n")
     );
     let score = score_functor(&b.scores);
     let t = metal_type(b.dtype);
@@ -1142,7 +1151,12 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         .inputs()
         .iter()
         .enumerate()
-        .map(|(k, &v)| format!("device const {} *in{k} [[buffer({k})]]", metal_type(body.type_of(v).dtype)))
+        .map(|(k, &v)| {
+            format!(
+                "device const {} *in{k} [[buffer({k})]]",
+                metal_type(body.type_of(v).dtype)
+            )
+        })
         .collect();
     let dkdv = b.dv.is_some();
     let outs: &[&str] = if dkdv { &["dv", "dk"] } else { &["dq"] };
@@ -1150,7 +1164,12 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         params.push(format!("device float *{out} [[buffer({})]]", n + k));
     }
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
-    let (q, k, v, g) = (input(b.q.base), input(b.k.base), input(b.v.base), input(b.d_o.base));
+    let (q, k, v, g) = (
+        input(b.q.base),
+        input(b.k.base),
+        input(b.v.base),
+        input(b.d_o.base),
+    );
     let (lse, delta) = (input(b.lse.base), input(b.delta.base));
     let (causal, offset) = (b.causal.is_some(), b.causal.unwrap_or(0));
     let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
@@ -1175,7 +1194,10 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
 /// threadgroup memory.
 fn backward_block(b: &Backward) -> usize {
     let bytes = |n: usize| n * (b.h + b.hv) * b.dtype.size_of() + 2 * n * 4;
-    [32, 16, 8].into_iter().find(|&n| bytes(n) <= 28 << 10).unwrap_or(8)
+    [32, 16, 8]
+        .into_iter()
+        .find(|&n| bytes(n) <= 28 << 10)
+        .unwrap_or(8)
 }
 
 /// Whether attention `a` takes the decoding kernel: few queries (a
@@ -1243,7 +1265,13 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         members.push(format!("in{k}"));
     }
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
-        writeln!(fields, "    device {} *out{};", metal_type(body.type_of(v).dtype), k + 1).unwrap();
+        writeln!(
+            fields,
+            "    device {} *out{};",
+            metal_type(body.type_of(v).dtype),
+            k + 1
+        )
+        .unwrap();
         members.push(format!("out{}", k + 1));
     }
     let operand = |v: Var| {

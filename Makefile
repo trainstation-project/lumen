@@ -34,9 +34,6 @@ test:
 	cargo test --doc
 	maturin develop $(MATURIN_FEATURES) && python -m pytest tests -q -rs
 
-fmt:
-	cargo fmt --all
-
 fmt-check:
 	cargo fmt --all -- --check
 
@@ -70,3 +67,4 @@ update-precommit:
 style:
 	uv run --extra dev --no-default-groups pre-commit run --all-files
 	clang-format -i --style=file:.clang-format $(CPP_SOURCES)
+	cargo fmt --all

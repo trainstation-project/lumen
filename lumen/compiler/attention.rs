@@ -186,7 +186,9 @@ fn body_of(graph: &Graph, producer: &[Option<usize>], outputs: &[Var], bases: &[
     for &n in &members {
         let node = &nodes[n];
         let ins: Vec<Var> = node.inputs.iter().map(|v| var[v]).collect();
-        let v = body.apply(node.primitive.clone(), &ins).expect("a node of the graph");
+        let v = body
+            .apply(node.primitive.clone(), &ins)
+            .expect("a node of the graph");
         var.insert(node.output, v);
     }
     let outputs: Vec<Var> = outputs.iter().map(|v| var[v]).collect();
@@ -205,7 +207,9 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
     let mut fusions: Vec<(usize, Vec<usize>, Vec<Var>)> = Vec::new();
     for i in 0..nodes.len() {
         let Some(b) = m.backward(i) else { continue };
-        let (Some(dv), Some(dk), Some(dq)) = (b.dv, b.dk, b.dq) else { continue };
+        let (Some(dv), Some(dk), Some(dq)) = (b.dv, b.dk, b.dq) else {
+            continue;
+        };
         let mut bases: Vec<Var> = Vec::new();
         for acc in [&b.q, &b.k, &b.v, &b.d_o, &b.lse, &b.delta] {
             if !bases.contains(&acc.base) {
@@ -214,9 +218,9 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
         }
         for outs in [vec![dv, dk], vec![dq]] {
             let at = *outs.iter().max().expect("a dot");
-            let read_after = outs
-                .iter()
-                .all(|&o| !m.output[nodes[o].output] && m.readers[nodes[o].output].iter().all(|&r| r > at));
+            let read_after = outs.iter().all(|&o| {
+                !m.output[nodes[o].output] && m.readers[nodes[o].output].iter().all(|&r| r > at)
+            });
             if read_after {
                 fusions.push((at, outs, bases.clone()));
             }
@@ -232,12 +236,17 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
     }
     for (i, node) in nodes.iter().enumerate() {
         // An output of a fusion placed after it: mapped there.
-        if fusions.iter().any(|(at, outs, _)| outs.contains(&i) && i > *at) {
+        if fusions
+            .iter()
+            .any(|(at, outs, _)| outs.contains(&i) && i > *at)
+        {
             continue;
         }
         let Some((_, outs, bases)) = fusions.iter().find(|(at, _, _)| *at == i) else {
             let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-            map[node.output] = out.apply(node.primitive.clone(), &inputs).expect("a node of the graph");
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("a node of the graph");
             continue;
         };
         let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
@@ -247,13 +256,11 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
             2 => "flash_attention_backward(dk, dv)",
             _ => "flash_attention_backward(dq)",
         };
-        let fusion = Primitive::Fusion {
-            name,
-            label,
-            body,
-        };
+        let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
-        let first = out.apply(fusion, &reads).expect("a fusion typed as its first output");
+        let first = out
+            .apply(fusion, &reads)
+            .expect("a fusion typed as its first output");
         map[outputs[0]] = first;
         for (index, &o) in outputs.iter().enumerate().skip(1) {
             let ty = graph.type_of(o).clone();
@@ -357,10 +364,13 @@ pub(crate) fn fuse(
             // Its other outputs (its value, if kept; its log-sum-exp) are
             // read after it: without an epilogue if one would end past a
             // reader of them.
-            let read_after = |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
+            let read_after =
+                |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
             let end = chain.last().copied().unwrap_or(a.root);
             let root_read = !kept || read_after(graph.nodes()[a.root].output, end);
-            let lse_read = a.lse.is_none_or(|n| read_after(graph.nodes()[n].output, end));
+            let lse_read = a
+                .lse
+                .is_none_or(|n| read_after(graph.nodes()[n].output, end));
             if !root_read || !lse_read {
                 (chain, leaves, kept) = (Vec::new(), Vec::new(), false);
             }
@@ -383,11 +393,15 @@ pub(crate) fn fuse(
     }
     for (i, node) in nodes.iter().enumerate() {
         // A log-sum-exp after its attention: the fusion's output already.
-        if found.iter().any(|(a, _, end, _, _)| a.lse == Some(i) && i > *end) {
+        if found
+            .iter()
+            .any(|(a, _, end, _, _)| a.lse == Some(i) && i > *end)
+        {
             continue;
         }
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let Some((a, chain, _, leaves, kept)) = found.iter().find(|(_, _, end, _, _)| *end == i) else {
+        let Some((a, chain, _, leaves, kept)) = found.iter().find(|(_, _, end, _, _)| *end == i)
+        else {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
@@ -410,8 +424,8 @@ pub(crate) fn fuse(
         let name = kernel(&body);
         // Profiled as the attention, then its epilogue's primitives:
         // `flash_attention → reshape → add`.
-        let label = std::iter::once("flash_attention")
-            .chain(chain.iter().map(|&n| graph.label(&nodes[n])));
+        let label =
+            std::iter::once("flash_attention").chain(chain.iter().map(|&n| graph.label(&nodes[n])));
         let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
@@ -463,8 +477,7 @@ impl<'a> Matcher<'a> {
                 _ => break,
             };
             let n = &nodes[u];
-            let step =
-                super::elementwise(&n.primitive) || matches!(n.primitive, Reshape { .. });
+            let step = super::elementwise(&n.primitive) || matches!(n.primitive, Reshape { .. });
             if !step {
                 break;
             }
@@ -558,10 +571,7 @@ impl<'a> Matcher<'a> {
     /// `v` through a cast read only once, if it is one.
     fn uncast(&self, v: Var) -> Var {
         match self.node(v) {
-            Some(n)
-                if matches!(n.primitive, Primitive::Cast { .. })
-                    && self.single(v) =>
-            {
+            Some(n) if matches!(n.primitive, Primitive::Cast { .. }) && self.single(v) => {
                 n.inputs[0]
             }
             _ => v,
@@ -618,7 +628,14 @@ impl<'a> Matcher<'a> {
                 rhs_batch,
                 accum_dtype,
                 output_dtype,
-            } => Some((lhs_contracting, rhs_contracting, lhs_batch, rhs_batch, *accum_dtype, *output_dtype)),
+            } => Some((
+                lhs_contracting,
+                rhs_contracting,
+                lhs_batch,
+                rhs_batch,
+                *accum_dtype,
+                *output_dtype,
+            )),
             _ => None,
         };
         let f32 = DType::F32;
@@ -635,10 +652,13 @@ impl<'a> Matcher<'a> {
         let (s, scores, causal) = self.scores(x, nb, true)?;
         let (lc1, rc1, lb1, rb1, acc1, _) = dot(s)?;
         let (k_, q_) = (nodes[s].inputs[0], nodes[s].inputs[1]);
-        if lb1.len() != nb || lc1.len() != 1 || rc1.len() != 1 || acc1 != f32 || ty(x).dtype != f32 {
+        if lb1.len() != nb || lc1.len() != 1 || rc1.len() != 1 || acc1 != f32 || ty(x).dtype != f32
+        {
             return None;
         }
-        let free = |rank: usize, used: &[&[usize]]| (0..rank).find(|d| used.iter().all(|u| !u.contains(d)));
+        let free = |rank: usize, used: &[&[usize]]| {
+            (0..rank).find(|d| used.iter().all(|u| !u.contains(d)))
+        };
         let (kf, qf) = (
             free(ty(k_).shape.len(), &[lb1, lc1])?,
             free(ty(q_).shape.len(), &[rb1, rc1])?,
@@ -651,7 +671,9 @@ impl<'a> Matcher<'a> {
                 Mul if m1.is_none() => m1 = Some(r),
                 Cast { .. } if dv.is_none() => {
                     let c = nodes[r].output;
-                    let [d] = self.readers[c][..] else { return None };
+                    let [d] = self.readers[c][..] else {
+                        return None;
+                    };
                     (self.single(c) && nodes[d].inputs[0] == c).then_some(())?;
                     dv = Some(d);
                 }
@@ -680,7 +702,9 @@ impl<'a> Matcher<'a> {
             free(ty(do_).shape.len(), &[rb2, rc2])?,
         );
         let m1_out = m1.output;
-        let [m2] = self.readers[m1_out][..] else { return None };
+        let [m2] = self.readers[m1_out][..] else {
+            return None;
+        };
         if self.output[m1_out] || !matches!(nodes[m2].primitive, Mul) {
             return None;
         }
@@ -701,12 +725,22 @@ impl<'a> Matcher<'a> {
         let (mut dk, mut dq) = (None, None);
         for &r in &self.readers[ds] {
             let (lc, rc, lb, _, acc, out) = dot(r)?;
-            if nodes[r].inputs[0] != ds || *lb != (0..nb).collect::<Vec<_>>() || acc != f32 || out != f32 {
+            if nodes[r].inputs[0] != ds
+                || *lb != (0..nb).collect::<Vec<_>>()
+                || acc != f32
+                || out != f32
+            {
                 return None;
             }
             match (lc.as_slice(), rc.as_slice()) {
-                ([c], [d]) if *c == nb + 1 && nodes[r].inputs[1] == q_ && *d == qf && dk.is_none() => dk = Some(r),
-                ([c], [d]) if *c == nb && nodes[r].inputs[1] == k_ && *d == kf && dq.is_none() => dq = Some(r),
+                ([c], [d])
+                    if *c == nb + 1 && nodes[r].inputs[1] == q_ && *d == qf && dk.is_none() =>
+                {
+                    dk = Some(r)
+                }
+                ([c], [d]) if *c == nb && nodes[r].inputs[1] == k_ && *d == kf && dq.is_none() => {
+                    dq = Some(r)
+                }
                 _ => return None,
             }
         }
@@ -749,7 +783,8 @@ impl<'a> Matcher<'a> {
         if !per_query(&lse, lse_b) || !per_query(&delta, d_b) {
             return None;
         }
-        if !fits32(&q, sq, h) || !fits32(&k, sk, h) || !fits32(&v, sk, hv) || !fits32(&d_o, sq, hv) {
+        if !fits32(&q, sq, h) || !fits32(&k, sk, h) || !fits32(&v, sk, hv) || !fits32(&d_o, sq, hv)
+        {
             return None;
         }
         Some(Backward {
@@ -778,7 +813,12 @@ impl<'a> Matcher<'a> {
     /// and the causal mask each goes through, as [`Score`]s in order (from
     /// the dot's rounding), and the mask's offset. `transposed`: `x`'s rows
     /// are the keys, its columns the queries (a backward's `S^T`).
-    fn scores(&self, x: Var, nb: usize, transposed: bool) -> Option<(usize, Vec<Score>, Option<i64>)> {
+    fn scores(
+        &self,
+        x: Var,
+        nb: usize,
+        transposed: bool,
+    ) -> Option<(usize, Vec<Score>, Option<i64>)> {
         use Primitive::*;
         let ty = |v: Var| self.graph.type_of(v);
         let (mut v, mut scale, mut causal) = (x, None, None);
@@ -919,10 +959,16 @@ impl<'a> Matcher<'a> {
         // The kernel accumulates the dots, and computes the softmax, in
         // float32.
         let f32 = |p: &Primitive| match p {
-            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => *accum_dtype == DType::F32,
+            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => {
+                *accum_dtype == DType::F32
+            }
             _ => false,
         };
-        let (p1, p2, ps) = (&s.primitive, &nodes[i].primitive, &self.node(sum)?.primitive);
+        let (p1, p2, ps) = (
+            &s.primitive,
+            &nodes[i].primitive,
+            &self.node(sum)?.primitive,
+        );
         if ty(x).dtype != DType::F32 || !f32(p1) || !f32(p2) || !f32(ps) {
             return None;
         }
@@ -1080,8 +1126,7 @@ impl<'a> Matcher<'a> {
             BroadcastInDim { .. } | Reshape { .. } | Cast { .. } => {
                 let (ci, cj, c) = self.affine(n.inputs[0], nb)?;
                 // Only constants are broadcast: an index would move.
-                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0))
-                    .then_some((ci, cj, c))
+                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0)).then_some((ci, cj, c))
             }
             Add | Sub => {
                 let (a, b) = (self.affine(n.inputs[0], nb)?, self.affine(n.inputs[1], nb)?);

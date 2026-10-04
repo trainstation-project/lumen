@@ -13,9 +13,9 @@
 //! consumers read its output. Contractions are never fused.
 
 use super::diamonds::Row;
-pub(super) use crate::compiler::{constant, elementwise};
 use crate::DType;
 use crate::compiler::CompilerConfig;
+pub(super) use crate::compiler::{constant, elementwise};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
@@ -245,10 +245,16 @@ pub(crate) fn fuse(
                 let v = nodes[k].output;
                 is_output[v] || users[v].iter().any(|w| !taken.contains(w))
             };
-            let aux: Vec<usize> = taken[..taken.len() - 1].iter().copied().filter(outside).collect();
-            let read_after = aux
+            let aux: Vec<usize> = taken[..taken.len() - 1]
                 .iter()
-                .all(|&k| users[nodes[k].output].iter().all(|&w| taken.contains(&w) || w > u));
+                .copied()
+                .filter(outside)
+                .collect();
+            let read_after = aux.iter().all(|&k| {
+                users[nodes[k].output]
+                    .iter()
+                    .all(|&w| taken.contains(&w) || w > u)
+            });
             if read_after && aux.len() <= MAX_AUX {
                 end = Some((taken.clone(), aux));
             }
@@ -425,7 +431,6 @@ pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]
     intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
 
-
 /// The nodes of the fusion rooted at node `root_node` and the values it
 /// reads, each in graph order: the root and, from it, every fusible
 /// producer that is not a `root` (for this fusion: one it hosts is not).
@@ -508,4 +513,3 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
     }
     false
 }
-
