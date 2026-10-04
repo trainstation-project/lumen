@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use super::fusion::constant;
 use crate::DType;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
 use crate::tensor::contiguous_strides;
 
 /// How the kernel reads (or writes) an operand: element `(batch, row, col)`
@@ -179,10 +179,10 @@ pub(crate) fn fuse(
             .expect("the attention's output");
         let name = kernel(&body);
         // Profiled as the attention, then its epilogue's primitives:
-        // `flash_attention -> reshape -> add`.
+        // `flash_attention → reshape → add`.
         let label = std::iter::once("flash_attention")
             .chain(chain.iter().map(|&n| nodes[n].primitive.name()));
-        let label = super::fusion::intern(label.collect::<Vec<_>>().join(" -> "));
+        let label = super::fusion::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out

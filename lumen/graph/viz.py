@@ -22,7 +22,7 @@ import statistics
 import sys
 
 import lumen
-from lumen._C import Plan
+from lumen._C import FUSION_SEPARATOR, Plan
 from lumen.profiler import ProfilerActivity, profile
 
 OPS = pathlib.Path(lumen.__file__).parent / "ops"
@@ -279,6 +279,7 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
     return {
         "title": title,
         "device": device,
+        "fusion_separator": FUSION_SEPARATOR,
         "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "inputs": [type_text(*graph.type_of(v)) for v in graph.inputs()],
         "graph_text": str(graph),

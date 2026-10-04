@@ -15,7 +15,7 @@ pub(crate) mod tests;
 use std::fmt;
 
 pub use plan::{Plan, PlanOptions};
-pub use primitive::Primitive;
+pub use primitive::{FUSION_SEPARATOR, Primitive};
 
 use crate::DType;
 

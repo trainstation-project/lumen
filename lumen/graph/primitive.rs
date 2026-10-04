@@ -10,6 +10,10 @@ use std::fmt;
 use super::{Graph, TensorType};
 use crate::{DType, Scalar};
 
+/// What a fusion's label (its primitives' names, as the profiler and the
+/// graph viewer show it) joins them with: `mul → tanh → add`.
+pub const FUSION_SEPARATOR: &str = " → ";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     // elementwise, two operands of the same type
@@ -96,7 +100,8 @@ pub enum Primitive {
     /// (`crate::compiler`) groups the primitives it fuses into. Its value is
     /// the body's first output; a body with more (a multi-output fusion)
     /// has each other one read by a [`Primitive::FusionOutput`].
-    /// Profiled as `label`, its primitives' names: `mul -> tanh -> add`.
+    /// Profiled as `label`, its primitives' names joined by
+    /// [`FUSION_SEPARATOR`]: `mul → tanh → add`.
     Fusion {
         name: String,
         label: &'static str,

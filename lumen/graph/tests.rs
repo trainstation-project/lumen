@@ -479,7 +479,7 @@ fn plan_matches_reference() {
 
 #[test]
 fn plan_reuses_workspace() {
-    // x -> exp -> exp -> ... (10 times): only two intermediates are ever
+    // x → exp → exp → ... (10 times): only two intermediates are ever
     // live at once, so the workspace holds two, not nine.
     let mut g = Graph::new();
     let mut v = g.input(ty(DType::F32, &[256]));

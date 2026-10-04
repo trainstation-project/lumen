@@ -603,7 +603,7 @@ def test_packed_weights_are_one_matmul(device):
     graph = lumen.make_graph(gated)(*args)
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
     if device == "mps":
-        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice -> slice")
+        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice → slice")
     assert steps.count("dot_general") == 1
 
 
@@ -774,7 +774,7 @@ def test_softmax_traces_to_its_primitives(device):
     )
     if device == "mps":
         (step,) = lumen.graph.Plan(graph, "mps").steps()
-        assert step["fusion"] is not None and step["label"].startswith("full -> broadcast_in_dim -> mul")
+        assert step["fusion"] is not None and step["label"].startswith("full → broadcast_in_dim → mul")
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(
         lumen.to_numpy(lumen.compile(lambda t: F.softmax(t, 0))(t)),
@@ -825,7 +825,7 @@ def test_rms_norm(device):
         for g in (f, by_hand):
             (label,) = steps(g)
             assert "reduce_sum" in label and "sqrt" in label, label
-        assert steps(f)[0].startswith("full -> broadcast_in_dim -> add -> mul -> reduce_sum")
+        assert steps(f)[0].startswith("full → broadcast_in_dim → add → mul → reduce_sum")
     with pytest.raises(NotImplementedError, match="last dimension"):
         lumen.make_graph(lambda a: F.rms_norm(a, (8, 300)))(X)
     norm = Norm(lumen.empty([300], device="meta"), 1e-6)
@@ -994,7 +994,7 @@ def test_upcast_rms_norm_is_one_kernel(n):
     )
     (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     source = step["fusion"]["source"]
-    assert step["label"].endswith("div -> convert_element_type -> broadcast_in_dim -> mul"), step["label"]
+    assert step["label"].endswith("div → convert_element_type → broadcast_in_dim → mul"), step["label"]
     cached = n <= 8 * 256
     assert ("float kept0[" in source) == cached
     assert source.count("in0[j]") == (1 if cached else 2), source
@@ -1024,7 +1024,7 @@ def test_split_reduction_converts_its_input_once():
     f = lumen.compile(lambda a: F.sum(a.float(), -1))
     graph = lumen.make_graph(lambda a: F.sum(a.float(), -1))(x)
     (step,) = lumen.graph.Plan(graph, "mps").steps()
-    assert step["label"] == "convert_element_type -> reduce_sum" and step["scratch"] is not None
+    assert step["label"] == "convert_element_type → reduce_sum" and step["scratch"] is not None
     source = step["fusion"]["source"]
     assert source.count("convert_value<float>") == 1, source
     assert "device float *out" in source and "device const bfloat *in0" in source, source
@@ -1122,7 +1122,7 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
     except RuntimeError as e:
         pytest.skip(str(e))
     (step,) = lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()
-    assert step["label"].startswith("dot_general ->"), step["label"]
+    assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
     lumen.config.compiler.contraction_epilogues = False
     try:
@@ -1192,7 +1192,7 @@ def test_matmul_epilogue_reads_packed_weights_in_place():
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         relu(_Relu(w1), xt)
     ops = [e for e in prof.events() if e["kind"] == "op"]
-    assert any(e["name"].startswith("dot_general ->") for e in ops)
+    assert any(e["name"].startswith("dot_general →") for e in ops)
     # (x, copied into the workspace, is made contiguous; the weight never.)
     copied = [e["inputs"] for e in ops if e["name"] == "lumen::contiguous"]
     assert [("float32", [32, 48])] not in copied, copied

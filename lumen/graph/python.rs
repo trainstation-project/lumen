@@ -354,5 +354,6 @@ fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, Py
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
+    m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)?;
     m.add_class::<PyPlan>()
 }

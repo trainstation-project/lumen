@@ -14,7 +14,7 @@
 //! ```text
 //!              p
 //!            /   \
-//!     trivial     trivial -> reduce (last dim) -> trivial -> broadcast
+//!     trivial     trivial → reduce (last dim) → trivial → broadcast
 //!            \   /
 //!            root
 //! ```

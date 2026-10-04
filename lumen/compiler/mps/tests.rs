@@ -83,7 +83,7 @@ fn fuses_elementwise_and_layout_chains() {
     // Profiled by its primitives, in graph order.
     assert_eq!(
         fuse(&g).nodes()[0].primitive.name(),
-        "full -> broadcast_in_dim -> mul -> tanh -> transpose -> add"
+        "full → broadcast_in_dim → mul → tanh → transpose → add"
     );
 }
 
@@ -1315,7 +1315,7 @@ fn rms_norm_row_kernels_fuse_their_input() {
     let labels: Vec<_> = fused.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(labels.len(), 1, "{fused}");
     assert!(
-        labels[0].starts_with("add -> mul -> reduce_sum"),
+        labels[0].starts_with("add → mul → reduce_sum"),
         "{labels:?}"
     );
     assert_eq!(fused_primitives(&g, &inputs), ["fusion"]);

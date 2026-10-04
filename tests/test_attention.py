@@ -193,9 +193,9 @@ def test_attention_epilogues_fuse(f, sq):
     agreeing with the CPU and with the unfused plan."""
     shapes = [(1, sq, 4, 32), (1, 96, 4, 32), (1, 96, 4, 32), (sq, 128), (128,)]
     ts, arrays = tensors("mps", "float32", *shapes)
-    # Profiled as the attention and its epilogue: flash_attention -> reshape -> ...
+    # Profiled as the attention and its epilogue: flash_attention → reshape → ...
     (label,) = steps(f, *ts)
-    assert label.startswith("flash_attention -> reshape -> "), label
+    assert label.startswith("flash_attention → reshape → "), label
     got = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)).to(dtype="float32"))
     np.testing.assert_allclose(got, want, rtol=1e-3, atol=1e-3)

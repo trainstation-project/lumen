@@ -18,7 +18,7 @@ use std::sync::{Mutex, PoisonError};
 use super::diamonds::Row;
 use crate::DType;
 use crate::compiler::CompilerConfig;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
 const MAX_INPUTS: usize = 29;
@@ -342,7 +342,7 @@ pub(crate) fn fuse(
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
                 let label = members.iter().map(|&m| nodes[m].primitive.name());
-                let label = intern(label.collect::<Vec<_>>().join(" -> "));
+                let label = intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
                 let out = out.expect("a fused graph is typed as the original");
