@@ -448,7 +448,8 @@ pub(crate) fn encode(
                 u32_arg(n as u32),
             ];
             let grid = elementwise_grid(n, DType::F32);
-            launch("fill_4", &[extra[1]], &args, grid, Vec::new(), step.label)?;
+            // Profiled as what it is, not as the kernel after it.
+            launch("fill_4", &[extra[1]], &args, grid, Vec::new(), "full (dQ)")?;
         }
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
@@ -476,13 +477,15 @@ pub(crate) fn encode(
             u32_arg((m * n) as u32),
         ];
         let fill = elementwise_grid(m * n, DType::F32);
+        // Profiled as what it is, not as the dot after it.
+        let label = "full (split-K output)";
         launch(
             "fill_4",
             &[output.cast_const()],
             &zero,
             fill,
             Vec::new(),
-            step.label,
+            label,
         )?;
         let kernel = format!("matmul_atomic_{}", lhs.dtype);
         let grid = Grid::Groups([n.div_ceil(64), m.div_ceil(64), chunks]);
