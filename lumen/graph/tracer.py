@@ -487,6 +487,15 @@ def _binary(prim, reflected=False):
 
 
 def _true_div(x, y):
+    # By a scalar (a Python number, a runtime scalar): times its reciprocal.
+    if isinstance(y, (int, float)) and not isinstance(y, bool):
+        _require_float(x, "true division (/)")
+        return _elementwise(prims.mul, x, 1 / y if y else math.copysign(math.inf, y))
+    if isinstance(y, TracedTensor) and y.weak and not getattr(x, "weak", True):
+        _require_float(x, "true division (/)")
+        r = _true_div(1.0, y)
+        r.weak = True
+        return _elementwise(prims.mul, x, r)
     x, y = _operands("div", x, y)
     return prims.div(_require_float(x, "true division (/)"), y)
 

@@ -8,9 +8,10 @@
 // within a batch index: query or key i, head dimension d at
 // i * ROW + d * COL).
 //
-// Scores, the softmax and the output accumulate in float; the
-// probabilities are rounded to T for p v, as the traced program rounds
-// them. A causal mask lets query i see key j iff j <= i + offset. Each
+// Scores, the softmax and the output accumulate in float; each score then
+// goes through `score` (its rounding, casts and scale as traced, codegen.rs)
+// and the probabilities are rounded to T for p v, as the traced program
+// rounds them. A causal mask lets query i see key j iff j <= i + offset. Each
 // output is written as epi(it, its flat index): Same, or a fusion's
 // epilogue (codegen.rs), writing Out.
 
@@ -48,6 +49,7 @@ template <typename T,
           uint BK,
           bool CAUSAL,
           typename Ix,
+          typename Score,
           typename Out = O,
           typename Epi = Same>
 inline void flash_attention(device const T *q,
@@ -57,7 +59,7 @@ inline void flash_attention(device const T *q,
                             Ix ix,
                             uint sq,
                             uint sk,
-                            float scale,
+                            Score score,
                             int offset,
                             threadgroup T *ks,
                             threadgroup T *vs,
@@ -118,7 +120,7 @@ inline void flash_attention(device const T *q,
             ATTN_UNROLL for (uint u = 0; u < 2; ++u) {
                 int key = int(k0 + jc * 8 + fc + u);
                 bool seen = key < int(sk) && (!CAUSAL || key <= int(row) + offset);
-                e[u] = seen ? e[u] * scale : -INFINITY;
+                e[u] = seen ? score(e[u]) : -INFINITY;
                 mx = max(mx, e[u]);
             }
         }
@@ -166,14 +168,22 @@ inline void flash_attention(device const T *q,
 // b, its SIMD groups every 8th key, each lane a 32nd of the head
 // dimension; each SIMD group's running max, sum and output, then theirs
 // combined.
-template <typename T, typename O, uint D, uint DV, bool CAUSAL, typename Ix, typename Out = O, typename Epi = Same>
+template <typename T,
+          typename O,
+          uint D,
+          uint DV,
+          bool CAUSAL,
+          typename Ix,
+          typename Score,
+          typename Out = O,
+          typename Epi = Same>
 inline void attention_decode(device const T *q,
                              device const T *k,
                              device const T *v,
                              device Out *out,
                              Ix ix,
                              uint sk,
-                             float scale,
+                             Score score,
                              int offset,
                              threadgroup float *maxima,
                              threadgroup float *sums,
@@ -209,7 +219,7 @@ inline void attention_decode(device const T *q,
                 s += qv[n] * float(k[j * Ix::K_ROW + d * Ix::K_COL]);
             }
         }
-        s = simd_sum(s) * scale;
+        s = score(simd_sum(s));
         float m_new = max(m, s);
         float factor = exp(m - m_new);
         float p = exp(s - m_new);
