@@ -263,3 +263,37 @@ def test_function_runs_outside_a_trace_and_checks_backward():
 
     with pytest.raises(TypeError, match=r"Wrong.backward: returned float64\[\] for float64\[3\]"):
         lumen.grad(lambda x: F.sum(Wrong.apply(x)))(lumen.from_numpy(x))
+
+
+class _Affine(lumen.autograd.Function):
+    """``x * w + b``: keyword arguments, a default, a keyword-only one."""
+
+    @staticmethod
+    def forward(ctx, x, w, b=None, *, shift=0.0):
+        ctx.save_for_backward(x, w)
+        y = x * w + shift
+        return y if b is None else y + b
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, w = ctx.saved_tensors
+        return grad * w, grad * x, grad
+
+
+def test_function_takes_keyword_arguments():
+    """Arguments bind to forward's parameters, however passed: backward
+    returns a gradient per positional parameter (defaults included);
+    keyword-only ones are not differentiated."""
+    x, w, b = arrays((4,), (4,), (4,))
+
+    def f(x, w, b):
+        return F.sum(_Affine.apply(x, b=b, w=w, shift=2.0) * x)
+
+    gx, gw, gb = lumen.grad(f, (0, 1, 2))(*map(lumen.from_numpy, (x, w, b)))
+    np.testing.assert_allclose(lumen.to_numpy(gx), x * w + 2.0 + b + x * w)
+    np.testing.assert_allclose(lumen.to_numpy(gw), x * x)
+    np.testing.assert_allclose(lumen.to_numpy(gb), x)
+    out = _Affine.apply(lumen.from_numpy(x), w=lumen.from_numpy(w), shift=1.0)
+    np.testing.assert_allclose(lumen.to_numpy(out), x * w + 1.0)
+    with pytest.raises(TypeError, match="keyword-only 'shift'"):
+        lumen.make_graph(lambda x: _Affine.apply(x, x, shift=x))(lumen.from_numpy(x))
