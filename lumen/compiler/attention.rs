@@ -1093,8 +1093,8 @@ impl<'a> Matcher<'a> {
     /// key `j` is seen by query `i` iff `j <= i + offset`.
     fn causal(&self, v: Var, nb: usize, transposed: bool) -> Option<i64> {
         use Primitive::*;
-        // `a < b`, or `a <= b` (`select(a < b, a < b, a == b)`): a - b, and
-        // whether equal is in.
+        // `a < b`, or `a <= b` (`select(a < b, a < b, a == b)`, `==` either
+        // way round: CSE's): a - b, and whether equal is in.
         let n = self.node(v)?;
         let (a, b, inclusive) = match n.primitive {
             Lt => (n.inputs[0], n.inputs[1], false),
@@ -1105,7 +1105,10 @@ impl<'a> Matcher<'a> {
                 let eq = self
                     .node(n.inputs[2])
                     .filter(|e| matches!(e.primitive, Eq))?;
-                if n.inputs[1] != n.inputs[0] || less.inputs != eq.inputs {
+                let swapped = [eq.inputs[1], eq.inputs[0]];
+                if n.inputs[1] != n.inputs[0]
+                    || (less.inputs != eq.inputs && less.inputs != swapped)
+                {
                     return None;
                 }
                 (less.inputs[0], less.inputs[1], true)

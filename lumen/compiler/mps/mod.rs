@@ -85,6 +85,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph,
     };
+    // Now the attention's are matched (its kernels' layouts): transposes of
+    // dots (a weight's gradient) as the dots swapped, reshapes, transposes
+    // and casts moved.
+    let graph = super::simplify::simplify_with(&graph, true);
     let graph = dot_strength::reduce_vector_dots(&graph);
     let graph = match config.split_k {
         true => split_k::split_k(&graph),

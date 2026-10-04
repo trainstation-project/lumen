@@ -18,6 +18,7 @@ mod cse;
 pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+mod simplify;
 #[cfg(test)]
 mod tests;
 
@@ -65,11 +66,13 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
 
 /// [`compile`] with `options`.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
-    let graph = &cse::cse(graph);
+    let graph = &simplify::simplify(&cse::cse(graph));
     match device {
         #[cfg(lumen_mps_linked)]
         Device::Mps => mps::compile(graph, options),
         _ => {
+            // No attention to match: the rewrites changing it too.
+            let graph = &simplify::simplify_with(graph, true);
             let plan = PlanOptions {
                 scratch: None,
                 donate: options.donate.clone(),
