@@ -198,10 +198,15 @@ fn body_of(graph: &Graph, producer: &[Option<usize>], outputs: &[Var], bases: &[
 }
 
 /// `graph` with each attention backward (see [`Backward`]) replaced by two
-/// fusions: one of dV and dK, one of dQ, their kernels named by `kernel`
+/// fusions: one of dV and dK, one of dQ (or, if `together` says so for it,
+/// one of all three: its kernel adds dQ atomically), their kernels named by `kernel`
 /// (the nodes they replace left dead, each fusion where its last output
 /// was, every reader of its outputs after it).
-pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> Graph {
+pub(crate) fn fuse_backward(
+    graph: &Graph,
+    together: impl Fn(&Backward) -> bool,
+    mut kernel: impl FnMut(&Graph) -> String,
+) -> Graph {
     let m = Matcher::new(graph);
     let nodes = graph.nodes();
     // Each fusion: where it goes, its outputs (the dots'), its inputs.
@@ -220,13 +225,23 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
                 bases.push(acc.base);
             }
         }
-        for outs in [vec![dv, dk], vec![dq]] {
-            let at = *outs.iter().max().expect("a dot");
-            // Read after it (they may be the graph's outputs too).
-            let read_after = outs
-                .iter()
-                .all(|&o| m.readers[nodes[o].output].iter().all(|&r| r > at));
-            if read_after {
+        // The fusion goes where its inputs and first dot are computed: if
+        // each output is read after (they may be the graph's outputs too).
+        let ready = bases.iter().filter_map(|&v| m.producer[v]).max();
+        let read_after = |outs: &[usize]| {
+            let first = *outs.iter().min().expect("a dot");
+            let at = ready.map_or(first, |r| r.max(first));
+            outs.iter()
+                .all(|&o| m.readers[nodes[o].output].iter().all(|&r| r > at))
+                .then_some(at)
+        };
+        let all = vec![dv, dk, dq];
+        let groups = match (together(&b), read_after(&all)) {
+            (true, Some(_)) => vec![all],
+            _ => vec![vec![dv, dk], vec![dq]],
+        };
+        for outs in groups {
+            if let Some(at) = read_after(&outs) {
                 fusions.push((at, outs, bases.clone()));
             }
         }
@@ -240,38 +255,35 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
-        // An output of a fusion placed after it: mapped there.
-        if fusions
-            .iter()
-            .any(|(at, outs, _)| outs.contains(&i) && i > *at)
-        {
-            continue;
-        }
-        let Some((_, outs, bases)) = fusions.iter().find(|(at, _, _)| *at == i) else {
+        // A fusion's output: the fusion's. Any other node as it is (before
+        // the fusions placed at it).
+        if !fusions.iter().any(|(_, outs, _)| outs.contains(&i)) {
             let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
-            continue;
-        };
-        let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
-        let body = body_of(graph, &m.producer, &outputs, bases);
-        let name = kernel(&body);
-        let label = match outs.len() {
-            2 => "flash_attention_backward(dk, dv)",
-            _ => "flash_attention_backward(dq)",
-        };
-        let fusion = Primitive::Fusion { name, label, body };
-        let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
-        let first = out
-            .apply(fusion, &reads)
-            .expect("a fusion typed as its first output");
-        map[outputs[0]] = first;
-        for (index, &o) in outputs.iter().enumerate().skip(1) {
-            let ty = graph.type_of(o).clone();
-            map[o] = out
-                .apply(Primitive::FusionOutput { index, ty }, &[first])
-                .expect("the fusion's output");
+        }
+        for (_, outs, bases) in fusions.iter().filter(|(at, _, _)| *at == i) {
+            let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
+            let body = body_of(graph, &m.producer, &outputs, bases);
+            let name = kernel(&body);
+            let label = match outs.len() {
+                3 => "flash_attention_backward(dk, dv, dq)",
+                2 => "flash_attention_backward(dk, dv)",
+                _ => "flash_attention_backward(dq)",
+            };
+            let fusion = Primitive::Fusion { name, label, body };
+            let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
+            let first = out
+                .apply(fusion, &reads)
+                .expect("a fusion typed as its first output");
+            map[outputs[0]] = first;
+            for (index, &o) in outputs.iter().enumerate().skip(1) {
+                let ty = graph.type_of(o).clone();
+                map[o] = out
+                    .apply(Primitive::FusionOutput { index, ty }, &[first])
+                    .expect("the fusion's output");
+            }
         }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();

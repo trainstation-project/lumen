@@ -16,6 +16,7 @@ class CompilerConfig:
     online_softmax: bool
     flash_attention: bool
     split_k: bool
+    deterministic: bool
     row_cache: int
 
     def reset(self) -> None: ...

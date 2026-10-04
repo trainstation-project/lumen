@@ -23,13 +23,15 @@ use std::sync::{Mutex, PoisonError};
 
 use self::merge_dots::merge_dots;
 use super::Options;
-use crate::Tensor;
 use crate::compiler::attention;
 use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
-use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, scratch_bytes, u32_arg};
+use crate::ops::mps::{
+    Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
+};
 use crate::tensor::contiguous_strides;
+use crate::{DType, Scalar, Tensor};
 
 unsafe extern "C" {
     // In lumen/ops/mps/shim.mm.
@@ -74,15 +76,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph.clone(),
     };
-    // Its backward as two kernels (dV and dK, dQ), the probabilities
-    // recomputed from the forward's log-sum-exp.
+    // Its backward as one kernel adding dQ atomically (unless
+    // `deterministic`, or its blocks do not fit), or two (dV and dK, dQ), the
+    // probabilities recomputed from the forward's log-sum-exp.
     let graph = match config.fuse && config.flash_attention {
-        true => attention::fuse_backward(&graph, |body| {
-            let b = attention::backward_of_body(body).expect("an attention backward");
-            let (name, source) = codegen::attention_backward_kernel(body, &b);
-            attention_kernels.insert(name.clone(), source);
-            name
-        }),
+        true => attention::fuse_backward(
+            &graph,
+            |b| !config.deterministic && codegen::backward_block_with_dq(b).is_some(),
+            |body| {
+                let b = attention::backward_of_body(body).expect("an attention backward");
+                let (name, source) = codegen::attention_backward_kernel(body, &b);
+                attention_kernels.insert(name.clone(), source);
+                name
+            },
+        ),
         false => graph,
     };
     // Now the attention's are matched (its kernels' layouts): transposes of
@@ -433,6 +440,16 @@ pub(crate) fn encode(
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
+        // dQ with dK and dV, added to atomically: zeroed first.
+        if b.dv_out.is_some() && b.dq_out.is_some() {
+            let n = body.type_of(body.outputs()[2]).numel();
+            let args = [
+                element_arg(DType::F32, Scalar::Float(0.0)),
+                u32_arg(n as u32),
+            ];
+            let grid = elementwise_grid(n, DType::F32);
+            launch("fill_4", &[extra[1]], &args, grid, Vec::new(), step.label)?;
+        }
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
     }

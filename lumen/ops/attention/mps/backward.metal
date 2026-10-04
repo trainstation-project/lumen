@@ -14,8 +14,11 @@
 // of batch index b, its SIMD group sg 8 of them, their K, V, dK and dV rows
 // in simdgroup matrices (registers). Queries in blocks of BQ, Q, dO, lse
 // and D staged in threadgroup memory. Query blocks before the first that
-// sees the threadgroup's first key (causal) are skipped.
-template <typename T, uint D, uint DV, uint BQ, bool CAUSAL, typename Ix, typename Score>
+// sees the threadgroup's first key (causal) are skipped. With DQ, dQ = dS K
+// too: the keys' K rows staged in ks, each query block's dS^T in dss, and
+// dS K over the threadgroup's keys added to dq (zeroed before) atomically,
+// so in no fixed order (not deterministic).
+template <typename T, uint D, uint DV, uint BQ, bool CAUSAL, bool DQ, typename Ix, typename Score>
 inline void flash_attention_dkdv(device const T *q,
                                  device const T *k,
                                  device const T *v,
@@ -24,6 +27,7 @@ inline void flash_attention_dkdv(device const T *q,
                                  device const float *delta,
                                  device float *dk,
                                  device float *dv,
+                                 device atomic_float *dq,
                                  Ix ix,
                                  uint sq,
                                  uint sk,
@@ -33,6 +37,8 @@ inline void flash_attention_dkdv(device const T *q,
                                  threadgroup T *gs,
                                  threadgroup float *lses,
                                  threadgroup float *deltas,
+                                 threadgroup T *ks,
+                                 threadgroup T *dss,
                                  uint kblock,
                                  uint b,
                                  uint sg,
@@ -50,6 +56,14 @@ inline void flash_attention_dkdv(device const T *q,
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = kblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
+    if constexpr (DQ) {
+        dq += ix.dq(b);
+        // The keys' K rows, zero past the last (their dS is not).
+        for (uint e = t; e < ATTN_BQ * D; e += 256) {
+            uint j = e / D, d = e % D, key = kblock * ATTN_BQ + j;
+            ks[e] = key < sk ? k[key * Ix::K_ROW + d * Ix::K_COL] : T(0);
+        }
+    }
     simdgroup_matrix<T, 8, 8> km[D / 8], vm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
         uint d = c * 8 + fc;
@@ -121,6 +135,30 @@ inline void flash_attention_dkdv(device const T *q,
                 simdgroup_matrix<T, 8, 8> qm;
                 simdgroup_load(qm, qs + ic * 8 * D + c * 8, D);
                 simdgroup_multiply_accumulate(dkm[c], dsm, qm, dkm[c]);
+            }
+            if constexpr (DQ) {
+                simdgroup_store(dsm, dss + sg * ATTN_ROWS * BQ + ic * 8, BQ);
+            }
+        }
+        if constexpr (DQ) {
+            // dQ += dS K over the threadgroup's keys, [BQ x D] in 8x8
+            // tiles, the SIMD groups' in turn.
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint tile = sg; tile < BQ / 8 * (D / 8); tile += ATTN_GROUPS) {
+                uint i = tile / (D / 8), c = tile % (D / 8);
+                simdgroup_matrix<float, 8, 8> acc(0);
+                ATTN_UNROLL for (uint j = 0; j < ATTN_BQ / 8; ++j) {
+                    simdgroup_matrix<T, 8, 8> dsq, km;
+                    simdgroup_load(dsq, dss + j * 8 * BQ + i * 8, BQ, ulong2(0, 0), true);
+                    simdgroup_load(km, ks + j * 8 * D + c * 8, D);
+                    simdgroup_multiply_accumulate(acc, dsq, km, acc);
+                }
+                uint query = q0 + i * 8 + fr, d = c * 8 + fc;
+                if (query < sq) {
+                    device atomic_float *out = dq + query * Ix::DQ_ROW;
+                    atomic_fetch_add_explicit(out + d * Ix::DQ_COL, frag(acc).x, memory_order_relaxed);
+                    atomic_fetch_add_explicit(out + (d + 1) * Ix::DQ_COL, frag(acc).y, memory_order_relaxed);
+                }
             }
         }
     }
