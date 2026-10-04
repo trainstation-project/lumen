@@ -91,8 +91,9 @@ def mul(input, other):
 
 
 def div(input, other):
-    """True division: floating-point operands. By a scalar (a Python
-    number, a runtime scalar), traced as a product with its reciprocal."""
+    """True division: floating-point operands. By a Python number whose
+    reciprocal is a normal number of the tensor's dtype, traced as a
+    product with its reciprocal."""
     return _true_div(input, other)
 
 
@@ -320,33 +321,49 @@ def scaled_dot_product_attention(query, key, value, scale=None, is_causal=False)
     the inputs' dtype times ``value``. The MPS compiler runs them as one
     flash-attention kernel (``lumen.config.compiler.flash_attention``), as
     it does attention written out."""
-    q, k, v = _lift(query), _lift(key), _lift(value)
+
+    q = _lift(query)
+    k = _lift(key)
+    v = _lift(value)
+
     for name, t in (("query", q), ("key", k), ("value", v)):
         if not isinstance(t, TracedTensor) or t.ndim != 4:
             raise ValueError(f"scaled_dot_product_attention: {name} must be a [B, S, N, H] tensor, got {t!r}")
+
     _require_float(q, "scaled_dot_product_attention")
     _common_dtype("scaled_dot_product_attention", (q, k, v))
-    (b, sq, n, h), (_, sk, nkv, hv) = q.shape, v.shape
+
+    b, sq, n, h = q.shape
+    _, sk, nkv, hv = v.shape
+
     if k.shape[:3] != (b, sk, nkv) or v.shape[0] != b or k.shape[3] != h or n % nkv:
         raise ValueError(
             "scaled_dot_product_attention: shapes "
             f"{list(q.shape)}, {list(k.shape)}, {list(v.shape)} are not [B, Sq, N, H], [B, Sk, Nkv, H], [B, Sk, Nkv, Hv] "
             "with N a multiple of Nkv"
         )
+
     if nkv != n:
         # Each key and value head, for its group of query heads.
         g = n // nkv
         k = k.unsqueeze(3).expand(b, sk, nkv, g, h).reshape(b, sk, n, h)
         v = v.unsqueeze(3).expand(b, sk, nkv, g, hv).reshape(b, sk, n, hv)
+
     accum = _accum_dtype(q.dtype)
+    if scale is None:
+        scale = 1.0 / math.sqrt(h)
+
     # [B, N, Sq, Sk], in the accumulation dtype.
     s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
-    s = s * (1.0 / math.sqrt(h) if scale is None else scale)
+    s = s * scale
+
     if is_causal:
         rows = prims.iota("int64", s.shape, 2)
         cols = prims.iota("int64", s.shape, 3)
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
+
     p = softmax(s, -1).to(q.dtype)
     # [B, N, Sq, Hv], then [B, Sq, N, Hv].
     o = prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
+
     return o.permute(0, 2, 1, 3)
