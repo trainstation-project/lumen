@@ -535,9 +535,12 @@ impl Plan {
                     let operands = s.inputs.iter().zip(&s.views).enumerate();
                     let mut reads = operands.filter(|(_, ((b, _), _))| *b == at);
                     reads.all(|(k, (_, view))| match &s.primitive {
+                        // Read as it is (not through a reshape: a split
+                        // dot's).
                         Primitive::DotGeneral { .. } => {
                             let operands = [&s.inputs[0].1, &s.inputs[1].1];
                             view.is_none()
+                                && operands[k].shape == self.inputs[i].shape
                                 && crate::ops::dot_general::mps::reads_strided(
                                     &s.primitive,
                                     operands,

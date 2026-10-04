@@ -18,7 +18,7 @@ use crate::tensor::contiguous_strides;
 /// half of the last) take; 64 x 64 (`MM_TILE`) for the 8- to 32-bit integer
 /// kernels and 32 x 32 (`WIDE_TILE`) for the 64-bit ones.
 const FLOAT_TILE: (usize, usize) = (128, 64);
-const SMALL_TILE: (usize, usize) = (64, 64);
+pub(crate) const SMALL_TILE: (usize, usize) = (64, 64);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;

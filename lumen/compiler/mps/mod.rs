@@ -13,6 +13,7 @@ mod diamonds;
 mod dot_strength;
 mod fusion;
 mod merge_dots;
+mod split_k;
 #[cfg(test)]
 mod tests;
 
@@ -84,7 +85,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph,
     };
-    let graph = canonicalize_dots(&dot_strength::reduce_vector_dots(&graph));
+    let graph = dot_strength::reduce_vector_dots(&graph);
+    let graph = match config.split_k {
+        true => split_k::split_k(&graph),
+        false => graph,
+    };
+    let graph = canonicalize_dots(&graph);
     // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
     // position (the passes keep inputs in order): those every step reading
     // them is a fusion of; any other, a buffer.

@@ -69,6 +69,11 @@ flags! {
     /// default): not what the program computes, its rounding differs; off
     /// runs attention exactly as traced.
     flash_attention, set_flash_attention: bool;
+    /// A dot of few output tiles and a long contraction split along it
+    /// across threadgroups (on by default): not what the program computes,
+    /// the partials are added in another order; off runs dots exactly as
+    /// traced.
+    split_k, set_split_k: bool;
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).
     row_cache, set_row_cache: usize;
