@@ -243,11 +243,25 @@ pub(crate) fn fuse(
             }
             taken.push(u);
             after[un.output] = true;
+            // Ending at u: its kernel computes what u depends on (another
+            // branch, read outside, is not its own).
+            let mut kept = vec![u];
+            let mut stack = vec![u];
+            while let Some(k) = stack.pop() {
+                for &v in &nodes[k].inputs {
+                    if let Some(p) = producer[v].filter(|p| taken.contains(p) && !kept.contains(p))
+                    {
+                        kept.push(p);
+                        stack.push(p);
+                    }
+                }
+            }
+            kept.sort_unstable();
             let outside = |&k: &usize| {
                 let v = nodes[k].output;
-                is_output[v] || users[v].iter().any(|w| !taken.contains(w))
+                is_output[v] || users[v].iter().any(|w| !kept.contains(w))
             };
-            let aux: Vec<usize> = taken[..taken.len() - 1]
+            let aux: Vec<usize> = kept[..kept.len() - 1]
                 .iter()
                 .copied()
                 .filter(outside)
@@ -255,10 +269,10 @@ pub(crate) fn fuse(
             let read_after = aux.iter().all(|&k| {
                 users[nodes[k].output]
                     .iter()
-                    .all(|&w| taken.contains(&w) || w > u)
+                    .all(|&w| kept.contains(&w) || w > u)
             });
-            if read_after && aux.len() <= MAX_AUX {
-                end = Some((taken.clone(), aux));
+            if kept.first() == Some(&i) && read_after && aux.len() <= MAX_AUX {
+                end = Some((kept, aux));
             }
         }
         if let Some((taken, aux)) = end {

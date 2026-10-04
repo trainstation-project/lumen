@@ -559,6 +559,9 @@ def test_projections_backward_writes_cotangents_side_by_side():
                 # them: the concatenate fused, never a copy of its own.
                 (side_by_side,) = [label for label in labels if "concatenate" in label]
                 assert side_by_side != "concatenate" and "mul" in side_by_side, labels
+                # The weights' gradient one dot as their layout wants it (its
+                # transpose swapped into it, simplify.rs): no transpose copy.
+                assert not any("transpose" in label for label in labels), labels
         finally:
             lumen.config.compiler.reset()
     (loss, gx, *gw), (loss_, gx_, *gw_) = results

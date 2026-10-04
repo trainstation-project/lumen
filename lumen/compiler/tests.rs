@@ -96,3 +96,124 @@ fn different_parameters_or_order_are_kept() {
     g.set_outputs(&[c, d]).unwrap();
     assert_eq!(names(&cse(&g)), names(&g));
 }
+
+/// The reference's outputs of `g` and of `g` simplified: equal, exactly.
+fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
+    let want = reference::run(g, inputs).unwrap();
+    let got = reference::run(simplified, inputs).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(w.to_vec::<f32>(), g.to_vec::<f32>());
+    }
+}
+
+fn full(shape: &[usize], value: f64) -> Primitive {
+    Full {
+        shape: shape.to_vec(),
+        fill_value: Scalar::Float(value),
+        dtype: DType::F32,
+    }
+}
+
+/// Algebraic simplification: `x * 1`, `1 * x`, `x / 1`, `x + 0`, `0 + x`,
+/// `x - 0`, `neg(neg(x))`, `select(p, x, x)` and a cast to `x`'s dtype are
+/// `x`; a reshape of a reshape, a transpose of a transpose, a broadcast of a
+/// broadcast one.
+#[test]
+fn algebraic_simplification() {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2, 3]));
+    let one = apply(&mut g, full(&[2, 3], 1.0), &[]);
+    let zero = apply(&mut g, full(&[2, 3], 0.0), &[]);
+    let a = apply(&mut g, Mul, &[x, one]);
+    let a = apply(&mut g, Mul, &[one, a]);
+    let a = apply(&mut g, Div, &[a, one]);
+    let a = apply(&mut g, Add, &[a, zero]);
+    let a = apply(&mut g, Add, &[zero, a]);
+    let a = apply(&mut g, Sub, &[a, zero]);
+    let a = apply(&mut g, Neg, &[a]);
+    let a = apply(&mut g, Neg, &[a]);
+    let p = apply(&mut g, Lt, &[a, x]);
+    let a = apply(&mut g, Select, &[p, a, a]);
+    let a = apply(
+        &mut g,
+        Cast {
+            new_dtype: DType::F32,
+        },
+        &[a],
+    );
+    let r = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![3, 2],
+        },
+        &[a],
+    );
+    let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[r]);
+    let t = apply(
+        &mut g,
+        Transpose {
+            permutation: vec![1, 0],
+        },
+        &[a],
+    );
+    let t = apply(
+        &mut g,
+        Transpose {
+            permutation: vec![1, 0],
+        },
+        &[t],
+    );
+    let inner = BroadcastInDim {
+        shape: vec![4, 2, 3],
+        broadcast_dimensions: vec![1, 2],
+    };
+    let b = apply(&mut g, inner, &[x]);
+    let outer = BroadcastInDim {
+        shape: vec![5, 4, 2, 3],
+        broadcast_dimensions: vec![1, 2, 3],
+    };
+    let b = apply(&mut g, outer, &[b]);
+    g.set_outputs(&[r, t, b]).unwrap();
+    let simplified = super::simplify::simplify(&g);
+    assert_eq!(
+        names(&simplified),
+        ["reshape", "broadcast_in_dim"],
+        "{simplified}"
+    );
+    same_values(&g, &simplified, &[data(&[2, 3], 1)]);
+}
+
+/// A transpose of a dot swapping its free dimensions (a weight's gradient
+/// from autodiff) is the dot of its operands swapped, no copy, with
+/// `swap_dots` (the MPS compiler's, after matching attention); not without
+/// it, nor when the dot is read twice.
+#[test]
+fn transposes_of_dots_swap_their_operands() {
+    let build = |read_twice: bool| {
+        let mut g = Graph::new();
+        let a = g.input(ty(&[4, 6]));
+        let b = g.input(ty(&[6, 5]));
+        let d = apply(&mut g, matmul(), &[a, b]);
+        let t = apply(
+            &mut g,
+            Transpose {
+                permutation: vec![1, 0],
+            },
+            &[d],
+        );
+        let outputs = if read_twice { vec![t, d] } else { vec![t] };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+    let inputs = [data(&[4, 6], 1), data(&[6, 5], 2)];
+    let g = build(false);
+    let swapped = super::simplify::simplify_with(&g, true);
+    assert_eq!(names(&swapped), ["dot_general"], "{swapped}");
+    same_values(&g, &swapped, &inputs);
+    assert_eq!(
+        names(&super::simplify::simplify(&g)),
+        ["dot_general", "transpose"]
+    );
+    let twice = super::simplify::simplify_with(&build(true), true);
+    assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
+}
