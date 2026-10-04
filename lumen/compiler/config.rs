@@ -37,7 +37,7 @@ pub struct CompilerConfig {
     /// off runs softmax exactly as traced.
     pub online_softmax: bool,
     /// Run attention (`softmax(q @ k^T * scale [masked]) @ v`, however
-    /// written, `F.scaled_dot_product_attention` too) as one flash-attention
+    /// written, `F.flash_attention` too) as one flash-attention
     /// kernel: the scores never reach memory. On by default; not what the
     /// program computes (an online softmax across key blocks, `P` not
     /// normalized before `P @ V`), so off runs it exactly as traced.

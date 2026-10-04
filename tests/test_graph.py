@@ -1289,7 +1289,7 @@ def test_rounding_a_contraction_then_widening_it_warns():
         warnings.simplefilter("error")
         lumen.make_graph(lambda x: F.matmul(x, x.t(), "float32", "float32") * 0.5)(x)
         lumen.make_graph(lambda x: F.relu(x @ x.t()))(x)
-        lumen.make_graph(lambda q: F.scaled_dot_product_attention(q, q, q))(q)
+        lumen.make_graph(lambda q: F.flash_attention(q, q, q))(q)
 
 
 class _Counter(lumen.nn.Module):

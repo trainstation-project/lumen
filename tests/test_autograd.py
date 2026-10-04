@@ -56,7 +56,7 @@ CASES = {
     "broadcast": (lambda x, y: F.sum(F.tanh(x + y[0]) * x[:, :1]), [(3, 4), (3, 4)]),
     "cast": (lambda x, y: F.sum(F.tanh(x.float() * y.float()).double()), [(3, 4), (3, 4)]),
     "attention": (
-        lambda q, k: F.sum(F.tanh(F.scaled_dot_product_attention(q, k, k * 0.5, is_causal=True))),
+        lambda q, k: F.sum(F.tanh(F.flash_attention(q, k, k * 0.5, is_causal=True))),
         [(1, 5, 4, 8), (1, 5, 2, 8)],
     ),
 }
@@ -382,3 +382,58 @@ def test_named_parameters_of_compiled_results():
     assert [p for p, _ in g.named_parameters()] == ["w1", "w2"]
     shared = _MLP(model.w1, model.w1)
     assert [p for p, _ in shared.named_parameters()] == ["w1"]
+
+
+def _written_attention(q, k, v):
+    """Attention written out ([B, S, N, H] in and out), as a model might."""
+    q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+    s = F.matmul(q, k.transpose(-1, -2), "float32", "float32") * 0.125
+    return (F.softmax(s, -1) @ v).transpose(1, 2)
+
+
+@pytest.mark.parametrize(
+    "attention, shapes",
+    [
+        (_written_attention, [(1, 12, 2, 16)] * 3),
+        (
+            lambda q, k, v: F.flash_attention(q, k, v, is_causal=True),
+            [(2, 9, 4, 8), (2, 9, 2, 8), (2, 9, 2, 8)],
+        ),
+    ],
+    ids=["written out", "causal grouped-query"],
+)
+def test_attention_gradient_is_flash_attentions(attention, shapes):
+    """Before autodiff, an attention (however written) becomes one node whose
+    backward is FlashAttention-2's (lumen/autograd/attention.py): its
+    log-sum-exp in the graph; the gradient agrees with autodiff of the
+    primitives as traced (``flash_attention`` off)."""
+    xs = [a.astype(np.float32) for a in arrays(*shapes)]
+
+    def loss(q, k, v):
+        return F.sum(F.tanh(attention(q, k, v)))
+
+    grad = lumen.grad(loss, (0, 1, 2))
+    m = [lumen.empty(list(s), device="meta") for s in shapes]
+    assert "log" in str(lumen.make_graph(grad)(*m))
+    got = lumen.compile(grad)(*map(lumen.from_numpy, xs))
+    lumen.config.compiler.flash_attention = False
+    try:
+        assert "log" not in str(lumen.make_graph(grad)(*m))
+        want = lumen.compile(grad)(*map(lumen.from_numpy, xs))
+    finally:
+        lumen.config.compiler.reset()
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-5, atol=1e-5)
+
+
+def test_attention_read_elsewhere_keeps_autodiff():
+    """An attention whose probabilities the program also returns is not one
+    node: its gradient is autodiff of the primitives."""
+    q = lumen.empty([1, 6, 2, 8], device="meta")
+
+    def loss(q):
+        s = F.matmul(q.transpose(1, 2), q.transpose(1, 2).transpose(-1, -2), "float32", "float32")
+        p = F.softmax(s, -1)
+        return F.sum(p @ q.transpose(1, 2)) + F.sum(p)
+
+    assert "log" not in str(lumen.make_graph(lumen.grad(loss))(q))

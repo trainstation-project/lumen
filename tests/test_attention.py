@@ -1,4 +1,4 @@
-"""Attention: F.scaled_dot_product_attention ([B, S, N, H], grouped-query,
+"""Attention: F.flash_attention ([B, S, N, H], grouped-query,
 causal), and the MPS compiler running attention, however written, as one
 flash-attention kernel (lumen/compiler/mps/attention.rs, attention.metal)."""
 
@@ -76,14 +76,14 @@ def _ids(cases):
     [("cpu", c) for c in CPU_CASES] + [pytest.param("mps", c, marks=pytest.mark.mps) for c in CASES],
     ids=[f"cpu-{i}" for i in _ids(CPU_CASES)] + [f"mps-{i}" for i in _ids(CASES)],
 )
-def test_scaled_dot_product_attention(device, case, dtype):
-    """F.scaled_dot_product_attention agrees with attention in float64, on
+def test_flash_attention(device, case, dtype):
+    """F.flash_attention agrees with attention in float64, on
     the CPU (as traced) and on MPS (one flash-attention kernel)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
     (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv))
 
     def f(q, k, v):
-        return F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        return F.flash_attention(q, k, v, is_causal=causal)
 
     out = lumen.compile(f)(q, k, v)
     assert out.dtype == dtype and list(out.shape) == [b, sq, n, hv]
@@ -102,7 +102,7 @@ def test_attention_as_traced_without_flash_attention():
     (q, k, v), _ = tensors("mps", "float16", (1, 64, 4, 32), (1, 64, 2, 32), (1, 64, 2, 32))
 
     def f(q, k, v):
-        return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return F.flash_attention(q, k, v, is_causal=True)
 
     assert lumen.config.compiler.flash_attention is True
     flash = lumen.to_numpy(lumen.compile(f)(q, k, v).to(dtype="float32"))
@@ -150,16 +150,16 @@ def test_attention_the_kernels_cannot_take_runs_as_traced():
         (q, k, v), arrays = tensors("mps", "float32", (1, 16, 2, h), (1, 16, 2, h), (1, 16, 2, h))
 
         def f(q, k, v):
-            return F.scaled_dot_product_attention(q, k, v)
+            return F.flash_attention(q, k, v)
 
         assert "flash_attention" not in steps(f, q, k, v)
         out = lumen.to_numpy(lumen.compile(f)(q, k, v))
         np.testing.assert_allclose(out, reference(*arrays), rtol=1e-5, atol=1e-5)
 
 
-def test_scaled_dot_product_attention_checks_its_operands():
+def test_flash_attention_checks_its_operands():
     def call(q, k, v):
-        return lumen.make_graph(F.scaled_dot_product_attention)(q, k, v)
+        return lumen.make_graph(F.flash_attention)(q, k, v)
 
     m = lambda *s, dtype="float32": lumen.empty(list(s), dtype=dtype, device="meta")  # noqa: E731
     with pytest.raises(ValueError, match="multiple of Nkv"):
@@ -176,14 +176,14 @@ def test_scaled_dot_product_attention_checks_its_operands():
 @pytest.mark.parametrize(
     "f, sq",
     [
-        (lambda q, k, v, x, b: x + F.scaled_dot_product_attention(q, k, v).reshape(-1, 128), 96),
+        (lambda q, k, v, x, b: x + F.flash_attention(q, k, v).reshape(-1, 128), 96),
         (
-            lambda q, k, v, x, b: (
-                F.scaled_dot_product_attention(q, k, v, is_causal=True).reshape(-1, 128) * 2.0 + b
-            ).to(dtype="float16"),
+            lambda q, k, v, x, b: (F.flash_attention(q, k, v, is_causal=True).reshape(-1, 128) * 2.0 + b).to(
+                dtype="float16"
+            ),
             96,
         ),
-        (lambda q, k, v, x, b: x + F.scaled_dot_product_attention(q, k, v, is_causal=True).reshape(-1, 128), 1),
+        (lambda q, k, v, x, b: x + F.flash_attention(q, k, v, is_causal=True).reshape(-1, 128), 1),
     ],
     ids=["residual", "scale bias cast", "decode residual"],
 )
@@ -218,12 +218,12 @@ def _sources(f, *args):
 def test_attention_computes_its_scores_as_traced():
     """The kernel rounds the scores as traced: ``_written``'s ``q @ k^T`` to
     bf16, its scale in bf16, then cast to float32 for the softmax;
-    F.scaled_dot_product_attention's in float32."""
+    F.flash_attention's in float32."""
     m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 4, 64, 32], [1, 2, 64, 32], [1, 4, 64, 32])]
     source = _sources(_written, *m)["flash_attention"]
     assert "convert_value<float>(Mul::apply(convert_value<bfloat>(s), as_type<bfloat>" in source, source
     m = [lumen.empty([1, 64, 4, 32], dtype="bfloat16", device="meta")] * 3
-    source = _sources(F.scaled_dot_product_attention, *m)["flash_attention"]
+    source = _sources(F.flash_attention, *m)["flash_attention"]
     assert "(convert_value<float>(s), as_type<float>" in source, source
 
 
@@ -246,3 +246,68 @@ def test_attention_the_kernel_cannot_compute_as_traced_runs_as_traced(f):
     softmax and accumulation) is not matched: it runs as traced."""
     m = [lumen.empty([1, 4, 64, 32], dtype="bfloat16", device="meta")] * 3
     assert "flash_attention" not in _sources(f, *m)
+
+
+# Smaller (the CPU's gradient is the reference): grouped-query and causal,
+# a query past the key block, few queries (decoding), head sizes that
+# differ, the backward kernels' largest head.
+BACKWARD_CASES = [
+    ((1, 40, 40, 4, 2, 32, 32), True),
+    ((1, 70, 20, 2, 2, 16, 16), False),
+    ((1, 3, 50, 2, 1, 16, 24), True),
+    ((1, 9, 24, 2, 2, 128, 128), True),
+]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("device, case", [("mps", c) for c in BACKWARD_CASES], ids=_ids(BACKWARD_CASES))
+def test_attention_backward_is_flash_attention(device, case, dtype):
+    """The gradient of F.flash_attention on MPS: the forward one
+    flash-attention kernel (writing each row's log-sum-exp too), the
+    backward two (dK and dV, then dQ) recomputing the probabilities;
+    agreeing with the CPU's (the same program, as traced)."""
+    (b, sq, sk, n, nkv, h, hv), causal = case
+    shapes = (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv), (b, sq, n, hv)
+    (q, k, v, w), arrays = tensors(device, dtype, *shapes)
+
+    def loss(q, k, v, w):
+        return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
+
+    grad = lumen.grad(loss, (0, 1, 2))
+    labels = steps(grad, q, k, v, w)
+    for kernel in ("flash_attention", "flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"):
+        assert kernel in labels, labels
+    got = lumen.compile(grad)(q, k, v, w)
+    cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
+    want = lumen.compile(grad, device="cpu")(*cpu)
+    tol = {"float32": 1e-5, "bfloat16": 2e-2}[dtype]
+    for g, c in zip(got, want):
+        g, c = (lumen.to_numpy(t.to(dtype="float32")) for t in (g, c))
+        np.testing.assert_allclose(g, c, rtol=tol, atol=tol * np.abs(c).max())
+
+
+@pytest.mark.mps
+def test_written_attention_trains_with_flash_attention():
+    """Attention written out (``_written``) is flash attention in training
+    too: its gradient's plan has the forward and both backward kernels."""
+    m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([2, 4, 64, 32], [2, 2, 64, 32], [2, 4, 64, 32])]
+
+    def loss(q, k, v):
+        return F.sum(_written(q, k, v).float())
+
+    labels = steps(lumen.grad(loss, (0, 1, 2)), *m)
+    for kernel in ("flash_attention", "flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"):
+        assert kernel in labels, labels
+
+
+@pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
+def test_naive_attention_is_flash_attention(causal):
+    """F.naive_attention (attention as main first wrote it) computes as
+    F.flash_attention does, its gradient too."""
+    (q, k, v), _ = tensors("cpu", "float32", (2, 7, 4, 8), (2, 9, 2, 8), (2, 9, 2, 8))
+    for fn in (lambda f: f, lambda f: lumen.grad(lambda q, k, v: F.sum(F.tanh(f(q, k, v))), (0, 1, 2))):
+        naive = lumen.compile(fn(lambda q, k, v: F.naive_attention(q, k, v, is_causal=causal)))(q, k, v)
+        sdpa = lumen.compile(fn(lambda q, k, v: F.flash_attention(q, k, v, is_causal=causal)))(q, k, v)
+        for a, b in zip(naive if isinstance(naive, tuple) else [naive], sdpa if isinstance(sdpa, tuple) else [sdpa]):
+            np.testing.assert_allclose(lumen.to_numpy(a), lumen.to_numpy(b), rtol=1e-6, atol=1e-6)
