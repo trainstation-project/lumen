@@ -1130,8 +1130,11 @@ pub(crate) mod mps {
             return;
         }
         // Rows and columns, split into chunks and not, a middle axis, and
-        // axes that are not consecutive (a threadgroup per output).
-        let cases: [(&[usize], Vec<usize>); 7] = [
+        // axes that are not consecutive (a threadgroup per output). Then
+        // the same with size-1 dimensions, which normalization drops: axes
+        // apart across them (rows, columns, split), axes still apart
+        // (grouped), and size-1 axes alone (nothing reduced).
+        let cases: [(&[usize], Vec<usize>); 13] = [
             (&[3, 50_000], vec![1]),
             (&[50_000, 3], vec![0]),
             (&[300, 700], vec![0, 1]),
@@ -1139,6 +1142,12 @@ pub(crate) mod mps {
             (&[2_000, 300], vec![1]),
             (&[300, 2_000], vec![0]),
             (&[40, 7, 300], vec![0, 2]),
+            (&[400, 1, 300], vec![0, 2]),
+            (&[3, 1, 50_000, 1], vec![1, 2]),
+            (&[1, 50_000, 1, 3], vec![0, 1, 2]),
+            (&[40, 1, 7, 1, 300], vec![0, 1, 4]),
+            (&[300, 1, 7], vec![1]),
+            (&[1, 1], vec![0, 1]),
         ];
         for dtype in [
             DType::F32,

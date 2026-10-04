@@ -342,6 +342,51 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// Reductions are normalized before they take a kernel, as XLA's
+/// reduction passes normalize them: size-1 dimensions dropped and adjacent
+/// reduced (or kept) ones merged, so axes apart only across size-1
+/// dimensions are a row or column reduction, not a grouped one; and a
+/// split one's partials are sized for the normalized view.
+#[test]
+fn reductions_are_normalized() {
+    use crate::ops::reduce::mps::scratch_bytes;
+    for (shape, axes, kernel) in [
+        (vec![400, 1, 300], vec![0, 2], "reduce_rows"),
+        (vec![4, 1, 64, 1, 300], vec![1, 2, 3, 4], "reduce_rows"),
+        (vec![300, 1, 7, 1], vec![0, 1], "reduce_cols"),
+        (vec![300, 1, 7], vec![1], "reduce_rows"),
+        (vec![40, 1, 7, 1, 300], vec![0, 1, 4], "reduce_grouped"),
+    ] {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &shape));
+        let e = apply(&mut g, Exp, &[x]);
+        let sum = ReduceSum {
+            axes: axes.clone(),
+            accum_dtype: DType::F32,
+        };
+        let r = apply(&mut g, sum, &[e]);
+        g.set_outputs(&[r]).unwrap();
+        let fused = fuse(&g);
+        let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+            panic!("{fused}")
+        };
+        let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+        assert!(
+            source.contains(&format!("{kernel}<")),
+            "{shape:?} {axes:?}: {source}"
+        );
+    }
+    // Rows split into partials: 4 rows of 50000, as [4, 50000] has.
+    let squeezed = scratch_bytes(&ty(DType::F32, &[4, 50_000]), &[1], DType::F32);
+    let spread = scratch_bytes(
+        &ty(DType::F32, &[4, 1, 500, 1, 100]),
+        &[1, 2, 4],
+        DType::F32,
+    );
+    assert!(squeezed > 0);
+    assert_eq!(spread, squeezed);
+}
+
 /// A hierarchical reduction keeps its accumulation dtype at every level:
 /// each thread's accumulator, the threadgroup's tree, a split reduction's
 /// partials (its scratch, of that dtype) and the second launch over them;

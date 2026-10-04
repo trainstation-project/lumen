@@ -1,4 +1,6 @@
-//! reduce_sum and reduce_max on MPS (`kernels.metal`). Consecutive axes are a
+//! reduce_sum and reduce_max on MPS (`kernels.metal`), of the input
+//! normalized: size-1 dimensions dropped, adjacent ones both reduced or both
+//! kept merged ([`normalize`]). Consecutive axes are a
 //! view [a, count, b] reduced over the middle: rows when b = 1, columns
 //! otherwise, split into chunks when there are too few outputs to fill
 //! the GPU. Other axes take a generic kernel, with up to a threadgroup
@@ -55,10 +57,9 @@ pub(crate) enum Layout {
 }
 
 pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
-    let mut reduced = axes.to_vec();
-    reduced.sort_unstable();
+    let (x, reduced) = normalize(x, axes);
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
-        return match split(x, &reduced).b {
+        return match split(&x, &reduced).b {
             1 => Layout::Rows,
             _ => Layout::Cols,
         };
@@ -67,6 +68,31 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
         true => Layout::Grouped,
         false => Layout::Generic,
     }
+}
+
+/// `x` and the `axes` it is reduced over, normalized as XLA's reduction
+/// passes do (`ReductionDegenerateDimRemover`,
+/// `ReductionDimensionGrouper`): size-1 dimensions dropped, and adjacent
+/// dimensions both reduced or both kept merged, a view of the same
+/// row-major memory. Reduced axes apart only across size-1 dimensions
+/// become one: a row or column reduction.
+fn normalize(x: &TensorType, axes: &[usize]) -> (TensorType, Vec<usize>) {
+    let (mut shape, mut reduced) = (Vec::new(), Vec::new());
+    let mut last = None;
+    for (d, &n) in x.shape.iter().enumerate().filter(|&(_, &n)| n != 1) {
+        let r = axes.contains(&d);
+        match (last == Some(r), shape.last_mut()) {
+            (true, Some(merged)) => *merged *= n,
+            _ => {
+                if r {
+                    reduced.push(shape.len());
+                }
+                shape.push(n);
+            }
+        }
+        last = Some(r);
+    }
+    (TensorType::new(x.dtype, &shape), reduced)
 }
 
 /// Reduce `x` with `op` (reduce_sum or reduce_max), its first launch the
@@ -101,8 +127,8 @@ pub(crate) fn encode_reduction(
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
     buffers.extend(extra);
-    let mut reduced = axes.clone();
-    reduced.sort_unstable();
+    let (x, reduced) = normalize(x, axes);
+    let x = &x;
     let layout = layout(x, &reduced);
     if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
@@ -253,12 +279,11 @@ pub(crate) fn kernel_dtype(x: DType, accum: DType) -> String {
 /// The scratch a reduction of `x` over `axes`, accumulating in `accum`,
 /// needs: a split reduction's partials, of `accum` (none for the others).
 pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usize {
-    let mut reduced = axes.to_vec();
-    reduced.sort_unstable();
+    let (x, reduced) = normalize(x, axes);
     if !reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         return 0;
     }
-    let Split { a, b, chunks, .. } = split(x, &reduced);
+    let Split { a, b, chunks, .. } = split(&x, &reduced);
     if chunks == 1 || a * b == 0 {
         return 0;
     }
