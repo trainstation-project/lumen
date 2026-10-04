@@ -21,6 +21,7 @@ pub(crate) mod mps;
 pub mod python;
 pub mod reduce;
 pub mod reference;
+pub mod scan;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "python")]

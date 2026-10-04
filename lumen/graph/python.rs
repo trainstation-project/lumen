@@ -51,6 +51,11 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
         "reduce_max" => ReduceMax {
             axes: dims("axes")?,
         },
+        "cumsum" => Cumsum {
+            axis: get("axis")?.extract()?,
+            reverse: get("reverse")?.extract()?,
+            accum_dtype: dtype("accum_dtype")?,
+        },
         "dot_general" => DotGeneral {
             lhs_contracting: dims("lhs_contracting")?,
             rhs_contracting: dims("rhs_contracting")?,

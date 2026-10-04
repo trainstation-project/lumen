@@ -37,6 +37,16 @@ def _reduce_sum_transpose(ct, x, axes, accum_dtype):
 deflinear(prims.reduce_sum, _reduce_sum_transpose)
 
 
+def _cumsum_transpose(ct, x, axis, reverse, accum_dtype):
+    # Each element reaches the outputs after it (before it, reversed): the
+    # cotangent summed the other way, in its dtype, then x's.
+    ct = prims.cumsum(ct, axis, not reverse, ct.dtype)
+    return [prims.cast(ct, x.dtype) if ct.dtype != x.dtype else ct]
+
+
+deflinear(prims.cumsum, _cumsum_transpose)
+
+
 def _broadcast_in_dim_transpose(ct, x, shape, broadcast_dimensions):
     # Summed over the dimensions it adds and those it stretches from 1.
     dims = broadcast_dimensions

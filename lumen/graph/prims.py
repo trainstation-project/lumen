@@ -26,6 +26,7 @@ __all__ = [
     "select",
     "reduce_sum",
     "reduce_max",
+    "cumsum",
     "dot_general",
     "reshape",
     "broadcast_in_dim",
@@ -120,6 +121,13 @@ def reduce_sum(x, axes, accum_dtype):
 
 def reduce_max(x, axes):
     return bind("reduce_max", x, axes=tuple(axes))
+
+
+def cumsum(x, axis, reverse, accum_dtype):
+    """The inclusive cumulative sum along ``axis`` (from its end if
+    ``reverse``), accumulated in ``accum_dtype``, the result's dtype: ``x``'s,
+    or ``float32`` for floats narrower than it (``lax.cumsum``)."""
+    return bind("cumsum", x, axis=int(axis), reverse=bool(reverse), accum_dtype=accum_dtype)
 
 
 def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):

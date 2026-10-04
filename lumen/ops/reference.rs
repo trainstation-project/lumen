@@ -369,6 +369,46 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!(),
             }
         }
+        Cumsum { axis, reverse, .. } => {
+            // Each line along `axis`, [a, n, b] its view: summed in order
+            // (from its end if `reverse`), in the dtype, rounding (or
+            // wrapping) each step.
+            let shape = &types[0].shape;
+            let n = shape[*axis];
+            let b: usize = shape[axis + 1..].iter().product();
+            let lines = out.numel().checked_div(n).unwrap_or(0);
+            let order = |line: usize| {
+                let (i, j) = (line / b, line % b);
+                (0..n).map(move |k| {
+                    let k = if *reverse { n - 1 - k } else { k };
+                    (i * n + k) * b + j
+                })
+            };
+            match args[0] {
+                Int(v) => {
+                    let mut acc = vec![0; v.len()];
+                    for line in 0..lines {
+                        let mut s = 0;
+                        for e in order(line) {
+                            s = wrap(s + v[e], dtype);
+                            acc[e] = s;
+                        }
+                    }
+                    Int(acc)
+                }
+                Float(v) => {
+                    let mut acc = vec![0.0; v.len()];
+                    for line in 0..lines {
+                        let mut s = 0.0;
+                        for e in order(line) {
+                            s = round(s + v[e], dtype);
+                            acc[e] = s;
+                        }
+                    }
+                    Float(acc)
+                }
+            }
+        }
         DotGeneral {
             lhs_contracting,
             rhs_contracting,

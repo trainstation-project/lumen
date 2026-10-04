@@ -45,6 +45,8 @@ __all__ = [
     "mean",
     "amax",
     "max",
+    # scans
+    "cumsum",
     # normalizations
     "softmax",
     "log_softmax",

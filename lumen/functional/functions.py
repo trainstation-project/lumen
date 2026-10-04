@@ -24,6 +24,7 @@ from lumen.graph.tracer import (
     _broadcast_shapes,
     _broadcast_to,
     _common_dtype,
+    _dim,
     _dims,
     _elementwise,
     _is_float,
@@ -63,6 +64,8 @@ __all__ = [
     "mean",
     "amax",
     "max",
+    # scans
+    "cumsum",
     # normalizations
     "softmax",
     "log_softmax",
@@ -220,6 +223,24 @@ def max(input, other=None):
     if isinstance(other, TracedTensor):
         return maximum(input, other)
     raise NotImplementedError("max(input, dim) returns indices, which lumen does not support yet; use amax")
+
+
+# ---------------------------------------------------------------------
+# scans
+# ---------------------------------------------------------------------
+
+
+def cumsum(input, dim, dtype=None):
+    """The cumulative sum along ``dim`` (``torch.cumsum``), accumulated in
+    ``dtype``, the result's: the tensor's if None (integers wrap), or
+    float32 for a float16 or bfloat16 tensor, each element widened exactly
+    as its kernel reads it; for any other, the tensor converted first."""
+    x = _lift(input)
+    dtype = x.dtype if dtype is None else dtype
+    widened = dtype == "float32" and x.dtype in ("float16", "bfloat16")
+    if dtype != x.dtype and not widened:
+        x = x.to(dtype=dtype)
+    return prims.cumsum(x, _dim(dim, x.ndim), False, dtype)
 
 
 # ---------------------------------------------------------------------

@@ -55,6 +55,9 @@ pub(crate) fn encode(
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
+    if let Cumsum { .. } = step.primitive {
+        return super::scan::mps::encode(step, inputs, output, scratch, keep);
+    }
     if let Fusion { .. } = step.primitive {
         return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -79,8 +82,11 @@ pub(crate) fn encode(
         | Logistic
         | Cast { .. }
         | Select => super::elementwise::mps::encode,
-        ReduceSum { .. } | ReduceMax { .. } | Concatenate { .. } => unreachable!("encoded above"),
+        ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
+            unreachable!("encoded above")
+        }
         DotGeneral { .. } => super::dot_general::mps::encode,
+
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
             super::layout::mps::encode
         }
@@ -100,6 +106,9 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
             let accum = super::reduce::mps::accum_dtype(p, inputs[0].dtype);
             super::reduce::mps::scratch_bytes(inputs[0], axes, accum)
         }
+        Primitive::Cumsum {
+            axis, accum_dtype, ..
+        } => super::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
         Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
         _ => 0,
     }
