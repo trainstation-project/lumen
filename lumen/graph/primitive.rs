@@ -88,6 +88,19 @@ pub enum Primitive {
         start_indices: Vec<usize>,
         limit_indices: Vec<usize>,
     },
+    /// The `slice_sizes` block of the operand at start indices known when it
+    /// runs: the operands after it, an integer scalar (int32 or int64, one
+    /// dtype) a dimension, each clamped so the block is inside the operand
+    /// (`lax.dynamic_slice`).
+    DynamicSlice {
+        slice_sizes: Vec<usize>,
+    },
+    /// The operand with the block `update` (its second operand) written at
+    /// start indices (the operands after it, as [`Primitive::DynamicSlice`]'s,
+    /// clamped as its) (`lax.dynamic_update_slice`). Where nothing reads the
+    /// operand after it, its value is the operand's buffer, the update written
+    /// there alone (in place: `graph/plan.rs`).
+    DynamicUpdateSlice,
     /// The operands one after another along `dimension`, their other
     /// dimensions equal (`lax.concatenate`).
     Concatenate {
@@ -151,6 +164,8 @@ impl Primitive {
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
             Slice { .. } => "slice",
+            DynamicSlice { .. } => "dynamic_slice",
+            DynamicUpdateSlice => "dynamic_update_slice",
             Concatenate { .. } => "concatenate",
             Full { .. } => "full",
             Iota { .. } => "iota",
@@ -188,6 +203,9 @@ impl Primitive {
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
+            // An index a dimension of the operand (none if it is missing).
+            DynamicSlice { .. } => 1 + args.first().map_or(0, |x| x.shape.len()),
+            DynamicUpdateSlice => 2 + args.first().map_or(0, |x| x.shape.len()),
             _ => 1,
         };
         if args.len() != arity {
@@ -369,6 +387,29 @@ impl Primitive {
                 }
                 Ok(TensorType::new(x.dtype, &shape))
             }
+            DynamicSlice { slice_sizes } => {
+                let x = args[0];
+                check_indices(x, &args[1..]).map_err(prefix)?;
+                let fits = slice_sizes.len() == x.shape.len()
+                    && slice_sizes.iter().zip(&x.shape).all(|(s, n)| s <= n);
+                if !fits {
+                    return err(format!(
+                        "slice_sizes {slice_sizes:?} are not a block of {x}"
+                    ));
+                }
+                Ok(TensorType::new(x.dtype, slice_sizes))
+            }
+            DynamicUpdateSlice => {
+                let (x, update) = (args[0], args[1]);
+                check_indices(x, &args[2..]).map_err(prefix)?;
+                let fits = update.dtype == x.dtype
+                    && update.shape.len() == x.shape.len()
+                    && update.shape.iter().zip(&x.shape).all(|(u, n)| u <= n);
+                if !fits {
+                    return err(format!("the update {update} is not a block of {x}"));
+                }
+                Ok(x.clone())
+            }
             Concatenate { dimension } => {
                 let x = args[0];
                 if *dimension >= x.shape.len() {
@@ -453,6 +494,25 @@ impl fmt::Display for Tuple<'_> {
 
 /// Ok if a sum of elements of `x` may accumulate in `accum`: its dtype, or
 /// float32 for floats narrower than it (fp16, bf16, later fp8 and fp4).
+/// Ok if `indices` are start indices into `x`: integer scalars of one
+/// dtype, int32 or int64 (the MPS kernels', as XLA's).
+fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> {
+    let dtype = indices.first().map(|i| i.dtype);
+    let valid = indices.iter().all(|i| {
+        i.shape.is_empty() && Some(i.dtype) == dtype && matches!(i.dtype, DType::I32 | DType::I64)
+    });
+    match valid {
+        true => Ok(()),
+        false => {
+            let got: Vec<String> = indices.iter().map(ToString::to_string).collect();
+            Err(format!(
+                "start indices into {x} are an int32 or int64 scalar a dimension, of one dtype: got [{}]",
+                got.join(", ")
+            ))
+        }
+    }
+}
+
 fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
     let widened =
         x.dtype.is_float() && x.dtype.size_of() < DType::F32.size_of() && accum == DType::F32;
@@ -517,6 +577,7 @@ impl fmt::Display for Primitive {
                     Tuple(rhs_batch)
                 )
             }
+            DynamicSlice { slice_sizes } => write!(f, "[slice_sizes={}]", Tuple(slice_sizes)),
             Reshape { new_sizes } => write!(f, "[new_sizes={}]", Tuple(new_sizes)),
             BroadcastInDim {
                 shape,

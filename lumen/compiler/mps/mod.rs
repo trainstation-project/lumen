@@ -55,7 +55,14 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let config = &options.config;
     // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match config.fuse && config.merge_dots {
-        true => merge_dots(graph, &options.packable),
+        // Not a donated parameter: its new value is written over it, which
+        // a block holding it would not know.
+        true => {
+            let packable: Vec<bool> = (0..options.packable.len())
+                .map(|i| options.packable[i] && !options.donate.contains(&i))
+                .collect();
+            merge_dots(graph, &packable)
+        }
         false => (graph.clone(), Vec::new()),
     };
     let graph = &merged;

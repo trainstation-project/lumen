@@ -340,12 +340,17 @@ def compile(fn, device=None):
         # A new plan: dots merged into blocks of weights while none of theirs
         # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
-        plan = Plan(graph, target, parameters=params, packable=packable, scalars=scalars)
+        # The weights it assigns, donated: each new value written over its
+        # weight where nothing reads the old one after (in place: a cache's
+        # dynamic_update_slice), not copied back.
+        written, _ = plans[key][2]
+        donate = [len(tensors) + k for k in written]
+        plan = Plan(graph, target, donate=donate, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
         entries.append((plan, workspace))
         placed = inputs_for(plan)
         if placed is None:
-            plan = Plan(graph, target, parameters=params, scalars=scalars)
+            plan = Plan(graph, target, donate=donate, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
             placed = inputs_for(plan)
         return graph, plan, workspace, out, placed
@@ -368,8 +373,13 @@ def compile(fn, device=None):
             # torch.compile does a mutation).
             weights = _weights(args)
             written, written_scalars = plans[latest[0]][2]
+            target = latest[0][1]
             for k, value in zip(written, outputs):
-                weights[k].copy_(value)
+                # Written over its memory already (donated), or copied.
+                w = weights[k]
+                memory = w._placed(target) if w._is_parameter else w
+                if value.storage_id != memory.storage_id:
+                    w.copy_(value)
             for k, value in zip(written_scalars, outputs):
                 (v,) = value.tolist()  # a 0-d tensor lists its one element
                 nn._set_float(args, k, float(v))

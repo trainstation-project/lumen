@@ -1224,6 +1224,81 @@ pub(crate) mod mps {
         }
     }
 
+    /// dynamic_slice and dynamic_update_slice on MPS agree with the
+    /// reference for every dtype and int32 or int64 indices, starts inside
+    /// and clamped (past the end, negative); dynamic_update_slice in place
+    /// (its operand donated) and copying.
+    #[test]
+    fn dynamic_slices_run_on_mps() {
+        if !available() {
+            return;
+        }
+        let index = |dtype: DType, i: i64| match dtype {
+            DType::I32 => Tensor::from_slice(&[i as i32], dtype).reshape(&[]),
+            _ => Tensor::from_slice(&[i], dtype).reshape(&[]),
+        };
+        for &dtype in &DTYPES {
+            for index_dtype in [DType::I32, DType::I64] {
+                for starts in [[1, 4, 0], [3, 9, 2], [-2, -1, 5]] {
+                    let mut g = Graph::new();
+                    let x = g.input(ty(dtype, &[4, 10, 3]));
+                    let u = g.input(ty(dtype, &[2, 3, 3]));
+                    let idx: Vec<_> = (0..3).map(|_| g.input(ty(index_dtype, &[]))).collect();
+                    let slice_sizes = vec![2, 3, 3];
+                    let ds = g
+                        .apply(DynamicSlice { slice_sizes }, &[&[x][..], &idx].concat())
+                        .unwrap();
+                    let dus = g
+                        .apply(DynamicUpdateSlice, &[&[x, u][..], &idx].concat())
+                        .unwrap();
+                    g.set_outputs(&[ds, dus]).unwrap();
+                    let mut inputs =
+                        vec![values(dtype, &[4, 10, 3], 1), values(dtype, &[2, 3, 3], 2)];
+                    inputs.extend(starts.map(|s| index(index_dtype, s)));
+                    check(&g, &inputs);
+                }
+            }
+        }
+        // In place: its operand donated.
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[4, 6]));
+        let u = g.input(ty(DType::F32, &[1, 6]));
+        let i = g.input(ty(DType::I32, &[]));
+        let y = g.apply(DynamicUpdateSlice, &[x, u, i, i]).unwrap();
+        g.set_outputs(&[y]).unwrap();
+        let options = crate::compiler::Options {
+            donate: vec![0],
+            ..Default::default()
+        };
+        let plan = crate::compiler::compile_with(&g, Device::Mps, &options).unwrap();
+        assert!(
+            plan.to_string()
+                .contains("in0:f32[4,6] = dynamic_update_slice in0"),
+            "{plan}"
+        );
+        let x = values(DType::F32, &[4, 6], 1).to(Device::Mps);
+        let want = reference::run(
+            &g,
+            &[
+                x.clone(),
+                values(DType::F32, &[1, 6], 2),
+                index(DType::I32, 2),
+            ],
+        )
+        .unwrap();
+        let got = plan
+            .run(&[
+                x,
+                values(DType::F32, &[1, 6], 2).to(Device::Mps),
+                index(DType::I32, 2).to(Device::Mps),
+            ])
+            .unwrap();
+        assert_eq!(
+            want[0].to_vec::<f32>(),
+            got[0].to(Device::Cpu).to_vec::<f32>()
+        );
+    }
+
     #[test]
     fn rejects_float64_and_mixed_devices() {
         if !available() {
