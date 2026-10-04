@@ -23,13 +23,15 @@ use std::sync::{Mutex, PoisonError};
 
 use self::merge_dots::merge_dots;
 use super::Options;
-use crate::Tensor;
 use crate::compiler::attention;
 use crate::graph::plan::{Buffer, Step};
 use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
-use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, scratch_bytes, u32_arg};
+use crate::ops::mps::{
+    Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
+};
 use crate::tensor::contiguous_strides;
+use crate::{DType, Scalar, Tensor};
 
 unsafe extern "C" {
     // In lumen/ops/mps/shim.mm.
@@ -74,15 +76,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph.clone(),
     };
-    // Its backward as two kernels (dV and dK, dQ), the probabilities
-    // recomputed from the forward's log-sum-exp.
+    // Its backward as one kernel adding dQ atomically (unless
+    // `deterministic`, or its blocks do not fit), or two (dV and dK, dQ), the
+    // probabilities recomputed from the forward's log-sum-exp.
     let graph = match config.fuse && config.flash_attention {
-        true => attention::fuse_backward(&graph, |body| {
-            let b = attention::backward_of_body(body).expect("an attention backward");
-            let (name, source) = codegen::attention_backward_kernel(body, &b);
-            attention_kernels.insert(name.clone(), source);
-            name
-        }),
+        true => attention::fuse_backward(
+            &graph,
+            |b| !config.deterministic && codegen::backward_block_with_dq(b).is_some(),
+            |body| {
+                let b = attention::backward_of_body(body).expect("an attention backward");
+                let (name, source) = codegen::attention_backward_kernel(body, &b);
+                attention_kernels.insert(name.clone(), source);
+                name
+            },
+        ),
         false => graph,
     };
     // Now the attention's are matched (its kernels' layouts): transposes of
@@ -91,7 +98,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let graph = super::simplify::simplify_with(&graph, true);
     let graph = dot_strength::reduce_vector_dots(&graph);
     let graph = match config.split_k {
-        true => split_k::split_k(&graph),
+        true => split_k::split_k(&graph, !config.deterministic),
         false => graph,
     };
     let graph = canonicalize_dots(&graph);
@@ -433,8 +440,64 @@ pub(crate) fn encode(
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
+        // dQ with dK and dV, added to atomically: zeroed first.
+        if b.dv_out.is_some() && b.dq_out.is_some() {
+            let n = body.type_of(body.outputs()[2]).numel();
+            let args = [
+                element_arg(DType::F32, Scalar::Float(0.0)),
+                u32_arg(n as u32),
+            ];
+            let grid = elementwise_grid(n, DType::F32);
+            // Profiled as what it is, not as the kernel after it.
+            launch("fill_4", &[extra[1]], &args, grid, Vec::new(), "full (dQ)")?;
+        }
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
+    }
+    // A split dot whose chunks are added atomically: its output zeroed,
+    // then a threadgroup a 64x64 tile of a chunk (`matmul_atomic`).
+    if let Some(dot) = split_k::atomic_dot(body) {
+        let ty = |v: Var| body.type_of(v);
+        let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
+        let plan = crate::ops::dot_general::mps::plan_matmul(
+            &dot.primitive,
+            lhs,
+            rhs,
+            ty(dot.output),
+            &contiguous_strides(&lhs.shape),
+            &contiguous_strides(&rhs.shape),
+            step.label,
+        )?;
+        let Grid::Groups([_, _, chunks]) = plan.grid else {
+            unreachable!("a matmul's grid")
+        };
+        let [m, n] = [plan.p[0], plan.p[1]];
+        let zero = [
+            element_arg(DType::F32, Scalar::Float(0.0)),
+            u32_arg((m * n) as u32),
+        ];
+        let fill = elementwise_grid(m * n, DType::F32);
+        // Profiled as what it is, not as the dot after it.
+        let label = "full (split-K output)";
+        launch(
+            "fill_4",
+            &[output.cast_const()],
+            &zero,
+            fill,
+            Vec::new(),
+            label,
+        )?;
+        let kernel = format!("matmul_atomic_{}", lhs.dtype);
+        let grid = Grid::Groups([n.div_ceil(64), m.div_ceil(64), chunks]);
+        let buffers = [inputs[0], inputs[1], output.cast_const()];
+        return launch(
+            &kernel,
+            &buffers,
+            &[dims_arg(plan.p)],
+            grid,
+            keep,
+            step.label,
+        );
     }
     // A contraction with its epilogue: the matmul's launch (on the small
     // tiles, `NAME_small`, as the primitive's would be).
@@ -525,6 +588,9 @@ pub(crate) fn encode(
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's
 /// split reduction's partials ([`crate::ops::reduce::mps::scratch_bytes`]).
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
+    if split_k::atomic_dot(body).is_some() {
+        return 0;
+    }
     match codegen::reduction_root(body).filter(|r| {
         matches!(
             r.primitive,

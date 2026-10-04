@@ -261,14 +261,28 @@ BACKWARD_CASES = [
 ]
 
 
+def backward_kernels(h, hv, dtype, deterministic=False):
+    """An attention backward's kernels: one adding dQ atomically, if its
+    blocks fit in threadgroup memory (codegen.rs's
+    ``backward_block_with_dq``) and not ``deterministic``; else two."""
+    t = {"float32": 4, "bfloat16": 2}[dtype]
+    fits = any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16))
+    if fits and not deterministic:
+        return ["flash_attention_backward(dk, dv, dq)"]
+    return ["flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"]
+
+
 @pytest.mark.mps
+@pytest.mark.parametrize("deterministic", [False, True], ids=["", "deterministic"])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("device, case", [("mps", c) for c in BACKWARD_CASES], ids=_ids(BACKWARD_CASES))
-def test_attention_backward_is_flash_attention(device, case, dtype):
+def test_attention_backward_is_flash_attention(device, case, dtype, deterministic):
     """The gradient of F.flash_attention on MPS: the forward one
     flash-attention kernel (writing each row's log-sum-exp too), the
-    backward two (dK and dV, then dQ) recomputing the probabilities;
-    agreeing with the CPU's (the same program, as traced)."""
+    backward one adding dQ atomically by its dK and dV kernel (where its
+    blocks fit), or two (dK and dV, then dQ; ``deterministic``: the same
+    bits each run), recomputing the probabilities; agreeing with the CPU's
+    (the same program, as traced)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
     shapes = (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv), (b, sq, n, hv)
     (q, k, v, w), arrays = tensors(device, dtype, *shapes)
@@ -277,10 +291,19 @@ def test_attention_backward_is_flash_attention(device, case, dtype):
         return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
 
     grad = lumen.grad(loss, (0, 1, 2))
-    labels = steps(grad, q, k, v, w)
-    for kernel in ("flash_attention", "flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"):
-        assert kernel in labels, labels
-    got = lumen.compile(grad)(q, k, v, w)
+    lumen.config.compiler.deterministic = deterministic
+    try:
+        labels = steps(grad, q, k, v, w)
+        for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic)]:
+            assert kernel in labels, labels
+        compiled = lumen.compile(grad)
+        got = compiled(q, k, v, w)
+        if deterministic:
+            for g, again in zip(got, compiled(q, k, v, w)):
+                g, again = (lumen.to_numpy(t.to(dtype="float32")) for t in (g, again))
+                np.testing.assert_array_equal(g, again)
+    finally:
+        lumen.config.compiler.reset()
     cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
     want = lumen.compile(grad, device="cpu")(*cpu)
     tol = {"float32": 1e-5, "bfloat16": 2e-2}[dtype]
@@ -299,7 +322,7 @@ def test_written_attention_trains_with_flash_attention():
         return F.sum(_written(q, k, v).float())
 
     labels = steps(lumen.grad(loss, (0, 1, 2)), *m)
-    for kernel in ("flash_attention", "flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"):
+    for kernel in ["flash_attention", *backward_kernels(32, 32, "bfloat16")]:
         assert kernel in labels, labels
 
 
@@ -321,7 +344,8 @@ def test_attention_epilogue_fuses_in_training(sq):
     """In a training step the attention's value is read by its epilogue (a
     residual) and by the backward: the epilogue still runs in its kernel,
     which writes the attention's value too; the step agrees exactly with
-    the unfused one."""
+    the unfused one (``deterministic``: dQ in a fixed order)."""
+    lumen.config.compiler.deterministic = True
     shapes = [(1, sq, 4, 32), (1, 40, 2, 32), (1, 40, 2, 32), (sq, 128)]
     ts, _ = tensors("mps", "float32", *shapes)
 

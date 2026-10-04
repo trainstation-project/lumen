@@ -157,10 +157,19 @@ inline void matmul_wide_impl(device const T *lhs,
 // BMx16 and 16xBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
 // fixed column of them, and loads the next k step's while the current one is multiplied. Each output sums over k in
 // increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
-// kernels; a fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out.
+// kernels; a fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out. With ATOMIC (a split-K dot's: its batch
+// index a chunk of the contraction), each output is added to out[m, n] (float, zeroed before) atomically instead, the
+// chunks' in no fixed order.
 #define SG_BK 16
 #define SG_COLS 2 // SIMD groups across the tile
-template <typename T, typename A, typename O, uint BM, uint BN, typename Out = O, typename Epi = Same>
+template <typename T,
+          typename A,
+          typename O,
+          uint BM,
+          uint BN,
+          typename Out = O,
+          typename Epi = Same,
+          bool ATOMIC = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -242,7 +251,12 @@ inline void matmul_sg_impl(device const T *lhs,
             for (uint e = lane; e < 64; e += 32) {
                 ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
                 if (m < M && n < N) {
-                    o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
+                    if constexpr (ATOMIC) {
+                        device atomic_float *sum = (device atomic_float *)(out + m * N + n);
+                        atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
+                    } else {
+                        o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
+                    }
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -287,6 +301,16 @@ inline void matmul_sg_impl(device const T *lhs,
     MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)     \
     MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 64, 64)
 
+// matmul_atomic_<dtype>: a split-K dot's, on 64x64 tiles, accumulating in float, each chunk's (batch index's)
+// products added to the float output atomically.
+#define MATMUL_ATOMIC(NAME, T)                                                                                        \
+    kernel void matmul_atomic_##NAME(                                                                                 \
+        MATMUL_ARGS(T, float), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
+        threadgroup T lt[64 * SG_BK], rt[SG_BK * 64];                                                                 \
+        matmul_sg_impl<T, float, float, 64, 64, float, Same, true>(                                                   \
+            lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);                                           \
+    }
+
 // The generated kernels include the templates alone.
 #ifndef TEMPLATES_ONLY
 MATMUL(u8, uchar)
@@ -298,6 +322,7 @@ MATMUL(i16, short)
 MATMUL(i32, int)
 MATMUL_WIDE(i64, long)
 FOR_FLOAT(MATMUL_FLOAT)
+FOR_FLOAT(MATMUL_ATOMIC)
 MATMUL_WIDENED(f16, half)
 MATMUL_WIDENED(bf16, bfloat)
 #endif

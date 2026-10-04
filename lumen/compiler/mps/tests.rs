@@ -917,6 +917,39 @@ fn reductions_apply_their_epilogue() {
     }
 }
 
+/// A SiLU after a reduction, `s * logistic(s)`, reading its value twice
+/// (as after a split-K dot's sum): the reduction's epilogue, one fusion;
+/// split, applied by its second launch.
+#[test]
+fn reductions_apply_an_epilogue_reading_them_twice() {
+    for (shape, split) in [(vec![64, 300], false), (vec![4, 200_000], true)] {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &shape));
+        let sum = ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        };
+        let s = apply(&mut g, sum, &[x]);
+        let sigmoid = apply(&mut g, Logistic, &[s]);
+        let y = apply(&mut g, Mul, &[s, sigmoid]);
+        g.set_outputs(&[y]).unwrap();
+        let fused = fuse(&g);
+        assert_eq!(names(&fused), ["fusion"], "{fused}");
+        let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+            panic!("{fused}")
+        };
+        assert!(super::codegen::has_epilogue(body));
+        let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+        assert_eq!(source.contains("_final("), split, "{source}");
+        if available() {
+            // The sum's float accumulation error: of `shape[1]` values of
+            // up to 2.
+            let slack = shape[1] as f64 * 2.0 * f64::from(f32::EPSILON);
+            check_within(&g, &[values(DType::F32, &shape, 1)], slack);
+        }
+    }
+}
+
 /// A softmax written out, its values read by its two reductions and its
 /// division (the scaled input, the exp): a chain of diamonds, one row
 /// kernel, nothing stored between them.
@@ -1423,7 +1456,7 @@ fn skinny_dots_split_their_contraction() {
     };
     // 4 tiles: 16 chunks of 256 (32 would be chunks of 128).
     let g = build(4, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g);
+    let split = super::split_k::split_k(&g, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
@@ -1441,18 +1474,35 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
     // Rounded to bfloat16 once, after the sum.
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16));
+    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
+    // Atomically: the dot and the sum one fusion (its kernel adds the
+    // chunks' products to the output).
+    let split = super::split_k::split_k(&g, true);
+    let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(
+        names,
+        ["reshape", "reshape", "dot_general (split-K)"],
+        "{split}"
+    );
+    let Primitive::Fusion { body, .. } = &split.nodes()[2].primitive else {
+        unreachable!("a fusion")
+    };
+    assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
+    let got = reference::run(&split, &inputs).unwrap()[0].to_vec::<f32>();
+    for (w, g) in want.iter().zip(&got) {
+        assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
+    }
     // Many tiles, or a short contraction: as it is.
     for g in [
         build(1024, 1024, 1024, DType::F32),
         build(4, 256, 300, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g);
+        let split = super::split_k::split_k(&g, false);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }

@@ -62,26 +62,23 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
         producer[node.output] = Some(i);
     }
     // From the output back through its epilogue (elementwise primitives and
-    // reshapes of one value and constants) to a reduction.
-    let mut v = body.outputs()[0];
-    loop {
-        let node = &nodes[producer[v]?];
+    // reshapes of the reduction's value, each other's and constants: a
+    // SiLU's reads it twice) to the one reduction.
+    let (mut found, mut stack) = (None, vec![body.outputs()[0]]);
+    while let Some(v) = stack.pop() {
+        let i = producer[v]?;
+        let node = &nodes[i];
         match &node.primitive {
-            ReduceSum { .. } | ReduceMax { .. } => return Some(node),
-            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => {
-                let mut rest = node
-                    .inputs
+            ReduceSum { .. } | ReduceMax { .. } if found.is_none_or(|f| f == i) => found = Some(i),
+            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => stack.extend(
+                node.inputs
                     .iter()
-                    .filter(|&&u| !fusion::constant(body, &producer, u));
-                let next = *rest.next()?;
-                if rest.any(|&u| u != next) {
-                    return None;
-                }
-                v = next;
-            }
+                    .filter(|&&u| !fusion::constant(body, &producer, u)),
+            ),
             _ => return None,
         }
     }
+    found.map(|i| &nodes[i])
 }
 
 /// The names a reduction fusion's two launches (a split reduction's) are
@@ -1166,9 +1163,19 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         })
         .collect();
     let dkdv = b.dv_out.is_some();
-    let outs: &[&str] = if dkdv { &["dv", "dk"] } else { &["dq"] };
+    let dq = b.dq_out.is_some();
+    let outs: &[&str] = match (dkdv, dq) {
+        (true, true) => &["dv", "dk", "dq"],
+        (true, false) => &["dv", "dk"],
+        _ => &["dq"],
+    };
     for (k, out) in outs.iter().enumerate() {
-        params.push(format!("device float *{out} [[buffer({})]]", n + k));
+        // dQ with dK and dV: added atomically.
+        let ty = match dkdv && *out == "dq" {
+            true => "atomic_float",
+            false => "float",
+        };
+        params.push(format!("device {ty} *{out} [[buffer({})]]", n + k));
     }
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v, g) = (
@@ -1181,12 +1188,18 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     let (causal, offset) = (b.causal.is_some(), b.causal.unwrap_or(0));
     let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
     let ds_scale = constant(DType::F32, Scalar::Float(b.ds_scale));
-    let rows = backward_block(b);
-    let call = match dkdv {
-        true => format!(
-            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+    let rows = match dkdv && dq {
+        true => backward_block_with_dq(b).expect("a fused backward fits"),
+        false => backward_block(b),
+    };
+    let call = match (dkdv, dq) {
+        (true, true) => format!(
+            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
         ),
-        false => format!(
+        (true, false) => format!(
+            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+        ),
+        (false, _) => format!(
             "threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];\n    flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
         ),
     };
@@ -1205,6 +1218,18 @@ fn backward_block(b: &Backward) -> usize {
         .into_iter()
         .find(|&n| bytes(n) <= 28 << 10)
         .unwrap_or(8)
+}
+
+/// The queries the dK, dV and dQ kernel of an attention backward stages at
+/// once: the most of 32 or 16 whose Q and dO blocks, with its key block's
+/// K and dS^T (`ATTN_BQ` keys), fit in 28 KB of threadgroup memory; none if
+/// neither does (the backward then takes two kernels: on blocks of 8, one
+/// is no faster).
+pub(crate) fn backward_block_with_dq(b: &Backward) -> Option<usize> {
+    const KEYS: usize = 64; // ATTN_BQ
+    let t = b.dtype.size_of();
+    let bytes = |n: usize| n * (b.h + b.hv) * t + 2 * n * 4 + KEYS * b.h * t + KEYS * n * t;
+    [32, 16].into_iter().find(|&n| bytes(n) <= 28 << 10)
 }
 
 /// Whether attention `a` takes the decoding kernel: few queries (a

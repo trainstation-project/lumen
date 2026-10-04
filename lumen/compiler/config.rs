@@ -3,7 +3,8 @@
 //! snapshot ([`config`]) into its [`Options`](super::Options). The
 //! defaults run every program exactly as traced, but for `online_softmax`,
 //! `flash_attention` and `split_k` (on: rounding not the program's); turn
-//! them off to run softmax, attention and dots as traced too.
+//! them off to run softmax, attention and dots as traced too. Kernels may
+//! add atomically (in no fixed order) unless `deterministic`.
 
 use std::sync::{PoisonError, RwLock};
 
@@ -48,6 +49,12 @@ pub struct CompilerConfig {
     /// program computes (the partials are added in another order), so off
     /// runs dots exactly as traced.
     pub split_k: bool,
+    /// Run every kernel deterministically (the same inputs give the same
+    /// bits): off by default, so a kernel may add atomically, in no fixed
+    /// order (attention's backward adds dQ by its dK and dV kernel, one
+    /// kernel rather than two; a split-K dot adds its chunks' products to
+    /// its output, rather than writing them for a sum).
+    pub deterministic: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
@@ -66,6 +73,7 @@ impl Default for CompilerConfig {
             online_softmax: true,
             flash_attention: true,
             split_k: true,
+            deterministic: false,
             row_cache: 8,
         }
     }

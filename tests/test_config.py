@@ -72,7 +72,7 @@ def test_compiler_flags_defaults(compiler):
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
-    assert compiler.split_k is True
+    assert compiler.split_k is True and compiler.deterministic is False
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -126,10 +126,11 @@ def test_compiler_flags_change_what_compiles(compiler):
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_agrees(compiler, dtype):
     """With ``split_k`` (the default) a matmul of few output tiles and a long
-    contraction (a decode step's) is one dot of the chunks' partials and
-    their sum in float32 (rounded to bfloat16 once, after it); it agrees
-    with the dot as traced (off) to rounding. One of many tiles is not
-    split."""
+    contraction (a decode step's) is one kernel adding its chunks' products
+    to its float32 output atomically (``deterministic``: one dot of the
+    chunks' partials, then their sum), rounded to bfloat16 once, after it;
+    each agrees with the dot as traced (off) to rounding. One of many tiles
+    is not split."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     try:
@@ -138,18 +139,61 @@ def test_split_k_agrees(compiler, dtype):
         pytest.skip(str(e))
     f = lambda x, w: x @ w  # noqa: E731
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
-    rounded = {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
-    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    cast = "cast(float32 -> bfloat16)"
+    atomic = {"float32": ["dot_general (split-K)"], "bfloat16": ["dot_general (split-K)", cast]}[dtype]
+    assert _labels(f, x, w) == atomic
     split = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    compiler.deterministic = True
+    rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
+    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    ordered = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.split_k = False
     assert _labels(f, x, w) == ["dot_general"]
     traced = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
-    np.testing.assert_allclose(split, want, atol=tol)
-    np.testing.assert_allclose(traced, want, atol=tol)
+    for got in (split, ordered, traced):
+        np.testing.assert_allclose(got, want, atol=tol)
     compiler.reset()
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, big, big) == ["dot_general"]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_split_k_then_silu(compiler, dtype):
+    """SiLU after a matmul of few output tiles and a long contraction: not
+    split, it is the matmul's epilogue (one kernel); split, it needs every
+    chunk's products: with ``deterministic``, the epilogue of the
+    ``reduce_sum`` of the dot's partials (reading the sum twice); atomically,
+    a kernel after the split dot's. Each agrees with SiLU of the exact
+    product to rounding."""
+    rng = np.random.default_rng(0)
+    a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
+    try:
+        x, w = (lumen.from_numpy(t).to("mps").to(dtype=dtype) for t in (a, b))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def f(x, w):
+        y = F.matmul(x, w, accum_dtype=lumen.float32, output_dtype=lumen.float32)
+        return (y * F.sigmoid(y)).to(dtype=x.dtype)
+
+    y = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
+    want = y / (1 + np.exp(-y))
+    silu = "logistic → mul" + {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
+    plans = {
+        "unsplit": ["dot_general → " + silu],
+        "atomic": ["dot_general (split-K)", silu],
+        "deterministic": ["dot_general", "reduce_sum → " + silu],
+    }
+    tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
+    for mode, plan in plans.items():
+        compiler.reset()
+        compiler.split_k = mode != "unsplit"
+        compiler.deterministic = mode == "deterministic"
+        assert _labels(f, x, w) == plan, mode
+        got = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+        np.testing.assert_allclose(got, want, atol=tol, err_msg=mode)
 
 
 @pytest.mark.mps

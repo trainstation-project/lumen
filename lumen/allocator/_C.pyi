@@ -5,7 +5,8 @@ class CompilerConfig:
     """The graph compilers' flags; use the ``lumen.config.compiler`` instance.
     Read when a graph is compiled; the defaults run every program exactly as
     traced, but for ``online_softmax``, ``flash_attention`` and ``split_k``
-    (on: set them off for softmax, attention and dots as traced)."""
+    (on: set them off for softmax, attention and dots as traced); kernels may
+    add atomically, in no fixed order, unless ``deterministic``."""
 
     fuse: bool
     merge_dots: bool
@@ -16,6 +17,7 @@ class CompilerConfig:
     online_softmax: bool
     flash_attention: bool
     split_k: bool
+    deterministic: bool
     row_cache: int
 
     def reset(self) -> None: ...

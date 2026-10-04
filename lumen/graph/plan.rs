@@ -552,6 +552,7 @@ impl Plan {
                         // operands as the dot does.
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
+                                && s.inputs[k].1.shape == self.inputs[i].shape
                                 && crate::compiler::mps::fusion_reads_strided(body, k, strides)
                         }
                         _ => false,
