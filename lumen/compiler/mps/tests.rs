@@ -1328,3 +1328,73 @@ fn rms_norm_row_kernels_fuse_their_input() {
         check(&g, &inputs);
     }
 }
+
+/// Dots whose epilogues meet (`relu(x @ w1) * (x @ w2) + (x @ w3)`): each
+/// node joins one dot's epilogue alone, the other dots' values its inputs,
+/// so no fusion computes two dots; as the reference computes it.
+#[test]
+fn dots_epilogues_do_not_overlap() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[8, 16]));
+    let ws: Vec<Var> = (0..3).map(|_| g.input(ty(DType::F32, &[16, 12]))).collect();
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let ys: Vec<Var> = ws
+        .iter()
+        .map(|&w| apply(&mut g, dot.clone(), &[x, w]))
+        .collect();
+    let zero = Full {
+        shape: vec![8, 12],
+        fill_value: Scalar::Float(0.0),
+        dtype: DType::F32,
+    };
+    let zero = apply(&mut g, zero, &[]);
+    let r = apply(&mut g, Max, &[ys[0], zero]);
+    let m = apply(&mut g, Mul, &[r, ys[1]]);
+    let out = apply(&mut g, Add, &[m, ys[2]]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [
+        data(&[8, 16], 1),
+        data(&[16, 12], 2),
+        data(&[16, 12], 3),
+        data(&[16, 12], 4),
+    ];
+    let names = fused_primitives(&g, &inputs);
+    assert_eq!(names, ["dot_general", "dot_general", "fusion"], "{names:?}");
+}
+
+/// A dot with no free dimension on either side (a dot product per batch
+/// index, attention's backward `D`) is a product and a sum, not a matmul:
+/// as the reference computes the dot (XLA's DotStrengthReduction).
+#[test]
+fn vector_dots_are_reduced() {
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::F32, &[4, 6, 16]));
+    let b = g.input(ty(DType::F32, &[4, 6, 16]));
+    let dot = DotGeneral {
+        lhs_contracting: vec![2],
+        rhs_contracting: vec![2],
+        lhs_batch: vec![0, 1],
+        rhs_batch: vec![0, 1],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let d = apply(&mut g, dot, &[a, b]);
+    g.set_outputs(&[d]).unwrap();
+    let reduced = super::dot_strength::reduce_vector_dots(&g);
+    let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
+    let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
+    let want = reference::run(&g, &inputs).unwrap();
+    let got = reference::run(&reduced, &inputs).unwrap();
+    let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
+    for (w, g) in want.iter().zip(&got) {
+        assert!((w - g).abs() <= 1e-5 * w.abs().max(1.0), "{w} {g}");
+    }
+}

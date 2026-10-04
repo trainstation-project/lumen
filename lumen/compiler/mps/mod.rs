@@ -10,6 +10,7 @@
 
 mod codegen;
 mod diamonds;
+mod dot_strength;
 mod fusion;
 mod merge_dots;
 #[cfg(test)]
@@ -83,7 +84,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }),
         false => graph,
     };
-    let graph = canonicalize_dots(&graph);
+    let graph = canonicalize_dots(&dot_strength::reduce_vector_dots(&graph));
     // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
     // position (the passes keep inputs in order): those every step reading
     // them is a fusion of; any other, a buffer.
@@ -120,7 +121,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }
     } else {
         scalars.clear();
-        graph
+        // A concatenate has no kernel but a fusion's: each its own.
+        concatenates_alone(&graph, |body| {
+            let (name, source) = codegen::kernel(body, &[], config);
+            kernels.insert(name.clone(), source);
+            name
+        })
     };
     kernels.extend(attention_kernels);
     if !kernels.is_empty() {
@@ -312,6 +318,61 @@ pub(crate) fn fusion_source(name: &str) -> Option<String> {
     sources.get(name).cloned()
 }
 
+/// `graph` with each concatenate a fusion of it alone (its kernel named by
+/// `kernel`): unfused, as it runs on MPS.
+fn concatenates_alone(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> Graph {
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    for node in graph.nodes() {
+        let primitive = match node.primitive {
+            Primitive::Concatenate { .. } => {
+                let mut reads: Vec<Var> = Vec::new();
+                for &v in &node.inputs {
+                    if !reads.contains(&v) {
+                        reads.push(v);
+                    }
+                }
+                let mut body = Graph::new();
+                let ins: Vec<Var> = reads
+                    .iter()
+                    .map(|&v| body.input(graph.type_of(v).clone()))
+                    .collect();
+                let operands: Vec<Var> = node
+                    .inputs
+                    .iter()
+                    .map(|v| ins[reads.iter().position(|r| r == v).expect("read")])
+                    .collect();
+                let value = body
+                    .apply(node.primitive.clone(), &operands)
+                    .expect("the concatenate");
+                body.set_outputs(&[value]).expect("its value");
+                let name = kernel(&body);
+                let reads: Vec<Var> = reads.iter().map(|&v| map[v]).collect();
+                map[node.output] = out
+                    .apply(
+                        Primitive::Fusion {
+                            name,
+                            label: "concatenate",
+                            body,
+                        },
+                        &reads,
+                    )
+                    .expect("a fusion typed as the concatenate");
+                continue;
+            }
+            ref p => p.clone(),
+        };
+        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
 /// Encode fusion `step`: its kernel, compiled with its graph, over the
 /// output's elements, or, for a reduction fusion, over its reduction's.
 pub(crate) fn encode(
@@ -358,7 +419,7 @@ pub(crate) fn encode(
     // of queries (dQ) of each batch index.
     if let Some(b) = attention::backward_of_body(body) {
         let batch: usize = b.batch.iter().product();
-        let rows = if b.dv.is_some() { b.sk } else { b.sq };
+        let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);

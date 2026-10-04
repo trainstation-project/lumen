@@ -56,7 +56,10 @@ class _FlashAttention(Function):
             st = where(le(keys, queries + (sk - sq)), st, float("-inf"))
         # P^T, from each query's log-sum-exp; D = rowsum(dO * O), per query.
         pt = exp(st - lse.reshape(b, n, 1, sq))
-        d = sum(do.to(accum) * o.to(accum), -1).permute(0, 2, 1).reshape(b, n, 1, sq)
+        # A dot over the head dimension, accumulated in float32: no value
+        # rounded (O by p @ v, dO by its producer) is widened.
+        d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum, accum)
+        d = d.permute(0, 2, 1).reshape(b, n, 1, sq)
         # dP^T = V dO^T; dS^T = P^T (dP^T - D) * scale.
         dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
         dst = (pt * (dpt - d) * ctx.scale).to(dtype)

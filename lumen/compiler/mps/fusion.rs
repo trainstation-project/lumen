@@ -203,6 +203,8 @@ pub(crate) fn fuse(
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut in_epilogue = vec![false; nodes.len()];
     let mut dot_aux: Vec<Option<usize>> = vec![None; nodes.len()];
+    // Nodes an earlier dot's epilogue took: no other's.
+    let mut claimed = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
         let float = |v: Var| {
             matches!(
@@ -234,7 +236,7 @@ pub(crate) fn fuse(
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let fuses = fusible[u] && elementwise(&un.primitive) && !in_row(u);
+            let fuses = fusible[u] && elementwise(&un.primitive) && !in_row(u) && !claimed[u];
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
             if !fuses || !reads {
                 break;
@@ -265,6 +267,7 @@ pub(crate) fn fuse(
             for &k in &taken[1..taken.len() - 1] {
                 in_epilogue[k] = true;
             }
+            taken.iter().for_each(|&k| claimed[k] = true);
             for k in aux {
                 dot_aux[k] = Some(end);
             }
