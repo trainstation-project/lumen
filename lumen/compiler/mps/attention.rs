@@ -110,16 +110,17 @@ pub(crate) fn fuse(
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
-    // Each attention, its epilogue's last node, and the buffers its
-    // epilogue reads.
-    let found: Vec<(Attention, usize, Vec<Var>)> = attentions(graph)
+    // Each attention, its epilogue's nodes (in order), its last node, and
+    // the buffers its epilogue reads.
+    let found: Vec<(Attention, Vec<usize>, usize, Vec<Var>)> = attentions(graph)
         .into_iter()
         .map(|a| {
-            let (end, leaves) = match epilogues {
+            let (chain, leaves) = match epilogues {
                 true => m.epilogue(a.root, scalars),
-                false => (a.root, Vec::new()),
+                false => (Vec::new(), Vec::new()),
             };
-            (a, end, leaves)
+            let end = chain.last().copied().unwrap_or(a.root);
+            (a, chain, end, leaves)
         })
         .collect();
     if found.is_empty() {
@@ -133,7 +134,7 @@ pub(crate) fn fuse(
     }
     for (i, node) in nodes.iter().enumerate() {
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let Some((a, _, leaves)) = found.iter().find(|(_, end, _)| *end == i) else {
+        let Some((a, chain, _, leaves)) = found.iter().find(|(_, _, end, _)| *end == i) else {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
@@ -177,11 +178,12 @@ pub(crate) fn fuse(
         body.set_outputs(&[var[&node.output]])
             .expect("the attention's output");
         let name = kernel(&body);
-        let fusion = Primitive::Fusion {
-            name,
-            label: "flash_attention",
-            body,
-        };
+        // Profiled as the attention, then its epilogue's primitives:
+        // `flash_attention -> reshape -> add`.
+        let label = std::iter::once("flash_attention")
+            .chain(chain.iter().map(|&n| nodes[n].primitive.name()));
+        let label = super::fusion::intern(label.collect::<Vec<_>>().join(" -> "));
+        let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out
             .apply(fusion, &reads)
@@ -202,13 +204,13 @@ struct Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
-    /// The epilogue after node `root`: its last node (`root` if none), and
-    /// the values its other operands read (the fusion's inputs), as
-    /// [`fuse`] takes it.
-    fn epilogue(&self, root: usize, scalars: &[Var]) -> (usize, Vec<Var>) {
+    /// The epilogue after node `root`: its nodes in order (none: `root`
+    /// alone), and the values its other operands read (the fusion's
+    /// inputs), as [`fuse`] takes it.
+    fn epilogue(&self, root: usize, scalars: &[Var]) -> (Vec<usize>, Vec<Var>) {
         use Primitive::*;
         let nodes = self.graph.nodes();
-        let (mut end, mut leaves) = (root, Vec::new());
+        let (mut end, mut chain, mut leaves) = (root, Vec::new(), Vec::new());
         loop {
             let v = nodes[end].output;
             let [u] = self.readers[v][..] else { break };
@@ -232,8 +234,9 @@ impl<'a> Matcher<'a> {
                 }
             }
             end = u;
+            chain.push(u);
         }
-        (end, leaves)
+        (chain, leaves)
     }
 
     /// Whether operand `v` of an epilogue can be read at its output's
