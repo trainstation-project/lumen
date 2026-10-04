@@ -9,6 +9,10 @@ from lumen.tensor._C import Tensor
 FUSION_SEPARATOR: str
 """What a fusion's label joins its primitives' names with (``mul → tanh → add``)."""
 
+def _register_custom_op(f: Any) -> int:
+    """Keep custom op function ``f`` (called with its operands as tensors
+    when its step runs): its handle (``lumen.ops.custom_op``)."""
+
 class Graph:
     """A graph of primitive ops, built by tracing (``lumen/graph/``)."""
 

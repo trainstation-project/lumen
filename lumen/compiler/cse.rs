@@ -22,6 +22,13 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
     let mut seen = Seen::new();
     for node in graph.nodes() {
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        // A custom op's function is opaque: each call made, as written.
+        if let Primitive::CustomCall { .. } = node.primitive {
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("the node's own operands");
+            continue;
+        }
         let mut key = inputs.clone();
         if commutative(&node.primitive) {
             key.sort_unstable();

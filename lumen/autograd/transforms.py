@@ -51,6 +51,8 @@ def _jvp_tape(tape, tangents, linearizing=False):
             continue
 
         primitive = getattr(prims, name, None)
+        if name == "custom_call":
+            raise NotImplementedError(f"custom op {params['op']} is not differentiable: its function is opaque")
         if primitive not in primitive_jvps:
             raise NotImplementedError(f"{name} has no JVP rule")
 

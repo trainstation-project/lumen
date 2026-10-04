@@ -5,6 +5,7 @@
 //! [`reference`](crate::ops::reference), a CPU interpreter, defines what
 //! each primitive computes.
 
+pub(crate) mod custom;
 pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]

@@ -666,6 +666,62 @@ fn inputs_donated_into_an_output_hold_it_alone() {
     }
 }
 
+/// A custom op's mutated operand (`CustomCall`, its function opaque) is its
+/// output's memory where nothing reads it after the call, in place; read
+/// after, the output has memory of its own (the operand copied there when it
+/// runs). A second mutated operand's output, a fusion output of the call,
+/// likewise.
+#[test]
+fn custom_calls_mutate_in_place_where_they_can() {
+    let ty = TensorType::new(DType::F32, &[4]);
+    let plan_of = |read_after: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty.clone());
+        let a = g.apply(Exp, &[x]).unwrap();
+        let b = g.apply(Neg, &[x]).unwrap();
+        let call = CustomCall {
+            label: "test::op",
+            kernel: 0,
+            mutated: vec![1, 2],
+        };
+        let new_a = g.apply(call, &[x, a, b]).unwrap();
+        let new_b = g
+            .apply(
+                FusionOutput {
+                    index: 1,
+                    ty: ty.clone(),
+                },
+                &[new_a],
+            )
+            .unwrap();
+        let y = g.apply(Add, &[new_a, new_b]).unwrap();
+        let mut outputs = vec![y];
+        if read_after {
+            outputs.push(g.apply(Mul, &[a, b]).unwrap());
+        }
+        g.set_outputs(&outputs).unwrap();
+        Plan::compile(&g)
+    };
+    let step = |plan: &Plan| {
+        let step = plan
+            .steps()
+            .iter()
+            .find(|s| s.label == "test::op")
+            .unwrap()
+            .clone();
+        let written: Vec<Buffer> = std::iter::once(step.output.0)
+            .chain(step.extra_outputs.iter().map(|o| o.0))
+            .collect();
+        (written, vec![step.inputs[1].0, step.inputs[2].0])
+    };
+    let plan = plan_of(false);
+    let (written, operands) = step(&plan);
+    assert_eq!(written, operands, "{plan}");
+    let plan = plan_of(true);
+    let (written, operands) = step(&plan);
+    assert!(written.iter().zip(&operands).all(|(w, o)| w != o), "{plan}");
+}
+
 #[test]
 fn kernel_scratch_is_placed_in_the_workspace() {
     let mut g = Graph::new();

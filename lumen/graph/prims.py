@@ -196,6 +196,18 @@ def dynamic_update_slice(x, update, start_indices):
     return bind("dynamic_update_slice", x, update, *_start_indices(start_indices))
 
 
+def _custom_call(operands, name, kernel, mutated):
+    """Custom op ``name`` (``lumen.ops.custom_op``), function ``kernel`` (its
+    handle) on ``operands``, mutating those at ``mutated``: their new
+    values."""
+    first = bind("custom_call", *operands, op=name, kernel=kernel, mutated=tuple(mutated))
+    rest = [
+        bind("fusion_output", first, index=k, dtype=operands[m].dtype, shape=tuple(operands[m].shape))
+        for k, m in enumerate(mutated[1:], 1)
+    ]
+    return [first, *rest]
+
+
 def concatenate(operands, dimension):
     """``operands`` one after another along ``dimension``, their other
     dimensions equal (``lax.concatenate``)."""

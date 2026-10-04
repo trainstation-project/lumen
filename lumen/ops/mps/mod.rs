@@ -94,6 +94,7 @@ pub(crate) fn encode(
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
+        CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),
     };
     encode(step, inputs, output, keep)
 }

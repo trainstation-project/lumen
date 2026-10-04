@@ -385,6 +385,9 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!(),
             }
         }
+        CustomCall { label, .. } => {
+            panic!("{label}: a custom op's function runs in a plan (lumen.compile), on tensors")
+        }
         DynamicSlice { slice_sizes } => {
             // Each output element's operand index: its own, from the starts.
             let x = types[0];

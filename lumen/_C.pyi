@@ -14,6 +14,7 @@ from lumen.allocator._C import config as config
 from lumen.graph._C import FUSION_SEPARATOR as FUSION_SEPARATOR
 from lumen.graph._C import Graph as Graph
 from lumen.graph._C import Plan as Plan
+from lumen.graph._C import _register_custom_op as _register_custom_op
 from lumen.ops._C import _dummy_op as _dummy_op
 from lumen.ops._C import _register_kernel as _register_kernel
 from lumen.ops._C import _registered_ops as _registered_ops

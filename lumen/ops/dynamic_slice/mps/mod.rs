@@ -10,6 +10,28 @@ use crate::graph::Primitive;
 use crate::graph::plan::Step;
 use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg};
 
+/// Copy the `ty` value at `src` to `dst` (distinct buffers, perhaps of one
+/// storage), in the stream.
+pub(crate) fn copy(
+    src: *const u8,
+    dst: *mut u8,
+    ty: &crate::graph::TensorType,
+    keep: Vec<Tensor>,
+    name: &'static str,
+) -> Result<(), String> {
+    let n = ty.numel();
+    let kernel = format!("dynamic_slice_copy_{}", ty.dtype.size_of());
+    let grid = elementwise_grid(n, ty.dtype);
+    launch(
+        &kernel,
+        &[src, dst.cast_const()],
+        &[u32_arg(n as u32)],
+        grid,
+        keep,
+        name,
+    )
+}
+
 /// The most dimensions the kernels take (`DS_MAX_RANK`).
 const MAX_RANK: usize = 8;
 
@@ -36,12 +58,7 @@ pub(crate) fn encode(
     let update = matches!(step.primitive, Primitive::DynamicUpdateSlice);
     // The operand's value, if not already in the output's buffer.
     if update && output.cast_const() != inputs[0] {
-        let n = x.numel();
-        let args = [u32_arg(n as u32)];
-        let kernel = format!("dynamic_slice_copy_{bytes}");
-        let buffers = [inputs[0], output.cast_const()];
-        let grid = elementwise_grid(n, x.dtype);
-        launch(&kernel, &buffers, &args, grid, keep.clone(), step.label)?;
+        copy(inputs[0], output, x, keep.clone(), step.label)?;
     }
     // Each dimension's start index, the unused slots any buffer.
     let index_dtype = step

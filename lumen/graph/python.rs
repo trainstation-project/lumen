@@ -82,6 +82,15 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             slice_sizes: dims("slice_sizes")?,
         },
         "dynamic_update_slice" => DynamicUpdateSlice,
+        "custom_call" => CustomCall {
+            label: crate::graph::intern(get("op")?.extract()?),
+            kernel: get("kernel")?.extract()?,
+            mutated: dims("mutated")?,
+        },
+        "fusion_output" => FusionOutput {
+            index: get("index")?.extract()?,
+            ty: TensorType::new(dtype("dtype")?, &dims("shape")?),
+        },
         "concatenate" => Concatenate {
             dimension: get("dimension")?.extract()?,
         },
@@ -421,7 +430,41 @@ fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, Py
     Ok(d)
 }
 
+/// Custom op functions (`lumen.ops.custom_op`), by handle: never removed,
+/// so a handle a traced graph holds stays valid.
+static CUSTOM_OPS: std::sync::RwLock<Vec<Py<PyAny>>> = std::sync::RwLock::new(Vec::new());
+
+/// Keep custom op function `f`: its handle, which a graph's custom call
+/// names.
+#[pyfunction]
+fn _register_custom_op(f: Py<PyAny>) -> usize {
+    let mut ops = CUSTOM_OPS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ops.push(f);
+    ops.len() - 1
+}
+
+/// Call custom op function `kernel` on `args` (the hook `graph/custom.rs`
+/// calls): Python's, with the GIL.
+fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
+    Python::attach(|py| {
+        let f = {
+            let ops = CUSTOM_OPS
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ops[kernel].clone_ref(py)
+        };
+        let tensors: Vec<PyTensor> = args.iter().map(|t| PyTensor::wrap(t.clone())).collect();
+        f.call1(py, (tensors,))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::graph::custom::set_hook(call_custom_op);
+    m.add_function(wrap_pyfunction!(_register_custom_op, m)?)?;
     m.add_class::<PyGraph>()?;
     m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)?;
     m.add_class::<PyPlan>()

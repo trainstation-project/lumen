@@ -135,6 +135,16 @@ pub enum Primitive {
         index: usize,
         ty: TensorType,
     },
+    /// A custom op (`lumen.ops.custom_op`), `label` its name: `kernel`, a
+    /// function opaque to the compilers (by its handle, `graph/custom.rs`),
+    /// reading its operands and writing those at `mutated` in place. Its
+    /// value is `mutated[0]`'s new value; `mutated[k]`'s, a
+    /// [`Primitive::FusionOutput`] of it at index `k`.
+    CustomCall {
+        label: &'static str,
+        kernel: usize,
+        mutated: Vec<usize>,
+    },
 }
 
 impl Primitive {
@@ -171,6 +181,7 @@ impl Primitive {
             Iota { .. } => "iota",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
+            CustomCall { label, .. } => label,
         }
     }
 
@@ -203,6 +214,7 @@ impl Primitive {
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
+            CustomCall { .. } => args.len(),
             // An index a dimension of the operand (none if it is missing).
             DynamicSlice { .. } => 1 + args.first().map_or(0, |x| x.shape.len()),
             DynamicUpdateSlice => 2 + args.first().map_or(0, |x| x.shape.len()),
@@ -431,6 +443,13 @@ impl Primitive {
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             FusionOutput { ty, .. } => Ok(ty.clone()),
+            CustomCall { mutated, .. } => {
+                check_dims(mutated, args.len(), "mutated operands").map_err(prefix)?;
+                match mutated.first() {
+                    Some(&m) => Ok(args[m].clone()),
+                    None => err("mutates no operand: it would compute nothing".into()),
+                }
+            }
             Iota {
                 dtype,
                 shape,
@@ -578,6 +597,7 @@ impl fmt::Display for Primitive {
                 )
             }
             DynamicSlice { slice_sizes } => write!(f, "[slice_sizes={}]", Tuple(slice_sizes)),
+            CustomCall { mutated, .. } => write!(f, "[mutated={}]", Tuple(mutated)),
             Reshape { new_sizes } => write!(f, "[new_sizes={}]", Tuple(new_sizes)),
             BroadcastInDim {
                 shape,
