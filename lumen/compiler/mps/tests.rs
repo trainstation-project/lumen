@@ -83,7 +83,7 @@ fn fuses_elementwise_and_layout_chains() {
     // Profiled by its primitives, in graph order.
     assert_eq!(
         fuse(&g).nodes()[0].primitive.name(),
-        "full → broadcast_in_dim → mul → tanh → transpose → add"
+        "mul → tanh → transpose → add"
     );
 }
 

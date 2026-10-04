@@ -366,8 +366,7 @@ pub(crate) fn fuse(
                 let body = body(graph, members, reads, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
-                let label = members.iter().map(|&m| nodes[m].primitive.name());
-                let label = intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
+                let label = label(graph, &producer, members);
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
                 let out = out.expect("a fused graph is typed as the original");
@@ -390,6 +389,22 @@ pub(crate) fn fuse(
         .set_outputs(&outputs)
         .expect("outputs are values of the fused graph");
     fused
+}
+
+/// A fusion's label (as profiled): its `members`' names, leaving out the
+/// constants (`full → broadcast_in_dim`, literals in its kernel) unless
+/// they are all it computes.
+pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
+    let nodes = graph.nodes();
+    let names = |all: bool| -> Vec<&str> {
+        members
+            .iter()
+            .filter(|&&m| all || !constant(graph, producer, nodes[m].output))
+            .map(|&m| nodes[m].primitive.name())
+            .collect()
+    };
+    let shown = names(false);
+    intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
 
 /// `label` as a `&'static str`, as profiled names are: each distinct label

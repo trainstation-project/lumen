@@ -776,7 +776,7 @@ def test_softmax_traces_to_its_primitives(device):
     )
     if device == "mps":
         (step,) = lumen.graph.Plan(graph, "mps").steps()
-        assert step["fusion"] is not None and step["label"].startswith("full → broadcast_in_dim → mul")
+        assert step["fusion"] is not None and step["label"].startswith("mul")
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(
         lumen.to_numpy(lumen.compile(lambda t: F.softmax(t, 0))(t)),
@@ -827,7 +827,7 @@ def test_rms_norm(device):
         for g in (f, by_hand):
             (label,) = steps(g)
             assert "reduce_sum" in label and "sqrt" in label, label
-        assert steps(f)[0].startswith("full → broadcast_in_dim → add → mul → reduce_sum")
+        assert steps(f)[0].startswith("add → mul → reduce_sum")
     with pytest.raises(NotImplementedError, match="last dimension"):
         lumen.make_graph(lambda a: F.rms_norm(a, (8, 300)))(X)
     norm = Norm(lumen.empty([300], device="meta"), 1e-6)
