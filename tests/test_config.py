@@ -66,12 +66,13 @@ def _labels(f, *args, device="mps"):
 
 
 def test_compiler_flags_defaults(compiler):
-    """Every program runs as traced, but for online softmax and flash
-    attention (on)."""
+    """Every program runs as traced, but for online softmax, flash
+    attention and split-K (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
+    assert compiler.split_k is True
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -119,6 +120,36 @@ def test_compiler_flags_change_what_compiles(compiler):
     compiler.row_cache = 0
     (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" not in step["fusion"]["source"]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_split_k_agrees(compiler, dtype):
+    """With ``split_k`` (the default) a matmul of few output tiles and a long
+    contraction (a decode step's) is one dot of the chunks' partials and
+    their sum in float32 (rounded to bfloat16 once, after it); it agrees
+    with the dot as traced (off) to rounding. One of many tiles is not
+    split."""
+    rng = np.random.default_rng(0)
+    a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
+    try:
+        x, w = (lumen.from_numpy(t).to("mps").to(dtype=dtype) for t in (a, b))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lambda x, w: x @ w  # noqa: E731
+    want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
+    rounded = {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
+    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    split = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    compiler.split_k = False
+    assert _labels(f, x, w) == ["dot_general"]
+    traced = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
+    np.testing.assert_allclose(split, want, atol=tol)
+    np.testing.assert_allclose(traced, want, atol=tol)
+    compiler.reset()
+    big = lumen.empty([1024, 1024], device="meta")
+    assert _labels(f, big, big) == ["dot_general"]
 
 
 @pytest.mark.mps

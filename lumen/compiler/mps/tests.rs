@@ -1398,3 +1398,149 @@ fn vector_dots_are_reduced() {
         assert!((w - g).abs() <= 1e-5 * w.abs().max(1.0), "{w} {g}");
     }
 }
+
+/// A dot of few output tiles and a long contraction is split along it
+/// (XLA's SplitKRewriter): one dot of the chunks' partials (the operands
+/// reshaped: a new batch dimension), summed in float32, then cast to the
+/// dot's dtype; one of many tiles is not.
+#[test]
+fn skinny_dots_split_their_contraction() {
+    let build = |m: usize, n: usize, k: usize, dtype: DType| {
+        let mut g = Graph::new();
+        let a = g.input(ty(dtype, &[m, k]));
+        let b = g.input(ty(dtype, &[k, n]));
+        let dot = DotGeneral {
+            lhs_contracting: vec![1],
+            rhs_contracting: vec![0],
+            lhs_batch: vec![],
+            rhs_batch: vec![],
+            accum_dtype: DType::F32,
+            output_dtype: dtype,
+        };
+        let d = apply(&mut g, dot, &[a, b]);
+        g.set_outputs(&[d]).unwrap();
+        g
+    };
+    // 4 tiles: 16 chunks of 256 (32 would be chunks of 128).
+    let g = build(4, 256, 4096, DType::F32);
+    let split = super::split_k::split_k(&g);
+    let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(
+        names,
+        ["reshape", "reshape", "dot_general", "reduce_sum"],
+        "{split}"
+    );
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 4, 256]);
+    let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
+    let want = reference::run(&g, &inputs).unwrap();
+    let got = reference::run(&split, &inputs).unwrap();
+    // The partials added in another order: within float32's rounding of a
+    // sum of 4096 products of up to 4.
+    let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
+    for (w, g) in want.iter().zip(&got) {
+        assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
+    }
+    // Rounded to bfloat16 once, after the sum.
+    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16));
+    let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(
+        names,
+        ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
+    );
+    // Many tiles, or a short contraction: as it is.
+    for g in [
+        build(1024, 1024, 1024, DType::F32),
+        build(4, 256, 300, DType::F32),
+    ] {
+        let split = super::split_k::split_k(&g);
+        assert_eq!(split.nodes().len(), 1, "{split}");
+    }
+}
+
+/// A matrix-vector dot (a decode step's `x @ W`, `x @ W^T`, the vector's
+/// free dimension of size 1, or batched) is the vector broadcast into the
+/// matrix's layout, a product and a sum over the contracted dimensions,
+/// agreeing with the dot.
+#[test]
+fn matrix_vector_dots_are_reduced() {
+    let dot = |lc: usize, rc: usize, batch: bool| DotGeneral {
+        lhs_contracting: vec![lc],
+        rhs_contracting: vec![rc],
+        lhs_batch: if batch { vec![0] } else { vec![] },
+        rhs_batch: if batch { vec![0] } else { vec![] },
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    // The lhs's and rhs's shapes, the dot, its primitives once reduced.
+    type Case = (
+        &'static [usize],
+        &'static [usize],
+        Primitive,
+        &'static [&'static str],
+    );
+    let cases: [Case; 4] = [
+        // x [1, K] @ W [K, N]: a sum over W's rows.
+        (
+            &[1, 64],
+            &[64, 48],
+            dot(1, 0, false),
+            &[
+                "reshape",
+                "broadcast_in_dim",
+                "mul",
+                "reduce_sum",
+                "reshape",
+            ],
+        ),
+        // x [1, K] @ W[N, K]^T.
+        (
+            &[1, 64],
+            &[48, 64],
+            dot(1, 1, false),
+            &[
+                "reshape",
+                "broadcast_in_dim",
+                "mul",
+                "reduce_sum",
+                "reshape",
+            ],
+        ),
+        // W [N, K] @ x [K]: the vector the rhs.
+        (
+            &[48, 64],
+            &[64],
+            dot(1, 0, false),
+            &["broadcast_in_dim", "mul", "reduce_sum"],
+        ),
+        // Batched: x [B, 1, K] @ W [B, K, N].
+        (
+            &[3, 1, 64],
+            &[3, 64, 48],
+            dot(2, 1, true),
+            &[
+                "reshape",
+                "broadcast_in_dim",
+                "mul",
+                "reduce_sum",
+                "reshape",
+            ],
+        ),
+    ];
+    for (lhs, rhs, p, want) in cases {
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::F32, lhs));
+        let b = g.input(ty(DType::F32, rhs));
+        let d = apply(&mut g, p, &[a, b]);
+        g.set_outputs(&[d]).unwrap();
+        let reduced = super::dot_strength::reduce_vector_dots(&g);
+        let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
+        assert_eq!(names, want, "{reduced}");
+        let inputs = [data(lhs, 1), data(rhs, 2)];
+        let want = reference::run(&g, &inputs).unwrap();
+        let got = reference::run(&reduced, &inputs).unwrap();
+        assert_eq!(want[0].shape(), got[0].shape());
+        for (w, g) in want[0].to_vec::<f32>().iter().zip(&got[0].to_vec::<f32>()) {
+            assert!((w - g).abs() <= 64.0 * 4.0 * f32::EPSILON, "{w} {g}");
+        }
+    }
+}

@@ -1,9 +1,9 @@
 //! How the graph compilers compile: process-wide flags, read when a graph
 //! is compiled (Python: `lumen.config.compiler`). Each compile takes a
 //! snapshot ([`config`]) into its [`Options`](super::Options). The
-//! defaults run every program exactly as traced, but for `online_softmax`
-//! and `flash_attention` (on: rounding not the program's); turn them off
-//! to run softmax and attention as traced too.
+//! defaults run every program exactly as traced, but for `online_softmax`,
+//! `flash_attention` and `split_k` (on: rounding not the program's); turn
+//! them off to run softmax, attention and dots as traced too.
 
 use std::sync::{PoisonError, RwLock};
 
@@ -42,6 +42,12 @@ pub struct CompilerConfig {
     /// program computes (an online softmax across key blocks, `P` not
     /// normalized before `P @ V`), so off runs it exactly as traced.
     pub flash_attention: bool,
+    /// Split the contraction of a dot of few output tiles (small M and N,
+    /// large K: a decode step's) across threadgroups, the partials summed
+    /// in float32 (XLA's SplitKRewriter). On by default; not what the
+    /// program computes (the partials are added in another order), so off
+    /// runs dots exactly as traced.
+    pub split_k: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
@@ -59,6 +65,7 @@ impl Default for CompilerConfig {
             multi_output_fusion: true,
             online_softmax: true,
             flash_attention: true,
+            split_k: true,
             row_cache: 8,
         }
     }
