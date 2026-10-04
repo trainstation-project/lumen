@@ -210,6 +210,8 @@ unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
 /// The managed tensor for `t` (PyTorch: `toDLPackImpl`), owned by the
 /// caller until its deleter runs.
 fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
+    // Its values written: the consumer reads them as it likes.
+    t.storage().synchronize();
     let shape: Vec<i64> = t.shape().iter().map(|&d| d as i64).collect();
     let strides: Vec<i64> = t.strides().iter().map(|&s| s as i64).collect();
     // Metal buffers are addressed from their base, as in PyTorch; elsewhere

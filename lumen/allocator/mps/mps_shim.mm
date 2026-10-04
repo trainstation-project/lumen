@@ -56,6 +56,12 @@ id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset) {
 extern "C" {
 int lumen_mps_available(void) { return lumen_default_device() != nil ? 1 : 0; }
 
+// lumen_mps_buffer's buffer as a pointer (unretained: the allocator keeps
+// it), for code outside Objective-C.
+void *lumen_mps_buffer_pointer(const void *ptr, size_t *offset) {
+    return (__bridge void *)lumen_mps_buffer(ptr, offset);
+}
+
 // Device properties the allocator's size math needs, mirroring what
 // MPSHeapAllocatorImpl reads from Metal. Returns 0 if there is no device.
 typedef struct {

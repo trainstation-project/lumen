@@ -160,25 +160,60 @@ impl Plan {
         // A reshape's value is the bytes of its operand's root; a viewed
         // slice's, a view of them; a dynamic_update_slice's, its operand's,
         // in place, where nothing reads those after it (nor as its update
-        // or an index) and they are no input's or output's (a donated
+        // or an index) and they are no output's, nor the caller's: an
+        // input's, unless an owned plan's copy of an argument (a donated
         // input's: below).
+        let callers = |r: Var| {
+            graph
+                .inputs()
+                .iter()
+                .position(|&v| v == r)
+                .is_some_and(|i| {
+                    options.parameters.as_ref().is_none_or(|p| p[i]) || options.scalars.contains(&i)
+                })
+        };
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
             if is_reshape(&node.primitive) {
                 root[node.output] = root[node.inputs[0]];
             }
-            if let Primitive::DynamicUpdateSlice = node.primitive
-                && live[node.output]
-            {
-                let r = root[node.inputs[0]];
+            // Each value it writes in place, with the operand position it
+            // replaces: a dynamic_update_slice's, its operand's; a custom
+            // op's, each mutated operand's (its own value the first, its
+            // fusion outputs the others).
+            let written: Vec<(Var, usize)> = match &node.primitive {
+                Primitive::DynamicUpdateSlice => vec![(node.output, 0)],
+                Primitive::CustomCall { mutated, .. } => {
+                    let mut written = vec![(node.output, mutated[0])];
+                    for other in graph.nodes() {
+                        if let Primitive::FusionOutput { index, .. } = other.primitive
+                            && other.inputs[0] == node.output
+                        {
+                            written.push((other.output, mutated[index]));
+                        }
+                    }
+                    written
+                }
+                _ => Vec::new(),
+            };
+            for (out, position) in written {
+                if !live[out] {
+                    continue;
+                }
+                let r = root[node.inputs[position]];
                 let mine = |v: Var| root[v] == r;
-                let free = !graph.inputs().contains(&r)
+                let others = node
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .any(|(j, &v)| j != position && mine(v));
+                let free = !callers(r)
                     && !graph.outputs().iter().any(|&o| mine(o))
-                    && !node.inputs[1..].iter().any(|&v| mine(v))
+                    && !others
                     && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&u| u > t));
                 if free {
-                    root[node.output] = r;
+                    root[out] = r;
                 }
             }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
@@ -283,8 +318,8 @@ impl Plan {
                 let u = graph.inputs()[i];
                 let writer = nodes[first[v]];
                 let read_by_writer = writer.inputs.iter().any(|&w| root[w] == u);
-                let read_later =
-                    last[u] > first[v] || (read_by_writer && !reads_in_place(writer, u, &root));
+                let read_later = last[u] > first[v]
+                    || (read_by_writer && !reads_in_place(graph, writer, v, u, &root));
                 let is_output = graph.outputs().iter().any(|&o| root[o] == u);
                 let its = !paired(i) || options.donate_into.contains(&(i, k));
                 ty(u) == ty(v) && !read_later && !is_output && its
@@ -678,6 +713,13 @@ impl Plan {
             return Err("operands read as views run on MPS only".into());
         }
         for step in &self.steps {
+            if let Primitive::CustomCall {
+                kernel, mutated, ..
+            } = &step.primitive
+            {
+                self.call_custom_op(step, *kernel, mutated, executor, &tensor, workspace)?;
+                continue;
+            }
             // A strided input (a parameter [`run_in`](Self::run_in) reads in
             // place) is read as a view at its strides.
             let strided = |&(b, _): &(Buffer, TensorType)| match b {
@@ -757,6 +799,72 @@ impl Plan {
     }
 }
 
+impl Plan {
+    /// Run custom op step `step` (its function `kernel`, mutating its
+    /// operands at `mutated`): each mutated operand's value in its output's
+    /// buffer (copied there unless the planner put the output in the
+    /// operand's own), then the function called on its operands as tensors,
+    /// the mutated ones those output buffers, which it writes in place.
+    fn call_custom_op<'a>(
+        &self,
+        step: &Step,
+        kernel: usize,
+        mutated: &[usize],
+        executor: Device,
+        tensor: &dyn Fn(Buffer) -> &'a Tensor,
+        workspace: &Tensor,
+    ) -> Result<(), String> {
+        let view = |&(buffer, ref ty): &(Buffer, TensorType)| match buffer {
+            Buffer::Workspace(offset) => workspace.view_bytes(offset, ty.dtype, &ty.shape),
+            _ => tensor(buffer).clone(),
+        };
+        let outputs: Vec<&(Buffer, TensorType)> = std::iter::once(&step.output)
+            .chain(&step.extra_outputs)
+            .collect();
+        let mut args: Vec<Tensor> = step.inputs.iter().map(view).collect();
+        for (k, &m) in mutated.iter().enumerate() {
+            let out = view(outputs[k]);
+            let src = &args[m];
+            // Not in place: the operand copied first (its own buffers, perhaps
+            // of one storage: the workspace; a strided parameter, through
+            // `copy_`).
+            if out.data_ptr() != src.data_ptr() {
+                let ty = &outputs[k].1;
+                match executor {
+                    _ if !src.is_contiguous() => {
+                        out.copy_(src)?;
+                    }
+                    #[cfg(lumen_mps_linked)]
+                    Device::Mps => crate::ops::dynamic_slice::mps::copy(
+                        src.data_ptr().cast_const(),
+                        out.data_ptr(),
+                        ty,
+                        vec![src.clone(), out.clone()],
+                        "copy",
+                    )?,
+                    // SAFETY: two distinct host buffers of `ty`'s bytes.
+                    _ => unsafe {
+                        let bytes = ty.numel() * ty.dtype.size_of();
+                        std::ptr::copy_nonoverlapping(src.data_ptr(), out.data_ptr(), bytes);
+                    },
+                }
+            }
+            args[m] = out;
+        }
+        // No wait: the function's host reads and writes wait for the stream
+        // (as every host access to MPS memory does); its device work, in
+        // the stream (`lumen.mps.launch`, `lumen.mps.command_buffer`), runs
+        // in order with the plan's, counted so `synchronize` waits for it.
+        let called = crate::graph::custom::call(kernel, &args);
+        #[cfg(lumen_mps_linked)]
+        if executor == Device::Mps {
+            crate::stream::mps::mark();
+        }
+        let _ = executor;
+        called.map_err(|e| format!("{}: {e}", step.label))
+    }
+}
+
 /// ```text
 /// plan (workspace 1024 bytes)
 ///     ws+0:f32[4,16] = dot_general[...] in0 in1
@@ -788,8 +896,9 @@ impl fmt::Display for Plan {
 
 /// Whether `node` reads each operand whose root is `r` only at the element
 /// it writes (an elementwise primitive, or a fusion that uses it only in
-/// elementwise ones), so its output may overwrite `r`'s buffer.
-fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
+/// elementwise ones), so its output `out` may overwrite `r`'s buffer: a
+/// dynamic_update_slice's or a custom op's, `r` its operand `out` replaces.
+fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) -> bool {
     use Primitive::*;
     let elementwise = |p: &Primitive| {
         matches!(
@@ -824,6 +933,22 @@ fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
             }),
         // Its operand alone, in place.
         DynamicUpdateSlice => node.inputs[1..].iter().all(|&v| root[v] != r),
+        // At the operand whose new value `out` is alone (its value is the
+        // first mutated operand's; a fusion output of it at index k, the
+        // k-th's).
+        CustomCall { mutated, .. } => {
+            let k = graph.nodes().iter().find_map(|n| match n.primitive {
+                FusionOutput { index, .. } if n.output == out && n.inputs[0] == node.output => {
+                    Some(index)
+                }
+                _ => None,
+            });
+            let position = mutated[k.unwrap_or(0)];
+            node.inputs
+                .iter()
+                .enumerate()
+                .all(|(j, &v)| (root[v] == r) == (j == position))
+        }
         p => elementwise(p),
     }
 }

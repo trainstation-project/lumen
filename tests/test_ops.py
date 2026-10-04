@@ -47,7 +47,8 @@ def device(request):
 
 
 def test_ops_is_exported_from_the_package():
-    assert set(lumen.ops.__all__) == {"register", "registered_ops", "signature", "unregister"}
+    assert set(lumen.ops.__all__) == {"CustomOp", "custom_op", "register", "registered_ops", "signature", "unregister"}
+    assert callable(lumen.ops.custom_op)
     assert callable(lumen.ops.register)
     assert callable(lumen.ops.registered_ops)
     assert callable(lumen.ops.signature)
