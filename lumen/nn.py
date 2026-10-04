@@ -84,6 +84,35 @@ def _leaves(x, path):
             yield from _leaves(v, prefix + str(i))
 
 
+def _set_float(x, k, value):
+    """Set the ``k``-th float of ``x`` (in :func:`_floats`' order) to
+    ``value``: a module's field or a list's element (a tuple's cannot be)."""
+    slots = list(_float_slots(x))
+    holder, key = slots[k]
+    if holder is None:
+        raise TypeError("a float in a tuple cannot be assigned: hold it in a module field or a list")
+    if isinstance(holder, Module):
+        object.__setattr__(holder, key, value)
+    else:
+        holder[key] = value
+
+
+def _float_slots(x):
+    """Where each float of ``x`` is, ``(holder, key)``, in :func:`_floats`'
+    order (``(None, None)`` in a tuple)."""
+    if isinstance(x, Module):
+        items = [(x, f.name, getattr(x, f.name)) for f in dataclasses.fields(x)]
+    elif isinstance(x, (list, tuple)):
+        items = [(x if isinstance(x, list) else None, i, v) for i, v in enumerate(x)]
+    else:
+        return
+    for holder, key, v in items:
+        if isinstance(v, float):
+            yield (holder, key) if holder is not None else (None, None)
+        else:
+            yield from _float_slots(v)
+
+
 def _floats(x):
     """Each float field of ``x`` (a module, a list or tuple), recursively, in
     field order: runtime scalars of a compiled function (``lumen.compile``),

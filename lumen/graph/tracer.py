@@ -151,6 +151,8 @@ def _trace(fn, args):
     ]
 
     sources = {}
+    assigned = {sid: t.var for sid, t in weights.items()}
+    assigned_scalars = [t.var for t in scalars]
     # Recorded from the start, for ``.backward()``.
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
@@ -171,7 +173,16 @@ def _trace(fn, args):
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
-    graph.set_outputs([o.var for o in outputs])
+    # A weight or a module's float ``fn`` assigned (``w.copy_(value)``):
+    # its new value is an output too, written back after each run (the
+    # float on the host).
+    written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
+    written_scalars = [k for k, t in enumerate(scalars) if t.var != assigned_scalars[k]]
+    graph.set_outputs(
+        [o.var for o in outputs]
+        + [list(weights.values())[k].var for k in written]
+        + [scalars[k].var for k in written_scalars]
+    )
     # Without the values no output depends on (an autodiff transform's
     # tangents its transpose does not read).
     renumbered = graph.prune()
@@ -184,7 +195,7 @@ def _trace(fn, args):
             warnings.warn_explicit(message, UserWarning, *where)
         else:
             warnings.warn(message)
-    return graph, out
+    return graph, out, (written, written_scalars)
 
 
 def _lift(x):
@@ -262,6 +273,10 @@ def compile(fn, device=None):
     With only meta tensors and no ``device``, nothing is compiled for a
     device: results are meta tensors of the right types.
 
+    A weight the function assigns (``w.copy_(value)``, an optimizer's
+    step) is written back into the weight's memory after each call; a
+    module's float so assigned (a step count), into the module.
+
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
@@ -288,7 +303,7 @@ def compile(fn, device=None):
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
-        graph, out, entries, _, _ = plans[key]
+        graph, out, _, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
@@ -329,7 +344,8 @@ def compile(fn, device=None):
     @functools.wraps(fn)
     def compiled(*args):
         graph, plan, workspace, out, inputs = prepare(args)
-        if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
+        ran = not (workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args))
+        if not ran:
             # Compiled (and the weights placed); nothing to run.
             outputs = [
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
@@ -337,7 +353,18 @@ def compile(fn, device=None):
         else:
             outputs = plan.run_in(workspace, inputs)
         outputs = iter(outputs)
-        return _tree_map(lambda _: next(outputs), out)
+        result = _tree_map(lambda _: next(outputs), out)
+        if ran:
+            # The weights it assigned, written back (functionalized: as
+            # torch.compile does a mutation).
+            weights = _weights(args)
+            written, written_scalars = plans[latest[0]][2]
+            for k, value in zip(written, outputs):
+                weights[k].copy_(value)
+            for k, value in zip(written_scalars, outputs):
+                (v,) = value.tolist()  # a 0-d tensor lists its one element
+                nn._set_float(args, k, float(v))
+        return result
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
@@ -352,7 +379,7 @@ def compile(fn, device=None):
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = latest
-        graph, _, _, n_tensors, scalars = plans[latest[0]]
+        graph, _, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
@@ -645,6 +672,17 @@ class TracedTensor:
 
     def __neg__(self):
         return prims.neg(self)
+
+    def copy_(self, value):
+        """Assign ``value`` (of its type) to it, in place (torch's ``copy_``):
+        every reference to it reads ``value`` from here on. A module's
+        weight so assigned is written back into the weight after each call
+        of the compiled function (an optimizer's step)."""
+        value = _lift(value)
+        if not isinstance(value, TracedTensor) or (value.dtype, value.shape) != (self.dtype, self.shape):
+            raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
+        self.var = value.var
+        return self
 
     def backward(self, gradient=None):
         """Its gradient (``gradient``: its cotangent; for a scalar, 1 by

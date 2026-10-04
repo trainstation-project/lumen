@@ -1290,3 +1290,62 @@ def test_rounding_a_contraction_then_widening_it_warns():
         lumen.make_graph(lambda x: F.matmul(x, x.t(), "float32", "float32") * 0.5)(x)
         lumen.make_graph(lambda x: F.relu(x @ x.t()))(x)
         lumen.make_graph(lambda q: F.scaled_dot_product_attention(q, q, q))(q)
+
+
+class _Counter(lumen.nn.Module):
+    n: lumen.Tensor
+    w: lumen.Tensor
+
+
+def test_copy_into_a_weight_is_written_back():
+    """w.copy_(value) in a compiled function assigns a module's weight: the
+    compiled function writes it back after each call (an optimizer's step),
+    and the next call reads it; a call compiling on meta tensors does not."""
+    counter = _Counter(lumen.empty([], device="meta"), lumen.empty([3], device="meta"))
+
+    def step(c, x):
+        c.n.copy_(c.n + 1.0)
+        c.w.copy_(c.w + x * c.n)
+        return c.n * 1.0
+
+    step = lumen.compile(step, device="cpu")
+    step(counter, lumen.empty([3], device="meta"))
+    x = np.array([1.0, 2.0, 3.0], np.float32)
+    for k in range(1, 4):
+        assert float(lumen.to_numpy(step(counter, lumen.from_numpy(x)))) == k
+    # w = x * (1 + 2 + 3), read back by a function returning it.
+    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda c: c.w * 1.0)(counter)), 6 * x)
+    with pytest.raises(TypeError, match="copy_"):
+        lumen.make_graph(lambda c: c.w.copy_(c.n))(counter)
+
+
+class _Steps(lumen.nn.Module):
+    w: lumen.Tensor
+    t: float
+    lrs: tuple
+
+
+def test_copy_into_a_modules_float_is_written_back():
+    """A module's float (a runtime scalar) assigned with copy_ is written
+    back into the module, on the host, after each call: the next call
+    passes it (a step count). One in a tuple cannot be."""
+    steps = _Steps(lumen.empty([2], device="meta"), 0.0, (0.5,))
+
+    def step(s):
+        s.t.copy_(s.t + 1.0)
+        s.w.copy_(s.w + s.t)
+        return s.t * 1.0
+
+    step = lumen.compile(step, device="cpu")
+    for k in range(1, 4):
+        step(steps)
+        assert steps.t == k
+    # w = 1 + 2 + 3.
+    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda s: s.w * 1.0)(steps)), [6.0, 6.0])
+
+    def assign_tuple(s):
+        s.lrs[0].copy_(s.lrs[0] * 2.0)
+        return s.w * 1.0
+
+    with pytest.raises(TypeError, match="tuple"):
+        lumen.compile(assign_tuple, device="cpu")(steps)
