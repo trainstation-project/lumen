@@ -2,6 +2,7 @@
 traced tensors, and the strict primitives (lumen/graph/)."""
 
 import dataclasses
+import re
 import warnings
 
 import numpy as np
@@ -1266,6 +1267,16 @@ def test_rounding_a_contraction_then_widening_it_warns():
     float32 is more accurate. Outputting float32, or not widening, does
     not."""
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
+
+    def scores(x):
+        s = (x @ x.t()) * 0.5
+        return s.float()
+
+    # At the line computing the matmul, naming the cast's.
+    with pytest.warns(UserWarning, match=rf"cast at {re.escape(__file__)}:\d+") as record:
+        lumen.make_graph(scores)(x)
+    (w,) = record
+    assert (w.filename, w.lineno) == (__file__, scores.__code__.co_firstlineno + 1)
     with pytest.warns(
         UserWarning,
         match=r"dot_general\(bf16\[4,8\], bf16\[8,4\]\) -> bf16\[4,4\] accumulates in f32 but outputs bf16, then dot_general → mul → convert_element_type",

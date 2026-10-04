@@ -148,7 +148,7 @@ impl PyGraph {
     }
 
     /// See [`crate::graph::Graph::precision_warnings`].
-    fn precision_warnings(&self) -> Vec<String> {
+    fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()
     }
 

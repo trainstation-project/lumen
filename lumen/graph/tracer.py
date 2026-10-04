@@ -20,6 +20,8 @@ Convert with ``.to(dtype)``.
 import builtins
 import functools
 import math
+import os
+import sys
 import warnings
 
 from lumen import nn
@@ -34,6 +36,20 @@ __all__ = [
 
 # The graphs being traced, innermost last.
 _TRACES = []
+# Each trace's values' source lines (``(filename, lineno)``): the line
+# outside lumen that computed each.
+_SOURCES = []
+# Frames in lumen's package are lumen's, not the traced program's.
+_PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _record_source(var):
+    """Record the line of the traced program computing ``var``."""
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE):
+        frame = frame.f_back
+    if frame is not None:
+        _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
 
 
 def current_graph():
@@ -69,14 +85,14 @@ def _scalars(args):
     return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
 
 
-def _trace(fn, args, stacklevel):
+def _trace(fn, args):
     """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
     single tensor (rather than a tuple or list of them). The graph's inputs
     are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
-    meta tensor. Precision warnings are attributed ``stacklevel`` frames
-    up (the user's call)."""
+    meta tensor. Precision warnings point at the line computing the value
+    they are about."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
 
@@ -99,19 +115,28 @@ def _trace(fn, args, stacklevel):
         )
         for a in traced
     ]
+    sources = {}
     _TRACES.append(graph)
+    _SOURCES.append(sources)
     try:
         out = fn(*traced)
     finally:
         _TRACES.pop()
+        _SOURCES.pop()
     single = isinstance(out, TracedTensor)
     outputs = (out,) if single else tuple(out)
     for o in outputs:
         if not isinstance(o, TracedTensor) or o.graph is not graph:
             raise TypeError(f"a compiled function must return tensors computed from its inputs, got {o!r}")
     graph.set_outputs([o.var for o in outputs])
-    for message in graph.precision_warnings():
-        warnings.warn(message, stacklevel=stacklevel)
+    for var, cast, message in graph.precision_warnings():
+        where, cast_at = sources.get(var), sources.get(cast)
+        if cast_at and cast_at != where:
+            message += f" (cast at {cast_at[0]}:{cast_at[1]})"
+        if where:
+            warnings.warn_explicit(message, UserWarning, *where)
+        else:
+            warnings.warn(message)
     return graph, single
 
 
@@ -215,7 +240,7 @@ def compile(fn, device=None):
         scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
-            plans[key] = (*_trace(fn, args, 4), [], len(tensors), scalars)
+            plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
         graph, single, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
@@ -318,7 +343,7 @@ def make_graph(fn):
 
     @functools.wraps(fn)
     def graph(*args):
-        return _trace(fn, args, 3)[0]
+        return _trace(fn, args)[0]
 
     return graph
 

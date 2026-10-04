@@ -18,9 +18,10 @@ class Graph:
     def type_of(self, var: int) -> tuple[str, list[int]]: ...
     def inputs(self) -> list[int]: ...
     def outputs(self) -> list[int]: ...
-    def precision_warnings(self) -> list[str]:
+    def precision_warnings(self) -> list[tuple[int, int, str]]:
         """A warning for each dot or sum rounded to a narrower dtype than it
-        accumulates in, then cast back up."""
+        accumulates in, then cast back up: its output, the cast's, the
+        message."""
 
     def nodes(self) -> list[dict[str, Any]]:
         """Each node: ``primitive``, ``text`` (with its parameters),

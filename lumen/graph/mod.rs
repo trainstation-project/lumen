@@ -130,8 +130,8 @@ impl Graph {
     /// dtype than it accumulates in, then cast back up (through primitives
     /// keeping that dtype: a scale, a reshape): the rounding loses
     /// precision the program then computes with; outputting the wider
-    /// dtype would not.
-    pub fn precision_warnings(&self) -> Vec<String> {
+    /// dtype would not. Each: the node's output, the cast's, the message.
+    pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
         for (i, node) in self.nodes.iter().enumerate() {
@@ -168,7 +168,7 @@ impl Graph {
                             };
                             let operands: Vec<String> =
                                 node.inputs.iter().map(|&i| self.types[i].to_string()).collect();
-                            warnings.push(format!(
+                            let message = format!(
                                 "{name}({}) -> {} accumulates in {accum_dtype} but outputs {narrow}, then \
                                  {name} {sep} {} casts it back to {wide}: the rounding loses precision; {fix} \
                                  for a more accurate graph",
@@ -176,7 +176,8 @@ impl Graph {
                                 self.types[node.output],
                                 path.join(FUSION_SEPARATOR),
                                 sep = FUSION_SEPARATOR.trim(),
-                            ));
+                            );
+                            warnings.push((node.output, reader.output, message));
                         }
                         DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {}
                         _ if wide == narrow && !seen[reader.output] => {
