@@ -257,3 +257,166 @@ def test_weight_assigned_in_place(device):
     assert "in0:f32[2,3] = " in plan, plan
     assert m.w._placed(device).storage_id == memory.storage_id
     assert lumen.to_numpy(memory).tolist() == [[2] * 3] * 2
+
+
+# Every in-place op: functionalized as its out-of-place op then ``copy_``
+# (so through a view too). Each: the op on a traced tensor, the same on a
+# numpy array (out of place).
+def _iadd(t):
+    t += 2.0
+
+
+def _isub(t):
+    t -= 2.0
+
+
+def _imul(t):
+    t *= 3.0
+
+
+def _idiv(t):
+    t /= 4.0
+
+
+def _setitem(t):
+    t[0] = 7.0
+
+
+INPLACE = {
+    "add_": (lambda t: t.add_(1.5), lambda a: a + 1.5),
+    "add_ alpha": (lambda t: t.add_(t * 1.0, alpha=2), lambda a: a + 2 * a),
+    "sub_ alpha": (lambda t: t.sub_(1.0, alpha=3), lambda a: a - 3),
+    "mul_": (lambda t: t.mul_(t * 1.0), lambda a: a * a),
+    "div_": (lambda t: t.div_(2.0), lambda a: a / 2),
+    "neg_": (lambda t: t.neg_(), lambda a: -a),
+    "exp_": (lambda t: t.exp_(), np.exp),
+    "log_": (lambda t: t.log_(), np.log),
+    "sqrt_": (lambda t: t.sqrt_(), np.sqrt),
+    "tanh_": (lambda t: t.tanh_(), np.tanh),
+    "sigmoid_": (lambda t: t.sigmoid_(), lambda a: 1 / (1 + np.exp(-a))),
+    "relu_": (lambda t: t.add_(-1.5).relu_(), lambda a: np.maximum(a - 1.5, 0)),
+    "clamp_": (lambda t: t.clamp_(1.0, 2.0), lambda a: np.clip(a, 1, 2)),
+    "clamp_min_": (lambda t: t.clamp_min_(1.5), lambda a: np.maximum(a, 1.5)),
+    "clamp_max_": (lambda t: t.clamp_max_(1.5), lambda a: np.minimum(a, 1.5)),
+    "zero_": (lambda t: t.zero_(), np.zeros_like),
+    "fill_": (lambda t: t.fill_(3.0), lambda a: np.full_like(a, 3)),
+    "masked_fill_": (lambda t: t.masked_fill_(t > 1.5, -1.0), lambda a: np.where(a > 1.5, -1, a)),
+    "+=": (_iadd, lambda a: a + 2),
+    "-=": (_isub, lambda a: a - 2),
+    "*=": (_imul, lambda a: a * 3),
+    "/=": (_idiv, lambda a: a / 4),
+    "[0] =": (_setitem, lambda a: np.concatenate([[7.0], a[1:]])),
+}
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("op", list(INPLACE))
+def test_inplace_ops(device, op):
+    """Each in-place op assigns its tensor its out-of-place result, and a
+    slice view's assignment reaches its base; it returns the tensor."""
+    f, want = INPLACE[op]
+    x = np.array([0.5, 1.0, 2.0, 4.0], np.float32)
+
+    def whole(x):
+        y = x * 1.0
+        f(y)
+        return y * 1.0
+
+    def through_view(x):
+        y = x * 1.0
+        f(y[1:3])
+        return y * 1.0
+
+    (got,) = _run(whole, x, device=device)
+    np.testing.assert_allclose(got, want(x), rtol=1e-6)
+    (got,) = _run(through_view, x, device=device)
+    expected = x.copy()
+    expected[1:3] = want(x[1:3])
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+def test_inplace_ops_return_their_tensor():
+    def f(x):
+        y = x * 1.0
+        assert y.add_(1.0) is y and y.mul_(2.0).clamp_(max=3.0) is y
+        return y
+
+    assert _run(f, [0.0, 1.0]) == [[2.0, 3.0]]
+
+
+def test_augmented_assignment_is_in_place():
+    """``y += 1`` assigns y in place (torch), so a view of y taken before
+    reads it: not ``y = y + 1`` (a new tensor)."""
+
+    def f(x):
+        y = x * 2.0
+        z = y[0:2]
+        y += 1.0
+        return z * 1.0
+
+    assert _run(f, X) == [[1.0, 3.0]]
+
+
+def test_inplace_op_errors():
+    """As torch: the other operand broadcasts to the tensor, never it to the
+    other's; the result keeps its dtype (no float into an integer tensor);
+    a mask is bool; an assigned value broadcasts to the indexed view."""
+    m = lambda shape, dtype="float32": lumen.empty(shape, dtype=dtype, device="meta")  # noqa: E731
+    trace = lambda f, *args: lumen.make_graph(f)(*args)  # noqa: E731
+    with pytest.raises(RuntimeError, match="doesn't match the broadcast shape"):
+        trace(lambda x, y: x.add_(y), m([3]), m([2, 3]))
+    trace(lambda x, y: x.add_(y), m([2, 3]), m([3]))  # broadcast to x: fine
+    with pytest.raises(TypeError):
+        trace(lambda x: x.add_(1.5), m([3], "int32"))
+    with pytest.raises(TypeError):
+        trace(lambda x: x.div_(2), m([3], "int32"))
+    with pytest.raises(TypeError, match="boolean"):
+        trace(lambda x, y: x.masked_fill_(y, 0.0), m([3]), m([3]))
+    with pytest.raises(RuntimeError, match="cannot be broadcast"):
+        trace(lambda x, y: x.__setitem__(slice(0, 2), y), m([4]), m([3]))
+    with pytest.raises(RuntimeError, match="at least one"):
+        trace(lambda x: x.clamp_(), m([3]))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_inplace_ops_on_arguments_and_weights(device):
+    """``+=`` on an argument, ``[i] =`` on a weight: written back after the
+    call, as ``copy_``'s."""
+    m = _Weights(lumen.empty([2, 3], device="meta"))
+
+    def step(m, a):
+        a += 1.0
+        m.w[0] = 5.0
+        return a * 1.0
+
+    step = lumen.compile(step, device=device)
+    step(m, lumen.empty([3], device="meta"))
+    m.load_state_dict({"w": lumen.from_numpy(np.zeros((2, 3), np.float32))})
+    try:
+        a = lumen.from_numpy(np.zeros(3, np.float32)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    step(m, a)
+    step(m, a)
+    assert lumen.to_numpy(a).tolist() == [2.0] * 3
+    assert lumen.to_numpy(m.w._placed(device)).tolist() == [[5.0] * 3, [0.0] * 3]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gradients_through_inplace_ops(device):
+    """In-place ops differentiate as their out-of-place ones: ``y = x * 2;
+    y *= x; y[0] = z``: d sum(y)/dx = 4x but at 0 (overwritten), and dz = 1."""
+    rng = np.random.default_rng(1)
+    x, z = rng.standard_normal(4), rng.standard_normal(())
+
+    def loss(x, z):
+        y = x * 2.0
+        y *= x
+        y[0] = z
+        return F.sum(y)
+
+    gx, gz = (np.array(g) for g in _run(lumen.grad(loss, (0, 1)), x, np.array([z]).reshape(()), device=device))
+    want = 4 * x.astype(np.float32)
+    want[0] = 0
+    np.testing.assert_allclose(gx, want, rtol=1e-6)
+    np.testing.assert_allclose(gz, 1.0)

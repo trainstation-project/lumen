@@ -821,6 +821,121 @@ class TracedTensor:
             self._var, self._seen = value.var, base._version
         return self
 
+    # -- in place (functionalized: each an out-of-place op, then ``copy_``) --
+
+    def _assign(self, value, op):
+        """Assign ``value``, ``op`` of it computed out of place, as torch's
+        in-place ``op``: of its shape (the other operand broadcast to it,
+        never it to the other's) and dtype."""
+        if value.shape != self.shape:
+            raise RuntimeError(
+                f"{op}: output with shape {list(self.shape)} doesn't match the broadcast shape {list(value.shape)}"
+            )
+        if value.dtype != self.dtype:
+            raise TypeError(f"{op}: result type {value.dtype} can't be cast to the desired output type {self.dtype}")
+        return self.copy_(value)
+
+    def add_(self, other, alpha=1):
+        return self._assign(self + (other if alpha == 1 else other * alpha), "add_")
+
+    def sub_(self, other, alpha=1):
+        return self._assign(self - (other if alpha == 1 else other * alpha), "sub_")
+
+    def mul_(self, other):
+        return self._assign(self * other, "mul_")
+
+    def div_(self, other):
+        return self._assign(self / other, "div_")
+
+    def neg_(self):
+        return self._assign(-self, "neg_")
+
+    def exp_(self):
+        return self._assign(prims.exp(_require_float(self, "exp_")), "exp_")
+
+    def log_(self):
+        return self._assign(prims.log(_require_float(self, "log_")), "log_")
+
+    def sqrt_(self):
+        return self._assign(prims.sqrt(_require_float(self, "sqrt_")), "sqrt_")
+
+    def tanh_(self):
+        return self._assign(prims.tanh(_require_float(self, "tanh_")), "tanh_")
+
+    def sigmoid_(self):
+        return self._assign(prims.logistic(_require_float(self, "sigmoid_")), "sigmoid_")
+
+    def relu_(self):
+        return self._assign(_elementwise(prims.max, self, 0), "relu_")
+
+    def clamp_(self, min=None, max=None):
+        if min is None and max is None:
+            raise RuntimeError("clamp_: at least one of 'min' or 'max' must not be None")
+        value = self if min is None else _elementwise(prims.max, self, min)
+        value = value if max is None else _elementwise(_min, value, max)
+        return self._assign(value, "clamp_")
+
+    def clamp_min_(self, min):
+        return self.clamp_(min=min)
+
+    def clamp_max_(self, max):
+        return self.clamp_(max=max)
+
+    def zero_(self):
+        return self.fill_(False if self.dtype == "bool" else 0)
+
+    def fill_(self, value):
+        value = _as_tensor(value, self.dtype, "fill_")
+        if value.shape != ():
+            raise RuntimeError(
+                f"fill_ only supports 0-dimension value tensor but got tensor with {value.ndim} dimensions."
+            )
+        return self._assign(_broadcast_to(value, self.shape), "fill_")
+
+    def masked_fill_(self, mask, value):
+        """``value`` where ``mask`` (a bool tensor broadcast to it)."""
+        mask = _lift(mask)
+        if not isinstance(mask, TracedTensor) or mask.dtype != "bool":
+            raise TypeError("masked_fill_ only supports boolean masks")
+        value = _broadcast_to(_as_tensor(value, self.dtype, "masked_fill_"), self.shape)
+        mask = _broadcast_to(mask, _broadcast_shapes(mask.shape, self.shape))
+        return self._assign(prims.select(mask, value, self), "masked_fill_")
+
+    # ``x += y``: in place (torch's), not ``x = x + y``.
+    def __iadd__(self, other):
+        return self.add_(other)
+
+    def __isub__(self, other):
+        return self.sub_(other)
+
+    def __imul__(self, other):
+        return self.mul_(other)
+
+    def __itruediv__(self, other):
+        return self.div_(other)
+
+    def __setitem__(self, key, value):
+        """``x[key] = value``: the indexed view of it assigned ``value`` (a
+        Python scalar, or a tensor of its dtype broadcast to the view)."""
+        view = self[key]
+        value = _as_tensor(value, self.dtype, "index assignment")
+        if value.dtype != self.dtype:
+            raise TypeError(f"index assignment: got a {value.dtype} value for a {self.dtype} tensor")
+        # As torch: the value's leading size-1 dimensions dropped, then it
+        # broadcast to the view.
+        shape = value.shape
+        while len(shape) > view.ndim and shape[0] == 1:
+            shape = shape[1:]
+        try:
+            fits = len(shape) <= view.ndim and _broadcast_shapes(shape, view.shape) == view.shape
+        except RuntimeError:
+            fits = False
+        if not fits:
+            raise RuntimeError(
+                f"shape mismatch: value tensor of shape {list(value.shape)} cannot be broadcast to indexing result of shape {list(view.shape)}"
+            )
+        view.copy_(_broadcast_to(value.reshape(shape), view.shape))
+
     def backward(self, gradient=None):
         """Its gradient (``gradient``: its cotangent; for a scalar, 1 by
         default) with respect to the traced function's tensor arguments and
