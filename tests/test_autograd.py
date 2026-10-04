@@ -395,15 +395,13 @@ def _written_attention(q, k, v):
     "attention, shapes",
     [
         (_written_attention, [(1, 12, 2, 16)] * 3),
-        (
-            lambda q, k, v: F.flash_attention(q, k, v, is_causal=True),
-            [(2, 9, 4, 8), (2, 9, 2, 8), (2, 9, 2, 8)],
-        ),
+        (lambda q, k, v: F.naive_attention(q, k, v, is_causal=True), [(2, 9, 4, 8), (2, 9, 2, 8), (2, 9, 2, 8)]),
     ],
     ids=["written out", "causal grouped-query"],
 )
 def test_attention_gradient_is_flash_attentions(attention, shapes):
-    """Before autodiff, an attention (however written) becomes one node whose
+    """Before autodiff, an attention written as primitives (out by hand,
+    F.naive_attention) becomes one node whose
     backward is FlashAttention-2's (lumen/autograd/attention.py): its
     log-sum-exp in the graph; the gradient agrees with autodiff of the
     primitives as traced (``flash_attention`` off)."""

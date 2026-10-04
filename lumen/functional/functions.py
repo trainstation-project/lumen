@@ -69,8 +69,6 @@ __all__ = [
     "rms_norm",
     # contractions
     "matmul",
-    "flash_attention",
-    "naive_attention",
 ]
 
 
