@@ -59,7 +59,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         // a block holding it would not know.
         true => {
             let packable: Vec<bool> = (0..options.packable.len())
-                .map(|i| options.packable[i] && !options.donate.contains(&i))
+                .map(|i| {
+                    let donated = options.donate.contains(&i)
+                        || options.donate_into.iter().any(|&(j, _)| j == i);
+                    options.packable[i] && !donated
+                })
                 .collect();
             merge_dots(graph, &packable)
         }
@@ -175,6 +179,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let plan = PlanOptions {
         scratch: Some(scratch_bytes),
         donate: options.donate.clone(),
+        donate_into: options.donate_into.clone(),
         parameters,
         views: dot_views(&fused),
         scalars,

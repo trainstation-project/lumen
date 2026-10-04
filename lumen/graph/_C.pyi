@@ -52,9 +52,13 @@ class Plan:
         donate: Sequence[int] = (),
         parameters: Optional[Sequence[int]] = None,
         packable: Sequence[int] = (),
+        scalars: Sequence[int] = (),
+        donate_into: Sequence[tuple[int, int]] = (),
     ) -> None:
         """Fused where ``device`` fuses (unless ``fuse`` is false), with outputs
-        written into the inputs at positions ``donate`` where they fit. With
+        written into the inputs at positions ``donate`` where they fit, and
+        output ``k`` alone into input ``i`` for each ``(i, k)`` of
+        ``donate_into`` where it fits. With
         ``parameters`` (input positions), an executable that owns its memory
         (``run_in``), those inputs its parameters, the ``packable`` ones of
         them packed into blocks where dots merge (``packed``)."""

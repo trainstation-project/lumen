@@ -35,6 +35,8 @@ pub struct Options {
     /// Inputs the caller donates (JAX: `donate_argnums`; see
     /// [`PlanOptions::donate`]).
     pub donate: Vec<usize>,
+    /// Inputs donated to one output each ([`PlanOptions::donate_into`]).
+    pub donate_into: Vec<(usize, usize)>,
     /// An executable that owns its memory, these inputs its parameters
     /// ([`PlanOptions::parameters`]).
     pub parameters: Option<Vec<bool>>,
@@ -51,6 +53,7 @@ impl Default for Options {
         Options {
             config: config::config(),
             donate: Vec::new(),
+            donate_into: Vec::new(),
             parameters: None,
             packable: Vec::new(),
             scalars: Vec::new(),
@@ -76,6 +79,7 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
             let plan = PlanOptions {
                 scratch: None,
                 donate: options.donate.clone(),
+                donate_into: options.donate_into.clone(),
                 parameters: options.parameters.clone(),
                 views: Vec::new(),
                 // The host executor reads every input in place.

@@ -121,11 +121,36 @@ def test_dynamic_update_slice_in_place():
     # x * 2 read later: copied, kept.
     plan = _plan(lambda x, u, i: (prims.dynamic_update_slice(x * 2.0, u, (i, 0)), x * 2.0 + 1.0), *shapes)
     assert "out0:f32[4,6] = dynamic_update_slice ws+" in plan, plan
+    # A reshape of x * 2 (another name for its memory) read later: copied.
+    plan = _plan(
+        lambda x, u, i: (lambda e: (prims.dynamic_update_slice(e, u, (i, 0)), e.reshape(24) * 3.0))(x * 2.0), *shapes
+    )
+    assert "out0:f32[4,6] = dynamic_update_slice ws+" in plan, plan
     # An input: in place only donated.
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x, u, (i, 0)), *shapes)
     assert "out0:f32[4,6] = dynamic_update_slice in0 " in plan, plan
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x, u, (i, 0)), *shapes, donate=[0])
     assert "in0:f32[4,6] = dynamic_update_slice in0 " in plan, plan
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_operand_read_after_its_update(device):
+    """An operand (or a reshape of it) read after its update keeps its old
+    value: the update is written into a copy."""
+    rng = np.random.default_rng(2)
+    x, u = rng.standard_normal((4, 6)).astype(np.float32), rng.standard_normal((1, 6)).astype(np.float32)
+    xt, ut = _tensor(x, device), _tensor(u, device)
+    i = _tensor(np.array([2], np.int32), device)
+
+    def f(x, u, i):
+        e = x * 2.0
+        return prims.dynamic_update_slice(e, u, (i.reshape(()), 0)), e.reshape(24) * 3.0
+
+    updated, later = (lumen.to_numpy(t) for t in lumen.compile(f)(xt, ut, i))
+    want = 2 * x
+    want[2] = u[0]
+    np.testing.assert_allclose(updated, want, rtol=1e-6)
+    np.testing.assert_allclose(later, 6 * x.reshape(24), rtol=1e-6)
 
 
 class _Cache(lumen.nn.Module):
