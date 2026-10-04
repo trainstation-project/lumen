@@ -147,6 +147,11 @@ impl PyGraph {
         self.inner.outputs().to_vec()
     }
 
+    /// See [`crate::graph::Graph::precision_warnings`].
+    fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
+        self.inner.precision_warnings()
+    }
+
     /// The nodes in order, as dicts: `primitive` (its name), `text` (with
     /// its parameters), `fusion` (see [`primitive_dict`]), and the `inputs`
     /// and `output` values.

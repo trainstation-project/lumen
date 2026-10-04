@@ -2,6 +2,8 @@
 traced tensors, and the strict primitives (lumen/graph/)."""
 
 import dataclasses
+import re
+import warnings
 
 import numpy as np
 import pytest
@@ -1257,3 +1259,34 @@ def test_matmul_takes_accum_and_output_dtypes():
         lumen.make_graph(lambda x, y: F.matmul(x, y))(x, y)
     a, b = (lumen.ones(s, dtype="bfloat16") for s in ([4, 8], [8, 3]))
     assert lumen.compile(lambda x, y: F.matmul(x, y, "float32", "float32"))(a, b).dtype == "float32"
+
+
+def test_rounding_a_contraction_then_widening_it_warns():
+    """A matmul or attention's scores output in bf16 (accumulated in
+    float32) and cast back to float32, through a scale, warns: outputting
+    float32 is more accurate. Outputting float32, or not widening, does
+    not."""
+    x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
+
+    def scores(x):
+        s = (x @ x.t()) * 0.5
+        return s.float()
+
+    # At the line computing the matmul, naming the cast's.
+    with pytest.warns(UserWarning, match=rf"cast at {re.escape(__file__)}:\d+") as record:
+        lumen.make_graph(scores)(x)
+    (w,) = record
+    assert (w.filename, w.lineno) == (__file__, scores.__code__.co_firstlineno + 1)
+    with pytest.warns(
+        UserWarning,
+        match=r"dot_general\(bf16\[4,8\], bf16\[8,4\]\) -> bf16\[4,4\] accumulates in f32 but outputs bf16, then dot_general → mul → convert_element_type",
+    ):
+        lumen.make_graph(lambda x: ((x @ x.t()) * 0.5).float())(x)
+    with pytest.warns(UserWarning, match="output_dtype=f32"):
+        lumen.compile(lambda x: F.softmax((x @ x.t()).float(), -1))(x)
+    q = lumen.empty([1, 4, 2, 8], dtype="bfloat16", device="meta")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        lumen.make_graph(lambda x: F.matmul(x, x.t(), "float32", "float32") * 0.5)(x)
+        lumen.make_graph(lambda x: F.relu(x @ x.t()))(x)
+        lumen.make_graph(lambda q: F.scaled_dot_product_attention(q, q, q))(q)

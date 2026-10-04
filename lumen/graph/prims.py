@@ -44,7 +44,9 @@ def bind(name, *operands, **params):
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")
-    return tracer.TracedTensor(graph, graph.apply(name, [x.var for x in operands], params))
+    var = graph.apply(name, [x.var for x in operands], params)
+    tracer._record_source(var)
+    return tracer.TracedTensor(graph, var)
 
 
 def add(x, y):
