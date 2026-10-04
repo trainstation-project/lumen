@@ -371,3 +371,14 @@ def test_tensor_backward():
     np.testing.assert_allclose(lumen.to_numpy(got), np.exp(x) * (1 + c))
     with pytest.raises(RuntimeError, match="non-scalar"):
         lumen.make_graph(lambda x: F.exp(x).backward())(lumen.from_numpy(x))
+
+
+def test_named_parameters_of_compiled_results():
+    """A module a compiled function returns lists each of its weights,
+    though they share the function's workspace (named_parameters tells
+    tensors apart, not storages)."""
+    model = _MLP(lumen.empty([4, 8], device="meta"), lumen.empty([8, 3], device="meta"))
+    g = lumen.compile(lumen.grad(lambda m, x: m(x)), device="cpu")(model, lumen.empty([2, 4], device="meta"))
+    assert [p for p, _ in g.named_parameters()] == ["w1", "w2"]
+    shared = _MLP(model.w1, model.w1)
+    assert [p for p, _ in shared.named_parameters()] == ["w1"]

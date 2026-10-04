@@ -43,10 +43,12 @@ class Module:
     def named_parameters(self):
         """``(path, weight)`` for each weight, recursively, in field order
         (``layers.0.w1``); a tensor in several fields is listed once."""
+        # By tensor, not storage: a compiled function's results share its
+        # workspace's.
         seen = set()
         for path, t in _leaves(self, ""):
-            if t.storage_id not in seen:
-                seen.add(t.storage_id)
+            if id(t) not in seen:
+                seen.add(id(t))
                 yield path, t
 
     def parameters(self):
