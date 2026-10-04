@@ -22,7 +22,7 @@ __all__ = [
     "sqrt",
     "tanh",
     "logistic",
-    "convert_element_type",
+    "cast",
     "select",
     "reduce_sum",
     "reduce_max",
@@ -103,8 +103,8 @@ def logistic(x):
     return bind("logistic", x)
 
 
-def convert_element_type(x, new_dtype):
-    return bind("convert_element_type", x, new_dtype=new_dtype)
+def cast(x, new_dtype):
+    return bind("cast", x, new_dtype=new_dtype)
 
 
 def select(pred, on_true, on_false):

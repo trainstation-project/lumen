@@ -815,7 +815,7 @@ mod to_dtype {
     use crate::tensor::dtype::bf16;
     use crate::{DType, Device, Tensor};
 
-    /// A conversion as `convert_element_type` converts (floats round,
+    /// A conversion as `cast` converts (floats round,
     /// integers truncate toward zero), on the tensor's device; the same
     /// tensor when the dtype does not change; types alone on meta.
     #[test]

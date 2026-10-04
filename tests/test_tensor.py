@@ -188,7 +188,7 @@ def test_ones_is_float32_by_default_like_torch():
 
 def test_to_converts_dtypes_and_moves():
     """``to(device=None, dtype=None)``: a conversion as
-    ``convert_element_type`` converts, on the tensor's device; the same
+    ``cast`` converts, on the tensor's device; the same
     storage when nothing changes."""
     x = lumen.tensor([1.0, 2.5, -3.7, 1e6])
     b = x.to(dtype=lumen.bfloat16)

@@ -12,13 +12,10 @@
 //! its fusion computes its input (XLA's reduce input fusion), and its
 //! consumers read its output. Contractions are never fused.
 
-use std::collections::BTreeSet;
-use std::sync::{Mutex, PoisonError};
-
 use super::diamonds::Row;
 use crate::DType;
 use crate::compiler::CompilerConfig;
-use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
 const MAX_INPUTS: usize = 29;
@@ -40,7 +37,7 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Sqrt
             | Tanh
             | Logistic
-            | ConvertElementType { .. }
+            | Cast { .. }
             | Select
             | Reshape { .. }
             | BroadcastInDim { .. }
@@ -366,8 +363,7 @@ pub(crate) fn fuse(
                 let body = body(graph, members, reads, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
-                let label = members.iter().map(|&m| nodes[m].primitive.name());
-                let label = intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
+                let label = label(graph, &producer, members);
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
                 let out = out.expect("a fused graph is typed as the original");
@@ -392,18 +388,22 @@ pub(crate) fn fuse(
     fused
 }
 
-/// `label` as a `&'static str`, as profiled names are: each distinct label
-/// is leaked once, however many graphs fuse it.
-pub(super) fn intern(label: String) -> &'static str {
-    static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
-    let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&interned) = labels.get(label.as_str()) {
-        return interned;
-    }
-    let interned: &'static str = Box::leak(label.into_boxed_str());
-    labels.insert(interned);
-    interned
+/// A fusion's label (as profiled): its `members`' labels, leaving out the
+/// constants (`full → broadcast_in_dim`, literals in its kernel) unless
+/// they are all it computes.
+pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
+    let nodes = graph.nodes();
+    let names = |all: bool| -> Vec<&str> {
+        members
+            .iter()
+            .filter(|&&m| all || !constant(graph, producer, nodes[m].output))
+            .map(|&m| graph.label(&nodes[m]))
+            .collect()
+    };
+    let shown = names(false);
+    intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
+
 
 /// The nodes of the fusion rooted at node `root_node` and the values it
 /// reads, each in graph order: the root and, from it, every fusible
@@ -506,7 +506,7 @@ pub(super) fn elementwise(p: &Primitive) -> bool {
             | Sqrt
             | Tanh
             | Logistic
-            | ConvertElementType { .. }
+            | Cast { .. }
             | Select
     )
 }

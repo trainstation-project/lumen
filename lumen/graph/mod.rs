@@ -12,7 +12,9 @@ pub(crate) mod python;
 #[cfg(test)]
 pub(crate) mod tests;
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::{Mutex, PoisonError};
 
 pub use plan::{Plan, PlanOptions};
 pub use primitive::{FUSION_SEPARATOR, Primitive};
@@ -126,6 +128,19 @@ impl Graph {
         &self.outputs
     }
 
+    /// What `node` is profiled as: its primitive's name; a cast's, with
+    /// its dtypes: `cast(float32 -> bfloat16)`.
+    pub fn label(&self, node: &Node) -> &'static str {
+        match node.primitive {
+            Primitive::Cast { new_dtype } => intern(format!(
+                "cast({} -> {})",
+                self.types[node.inputs[0]].dtype.full_name(),
+                new_dtype.full_name()
+            )),
+            ref p => p.name(),
+        }
+    }
+
     /// A warning for each dot or sum whose result is rounded to a narrower
     /// dtype than it accumulates in, then cast back up (through primitives
     /// keeping that dtype: a scale, a reshape): the rounding loses
@@ -156,9 +171,9 @@ impl Graph {
                 for &r in &readers[v] {
                     let (reader, wide) = (&self.nodes[r], self.types[self.nodes[r].output].dtype);
                     let mut path = path.clone();
-                    path.push(reader.primitive.name());
+                    path.push(self.label(reader));
                     match reader.primitive {
-                        ConvertElementType { .. } if wide.size_of() > narrow.size_of() => {
+                        Cast { .. } if wide.size_of() > narrow.size_of() => {
                             let (name, fix) = match node.primitive {
                                 DotGeneral { .. } => (
                                     "dot_general",
@@ -191,6 +206,19 @@ impl Graph {
         }
         warnings
     }
+}
+
+/// `label` as a `&'static str`, as profiled names are: each distinct label
+/// is leaked once, however many graphs have it.
+pub(crate) fn intern(label: String) -> &'static str {
+    static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&interned) = labels.get(label.as_str()) {
+        return interned;
+    }
+    let interned: &'static str = Box::leak(label.into_boxed_str());
+    labels.insert(interned);
+    interned
 }
 
 /// The graph as text, in the style of a jaxpr:

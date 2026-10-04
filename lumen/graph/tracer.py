@@ -614,7 +614,7 @@ class TracedTensor:
     # -- dtype conversion --------------------------------------------------
 
     def to(self, dtype):
-        return self if dtype == self.dtype else prims.convert_element_type(self, dtype)
+        return self if dtype == self.dtype else prims.cast(self, dtype)
 
     def type_as(self, other):
         return self.to(other.dtype)

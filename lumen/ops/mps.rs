@@ -77,7 +77,7 @@ pub(crate) fn encode(
         | Sqrt
         | Tanh
         | Logistic
-        | ConvertElementType { .. }
+        | Cast { .. }
         | Select => super::elementwise::mps::encode,
         ReduceSum { .. } | ReduceMax { .. } | Concatenate { .. } => unreachable!("encoded above"),
         DotGeneral { .. } => super::dot_general::mps::encode,

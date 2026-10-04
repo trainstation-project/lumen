@@ -333,7 +333,7 @@ impl Plan {
             .zip(scratch_at)
             .map(|(node, scratch)| Step {
                 primitive: node.primitive.clone(),
-                label: node.primitive.name(),
+                label: graph.label(node),
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
                 views: node.inputs.iter().map(|&v| view[v].clone()).collect(),
                 output: slot(node.output),
@@ -765,7 +765,7 @@ fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
                 | Sqrt
                 | Tanh
                 | Logistic
-                | ConvertElementType { .. }
+                | Cast { .. }
                 | Select
         )
     };

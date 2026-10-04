@@ -5,7 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use super::attention::{Access, Attention, Score};
 use super::fusion;
 use crate::compiler::CompilerConfig;
-use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
@@ -87,8 +87,8 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
 /// The names a reduction fusion's two launches (a split reduction's) are
 /// profiled as: the primitives each computes, as the fusion's label names
 /// all of them. The first, the reduction's input and the reduction (into
-/// partials); the second, the reduction (of the partials) and its epilogue,
-/// with the constants it reads.
+/// partials); the second, the reduction (of the partials) and its epilogue
+/// (without its constants, as [`fusion::label`]).
 pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
     let root = reduction_root(body).expect("a reduction fusion");
     let nodes = body.nodes();
@@ -109,12 +109,10 @@ pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
         }
     }
     let names = |second: bool| {
-        let names = nodes
-            .iter()
-            .enumerate()
-            .filter(|&(i, n)| n.output == root.output || epilogue[i] == second);
-        let names: Vec<&str> = names.map(|(_, n)| n.primitive.name()).collect();
-        fusion::intern(names.join(FUSION_SEPARATOR))
+        let members: Vec<usize> = (0..nodes.len())
+            .filter(|&i| nodes[i].output == root.output || epilogue[i] == second)
+            .collect();
+        fusion::label(body, &producer, &members)
     };
     (names(false), names(true))
 }
@@ -766,7 +764,7 @@ impl<'a> Emitter<'a> {
                         let op = functor(&node.primitive);
                         format!("{op}::apply({x})")
                     }
-                    ConvertElementType { .. } => {
+                    Cast { .. } => {
                         format!("convert_value<{t}>({})", self.value(node.inputs[0], idx))
                     }
                     Select => {

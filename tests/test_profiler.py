@@ -284,13 +284,14 @@ def test_launches_are_named_after_what_they_compute():
         x = lumen.ones([1024, 1024], device="mps").to(dtype="bfloat16")
     except RuntimeError as e:
         pytest.skip(str(e))
-    step = sep.join(["convert_element_type", "reduce_sum", "convert_element_type"])
+    up, down = "cast(bfloat16 -> float32)", "cast(float32 -> bfloat16)"
+    step = sep.join([up, "reduce_sum", down])
     for f, launches in [
         (
             lambda a: F.sum(a.float()).bfloat16(),
             [
-                (sep.join(["convert_element_type", "reduce_sum"]), ("bfloat16", [1024, 1024]), "float32"),
-                (sep.join(["reduce_sum", "convert_element_type"]), "float32", ("bfloat16", [])),
+                (sep.join([up, "reduce_sum"]), ("bfloat16", [1024, 1024]), "float32"),
+                (sep.join(["reduce_sum", down]), "float32", ("bfloat16", [])),
             ],
         ),
         (lambda a: F.sum(a.float(), -1).bfloat16(), [(step, ("bfloat16", [1024, 1024]), ("bfloat16", [1024]))]),

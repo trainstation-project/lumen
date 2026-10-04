@@ -309,7 +309,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             };
             Float(x.iter().map(|&a| round(f(a), dtype)).collect())
         }
-        ConvertElementType { .. } => match (args[0], dtype.is_float()) {
+        Cast { .. } => match (args[0], dtype.is_float()) {
             (Int(x), true) => Float(x.iter().map(|&a| round(a as f64, dtype)).collect()),
             (Int(x), false) => Int(x.iter().map(|&a| wrap(a, dtype)).collect()),
             (Float(x), true) => Float(x.iter().map(|&a| round(a, dtype)).collect()),
