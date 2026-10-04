@@ -339,3 +339,21 @@ def test_attention_epilogue_fuses_in_training(sq):
         lumen.config.compiler.reset()
     for g, w in zip(got, (loss, *grads)):
         np.testing.assert_array_equal(g, lumen.to_numpy(w))
+
+
+@pytest.mark.mps
+def test_log_sum_exp_is_written_only_for_training():
+    """The forward kernel writes each row's log-sum-exp only when a backward
+    reads it: without one, it is pruned before compiling."""
+    m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 64, 4, 32], [1, 64, 2, 32], [1, 64, 2, 32])]
+
+    def forward(q, k, v):
+        return F.flash_attention(q, k, v, is_causal=True)
+
+    def source(f):
+        plan = lumen.graph.Plan(lumen.make_graph(f)(*m), "mps")
+        (step,) = [s for s in plan.steps() if s["label"] == "flash_attention"]
+        return step["fusion"]["source"]
+
+    assert "float *lse" not in source(forward)
+    assert "float *lse" in source(lumen.grad(lambda q, k, v: F.sum(forward(q, k, v).float()), (0, 1, 2)))
