@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use super::attention::{Access, Attention, Score};
+use super::attention::{Access, Attention, Backward, Score};
 use super::fusion;
 use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -975,44 +975,14 @@ fn constant(dtype: DType, value: Scalar) -> String {
 
 /// The kernel of an attention fusion (`attention.rs`): its name and Metal
 /// source, instantiating `flash_attention`, or for few queries
-/// `attention_decode` (`attention.metal`), with an indexer of its
+/// `attention_decode` (`ops/attention/mps.metal`), with an indexer of its
 /// operands' strides. Its buffers: the body's inputs, then `out`.
 pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
     let input = |base: Var| {
         let k = body.inputs().iter().position(|&v| v == base);
         format!("in{}", k.expect("an input of the body"))
     };
-    // Each operand's batch index's offset (its index split over the batch
-    // dimensions, the last fastest), and its row and column strides.
-    let index = |name: &str, acc: &Access| {
-        let up = name.to_uppercase();
-        let mut code = format!(
-            "    static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;\n    inline ulong {name}(uint b) const {{\n        ulong o = {}ul;\n",
-            acc.row, acc.col, acc.offset
-        );
-        if !a.batch.is_empty() {
-            code += "        uint rest = b;\n";
-        }
-        for (k, (&size, &(stride, div))) in a.batch.iter().zip(&acc.batch).enumerate().rev() {
-            let last = k == 0;
-            let idx = match last {
-                true => "rest".to_string(),
-                false => format!("(rest % {size}u)"),
-            };
-            if stride != 0 {
-                let idx = match div {
-                    1 => idx,
-                    _ => format!("({idx} / {div}u)"),
-                };
-                writeln!(code, "        o += ulong({idx}) * {stride}ul;").unwrap();
-            }
-            if !last {
-                writeln!(code, "        rest /= {size}u;").unwrap();
-            }
-        }
-        code += "        return o;\n    }";
-        code
-    };
+    let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
     let ix = format!(
         "struct NAME_ix {{\n{}\n{}\n{}\n{}\n}};\n\n",
         index("q", &a.q),
@@ -1063,29 +1033,25 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         "device {w} *out [[buffer({})]]",
         body.inputs().len()
     ));
+    // The log-sum-exp, the fusion's second output (a training forward's).
+    let lse = a.lse.is_some();
+    if lse {
+        params.push(format!("device float *lse [[buffer({})]]", body.inputs().len() + 1));
+    }
+    let lse_arg = if lse { "lse" } else { "nullptr" };
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
-    // Each score as traced: rounded, cast and scaled, each in its dtype.
-    let mut score = "s".to_string();
-    for step in &a.scores {
-        score = match *step {
-            Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
-            Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
-        };
-    }
-    let score = format!(
-        "struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n"
-    );
+    let score = score_functor(&a.scores);
     let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
         true => format!(
-            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, NAME_ix(), {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
             format!(
-                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
@@ -1093,6 +1059,113 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         "{ix}{score}{epilogue}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
         params.join(", ")
     ))
+}
+
+/// An operand's indexer method, `name(b)`: its batch index `b`'s offset
+/// (`b` split over the `batch` dimensions, the last fastest); and its row
+/// and column strides, `NAME_ROW` and `NAME_COL`.
+fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
+    let up = name.to_uppercase();
+    let mut code = format!(
+        "    static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;\n    inline ulong {name}(uint b) const {{\n        ulong o = {}ul;\n",
+        acc.row, acc.col, acc.offset
+    );
+    if !batch.is_empty() {
+        code += "        uint rest = b;\n";
+    }
+    for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate().rev() {
+        let last = k == 0;
+        let idx = match last {
+            true => "rest".to_string(),
+            false => format!("(rest % {size}u)"),
+        };
+        if stride != 0 {
+            let idx = match div {
+                1 => idx,
+                _ => format!("({idx} / {div}u)"),
+            };
+            writeln!(code, "        o += ulong({idx}) * {stride}ul;").unwrap();
+        }
+        if !last {
+            writeln!(code, "        rest /= {size}u;").unwrap();
+        }
+    }
+    code += "        return o;\n    }";
+    code
+}
+
+/// The functor taking a score (the dot's value, in float) as the traced
+/// program does to the softmax's input: `scores`' roundings, casts and
+/// scale, each in its dtype.
+fn score_functor(scores: &[Score]) -> String {
+    let mut score = "s".to_string();
+    for step in scores {
+        score = match *step {
+            Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
+            Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
+        };
+    }
+    format!("struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n")
+}
+
+/// The kernel of an attention backward's fusion (`attention.rs`'s
+/// [`Backward`]): its name and Metal source, instantiating
+/// `flash_attention_dkdv` (a fusion of dV and dK: its buffers the body's
+/// inputs, then dV and dK) or `flash_attention_dq` (then dQ).
+pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, String) {
+    let input = |base: Var| {
+        let k = body.inputs().iter().position(|&v| v == base);
+        format!("in{}", k.expect("an input of the body"))
+    };
+    let ix = format!(
+        "struct NAME_ix {{\n{}\n}};\n\n",
+        [("q", &b.q), ("k", &b.k), ("v", &b.v), ("g", &b.d_o), ("lse", &b.lse), ("delta", &b.delta)]
+            .iter()
+            .map(|(name, acc)| ix_method(name, acc, &b.batch))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let score = score_functor(&b.scores);
+    let t = metal_type(b.dtype);
+    let n = body.inputs().len();
+    let mut params: Vec<String> = body
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| format!("device const {} *in{k} [[buffer({k})]]", metal_type(body.type_of(v).dtype)))
+        .collect();
+    let dkdv = b.dv.is_some();
+    let outs: &[&str] = if dkdv { &["dv", "dk"] } else { &["dq"] };
+    for (k, out) in outs.iter().enumerate() {
+        params.push(format!("device float *{out} [[buffer({})]]", n + k));
+    }
+    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
+    let (q, k, v, g) = (input(b.q.base), input(b.k.base), input(b.v.base), input(b.d_o.base));
+    let (lse, delta) = (input(b.lse.base), input(b.delta.base));
+    let (causal, offset) = (b.causal.is_some(), b.causal.unwrap_or(0));
+    let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
+    let ds_scale = constant(DType::F32, Scalar::Float(b.ds_scale));
+    let rows = backward_block(b);
+    let call = match dkdv {
+        true => format!(
+            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+        ),
+        false => format!(
+            "threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];\n    flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+        ),
+    };
+    named(format!(
+        "{ix}{score}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        params.join(", ")
+    ))
+}
+
+/// The rows (queries, or keys) an attention backward's threadgroup stages
+/// at once: the most of 32, 16 or 8 whose two blocks fit in 28 KB of
+/// threadgroup memory.
+fn backward_block(b: &Backward) -> usize {
+    let bytes = |n: usize| n * (b.h + b.hv) * b.dtype.size_of() + 2 * n * 4;
+    [32, 16, 8].into_iter().find(|&n| bytes(n) <= 28 << 10).unwrap_or(8)
 }
 
 /// Whether attention `a` takes the decoding kernel: few queries (a

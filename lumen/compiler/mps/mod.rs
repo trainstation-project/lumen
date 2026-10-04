@@ -41,7 +41,7 @@ const PRELUDE: &str = concat!(
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps.metal"),
     include_str!("../../ops/dot_general/mps.metal"),
-    include_str!("attention.metal"),
+    include_str!("../../ops/attention/mps.metal"),
 );
 
 /// `graph` canonicalized, fused (as `options.config` says) and planned, its
@@ -70,6 +70,17 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             name
         }),
         false => graph.clone(),
+    };
+    // Its backward as two kernels (dV and dK, dQ), the probabilities
+    // recomputed from the forward's log-sum-exp.
+    let graph = match config.fuse && config.flash_attention {
+        true => attention::fuse_backward(&graph, |body| {
+            let b = attention::backward_of_body(body).expect("an attention backward");
+            let (name, source) = codegen::attention_backward_kernel(body, &b);
+            attention_kernels.insert(name.clone(), source);
+            name
+        }),
+        false => graph,
     };
     let graph = canonicalize_dots(&graph);
     // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
@@ -337,7 +348,20 @@ pub(crate) fn encode(
         };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
+        // Its log-sum-exp, if a training forward computes it.
+        buffers.extend(extra);
         let grid = Grid::Groups([queries, batch, 1]);
+        return launch(name, &buffers, &[], grid, keep, step.label);
+    }
+    // An attention backward: a threadgroup a block of keys (dV and dK) or
+    // of queries (dQ) of each batch index.
+    if let Some(b) = attention::backward_of_body(body) {
+        let batch: usize = b.batch.iter().product();
+        let rows = if b.dv.is_some() { b.sk } else { b.sq };
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        buffers.extend(extra);
+        let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &[], grid, keep, step.label);
     }
     // A contraction with its epilogue: the matmul's launch (on the small
