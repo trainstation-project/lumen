@@ -32,6 +32,8 @@ __all__ = [
     "broadcast_in_dim",
     "transpose",
     "slice",
+    "dynamic_slice",
+    "dynamic_update_slice",
     "concatenate",
     "full",
     "iota",
@@ -169,6 +171,29 @@ def slice(x, start_indices, limit_indices):
     """The elements from ``start_indices`` up to ``limit_indices``
     (exclusive) in each dimension (``lax.slice``, unit strides)."""
     return bind("slice", x, start_indices=tuple(start_indices), limit_indices=tuple(limit_indices))
+
+
+def _start_indices(start_indices):
+    """Start indices as the primitives take them: a scalar each, Python
+    ints as constants of the traced ones' dtype (int32 if none)."""
+    traced = [i for i in start_indices if not isinstance(i, int)]
+    dtype = tracer._lift(traced[0]).dtype if traced else "int32"
+    return [full((), i, dtype) if isinstance(i, int) else i for i in start_indices]
+
+
+def dynamic_slice(x, start_indices, slice_sizes):
+    """The ``slice_sizes`` block of ``x`` at ``start_indices`` (one integer
+    scalar, or int, a dimension, read when it runs), each clamped so the
+    block is inside ``x`` (``lax.dynamic_slice``)."""
+    return bind("dynamic_slice", x, *_start_indices(start_indices), slice_sizes=tuple(slice_sizes))
+
+
+def dynamic_update_slice(x, update, start_indices):
+    """``x`` with the block ``update`` written at ``start_indices`` (as
+    :func:`dynamic_slice`'s) (``lax.dynamic_update_slice``); where nothing
+    reads ``x`` after it, written in ``x``'s memory alone (in place: a
+    donated input's, a weight assigned with ``copy_``)."""
+    return bind("dynamic_update_slice", x, update, *_start_indices(start_indices))
 
 
 def concatenate(operands, dimension):

@@ -90,6 +90,7 @@ pub(crate) fn encode(
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
             super::layout::mps::encode
         }
+        DynamicSlice { .. } | DynamicUpdateSlice => super::dynamic_slice::mps::encode,
         Full { .. } | Iota { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),

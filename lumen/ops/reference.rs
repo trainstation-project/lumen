@@ -244,6 +244,22 @@ fn ravel(idx: impl IntoIterator<Item = usize>, shape: &[usize]) -> usize {
         .fold(0, |flat, (i, n)| flat * n + i)
 }
 
+/// A dynamic slice's start in each dimension of `x`: `indices` (integer
+/// scalars) each clamped so a block of `sizes` is inside `x`, as XLA's.
+fn starts(x: &TensorType, indices: &[&Values], sizes: &[usize]) -> Vec<usize> {
+    indices
+        .iter()
+        .zip(&x.shape)
+        .zip(sizes)
+        .map(|((index, &n), &size)| {
+            let Values::Int(i) = index else {
+                unreachable!("an integer index")
+            };
+            i[0].clamp(0, (n - size) as i128) as usize
+        })
+        .collect()
+}
+
 fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType) -> Values {
     use Primitive::*;
     use Values::{Float, Int};
@@ -367,6 +383,46 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     Float(acc)
                 }
                 _ => unreachable!(),
+            }
+        }
+        DynamicSlice { slice_sizes } => {
+            // Each output element's operand index: its own, from the starts.
+            let x = types[0];
+            let starts = starts(x, &args[1..], slice_sizes);
+            let mut at = Vec::with_capacity(out.numel());
+            if out.numel() > 0 {
+                for_each_index(&out.shape, |idx| {
+                    at.push(ravel(idx.iter().zip(&starts).map(|(i, s)| i + s), &x.shape));
+                });
+            }
+            match args[0] {
+                Int(v) => Int(at.iter().map(|&i| v[i]).collect()),
+                Float(v) => Float(at.iter().map(|&i| v[i]).collect()),
+            }
+        }
+        DynamicUpdateSlice => {
+            // The operand, each update element written at its index from
+            // the starts.
+            let (x, u) = (types[0], types[1]);
+            let starts = starts(x, &args[2..], &u.shape);
+            let mut at = Vec::with_capacity(u.numel());
+            if u.numel() > 0 {
+                for_each_index(&u.shape, |idx| {
+                    at.push(ravel(idx.iter().zip(&starts).map(|(i, s)| i + s), &x.shape));
+                });
+            }
+            match (args[0], args[1]) {
+                (Int(v), Int(w)) => {
+                    let mut v = v.clone();
+                    at.iter().zip(w).for_each(|(&i, &e)| v[i] = e);
+                    Int(v)
+                }
+                (Float(v), Float(w)) => {
+                    let mut v = v.clone();
+                    at.iter().zip(w).for_each(|(&i, &e)| v[i] = e);
+                    Float(v)
+                }
+                _ => unreachable!("an update of the operand's dtype"),
             }
         }
         Cumsum { axis, reverse, .. } => {

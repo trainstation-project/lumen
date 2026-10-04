@@ -133,13 +133,48 @@ impl Plan {
         let is_reshape = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
         let bytes = |v: Var| graph.type_of(v).numel() * graph.type_of(v).dtype.size_of();
 
+        let mut live = vec![false; n];
+        for &v in graph.outputs() {
+            live[v] = true;
+        }
+        for node in graph.nodes().iter().rev() {
+            if live[node.output] {
+                for &v in &node.inputs {
+                    live[v] = true;
+                }
+            }
+        }
+        // Each value's readers (live nodes, by index).
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (t, node) in graph.nodes().iter().enumerate() {
+            if live[node.output] {
+                node.inputs.iter().for_each(|&v| readers[v].push(t));
+            }
+        }
+
         // A reshape's value is the bytes of its operand's root; a viewed
-        // slice's, a view of them.
+        // slice's, a view of them; a dynamic_update_slice's, its operand's,
+        // in place, where nothing reads those after it (nor as its update
+        // or an index) and they are no input's or output's (a donated
+        // input's: below).
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
-        for node in graph.nodes() {
+        for (t, node) in graph.nodes().iter().enumerate() {
             if is_reshape(&node.primitive) {
                 root[node.output] = root[node.inputs[0]];
+            }
+            if let Primitive::DynamicUpdateSlice = node.primitive
+                && live[node.output]
+            {
+                let r = root[node.inputs[0]];
+                let mine = |v: Var| root[v] == r;
+                let free = !graph.inputs().contains(&r)
+                    && !graph.outputs().iter().any(|&o| mine(o))
+                    && !node.inputs[1..].iter().any(|&v| mine(v))
+                    && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&u| u > t));
+                if free {
+                    root[node.output] = r;
+                }
             }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
                 && options.views.contains(&node.output)
@@ -154,18 +189,6 @@ impl Plan {
         }
         let is_view = |v: Var| view[v].is_some();
         let is_fusion_output = |p: &Primitive| matches!(p, Primitive::FusionOutput { .. });
-
-        let mut live = vec![false; n];
-        for &v in graph.outputs() {
-            live[v] = true;
-        }
-        for node in graph.nodes().iter().rev() {
-            if live[node.output] {
-                for &v in &node.inputs {
-                    live[v] = true;
-                }
-            }
-        }
         let nodes: Vec<_> = graph
             .nodes()
             .iter()
@@ -197,12 +220,13 @@ impl Plan {
             }
         }
 
-        // Each root's lifetime, in steps: from the step that writes it to
-        // the last that reads it (the copies run after every other step).
+        // Each root's lifetime, in steps: from the first step that writes it
+        // (an in-place dynamic_update_slice writes it again) to the last that
+        // reads it (the copies run after every other step).
         let mut first = vec![usize::MAX; n];
         let mut last = vec![0; n];
         for (t, node) in nodes.iter().enumerate() {
-            first[root[node.output]] = t;
+            first[root[node.output]] = first[root[node.output]].min(t);
             last[root[node.output]] = t;
             for &v in &node.inputs {
                 last[root[v]] = t;
@@ -236,11 +260,16 @@ impl Plan {
         // Donation: an output goes into a donated input's buffer if it has
         // the input's type, and nothing reads the input after the step that
         // writes the output (which may read it only at the element it
-        // writes).
+        // writes, or as a dynamic_update_slice's operand: in place). An
+        // owned plan's too: a parameter's new value, written there.
         let mut aliases = vec![None; graph.outputs().len()];
         let mut donors: Vec<usize> = options.donate.clone();
         for (k, &v) in graph.outputs().iter().enumerate() {
-            if v != root[v] || buffer[v] != Some(Buffer::Output(k)) {
+            let unplaced = match owned {
+                None => buffer[v] == Some(Buffer::Output(k)),
+                Some(_) => buffer[v].is_none(),
+            };
+            if v != root[v] || !unplaced {
                 continue;
             }
             let fits = |&i: &usize| {
@@ -785,6 +814,8 @@ fn reads_in_place(node: &Node, r: Var, root: &[Var]) -> bool {
                     .filter(|n| n.inputs.contains(&b))
                     .all(|n| elementwise(&n.primitive))
             }),
+        // Its operand alone, in place.
+        DynamicUpdateSlice => node.inputs[1..].iter().all(|&v| root[v] != r),
         p => elementwise(p),
     }
 }

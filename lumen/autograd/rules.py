@@ -115,6 +115,45 @@ def _select_transpose(ct, pred, x, y):
 primitive_jvps[prims.select] = _select_jvp
 primitive_transposes[prims.select] = _select_transpose
 
+
+# Dynamic slices: linear in the operand (and update), their start indices
+# (integers) fixed.
+def _dynamic_slice_jvp(primals, tangents, out, slice_sizes):
+    x, *indices = primals
+    if tangents[0] is None:
+        return None
+    return prims.dynamic_slice(tangents[0], indices, slice_sizes)
+
+
+def _dynamic_slice_transpose(ct, x, *indices, slice_sizes):
+    # The block's cotangent where it was read, zeros elsewhere.
+    return [prims.dynamic_update_slice(_full(x, 0), ct, indices), *[None] * len(indices)]
+
+
+def _dynamic_update_slice_jvp(primals, tangents, out):
+    x, update, *indices = primals
+    tx, tu = tangents[:2]
+    if tx is None and tu is None:
+        return None
+    tx, tu = (t if t is not None else _full(p, 0) for t, p in ((tx, x), (tu, update)))
+    return prims.dynamic_update_slice(tx, tu, indices)
+
+
+def _dynamic_update_slice_transpose(ct, x, update, *indices):
+    # The operand's cotangent but where the update overwrote it; the
+    # update's, the block it was written to.
+    return [
+        prims.dynamic_update_slice(ct, _full(update, 0), indices) if isinstance(x, UndefinedPrimal) else None,
+        prims.dynamic_slice(ct, indices, update.shape) if isinstance(update, UndefinedPrimal) else None,
+        *[None] * len(indices),
+    ]
+
+
+primitive_jvps[prims.dynamic_slice] = _dynamic_slice_jvp
+primitive_transposes[prims.dynamic_slice] = _dynamic_slice_transpose
+primitive_jvps[prims.dynamic_update_slice] = _dynamic_update_slice_jvp
+primitive_transposes[prims.dynamic_update_slice] = _dynamic_update_slice_transpose
+
 # Bilinear: linear in each operand, the other fixed.
 defjvp(prims.mul, lambda t, out, x, y: prims.mul(t, y), lambda t, out, x, y: prims.mul(x, t))
 

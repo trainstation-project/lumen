@@ -78,6 +78,10 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             start_indices: dims("start_indices")?,
             limit_indices: dims("limit_indices")?,
         },
+        "dynamic_slice" => DynamicSlice {
+            slice_sizes: dims("slice_sizes")?,
+        },
+        "dynamic_update_slice" => DynamicUpdateSlice,
         "concatenate" => Concatenate {
             dimension: get("dimension")?.extract()?,
         },
