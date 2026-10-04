@@ -8,6 +8,10 @@
 // within a batch index: query or key i, head dimension d at
 // i * ROW + d * COL).
 //
+// With RAW, the attention's own value is written to `raw` too (at the
+// output's index): with an epilogue, when it is read elsewhere (a training
+// forward's, which the backward reads).
+//
 // With LSE, each query row's log-sum-exp of its scores, m + log(l), is
 // written to `lse` too ([batch, Sq], float): what a training forward saves
 // for the backward (backward.metal).
@@ -52,6 +56,7 @@ template <typename T,
           uint DV,
           uint BK,
           bool CAUSAL,
+          bool RAW,
           bool LSE,
           typename Ix,
           typename Score,
@@ -61,6 +66,7 @@ inline void flash_attention(device const T *q,
                             device const T *k,
                             device const T *v,
                             device Out *out,
+                            device O *raw,
                             device float *lse,
                             Ix ix,
                             uint sq,
@@ -170,6 +176,10 @@ inline void flash_attention(device const T *q,
             uint e0 = row * Ix::O_ROW + d * Ix::O_COL, e1 = row * Ix::O_ROW + (d + 1) * Ix::O_COL;
             out[e0] = epi(O(o.x), ob + e0);
             out[e1] = epi(O(o.y), ob + e1);
+            if (RAW) {
+                raw[ob + e0] = O(o.x);
+                raw[ob + e1] = O(o.y);
+            }
         }
     }
 }
@@ -183,6 +193,7 @@ template <typename T,
           uint D,
           uint DV,
           bool CAUSAL,
+          bool RAW,
           bool LSE,
           typename Ix,
           typename Score,
@@ -192,6 +203,7 @@ inline void attention_decode(device const T *q,
                              device const T *k,
                              device const T *v,
                              device Out *out,
+                             device O *raw,
                              device float *lse,
                              Ix ix,
                              uint sq,
@@ -276,5 +288,8 @@ inline void attention_decode(device const T *q,
         }
         uint e = i * Ix::O_ROW + d * Ix::O_COL;
         out[e] = epi(O(o / total), ob + e);
+        if (RAW) {
+            raw[ob + e] = O(o / total);
+        }
     }
 }

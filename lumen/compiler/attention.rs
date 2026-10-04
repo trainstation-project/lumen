@@ -327,6 +327,11 @@ pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
     attentions(body).into_iter().next()
 }
 
+/// An attention [`fuse`] fuses: it, its epilogue's nodes (in order), its
+/// last node, the buffers its epilogue reads, and whether it writes its own
+/// value too.
+type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
+
 /// `graph` with each attention replaced by a fusion of its nodes (inputs:
 /// the buffers it reads), its kernel named by `kernel`; the nodes it
 /// replaces are left dead. With `epilogues`, the fusion takes the
@@ -342,27 +347,27 @@ pub(crate) fn fuse(
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
-    // Each attention, its epilogue's nodes (in order), its last node, and
-    // the buffers its epilogue reads.
-    let found: Vec<(Attention, Vec<usize>, usize, Vec<Var>)> = attentions(graph)
+    let found: Vec<Fused> = attentions(graph)
         .into_iter()
         .map(|a| {
-            let (mut chain, mut leaves) = match epilogues {
+            let (mut chain, mut leaves, mut kept) = match epilogues {
                 true => m.epilogue(a.root, scalars),
-                false => (Vec::new(), Vec::new()),
+                false => (Vec::new(), Vec::new(), false),
             };
-            // Its log-sum-exp, an output of its fusion, is read after it:
-            // without an epilogue if one would end past a reader of it.
-            let lse_read = |end: usize| {
-                a.lse.is_none_or(|n| m.readers[graph.nodes()[n].output].iter().all(|&r| r > end))
-            };
-            if !lse_read(chain.last().copied().unwrap_or(a.root)) {
-                (chain, leaves) = (Vec::new(), Vec::new());
+            // Its other outputs (its value, if kept; its log-sum-exp) are
+            // read after it: without an epilogue if one would end past a
+            // reader of them.
+            let read_after = |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
+            let end = chain.last().copied().unwrap_or(a.root);
+            let root_read = !kept || read_after(graph.nodes()[a.root].output, end);
+            let lse_read = a.lse.is_none_or(|n| read_after(graph.nodes()[n].output, end));
+            if !root_read || !lse_read {
+                (chain, leaves, kept) = (Vec::new(), Vec::new(), false);
             }
             let end = chain.last().copied().unwrap_or(a.root);
-            (a, chain, end, leaves)
+            (a, chain, end, leaves, kept)
         })
-        .filter(|(a, _, end, _)| {
+        .filter(|(a, _, end, _, _)| {
             a.lse
                 .is_none_or(|n| m.readers[graph.nodes()[n].output].iter().all(|r| r > end))
         })
@@ -378,11 +383,11 @@ pub(crate) fn fuse(
     }
     for (i, node) in nodes.iter().enumerate() {
         // A log-sum-exp after its attention: the fusion's output already.
-        if found.iter().any(|(a, _, end, _)| a.lse == Some(i) && i > *end) {
+        if found.iter().any(|(a, _, end, _, _)| a.lse == Some(i) && i > *end) {
             continue;
         }
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let Some((a, chain, _, leaves)) = found.iter().find(|(_, _, end, _)| *end == i) else {
+        let Some((a, chain, _, leaves, kept)) = found.iter().find(|(_, _, end, _, _)| *end == i) else {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
@@ -396,8 +401,11 @@ pub(crate) fn fuse(
                 bases.push(b);
             }
         }
+        // Its outputs: the epilogue's (or its own) value, its own too if
+        // read elsewhere, its log-sum-exp.
+        let raw = kept.then_some(nodes[a.root].output);
         let lse = a.lse.map(|n| nodes[n].output);
-        let outputs: Vec<Var> = std::iter::once(node.output).chain(lse).collect();
+        let outputs: Vec<Var> = std::iter::once(node.output).chain(raw).chain(lse).collect();
         let body = body_of(graph, &m.producer, &outputs, &bases);
         let name = kernel(&body);
         // Profiled as the attention, then its epilogue's primitives:
@@ -410,10 +418,12 @@ pub(crate) fn fuse(
         map[node.output] = out
             .apply(fusion, &reads)
             .expect("a fusion typed as the attention");
-        if let Some(v) = lse {
+        let fused = map[node.output];
+        for (index, &v) in outputs.iter().enumerate().skip(1) {
             let ty = graph.type_of(v).clone();
-            let lse = Primitive::FusionOutput { index: 1, ty };
-            map[v] = out.apply(lse, &[map[node.output]]).expect("the fusion's output");
+            map[v] = out
+                .apply(Primitive::FusionOutput { index, ty }, &[fused])
+                .expect("the fusion's output");
         }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
@@ -432,19 +442,30 @@ struct Matcher<'a> {
 
 impl<'a> Matcher<'a> {
     /// The epilogue after node `root`: its nodes in order (none: `root`
-    /// alone), and the values its other operands read (the fusion's
-    /// inputs), as [`fuse`] takes it.
-    fn epilogue(&self, root: usize, scalars: &[Var]) -> (Vec<usize>, Vec<Var>) {
+    /// alone), the values its other operands read (the fusion's inputs),
+    /// as [`fuse`] takes it, and whether `root`'s value is read elsewhere
+    /// too (the fusion writes it as well).
+    fn epilogue(&self, root: usize, scalars: &[Var]) -> (Vec<usize>, Vec<Var>, bool) {
         use Primitive::*;
         let nodes = self.graph.nodes();
         let (mut end, mut chain, mut leaves) = (root, Vec::new(), Vec::new());
+        // The attention's own value, if also read elsewhere (a training
+        // step's backward): its earliest reader starts the epilogue.
+        let mut kept = false;
         loop {
             let v = nodes[end].output;
-            let [u] = self.readers[v][..] else { break };
+            let u = match (&self.readers[v][..], end == root) {
+                ([u], _) if !self.output[v] => *u,
+                ([u, ..], true) => {
+                    kept = true;
+                    *u
+                }
+                _ => break,
+            };
             let n = &nodes[u];
             let step =
                 super::elementwise(&n.primitive) || matches!(n.primitive, Reshape { .. });
-            if self.output[v] || !step {
+            if !step {
                 break;
             }
             let mut found = Vec::new();
@@ -463,7 +484,8 @@ impl<'a> Matcher<'a> {
             end = u;
             chain.push(u);
         }
-        (chain, leaves)
+        let kept = kept && !chain.is_empty();
+        (chain, leaves, kept)
     }
 
     /// Whether operand `v` of an epilogue can be read at its output's

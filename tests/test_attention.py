@@ -311,3 +311,31 @@ def test_naive_attention_is_flash_attention(causal):
         sdpa = lumen.compile(fn(lambda q, k, v: F.flash_attention(q, k, v, is_causal=causal)))(q, k, v)
         for a, b in zip(naive if isinstance(naive, tuple) else [naive], sdpa if isinstance(sdpa, tuple) else [sdpa]):
             np.testing.assert_allclose(lumen.to_numpy(a), lumen.to_numpy(b), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("sq", [40, 1], ids=["tiled", "decode"])
+def test_attention_epilogue_fuses_in_training(sq):
+    """In a training step the attention's value is read by its epilogue (a
+    residual) and by the backward: the epilogue still runs in its kernel,
+    which writes the attention's value too; the step agrees exactly with
+    the unfused one."""
+    shapes = [(1, sq, 4, 32), (1, 40, 2, 32), (1, 40, 2, 32), (sq, 128)]
+    ts, _ = tensors("mps", "float32", *shapes)
+
+    def block(q, k, v, x):
+        return F.sum(F.tanh(x + F.flash_attention(q, k, v, is_causal=True).reshape(sq, 128)))
+
+    step = lumen.value_and_grad(block, (0, 1, 2, 3))
+    labels = steps(step, *ts)
+    assert "flash_attention → reshape → add → tanh" in labels, labels
+    assert "flash_attention_backward(dk, dv)" in labels and "flash_attention_backward(dq)" in labels
+    loss, grads = lumen.compile(step)(*ts)
+    got = [lumen.to_numpy(t) for t in (loss, *grads)]
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        loss, grads = lumen.compile(step)(*ts)
+    finally:
+        lumen.config.compiler.reset()
+    for g, w in zip(got, (loss, *grads)):
+        np.testing.assert_array_equal(g, lumen.to_numpy(w))

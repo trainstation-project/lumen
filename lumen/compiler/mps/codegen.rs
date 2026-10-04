@@ -1033,11 +1033,21 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         "device {w} *out [[buffer({})]]",
         body.inputs().len()
     ));
-    // The log-sum-exp, the fusion's second output (a training forward's).
+    // Its other outputs, in order: its own value, if read elsewhere too
+    // (with an epilogue: a training forward's, the backward reads it); its
+    // log-sum-exp (a training forward's).
+    let mut buffer = body.inputs().len();
+    let raw = body.outputs()[1..].contains(&root);
+    if raw {
+        buffer += 1;
+        params.push(format!("device {o} *raw [[buffer({buffer})]]"));
+    }
     let lse = a.lse.is_some();
     if lse {
-        params.push(format!("device float *lse [[buffer({})]]", body.inputs().len() + 1));
+        buffer += 1;
+        params.push(format!("device float *lse [[buffer({buffer})]]"));
     }
+    let raw_arg = if raw { "raw" } else { "nullptr" };
     let lse_arg = if lse { "lse" } else { "nullptr" };
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
@@ -1046,12 +1056,12 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
         true => format!(
-            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
             format!(
-                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
