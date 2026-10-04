@@ -18,6 +18,10 @@ class Graph:
     def type_of(self, var: int) -> tuple[str, list[int]]: ...
     def inputs(self) -> list[int]: ...
     def outputs(self) -> list[int]: ...
+    def prune(self) -> list[int | None]:
+        """Remove the nodes no output depends on; each value's new number,
+        or None if removed."""
+
     def precision_warnings(self) -> list[tuple[int, int, str]]:
         """A warning for each dot or sum rounded to a narrower dtype than it
         accumulates in, then cast back up: its output, the cast's, the

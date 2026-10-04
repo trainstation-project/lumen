@@ -18,6 +18,7 @@ Convert with ``.to(dtype)``.
 """
 
 import builtins
+import dataclasses
 import functools
 import math
 import os
@@ -43,13 +44,42 @@ _SOURCES = []
 _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _record_source(var):
-    """Record the line of the traced program computing ``var``."""
+# The autodiff tapes being recorded (``lumen/autograd``), innermost
+# last: each node bound while one is open, ``(name, input vars, params,
+# output var)``, is appended to each.
+_TAPES = []
+
+
+def _record(name, inputs, params, var):
+    """Record node ``var = name(inputs, **params)``: its source line, and
+    on each open tape."""
+    for tape in _TAPES:
+        tape.append((name, inputs, params, var))
     frame = sys._getframe(1)
     while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+
+
+def _tree_map(f, x):
+    """``x`` with each traced tensor in it (through modules, lists and
+    tuples) replaced by ``f(t)``."""
+    if isinstance(x, TracedTensor):
+        return f(x)
+    if isinstance(x, nn.Module):
+        fields = {fl.name: _tree_map(f, getattr(x, fl.name)) for fl in dataclasses.fields(x)}
+        return dataclasses.replace(x, **fields)
+    if isinstance(x, (list, tuple)):
+        return type(x)(_tree_map(f, v) for v in x)
+    return x
+
+
+def _tree_leaves(x):
+    """The traced tensors in ``x``, in ``_tree_map``'s order."""
+    leaves = []
+    _tree_map(leaves.append, x)
+    return leaves
 
 
 def current_graph():
@@ -86,8 +116,9 @@ def _scalars(args):
 
 
 def _trace(fn, args):
-    """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
-    single tensor (rather than a tuple or list of them). The graph's inputs
+    """``fn`` traced on ``args``: the graph, and what ``fn`` returned (a
+    traced tensor, or modules, lists and tuples of them: the structure the
+    graph's outputs, its traced tensors in order, are returned in). The graph's inputs
     are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
@@ -123,12 +154,14 @@ def _trace(fn, args):
     finally:
         _TRACES.pop()
         _SOURCES.pop()
-    single = isinstance(out, TracedTensor)
-    outputs = (out,) if single else tuple(out)
-    for o in outputs:
-        if not isinstance(o, TracedTensor) or o.graph is not graph:
-            raise TypeError(f"a compiled function must return tensors computed from its inputs, got {o!r}")
+    outputs = _tree_leaves(out)
+    if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
+        raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
     graph.set_outputs([o.var for o in outputs])
+    # Without the values no output depends on (an autodiff transform's
+    # tangents its transpose does not read).
+    renumbered = graph.prune()
+    sources = {renumbered[v]: s for v, s in sources.items() if renumbered[v] is not None}
     for var, cast, message in graph.precision_warnings():
         where, cast_at = sources.get(var), sources.get(cast)
         if cast_at and cast_at != where:
@@ -137,7 +170,7 @@ def _trace(fn, args):
             warnings.warn_explicit(message, UserWarning, *where)
         else:
             warnings.warn(message)
-    return graph, single
+    return graph, out
 
 
 def _lift(x):
@@ -228,7 +261,7 @@ def compile(fn, device=None):
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
-        workspace, whether ``fn`` returns a single tensor, and the plan's
+        workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
         # The compiler's flags too: a plan compiled with others is not reused.
@@ -241,13 +274,13 @@ def compile(fn, device=None):
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
-        graph, single, entries, _, _ = plans[key]
+        graph, out, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, single, tensors + weights
+            return graph, entries[0][0], None, out, tensors + weights
         params = list(range(len(tensors), len(tensors) + len(weights)))
         inputs = tensors + weights
 
@@ -265,7 +298,7 @@ def compile(fn, device=None):
         for plan, workspace in entries:
             placed = inputs_for(plan)
             if placed is not None:
-                return graph, plan, workspace, single, placed
+                return graph, plan, workspace, out, placed
         # A new plan: dots merged into blocks of weights while none of theirs
         # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
@@ -277,11 +310,11 @@ def compile(fn, device=None):
             plan = Plan(graph, target, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
             placed = inputs_for(plan)
-        return graph, plan, workspace, single, placed
+        return graph, plan, workspace, out, placed
 
     @functools.wraps(fn)
     def compiled(*args):
-        graph, plan, workspace, single, inputs = prepare(args)
+        graph, plan, workspace, out, inputs = prepare(args)
         if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
             # Compiled (and the weights placed); nothing to run.
             outputs = [
@@ -289,7 +322,8 @@ def compile(fn, device=None):
             ]
         else:
             outputs = plan.run_in(workspace, inputs)
-        return outputs[0] if single else tuple(outputs)
+        outputs = iter(outputs)
+        return _tree_map(lambda _: next(outputs), out)
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the

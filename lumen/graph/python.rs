@@ -147,6 +147,14 @@ impl PyGraph {
         self.inner.outputs().to_vec()
     }
 
+    /// Remove the nodes no output depends on (see
+    /// [`crate::graph::Graph::prune`]); each value's new number, or None.
+    fn prune(&mut self) -> Vec<Option<Var>> {
+        let (pruned, map) = self.inner.prune();
+        self.inner = pruned;
+        map
+    }
+
     /// See [`crate::graph::Graph::precision_warnings`].
     fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()
