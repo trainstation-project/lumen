@@ -41,7 +41,8 @@ const PRELUDE: &str = concat!(
     "\n#define TEMPLATES_ONLY\n",
     include_str!("../../ops/reduce/mps/kernels.metal"),
     include_str!("../../ops/dot_general/mps/kernels.metal"),
-    include_str!("../../ops/attention/mps/kernels.metal"),
+    include_str!("../../ops/attention/mps/forward.metal"),
+    include_str!("../../ops/attention/mps/backward.metal"),
 );
 
 /// `graph` canonicalized, fused (as `options.config` says) and planned, its

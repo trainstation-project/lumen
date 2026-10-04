@@ -975,7 +975,7 @@ fn constant(dtype: DType, value: Scalar) -> String {
 
 /// The kernel of an attention fusion (`ops/attention`): its name and Metal
 /// source, instantiating `flash_attention`, or for few queries
-/// `attention_decode` (`ops/attention/mps/kernels.metal`), with an indexer of its
+/// `attention_decode` (`ops/attention/mps/forward.metal`), with an indexer of its
 /// operands' strides. Its buffers: the body's inputs, then `out`.
 pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
     let input = |base: Var| {
@@ -1110,7 +1110,7 @@ fn score_functor(scores: &[Score]) -> String {
 
 /// The kernel of an attention backward's fusion (`ops/attention`'s
 /// [`Backward`]): its name and Metal source, instantiating
-/// `flash_attention_dkdv` (a fusion of dV and dK: its buffers the body's
+/// (`ops/attention/mps/backward.metal`) `flash_attention_dkdv` (a fusion of dV and dK: its buffers the body's
 /// inputs, then dV and dK) or `flash_attention_dq` (then dQ).
 pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, String) {
     let input = |base: Var| {
