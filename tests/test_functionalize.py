@@ -420,3 +420,55 @@ def test_gradients_through_inplace_ops(device):
     want[0] = 0
     np.testing.assert_allclose(gx, want, rtol=1e-6)
     np.testing.assert_allclose(gz, 1.0)
+
+
+def _meta(*shape):
+    return lumen.empty(list(shape), device="meta")
+
+
+def test_inplace_code_costs_no_memory():
+    """Functionalized, in-place code is the graph its out-of-place spelling
+    traces (each name bound to its new value): the same plan, the same
+    workspace (each dead value's memory reused)."""
+
+    def inplace(x, w):
+        y = x @ w
+        y += 1.0
+        y *= 2.0
+        y.clamp_(max=3.0)
+        return F.sum(y)
+
+    def out_of_place(x, w):
+        y = x @ w
+        y = y + 1.0
+        y = y * 2.0
+        y = F.minimum(y, 3.0)
+        return F.sum(y)
+
+    args = _meta(8, 16), _meta(16, 32)
+    graphs = [lumen.make_graph(f)(*args) for f in (inplace, out_of_place)]
+    assert str(graphs[0]) == str(graphs[1])
+    for device in ("cpu", "meta"):
+        plans = [lumen.graph.Plan(g, device, parameters=[0, 1]) for g in graphs]
+        assert plans[0].workspace_bytes == plans[1].workspace_bytes
+
+
+def test_view_assignment_updates_its_base_in_place():
+    """Assigning through a view writes the view's part of its base, in the
+    base's memory (an in-place ``dynamic_update_slice``): no copy of the
+    base, the workspace no larger than the base and the part."""
+
+    def f(x, w):
+        y = x @ w
+        y[:, :8] += 1.0
+        return F.sum(y)
+
+    graph = lumen.make_graph(f)(_meta(8, 16), _meta(16, 32))
+    plan = lumen.graph.Plan(graph, "cpu", parameters=[0, 1])
+    # One write (``y[k] += v``'s ``y[k] = t`` writes nothing more).
+    (step,) = [line for line in str(plan).splitlines() if "dynamic_update_slice" in line]
+    written, operand = step.split(":")[0].strip(), step.split("dynamic_update_slice ")[1].split()[0]
+    assert written == operand, plan
+    y, part = 8 * 32 * 4, 8 * 8 * 4
+    # The base, the part's slice and its new value, and constants.
+    assert plan.workspace_bytes <= y + 2 * part + 1024, plan

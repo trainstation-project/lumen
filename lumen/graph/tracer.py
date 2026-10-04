@@ -918,6 +918,12 @@ class TracedTensor:
         """``x[key] = value``: the indexed view of it assigned ``value`` (a
         Python scalar, or a tensor of its dtype broadcast to the view)."""
         view = self[key]
+        # ``y[k] += v``: Python's ``t = y[k]; t += v; y[k] = t``, t already
+        # written through (the same part of the same base, up to date).
+        base = view._base
+        if isinstance(value, TracedTensor) and value is not view and base is not None:
+            if value._base is base and value._ops == view._ops and value._seen == base._version:
+                return
         value = _as_tensor(value, self.dtype, "index assignment")
         if value.dtype != self.dtype:
             raise TypeError(f"index assignment: got a {value.dtype} value for a {self.dtype} tensor")
