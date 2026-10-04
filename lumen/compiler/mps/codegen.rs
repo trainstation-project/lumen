@@ -1129,20 +1129,27 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         let k = body.inputs().iter().position(|&v| v == base);
         format!("in{}", k.expect("an input of the body"))
     };
+    // The operands', and the outputs' (as written: perhaps transposed).
+    let operands = [
+        ("q", &b.q),
+        ("k", &b.k),
+        ("v", &b.v),
+        ("g", &b.d_o),
+        ("lse", &b.lse),
+        ("delta", &b.delta),
+    ];
+    let outputs = [("dv", &b.dv_out), ("dk", &b.dk_out), ("dq", &b.dq_out)];
+    let outputs = outputs
+        .iter()
+        .filter_map(|(name, out)| out.as_ref().map(|(_, acc)| (*name, acc)));
     let ix = format!(
         "struct NAME_ix {{\n{}\n}};\n\n",
-        [
-            ("q", &b.q),
-            ("k", &b.k),
-            ("v", &b.v),
-            ("g", &b.d_o),
-            ("lse", &b.lse),
-            ("delta", &b.delta)
-        ]
-        .iter()
-        .map(|(name, acc)| ix_method(name, acc, &b.batch))
-        .collect::<Vec<_>>()
-        .join("\n")
+        operands
+            .into_iter()
+            .chain(outputs)
+            .map(|(name, acc)| ix_method(name, acc, &b.batch))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     let score = score_functor(&b.scores);
     let t = metal_type(b.dtype);
@@ -1158,7 +1165,7 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
             )
         })
         .collect();
-    let dkdv = b.dv.is_some();
+    let dkdv = b.dv_out.is_some();
     let outs: &[&str] = if dkdv { &["dv", "dk"] } else { &["dq"] };
     for (k, out) in outs.iter().enumerate() {
         params.push(format!("device float *{out} [[buffer({})]]", n + k));

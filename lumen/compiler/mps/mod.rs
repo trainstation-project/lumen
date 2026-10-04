@@ -419,7 +419,7 @@ pub(crate) fn encode(
     // of queries (dQ) of each batch index.
     if let Some(b) = attention::backward_of_body(body) {
         let batch: usize = b.batch.iter().product();
-        let rows = if b.dv.is_some() { b.sk } else { b.sq };
+        let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);

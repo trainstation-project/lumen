@@ -124,12 +124,13 @@ pub(crate) enum Score {
 /// dots present.
 #[derive(Debug, Clone)]
 pub(crate) struct Backward {
-    /// The dots computing dV, dK and dQ (`[batch..., Sk, Hv]`,
-    /// `[batch..., Sk, H]`, `[batch..., Sq, H]`, float32, contiguous), each
-    /// if present.
-    pub dv: Option<usize>,
-    pub dk: Option<usize>,
-    pub dq: Option<usize>,
+    /// Where dV, dK and dQ (`[batch..., Sk, Hv]`, `[batch..., Sk, H]`,
+    /// `[batch..., Sq, H]`, float32) are written, each if computed: the
+    /// node (its dot, or the dot's transpose, which the kernel writes in
+    /// that layout) and its strides.
+    pub dv_out: Option<(usize, Access)>,
+    pub dk_out: Option<(usize, Access)>,
+    pub dq_out: Option<(usize, Access)>,
     /// q and dO (row: query), k and v (row: key); lse and D (one per
     /// query: its column).
     pub q: Access,
@@ -207,9 +208,12 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
     let mut fusions: Vec<(usize, Vec<usize>, Vec<Var>)> = Vec::new();
     for i in 0..nodes.len() {
         let Some(b) = m.backward(i) else { continue };
-        let (Some(dv), Some(dk), Some(dq)) = (b.dv, b.dk, b.dq) else {
+        // The nodes they write: the dots, or their transposes.
+        let (Some((dv, _)), Some((dk, _)), Some((dq, _))) = (&b.dv_out, &b.dk_out, &b.dq_out)
+        else {
             continue;
         };
+        let (dv, dk, dq) = (*dv, *dk, *dq);
         let mut bases: Vec<Var> = Vec::new();
         for acc in [&b.q, &b.k, &b.v, &b.d_o, &b.lse, &b.delta] {
             if !bases.contains(&acc.base) {
@@ -218,9 +222,10 @@ pub(crate) fn fuse_backward(graph: &Graph, mut kernel: impl FnMut(&Graph) -> Str
         }
         for outs in [vec![dv, dk], vec![dq]] {
             let at = *outs.iter().max().expect("a dot");
-            let read_after = outs.iter().all(|&o| {
-                !m.output[nodes[o].output] && m.readers[nodes[o].output].iter().all(|&r| r > at)
-            });
+            // Read after it (they may be the graph's outputs too).
+            let read_after = outs
+                .iter()
+                .all(|&o| m.readers[nodes[o].output].iter().all(|&r| r > at));
             if read_after {
                 fusions.push((at, outs, bases.clone()));
             }
@@ -787,10 +792,11 @@ impl<'a> Matcher<'a> {
         {
             return None;
         }
+        let out = |d: Option<usize>| d.map(|d| self.written(d, nb));
         Some(Backward {
-            dv,
-            dk,
-            dq,
+            dv_out: out(dv),
+            dk_out: out(dk),
+            dq_out: out(dq),
             q,
             k,
             v,
@@ -807,6 +813,31 @@ impl<'a> Matcher<'a> {
             ds_scale,
             dtype,
         })
+    }
+
+    /// Where a kernel writes dot `i`'s value (`[batch..., rows, cols]`):
+    /// as it is, or as its transpose if that is its only reader (the node
+    /// written, and its strides).
+    fn written(&self, i: usize, nb: usize) -> (usize, Access) {
+        let nodes = self.graph.nodes();
+        let o = nodes[i].output;
+        let (root, perm) = match self.readers[o].as_slice() {
+            [r] if !self.output[o] => match &nodes[*r].primitive {
+                Primitive::Transpose { permutation } => (*r, permutation.clone()),
+                _ => (i, (0..nb + 2).collect()),
+            },
+            _ => (i, (0..nb + 2).collect()),
+        };
+        let strides = contiguous_strides(&self.graph.type_of(nodes[root].output).shape);
+        let stride = |d: usize| strides[perm.iter().position(|&p| p == d).expect("a permutation")];
+        let out = Access {
+            base: nodes[root].output,
+            offset: 0,
+            batch: (0..nb).map(|d| (stride(d), 1)).collect(),
+            row: stride(nb),
+            col: stride(nb + 1),
+        };
+        (root, out)
     }
 
     /// The scores `x` back to their dot (its node): the casts, the scale
@@ -1018,23 +1049,7 @@ impl<'a> Matcher<'a> {
             return None;
         }
         // The output, [batch..., Sq, Hv], or its transpose (the only reader).
-        let o = nodes[i].output;
-        let (root, perm) = match self.readers[o].as_slice() {
-            [r] if !self.output[o] => match &nodes[*r].primitive {
-                Transpose { permutation } => (*r, permutation.clone()),
-                _ => (i, (0..nb + 2).collect()),
-            },
-            _ => (i, (0..nb + 2).collect()),
-        };
-        let strides = contiguous_strides(&ty(nodes[root].output).shape);
-        let stride = |d: usize| strides[perm.iter().position(|&p| p == d).expect("a permutation")];
-        let out = Access {
-            base: nodes[root].output,
-            offset: 0,
-            batch: (0..nb).map(|d| (stride(d), 1)).collect(),
-            row: stride(nb),
-            col: stride(nb + 1),
-        };
+        let (root, out) = self.written(i, nb);
         Some(Attention {
             root,
             q,

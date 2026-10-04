@@ -7,7 +7,8 @@
 // dS^T = P^T (V dO^T - D) * ds_scale, recomputed a block at a time from
 // each query's log-sum-exp `lse` and D = rowsum(dO * O), never stored. P
 // and dS are rounded to T for their products, which accumulate in float
-// and are written as float (contiguous [batch, rows, cols]).
+// and are written as float, at the strides of the layout their readers want
+// (the indexer's dk, dv, dq: [batch, rows, cols] or its transpose).
 
 // dK = dS^T Q and dV = P^T dO: threadgroup (kblock, b) takes ATTN_BQ keys
 // of batch index b, its SIMD group sg 8 of them, their K, V, dK and dV rows
@@ -44,8 +45,8 @@ inline void flash_attention_dkdv(device const T *q,
     g += ix.g(b);
     lse += ix.lse(b);
     delta += ix.delta(b);
-    dk += ulong(b) * sk * D;
-    dv += ulong(b) * sk * DV;
+    dk += ix.dk(b);
+    dv += ix.dv(b);
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = kblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
@@ -126,13 +127,13 @@ inline void flash_attention_dkdv(device const T *q,
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
             uint d = c * 8 + fc;
-            dk[row * D + d] = frag(dkm[c]).x;
-            dk[row * D + d + 1] = frag(dkm[c]).y;
+            dk[row * Ix::DK_ROW + d * Ix::DK_COL] = frag(dkm[c]).x;
+            dk[row * Ix::DK_ROW + (d + 1) * Ix::DK_COL] = frag(dkm[c]).y;
         }
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
             uint d = c * 8 + fc;
-            dv[row * DV + d] = frag(dvm[c]).x;
-            dv[row * DV + d + 1] = frag(dvm[c]).y;
+            dv[row * Ix::DV_ROW + d * Ix::DV_COL] = frag(dvm[c]).x;
+            dv[row * Ix::DV_ROW + (d + 1) * Ix::DV_COL] = frag(dvm[c]).y;
         }
     }
 }
@@ -168,7 +169,7 @@ inline void flash_attention_dq(device const T *q,
     g += ix.g(b);
     lse += ix.lse(b);
     delta += ix.delta(b);
-    dq += ulong(b) * sq * D;
+    dq += ix.dq(b);
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = qblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sq;
@@ -238,8 +239,8 @@ inline void flash_attention_dq(device const T *q,
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
             uint d = c * 8 + fc;
-            dq[row * D + d] = frag(dqm[c]).x;
-            dq[row * D + d + 1] = frag(dqm[c]).y;
+            dq[row * Ix::DQ_ROW + d * Ix::DQ_COL] = frag(dqm[c]).x;
+            dq[row * Ix::DQ_ROW + (d + 1) * Ix::DQ_COL] = frag(dqm[c]).y;
         }
     }
 }
