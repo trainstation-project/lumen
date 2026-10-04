@@ -291,10 +291,11 @@ def test_mps_kernels_match_cpu(dtype):
 def test_plan():
     graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
     plan = lumen.graph.Plan(graph)
-    # add reads exp and the broadcast 1 and writes a third 1 KiB buffer; the
-    # 0-d constant fits in exp's gap, and the reshape costs nothing.
+    # exp writes the output's memory, add and tanh write over it in place
+    # (each operand dies there); the workspace holds the broadcast 1 (1 KiB)
+    # and the 0-d constant; the reshape costs nothing.
     assert "reshape" not in str(plan)
-    assert plan.workspace_bytes == 3 * 1024
+    assert plan.workspace_bytes == 1024 + 4, plan
     x = rand(16, 16)
     np.testing.assert_allclose(
         lumen.to_numpy(plan.run([lumen.from_numpy(x)])[0]), np.tanh(np.exp(x) + 1).ravel(), rtol=1e-6

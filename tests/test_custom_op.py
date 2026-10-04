@@ -242,3 +242,102 @@ def test_custom_op_errors():
         lumen.compile(lumen.grad(lambda x, y: (axpy(1.0, x * 1.0, y), F.sum(y))[1], 0), device="cpu")(
             lumen.zeros([2]), lumen.zeros([2])
         )
+
+
+# The data pointers of each call's x and out.
+POINTERS = []
+
+
+def _square(x, out):
+    POINTERS.append((x.data_ptr(), out.data_ptr()))
+    values = _array(x)  # every element of x read before out is written
+    _assign(out, values * values)
+
+
+SQUARE = custom_op("test::square", mutates_args=("out",), overlappable={"out": "x"})(_square)
+SQUARE_PLAIN = custom_op("test::square_plain", mutates_args=("out",))(_square)
+
+
+def _square_call(plan):
+    (line,) = [line for line in plan.splitlines() if "test::square" in line]
+    written = line.split(":")[0].strip()
+    x, out = line.rsplit("] ", 1)[1].split()
+    return written, x, out
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_overlappable_operand_memory_is_the_compilers_choice(device):
+    """``overlappable={"out": "x"}``: where out's old value is read after the
+    call (no in place) and x dies there, out is written in x's memory (the
+    function gets one memory for both), its old value not copied in, and
+    the plan needs less workspace; undeclared, out gets memory of its own,
+    its old value copied in. The values alike."""
+
+    def using(op):
+        def f(a):
+            x = a + 1.0
+            out = a * 0.0
+            op(x, out)
+            return out * 1.0, a * 0.0  # out's old value, a * 0, read after
+
+        return f
+
+    overlapped = _plan(using(SQUARE), [4])
+    written, x, out = _square_call(overlapped)
+    assert written == x != out, overlapped
+    plain = _plan(using(SQUARE_PLAIN), [4])
+    written, x, out = _square_call(plain)
+    assert written not in (x, out), plain
+    # Planned with the caller's memory for its inputs and outputs: x in the
+    # output's memory (out's, overlapped); undeclared, x needs its own too.
+    meta = [lumen.empty([1024], device="meta")]
+    workspace = [
+        lumen.graph.Plan(lumen.make_graph(using(op))(*meta), "cpu").workspace_bytes for op in (SQUARE, SQUARE_PLAIN)
+    ]
+    assert workspace[1] - workspace[0] == 1024 * 4, workspace
+    for op, shared in ((SQUARE, True), (SQUARE_PLAIN, False)):
+        POINTERS.clear()
+        new, old = lumen.compile(using(op))(_tensor([0, 1, 2, 3], device))
+        assert _array(new).tolist() == [1, 4, 9, 16] and _array(old).tolist() == [0] * 4
+        ((x_pointer, out_pointer),) = POINTERS
+        assert (x_pointer == out_pointer) == shared
+
+
+def test_overlap_only_where_it_helps_and_is_safe():
+    """out in its own memory where it can be (its old value dead), not x's;
+    x read after the call: never x's memory."""
+
+    def own(a):
+        x, out = a + 1.0, a * 0.0
+        SQUARE(x, out)
+        return out * 1.0
+
+    written, x, out = _square_call(_plan(own, [4]))
+    assert written == out != x
+    POINTERS.clear()
+    new = lumen.compile(own, device="cpu")(lumen.from_numpy(np.arange(3, dtype=np.float32)))
+    assert _array(new).tolist() == [1, 4, 9]
+    ((x_pointer, out_pointer),) = POINTERS
+    assert x_pointer != out_pointer
+
+    def x_read_after(a):
+        x, out = a + 1.0, a * 0.0
+        SQUARE(x, out)
+        return out * 1.0, x * 1.0, a * 0.0
+
+    written, x, out = _square_call(_plan(x_read_after, [4]))
+    assert written not in (x, out)
+    POINTERS.clear()
+    new, x_after, _ = lumen.compile(x_read_after, device="cpu")(lumen.from_numpy(np.arange(3, dtype=np.float32)))
+    assert _array(new).tolist() == [1, 4, 9] and _array(x_after).tolist() == [1, 2, 3]
+    ((x_pointer, out_pointer),) = POINTERS
+    assert x_pointer != out_pointer
+
+
+def test_overlappable_errors():
+    with pytest.raises(ValueError, match="does not mutate"):
+        custom_op("t::f", mutates_args=("out",), overlappable={"x": "out"})(_square)
+    with pytest.raises(ValueError, match="arguments it reads"):
+        custom_op("t::f", mutates_args=("out",), overlappable={"out": "z"})(_square)
+    with pytest.raises(ValueError, match="arguments it reads"):
+        custom_op("t::f", mutates_args=("x", "out"), overlappable={"out": "x"})(_square)
