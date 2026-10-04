@@ -1,7 +1,7 @@
 // Flash attention, forward and backward: the kernels of attentions the MPS
-// compiler matches (mod.rs): o = softmax(q k^T * scale
+// compiler matches (lumen/compiler/mps/attention.rs): o = softmax(q k^T * scale
 // [causal]) v over each batch index, the scores and probabilities never
-// in memory. A generated kernel (compiler/mps/codegen.rs) instantiates one template
+// in memory. A generated kernel (lumen/compiler/mps/codegen.rs) instantiates one template
 // with the attention's sizes and an indexer `Ix`: q(b), k(b), v(b) and
 // o(b), the offset of batch index b's elements in each buffer (64-bit,
 // once a threadgroup), and the row and column strides of each (32-bit
@@ -279,7 +279,7 @@ inline void attention_decode(device const T *q,
     }
 }
 
-// The backward (FlashAttention-2's; mod.rs's `Backward`), on the
+// The backward (FlashAttention-2's; attention.rs's `Backward`), on the
 // transposed scores S^T = K Q^T: P^T = exp(score(S^T) - lse) and
 // dS^T = P^T (V dO^T - D) * ds_scale, recomputed a block at a time from
 // each query's log-sum-exp `lse` and D = rowsum(dO * O), never stored. P

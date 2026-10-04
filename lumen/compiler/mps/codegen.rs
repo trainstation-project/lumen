@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use super::attention::{Access, Attention, Backward, Score};
 use super::fusion;
-use crate::ops::attention::{Access, Attention, Backward, Score};
 use crate::compiler::CompilerConfig;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
