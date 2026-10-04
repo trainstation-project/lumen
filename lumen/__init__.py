@@ -27,7 +27,9 @@ wraps:
   ``load_file`` and ``safe_open`` for safetensors files, as in
   ``safetensors.torch``.
 * ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
-  ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``.
+  ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``; on MPS, Metal
+  kernels of your own in the stream (``compile``, ``launch``, the open
+  ``command_buffer``).
 
 Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.

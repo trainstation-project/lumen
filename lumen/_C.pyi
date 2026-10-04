@@ -33,6 +33,10 @@ from lumen.safetensors._C import safe_open as safe_open
 from lumen.stream._C import _cuda_is_available as _cuda_is_available
 from lumen.stream._C import _cuda_stream_wait as _cuda_stream_wait
 from lumen.stream._C import _cuda_synchronize as _cuda_synchronize
+from lumen.stream._C import _mps_buffer as _mps_buffer
+from lumen.stream._C import _mps_command_buffer as _mps_command_buffer
+from lumen.stream._C import _mps_compile as _mps_compile
+from lumen.stream._C import _mps_launch as _mps_launch
 from lumen.stream._C import _mps_synchronize as _mps_synchronize
 from lumen.tensor._C import Scalar as Scalar
 from lumen.tensor._C import Tensor as Tensor

@@ -160,8 +160,18 @@ impl Plan {
         // A reshape's value is the bytes of its operand's root; a viewed
         // slice's, a view of them; a dynamic_update_slice's, its operand's,
         // in place, where nothing reads those after it (nor as its update
-        // or an index) and they are no input's or output's (a donated
+        // or an index) and they are no output's, nor the caller's: an
+        // input's, unless an owned plan's copy of an argument (a donated
         // input's: below).
+        let callers = |r: Var| {
+            graph
+                .inputs()
+                .iter()
+                .position(|&v| v == r)
+                .is_some_and(|i| {
+                    options.parameters.as_ref().is_none_or(|p| p[i]) || options.scalars.contains(&i)
+                })
+        };
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
@@ -198,7 +208,7 @@ impl Plan {
                     .iter()
                     .enumerate()
                     .any(|(j, &v)| j != position && mine(v));
-                let free = !graph.inputs().contains(&r)
+                let free = !callers(r)
                     && !graph.outputs().iter().any(|&o| mine(o))
                     && !others
                     && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&u| u > t));
@@ -793,9 +803,8 @@ impl Plan {
     /// Run custom op step `step` (its function `kernel`, mutating its
     /// operands at `mutated`): each mutated operand's value in its output's
     /// buffer (copied there unless the planner put the output in the
-    /// operand's own), the device done with every earlier step, then the
-    /// function called on its operands as tensors, the mutated ones those
-    /// output buffers, which it writes in place.
+    /// operand's own), then the function called on its operands as tensors,
+    /// the mutated ones those output buffers, which it writes in place.
     fn call_custom_op<'a>(
         &self,
         step: &Step,
@@ -831,7 +840,7 @@ impl Plan {
                         out.data_ptr(),
                         ty,
                         vec![src.clone(), out.clone()],
-                        step.label,
+                        "copy",
                     )?,
                     // SAFETY: two distinct host buffers of `ty`'s bytes.
                     _ => unsafe {
@@ -842,12 +851,17 @@ impl Plan {
             }
             args[m] = out;
         }
+        // No wait: the function's host reads and writes wait for the stream
+        // (as every host access to MPS memory does); its device work, in
+        // the stream (`lumen.mps.launch`, `lumen.mps.command_buffer`), runs
+        // in order with the plan's, counted so `synchronize` waits for it.
+        let called = crate::graph::custom::call(kernel, &args);
         #[cfg(lumen_mps_linked)]
         if executor == Device::Mps {
-            crate::stream::mps::synchronize();
+            crate::stream::mps::mark();
         }
         let _ = executor;
-        crate::graph::custom::call(kernel, &args).map_err(|e| format!("{}: {e}", step.label))
+        called.map_err(|e| format!("{}: {e}", step.label))
     }
 }
 

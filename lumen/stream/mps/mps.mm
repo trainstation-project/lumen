@@ -159,6 +159,44 @@ uint64_t lumen_mps_stream_flush(void) {
     return total;
 }
 
+// The open command buffer (made if none is), its compute encoder ended so
+// the caller may encode its own work into it, after the ops encoded so far
+// and before those encoded after: valid until the stream commits it (the
+// next flush, or op that fills it). Null without a Metal device.
+void *lumen_mps_stream_command_buffer(void) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil) {
+        return nullptr;
+    }
+    os_unfair_lock_lock(&lock);
+    if (commands == nil) {
+        commands = [queue commandBuffer];
+    }
+    if (encoder != nil) {
+        end_encoder();
+    }
+    void *buffer = (__bridge void *)commands;
+    os_unfair_lock_unlock(&lock);
+    return buffer;
+}
+
+// Count work encoded into the open command buffer outside lumen's ops (a
+// custom op's, through lumen_mps_stream_command_buffer) as an op: done is
+// called when the buffer completes, which synchronize then waits for.
+void lumen_mps_stream_mark(lumen_mps_completion done, void *context) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    os_unfair_lock_lock(&lock);
+    if (commands == nil) {
+        commands = [queue commandBuffer];
+    }
+    ops.push_back({done, context, -1});
+    ++encoded_total;
+    if (ops.size() >= kOpsPerCommit) {
+        commit();
+    }
+    os_unfair_lock_unlock(&lock);
+}
+
 // The host clock Metal's GPUStartTime/GPUEndTime use (mach_absolute_time, as
 // seconds), so GPU times can be mapped onto the profiler's clock.
 double lumen_mps_stream_host_time(void) {

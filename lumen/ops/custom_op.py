@@ -11,16 +11,21 @@ tensor argument so mutated is written back after the call.
 
 When the step runs, the function is called with its tensor arguments as
 lumen tensors on the plan's device (views of the plan's memory, no copy)
-and its other arguments as given: it writes the mutated ones in place
-(through DLPack, a kernel of its own, ...), done by the time it returns.
-The device has finished every earlier step when it is called. A mutated
+and its other arguments as given: it writes the mutated ones in place. On
+MPS, nothing waits for the device: its own kernels, encoded into lumen's
+stream (``lumen.mps.launch``, ``lumen.mps.command_buffer``), run in order
+with the plan's, after the earlier steps and before the later ones; host
+reads and writes (``lumen.to_numpy``, ``copy_``, DLPack) wait for the
+stream themselves. Host work is done by the time it returns. A mutated
 argument is the argument's own memory where nothing reads its old value
 after the call, else a copy of it (PyTorch: ``auto_functionalized``,
 reinplaced where it can be).
 
+    lumen.mps.compile(AXPY_METAL_SOURCE)  # kernel void mylib_axpy(...)
+
     @lumen.ops.custom_op("mylib::axpy", mutates_args=("y",))
     def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
-        ...  # y += a * x, however it likes
+        lumen.mps.launch("mylib_axpy", [x, y], [np.float32(a)], grid=(y.numel,))
 
     @lumen.compile
     def step(x, y):

@@ -21,6 +21,27 @@ unsafe extern "C" {
     // In mps.mm (which also holds the queue the shims submit to).
     fn lumen_mps_stream_flush() -> u64;
     fn lumen_mps_stream_host_time() -> f64;
+    fn lumen_mps_stream_command_buffer() -> *mut c_void;
+    fn lumen_mps_stream_mark(done: Completion, context: *mut c_void);
+}
+
+/// The stream's open `MTLCommandBuffer` (made if none is), its compute
+/// encoder ended, for work of the caller's own: encoded into it, that runs
+/// after the work submitted so far and before what is submitted after.
+/// Valid until the stream commits it (the next [`synchronize`], or op that
+/// fills it). Null without a Metal device.
+pub fn command_buffer() -> *mut c_void {
+    unsafe { lumen_mps_stream_command_buffer() }
+}
+
+/// Count work encoded into the open command buffer outside lumen's ops (a
+/// custom op's): [`synchronize`] waits for it from now on.
+pub(crate) fn mark() {
+    let submission = Box::new(Submission {
+        _tensors: Vec::new(),
+        profile: None,
+    });
+    unsafe { lumen_mps_stream_mark(completed, Box::into_raw(submission).cast()) };
 }
 
 /// How many encoded ops the GPU has finished.
