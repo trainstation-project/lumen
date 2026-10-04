@@ -38,21 +38,7 @@ pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
 }
 
 pub(crate) fn dtype_name(dtype: DType) -> &'static str {
-    match dtype {
-        DType::F32 => "float32",
-        DType::F64 => "float64",
-        DType::F16 => "float16",
-        DType::BF16 => "bfloat16",
-        DType::I8 => "int8",
-        DType::I16 => "int16",
-        DType::I32 => "int32",
-        DType::I64 => "int64",
-        DType::U8 => "uint8",
-        DType::U16 => "uint16",
-        DType::U32 => "uint32",
-        DType::U64 => "uint64",
-        DType::Bool => "bool",
-    }
+    dtype.full_name()
 }
 
 // ---------------------------------------------------------------------
@@ -509,7 +495,7 @@ impl PyTensor {
 
     /// This tensor converted to `dtype` and/or on `device` (PyTorch:
     /// `Tensor.to`). Returns a view of the same storage if nothing changes;
-    /// a conversion (as `convert_element_type` converts: floats round,
+    /// a conversion (as `cast` converts: floats round,
     /// integers truncate) runs on the tensor's device, before any move.
     #[pyo3(signature = (device = None, dtype = None))]
     fn to(&self, device: Option<&Bound<'_, PyAny>>, dtype: Option<&str>) -> PyResult<Self> {

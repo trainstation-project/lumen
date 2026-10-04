@@ -996,7 +996,7 @@ def test_upcast_rms_norm_is_one_kernel(n):
     )
     (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     source = step["fusion"]["source"]
-    assert step["label"].endswith("div → convert_element_type → broadcast_in_dim → mul"), step["label"]
+    assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
     cached = n <= 8 * 256
     assert ("float kept0[" in source) == cached
     assert source.count("in0[j]") == (1 if cached else 2), source
@@ -1026,7 +1026,7 @@ def test_split_reduction_converts_its_input_once():
     f = lumen.compile(lambda a: F.sum(a.float(), -1))
     graph = lumen.make_graph(lambda a: F.sum(a.float(), -1))(x)
     (step,) = lumen.graph.Plan(graph, "mps").steps()
-    assert step["label"] == "convert_element_type → reduce_sum" and step["scratch"] is not None
+    assert step["label"] == "cast(bfloat16 -> float32) → reduce_sum" and step["scratch"] is not None
     source = step["fusion"]["source"]
     assert source.count("convert_value<float>") == 1, source
     assert "device float *out" in source and "device const bfloat *in0" in source, source
@@ -1279,7 +1279,7 @@ def test_rounding_a_contraction_then_widening_it_warns():
     assert (w.filename, w.lineno) == (__file__, scores.__code__.co_firstlineno + 1)
     with pytest.warns(
         UserWarning,
-        match=r"dot_general\(bf16\[4,8\], bf16\[8,4\]\) -> bf16\[4,4\] accumulates in f32 but outputs bf16, then dot_general → mul → convert_element_type",
+        match=r"dot_general\(bf16\[4,8\], bf16\[8,4\]\) -> bf16\[4,4\] accumulates in f32 but outputs bf16, then dot_general → mul → cast\(bfloat16 -> float32\)",
     ):
         lumen.make_graph(lambda x: ((x @ x.t()) * 0.5).float())(x)
     with pytest.warns(UserWarning, match="output_dtype=f32"):

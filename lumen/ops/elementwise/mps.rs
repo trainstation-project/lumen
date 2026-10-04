@@ -16,7 +16,7 @@ pub(crate) fn encode(
     let n = out.numel();
     // Threads take elements of the input (for select, of the cases).
     let (kernel, grid) = match &step.primitive {
-        ConvertElementType { .. } => (
+        Cast { .. } => (
             format!("convert_{}_{}", x.dtype, out.dtype),
             elementwise_grid(n, x.dtype),
         ),

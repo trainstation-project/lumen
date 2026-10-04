@@ -40,7 +40,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
         "sqrt" => Sqrt,
         "tanh" => Tanh,
         "logistic" => Logistic,
-        "convert_element_type" => ConvertElementType {
+        "cast" => Cast {
             new_dtype: dtype("new_dtype")?,
         },
         "select" => Select,

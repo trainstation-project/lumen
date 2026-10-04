@@ -70,6 +70,26 @@ impl DType {
         }
     }
 
+    /// The name Python (and PyTorch) gives it: `float32`, `bfloat16`.
+    pub const fn full_name(self) -> &'static str {
+        use DType::*;
+        match self {
+            F32 => "float32",
+            F64 => "float64",
+            F16 => "float16",
+            BF16 => "bfloat16",
+            I8 => "int8",
+            I16 => "int16",
+            I32 => "int32",
+            I64 => "int64",
+            U8 => "uint8",
+            U16 => "uint16",
+            U32 => "uint32",
+            U64 => "uint64",
+            Bool => "bool",
+        }
+    }
+
     /// Floating-point (real) dtypes.
     pub const fn is_float(self) -> bool {
         matches!(self, DType::F16 | DType::BF16 | DType::F32 | DType::F64)

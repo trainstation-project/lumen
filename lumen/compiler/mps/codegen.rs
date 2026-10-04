@@ -764,7 +764,7 @@ impl<'a> Emitter<'a> {
                         let op = functor(&node.primitive);
                         format!("{op}::apply({x})")
                     }
-                    ConvertElementType { .. } => {
+                    Cast { .. } => {
                         format!("convert_value<{t}>({})", self.value(node.inputs[0], idx))
                     }
                     Select => {

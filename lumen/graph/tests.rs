@@ -316,14 +316,14 @@ fn integers_wrap_and_converts_saturate() {
     assert_eq!(run(Lt, &[one, big.clone()]).to_vec::<bool>(), [true, false]);
     assert_eq!(run(Max, &[big.clone(), big]).to_vec::<u64>(), [u64::MAX, 1]);
     let f = Tensor::from_slice(&[300.0f32, -1.5, f32::NAN], DType::F32);
-    let to_i8 = ConvertElementType {
+    let to_i8 = Cast {
         new_dtype: DType::I8,
     };
     assert_eq!(
         run(to_i8, std::slice::from_ref(&f)).to_vec::<i8>(),
         [127, -1, 0]
     );
-    let to_f16 = ConvertElementType {
+    let to_f16 = Cast {
         new_dtype: DType::F16,
     };
     assert!(run(to_f16, &[f]).to_vec::<half::f16>()[0] == half::f16::from_f32(300.0));
@@ -913,7 +913,7 @@ pub(crate) mod mps {
         }
         for from in DTYPES {
             for to in DTYPES {
-                check_node(ConvertElementType { new_dtype: to }, &[ty(from, &[64])]);
+                check_node(Cast { new_dtype: to }, &[ty(from, &[64])]);
             }
         }
         // Saturation and NaN.
@@ -921,7 +921,7 @@ pub(crate) mod mps {
         for to in [DType::I8, DType::U8, DType::I32, DType::U64, DType::Bool] {
             let mut g = Graph::new();
             let x = g.input(ty(DType::F32, &[4]));
-            let y = g.apply(ConvertElementType { new_dtype: to }, &[x]).unwrap();
+            let y = g.apply(Cast { new_dtype: to }, &[x]).unwrap();
             g.set_outputs(&[y]).unwrap();
             check(&g, std::slice::from_ref(&f));
         }

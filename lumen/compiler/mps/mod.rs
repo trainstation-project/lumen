@@ -150,7 +150,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             _ => None,
         });
         if let Some(k) = block {
-            step.label = fusion::intern(format!("{}x dot_general", packed[k].0.len()));
+            step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
         }
     }
     plan.packed = packed;

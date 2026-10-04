@@ -196,8 +196,8 @@ pub(crate) fn fuse(
         // Profiled as the attention, then its epilogue's primitives:
         // `flash_attention → reshape → add`.
         let label = std::iter::once("flash_attention")
-            .chain(chain.iter().map(|&n| nodes[n].primitive.name()));
-        let label = super::fusion::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
+            .chain(chain.iter().map(|&n| graph.label(&nodes[n])));
+        let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out
@@ -266,7 +266,7 @@ impl<'a> Matcher<'a> {
         };
         match n.primitive {
             Full { .. } | Iota { .. } => true,
-            BroadcastInDim { .. } | Reshape { .. } | ConvertElementType { .. } => {
+            BroadcastInDim { .. } | Reshape { .. } | Cast { .. } => {
                 self.leaves(n.inputs[0], scalars, leaves)
             }
             _ => {
@@ -323,7 +323,7 @@ impl<'a> Matcher<'a> {
     fn uncast(&self, v: Var) -> Var {
         match self.node(v) {
             Some(n)
-                if matches!(n.primitive, Primitive::ConvertElementType { .. })
+                if matches!(n.primitive, Primitive::Cast { .. })
                     && self.single(v) =>
             {
                 n.inputs[0]
@@ -359,7 +359,7 @@ impl<'a> Matcher<'a> {
                 Primitive::Full { fill_value, .. } => return Some(fill_value.to_f64()),
                 Primitive::BroadcastInDim { .. }
                 | Primitive::Reshape { .. }
-                | Primitive::ConvertElementType { .. } => v = n.inputs[0],
+                | Primitive::Cast { .. } => v = n.inputs[0],
                 _ => return None,
             }
         }
@@ -438,7 +438,7 @@ impl<'a> Matcher<'a> {
             let dtype = ty(n.output).dtype;
             match &n.primitive {
                 DotGeneral { .. } => break n,
-                ConvertElementType { .. } => {
+                Cast { .. } => {
                     scores.push(Score::Round(dtype));
                     v = n.inputs[0];
                 }
@@ -622,10 +622,10 @@ impl<'a> Matcher<'a> {
                 let c = fill_value.to_f64();
                 (c.fract() == 0.0).then_some((0, 0, c as i64))
             }
-            BroadcastInDim { .. } | Reshape { .. } | ConvertElementType { .. } => {
+            BroadcastInDim { .. } | Reshape { .. } | Cast { .. } => {
                 let (ci, cj, c) = self.affine(n.inputs[0], nb)?;
                 // Only constants are broadcast: an index would move.
-                (matches!(n.primitive, ConvertElementType { .. }) || (ci, cj) == (0, 0))
+                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0))
                     .then_some((ci, cj, c))
             }
             Add | Sub => {

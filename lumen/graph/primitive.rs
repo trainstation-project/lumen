@@ -31,7 +31,7 @@ pub enum Primitive {
     Sqrt,
     Tanh,
     Logistic,
-    ConvertElementType {
+    Cast {
         new_dtype: DType,
     },
     /// `select(pred, on_true, on_false)`, elementwise.
@@ -133,7 +133,7 @@ impl Primitive {
             Sqrt => "sqrt",
             Tanh => "tanh",
             Logistic => "logistic",
-            ConvertElementType { .. } => "convert_element_type",
+            Cast { .. } => "cast",
             Select => "select",
             ReduceSum { .. } => "reduce_sum",
             ReduceMax { .. } => "reduce_max",
@@ -217,7 +217,7 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            ConvertElementType { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
+            Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
                 if pred.dtype != DType::Bool || pred.shape != x.shape {
@@ -464,7 +464,7 @@ impl fmt::Display for Primitive {
         }
         f.write_str(self.name())?;
         match self {
-            ConvertElementType { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
+            Cast { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
             ReduceSum { axes, accum_dtype } => {
                 write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
             }

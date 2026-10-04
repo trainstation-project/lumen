@@ -211,7 +211,7 @@ fn fused_kernels_match_reference() {
         );
         let i = apply(
             &mut g,
-            ConvertElementType {
+            Cast {
                 new_dtype: DType::I32,
             },
             &[y],
@@ -219,7 +219,7 @@ fn fused_kernels_match_reference() {
         g.set_outputs(&[t, i]).unwrap();
         // logistic, expensive and read twice, is stored: its convert runs alone.
         let expected: &[&str] = if dtype.is_float() && dtype != DType::BF16 {
-            &["fusion", "fusion", "convert_element_type"]
+            &["fusion", "fusion", "cast"]
         } else {
             &["fusion", "fusion"]
         };
@@ -868,7 +868,7 @@ fn reductions_apply_their_epilogue() {
             let x = g.input(ty(DType::BF16, &shape));
             let w = apply(
                 &mut g,
-                ConvertElementType {
+                Cast {
                     new_dtype: DType::F32,
                 },
                 &[x],
@@ -895,7 +895,7 @@ fn reductions_apply_their_epilogue() {
             }
             let y = apply(
                 &mut g,
-                ConvertElementType {
+                Cast {
                     new_dtype: DType::BF16,
                 },
                 &[s],
