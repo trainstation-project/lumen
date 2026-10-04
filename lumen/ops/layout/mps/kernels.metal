@@ -4,7 +4,7 @@
 // dimensions), transpose (permuted strides) and copies; a tiled transpose
 // where the reads would otherwise be strided.
 //
-// Compiled after lumen/ops/mps.metal, which build.rs puts first
+// Compiled after lumen/ops/mps/kernels.metal, which build.rs puts first
 // in the one Metal source the kernels share.
 
 // Thread (x, y) writes elements x, x + X, ... of output row y (X the grid

@@ -1,10 +1,10 @@
-// Launches the graph primitives' Metal kernels (lumen/ops/*/mps.metal,
+// Launches the graph primitives' Metal kernels (lumen/ops/*/mps/kernels.metal,
 // compiled as one library), and the fused kernels the MPS graph compiler
 // generates (lumen/compiler/mps), into lumen's MPS stream. Generic: Rust
-// (lumen/ops/*/mps.rs) names the kernel and passes its buffers and
+// (lumen/ops/*/mps/mod.rs) names the kernel and passes its buffers and
 // argument bytes, bound in that order.
 
-#include "../stream/mps/mps.h"
+#include "../../stream/mps/mps.h"
 #include "primitive_kernels.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>

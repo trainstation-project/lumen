@@ -1,5 +1,5 @@
 //! The MPS `fill_` kernel: compute shaders for dense and strided fills
-//! (`mps.mm`), as in PyTorch, encoded into the MPS stream without
+//! (`shim.mm`), as in PyTorch, encoded into the MPS stream without
 //! waiting (see [`crate::stream::mps`]). Memory outside lumen's MPS segments
 //! (a custom allocator's) takes the CPU kernel: MPS memory is unified.
 

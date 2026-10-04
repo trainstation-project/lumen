@@ -33,9 +33,10 @@ Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
 """
 
-from lumen import functional, graph, nn, ops, profiler, safetensors
+from lumen import autograd, functional, graph, nn, ops, profiler, safetensors
 from lumen._C import __version__, device
 from lumen.allocator import config
+from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.graph import compile, make_graph, prims
 from lumen.stream import cuda, mps
 from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
@@ -107,7 +108,12 @@ __all__ = [
     "from_dlpack",
     # compiled execution
     "compile",
+    "grad",
+    "jvp",
+    "value_and_grad",
+    "vjp",
     "make_graph",
     "prims",
     "functional",
+    "autograd",
 ]

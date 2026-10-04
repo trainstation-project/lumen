@@ -1289,4 +1289,108 @@ def test_rounding_a_contraction_then_widening_it_warns():
         warnings.simplefilter("error")
         lumen.make_graph(lambda x: F.matmul(x, x.t(), "float32", "float32") * 0.5)(x)
         lumen.make_graph(lambda x: F.relu(x @ x.t()))(x)
-        lumen.make_graph(lambda q: F.scaled_dot_product_attention(q, q, q))(q)
+        lumen.make_graph(lambda q: F.flash_attention(q, q, q))(q)
+
+
+class _Counter(lumen.nn.Module):
+    n: lumen.Tensor
+    w: lumen.Tensor
+
+
+def test_copy_into_a_weight_is_written_back():
+    """w.copy_(value) in a compiled function assigns a module's weight: the
+    compiled function writes it back after each call (an optimizer's step),
+    and the next call reads it; a call compiling on meta tensors does not."""
+    counter = _Counter(lumen.empty([], device="meta"), lumen.empty([3], device="meta"))
+
+    def step(c, x):
+        c.n.copy_(c.n + 1.0)
+        c.w.copy_(c.w + x * c.n)
+        return c.n * 1.0
+
+    step = lumen.compile(step, device="cpu")
+    step(counter, lumen.empty([3], device="meta"))
+    x = np.array([1.0, 2.0, 3.0], np.float32)
+    for k in range(1, 4):
+        assert float(lumen.to_numpy(step(counter, lumen.from_numpy(x)))) == k
+    # w = x * (1 + 2 + 3), read back by a function returning it.
+    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda c: c.w * 1.0)(counter)), 6 * x)
+    with pytest.raises(TypeError, match="copy_"):
+        lumen.make_graph(lambda c: c.w.copy_(c.n))(counter)
+
+
+class _Steps(lumen.nn.Module):
+    w: lumen.Tensor
+    t: float
+    lrs: tuple
+
+
+def test_copy_into_a_modules_float_is_written_back():
+    """A module's float (a runtime scalar) assigned with copy_ is written
+    back into the module, on the host, after each call: the next call
+    passes it (a step count). One in a tuple cannot be."""
+    steps = _Steps(lumen.empty([2], device="meta"), 0.0, (0.5,))
+
+    def step(s):
+        s.t.copy_(s.t + 1.0)
+        s.w.copy_(s.w + s.t)
+        return s.t * 1.0
+
+    step = lumen.compile(step, device="cpu")
+    for k in range(1, 4):
+        step(steps)
+        assert steps.t == k
+    # w = 1 + 2 + 3.
+    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda s: s.w * 1.0)(steps)), [6.0, 6.0])
+
+    def assign_tuple(s):
+        s.lrs[0].copy_(s.lrs[0] * 2.0)
+        return s.w * 1.0
+
+    with pytest.raises(TypeError, match="tuple"):
+        lumen.compile(assign_tuple, device="cpu")(steps)
+
+
+class _ReluMLP(lumen.nn.Module):
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        return F.relu(x @ self.w1) @ self.w2
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_writes_values_the_backward_reads():
+    """In a training step relu's backward reads x @ w1: the relu still runs
+    in the matmul's kernel, which writes x @ w1 too (XLA's GELU_AUX); the
+    step agrees exactly with the unfused one."""
+    rng = np.random.default_rng(0)
+    w1, w2 = (rng.standard_normal(s).astype(np.float32) * 0.1 for s in ((64, 96), (96, 32)))
+    x = rng.standard_normal((48, 64)).astype(np.float32)
+
+    def step(m, x):
+        loss = F.sum(F.tanh(m(x)))
+        loss.backward()
+        return loss, [p.grad for p in m.parameters()]
+
+    results = []
+    for epilogues in (True, False):
+        lumen.config.compiler.contraction_epilogues = epilogues
+        try:
+            model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
+            f = lumen.compile(step, device="mps")
+            try:
+                f(model, lumen.empty([48, 64], device="meta"))
+            except RuntimeError as e:
+                pytest.skip(str(e))
+            model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
+            loss, grads = f(model, lumen.from_numpy(x).to("mps"))
+            results.append([lumen.to_numpy(t) for t in (loss, *grads)])
+            plan = lumen.graph.Plan(lumen.make_graph(step)(model, lumen.from_numpy(x)), "mps")
+            labels = [s["label"] for s in plan.steps()]
+            if epilogues:
+                assert "dot_general → max" in labels, labels
+        finally:
+            lumen.config.compiler.reset()
+    for a, b in zip(*results):
+        np.testing.assert_array_equal(a, b)

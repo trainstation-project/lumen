@@ -1,7 +1,7 @@
 //! Graph-plan steps as Metal kernels on MPS. [`encode`] hands each step to
-//! its op (`lumen/ops/<op>/mps.rs`), which picks the kernel in its
-//! `mps.metal` and computes the arguments (shapes, strides); [`launch`]
-//! runs it through `mps.mm` into lumen's MPS stream without waiting (see
+//! its op (`lumen/ops/<op>/mps/mod.rs`), which picks the kernel in its
+//! `kernels.metal` and computes the arguments (shapes, strides); [`launch`]
+//! runs it through `shim.mm` into lumen's MPS stream without waiting (see
 //! [`crate::stream::mps`]). Values are contiguous, so a kernel only needs
 //! strides where it reads in another order (broadcast, transpose,
 //! reductions and contractions).
@@ -139,7 +139,7 @@ pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
 }
 
 /// Bytes of elements an elementwise kernel's thread takes
-/// (`BYTES_PER_THREAD` in `mps.metal`).
+/// (`BYTES_PER_THREAD` in `kernels.metal`).
 pub(crate) const BYTES_PER_THREAD: usize = 16;
 
 /// The grid of an elementwise kernel over `n` elements of `dtype`.

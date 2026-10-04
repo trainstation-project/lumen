@@ -18,6 +18,15 @@ class Graph:
     def type_of(self, var: int) -> tuple[str, list[int]]: ...
     def inputs(self) -> list[int]: ...
     def outputs(self) -> list[int]: ...
+    def attentions(self) -> list[dict[str, Any]]:
+        """The attentions traced so far, as the compiler matches them: each
+        dot's operands, output, the softmax's max and sum, the score chain,
+        the causal offset and the values it computes."""
+
+    def prune(self) -> list[int | None]:
+        """Remove the nodes no output depends on; each value's new number,
+        or None if removed."""
+
     def precision_warnings(self) -> list[tuple[int, int, str]]:
         """A warning for each dot or sum rounded to a narrower dtype than it
         accumulates in, then cast back up: its output, the cast's, the

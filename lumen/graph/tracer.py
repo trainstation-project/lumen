@@ -18,6 +18,7 @@ Convert with ``.to(dtype)``.
 """
 
 import builtins
+import dataclasses
 import functools
 import math
 import os
@@ -43,13 +44,45 @@ _SOURCES = []
 _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _record_source(var):
-    """Record the line of the traced program computing ``var``."""
+# The autodiff tapes being recorded (``lumen/autograd``), innermost
+# last: each node bound while one is open, ``(name, input vars, params,
+# output var)``, is appended to each.
+_TAPES = []
+# Each trace's whole tape and the tensors ``.backward()`` differentiates
+# with respect to (its tensor arguments and weights), innermost last.
+_BACKWARD = []
+
+
+def _record(name, inputs, params, var):
+    """Record node ``var = name(inputs, **params)``: its source line, and
+    on each open tape."""
+    for tape in _TAPES:
+        tape.append((name, inputs, params, var))
     frame = sys._getframe(1)
     while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+
+
+def _tree_map(f, x):
+    """``x`` with each traced tensor in it (through modules, lists and
+    tuples) replaced by ``f(t)``."""
+    if isinstance(x, TracedTensor):
+        return f(x)
+    if isinstance(x, nn.Module):
+        fields = {fl.name: _tree_map(f, getattr(x, fl.name)) for fl in dataclasses.fields(x)}
+        return dataclasses.replace(x, **fields)
+    if isinstance(x, (list, tuple)):
+        return type(x)(_tree_map(f, v) for v in x)
+    return x
+
+
+def _tree_leaves(x):
+    """The traced tensors in ``x``, in ``_tree_map``'s order."""
+    leaves = []
+    _tree_map(leaves.append, x)
+    return leaves
 
 
 def current_graph():
@@ -86,8 +119,9 @@ def _scalars(args):
 
 
 def _trace(fn, args):
-    """``fn`` traced on ``args``: the graph, and whether ``fn`` returned a
-    single tensor (rather than a tuple or list of them). The graph's inputs
+    """``fn`` traced on ``args``: the graph, and what ``fn`` returned (a
+    traced tensor, or modules, lists and tuples of them: the structure the
+    graph's outputs, its traced tensors in order, are returned in). The graph's inputs
     are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
@@ -115,20 +149,51 @@ def _trace(fn, args):
         )
         for a in traced
     ]
+
     sources = {}
+    assigned = {sid: t.var for sid, t in weights.items()}
+    assigned_scalars = [t.var for t in scalars]
+    # Recorded from the start, for ``.backward()``.
+    tape = []
+    leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
+
     _TRACES.append(graph)
     _SOURCES.append(sources)
+    _TAPES.append(tape)
+    _BACKWARD.append((tape, leaves))
+
     try:
         out = fn(*traced)
     finally:
         _TRACES.pop()
         _SOURCES.pop()
-    single = isinstance(out, TracedTensor)
-    outputs = (out,) if single else tuple(out)
-    for o in outputs:
-        if not isinstance(o, TracedTensor) or o.graph is not graph:
-            raise TypeError(f"a compiled function must return tensors computed from its inputs, got {o!r}")
-    graph.set_outputs([o.var for o in outputs])
+        _TAPES.pop()
+        _BACKWARD.pop()
+
+    outputs = _tree_leaves(out)
+    if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
+        raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
+    # A weight or a module's float ``fn`` assigned (``w.copy_(value)``):
+    # its new value is an output too, written back after each run (the
+    # float on the host).
+    written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
+    written_scalars = [k for k, t in enumerate(scalars) if t.var != assigned_scalars[k]]
+    graph.set_outputs(
+        [o.var for o in outputs]
+        + [list(weights.values())[k].var for k in written]
+        + [scalars[k].var for k in written_scalars]
+    )
+    # Without the values no output depends on (an autodiff transform's
+    # tangents its transpose does not read).
+    renumbered = graph.prune()
+    sources = {renumbered[v]: s for v, s in sources.items() if renumbered[v] is not None}
+    grads = [t.grad for t in leaves if t.grad is not None]
+    if grads and all(renumbered[g.var] is None for g in grads):
+        warnings.warn(
+            "backward() computed gradients the compiled function does not use: it is pruned. "
+            "Return them (x.grad, [p.grad for p in model.parameters()]) or use them (opt.step())",
+            stacklevel=3,
+        )
     for var, cast, message in graph.precision_warnings():
         where, cast_at = sources.get(var), sources.get(cast)
         if cast_at and cast_at != where:
@@ -137,7 +202,7 @@ def _trace(fn, args):
             warnings.warn_explicit(message, UserWarning, *where)
         else:
             warnings.warn(message)
-    return graph, single
+    return graph, out, (written, written_scalars)
 
 
 def _lift(x):
@@ -215,6 +280,10 @@ def compile(fn, device=None):
     With only meta tensors and no ``device``, nothing is compiled for a
     device: results are meta tensors of the right types.
 
+    A weight the function assigns (``w.copy_(value)``, an optimizer's
+    step) is written back into the weight's memory after each call; a
+    module's float so assigned (a step count), into the module.
+
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
@@ -228,7 +297,7 @@ def compile(fn, device=None):
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
-        workspace, whether ``fn`` returns a single tensor, and the plan's
+        workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = _device(args, device)
         # The compiler's flags too: a plan compiled with others is not reused.
@@ -241,13 +310,13 @@ def compile(fn, device=None):
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
-        graph, single, entries, _, _ = plans[key]
+        graph, out, _, entries, _, _ = plans[key]
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, single, tensors + weights
+            return graph, entries[0][0], None, out, tensors + weights
         params = list(range(len(tensors), len(tensors) + len(weights)))
         inputs = tensors + weights
 
@@ -265,7 +334,7 @@ def compile(fn, device=None):
         for plan, workspace in entries:
             placed = inputs_for(plan)
             if placed is not None:
-                return graph, plan, workspace, single, placed
+                return graph, plan, workspace, out, placed
         # A new plan: dots merged into blocks of weights while none of theirs
         # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
@@ -277,19 +346,32 @@ def compile(fn, device=None):
             plan = Plan(graph, target, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
             placed = inputs_for(plan)
-        return graph, plan, workspace, single, placed
+        return graph, plan, workspace, out, placed
 
     @functools.wraps(fn)
     def compiled(*args):
-        graph, plan, workspace, single, inputs = prepare(args)
-        if workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args):
+        graph, plan, workspace, out, inputs = prepare(args)
+        ran = not (workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args))
+        if not ran:
             # Compiled (and the weights placed); nothing to run.
             outputs = [
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
             ]
         else:
             outputs = plan.run_in(workspace, inputs)
-        return outputs[0] if single else tuple(outputs)
+        outputs = iter(outputs)
+        result = _tree_map(lambda _: next(outputs), out)
+        if ran:
+            # The weights it assigned, written back (functionalized: as
+            # torch.compile does a mutation).
+            weights = _weights(args)
+            written, written_scalars = plans[latest[0]][2]
+            for k, value in zip(written, outputs):
+                weights[k].copy_(value)
+            for k, value in zip(written_scalars, outputs):
+                (v,) = value.tolist()  # a 0-d tensor lists its one element
+                nn._set_float(args, k, float(v))
+        return result
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
@@ -304,7 +386,7 @@ def compile(fn, device=None):
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = latest
-        graph, _, _, n_tensors, scalars = plans[latest[0]]
+        graph, _, _, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
@@ -532,7 +614,7 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "var", "dtype", "shape", "weak")
+    __slots__ = ("graph", "var", "dtype", "shape", "weak", "grad")
 
     def __init__(self, graph, var):
         self.graph = graph
@@ -540,6 +622,8 @@ class TracedTensor:
         # A runtime scalar's (a float argument's): it takes its tensor
         # operand's dtype, as a Python scalar does.
         self.weak = False
+        # Its gradient, once ``.backward()`` computed one (torch's ``.grad``).
+        self.grad = None
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)
@@ -595,6 +679,40 @@ class TracedTensor:
 
     def __neg__(self):
         return prims.neg(self)
+
+    def copy_(self, value):
+        """Assign ``value`` (of its type) to it, in place (torch's ``copy_``):
+        every reference to it reads ``value`` from here on. A module's
+        weight so assigned is written back into the weight after each call
+        of the compiled function (an optimizer's step)."""
+        value = _lift(value)
+        if not isinstance(value, TracedTensor) or (value.dtype, value.shape) != (self.dtype, self.shape):
+            raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
+        self.var = value.var
+        return self
+
+    def backward(self, gradient=None):
+        """Its gradient (``gradient``: its cotangent; for a scalar, 1 by
+        default) with respect to the traced function's tensor arguments and
+        its modules' weights, added to their ``.grad`` (``torch.Tensor.backward``,
+        within the trace: return them). As ``lumen.grad`` computes it."""
+        from lumen.autograd.transforms import backward  # it imports this module
+
+        tape, leaves = _BACKWARD[-1]
+
+        if gradient is None:
+            if self.shape != () or not _is_float(self.dtype):
+                raise RuntimeError(f"backward: a gradient is needed for a non-scalar output, got {self!r}")
+
+            gradient = prims.full((), 1.0, self.dtype)
+
+        for leaf, g in zip(leaves, backward(self, gradient, list(tape), leaves)):
+            if g is not None:
+                # gradient accumulation
+                if leaf.grad is not None:
+                    g = leaf.grad + g
+
+                leaf.grad = g
 
     def __matmul__(self, other):
         """F.matmul, accumulating floats in float32 (float64 in float64),

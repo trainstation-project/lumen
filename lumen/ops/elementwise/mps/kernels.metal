@@ -1,6 +1,6 @@
 // Each (op, dtype) is its own kernel, named after the primitive (add_f32,
 // lt_i64, exp_bf16, convert_i32_f16, ...), applying the op's functor (in
-// lumen/ops/mps.metal), so the op is fixed at compile time.
+// lumen/ops/mps/kernels.metal), so the op is fixed at compile time.
 
 // `U` is the result's element type: T, or bool for comparisons.
 template <typename Op, typename T, typename U>

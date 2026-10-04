@@ -43,10 +43,12 @@ class Module:
     def named_parameters(self):
         """``(path, weight)`` for each weight, recursively, in field order
         (``layers.0.w1``); a tensor in several fields is listed once."""
+        # By tensor, not storage: a compiled function's results share its
+        # workspace's.
         seen = set()
         for path, t in _leaves(self, ""):
-            if t.storage_id not in seen:
-                seen.add(t.storage_id)
+            if id(t) not in seen:
+                seen.add(id(t))
                 yield path, t
 
     def parameters(self):
@@ -70,9 +72,12 @@ class Module:
 
 def _leaves(x, path):
     """``(path, tensor)`` for each tensor in ``x`` (a module, a list or
-    tuple, or a tensor), recursively."""
+    tuple, or a tensor), recursively: inside a compiled function, its
+    traced weights (not its floats, runtime scalars)."""
+    from lumen.graph.tracer import TracedTensor  # it imports this module
+
     prefix = f"{path}." if path else ""
-    if isinstance(x, Tensor):
+    if isinstance(x, Tensor) or (isinstance(x, TracedTensor) and not x.weak):
         yield path, x
     elif isinstance(x, Module):
         for f in dataclasses.fields(x):
@@ -80,6 +85,35 @@ def _leaves(x, path):
     elif isinstance(x, (list, tuple)):
         for i, v in enumerate(x):
             yield from _leaves(v, prefix + str(i))
+
+
+def _set_float(x, k, value):
+    """Set the ``k``-th float of ``x`` (in :func:`_floats`' order) to
+    ``value``: a module's field or a list's element (a tuple's cannot be)."""
+    slots = list(_float_slots(x))
+    holder, key = slots[k]
+    if holder is None:
+        raise TypeError("a float in a tuple cannot be assigned: hold it in a module field or a list")
+    if isinstance(holder, Module):
+        object.__setattr__(holder, key, value)
+    else:
+        holder[key] = value
+
+
+def _float_slots(x):
+    """Where each float of ``x`` is, ``(holder, key)``, in :func:`_floats`'
+    order (``(None, None)`` in a tuple)."""
+    if isinstance(x, Module):
+        items = [(x, f.name, getattr(x, f.name)) for f in dataclasses.fields(x)]
+    elif isinstance(x, (list, tuple)):
+        items = [(x if isinstance(x, list) else None, i, v) for i, v in enumerate(x)]
+    else:
+        return
+    for holder, key, v in items:
+        if isinstance(v, float):
+            yield (holder, key) if holder is not None else (None, None)
+        else:
+            yield from _float_slots(v)
 
 
 def _floats(x):

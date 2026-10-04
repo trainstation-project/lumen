@@ -1,12 +1,20 @@
-// Flash attention forward, the kernels of attentions the MPS compiler
-// matches (lumen/compiler/mps/attention.rs): o = softmax(q k^T * scale
+// Flash attention's forward: the kernels of attentions the MPS
+// compiler matches (lumen/compiler/mps/attention.rs): o = softmax(q k^T * scale
 // [causal]) v over each batch index, the scores and probabilities never
-// in memory. A generated kernel (codegen.rs) instantiates one template
+// in memory. A generated kernel (lumen/compiler/mps/codegen.rs) instantiates one template
 // with the attention's sizes and an indexer `Ix`: q(b), k(b), v(b) and
 // o(b), the offset of batch index b's elements in each buffer (64-bit,
 // once a threadgroup), and the row and column strides of each (32-bit
 // within a batch index: query or key i, head dimension d at
 // i * ROW + d * COL).
+//
+// With RAW, the attention's own value is written to `raw` too (at the
+// output's index): with an epilogue, when it is read elsewhere (a training
+// forward's, which the backward reads).
+//
+// With LSE, each query row's log-sum-exp of its scores, m + log(l), is
+// written to `lse` too ([batch, Sq], float): what a training forward saves
+// for the backward (backward.metal).
 //
 // Scores, the softmax and the output accumulate in float; each score then
 // goes through `score` (its rounding, casts and scale as traced, codegen.rs)
@@ -48,6 +56,8 @@ template <typename T,
           uint DV,
           uint BK,
           bool CAUSAL,
+          bool RAW,
+          bool LSE,
           typename Ix,
           typename Score,
           typename Out = O,
@@ -56,6 +66,8 @@ inline void flash_attention(device const T *q,
                             device const T *k,
                             device const T *v,
                             device Out *out,
+                            device O *raw,
+                            device float *lse,
                             Ix ix,
                             uint sq,
                             uint sk,
@@ -152,7 +164,11 @@ inline void flash_attention(device const T *q,
             }
         }
     }
-    // O / l, each lane its two elements of each row.
+    // O / l, each lane its two elements of each row; the row's
+    // log-sum-exp, by its first lane.
+    if (LSE && in_rows && fc == 0) {
+        lse[ulong(b) * sq + row] = m + log(l);
+    }
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
             float2 o = frag(om[c]) / l;
@@ -160,6 +176,10 @@ inline void flash_attention(device const T *q,
             uint e0 = row * Ix::O_ROW + d * Ix::O_COL, e1 = row * Ix::O_ROW + (d + 1) * Ix::O_COL;
             out[e0] = epi(O(o.x), ob + e0);
             out[e1] = epi(O(o.y), ob + e1);
+            if (RAW) {
+                raw[ob + e0] = O(o.x);
+                raw[ob + e1] = O(o.y);
+            }
         }
     }
 }
@@ -173,6 +193,8 @@ template <typename T,
           uint D,
           uint DV,
           bool CAUSAL,
+          bool RAW,
+          bool LSE,
           typename Ix,
           typename Score,
           typename Out = O,
@@ -181,7 +203,10 @@ inline void attention_decode(device const T *q,
                              device const T *k,
                              device const T *v,
                              device Out *out,
+                             device O *raw,
+                             device float *lse,
                              Ix ix,
+                             uint sq,
                              uint sk,
                              Score score,
                              int offset,
@@ -253,6 +278,9 @@ inline void attention_decode(device const T *q,
     for (uint g = 0; g < ATTN_GROUPS; ++g) {
         total += maxima[g] == -INFINITY ? 0.0f : sums[g] * exp(maxima[g] - mm);
     }
+    if (LSE && t == 0) {
+        lse[ulong(b) * sq + i] = mm + log(total);
+    }
     for (uint d = t; d < DV; d += 256) {
         float o = 0;
         for (uint g = 0; g < ATTN_GROUPS; ++g) {
@@ -260,5 +288,8 @@ inline void attention_decode(device const T *q,
         }
         uint e = i * Ix::O_ROW + d * Ix::O_COL;
         out[e] = epi(O(o / total), ob + e);
+        if (RAW) {
+            raw[ob + e] = O(o / total);
+        }
     }
 }

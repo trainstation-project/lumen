@@ -105,6 +105,47 @@ impl Graph {
         Ok(())
     }
 
+    /// The graph without the nodes no output depends on (XLA's DCE: the
+    /// tangents a linearized program computes and its transpose does not
+    /// read), its inputs kept; and each value's new number, if kept.
+    pub fn prune(&self) -> (Graph, Vec<Option<Var>>) {
+        let mut live = vec![false; self.types.len()];
+        for &v in &self.outputs {
+            live[v] = true;
+        }
+        for node in self.nodes.iter().rev() {
+            if live[node.output] {
+                for &v in &node.inputs {
+                    live[v] = true;
+                }
+            }
+        }
+        let mut pruned = Graph::new();
+        let mut map: Vec<Option<Var>> = vec![None; self.types.len()];
+        for &v in &self.inputs {
+            map[v] = Some(pruned.input(self.types[v].clone()));
+        }
+        for node in self.nodes.iter().filter(|n| live[n.output]) {
+            let inputs: Vec<Var> = node
+                .inputs
+                .iter()
+                .map(|&v| map[v].expect("an earlier value"))
+                .collect();
+            map[node.output] = Some(
+                pruned
+                    .apply(node.primitive.clone(), &inputs)
+                    .expect("a node of the graph"),
+            );
+        }
+        let outputs: Vec<Var> = self
+            .outputs
+            .iter()
+            .map(|&v| map[v].expect("a live value"))
+            .collect();
+        pruned.set_outputs(&outputs).expect("its values");
+        (pruned, map)
+    }
+
     fn check_vars(&self, vars: &[Var]) -> Result<(), String> {
         match vars.iter().find(|&&v| v >= self.types.len()) {
             Some(v) => Err(format!("%{v} is not a value of this graph")),
