@@ -88,7 +88,7 @@ def flash_attention(query, key, value, scale=None, is_causal=False):
     computed, in float32 or wider), the softmax, then the probabilities in
     the inputs' dtype times ``value``. The MPS compiler runs them as one
     flash-attention kernel (``lumen.config.compiler.flash_attention``), as
-    it does attention written out. An ``autograd.Function`` (``_Attention``):
+    it does attention written out. An ``autograd.Function`` (``_FlashAttention``):
     its gradient is FlashAttention-2's, the probabilities recomputed from
     each row's log-sum-exp, not saved; on MPS, two more kernels."""
 
@@ -115,4 +115,5 @@ def flash_attention(query, key, value, scale=None, is_causal=False):
 
     if scale is None:
         scale = 1.0 / math.sqrt(h)
-    return _Attention.apply(q, k, v, scale=scale, causal=is_causal)
+
+    return _FlashAttention.apply(q, k, v, scale=scale, causal=is_causal)
