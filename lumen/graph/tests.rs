@@ -757,6 +757,7 @@ fn custom_calls_mutate_in_place_where_they_can() {
             label: "test::op",
             kernel: 0,
             mutated: vec![1, 2],
+            overlappable: Vec::new(),
         };
         let new_a = g.apply(call, &[x, a, b]).unwrap();
         let new_b = g

@@ -139,11 +139,15 @@ pub enum Primitive {
     /// function opaque to the compilers (by its handle, `graph/custom.rs`),
     /// reading its operands and writing those at `mutated` in place. Its
     /// value is `mutated[0]`'s new value; `mutated[k]`'s, a
-    /// [`Primitive::FusionOutput`] of it at index `k`.
+    /// [`Primitive::FusionOutput`] of it at index `k`. Each `(m, j)` of
+    /// `overlappable`: the mutated operand `m` may be given operand `j`'s
+    /// memory (the function reads each element of `j` before writing `m`'s
+    /// at its index, and not `m`'s old value), which the planner decides.
     CustomCall {
         label: &'static str,
         kernel: usize,
         mutated: Vec<usize>,
+        overlappable: Vec<(usize, usize)>,
     },
 }
 
@@ -443,8 +447,19 @@ impl Primitive {
             }
             Full { shape, dtype, .. } => Ok(TensorType::new(*dtype, shape)),
             FusionOutput { ty, .. } => Ok(ty.clone()),
-            CustomCall { mutated, .. } => {
+            CustomCall {
+                mutated,
+                overlappable,
+                ..
+            } => {
                 check_dims(mutated, args.len(), "mutated operands").map_err(prefix)?;
+                for &(m, j) in overlappable {
+                    if !mutated.contains(&m) || mutated.contains(&j) || j >= args.len() {
+                        return err(format!(
+                            "an overlappable pair ({m}, {j}) is a mutated operand and another operand"
+                        ));
+                    }
+                }
                 match mutated.first() {
                     Some(&m) => Ok(args[m].clone()),
                     None => err("mutates no operand: it would compute nothing".into()),
@@ -597,7 +612,21 @@ impl fmt::Display for Primitive {
                 )
             }
             DynamicSlice { slice_sizes } => write!(f, "[slice_sizes={}]", Tuple(slice_sizes)),
-            CustomCall { mutated, .. } => write!(f, "[mutated={}]", Tuple(mutated)),
+            CustomCall {
+                mutated,
+                overlappable,
+                ..
+            } => {
+                write!(f, "[mutated={}", Tuple(mutated))?;
+                if !overlappable.is_empty() {
+                    let pairs: Vec<String> = overlappable
+                        .iter()
+                        .map(|(m, j)| format!("{m}:{j}"))
+                        .collect();
+                    write!(f, " overlappable=({})", pairs.join(", "))?;
+                }
+                f.write_str("]")
+            }
             Reshape { new_sizes } => write!(f, "[new_sizes={}]", Tuple(new_sizes)),
             BroadcastInDim {
                 shape,

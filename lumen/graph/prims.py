@@ -196,11 +196,19 @@ def dynamic_update_slice(x, update, start_indices):
     return bind("dynamic_update_slice", x, update, *_start_indices(start_indices))
 
 
-def _custom_call(operands, name, kernel, mutated):
+def _custom_call(operands, name, kernel, mutated, overlappable=()):
     """Custom op ``name`` (``lumen.ops.custom_op``), function ``kernel`` (its
-    handle) on ``operands``, mutating those at ``mutated``: their new
-    values."""
-    first = bind("custom_call", *operands, op=name, kernel=kernel, mutated=tuple(mutated))
+    handle) on ``operands``, mutating those at ``mutated``, each ``(m, j)``
+    of ``overlappable`` the mutated operand ``m`` perhaps in operand ``j``'s
+    memory: their new values."""
+    first = bind(
+        "custom_call",
+        *operands,
+        op=name,
+        kernel=kernel,
+        mutated=tuple(mutated),
+        overlappable=[tuple(pair) for pair in overlappable],
+    )
     rest = [
         bind("fusion_output", first, index=k, dtype=operands[m].dtype, shape=tuple(operands[m].shape))
         for k, m in enumerate(mutated[1:], 1)

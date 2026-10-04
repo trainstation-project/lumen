@@ -86,6 +86,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             label: crate::graph::intern(get("op")?.extract()?),
             kernel: get("kernel")?.extract()?,
             mutated: dims("mutated")?,
+            overlappable: get("overlappable")?.extract()?,
         },
         "fusion_output" => FusionOutput {
             index: get("index")?.extract()?,

@@ -197,23 +197,40 @@ impl Plan {
                 }
                 _ => Vec::new(),
             };
+            // Each value written in place: its operand's memory, else (a
+            // custom op's) one it may overlap's, if that dies here.
+            let overlappable: &[(usize, usize)] = match &node.primitive {
+                Primitive::CustomCall { overlappable, .. } => overlappable,
+                _ => &[],
+            };
             for (out, position) in written {
                 if !live[out] {
                     continue;
                 }
-                let r = root[node.inputs[position]];
-                let mine = |v: Var| root[v] == r;
-                let others = node
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .any(|(j, &v)| j != position && mine(v));
-                let free = !callers(r)
-                    && !graph.outputs().iter().any(|&o| mine(o))
-                    && !others
-                    && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&u| u > t));
-                if free {
-                    root[out] = r;
+                let candidates = std::iter::once(position).chain(
+                    overlappable
+                        .iter()
+                        .filter(|&&(m, _)| m == position)
+                        .map(|&(_, j)| j),
+                );
+                for j in candidates {
+                    let r = root[node.inputs[j]];
+                    let mine = |v: Var| root[v] == r;
+                    let others = node
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .any(|(i, &v)| i != j && i != position && mine(v));
+                    let free = graph.type_of(node.inputs[j]) == graph.type_of(out)
+                        && !callers(r)
+                        && !graph.outputs().iter().any(|&o| mine(o))
+                        && !others
+                        && (j == position || root[node.inputs[position]] != r)
+                        && !(0..n).any(|v| mine(v) && readers[v].iter().any(|&u| u > t));
+                    if free {
+                        root[out] = r;
+                        break;
+                    }
                 }
             }
             // Any other step (XLA's CanShareOperandBufferWithUser): its value
@@ -751,10 +768,14 @@ impl Plan {
         }
         for step in &self.steps {
             if let Primitive::CustomCall {
-                kernel, mutated, ..
+                kernel,
+                mutated,
+                overlappable,
+                ..
             } = &step.primitive
             {
-                self.call_custom_op(step, *kernel, mutated, executor, &tensor, workspace)?;
+                let op = (*kernel, mutated.as_slice(), overlappable.as_slice());
+                self.call_custom_op(step, op, executor, &tensor, workspace)?;
                 continue;
             }
             // A strided input (a parameter [`run_in`](Self::run_in) reads in
@@ -838,15 +859,17 @@ impl Plan {
 
 impl Plan {
     /// Run custom op step `step` (its function `kernel`, mutating its
-    /// operands at `mutated`): each mutated operand's value in its output's
-    /// buffer (copied there unless the planner put the output in the
-    /// operand's own), then the function called on its operands as tensors,
-    /// the mutated ones those output buffers, which it writes in place.
+    /// operands at `mutated`, each `(m, j)` of `overlappable` the mutated
+    /// operand `m` perhaps in operand `j`'s memory): each mutated operand's
+    /// value in its output's buffer (copied there unless the planner put the
+    /// output in the operand's own, or in an operand's it may overlap, where
+    /// its old value is not read), then the function called on its operands
+    /// as tensors, the mutated ones those output buffers, which it writes in
+    /// place.
     fn call_custom_op<'a>(
         &self,
         step: &Step,
-        kernel: usize,
-        mutated: &[usize],
+        (kernel, mutated, overlappable): (usize, &[usize], &[(usize, usize)]),
         executor: Device,
         tensor: &dyn Fn(Buffer) -> &'a Tensor,
         workspace: &Tensor,
@@ -862,10 +885,15 @@ impl Plan {
         for (k, &m) in mutated.iter().enumerate() {
             let out = view(outputs[k]);
             let src = &args[m];
+            // In an operand it may overlap's memory: its old value is not
+            // read, so not copied there.
+            let overlapped = overlappable
+                .iter()
+                .any(|&(o, j)| o == m && args[j].data_ptr() == out.data_ptr());
             // Not in place: the operand copied first (its own buffers, perhaps
             // of one storage: the workspace; a strided parameter, through
             // `copy_`).
-            if out.data_ptr() != src.data_ptr() {
+            if out.data_ptr() != src.data_ptr() && !overlapped {
                 let ty = &outputs[k].1;
                 match executor {
                     _ if !src.is_contiguous() => {
