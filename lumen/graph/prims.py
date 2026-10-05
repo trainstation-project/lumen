@@ -30,6 +30,8 @@ __all__ = [
     "dot_general",
     "reshape",
     "wait",
+    "to_host",
+    "to_device",
     "broadcast_in_dim",
     "transpose",
     "slice",
@@ -159,6 +161,19 @@ def wait(x):
     """``x``, once the device work producing it has finished: the host
     blocks until then (PyTorch: ``wait_tensor``). In place: no copy."""
     return bind("wait", x)
+
+
+def to_host(x):
+    """``x`` copied to the host (``Tensor.cpu``): the plan's step waits for
+    it and copies it there (none on the CPU), its result if returned; the
+    steps after it read it on the plan's device."""
+    return bind("to_host", x)
+
+
+def to_device(x):
+    """``x``, a host value, copied to the plan's device (``Tensor.to``): in
+    stream order, the host not waiting; a device value as it is."""
+    return bind("to_device", x)
 
 
 def reshape(x, new_sizes):
