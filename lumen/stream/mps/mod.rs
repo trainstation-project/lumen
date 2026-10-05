@@ -20,6 +20,7 @@ use crate::profiler::GpuContext;
 unsafe extern "C" {
     // In mps.mm (which also holds the queue the shims submit to).
     fn lumen_mps_stream_flush() -> u64;
+    fn lumen_mps_stream_encoded_total() -> u64;
     fn lumen_mps_stream_host_time() -> f64;
     fn lumen_mps_stream_command_buffer() -> *mut c_void;
     fn lumen_mps_stream_mark(done: Completion, context: *mut c_void);
@@ -42,6 +43,17 @@ pub(crate) fn mark() {
         profile: None,
     });
     unsafe { lumen_mps_stream_mark(completed, Box::into_raw(submission).cast()) };
+}
+
+/// Commit the work encoded so far, without waiting for it.
+pub(crate) fn flush() {
+    unsafe { lumen_mps_stream_flush() };
+}
+
+/// How many ops have ever been encoded: unchanged between two calls if no
+/// work was encoded in between.
+pub(crate) fn encoded() -> u64 {
+    unsafe { lumen_mps_stream_encoded_total() }
 }
 
 /// How many encoded ops the GPU has finished.

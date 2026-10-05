@@ -545,6 +545,42 @@ pub(crate) fn record_kernel_in(
     start_ns: u64,
     end_ns: u64,
 ) {
+    record_in(
+        context,
+        name,
+        kernel,
+        EventKind::Gpu,
+        device,
+        start_ns,
+        end_ns,
+    );
+}
+
+/// A plan step's kernel that ran on the host from `start_ns` to `end_ns`
+/// (on another thread: a Core ML step's prediction), issued by the op
+/// `context` captured, as [`record_host_kernel`] records one inside it.
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+pub(crate) fn record_host_kernel_in(context: GpuContext, name: &str, start_ns: u64, end_ns: u64) {
+    record_in(
+        context,
+        name,
+        None,
+        EventKind::HostKernel,
+        Device::Cpu,
+        start_ns,
+        end_ns,
+    );
+}
+
+fn record_in(
+    context: GpuContext,
+    name: &str,
+    kernel: Option<String>,
+    kind: EventKind,
+    device: Device,
+    start_ns: u64,
+    end_ns: u64,
+) {
     // Its own name and types, if set; else its op's (types given it when
     // the session ends).
     let (name, types) = match context.launch {
@@ -557,7 +593,7 @@ pub(crate) fn record_kernel_in(
         Event {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             name: name.to_owned(),
-            kind: EventKind::Gpu,
+            kind,
             start_ns,
             end_ns: end_ns.max(start_ns),
             thread: context.thread,
