@@ -733,6 +733,43 @@ def test_attention_projections_merge_into_one_matmul():
     assert views == [(0, [96, 1]), (64, [96, 1])]
 
 
+class Heads(lumen.nn.Module):
+    """q, k and v projections of ``[batch * seq, dim]`` rows (``nn.Linear``'s
+    ``[out, in]`` weights, merged in training too), attended over 4 heads by
+    ``F.flash_attention``."""
+
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        q, k, v = ((x @ w.t()).reshape(2, 32, 4, 16) for w in (self.wq, self.wk, self.wv))
+        return F.flash_attention(q, k, v, is_causal=True).reshape(64, 64)
+
+
+@pytest.mark.mps
+def test_trained_attention_reads_merged_projections_in_place():
+    """In training, the attention's forward and backward kernels both read
+    q, k and v where the merged matmul writes them (each a strided view of
+    its result, read through its slice and reshape): no copy of each,
+    though two kernels read it."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    model = Heads(meta(64, 64), meta(64, 64), meta(64, 64))
+    grad = lumen.grad(lambda model, x: F.sum(model(x) * model(x)), (0, 1))
+    graph = lumen.make_graph(grad)(model, meta(64, 64))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3]).steps()
+    labels = [s["label"] for s in steps]
+    merged = steps[labels.index("3x dot_general")]["output"][0]
+    attention = [s for s in steps if s["label"].startswith("flash_attention")]
+    assert len(attention) >= 2, labels
+    for s in attention:
+        assert merged in [b for b, *_ in s["inputs"]], (s["label"], s["inputs"])
+    assert not [label for label in labels if label.startswith("slice")], labels
+
+
 class QKV(lumen.nn.Module):
     """Three projections of x, ``nn.Linear``'s way: ``[out, in]`` weights
     read as ``x @ w.t()``."""

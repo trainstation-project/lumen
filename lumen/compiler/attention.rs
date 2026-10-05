@@ -1329,8 +1329,10 @@ impl<'a> Matcher<'a> {
     }
 
     /// `v` as read from the buffer it comes from: back through transposes,
-    /// slices, broadcasts and reshapes read only once: that buffer, the
-    /// offset, and each of `v`'s dimensions' (stride, divisor).
+    /// slices, broadcasts and reshapes (read elsewhere too or not: a
+    /// layout, each reader reads through it, as a training step's forward
+    /// and backward kernels read q, k and v in a merged dot's result): that
+    /// buffer, the offset, and each of `v`'s dimensions' (stride, divisor).
     fn view(&self, v: Var) -> (Var, usize, Vec<(usize, usize)>) {
         use Primitive::*;
         let own = || {
@@ -1344,7 +1346,7 @@ impl<'a> Matcher<'a> {
                     .collect(),
             )
         };
-        let Some(n) = self.node(v).filter(|_| self.single(v)) else {
+        let Some(n) = self.node(v) else {
             return own();
         };
         let layout = matches!(
