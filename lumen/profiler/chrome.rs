@@ -2,13 +2,19 @@
 //! Kineto's `ChromeTraceLogger`), viewable in Perfetto or `chrome://tracing`.
 //!
 //! - ops: complete (`"ph":"X"`) events, category `cpu_op`, and ranges from
-//!   `record_function` with category `user_annotation`, on the CPU process;
+//!   `record_function` with category `user_annotation`, on the `CPU
+//!   dispatch` process;
 //! - memory: instant (`"ph":"i"`) `[memory]` events with PyTorch's args
 //!   (`Device Type`, `Device Id`, `Addr`, `Bytes`, `Total Allocated`,
 //!   `Total Reserved`);
 //! - GPU work: complete events with category `gpu_memcpy` / `gpu_memset`
 //!   on a process per device, linked to the issuing op by an `ac2g` flow;
-//! - each `record_function` range again on the device's timeline, category
+//! - host kernels (a plan step's run on the host): category `kernel` on the
+//!   `CPU` process, as a device's, a row per thread that ran them, linked to
+//!   its op (the dispatch) by an `ac2g` flow; the last timeline (each
+//!   process's `process_sort_index`: the dispatch, the devices, the CPU);
+//! - each `record_function` range again on the device's (or the `CPU`'s)
+//!   timeline, category
 //!   `gpu_user_annotation` (Kineto's), spanning the GPU work issued inside
 //!   it: from its first kernel's start to its last's end. On a track of its
 //!   own beside the kernels', since kernels may overlap (Metal runs
@@ -26,6 +32,12 @@ const GPU_TID: u64 = 7;
 
 /// Track of the `record_function` ranges on a device's timeline.
 const ANNOTATION_TID: u64 = 8;
+
+/// Process id of the host kernels' timeline (`CPU`): apart from the ops'
+/// (`CPU dispatch`), the real pid's too.
+pub(crate) fn host_pid() -> u64 {
+    (1 << 32) + u64::from(std::process::id())
+}
 
 /// Process id of `device`'s timeline: the real pid for the CPU, so traces
 /// from several processes stay apart, and a fixed id per device.
@@ -120,8 +132,36 @@ pub(crate) fn trace(events: &[Event]) -> String {
     let mut out: Vec<String> = Vec::new();
     let cpu_pid = pid(Device::Cpu);
     let mut devices: Vec<Device> = Vec::new();
+    let mut host_threads: Vec<u64> = Vec::new();
+    let host_pid = host_pid();
     for e in events {
         match e.kind {
+            EventKind::HostKernel => {
+                if !host_threads.contains(&e.thread) {
+                    host_threads.push(e.thread);
+                }
+                let tid = e.thread;
+                let correlation = e.id;
+                out.push(format!(
+                    "{{\"ph\":\"X\",\"cat\":\"kernel\",\"name\":{},\"pid\":{host_pid},\"tid\":{tid},\"ts\":{},\"dur\":{},\"args\":{{\"device\":-1,\"correlation\":{correlation}{}}}}}",
+                    json_str(&e.name),
+                    us(e.start_ns),
+                    us(e.duration_ns()),
+                    types_args(e),
+                ));
+                // Flow arrow from the dispatching op to its run.
+                if let Some(op) = e.parent.and_then(|p| events.iter().find(|o| o.id == p)) {
+                    out.push(format!(
+                        "{{\"ph\":\"s\",\"id\":{correlation},\"pid\":{cpu_pid},\"tid\":{},\"ts\":{},\"cat\":\"ac2g\",\"name\":\"ac2g\"}}",
+                        op.thread,
+                        us(op.start_ns),
+                    ));
+                    out.push(format!(
+                        "{{\"ph\":\"f\",\"id\":{correlation},\"pid\":{host_pid},\"tid\":{tid},\"ts\":{},\"cat\":\"ac2g\",\"name\":\"ac2g\",\"bp\":\"e\"}}",
+                        us(e.start_ns),
+                    ));
+                }
+            }
             EventKind::Op | EventKind::UserRange => {
                 let cat = if e.kind == EventKind::Op {
                     "cpu_op"
@@ -189,11 +229,12 @@ pub(crate) fn trace(events: &[Event]) -> String {
             }
         }
     }
-    // Each range's GPU span, per device: the GPU work whose chain of
-    // issuing ops and ranges includes it.
+    // Each range's span, per device (the CPU's: its host kernels): the work
+    // whose chain of issuing ops and ranges includes it.
     let by_id: HashMap<u64, &Event> = events.iter().map(|e| (e.id, e)).collect();
     let mut spans: HashMap<(u64, Device), (u64, u64)> = HashMap::new();
-    for gpu in events.iter().filter(|e| e.kind == EventKind::Gpu) {
+    let work = |e: &&Event| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel);
+    for gpu in events.iter().filter(work) {
         let mut parent = gpu.parent;
         while let Some(range) = parent.and_then(|p| by_id.get(&p)) {
             if range.kind == EventKind::UserRange {
@@ -209,15 +250,35 @@ pub(crate) fn trace(events: &[Event]) -> String {
         out.push(format!(
             "{{\"ph\":\"X\",\"cat\":\"gpu_user_annotation\",\"name\":{},\"pid\":{},\"tid\":{ANNOTATION_TID},\"ts\":{},\"dur\":{},\"args\":{{\"External id\":{id}}}}}",
             json_str(&by_id[&id].name),
-            pid(device),
+            if device == Device::Cpu { host_pid } else { pid(device) },
             us(start),
             us(end - start),
         ));
     }
     // Name the timelines.
     out.push(format!(
-        "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{cpu_pid},\"tid\":0,\"args\":{{\"name\":\"CPU\"}}}}"
+        "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{cpu_pid},\"tid\":0,\"args\":{{\"name\":\"CPU dispatch\"}}}}"
     ));
+    if !host_threads.is_empty() {
+        out.push(format!(
+            "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{host_pid},\"tid\":0,\"args\":{{\"name\":\"CPU\"}}}}"
+        ));
+        let threads = host_threads.iter().map(|&t| (t, format!("thread {t}")));
+        for (tid, name) in threads.chain([(ANNOTATION_TID, "annotations".to_owned())]) {
+            out.push(format!(
+                "{{\"ph\":\"M\",\"name\":\"thread_name\",\"pid\":{host_pid},\"tid\":{tid},\"args\":{{\"name\":\"{name}\"}}}}",
+            ));
+        }
+    }
+    // In order: the dispatch, the devices, the CPU last.
+    let mut order = vec![cpu_pid];
+    order.extend(devices.iter().map(|&d| pid(d)));
+    order.push(host_pid);
+    for (index, pid) in order.into_iter().enumerate() {
+        out.push(format!(
+            "{{\"ph\":\"M\",\"name\":\"process_sort_index\",\"pid\":{pid},\"tid\":0,\"args\":{{\"sort_index\":{index}}}}}"
+        ));
+    }
     for device in devices {
         out.push(format!(
             "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{},\"tid\":0,\"args\":{{\"name\":{}}}}}",

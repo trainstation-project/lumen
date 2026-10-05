@@ -1028,6 +1028,7 @@ impl Plan {
                     // The reference evaluates each step whole: no scratch.
                     let _ = scratch;
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
+                    let _kernel = crate::profiler::record_host_kernel(step.label);
                     // SAFETY: all buffers are host memory of their step
                     // types' sizes, and the inputs were written before
                     // this step.

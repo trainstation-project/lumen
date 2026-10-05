@@ -139,7 +139,12 @@ impl Profile {
         let ranges: HashMap<u64, &Event> = self
             .events
             .iter()
-            .filter(|e| matches!(e.kind, EventKind::Op | EventKind::UserRange))
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    EventKind::Op | EventKind::UserRange | EventKind::HostKernel
+                )
+            })
             .map(|e| (e.id, e))
             .collect();
         let mut totals: HashMap<u64, Totals> =
@@ -150,7 +155,9 @@ impl Profile {
             };
             let direct = totals.get_mut(&parent).unwrap();
             match event.kind {
-                EventKind::Op | EventKind::UserRange => direct.child_cpu += event.duration_ns(),
+                EventKind::Op | EventKind::UserRange | EventKind::HostKernel => {
+                    direct.child_cpu += event.duration_ns()
+                }
                 EventKind::Gpu => direct.self_device += event.duration_ns(),
                 EventKind::Memory if event.device == Device::Cpu => {
                     direct.self_cpu_mem += event.bytes

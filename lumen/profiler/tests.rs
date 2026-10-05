@@ -526,6 +526,50 @@ fn chrome_trace_has_pytorchs_event_layout() {
 }
 
 #[test]
+fn host_kernels_are_apart_from_their_dispatch() {
+    // A CPU plan's step: its op (the dispatch), its kernel's run inside it.
+    let mut g = crate::graph::Graph::new();
+    let x = g.input(TensorType::new(DType::F32, &[4]));
+    let y = g.apply(crate::graph::Primitive::Exp, &[x]).unwrap();
+    g.set_outputs(&[y]).unwrap();
+    let plan = crate::graph::Plan::compile(&g);
+    let x = Tensor::zeros(&[4], DType::F32);
+    let p = profile(cpu(), || {
+        plan.run(&[x]).unwrap();
+    });
+    let op = p
+        .events()
+        .iter()
+        .find(|e| e.name == "exp" && e.kind == EventKind::Op)
+        .expect("the step's op");
+    let kernel = p
+        .events()
+        .iter()
+        .find(|e| e.kind == EventKind::HostKernel)
+        .expect("its kernel");
+    assert_eq!((kernel.name.as_str(), kernel.parent), ("exp", Some(op.id)));
+    assert!(op.start_ns <= kernel.start_ns && kernel.end_ns <= op.end_ns);
+    // Its time is the op's child's: the op's own, the dispatch alone.
+    let rows = p.key_averages();
+    assert_eq!(row(&rows, "exp").count, 2);
+    let trace = p.chrome_trace();
+    // On the CPU's timeline, as a device's; the ops on the dispatch's.
+    let (host, dispatch) = (chrome::host_pid(), std::process::id());
+    for needle in [
+        format!(
+            "\"cat\":\"kernel\",\"name\":\"exp\",\"pid\":{host},\"tid\":{}",
+            kernel.thread
+        ),
+        format!("\"pid\":{host},\"tid\":0,\"args\":{{\"name\":\"CPU\"}}"),
+        format!("\"pid\":{dispatch},\"tid\":0,\"args\":{{\"name\":\"CPU dispatch\"}}"),
+        // Last: after the dispatch (no device here).
+        format!("\"pid\":{host},\"tid\":0,\"args\":{{\"sort_index\":1}}"),
+    ] {
+        assert!(trace.contains(&needle), "missing {needle} in\n{trace}");
+    }
+}
+
+#[test]
 fn json_strings_escape_control_characters() {
     assert_eq!(
         chrome::json_str("a\"b\\c\nd\u{1}"),

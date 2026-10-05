@@ -4,6 +4,8 @@
 //! - **ops**: every tensor op (`lumen::zeros`, `lumen::fill_`, ...) as a
 //!   timed range on the CPU clock, nested per thread (PyTorch:
 //!   `RecordFunction`), plus user ranges from [`record_function`];
+//! - **host kernels**: a plan step's run on the host, inside its op (the
+//!   step's dispatch), drawn on the CPU's timeline as a device's;
 //! - **memory** (`profile_memory`): each allocation and free by the CPU and
 //!   static allocators, with the allocator's totals (PyTorch: `[memory]`
 //!   events);
@@ -81,6 +83,10 @@ pub enum EventKind {
     Memory,
     /// Device-side work: a copy or fill (`gpu_memcpy` / `gpu_memset`).
     Gpu,
+    /// A plan step's kernel run on the host ([`record_host_kernel`]),
+    /// inside the op dispatching it (category `kernel`, on the CPU's
+    /// host-kernel row).
+    HostKernel,
 }
 
 /// One recorded event. Times are nanoseconds since the session started.
@@ -278,7 +284,10 @@ pub fn stop() -> Result<Profile, String> {
         .filter(|e| e.kind == EventKind::Op)
         .map(|e| (e.id, (e.inputs.clone(), e.outputs.clone(), e.accum.clone())))
         .collect();
-    for e in events.iter_mut().filter(|e| e.kind == EventKind::Gpu) {
+    for e in events
+        .iter_mut()
+        .filter(|e| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel))
+    {
         if let Some((inputs, outputs, accum)) = e.parent.and_then(|p| types.get(&p)) {
             // A launch with types of its own ([`next_launch`]) keeps them.
             if e.inputs.is_empty() && e.outputs.is_empty() {
@@ -417,6 +426,12 @@ impl Drop for RecordGuard {
 /// `torch.profiler.record_function`). Ops inside it nest under it.
 pub fn record_function(name: impl Into<String>) -> RecordGuard {
     open_range(|| name.into(), EventKind::UserRange, Vec::new)
+}
+
+/// Time a plan step's kernel running on the host, inside its op, until
+/// the guard drops: its own row, apart from the dispatch's.
+pub(crate) fn record_host_kernel(name: &'static str) -> RecordGuard {
+    open_range(|| name.to_owned(), EventKind::HostKernel, Vec::new)
 }
 
 /// Time a lumen op until the guard drops, given its inputs' types (only
