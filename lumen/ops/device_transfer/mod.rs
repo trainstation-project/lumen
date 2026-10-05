@@ -59,16 +59,21 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
 /// not contiguous, or they share storage.
 ///
 /// Into MPS memory, the copy is in stream order: after the work submitted
-/// so far, with no wait ([`mps::copy_h2d`]).
+/// so far, with no wait ([`mps::copy_h2d`]). Onto a device, profiled as
+/// `copy_h2d` (`src`'s type in, `dst`'s out).
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);
     if dst.numel() == 0 {
         return;
     }
+    let _op = transfer(&COPY_H2D, dst, src, dst.device());
     COPY_H2D.dispatch(dst.device())(dst, src);
 }
 
 /// Copy `src`, on any device, into the host tensor `dst`.
+///
+/// From a device, profiled as `copy_d2h`, the wait for `src`'s value (a
+/// `wait`) inside it.
 ///
 /// # Panics
 /// As [`copy_h2d`], with `dst` the one that must be on the CPU.
@@ -77,8 +82,25 @@ pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     if src.numel() == 0 {
         return;
     }
+    let _op = transfer(&COPY_D2H, dst, src, src.device());
     src.wait_();
     COPY_D2H.dispatch(src.device())(dst, src);
+}
+
+/// A transfer's profiler range, `op`'s name, if it moves data between the
+/// host and `device` (none for a copy between host buffers).
+fn transfer(
+    op: &Op<CopyKernel>,
+    dst: &Tensor,
+    src: &Tensor,
+    device: Device,
+) -> Option<crate::profiler::RecordGuard> {
+    if device == Device::Cpu {
+        return None;
+    }
+    let mut guard = crate::profiler::record_op(op.name(), || vec![src.ty()]);
+    guard.outputs(|| vec![dst.ty()]);
+    Some(guard)
 }
 
 /// What every kernel relies on: `host` is on the CPU, and `dst` and `src`

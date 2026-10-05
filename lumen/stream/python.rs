@@ -7,10 +7,12 @@ use pyo3::prelude::*;
 use crate as core;
 use crate::tensor::python::PyTensor;
 
-/// Wait for all work on the MPS stream (`torch.mps.synchronize()`).
+/// Wait for all work on the MPS stream (`torch.mps.synchronize()`),
+/// profiled as `lumen::synchronize` (the host's wait).
 #[pyfunction]
 fn _mps_synchronize(py: Python<'_>) -> PyResult<()> {
     core::allocator::allocator_for(core::Device::Mps).map_err(PyRuntimeError::new_err)?;
+    let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
     #[cfg(lumen_mps_linked)]
     py.detach(core::stream::mps::synchronize);
     #[cfg(not(lumen_mps_linked))]
@@ -19,7 +21,8 @@ fn _mps_synchronize(py: Python<'_>) -> PyResult<()> {
 }
 
 /// Wait for all work on a CUDA device (`torch.cuda.synchronize(device)`):
-/// `device` is an index, a CUDA device, or `None` for device 0.
+/// `device` is an index, a CUDA device, or `None` for device 0. Profiled as
+/// `lumen::synchronize` (the host's wait).
 #[pyfunction]
 #[pyo3(signature = (device = None))]
 fn _cuda_synchronize(py: Python<'_>, device: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
@@ -36,6 +39,7 @@ fn _cuda_synchronize(py: Python<'_>, device: Option<&Bound<'_, PyAny>>) -> PyRes
         )));
     };
     core::allocator::allocator_for(device).map_err(PyRuntimeError::new_err)?;
+    let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
     #[cfg(lumen_cuda_linked)]
     py.detach(|| core::stream::cuda::synchronize(index));
     #[cfg(not(lumen_cuda_linked))]

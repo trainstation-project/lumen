@@ -314,10 +314,12 @@ def test_launches_are_named_after_what_they_compute():
 
 @pytest.mark.mps
 def test_kernels_queued_far_ahead_are_each_timed():
-    """Kernels queued far ahead of the GPU (more command buffers in flight
-    than Metal has counter sample buffers: 32) are each timed: no two share
-    a start and duration (their command buffer's, the untimed fallback), and
-    none overlap on the one queue."""
+    """Kernels queued ahead of the GPU are each timed: no two share a start
+    and duration, nor takes its command buffer's whole span (the untimed
+    fallback's times, which every op got once Metal's 32 counter sample
+    buffers were all held by command buffers in flight; now pooled). How far
+    the host gets ahead depends on the machine's load: this checks the
+    timing, not that the pool is exercised."""
     import collections
 
     import numpy as np
@@ -327,7 +329,7 @@ def test_kernels_queued_far_ahead_are_each_timed():
     class Weight(lumen.nn.Module):
         w: lumen.Tensor
 
-    model = Weight(lumen.empty([512, 512], device="meta"))
+    model = Weight(lumen.empty([1024, 1024], device="meta"))
 
     def chain(m, s):
         x = m.w * s
@@ -340,7 +342,8 @@ def test_kernels_queued_far_ahead_are_each_timed():
         f(model, 1.0)
     except RuntimeError as e:
         pytest.skip(str(e))
-    model.load_state_dict({"w": lumen.from_numpy(np.full((512, 512), 1 / 512, np.float32))})
+    model.load_state_dict({"w": lumen.from_numpy(np.full((1024, 1024), 1 / 1024, np.float32))})
+    # Matmuls slow enough that the host queues far ahead of the GPU.
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         for _ in range(40):  # ~40 command buffers of 32 kernels, queued without waiting
             f(model, 1.0)
@@ -349,5 +352,67 @@ def test_kernels_queued_far_ahead_are_each_timed():
     assert len(kernels) >= 40 * 33
     times = collections.Counter((e["start_us"], e["duration_us"]) for e in kernels)
     assert max(times.values()) == 1
-    for a, b in zip(kernels, kernels[1:]):
-        assert b["start_us"] >= a["start_us"] + a["duration_us"] - 0.5
+    # Each its own duration, not its command buffer's (32 kernels' span).
+    spans = sorted(e["duration_us"] for e in kernels)
+    assert spans[-1] < 10 * spans[len(spans) // 2]
+
+
+@pytest.mark.mps
+def test_host_waits_are_profiled():
+    """The host's waits are CPU ranges (the GPU does nothing for them):
+    ``lumen.mps.synchronize()`` as ``lumen::synchronize``, and a read of a
+    result (``item``) as ``lumen::wait`` in its transfer to the host
+    (``lumen::copy_d2h``), spanning the run's kernels."""
+    import numpy as np
+
+    f = lumen.compile(lambda x: F.sum(F.exp(x @ x)), device="mps")
+    x = lumen.from_numpy(np.ones((256, 256), np.float32) / 256)
+    try:
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+        f(x)
+        lumen.mps.synchronize()
+        f(x).item()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+    (sync,) = [e for e in events if e["name"] == "lumen::synchronize"]
+    (wait,) = [e for e in events if e["name"] == "lumen::wait"]
+    assert sync["kind"] == wait["kind"] == "op" and sync["device"] == wait["device"] == "cpu"
+    copy = by_id[wait["parent"]]
+    assert copy["name"] == "lumen::copy_d2h" and by_id[copy["parent"]]["name"] == "lumen::get"
+
+
+@pytest.mark.mps
+def test_device_transfers_are_profiled():
+    """Transfers between the host and MPS are ranges of their own: copying a
+    host input in, ``lumen::copy_h2d`` on the CPU (into staging memory, the
+    copy queued) and its ``copy_h2d`` kernel on the GPU; reading a result
+    back, ``lumen::copy_d2h`` on the CPU (a memcpy from shared memory: no
+    kernel), its ``lumen::wait`` inside it. Each the moved type in and out."""
+    import numpy as np
+
+    f = lumen.compile(lambda x: F.exp(x @ x), device="mps")
+    x = lumen.from_numpy(np.ones((64, 64), np.float32) / 64)
+    try:
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(x).tolist()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+
+    def one(name, kind):
+        (event,) = [e for e in events if e["name"] == name and e["kind"] == kind]
+        return event
+
+    h2d, d2h, wait = one("lumen::copy_h2d", "op"), one("lumen::copy_d2h", "op"), one("lumen::wait", "op")
+    assert h2d["inputs"] == h2d["outputs"] == [("float32", [64, 64])]
+    assert d2h["inputs"] == d2h["outputs"]
+    assert by_id[one("copy_h2d", "gpu")["parent"]] is h2d
+    assert by_id[wait["parent"]] is d2h
+    assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
