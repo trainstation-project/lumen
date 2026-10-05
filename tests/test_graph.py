@@ -1087,6 +1087,39 @@ def test_normalizations_are_one_row_kernel(f):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
 
 
+NORMALIZATIONS = [
+    lambda a, w: a / F.sqrt(F.mean(a * a, -1, keepdim=True) + 1e-6) * w,
+    lambda a, w: a / F.sqrt(F.sum(a * a, -1, keepdim=True) + 1e-6) * w,
+    lambda a, w: a * (1.0 / F.sqrt(F.mean(a * a, -1, keepdim=True))),
+    lambda a, w: (lambda e: e / F.sum(e, -1, keepdim=True))(F.exp(a - F.amax(a, -1, keepdim=True))),
+    _layer_norm,
+]
+
+
+@pytest.mark.parametrize(
+    "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
+)
+def test_normalizations_train_in_one_row_kernel(f):
+    """Trained, a normalization's forward is still one row kernel: the
+    values of a row its backward reads (an RMS norm's sqrt(mean + eps)) and
+    its value before its epilogue (``y`` of ``y * w``, for w's gradient)
+    are its outputs too, as a fused RMS norm writes each row's ``rstd``,
+    never computed again; the gradients the CPU's."""
+    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
+    labels = [s["label"] for s in lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
+    if "sqrt" in str(labels):
+        assert sum("sqrt" in label for label in labels) == 1, labels
+    got = lumen.compile(grad)(X, W, C)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
 def test_ops_are_functions():
     """The ops are functions in lumen.functional (``import lumen.functional
     as F``), as torch's are; a traced tensor keeps only its operators, layout

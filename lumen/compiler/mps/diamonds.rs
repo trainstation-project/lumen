@@ -27,19 +27,29 @@
 //! primitives read only by the next) the next one's producer: a softmax's
 //! max then its sum, a layer norm's mean then its variance. Each chain is
 //! one row kernel, its reductions inside.
+//!
+//! A diamond's values of a row each (the reduction's, and the trivial
+//! primitives' between it and the broadcast: an RMS norm's `sqrt(mean +
+//! eps)`) may be read elsewhere too (a training step's backward): the row
+//! kernel writes them as well, once a row (its `outputs`), as a fused RMS
+//! norm writes each row's `rstd` for its backward. Its broadcast too, where
+//! every other reader is a loop fusion's primitive: that fusion broadcasts
+//! the written value itself.
 
-use super::fusion::{constant, elementwise};
+use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
 
 /// A row fusion: a chain of diamonds, run as one row kernel. `root` (a
 /// node index) is the fusion's root, `reductions` its reductions (in
 /// order), `inner` the other nodes between them and the root, which are
-/// read nowhere else.
+/// read nowhere else but `outputs`: values of a row each (of reductions,
+/// or inner nodes) read after the root too, which the kernel writes.
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
     pub root: usize,
     pub reductions: Vec<usize>,
     pub inner: Vec<usize>,
+    pub outputs: Vec<usize>,
 }
 
 /// The chains of diamonds in `graph`, each a [`Row`].
@@ -67,6 +77,7 @@ pub(crate) fn diamonds(graph: &Graph) -> Vec<Row> {
                 row.inner.extend(first.inner);
                 row.inner.push(first.root);
                 row.reductions.splice(0..0, first.reductions);
+                row.outputs.splice(0..0, first.outputs);
             }
         }
         rows.push(row);
@@ -136,11 +147,13 @@ impl<'a> Finder<'a> {
     }
 
     /// Whether node `i` is trivially fusible (XLA's `IsTriviallyFusible`):
-    /// one reader, and a reshape, a unary elementwise primitive, or a
-    /// binary one of one value or of one value and a splat.
-    fn trivial(&self, i: usize) -> bool {
+    /// one reader (unless `shared`: a value of a row each, which the
+    /// kernel can write for other readers), and a reshape, a unary
+    /// elementwise primitive, or a binary one of one value or of one value
+    /// and a splat.
+    fn trivial(&self, i: usize, shared: bool) -> bool {
         let node = &self.graph.nodes()[i];
-        if self.output[node.output] || self.readers[node.output].len() > 1 {
+        if !shared && (self.output[node.output] || self.readers[node.output].len() > 1) {
             return false;
         }
         match (&node.primitive, node.inputs.as_slice()) {
@@ -161,16 +174,22 @@ impl<'a> Finder<'a> {
         }
     }
 
-    /// From value `v` back through trivial nodes (XLA's `TrivialEdge`) to
-    /// one whose primitive passes `is`: it, and the trivial nodes passed.
-    fn edge(&self, mut v: Var, is: fn(&Primitive) -> bool) -> Option<(usize, Vec<usize>)> {
+    /// From value `v` back through trivial nodes (XLA's `TrivialEdge`;
+    /// `shared`: perhaps read elsewhere too) to one whose primitive passes
+    /// `is`: it, and the trivial nodes passed.
+    fn edge(
+        &self,
+        mut v: Var,
+        is: fn(&Primitive) -> bool,
+        shared: bool,
+    ) -> Option<(usize, Vec<usize>)> {
         let mut path = Vec::new();
         loop {
             let i = self.producer[v]?;
             if is(&self.graph.nodes()[i].primitive) {
                 return Some((i, path));
             }
-            if !self.trivial(i) {
+            if !self.trivial(i, shared) {
                 return None;
             }
             path.push(i);
@@ -206,11 +225,18 @@ impl<'a> Finder<'a> {
     fn closed(&self, i: usize, side: Var, reduced: Var) -> Option<(Row, Var)> {
         let nodes = self.graph.nodes();
         let ty = self.graph.type_of(nodes[i].output);
-        let (b, mut inner) =
-            self.edge(reduced, |p| matches!(p, Primitive::BroadcastInDim { .. }))?;
-        let (r, path) = self.edge(nodes[b].inputs[0], |p| {
-            matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. })
-        })?;
+        let (b, mut inner) = self.edge(
+            reduced,
+            |p| matches!(p, Primitive::BroadcastInDim { .. }),
+            false,
+        )?;
+        // Values of a row each, which other nodes may read too.
+        let (r, path) = self.edge(
+            nodes[b].inputs[0],
+            |p| matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }),
+            true,
+        )?;
+        let per_row: Vec<usize> = std::iter::once(r).chain(path.iter().copied()).collect();
         inner.push(b);
         inner.extend(path);
         // Over the last dimension of a value of the root's shape, broadcast
@@ -238,21 +264,19 @@ impl<'a> Finder<'a> {
                 d != last || self.graph.type_of(nodes[b].inputs[0]).shape[k] == 1
             })
             && self.graph.type_of(nodes[b].inputs[0]).numel() == rows;
-        let single =
-            |n: usize| self.readers[nodes[n].output].len() == 1 && !self.output[nodes[n].output];
-        if !along || !single(b) || !single(r) {
+        if !along {
             return None;
         }
         // The producer: the reduction's operand back through trivial nodes.
         let mut producer = x;
-        while let Some(k) = self.producer[producer].filter(|&k| self.trivial(k)) {
+        while let Some(k) = self.producer[producer].filter(|&k| self.trivial(k, false)) {
             inner.push(k);
             producer = self.through(k);
         }
         // The root's other operand reaches it trivially too.
         let mut v = side;
         while v != producer {
-            let k = self.producer[v].filter(|&k| self.trivial(k))?;
+            let k = self.producer[v].filter(|&k| self.trivial(k, false))?;
             inner.push(k);
             v = self.through(k);
         }
@@ -277,11 +301,60 @@ impl<'a> Finder<'a> {
             inner.push(k);
             producer = self.through(k);
         }
+        let outputs = self.outputs(i, &inner, &per_row, b)?;
         let row = Row {
             root: i,
             reductions: vec![r],
             inner,
+            outputs,
         };
         Some((row, producer))
+    }
+
+    /// The values of a row each (`per_row`) that the row kernel rooted at
+    /// `root` (`inner` inside it) writes too: those read elsewhere, after
+    /// it (once it has written them), and the broadcast `b`'s operand if
+    /// `b` is read elsewhere, by loop fusions' primitives alone (each
+    /// broadcasting it itself); none if any is read otherwise.
+    fn outputs(
+        &self,
+        root: usize,
+        inner: &[usize],
+        per_row: &[usize],
+        b: usize,
+    ) -> Option<Vec<usize>> {
+        let nodes = self.graph.nodes();
+        let mut inside = inner.to_vec();
+        inside.push(root);
+        let outside = |n: usize| -> Vec<usize> {
+            let v = nodes[n].output;
+            self.readers[v]
+                .iter()
+                .copied()
+                .filter(|u| !inside.contains(u))
+                .collect()
+        };
+        let mut outputs = Vec::new();
+        for &n in per_row {
+            let readers = outside(n);
+            if self.output[nodes[n].output] || !readers.is_empty() {
+                readers.iter().all(|&u| u > root).then_some(())?;
+                outputs.push(n);
+            }
+        }
+        let readers = outside(b);
+        if self.output[nodes[b].output] {
+            return None;
+        }
+        if !readers.is_empty() {
+            let fused = |u: usize| u > root && fusible(self.graph, &nodes[u]);
+            readers.iter().all(|&u| fused(u)).then_some(())?;
+            let operand = self.producer[nodes[b].inputs[0]]?;
+            if !outputs.contains(&operand) {
+                outputs.push(operand);
+            }
+        }
+        outputs.sort_unstable();
+        Some(outputs)
     }
 }

@@ -138,16 +138,38 @@ pub(crate) fn fuse(
     }
     let fusible: Vec<bool> = nodes.iter().map(|node| fusible(graph, node)).collect();
     // A row kernel's epilogue: its root extends to the elementwise
-    // primitive reading it, while that is its only reader (a norm computed
-    // in float32, then cast back and scaled by its weight: one kernel).
+    // primitive reading it first (a norm computed in float32, then cast
+    // back and scaled by its weight: one kernel). Read elsewhere too, after
+    // it (a training step's backward), the root's value is another of its
+    // outputs, as are its values of a row each, so none may be read before.
+    // The nodes each row computes, which no other row's root extends to.
+    let owned = |u: usize, other: &Row| {
+        rows.iter().any(|r| {
+            !std::ptr::eq(r, other)
+                && (r.root == u || r.inner.contains(&u) || r.reductions.contains(&u))
+        })
+    };
     let rows: Vec<Row> = rows
         .iter()
-        .map(|row| {
-            let mut row = row.clone();
-            while let [u] = users[nodes[row.root].output][..] {
+        .map(|original| {
+            let mut row = original.clone();
+            loop {
                 let v = nodes[row.root].output;
-                if is_output[v] || !fusible[u] || !elementwise(&nodes[u].primitive) {
+                let Some(&u) = users[v].first() else { break };
+                // Read outside the row only after `u`.
+                let inside = |r: usize| r == row.root || row.inner.contains(&r);
+                let after = |k: usize| users[nodes[k].output].iter().all(|&r| inside(r) || r >= u);
+                let extends = !is_output[v]
+                    && !owned(u, original)
+                    && fusible[u]
+                    && elementwise(&nodes[u].primitive)
+                    && users[v][1..].iter().all(|&r| r > u)
+                    && row.outputs.iter().all(|&k| after(k));
+                if !extends {
                     break;
+                }
+                if users[v].len() > 1 {
+                    row.outputs.push(row.root);
                 }
                 row.inner.push(row.root);
                 row.root = u;
@@ -359,8 +381,10 @@ pub(crate) fn fuse(
             && !is_reduction(node)
             && !is_output[node.output]
             && expensive(graph, node)
-            // A contraction's epilogue's end is its fusion's, never hosted.
-            && dot_of[i].is_none();
+            // A contraction's epilogue's end is its fusion's, never hosted;
+            // nor a row kernel's root writing values of its own.
+            && dot_of[i].is_none()
+            && !rows.iter().any(|r| r.root == i && !r.outputs.is_empty());
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
@@ -375,6 +399,14 @@ pub(crate) fn fuse(
             && at_index(graph, &producer, &root, first, node.output)
         {
             host[i] = Some(fusion);
+        }
+    }
+
+    // A row kernel's values of a row each read elsewhere (`diamonds.rs`):
+    // its outputs too.
+    for row in rows {
+        for &k in &row.outputs {
+            host[k] = Some(row.root);
         }
     }
 

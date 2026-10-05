@@ -696,9 +696,26 @@ fn row_kernel(
         e.row_locals.insert(r.output, format!("r{k}"));
     }
     let (value, _) = pass(&mut e, passes.len());
+    // Its other outputs (`diamonds.rs`, `fusion.rs`: read elsewhere too):
+    // values of a row each, written once a row by its first thread; the
+    // others (an earlier value of the row, as its root's epilogue reads it)
+    // at each element, as the output is.
+    let (mut once, mut each) = (String::new(), String::new());
+    for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        let value = e.value(v, "j".into());
+        match body.type_of(v).numel() == rows {
+            true => writeln!(
+                once,
+                "    if (t == 0) {{\n        out{}[row] = {value};\n    }}",
+                k + 1
+            ),
+            false => writeln!(each, "        out{}[j] = {value};", k + 1),
+        }
+        .unwrap();
+    }
     write!(
         source,
-        "{}{header}{}        out[j] = {value};\n    }}\n",
+        "{}{once}{header}{}        out[j] = {value};\n{each}    }}\n",
         hoisted(&e.hoisted),
         e.lines
     )

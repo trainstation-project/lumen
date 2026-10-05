@@ -567,6 +567,8 @@ pub(crate) fn encode(
         let rows = out.numel().checked_div(n).unwrap_or(0);
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
+        // Its values of a row each read elsewhere too.
+        buffers.extend(extra);
         return launch(
             name,
             &buffers,

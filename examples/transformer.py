@@ -86,6 +86,7 @@ class Block(lumen.nn.Module):
     attn: Attention
     mlp: MLP
 
+    @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
         x = x + self.attn(x, batch, dropout_p)
         return x + self.mlp(x)
@@ -97,6 +98,7 @@ class Transformer(lumen.nn.Module):
     norm: lumen.Tensor
     head: lumen.Tensor
 
+    @lumen.profiler.record_function("transformer")
     def __call__(self, ids, dropout_p=0.0):
         """The logits of each position's next token, ``[batch * seq,
         vocab]``, from token ids ``[batch, seq]``."""
@@ -106,6 +108,7 @@ class Transformer(lumen.nn.Module):
         return F.rms_norm(h, DIM, self.norm) @ self.head
 
 
+@lumen.profiler.record_function("loss")
 def cross_entropy(logits, targets):
     """The mean cross-entropy of ``logits`` ``[n, vocab]`` against
     ``targets`` (token ids)."""
@@ -115,9 +118,10 @@ def cross_entropy(logits, targets):
 
 def train_step(model, opt, x, y):
     opt.zero_grad()
+    # loss = model(x, dropout_p=DROPOUT)
     loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
-    # loss.backward()
-    # opt.step()
+    loss.backward()
+    opt.step()
     return loss
 
 
@@ -177,8 +181,8 @@ def batch():
 for step in range(STEPS + 1):
     x, y, _ = batch()
     loss = train_step(model, opt, x, y)
-    if step % 50 == 0:
-        print(f"step {step:3d}  loss {loss.item():.4f}")
+    # if step % 50 == 0:
+    # print(f"step {step:3d}  loss {loss.item():.4f}")
 
 # Accuracy on new sequences, past the first two tokens (the step is known
 # only from the second on), without dropout.
