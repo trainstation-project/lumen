@@ -109,14 +109,19 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     let nodes = graph.nodes();
     let mut taken = vec![false; nodes.len()];
     for r in rows.iter() {
-        for &k in std::iter::once(&r.root).chain(&r.inner).chain(&r.reductions) {
+        for &k in std::iter::once(&r.root)
+            .chain(&r.inner)
+            .chain(&r.reductions)
+        {
             taken[k] = true;
         }
     }
     for i in (0..nodes.len()).rev() {
         let root = &nodes[i];
         // A diamond's root grows from its row (writing nothing else).
-        let own = rows.iter().position(|r| r.root == i && r.outputs.is_empty());
+        let own = rows
+            .iter()
+            .position(|r| r.root == i && r.outputs.is_empty());
         let free = !taken[i] || own.is_some();
         if !finder.live[i] || !free || !elementwise(&root.primitive) || !fusible(graph, root) {
             continue;
@@ -159,7 +164,10 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
                 .position(|r| r.root == k && r.outputs.is_empty() && shaped(v));
             if let Some(r) = earlier {
                 let row = &rows[r];
-                for &m in std::iter::once(&row.root).chain(&row.inner).chain(&row.reductions) {
+                for &m in std::iter::once(&row.root)
+                    .chain(&row.inner)
+                    .chain(&row.reductions)
+                {
                     inside[m] = true;
                 }
                 absorbed.push(r);

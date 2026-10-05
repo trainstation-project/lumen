@@ -69,6 +69,31 @@ def test_gather_fuses(index_dtype, axis):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.mps
+def test_gather_of_a_table_of_as_many_elements_as_rows():
+    """A lookup in a row kernel (an embedding, its positions added, then
+    normalized) whose table has as many elements as the kernel has rows
+    (16 x 64 entries, 32 x 32 tokens): read at its ids, not as a value a
+    row (a saved statistic is), its gradient the CPU's too."""
+    rng = np.random.default_rng(5)
+    table, positions = rng.standard_normal((16, 64)).astype(np.float32), rng.standard_normal((32, 64)).astype(
+        np.float32
+    )
+    ids, c = rng.integers(0, 16, (32, 32)), rng.standard_normal((1024, 64)).astype(np.float32)
+
+    def loss(table, positions, ids, c):
+        h = (table[ids] + positions).reshape(1024, 64)
+        return F.sum(F.rms_norm(h, 64) * c)
+
+    grad = lumen.value_and_grad(loss, (0, 1))
+    args = (table, positions, ids, c)
+    got = lumen.compile(grad)(*(_tensor(a, "mps") for a in args))
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in args))
+    np.testing.assert_allclose(got[0].item(), want[0].item(), rtol=1e-5)
+    for g, w in zip(got[1], want[1]):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-4, atol=1e-5)
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
 @pytest.mark.parametrize("axis", [0, 1])

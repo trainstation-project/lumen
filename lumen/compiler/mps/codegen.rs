@@ -561,27 +561,36 @@ fn row_kernel(
     let mut e = Emitter::new(body, by_value);
     // Which values are the same across a row: the reductions', constants
     // (index-free: no iota), one-element inputs (runtime scalars), inputs of
-    // a value a row (`rows` elements, read at the row's index: a forward's
-    // saved statistics, in a backward's row fusion; not one a broadcast
-    // spreads along the row, a weight of a row's length), and values of
-    // `rows` elements of those.
-    let along_row = |v: Var| {
-        body.nodes().iter().any(|node| match &node.primitive {
-            Primitive::BroadcastInDim {
-                shape,
-                broadcast_dimensions,
-            } if node.inputs[0] == v => broadcast_dimensions
+    // a value a row (read at the row's index: a forward's saved statistics,
+    // in a backward's row fusion), and values of `rows` elements of those.
+    // An input is a row's value by how it is read, not its size alone:
+    // each reader broadcasts it not along the row (a weight of a row's
+    // length spreads along it), or computes a value a row from it (no
+    // gather: an embedding table of `rows` elements is read at its ids).
+    let per_row = |v: Var| {
+        body.type_of(v).numel() == rows
+            && body
+                .nodes()
                 .iter()
-                .zip(&body.type_of(v).shape)
-                .any(|(&d, &size)| d + 1 == shape.len() && size > 1),
-            _ => false,
-        })
+                .filter(|node| node.inputs.contains(&v))
+                .all(|node| match &node.primitive {
+                    Primitive::BroadcastInDim {
+                        shape,
+                        broadcast_dimensions,
+                    } => !broadcast_dimensions
+                        .iter()
+                        .zip(&body.type_of(v).shape)
+                        .any(|(&d, &size)| d + 1 == shape.len() && size > 1),
+                    p => {
+                        (fusion::elementwise(p) || matches!(p, Primitive::Reshape { .. }))
+                            && body.type_of(node.output).numel() == rows
+                    }
+                })
     };
     let mut constant = vec![false; body.types.len()];
     for &v in body.inputs() {
-        let numel = body.type_of(v).numel();
-        constant[v] = numel == 1;
-        e.invariant[v] = constant[v] || (numel == rows && !along_row(v));
+        constant[v] = body.type_of(v).numel() == 1;
+        e.invariant[v] = constant[v] || per_row(v);
     }
     for node in body.nodes() {
         let v = node.output;
