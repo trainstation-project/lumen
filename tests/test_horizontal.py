@@ -1,6 +1,8 @@
 """Horizontal loop fusion on MPS (``lumen/compiler/mps/horizontal.rs``):
 independent small loop fusions of as many elements, one kernel."""
 
+import re
+
 import numpy as np
 import pytest
 
@@ -32,6 +34,12 @@ def _steps(f, *args):
     return lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()
 
 
+def _merged(label):
+    """Whether a step's (or kernel's) label is a horizontal fusion's: its
+    members' labels, ``Nx`` before one N share, joined by ``|``."""
+    return " | " in label or re.match(r"\d+x ", label) is not None
+
+
 def _independent(a, b, c):
     # Three chains, none reading another's value, of as many elements (b
     # another shape), and a lone cast.
@@ -58,6 +66,16 @@ def test_independent_loop_fusions_are_one_kernel(compiler):
         np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
 
 
+def test_fusions_of_one_chain_are_labelled_by_their_count():
+    """Members computing the same primitives are labelled once, with how
+    many there are, as merged dots are (``3x dot_general``)."""
+    args = _device(rand(64, 32), rand(64, 32, seed=1), rand(64, 32, seed=2))
+    steps = _steps(lambda *xs: tuple(F.exp(x) * 2.0 for x in xs), *args)
+    assert len(steps) == 1, [s["label"] for s in steps]
+    label = steps[0]["label"]
+    assert label.startswith("3x ") and " | " not in label, label
+
+
 def test_different_sizes_are_not_fused():
     """Fusions of different element counts stay apart (no concatenated
     buffer, XLA's other form)."""
@@ -76,7 +94,7 @@ def test_dependent_fusions_are_not_fused():
         return x, x * F.sum(x)
 
     steps = _steps(f, a)
-    assert not any(" | " in s["label"] for s in steps), [s["label"] for s in steps]
+    assert not any(_merged(s["label"]) for s in steps), [s["label"] for s in steps]
     got = lumen.compile(f)(a)
     want = lumen.compile(f, device="cpu")(lumen.from_numpy(lumen.to_numpy(a)))
     for g, w in zip(got, want):
@@ -132,7 +150,7 @@ def test_in_place_updates_fused(compiler):
         return [lumen.to_numpy(x._placed("mps")) for x in params.xs], kernels
 
     fused, kernels = run(True)
-    assert any(" | " in k for k in kernels), kernels
+    assert any(_merged(k) for k in kernels), kernels
     again, _ = run(True)
     alone, _ = run(False)
     want = [rand(*s, seed=k) for k, s in enumerate(shapes)]

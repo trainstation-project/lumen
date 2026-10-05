@@ -323,7 +323,23 @@ pub(crate) fn fuse(
         let (body, outputs) = bodies[k].take().expect("a group's body");
         let by_value: Vec<bool> = g.reads.iter().map(|v| scalars.contains(v)).collect();
         let name = kernel(&body, &by_value);
-        let labels: Vec<&str> = g.members.iter().map(|&m| label(graph, &nodes[m])).collect();
+        // Its members' labels, as merged dots' (`Nx dot_general`): each
+        // label once, in order, `Nx` before one N members share.
+        let mut labels: Vec<(&str, usize)> = Vec::new();
+        for &m in &g.members {
+            let l = label(graph, &nodes[m]);
+            match labels.iter_mut().find(|(seen, _)| *seen == l) {
+                Some((_, count)) => *count += 1,
+                None => labels.push((l, 1)),
+            }
+        }
+        let labels: Vec<String> = labels
+            .into_iter()
+            .map(|(l, count)| match count {
+                1 => l.to_owned(),
+                n => format!("{n}x {l}"),
+            })
+            .collect();
         let label = intern(labels.join(" | "));
         let reads: Vec<Var> = g.reads.iter().map(|&v| map[v]).collect();
         let fused = out
