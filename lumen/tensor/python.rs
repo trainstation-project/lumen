@@ -547,6 +547,15 @@ impl PyTensor {
         Ok(slf)
     }
 
+    /// Wait for this tensor's value in place and return the tensor
+    /// (PyTorch: `wait_tensor`): the device work producing or using it has
+    /// finished. Every read of its value (`tolist`, `item`, `cpu`, DLPack)
+    /// waits first; this is the wait alone.
+    fn wait_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf.inner.wait_();
+        slf
+    }
+
     /// Set every element to zero in place and return the tensor
     /// (PyTorch: `Tensor.zero_`).
     fn zero_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

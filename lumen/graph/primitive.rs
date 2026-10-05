@@ -69,6 +69,11 @@ pub enum Primitive {
         accum_dtype: DType,
         output_dtype: DType,
     },
+    /// Its operand, once the device work producing it has finished: the host
+    /// blocks until then (PyTorch: `wait_tensor`). In place: its value is
+    /// the operand's memory ([`crate::ops::wait`]). Placed before what needs
+    /// a value on the host.
+    Wait,
     Reshape {
         new_sizes: Vec<usize>,
     },
@@ -186,6 +191,7 @@ impl Primitive {
             ReduceMax { .. } => "reduce_max",
             Cumsum { .. } => "cumsum",
             DotGeneral { .. } => "dot_general",
+            Wait => "wait",
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
@@ -276,6 +282,7 @@ impl Primitive {
                 Ok(x.clone())
             }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
+            Wait => Ok(args[0].clone()),
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
                 if pred.dtype != DType::Bool || pred.shape != x.shape {

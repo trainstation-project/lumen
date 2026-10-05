@@ -18,6 +18,8 @@ deflinear(
 deflinear(prims.neg, lambda ct, x: [prims.neg(ct)])
 deflinear(prims.cast, lambda ct, x, new_dtype: [prims.cast(ct, x.dtype)])
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
+# A wait passes its cotangent through (PyTorch: wait_tensor's backward).
+deflinear(prims.wait, lambda ct, x: [ct])
 
 
 def _transpose_transpose(ct, x, permutation):

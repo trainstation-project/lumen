@@ -1,6 +1,8 @@
 mod cpu;
 #[cfg(lumen_cuda_linked)]
 mod cuda;
+#[cfg(lumen_mps_linked)]
+mod mps;
 
 use crate::Tensor;
 use crate::device::Device;
@@ -19,7 +21,7 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
     match key {
         DispatchKey::Cpu => Some(cpu::memcpy),
         #[cfg(lumen_mps_linked)]
-        DispatchKey::Mps => Some(cpu::memcpy),
+        DispatchKey::Mps => Some(mps::copy_h2d),
         #[cfg(not(lumen_mps_linked))]
         DispatchKey::Mps => None,
         #[cfg(lumen_cuda_linked)]
@@ -55,12 +57,14 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
 /// # Panics
 /// If `src` is not on the CPU, the two differ in dtype or size, either is
 /// not contiguous, or they share storage.
+///
+/// Into MPS memory, the copy is in stream order: after the work submitted
+/// so far, with no wait ([`mps::copy_h2d`]).
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);
     if dst.numel() == 0 {
         return;
     }
-    dst.storage().synchronize();
     COPY_H2D.dispatch(dst.device())(dst, src);
 }
 
@@ -73,7 +77,7 @@ pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     if src.numel() == 0 {
         return;
     }
-    src.storage().synchronize();
+    src.wait_();
     COPY_D2H.dispatch(src.device())(dst, src);
 }
 

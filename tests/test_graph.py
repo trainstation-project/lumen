@@ -335,7 +335,7 @@ def test_mps_plan_steps_and_profiled_kernels():
     with profile(activities=[ProfilerActivity.MPS]) as prof:
         plan.run([x])
         lumen.mps.synchronize()
-    kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
+    kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert kernels == [fusion["kernel"]]
     assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 128] * 64)
 
@@ -1035,7 +1035,7 @@ def test_split_reduction_converts_its_input_once():
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         out = f(x)
         lumen.mps.synchronize()
-    first, last = [e for e in prof.events() if e["kind"] == "gpu"]
+    first, last = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert first["kernel"] == step["fusion"]["kernel"]
     # The second reads the float32 partials with the plain float32 kernel.
     assert last["kernel"] == "reduce_sum_rows_f32"

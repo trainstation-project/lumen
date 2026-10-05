@@ -8,7 +8,7 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
         return;
     }
 
-    t.storage().synchronize();
+    t.wait_();
     let base = t.data_ptr().cast::<T>();
     if t.is_contiguous() {
         for i in 0..numel {

@@ -209,7 +209,9 @@ impl Plan {
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
-            if is_reshape(&node.primitive) {
+            // A wait's value is its operand's memory too (in place), but it
+            // is a step: the host waits there.
+            if is_reshape(&node.primitive) || matches!(node.primitive, Primitive::Wait) {
                 root[node.output] = root[node.inputs[0]];
             }
             // Each value it writes in place, with the operand position it
@@ -279,6 +281,7 @@ impl Plan {
                 Primitive::DynamicUpdateSlice
                     | Primitive::CustomCall { .. }
                     | Primitive::Reshape { .. }
+                    | Primitive::Wait
                     | Primitive::FusionOutput { .. }
             );
             let donated = graph.outputs().iter().enumerate().any(|(k, &o)| {

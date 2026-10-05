@@ -29,6 +29,7 @@ __all__ = [
     "cumsum",
     "dot_general",
     "reshape",
+    "wait",
     "broadcast_in_dim",
     "transpose",
     "slice",
@@ -152,6 +153,12 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
         accum_dtype=accum_dtype,
         output_dtype=output_dtype,
     )
+
+
+def wait(x):
+    """``x``, once the device work producing it has finished: the host
+    blocks until then (PyTorch: ``wait_tensor``). In place: no copy."""
+    return bind("wait", x)
 
 
 def reshape(x, new_sizes):
