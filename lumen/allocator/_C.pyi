@@ -14,6 +14,7 @@ class CompilerConfig:
     reduction_epilogues: bool
     contraction_epilogues: bool
     multi_output_fusion: bool
+    horizontal_fusion: bool
     online_softmax: bool
     flash_attention: bool
     split_k: bool

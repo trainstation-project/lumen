@@ -300,7 +300,7 @@ const MIN_TILED: usize = 16;
 
 /// The transposes a tile holds at most: 32x33 elements each, of
 /// threadgroup memory's 32 KiB.
-const MAX_HEROES: usize = 4;
+pub(crate) const MAX_HEROES: usize = 4;
 
 /// How fusion `body` is tiled, if it is a loop fusion with a transpose to
 /// tile ([`TransposeTiling`]; XLA's transpose heroes,
