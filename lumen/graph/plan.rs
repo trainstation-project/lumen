@@ -87,12 +87,12 @@ pub struct PlanOptions {
     /// memory holds its new value alone, which `lumen.compile` writes back
     /// into it).
     pub donate_into: Vec<(usize, usize)>,
-    /// Plan an executable that owns its memory ([`Plan::run_in`]): the
-    /// inputs not marked here and every output placed in the workspace too,
-    /// the inputs copied in on each run and the outputs views of it. Those
-    /// marked are parameters, whose memory is placed elsewhere (lumen's
-    /// parameter store) and read in place. `None`: the inputs and outputs
-    /// are the caller's ([`Plan::run`]).
+    /// Plan an executable that owns its memory ([`Plan::run_in`]): every
+    /// output placed in the workspace too, views of it; the inputs read
+    /// where they are. Those marked are parameters, whose memory is placed
+    /// elsewhere (lumen's parameter store); the others are arguments (read
+    /// in place too, or copied where they cannot be). `None`: the inputs
+    /// and outputs are the caller's ([`Plan::run`]).
     pub parameters: Option<Vec<bool>>,
     /// Slices the plan does not compute: each a view of its operand's
     /// buffer, which the steps reading it read in place at its offset and
@@ -117,9 +117,13 @@ pub struct Plan {
     outputs: Vec<TensorType>,
     /// The donated input each output is written into, if any.
     aliases: Vec<Option<usize>>,
-    /// Where each input and output is: in an owned plan, in the workspace
-    /// (or, for a parameter, the input itself).
+    /// Where each input and output is: in an owned plan, an input is read
+    /// where it is (a runtime scalar by value), an output in the workspace
+    /// (or a parameter, written in place).
     inputs_at: Vec<Buffer>,
+    /// An owned plan's inputs that are arguments: neither parameters nor
+    /// runtime scalars, read in place where [`run_in`](Self::run_in) can.
+    arguments: Vec<bool>,
     outputs_at: Vec<Buffer>,
     steps: Vec<Step>,
     workspace_bytes: usize,
@@ -242,17 +246,8 @@ impl Plan {
         // slice's, a view of them; a dynamic_update_slice's, its operand's,
         // in place, where nothing reads those after it (nor as its update
         // or an index) and they are no output's, nor the caller's: an
-        // input's, unless an owned plan's copy of an argument (a donated
-        // input's: below).
-        let callers = |r: Var| {
-            graph
-                .inputs()
-                .iter()
-                .position(|&v| v == r)
-                .is_some_and(|i| {
-                    options.parameters.as_ref().is_none_or(|p| p[i]) || options.scalars.contains(&i)
-                })
-        };
+        // input's (a donated input's: below).
+        let callers = |r: Var| graph.inputs().contains(&r);
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
@@ -383,15 +378,16 @@ impl Plan {
             .collect();
 
         let owned = options.parameters.as_ref();
-        let is_parameter = |i: usize| owned.is_none_or(|p| p[i]);
         let mut buffer: Vec<Option<Buffer>> = vec![None; n];
         for (i, &v) in graph.inputs().iter().enumerate() {
-            if options.scalars.contains(&i) {
-                buffer[v] = Some(Buffer::Scalar(i));
-            } else if is_parameter(i) {
-                buffer[v] = Some(Buffer::Input(i));
-            }
+            buffer[v] = Some(match options.scalars.contains(&i) {
+                true => Buffer::Scalar(i),
+                false => Buffer::Input(i),
+            });
         }
+        let arguments = (0..graph.inputs().len())
+            .map(|i| owned.is_some_and(|p| !p[i]) && !options.scalars.contains(&i))
+            .collect();
         let mut copies = Vec::new();
         if owned.is_none() {
             for (k, &v) in graph.outputs().iter().enumerate() {
@@ -429,11 +425,7 @@ impl Plan {
             }
         }
         if owned.is_some() {
-            // Inputs are copied in before the first step; outputs are read
-            // after the last.
-            for &v in graph.inputs() {
-                first[v] = 0;
-            }
+            // Outputs are read after the last step.
             for &v in graph.outputs() {
                 last[root[v]] = nodes.len();
             }
@@ -577,6 +569,7 @@ impl Plan {
             outputs: graph.outputs().iter().map(|&v| ty(v)).collect(),
             aliases,
             inputs_at,
+            arguments,
             outputs_at,
             steps,
             workspace_bytes,
@@ -601,6 +594,7 @@ impl Plan {
             inputs,
             outputs,
             inputs_at: Vec::new(),
+            arguments: Vec::new(),
             outputs_at: Vec::new(),
             steps,
             workspace_bytes,
@@ -759,11 +753,12 @@ impl Plan {
 
     /// Run an owned plan ([`PlanOptions::parameters`]) in `workspace` (at
     /// least [`workspace_bytes`](Self::workspace_bytes) bytes, on the device
-    /// it runs on, kept by the caller from run to run): the inputs that are
-    /// not parameters copied into their places in it (from any device),
-    /// the parameters read where they are (on that device). The outputs
-    /// are views of the workspace (or a parameter), valid until the next
-    /// run in it overwrites them.
+    /// it runs on, kept by the caller from run to run): the inputs read
+    /// where they are (parameters on that device; an argument elsewhere,
+    /// or sharing memory with a parameter the plan overwrites, copied
+    /// there first). The outputs are views of the workspace (or a
+    /// parameter; an argument returned as it is, a copy of it), valid until
+    /// the next run in it overwrites them.
     pub fn run_in(&self, workspace: &Tensor, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         self.check_inputs(inputs)?;
         if let Some(staged) = &self.staged {
@@ -786,10 +781,12 @@ impl Plan {
         }
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
-        // A parameter is read in place: as it is if contiguous, or if every
+        // An input is read in place: as it is if contiguous, or if every
         // step reading it takes it at its strides (a parameter packed into a
         // block another plan merged dots over is a strided view of it);
-        // else a contiguous copy.
+        // else a contiguous copy. An argument on another device is copied
+        // to this one; one sharing memory with a donated parameter (written
+        // in place, while the argument may be read after), copied too.
         let read = |i: usize| {
             let at = Buffer::Input(i);
             self.outputs_at.contains(&at)
@@ -798,6 +795,15 @@ impl Plan {
                     .iter()
                     .any(|s| s.inputs.iter().any(|&(b, _)| b == at))
         };
+        // `t` copied into new memory on the device, as `ty` (its elements
+        // reshaped: an output that is an argument's reshape).
+        let copied = |t: &Tensor, ty: &TensorType| -> Result<Tensor, String> {
+            let options = TensorOptions::new().dtype(t.dtype()).device(device);
+            // SAFETY: written whole by the copy.
+            let copy = unsafe { Tensor::empty(t.shape(), options) };
+            copy.copy_(t)?;
+            Ok(copy.reshape(&ty.shape))
+        };
         let mut params = Vec::with_capacity(inputs.len());
         for (i, ((t, ty), at)) in inputs
             .iter()
@@ -805,13 +811,16 @@ impl Plan {
             .zip(&self.inputs_at)
             .enumerate()
         {
+            let donated =
+                |j: &usize| self.aliases.contains(&Some(*j)) && inputs[*j].shares_storage_with(t);
             match *at {
-                Buffer::Workspace(offset) => {
-                    view(offset, ty).copy_(t)?;
-                    params.push(t.clone());
-                }
                 // Read on the host as its steps are encoded.
                 Buffer::Scalar(_) => params.push(t.to(Device::Cpu)),
+                _ if self.arguments[i]
+                    && (t.device() != device || (0..inputs.len()).any(|j| donated(&j))) =>
+                {
+                    params.push(copied(t, ty)?)
+                }
                 _ if t.device() != device => {
                     return Err(format!(
                         "parameters must be on {device}, got {}",
@@ -825,16 +834,18 @@ impl Plan {
             }
         }
         self.execute(executor, &params, &[], workspace)?;
-        Ok(self
-            .outputs_at
+        self.outputs_at
             .iter()
             .zip(&self.outputs)
             .map(|(at, ty)| match *at {
-                Buffer::Workspace(offset) => view(offset, ty),
-                Buffer::Input(i) | Buffer::Scalar(i) => params[i].clone(),
+                Buffer::Workspace(offset) => Ok(view(offset, ty)),
+                // An argument returned as it is: a copy (no output aliases
+                // the caller's argument).
+                Buffer::Input(i) if self.arguments[i] => copied(&params[i], ty),
+                Buffer::Input(i) | Buffer::Scalar(i) => Ok(params[i].clone()),
                 Buffer::Output(_) => unreachable!("an owned plan has no output buffers"),
             })
-            .collect())
+            .collect()
     }
 
     /// Whether every step reading parameter `i` reads it in place at

@@ -630,16 +630,29 @@ pub(crate) fn encode(
                 .map(|(&p, (_, ty))| (p.cast_mut(), ty.clone())),
         )
         .collect();
-    let ready = EVENT.fetch_add(2, Ordering::Relaxed) + 1;
-    // SAFETY: the stream's open command buffer, encoded into before the
-    // stream commits it (the flush).
-    unsafe { lumen_coreml_encode_signal(crate::stream::mps::command_buffer(), ready) };
-    crate::stream::mps::flush();
+    // Ready once the GPU work before it is done; with none encoded since
+    // the last step (Core ML steps back to back), once that step's
+    // prediction is, which the prediction thread runs first anyway: no
+    // round trip through the GPU.
+    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    let ready = match *last {
+        Some((encoded, done)) if encoded == crate::stream::mps::encoded() => done,
+        _ => {
+            let ready = EVENT.fetch_add(1, Ordering::Relaxed) + 1;
+            // SAFETY: the stream's open command buffer, encoded into before
+            // the stream commits it (the flush).
+            unsafe { lumen_coreml_encode_signal(crate::stream::mps::command_buffer(), ready) };
+            crate::stream::mps::flush();
+            ready
+        }
+    };
+    let done = EVENT.fetch_add(1, Ordering::Relaxed) + 1;
     let job = Job {
         program,
         ins,
         outs,
         ready,
+        done,
         _keep: keep,
         label: step.label,
         profile: crate::profiler::gpu_context(crate::device::Device::Mps),
@@ -647,19 +660,25 @@ pub(crate) fn encode(
     jobs()
         .send(job)
         .map_err(|_| format!("{}: the Core ML thread has stopped", step.label))?;
-    // SAFETY: as above; the work encoded after it waits for the
-    // prediction, and synchronize for that work (`mark`).
-    unsafe { lumen_coreml_encode_wait(crate::stream::mps::command_buffer(), ready + 1) };
+    // SAFETY: the stream's open command buffer; the work encoded after it
+    // waits for the prediction, and synchronize for that work (`mark`).
+    unsafe { lumen_coreml_encode_wait(crate::stream::mps::command_buffer(), done) };
     crate::stream::mps::mark();
+    *last = Some((crate::stream::mps::encoded(), done));
     Ok(())
 }
 
-/// The shared event's last value: each step takes two, the GPU's signal
-/// (the work before it done) and its prediction's (done).
+/// The shared event's last value: each step takes the value its prediction
+/// signals once done, and one the GPU signals once the work before it is
+/// (unless it follows another step directly).
 static EVENT: AtomicU64 = AtomicU64::new(0);
 
-/// A Core ML step's prediction, run on the prediction thread once the GPU
-/// signals `ready`, then signalling `ready + 1`: on the plan's buffers
+/// The last step's: the stream's encoded ops after it, and the value its
+/// prediction signals.
+static LAST: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
+/// A Core ML step's prediction, run on the prediction thread once the event
+/// reaches `ready`, then signalling `done`: on the plan's buffers
 /// (`ins`: a buffer, its type and strides; `outs`: a buffer and its
 /// type), kept alive by `_keep`.
 struct Job {
@@ -667,6 +686,7 @@ struct Job {
     ins: Vec<(*const u8, TensorType, Vec<usize>)>,
     outs: Vec<(*mut u8, TensorType)>,
     ready: u64,
+    done: u64,
     _keep: Vec<Tensor>,
     label: &'static str,
     profile: Option<crate::profiler::GpuContext>,
@@ -724,7 +744,7 @@ fn run(job: Job) {
         eprintln!("{}: {}: {e}", crate::LIBRARY_NAME, job.label);
     }
     // SAFETY: the value the GPU work after the step waits for.
-    unsafe { lumen_coreml_host_signal(job.ready + 1) };
+    unsafe { lumen_coreml_host_signal(job.done) };
 }
 
 /// Forget the programs of `steps`' `coreml_*` steps: compiled again on
