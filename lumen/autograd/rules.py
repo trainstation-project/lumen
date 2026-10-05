@@ -155,6 +155,45 @@ def _dynamic_update_slice_transpose(ct, x, update, *indices):
     ]
 
 
+# Gathers: linear in the operand (and a scatter's updates), the indices
+# (integers) fixed.
+def _gather_jvp(primals, tangents, out, axis):
+    if tangents[0] is None:
+        return None
+    return prims.gather(tangents[0], primals[1], axis)
+
+
+def _gather_transpose(ct, x, indices, axis):
+    # Each entry's cotangent where it was read, summed over its reads (as
+    # MLX's): in float32 or wider, then x's dtype.
+    accum = tracer._accum_dtype(x.dtype)
+    ct = ct if ct.dtype == accum else prims.cast(ct, accum)
+    out = prims.scatter_add(prims.full(x.shape, 0, accum), indices, ct, axis)
+    return [out if accum == x.dtype else prims.cast(out, x.dtype), None]
+
+
+def _scatter_add_jvp(primals, tangents, out, axis):
+    x, indices, updates = primals
+    tx, tu = tangents[0], tangents[2]
+    if tx is None and tu is None:
+        return None
+    tx, tu = (t if t is not None else _full(p, 0) for t, p in ((tx, x), (tu, updates)))
+    return prims.scatter_add(tx, indices, tu, axis)
+
+
+def _scatter_add_transpose(ct, x, indices, updates, axis):
+    # The operand's cotangent as it is; each update's, its entry's.
+    return [
+        ct if isinstance(x, UndefinedPrimal) else None,
+        None,
+        prims.gather(ct, indices, axis) if isinstance(updates, UndefinedPrimal) else None,
+    ]
+
+
+primitive_jvps[prims.gather] = _gather_jvp
+primitive_transposes[prims.gather] = _gather_transpose
+primitive_jvps[prims.scatter_add] = _scatter_add_jvp
+primitive_transposes[prims.scatter_add] = _scatter_add_transpose
 primitive_jvps[prims.dynamic_slice] = _dynamic_slice_jvp
 primitive_transposes[prims.dynamic_slice] = _dynamic_slice_transpose
 primitive_jvps[prims.dynamic_update_slice] = _dynamic_update_slice_jvp

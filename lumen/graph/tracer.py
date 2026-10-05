@@ -1197,7 +1197,11 @@ class TracedTensor:
 
     def __getitem__(self, key):
         """Basic indexing (torch, NumPy): integers (which drop their
-        dimension), slices with unit steps, and one ``...``."""
+        dimension), slices with unit steps, and one ``...``; or a tensor of
+        integer indices into the first dimension (``weight[ids]``, an
+        embedding's lookup: ``prims.gather``)."""
+        if isinstance(key, TracedTensor):
+            return prims.gather(self, key, 0)
         key = key if isinstance(key, tuple) else (key,)
         ellipses = [i for i, k in enumerate(key) if k is Ellipsis]
         if len(ellipses) > 1:

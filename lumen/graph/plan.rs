@@ -262,11 +262,14 @@ impl Plan {
                 root[node.output] = root[node.inputs[0]];
             }
             // Each value it writes in place, with the operand position it
-            // replaces: a dynamic_update_slice's, its operand's; a custom
+            // replaces: a dynamic_update_slice's or scatter_add's, its
+            // operand's; a custom
             // op's, each mutated operand's (its own value the first, its
             // fusion outputs the others).
             let written: Vec<(Var, usize)> = match &node.primitive {
-                Primitive::DynamicUpdateSlice => vec![(node.output, 0)],
+                Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => {
+                    vec![(node.output, 0)]
+                }
                 Primitive::CustomCall { mutated, .. } => {
                     let mut written = vec![(node.output, mutated[0])];
                     for other in graph.nodes() {
@@ -326,6 +329,7 @@ impl Plan {
             let step = !matches!(
                 node.primitive,
                 Primitive::DynamicUpdateSlice
+                    | Primitive::ScatterAdd { .. }
                     | Primitive::CustomCall { .. }
                     | Primitive::Reshape { .. }
                     | Primitive::Wait
@@ -1205,7 +1209,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
                 true
             }),
         // Its operand alone, in place.
-        DynamicUpdateSlice => node.inputs[1..].iter().all(|&v| root[v] != r),
+        DynamicUpdateSlice | ScatterAdd { .. } => node.inputs[1..].iter().all(|&v| root[v] != r),
         // At the operand whose new value `out` is alone (its value is the
         // first mutated operand's; a fusion output of it at index k, the
         // k-th's).

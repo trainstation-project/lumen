@@ -91,6 +91,7 @@ pub(crate) fn encode(
             super::layout::mps::encode
         }
         DynamicSlice { .. } | DynamicUpdateSlice => super::dynamic_slice::mps::encode,
+        Gather { .. } | ScatterAdd { .. } => super::gather::mps::encode,
         Wait => super::wait::encode,
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")

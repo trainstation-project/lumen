@@ -85,6 +85,12 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             slice_sizes: dims("slice_sizes")?,
         },
         "dynamic_update_slice" => DynamicUpdateSlice,
+        "gather" => Gather {
+            axis: get("axis")?.extract()?,
+        },
+        "scatter_add" => ScatterAdd {
+            axis: get("axis")?.extract()?,
+        },
         "custom_call" => CustomCall {
             label: crate::graph::intern(get("op")?.extract()?),
             kernel: get("kernel")?.extract()?,

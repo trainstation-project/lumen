@@ -158,6 +158,7 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/ops/dot_general/mps/kernels.metal",
     "lumen/ops/layout/mps/kernels.metal",
     "lumen/ops/dynamic_slice/mps/kernels.metal",
+    "lumen/ops/gather/mps/kernels.metal",
     "lumen/ops/factory/mps/kernels.metal",
 ];
 
