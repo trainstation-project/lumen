@@ -1,7 +1,7 @@
 """``lumen.config.compiler.neural_engine``: an MPS plan runs the large
 float16 dots of the weights its function does not write (and the float16
 work after them) on the Apple Neural Engine, as Core ML steps
-(``lumen/compiler/ane``): results as computed in float32 (to the Neural
+(``lumen/compiler/mps/ane``): results as computed in float32 (to the Neural
 Engine's precision); none with the flag off, nor for a weight the function
 writes (a training step's); the weights baked in again once written; the
 steps on the profile's own timeline."""

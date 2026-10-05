@@ -145,7 +145,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
     let mut neural_engine = false;
     for e in events {
         match e.kind {
-            // A Core ML step's (`compiler::ane`): on the Neural Engine's own
+            // A Core ML step's (`compiler::mps::ane`): on the Neural Engine's own
             // timeline.
             EventKind::HostKernel if e.name.starts_with("coreml") => {
                 neural_engine = true;

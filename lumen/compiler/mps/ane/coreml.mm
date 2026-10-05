@@ -1,4 +1,4 @@
-// Core ML programs (lumen/compiler/ane/mod.rs): a model specification
+// Core ML programs (lumen/compiler/mps/ane/mod.rs): a model specification
 // (an ML Program) compiled at runtime (MLModel compileModelAtURL:, no Xcode
 // tools) and loaded for the CPU and the Neural Engine; where Core ML places
 // each operation (MLComputePlan); predictions over the plan's buffers.

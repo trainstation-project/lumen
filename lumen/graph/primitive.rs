@@ -15,7 +15,7 @@ use crate::{DType, Scalar};
 pub const FUSION_SEPARATOR: &str = " → ";
 
 /// What the name of a [`Primitive::Fusion`] the Apple Neural Engine runs
-/// (`compiler::ane`, through Core ML) starts with: its body is a Core ML
+/// (`compiler::mps::ane`, through Core ML) starts with: its body is a Core ML
 /// program's, not a kernel's.
 pub const NEURAL_ENGINE: &str = "coreml_";
 

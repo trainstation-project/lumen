@@ -377,7 +377,7 @@ impl PyPlan {
     /// from their weights' values then: the weights were written.
     fn _invalidate_neural_engine(&self) {
         #[cfg(lumen_mps_linked)]
-        crate::compiler::ane::invalidate(self.inner.steps());
+        crate::compiler::mps::ane::invalidate(self.inner.steps());
     }
 
     #[getter]

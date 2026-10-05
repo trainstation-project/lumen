@@ -16,8 +16,6 @@
 // Used by the MPS backend (its fusions) and the tracer (`Graph.attentions`).
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod ane;
 pub mod config;
 mod cpu;
 mod cse;

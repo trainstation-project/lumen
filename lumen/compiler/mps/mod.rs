@@ -6,8 +6,11 @@
 //! compiled, then the fused graph's [`Plan`], with the workspace scratch
 //! the kernels need ([`crate::ops::mps::scratch_bytes`]): no kernel
 //! allocates. A fusion step runs its kernel ([`encode`]); the rest run the
-//! primitives' kernels ([`crate::ops::mps`]).
+//! primitives' kernels ([`crate::ops::mps`]). With `neural_engine`,
+//! regions of float16 work on fixed weights run on the Apple Neural Engine
+//! instead, as Core ML steps ([`ane`]).
 
+pub(crate) mod ane;
 mod codegen;
 mod diamonds;
 mod dot_strength;
@@ -122,7 +125,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
                     None => options.parameters.as_ref().is_some_and(|p| p[i]) && !written(i),
                 })
                 .collect();
-            super::ane::offload(&graph, &fixed)
+            ane::offload(&graph, &fixed)
         }
         false => graph,
     };
@@ -436,7 +439,7 @@ pub(crate) fn encode(
     };
     // A Core ML program's, on the Neural Engine.
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
-        return crate::compiler::ane::encode(step, inputs, output);
+        return ane::encode(step, inputs, output);
     }
     // The kernel's inputs, then (a multi-output fusion's) other outputs; of
     // the inputs, device buffers and the by-value ones' bytes, read on the
