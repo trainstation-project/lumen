@@ -636,6 +636,15 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             };
             gather(&values, out, |idx| ravel([idx[*dimension]], &range.shape))
         }
+        RandomBits { offset, .. } => {
+            let Int(state) = args[0] else {
+                unreachable!("a uint64 state")
+            };
+            let (seed, start) = (state[0] as u64, (state[1] as u64).wrapping_add(*offset));
+            Int((0..out.numel() as u64)
+                .map(|i| philox_bits(seed, start.wrapping_add(i)) as i128)
+                .collect())
+        }
         Fusion { body, .. } => {
             let inputs = args.iter().map(|&v| v.clone()).collect();
             eval_graph(body, inputs).remove(0)
@@ -649,4 +658,34 @@ fn pick<T: Copy>(pred: &[i128], x: &[T], y: &[T]) -> Vec<T> {
         .zip(x.iter().zip(y))
         .map(|(&p, (&a, &b))| if p != 0 { a } else { b })
         .collect()
+}
+
+/// The first word of the Philox4x32-10 block (Salmon et al., "Parallel
+/// random numbers: as easy as 1, 2, 3"; Random123's `philox4x32`) keyed by
+/// `key` (its low word first) at `counter` (the block's first two words,
+/// low first; the others 0): [`Primitive::RandomBits`]' element, as the MPS
+/// kernels compute it (`philox_bits`, `ops/mps/kernels.metal`).
+pub(crate) fn philox_bits(key: u64, counter: u64) -> u32 {
+    let counter = [counter as u32, (counter >> 32) as u32, 0, 0];
+    philox4x32([key as u32, (key >> 32) as u32], counter)[0]
+}
+
+/// Random123's `philox4x32_R` with 10 rounds: the block at `c`, keyed by `k`.
+pub(crate) fn philox4x32(mut k: [u32; 2], mut c: [u32; 4]) -> [u32; 4] {
+    let mulhilo = |a: u32, b: u32| {
+        let p = a as u64 * b as u64;
+        ((p >> 32) as u32, p as u32)
+    };
+    for round in 0..10 {
+        if round > 0 {
+            k = [
+                k[0].wrapping_add(0x9E37_79B9),
+                k[1].wrapping_add(0xBB67_AE85),
+            ];
+        }
+        let (hi0, lo0) = mulhilo(0xD251_1F53, c[0]);
+        let (hi1, lo1) = mulhilo(0xCD9E_8D57, c[2]);
+        c = [hi1 ^ c[1] ^ k[0], lo1, hi0 ^ c[3] ^ k[1], lo0];
+    }
+    c
 }

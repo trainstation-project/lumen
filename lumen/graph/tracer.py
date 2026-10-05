@@ -37,6 +37,9 @@ __all__ = [
 
 # The graphs being traced, innermost last.
 _TRACES = []
+# Each trace's random state (``lumen.random``): its hidden input, made at
+# its first draw (None before), and the numbers drawn so far.
+_RNG = []
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -87,6 +90,20 @@ def _tree_leaves(x):
     return leaves
 
 
+def _random_bits(shape):
+    """uint32 random bits of ``shape`` (``lumen.random``): the next run of
+    the stream, read from the trace's random state, a hidden input of the
+    graph (uint64 ``[seed, offset]``, after the weights) made at the first
+    draw."""
+    graph = current_graph()
+    rng = _RNG[-1]
+    if rng["state"] is None:
+        rng["state"] = TracedTensor(graph, graph.input("uint64", [2]))
+    offset = rng["drawn"]
+    rng["drawn"] += math.prod(shape)
+    return prims.random_bits(rng["state"], shape, offset)
+
+
 def current_graph():
     if not _TRACES:
         raise RuntimeError("lumen ops run only while tracing, inside a function passed to lumen.compile")
@@ -127,7 +144,9 @@ def _trace(fn, args):
     are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
-    meta tensor. Precision warnings point at the line computing the value
+    meta tensor, then, if ``fn`` draws random numbers (``lumen.random``),
+    the random state (uint64 ``[seed, offset]``); the numbers it draws are
+    returned last (None if none). Precision warnings point at the line computing the value
     they are about."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
@@ -162,6 +181,7 @@ def _trace(fn, args):
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
     _TRACES.append(graph)
+    _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
     _TAPES.append(tape)
     _BACKWARD.append((tape, leaves))
@@ -170,6 +190,7 @@ def _trace(fn, args):
         out = fn(*traced)
     finally:
         _TRACES.pop()
+        rng = _RNG.pop()
         _SOURCES.pop()
         _TAPES.pop()
         _BACKWARD.pop()
@@ -208,7 +229,8 @@ def _trace(fn, args):
             warnings.warn_explicit(message, UserWarning, *where)
         else:
             warnings.warn(message)
-    return graph, out, (written, written_scalars, written_arguments)
+    drawn = rng["drawn"] if rng["state"] is not None else None
+    return graph, out, (written, written_scalars, written_arguments), drawn
 
 
 def _lift(x):
@@ -316,13 +338,17 @@ def compile(fn, device=None):
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
-        graph, out, _, entries, _, _ = plans[key]
+        graph, out, _, drawn, entries, _, _ = plans[key]
+        # The random state, if it draws numbers: an input after the weights.
+        from lumen import random  # lazily: lumen.random imports this module
+
+        rng = [random._state()] if drawn is not None else []
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, out, tensors + weights
+            return graph, entries[0][0], None, out, tensors + weights + rng
         params = list(range(len(tensors), len(tensors) + len(weights)))
         inputs = tensors + weights
 
@@ -335,7 +361,7 @@ def compile(fn, device=None):
                 if block is None:
                     return None
                 blocks.append(block)
-            return tensors + [w._placed(target) for w in weights] + blocks
+            return tensors + [w._placed(target) for w in weights] + rng + blocks
 
         for plan, workspace in entries:
             placed = inputs_for(plan)
@@ -392,6 +418,12 @@ def compile(fn, device=None):
             arguments = [a for a in args if isinstance(a, Tensor)]
             for k, value in zip(written_arguments, outputs):
                 arguments[k].copy_(value)
+            # The next call draws the numbers after this one's.
+            drawn = plans[latest[0]][3]
+            if drawn is not None:
+                from lumen import random
+
+                random._advance(drawn)
         return result
 
     def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
@@ -407,12 +439,13 @@ def compile(fn, device=None):
         elif not latest:
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = latest
-        graph, _, _, _, n_tensors, scalars = plans[latest[0]]
+        graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
         target = str(device or compile_device or (target if target != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
         types = [graph.type_of(v) for v in graph.inputs()]
-        params = list(range(n_tensors, len(types)))
+        # The weights: the inputs after the tensors but the random state.
+        params = list(range(n_tensors, len(types) - (drawn is not None)))
         plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
         inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:

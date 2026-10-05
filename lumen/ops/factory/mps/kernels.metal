@@ -1,5 +1,6 @@
-// Factory primitives: full (a value, dtype-agnostic by element size) and
-// iota (the index along one dimension).
+// Factory primitives: full (a value, dtype-agnostic by element size),
+// iota (the index along one dimension) and random_bits (Philox, from a
+// uint64 state [seed, offset]).
 //
 // Compiled after lumen/ops/mps/kernels.metal, which build.rs puts first
 // in the one Metal source the kernels share.
@@ -19,3 +20,12 @@ FOR_BYTES(FULL)
     }
 
 FOR_NUMERIC(IOTA)
+
+// Element j: philox_bits keyed by the seed at the state's offset plus
+// `offset` plus j.
+kernel void random_bits(device const ulong *state [[buffer(0)]],
+                        device uint *out [[buffer(1)]],
+                        constant ulong &offset [[buffer(2)]],
+                        ELEMENTWISE_ARGS(3)) {
+    FOR_EACH_ELEMENT(j, uint) { out[j] = philox_bits(state[0], state[1] + offset + j); }
+}

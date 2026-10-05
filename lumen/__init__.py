@@ -23,8 +23,12 @@ wraps:
   (``F.softmax(x, -1)``, ``F.sum``, ``F.where``, ``F.rms_norm``, ...).
 * ``lumen.ops`` (``lumen/ops.py``) — registering device kernels written in
   Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
+* ``lumen.random`` (``lumen/random.py``) — random numbers, modeled on
+  PyTorch's generator (``lumen.manual_seed``, ``lumen.rand``,
+  ``lumen.randn``; ``F.dropout``): Philox's counter stream, drawn inside
+  compiled functions and fused into what reads it.
 * ``lumen.safetensors`` (``lumen/safetensors/``) — ``save_file``,
-  ``load_file`` and ``safe_open`` for safetensors files, as in
+  ``load_file`` and ``safe_open`` for safetensors files, as in.
   ``safetensors.torch``.
 * ``lumen.mps`` and ``lumen.cuda`` (``lumen/stream/``) — the device streams'
   ``synchronize``, modeled on ``torch.mps`` and ``torch.cuda``; on MPS, Metal
@@ -35,11 +39,12 @@ Everything is re-exported here. As in PyTorch, ``lumen.tensor`` is the
 factory function, which takes precedence over the package of that name.
 """
 
-from lumen import autograd, functional, graph, nn, ops, profiler, safetensors
+from lumen import autograd, functional, graph, nn, ops, profiler, random, safetensors
 from lumen._C import __version__, device
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.graph import compile, make_graph, prims
+from lumen.random import initial_seed, manual_seed, rand, randn
 from lumen.stream import cuda, mps
 from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
 from lumen.tensor import (
@@ -80,6 +85,7 @@ __all__ = [
     "nn",
     "ops",
     "profiler",
+    "random",
     "safetensors",
     # dtypes
     "float16",
@@ -104,6 +110,11 @@ __all__ = [
     "ones",
     "full",
     "arange",
+    # random numbers
+    "manual_seed",
+    "initial_seed",
+    "rand",
+    "randn",
     # numpy interop
     "to_numpy",
     "from_numpy",

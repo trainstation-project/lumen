@@ -51,6 +51,7 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Concatenate { .. }
             | Full { .. }
             | Iota { .. }
+            | RandomBits { .. }
     );
     // A reduction fuses the primitives computing its input (XLA's reduce
     // input fusion), whose elements it indexes in 32 bits.

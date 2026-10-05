@@ -40,6 +40,8 @@ __all__ = [
     "tanh",
     "sigmoid",
     "relu",
+    # random
+    "dropout",
     # reductions
     "sum",
     "mean",

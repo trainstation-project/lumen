@@ -59,6 +59,8 @@ __all__ = [
     "tanh",
     "sigmoid",
     "relu",
+    # random
+    "dropout",
     # reductions
     "sum",
     "mean",
@@ -173,6 +175,28 @@ def sigmoid(input):
 
 def relu(input):
     return _elementwise(prims.max, input, 0)
+
+
+def dropout(input, p=0.5, training=True):
+    """Each element zeroed with probability ``p``, the others scaled by
+    ``1 / (1 - p)`` (``F.dropout``); ``input`` as is unless ``training``.
+    An element is dropped where its random bits (``lumen.random``, the
+    generator's next ``input.numel`` numbers) are below ``p * 2**32``: the
+    mask is computed in the kernels applying it, forward and backward,
+    never stored."""
+    input = _require_float(_lift(input), "dropout")
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"dropout probability has to be between 0 and 1, but got {p}")
+    if not training or p == 0.0:
+        return input
+    from lumen import random
+
+    threshold = round(p * 2**32)
+    if threshold >= 2**32:
+        return where(prims.full(tuple(input.shape), True, "bool"), 0.0, input)
+    bits = random._bits(input.shape)
+    dropped = bits < prims.full(tuple(input.shape), threshold, "uint32")
+    return where(dropped, 0.0, input * (1.0 / (1.0 - p)))
 
 
 # ---------------------------------------------------------------------

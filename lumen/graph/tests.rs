@@ -567,6 +567,62 @@ fn plan_rematerializes_under_a_memory_limit() {
     assert_eq!((recomputed, exps), (4 * N, 3));
 }
 
+/// Philox4x32-10 gives Random123's known answers (`kat_vectors`).
+#[test]
+fn philox_matches_random123() {
+    use crate::ops::reference::philox4x32;
+    let kat: [([u32; 2], [u32; 4], [u32; 4]); 3] = [
+        (
+            [0; 2],
+            [0; 4],
+            [0x6627e8d5, 0xe169c58d, 0xbc57ac4c, 0x9b00dbd8],
+        ),
+        (
+            [u32::MAX; 2],
+            [u32::MAX; 4],
+            [0x408f276d, 0x41c83b0e, 0xa20bc7c6, 0x6d5451fd],
+        ),
+        (
+            [0xa4093822, 0x299f31d0],
+            [0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344],
+            [0xd16cfe09, 0x94fdcceb, 0x5001e420, 0x24126ea1],
+        ),
+    ];
+    for (key, counter, block) in kat {
+        assert_eq!(philox4x32(key, counter), block);
+    }
+}
+
+/// random_bits' element `i` is Philox's at counter `offset' + offset + i`
+/// (the state's offset, the primitive's): a draw is a run of one stream,
+/// so draws at offsets apart by a draw's size never overlap, and one
+/// starting inside another repeats its numbers.
+#[test]
+fn random_bits_are_a_counter_stream() {
+    use crate::ops::reference::philox_bits;
+    let draw = |offset: u64, shape: &[usize]| {
+        let mut g = Graph::new();
+        let state = g.input(ty(DType::U64, &[2]));
+        let bits = RandomBits {
+            shape: shape.to_vec(),
+            offset,
+        };
+        let r = g.apply(bits, &[state]).unwrap();
+        g.set_outputs(&[r]).unwrap();
+        let state = Tensor::from_slice(&[42u64 << 40 | 7, 1000], DType::U64);
+        reference::run(&g, &[state])
+            .unwrap()
+            .remove(0)
+            .to_vec::<u32>()
+    };
+    let (seed, start) = (42u64 << 40 | 7, 1005);
+    let whole = draw(5, &[2, 3]);
+    let want: Vec<u32> = (0..6).map(|i| philox_bits(seed, start + i)).collect();
+    assert_eq!(whole, want);
+    assert_eq!(draw(6, &[5]), whole[1..]);
+    assert_ne!(draw(11, &[6]), whole);
+}
+
 #[test]
 fn plan_copies_aliased_outputs_and_drops_dead_code() {
     let mut g = Graph::new();
@@ -1477,6 +1533,49 @@ pub(crate) mod mps {
                     let slack = shape[axis] as f64 * 2.0 * f64::from(f32::EPSILON);
                     check_within(&g, &[values(dtype, shape, 1)], slack);
                 }
+            }
+        }
+    }
+
+    /// random_bits on MPS agrees with the reference, bit for bit: alone
+    /// (its own kernel) and fused into what reads it (a uniform float, a
+    /// comparison: dropout's), through a counter crossing 2^32 (the carry
+    /// into its high word), at the state's offset plus the primitive's.
+    #[test]
+    fn random_bits_run_on_mps() {
+        if !available() {
+            return;
+        }
+        for shape in [&[7][..], &[1000, 33]] {
+            for fused in [false, true] {
+                let mut g = Graph::new();
+                let state = g.input(ty(DType::U64, &[2]));
+                let bits = RandomBits {
+                    shape: shape.to_vec(),
+                    offset: 3,
+                };
+                let r = g.apply(bits, &[state]).unwrap();
+                let outputs = match fused {
+                    false => vec![r],
+                    true => {
+                        let to_f32 = Cast {
+                            new_dtype: DType::F32,
+                        };
+                        let u = g.apply(to_f32, &[r]).unwrap();
+                        let half = Full {
+                            shape: shape.to_vec(),
+                            fill_value: Scalar::Int(1 << 31),
+                            dtype: DType::U32,
+                        };
+                        let half = g.apply(half, &[]).unwrap();
+                        let kept = g.apply(Lt, &[r, half]).unwrap();
+                        vec![u, kept]
+                    }
+                };
+                g.set_outputs(&outputs).unwrap();
+                let state =
+                    Tensor::from_slice(&[0xDEAD_BEEF_0123_4567u64, 0xFFFF_FFF0], DType::U64);
+                check(&g, &[state]);
             }
         }
     }
