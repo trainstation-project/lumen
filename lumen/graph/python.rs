@@ -364,6 +364,22 @@ impl PyPlan {
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
+    /// Whether it runs steps on the Apple Neural Engine (Core ML programs,
+    /// `lumen.config.compiler.neural_engine`), their fixed weights baked in.
+    #[getter]
+    fn neural_engine(&self) -> bool {
+        self.inner.steps().iter().any(|s| {
+            matches!(&s.primitive, Primitive::Fusion { name, .. } if name.starts_with(crate::graph::NEURAL_ENGINE))
+        })
+    }
+
+    /// Compile its Neural Engine steps' programs again on their next run,
+    /// from their weights' values then: the weights were written.
+    fn _invalidate_neural_engine(&self) {
+        #[cfg(lumen_mps_linked)]
+        crate::compiler::mps::ane::invalidate(self.inner.steps());
+    }
+
     #[getter]
     fn workspace_bytes(&self) -> usize {
         self.inner.workspace_bytes()

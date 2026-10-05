@@ -328,7 +328,13 @@ def compile(fn, device=None):
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
-    ``compiled.dump_graph(path, *args)``, those of ``args``' signature."""
+    ``compiled.dump_graph(path, *args)``, those of ``args``' signature.
+
+    With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
+    float16 dots of the weights the function does not write (and the
+    float16 work after them) on the Apple Neural Engine, their values baked
+    into Core ML programs: compiled again once a weight is written
+    (``copy_``, or by another compiled function)."""
     compile_device = device  # dump_graph's own `device` shadows it
     # Per signature and device: the graph, whether `fn` returns one tensor,
     # its plans, each with its workspace (`None` on the meta device), tried
@@ -405,10 +411,19 @@ def compile(fn, device=None):
             placed = inputs_for(plan)
         return graph, plan, workspace, out, placed
 
+    # Per plan running Neural Engine steps: its weights' versions when it
+    # last ran (their values baked into its programs).
+    baked = {}
+
     @functools.wraps(fn)
     def compiled(*args):
         graph, plan, workspace, out, inputs = prepare(args)
         ran = not (workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args))
+        if ran and plan.neural_engine:
+            versions = [w._version for w in _weights(args)]
+            if baked.get(id(plan)) != versions:
+                plan._invalidate_neural_engine()
+                baked[id(plan)] = versions
         if not ran:
             # Compiled (and the weights placed); nothing to run.
             outputs = [
@@ -437,6 +452,8 @@ def compile(fn, device=None):
                 memory = w._placed(target) if w._is_parameter else w
                 if value.storage_id != memory.storage_id:
                     w.copy_(value)
+                elif w._is_parameter:
+                    w._mark_written()
             for k, value in zip(written_scalars, outputs):
                 (v,) = value.tolist()  # a 0-d tensor lists its one element
                 nn._set_float(args, k, float(v))

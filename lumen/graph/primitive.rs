@@ -14,6 +14,11 @@ use crate::{DType, Scalar};
 /// graph viewer show it) joins them with: `mul → tanh → add`.
 pub const FUSION_SEPARATOR: &str = " → ";
 
+/// What the name of a [`Primitive::Fusion`] the Apple Neural Engine runs
+/// (`compiler::mps::ane`, through Core ML) starts with: its body is a Core ML
+/// program's, not a kernel's.
+pub const NEURAL_ENGINE: &str = "coreml_";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     // elementwise, two operands of the same type
