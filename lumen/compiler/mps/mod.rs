@@ -15,6 +15,7 @@ mod codegen;
 mod diamonds;
 mod dot_strength;
 mod fusion;
+mod horizontal;
 mod merge_dots;
 mod split_k;
 #[cfg(test)]
@@ -151,11 +152,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         loop {
             kernels.clear();
             let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
-            let fused = fusion::fuse(&graph, &rows, &vars, config, |body, by_value| {
+            let mut kernel = |body: &Graph, by_value: &[bool]| {
                 let (name, source) = codegen::kernel(body, by_value, config);
                 kernels.insert(name.clone(), source);
                 name
-            });
+            };
+            let fused = fusion::fuse(&graph, &rows, &vars, config, &mut kernel);
+            // Independent small loop fusions, one kernel each group.
+            let fused = match config.horizontal_fusion {
+                true => {
+                    let vars: Vec<Var> = scalars.iter().map(|&i| fused.inputs()[i]).collect();
+                    horizontal::fuse(&fused, &vars, &mut kernel)
+                }
+                false => fused,
+            };
             let unfused = |&i: &usize| {
                 let v = fused.inputs()[i];
                 let read = |n: &&Node| n.inputs.contains(&v);

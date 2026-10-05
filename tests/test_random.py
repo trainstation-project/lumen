@@ -154,8 +154,9 @@ def test_dropout(device):
 def test_dropout_backward_recomputes_its_mask(device):
     """Dropout's gradient: the cotangent where the forward kept the element,
     scaled, else 0; the mask recomputed by the backward's kernel from the
-    same numbers, not stored (on MPS: no workspace, each kernel drawing
-    its own bits)."""
+    same numbers, not stored (on MPS: no workspace, the forward's and the
+    backward's values each drawing their own bits, one kernel: horizontal
+    fusion)."""
     shape = (256, 256)
     try:
         x = lumen.from_numpy(np.ones(shape, np.float32)).to(device)
@@ -174,7 +175,7 @@ def test_dropout_backward_recomputes_its_mask(device):
     if device == "mps":
         plan = lumen.graph.Plan(lumen.make_graph(step)(x, w), "mps")
         labels = [s["label"] for s in plan.steps()]
-        assert len(labels) == 2 and all(label.startswith("random_bits") for label in labels), labels
+        assert len(labels) == 1 and labels[0].count("random_bits") == 2, labels
         assert plan.workspace_bytes == 0
 
 

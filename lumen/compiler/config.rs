@@ -31,6 +31,11 @@ pub struct CompilerConfig {
     /// written as another output of its kernel (XLA's MultiOutputFusion),
     /// rather than in a kernel of its own.
     pub multi_output_fusion: bool,
+    /// Run independent small loop fusions of as many elements (an
+    /// optimizer's update of each parameter, a cast of each weight) as one
+    /// kernel, each computed at every index as it was alone (XLA's
+    /// horizontal loop fusion).
+    pub horizontal_fusion: bool,
     /// In a row kernel, a softmax's max and its sum of `exp(x - max)` in one
     /// pass, the sum rescaled as the max grows (online softmax): a row of
     /// more elements than `row_cache` holds is read once less. On by
@@ -91,6 +96,7 @@ impl Default for CompilerConfig {
             reduction_epilogues: true,
             contraction_epilogues: true,
             multi_output_fusion: true,
+            horizontal_fusion: true,
             online_softmax: true,
             flash_attention: true,
             split_k: true,

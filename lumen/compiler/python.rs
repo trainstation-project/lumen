@@ -61,6 +61,9 @@ flags! {
     /// Compute an expensive value several fusions read in the first, as
     /// another output of its kernel.
     multi_output_fusion, set_multi_output_fusion: bool;
+    /// Independent small loop fusions of as many elements as one kernel
+    /// (XLA's horizontal loop fusion).
+    horizontal_fusion, set_horizontal_fusion: bool;
     /// A softmax's max and sum in one pass of its row kernel (online
     /// softmax; on by default): not what the program computes, its rounding
     /// differs; off runs softmax exactly as traced.
