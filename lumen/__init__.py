@@ -25,7 +25,8 @@ wraps:
   Python (``lumen.ops.register``), e.g. CUDA kernels authored with CuTe DSL.
 * ``lumen.random`` (``lumen/random.py``) — random numbers, modeled on
   PyTorch's generator (``lumen.manual_seed``, ``lumen.rand``,
-  ``lumen.randn``; ``F.dropout``): Philox's counter stream, drawn inside
+  ``lumen.randn``, ``lumen.randint``, ``Tensor.uniform_``; ``F.dropout``;
+  ``lumen.get_rng_state`` and ``set_rng_state`` for checkpoints): Philox's counter stream, drawn inside
   compiled functions and fused into what reads it.
 * ``lumen.safetensors`` (``lumen/safetensors/``) — ``save_file``,
   ``load_file`` and ``safe_open`` for safetensors files, as in.
@@ -44,7 +45,7 @@ from lumen._C import __version__, device
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.graph import compile, make_graph, prims
-from lumen.random import initial_seed, manual_seed, rand, randn
+from lumen.random import get_rng_state, initial_seed, manual_seed, rand, randint, randn, set_rng_state
 from lumen.stream import cuda, mps
 from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
 from lumen.tensor import (
@@ -114,7 +115,10 @@ __all__ = [
     "manual_seed",
     "initial_seed",
     "rand",
+    "randint",
     "randn",
+    "get_rng_state",
+    "set_rng_state",
     # numpy interop
     "to_numpy",
     "from_numpy",

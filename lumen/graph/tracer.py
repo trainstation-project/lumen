@@ -914,6 +914,15 @@ class TracedTensor:
     def clamp_max_(self, max):
         return self.clamp_(max=max)
 
+    def uniform_(self, from_=0.0, to=1.0):
+        """Fill it with uniform random numbers in ``[from_, to)``
+        (``Tensor.uniform_``, its ``from`` here ``from_``), drawn from the
+        generator (``lumen.random``): a weight so filled inside a compiled
+        function is written back after the call (an initialization)."""
+        from lumen import random
+
+        return self._assign(random._uniform(self.shape, self.dtype, from_, to), "uniform_")
+
     def zero_(self):
         return self.fill_(False if self.dtype == "bool" else 0)
 

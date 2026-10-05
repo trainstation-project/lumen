@@ -240,3 +240,108 @@ def test_rematerialized_dropout_draws_the_same_mask():
     assert (once, twice) == (1, 2)
     assert recomputed == kept - 512 * 512 * 4
     np.testing.assert_array_equal(y0, y1)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_randint(device):
+    """``randint(high, size)`` and ``randint(low, high, size)``: ``low`` plus a
+    draw's bits modulo the range, in ``dtype`` (int64 by default); a range
+    over 2**32 from two draws' 64 bits, the first's high."""
+    n = 5000
+    f = _compile(
+        lambda x: (
+            lumen.randint(10, (n,)),
+            lumen.randint(-5, 5, (n,), dtype="int32"),
+            lumen.randint(7, 3 * 2**32 + 7, size=(n,)),
+        ),
+        device,
+    )
+    lumen.manual_seed(4)
+    a, b, c = f()
+    bits = _bits(4, range(4 * n))
+    assert (a.dtype, b.dtype, c.dtype) == (np.int64, np.int32, np.int64)
+    np.testing.assert_array_equal(a, bits[:n] % 10)
+    np.testing.assert_array_equal(b, (bits[n : 2 * n] % 10).astype(np.int64) - 5)
+    wide = [(int(hi) << 32 | int(lo)) % (3 * 2**32) + 7 for hi, lo in zip(bits[2 * n : 3 * n], bits[3 * n :])]
+    np.testing.assert_array_equal(c, wide)
+    assert c.max() > 2**33
+
+
+def test_randint_errors():
+    """``low < high``, within the dtype's values; two or three arguments."""
+    for args, kwargs, error in [
+        ((5, 5, (3,)), {}, ValueError),
+        ((0, 300, (3,)), {"dtype": "uint8"}, ValueError),
+        ((-1, 3, (3,)), {"dtype": "uint32"}, ValueError),
+        (((3,),), {}, TypeError),
+    ]:
+        with pytest.raises(error):
+            lumen.compile(lambda x: lumen.randint(*args, **kwargs))(lumen.zeros([1]))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_uniform_initializes_a_weight(device):
+    """``w.uniform_(a, b)`` in a compiled function: ``a + (b - a) * rand`` in
+    the weight's dtype, written back into the weight after the call."""
+
+    class Linear(lumen.nn.Module):
+        w: lumen.Tensor
+
+    model = Linear(lumen.empty([64, 32], device="meta"))
+    try:
+        init = lumen.compile(lambda m: m.w.uniform_(-2.0, 3.0), device=device)
+        lumen.manual_seed(6)
+        init(model)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    read = lumen.compile(lambda m: m.w * 1.0, device=device)
+    w = lumen.to_numpy(read(model))
+    u = ((_bits(6, range(64 * 32)) >> 8).astype(np.float64) * 2.0**-24).astype(np.float32)
+    np.testing.assert_allclose(w.ravel(), u * np.float32(5) + np.float32(-2), rtol=0, atol=4e-7)
+    assert w.min() >= -2 and w.max() < 3
+
+
+def test_rng_state_round_trips():
+    """``get_rng_state``: 16 bytes, the seed then the offset, little-endian
+    (PyTorch's Philox layout); ``set_rng_state`` of it draws the numbers
+    that followed it, as a checkpoint resumes."""
+    f = _compile(lambda x: (lumen.rand([10]),), "cpu")
+    lumen.manual_seed(258)
+    f()
+    state = lumen.get_rng_state()
+    assert state.dtype == "uint8" and state.tolist() == [2, 1, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]
+    (after,) = f()
+    lumen.manual_seed(1)
+    lumen.set_rng_state(state)
+    np.testing.assert_array_equal(f()[0], after)
+    with pytest.raises(TypeError):
+        lumen.set_rng_state(lumen.zeros([16]))
+    with pytest.raises(RuntimeError, match="outside the compiled function"):
+        lumen.compile(lambda x: (lumen.get_rng_state(), x)[1])(lumen.zeros([1]))
+
+
+def test_fork_rng():
+    """``fork_rng``: the draws inside leave the generator as it was, between
+    calls and inside a compiled function (the draws after the block reading
+    the block's numbers again, the call moving the generator past those
+    alone)."""
+    from lumen.random import fork_rng
+
+    f = _compile(lambda x: (lumen.rand([5]),), "cpu")
+    lumen.manual_seed(3)
+    with fork_rng():
+        f()
+    (first,) = f()
+    lumen.manual_seed(3)
+    np.testing.assert_array_equal(f()[0], first)
+
+    def forked(x):
+        with fork_rng():
+            inside = lumen.rand([5])
+        return inside, lumen.rand([5])
+
+    lumen.manual_seed(3)
+    inside, after = _compile(forked, "cpu")()
+    np.testing.assert_array_equal(inside, first)
+    np.testing.assert_array_equal(after, first)
+    assert lumen.get_rng_state().tolist()[8:] == [5, 0, 0, 0, 0, 0, 0, 0]
