@@ -120,10 +120,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .collect();
     let fused = if config.fuse {
         // Normalization diamonds: each chain one fusion, its reductions
-        // inside.
-        let rows = match config.normalization_diamonds {
-            true => diamonds::diamonds(&graph),
-            false => Vec::new(),
+        // inside; and the sums over rows they compute as they go.
+        let (graph, rows) = match config.normalization_diamonds {
+            true => diamonds::partials(&graph, diamonds::diamonds(&graph)),
+            false => (graph.clone(), Vec::new()),
         };
         loop {
             kernels.clear();
@@ -584,11 +584,9 @@ pub(crate) fn encode(
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
         return launch(&kernel, &buffers, &args, plan.grid, keep, step.label);
     }
-    // A row kernel: a threadgroup a row of the last dimension.
+    // A row kernel: a threadgroup a row of the last dimension (a block of
+    // rows, with partials).
     if !codegen::row_reductions(body).is_empty() {
-        let out = &step.output.1;
-        let n = out.shape.last().copied().unwrap_or(1);
-        let rows = out.numel().checked_div(n).unwrap_or(0);
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         // Its values of a row each read elsewhere too.
@@ -597,7 +595,7 @@ pub(crate) fn encode(
             name,
             &buffers,
             &scalars,
-            Grid::Groups([rows, 1, 1]),
+            Grid::Groups([codegen::row_groups(body), 1, 1]),
             keep,
             step.label,
         );

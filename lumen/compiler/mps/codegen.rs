@@ -520,7 +520,32 @@ fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
 /// normalization's (`diamonds.rs`), each over the last dimension of a value
 /// of the root's shape, which make its kernel a row kernel.
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
-    // A reduction with an epilogue is not a row kernel's.
+    reductions_of_rows(body, true)
+}
+
+/// A row kernel's partials (`diamonds::partials`): its sums over blocks of
+/// rows, each a column's, `[groups, rows / groups, n]` over the middle.
+pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
+    match row_reductions(body).is_empty() {
+        true => Vec::new(),
+        false => reductions_of_rows(body, false),
+    }
+}
+
+/// The threadgroups a row kernel with `body` runs: a row each, or (with
+/// partials) a block of rows each.
+pub(crate) fn row_groups(body: &Graph) -> usize {
+    let out = body.type_of(body.outputs()[0]);
+    match row_partials(body).first() {
+        Some(p) => body.type_of(p.output).shape[0],
+        None => out.numel() / out.shape.last().copied().unwrap_or(1).max(1),
+    }
+}
+
+/// The reductions of `body` but its root, over the last dimension of their
+/// operand (`last`) or not; none if its root is a reduction (with an
+/// epilogue: not a row kernel).
+fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
     if reduction_root(body).is_some() {
         return Vec::new();
     }
@@ -528,11 +553,12 @@ pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
     body.nodes()
         .iter()
         .filter(|n| n.output != out)
-        .filter(|n| {
-            matches!(
-                n.primitive,
-                Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-            )
+        .filter(|n| match &n.primitive {
+            Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                let rank = body.type_of(n.inputs[0]).shape.len();
+                axes.contains(&(rank - 1)) == last
+            }
+            _ => false,
         })
         .collect()
 }
@@ -628,26 +654,36 @@ fn row_kernel(
         passes.push((k, online));
         k += 1 + usize::from(online);
     }
-    // Each pass's root, and the values kept for later passes: each with
-    // the pass computing it.
-    let roots: Vec<Var> = passes
+    // Its partials' values of the rows (`diamonds::partials`: each summed
+    // as a reshape of one, at the same index).
+    let partials = row_partials(body);
+    let summed: Vec<Var> = partials
         .iter()
-        .map(|&(k, _)| reductions[k].inputs[0])
-        .chain([out])
+        .map(|p| {
+            let reshape = body.nodes().iter().find(|n| n.output == p.inputs[0]);
+            reshape.expect("a reshape of the rows").inputs[0]
+        })
+        .collect();
+    // Each pass's roots (the last's: the output and those values), and the
+    // values kept for later passes: each with the pass computing it.
+    let roots: Vec<Vec<Var>> = passes
+        .iter()
+        .map(|&(k, _)| vec![reductions[k].inputs[0]])
+        .chain([std::iter::once(out).chain(summed.iter().copied()).collect()])
         .collect();
     let per_thread = n.div_ceil(reduce::REDUCE_THREADS);
     let kept = match per_thread <= config.row_cache {
         true => kept_values(body, &e.invariant, &roots),
         false => Vec::new(),
     };
-    let mut source = String::new();
+    let (mut source, mut decls) = (String::new(), String::new());
     for (m, &(v, _)) in kept.iter().enumerate() {
         let t = metal_type(body.type_of(v).dtype);
         writeln!(source, "    {t} kept{m}[{per_thread}];").unwrap();
     }
     // A pass's loop over this thread's elements of the row: unrolled over
     // its registers when values are kept.
-    let header = match kept.is_empty() {
+    let header = match kept.is_empty() && partials.is_empty() {
         true => format!(
             "    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n"
         ),
@@ -670,7 +706,7 @@ fn row_kernel(
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p < k) {
             e.values.insert((v, "j".into()), format!("kept{m}[e]"));
         }
-        let value = e.value(roots[k], "j".into());
+        let value = e.value(roots[k][0], "j".into());
         let mut stores = String::new();
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p == k) {
             let local = e.value(v, "j".into());
@@ -697,10 +733,15 @@ fn row_kernel(
             let sum = reductions[k + 1];
             write!(
                 source,
-                "{}    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];\n    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
+                "{}    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
                 hoisted(&e.hoisted),
                 e.lines,
                 k + 1
+            )
+            .unwrap();
+            writeln!(
+                decls,
+                "    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];"
             )
             .unwrap();
             e.row_locals.insert(r.output, format!("r{k}"));
@@ -713,11 +754,12 @@ fn row_kernel(
         };
         write!(
             source,
-            "{}    threadgroup {a} shared{k}[REDUCE_THREADS];\n    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n",
+            "{}    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n",
             hoisted(&e.hoisted),
             e.lines
         )
         .unwrap();
+        writeln!(decls, "    threadgroup {a} shared{k}[REDUCE_THREADS];").unwrap();
         e.row_locals.insert(r.output, format!("r{k}"));
     }
     let (value, _) = pass(&mut e, passes.len());
@@ -726,7 +768,28 @@ fn row_kernel(
     // others (an earlier value of the row, as its root's epilogue reads it)
     // at each element, as the output is.
     let (mut once, mut each) = (String::new(), String::new());
+    // Its partials: each thread's columns' sums (in registers, a column
+    // `c = t + e * REDUCE_THREADS` each), its block's rows added in order,
+    // then written as its block's.
+    let (mut init, mut written) = (String::new(), String::new());
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        if let Some(p) = partials.iter().position(|p| p.output == v) {
+            let a = metal_type(body.type_of(v).dtype);
+            let value = e.value(summed[p], "j".into());
+            writeln!(
+                init,
+                "    {a} part{k}[{per_thread}];\n    for (uint e = 0; e < {per_thread}u; ++e) {{\n        part{k}[e] = 0;\n    }}"
+            )
+            .unwrap();
+            writeln!(each, "        part{k}[e] += {a}({value});").unwrap();
+            writeln!(
+                written,
+                "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n        if (c < {n}u) {{\n            out{}[group.x * {n}u + c] = part{k}[e];\n        }}\n    }}",
+                k + 1
+            )
+            .unwrap();
+            continue;
+        }
         let value = e.value(v, "j".into());
         match body.type_of(v).numel() == rows {
             true => writeln!(
@@ -746,8 +809,20 @@ fn row_kernel(
     )
     .unwrap();
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
+    let signature = format!(
+        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]])"
+    );
+    if partials.is_empty() {
+        return named(format!(
+            "{signature} {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{decls}{source}}}\n"
+        ));
+    }
+    // A block of rows a threadgroup, each as above, the threadgroup's
+    // memory reused once every thread is done with the row.
+    let block = rows / row_groups(body);
+    let source: String = source.lines().map(|l| format!("    {l}\n")).collect();
     named(format!(
-        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{source}}}\n"
+        "{signature} {{\n    uint t = tid.y * 16 + tid.x;\n{decls}{init}    for (uint row = group.x * {block}u; row < (group.x + 1) * {block}u; ++row) {{\n{source}        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }}\n{written}}}\n"
     ))
 }
 
@@ -793,14 +868,14 @@ fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
 
 /// The values a row kernel keeps in registers across its passes, each
 /// with the first pass computing it: of the values at a pass's own index
-/// (from its root `roots[k]` through elementwise primitives, short of
+/// (from its roots `roots[k]` through elementwise primitives, short of
 /// those the same across the row), those an earlier pass computed, where a
 /// later pass first needs them.
-fn kept_values(body: &Graph, invariant: &[bool], roots: &[Var]) -> Vec<(Var, usize)> {
+fn kept_values(body: &Graph, invariant: &[bool], roots: &[Vec<Var>]) -> Vec<(Var, usize)> {
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    // From `root`, each value at its index, stopping where `stop` says.
-    let walk = |root: Var, stop: &dyn Fn(Var) -> bool| {
-        let (mut seen, mut stack) = (Vec::new(), vec![root]);
+    // From `roots`, each value at their index, stopping where `stop` says.
+    let walk = |roots: &[Var], stop: &dyn Fn(Var) -> bool| {
+        let (mut seen, mut stack) = (Vec::new(), roots.to_vec());
         while let Some(v) = stack.pop() {
             if invariant[v] || seen.contains(&v) {
                 continue;
@@ -819,7 +894,7 @@ fn kept_values(body: &Graph, invariant: &[bool], roots: &[Var]) -> Vec<(Var, usi
     };
     let mut first: HashMap<Var, usize> = HashMap::new();
     let mut kept: Vec<(Var, usize)> = Vec::new();
-    for (k, &root) in roots.iter().enumerate() {
+    for (k, root) in roots.iter().enumerate() {
         if k > 0 {
             for v in walk(root, &|v| first.contains_key(&v)) {
                 if let Some(&p) = first.get(&v)

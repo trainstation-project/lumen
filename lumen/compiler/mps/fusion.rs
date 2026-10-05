@@ -142,6 +142,23 @@ pub(crate) fn fuse(
     // back and scaled by its weight: one kernel). Read elsewhere too, after
     // it (a training step's backward), the root's value is another of its
     // outputs, as are its values of a row each, so none may be read before.
+    // Its partials (sums over blocks of rows) may be read before it: then
+    // by nothing it extends to.
+    // Whether value `v` depends on node `k` (no node before it can).
+    let depends = |v: Var, k: usize| {
+        let (mut seen, mut stack) = (vec![false; nodes.len()], vec![v]);
+        while let Some(v) = stack.pop() {
+            match producer[v].filter(|&p| p >= k && !seen[p]) {
+                Some(p) if p == k => return true,
+                Some(p) => {
+                    seen[p] = true;
+                    stack.extend(&nodes[p].inputs);
+                }
+                None => {}
+            }
+        }
+        false
+    };
     // The nodes each row computes, which no other row's root extends to.
     let owned = |u: usize, other: &Row| {
         rows.iter().any(|r| {
@@ -164,7 +181,11 @@ pub(crate) fn fuse(
                     && fusible[u]
                     && elementwise(&nodes[u].primitive)
                     && users[v][1..].iter().all(|&r| r > u)
-                    && row.outputs.iter().all(|&k| after(k));
+                    && row.outputs.iter().all(|&k| after(k))
+                    && row.partials.iter().all(|&p| {
+                        let v = nodes[u].output;
+                        !nodes[u].inputs.iter().any(|&w| w != v && depends(w, p))
+                    });
                 if !extends {
                     break;
                 }
@@ -364,10 +385,9 @@ pub(crate) fn fuse(
                 return false;
             }
             // A row fusion's inner nodes are computed in it alone.
-            if rows
-                .iter()
-                .any(|r| r.inner.contains(&i) || r.reductions.contains(&i))
-            {
+            if rows.iter().any(|r| {
+                r.inner.contains(&i) || r.reductions.contains(&i) || r.partials.contains(&i)
+            }) {
                 return false;
             }
             let inside = ends[i].is_some();
@@ -421,10 +441,10 @@ pub(crate) fn fuse(
         }
     }
 
-    // A row kernel's values of a row each read elsewhere (`diamonds.rs`):
-    // its outputs too.
+    // A row kernel's values of a row each read elsewhere (`diamonds.rs`),
+    // and its partials: its outputs too.
     for row in rows {
-        for &k in &row.outputs {
+        for &k in row.outputs.iter().chain(&row.partials) {
             host[k] = Some(row.root);
         }
     }
@@ -438,8 +458,13 @@ pub(crate) fn fuse(
                 // A value another fusion writes (a root's, or one a
                 // contraction's epilogue hosts) is read, not computed.
                 let hosted = |p: usize| (root[p] || host[p].is_some()) && host[p] != Some(i);
+                // From its root and the values it hosts (a row kernel's
+                // partials, computed from values the root is not).
+                let starts: Vec<usize> = std::iter::once(i)
+                    .chain((0..nodes.len()).filter(|&h| host[h] == Some(i)))
+                    .collect();
                 (live[i] && root[i] && fusible[i] && host[i].is_none())
-                    .then(|| members(graph, &producer, hosted, i))
+                    .then(|| members(graph, &producer, hosted, &starts))
             })
             .collect();
         let too_big: Vec<usize> = (0..nodes.len())
@@ -467,7 +492,52 @@ pub(crate) fn fuse(
     for &v in graph.inputs() {
         var[v] = fused.input(graph.type_of(v).clone());
     }
-    for (i, node) in nodes.iter().enumerate() {
+    // The order of the steps: the graph's, but one reading a value its
+    // host computes later (a row kernel's partial, its sum read before the
+    // row's root) after it.
+    let mut hosts: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for (h, &f) in host.iter().enumerate() {
+        if let Some(f) = f {
+            hosts[f].push(h);
+        }
+    }
+    let alone = |i: usize| match &fusions[i] {
+        Some((members, _)) => {
+            members.len() == 1 && !matches!(nodes[i].primitive, Primitive::Concatenate { .. })
+        }
+        None => true,
+    };
+    let order = {
+        let mut ready = vec![false; n];
+        graph.inputs().iter().for_each(|&v| ready[v] = true);
+        let step = |i: usize| live[i] && root[i] && host[i].is_none();
+        let (mut order, mut waiting) = (Vec::new(), Vec::new());
+        for i in 0..nodes.len() {
+            waiting.push(i);
+            while let Some(k) = waiting.iter().position(|&w| {
+                let reads = match &fusions[w] {
+                    Some((_, reads)) if !alone(w) => reads,
+                    _ => &nodes[w].inputs,
+                };
+                !step(w) || reads.iter().all(|&v| ready[v])
+            }) {
+                let w = waiting.remove(k);
+                if step(w) {
+                    for &h in std::iter::once(&w).chain(&hosts[w]) {
+                        ready[nodes[h].output] = true;
+                    }
+                }
+                order.push(w);
+            }
+        }
+        assert!(
+            waiting.is_empty(),
+            "every step reads values computed before it"
+        );
+        order
+    };
+    for i in order {
+        let node = &nodes[i];
         // Its scope its main node's: a contraction's or reduction's with an
         // epilogue (the work, not the epilogue's end), else its root's.
         let main = dot_of[i].or(epilogue[i]).unwrap_or(i);
@@ -478,14 +548,9 @@ pub(crate) fn fuse(
         }
         let out = match &fusions[i] {
             // A concatenate has no kernel of its own: alone, it is a fusion too.
-            Some((members, reads))
-                if members.len() > 1 || matches!(node.primitive, Primitive::Concatenate { .. }) =>
-            {
-                let hosted: Vec<Var> = (0..nodes.len())
-                    .filter(|&h| host[h] == Some(i))
-                    .map(|h| nodes[h].output)
-                    .collect();
-                let body = body(graph, members, reads, &hosted);
+            Some((members, reads)) if !alone(i) => {
+                let hosted: Vec<Var> = hosts[i].iter().map(|&h| nodes[h].output).collect();
+                let body = body(graph, members, reads, node.output, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
                 let label = label(graph, &producer, members);
@@ -529,18 +594,19 @@ pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]
     intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
 
-/// The nodes of the fusion rooted at node `root_node` and the values it
-/// reads, each in graph order: the root and, from it, every fusible
-/// producer that is not a `root` (for this fusion: one it hosts is not).
+/// The nodes of the fusion of nodes `starts` (its root, then the values it
+/// hosts) and the values it reads, each in graph order: those and, from
+/// them, every fusible producer that is not a `root` (for this fusion: one
+/// it hosts is not).
 fn members(
     graph: &Graph,
     producer: &[Option<usize>],
     root: impl Fn(usize) -> bool,
-    root_node: usize,
+    starts: &[usize],
 ) -> (Vec<usize>, Vec<Var>) {
     let nodes = graph.nodes();
-    let (mut members, mut reads) = (vec![root_node], Vec::new());
-    let mut stack = vec![root_node];
+    let (mut members, mut reads) = (starts.to_vec(), Vec::new());
+    let mut stack = starts.to_vec();
     while let Some(i) = stack.pop() {
         for &v in &nodes[i].inputs {
             match producer[v] {
@@ -564,9 +630,9 @@ fn members(
 }
 
 /// The fusion's body: a graph of its `members` from inputs `reads`, whose
-/// outputs are the last member's (the root's) value, then the `hosted`
-/// values (a multi-output fusion's).
-fn body(graph: &Graph, members: &[usize], reads: &[Var], hosted: &[Var]) -> Graph {
+/// outputs are its `root`'s value, then the `hosted` values (a
+/// multi-output fusion's).
+fn body(graph: &Graph, members: &[usize], reads: &[Var], root: Var, hosted: &[Var]) -> Graph {
     let mut body = Graph::new();
     let mut var = std::collections::HashMap::new();
     for &v in reads {
@@ -580,7 +646,6 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], hosted: &[Var]) -> Grap
             .expect("a fusion body is typed as the original");
         var.insert(node.output, out);
     }
-    let root = graph.nodes()[*members.last().expect("a fusion has a root")].output;
     let outputs: Vec<Var> = std::iter::once(root)
         .chain(hosted.iter().copied())
         .map(|v| var[&v])

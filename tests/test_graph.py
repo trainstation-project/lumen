@@ -1259,6 +1259,42 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "f, sums",
+    [
+        (lambda x, w, c: F.sum(F.rms_norm(x, 64, w) * c), 1),
+        (lambda x, w, c: F.sum((_layer_norm(x, w) + w) * c), 2),
+    ],
+    ids=["rms norm", "layer norm"],
+)
+def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
+    """A normalization's weight's gradient (``Σ_rows g·y``), a sum over
+    rows its backward's row kernel reads the values of: that kernel adds
+    them as it goes (a threadgroup a block of rows, each column's sum in
+    registers), writing a block's sums each, then one kernel sums those
+    (a block at a time, in order): two kernels for the backward, the sums
+    the same bits every run, the gradients the CPU's."""
+    x, w, c = rand(1024, 64), rand(64, seed=1), rand(1024, 64, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
+    assert len(backward) == 1, [s["label"] for s in steps]
+    assert len(backward[0]["extra_outputs"]) == sums
+    # The blocks' sums, each summed by one launch (unsplit: few blocks).
+    final = [s for s in steps if s["primitive"] == "reduce_sum"]
+    assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
+    got = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
+    again = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, a, e in zip(got, again, want):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
+
+
 def test_ops_are_functions():
     """The ops are functions in lumen.functional (``import lumen.functional
     as F``), as torch's are; a traced tensor keeps only its operators, layout

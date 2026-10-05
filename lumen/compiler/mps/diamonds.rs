@@ -46,18 +46,36 @@
 
 use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
+use crate::ops::reduce::mps::REDUCE_THREADS;
+
+/// The most threadgroups a row kernel with partials runs (each a block of
+/// rows): their partials, a column each, are summed by one thread a
+/// column (`reduce_sum`'s, unsplit).
+const MAX_GROUPS: usize = 64;
+
+/// The fewest it runs, unless the rows are fewer: rows of no divisor in
+/// between keep their sum's own reduction.
+const MIN_GROUPS: usize = 16;
+
+/// The most columns of a row each thread of a row kernel with partials
+/// accumulates (in registers): rows of up to this x 256 elements.
+const MAX_COLUMNS: usize = 16;
 
 /// A row fusion: a chain of diamonds, run as one row kernel. `root` (a
 /// node index) is the fusion's root, `reductions` its reductions (in
 /// order), `inner` the other nodes between them and the root, which are
 /// read nowhere else but `outputs`: values of a row each (of reductions,
 /// or inner nodes) read after the root too, which the kernel writes.
+/// `partials` ([`partials`]): sums of blocks of rows, each a column's
+/// (`[groups, rows / groups, n]` over its middle), which the kernel
+/// accumulates as it goes (a normalization's weight's gradient).
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
     pub root: usize,
     pub reductions: Vec<usize>,
     pub inner: Vec<usize>,
     pub outputs: Vec<usize>,
+    pub partials: Vec<usize>,
 }
 
 /// The chains of diamonds in `graph`, each a [`Row`].
@@ -212,8 +230,185 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             reductions,
             inner,
             outputs: Vec::new(),
+            partials: Vec::new(),
         });
     }
+}
+
+/// `graph` with each sum over rows (`Σ_rows v`: over every dimension but
+/// the last) that a row fusion of `rows` can compute as it goes split in
+/// two (Liger's and Apex's normalization backward, a persistent kernel):
+/// the sums of `groups` blocks of rows, `reduce_sum(reshape(v, [groups,
+/// rows / groups, n]), 1)`, that row fusion's `partials` (its kernel a
+/// threadgroup a block, accumulating each column's sum in registers as
+/// it goes, rows in order), then their sum (`reduce_sum(·, 0)`, a column
+/// at a time, blocks in order): deterministic. The rows, of the graph
+/// returned.
+///
+/// A sum is a row fusion's whose value reads (back through fusible nodes
+/// no row fusion computes, which its kernel computes too) a value the row
+/// fusion computes or reads (a normalization's weight's gradient, `Σ g·y`,
+/// its `dx`'s `g`), never its root, nor one depending on it, and on which
+/// nothing the row fusion computes depends.
+pub(crate) fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
+    let finder = Finder::new(graph);
+    let nodes = graph.nodes();
+    let mut row_of = vec![None; nodes.len()];
+    for (r, row) in rows.iter().enumerate() {
+        for &k in std::iter::once(&row.root)
+            .chain(&row.inner)
+            .chain(&row.reductions)
+        {
+            row_of[k] = Some(r);
+        }
+    }
+    // Whether value `v` depends on a node `on` says, of index `floor` or
+    // more (none before it can).
+    let depends = |v: Var, on: &dyn Fn(usize) -> bool, floor: usize| {
+        let (mut seen, mut stack) = (vec![false; nodes.len()], vec![v]);
+        while let Some(v) = stack.pop() {
+            let Some(k) = finder.producer[v].filter(|&k| k >= floor && !seen[k]) else {
+                continue;
+            };
+            if on(k) {
+                return true;
+            }
+            seen[k] = true;
+            stack.extend(&nodes[k].inputs);
+        }
+        false
+    };
+    // Each sum's row fusion and its groups.
+    let mut attach: Vec<Option<(usize, usize)>> = vec![None; nodes.len()];
+    for (c, node) in nodes.iter().enumerate() {
+        let Primitive::ReduceSum { axes, .. } = &node.primitive else {
+            continue;
+        };
+        if !finder.live[c] || !fusible(graph, node) {
+            continue;
+        }
+        let x = node.inputs[0];
+        let ty = graph.type_of(x);
+        let rank = ty.shape.len();
+        let n = ty.shape.last().copied().unwrap_or(1);
+        let over_rows = rank >= 2 && axes.iter().copied().eq(0..rank - 1);
+        if !over_rows || n <= 1 || n.div_ceil(REDUCE_THREADS) > MAX_COLUMNS {
+            continue;
+        }
+        let count = ty.numel() / n;
+        let Some(groups) = (1..=MAX_GROUPS.min(count))
+            .rev()
+            .find(|&g| count.is_multiple_of(g))
+            .filter(|&g| g >= MIN_GROUPS.min(count))
+        else {
+            continue;
+        };
+        // The values it reads: back from x through the fusible nodes no
+        // row fusion computes.
+        let (mut reads, mut stack) = (Vec::new(), vec![x]);
+        while let Some(v) = stack.pop() {
+            match finder.producer[v] {
+                Some(k)
+                    if row_of[k].is_none()
+                        && fusible(graph, &nodes[k])
+                        && !matches!(
+                            nodes[k].primitive,
+                            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+                        ) =>
+                {
+                    stack.extend(&nodes[k].inputs)
+                }
+                _ if !reads.contains(&v) => reads.push(v),
+                _ => {}
+            }
+        }
+        attach[c] = rows
+            .iter()
+            .enumerate()
+            .find(|&(r, row)| {
+                let in_row = |k: usize| row_of[k] == Some(r);
+                let root = graph.type_of(nodes[row.root].output);
+                let first = std::iter::once(row.root)
+                    .chain(row.inner.iter().copied())
+                    .chain(row.reductions.iter().copied())
+                    .min()
+                    .unwrap_or(row.root);
+                let shares = reads.iter().any(|&v| {
+                    finder.producer[v].is_some_and(in_row)
+                        || finder.readers[v].iter().any(|&u| in_row(u))
+                });
+                // Its reads computed before the row fusion's kernel runs,
+                // not after (nothing of it but what it recomputes).
+                let before = reads.iter().all(|&v| match finder.producer[v] {
+                    Some(k) if in_row(k) => k != row.root,
+                    _ => !depends(v, &in_row, first),
+                });
+                // Nothing the row fusion computes depends on the sum.
+                let after = std::iter::once(&row.root)
+                    .chain(&row.inner)
+                    .chain(&row.reductions)
+                    .all(|&k| !nodes[k].inputs.iter().any(|&v| depends(v, &|k| k == c, c)));
+                root.numel() == ty.numel()
+                    && root.shape.last() == Some(&n)
+                    && shares
+                    && before
+                    && after
+            })
+            .map(|(r, _)| (r, groups));
+    }
+    if attach.iter().all(Option::is_none) {
+        return (graph.clone(), rows);
+    }
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    let (mut index, mut added) = (vec![0; nodes.len()], Vec::new());
+    for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
+        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let mut primitive = node.primitive.clone();
+        if let Some((r, groups)) = attach[i] {
+            let Primitive::ReduceSum { accum_dtype, .. } = node.primitive else {
+                unreachable!("a sum")
+            };
+            let ty = out.type_of(inputs[0]);
+            let n = *ty.shape.last().expect("a dimension");
+            let new_sizes = vec![groups, ty.numel() / n / groups, n];
+            let blocks = out.apply(Primitive::Reshape { new_sizes }, &inputs);
+            let sum = |axes| Primitive::ReduceSum { axes, accum_dtype };
+            let blocks = blocks.expect("a reshape of the rows");
+            inputs = vec![out.apply(sum(vec![1]), &[blocks]).expect("their sums")];
+            let at = out.nodes().len();
+            added.push((r, at - 2, at - 1));
+            primitive = sum(vec![0]);
+        }
+        index[i] = out.nodes().len();
+        map[node.output] = out
+            .apply(primitive, &inputs)
+            .expect("a graph is typed as the original");
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs)
+        .expect("outputs are values of the graph");
+    for row in &mut rows {
+        row.root = index[row.root];
+        for k in row
+            .inner
+            .iter_mut()
+            .chain(&mut row.reductions)
+            .chain(&mut row.outputs)
+        {
+            *k = index[*k];
+        }
+    }
+    for (r, reshape, partial) in added {
+        rows[r].inner.push(reshape);
+        rows[r].inner.sort_unstable();
+        rows[r].partials.push(partial);
+    }
+    (out, rows)
 }
 
 struct Finder<'a> {
@@ -438,6 +633,7 @@ impl<'a> Finder<'a> {
             reductions: vec![r],
             inner,
             outputs,
+            partials: Vec::new(),
         };
         Some((row, producer))
     }
