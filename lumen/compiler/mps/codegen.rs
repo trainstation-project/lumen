@@ -536,10 +536,37 @@ pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
 /// partials) a block of rows each.
 pub(crate) fn row_groups(body: &Graph) -> usize {
     let out = body.type_of(body.outputs()[0]);
+    let rows = out.numel() / out.shape.last().copied().unwrap_or(1).max(1);
     match row_partials(body).first() {
         Some(p) => body.type_of(p.output).shape[0],
-        None => out.numel() / out.shape.last().copied().unwrap_or(1).max(1),
+        None if simd_rows(body) => rows.div_ceil(SIMD_ROWS),
+        None => rows,
     }
+}
+
+/// The rows of a threadgroup of a row kernel of short rows ([`simd_rows`]):
+/// a SIMD group (32 threads) each.
+const SIMD_ROWS: usize = 8;
+
+/// The longest rows a SIMD group reduces ([`simd_rows`]).
+const SIMD_ROW: usize = 256;
+
+/// Whether a row kernel with `body` reduces each row in a SIMD group
+/// rather than a threadgroup: rows of at most [`SIMD_ROW`] elements (an
+/// RMS norm of 64, a softmax of 16), which leave most of a threadgroup's
+/// 256 threads idle, combined across its lanes (`simd_sum`, `simd_max`: in
+/// a fixed order) without threadgroup memory or barriers. Its reductions
+/// accumulate in a dtype those take (float, half, int).
+pub(crate) fn simd_rows(body: &Graph) -> bool {
+    let out = body.type_of(body.outputs()[0]);
+    let simd = |r: &&Node| {
+        matches!(
+            body.type_of(r.output).dtype,
+            DType::F32 | DType::F16 | DType::I32
+        )
+    };
+    let reductions = row_reductions(body);
+    out.shape.last().is_some_and(|&n| n <= SIMD_ROW) && reductions.iter().all(simd)
 }
 
 /// The reductions of `body` but its root, over the last dimension of their
@@ -564,7 +591,8 @@ fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
 }
 
 /// The kernel of a fusion with reductions inside (a normalization over the
-/// last dimension, `diamonds.rs`): a threadgroup a row of the output. A
+/// last dimension, `diamonds.rs`): a threadgroup a row of the output (a
+/// SIMD group a row, of short rows: [`simd_rows`]). A
 /// pass over the row for each reduction, in order, accumulating it (in its
 /// dtype, combined in threadgroup memory); then one writing the output.
 /// Values the same across the row (the reductions', constants, and what
@@ -671,7 +699,13 @@ fn row_kernel(
         .map(|&(k, _)| vec![reductions[k].inputs[0]])
         .chain([std::iter::once(out).chain(summed.iter().copied()).collect()])
         .collect();
-    let per_thread = n.div_ceil(reduce::REDUCE_THREADS);
+    // A row's threads: a SIMD group's lanes, or a threadgroup's.
+    let simd = simd_rows(body);
+    let lanes = match simd {
+        true => 32,
+        false => reduce::REDUCE_THREADS,
+    };
+    let per_thread = n.div_ceil(lanes);
     let kept = match per_thread <= config.row_cache {
         true => kept_values(body, &e.invariant, &roots),
         false => Vec::new(),
@@ -685,15 +719,15 @@ fn row_kernel(
     // its registers when values are kept.
     let header = match kept.is_empty() && partials.is_empty() {
         true => format!(
-            "    for (uint c = t; c < {n}u; c += REDUCE_THREADS) {{\n        uint j = row * {n}u + c;\n"
+            "    for (uint c = t; c < {n}u; c += {lanes}u) {{\n        uint j = row * {n}u + c;\n"
         ),
         false => {
-            let bound = match n % reduce::REDUCE_THREADS {
+            let bound = match n % lanes {
                 0 => String::new(),
                 _ => format!("        if (c >= {n}u) {{\n            break;\n        }}\n"),
             };
             format!(
-                "    _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n{bound}        uint j = row * {n}u + c;\n"
+                "    _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * {lanes}u;\n{bound}        uint j = row * {n}u + c;\n"
             )
         }
     };
@@ -727,6 +761,22 @@ fn row_kernel(
         // accum_dtype): each element widened as read.
         let a = metal_type(body.type_of(r.output).dtype);
         let (value, stores) = pass(&mut e, p);
+        if online && simd {
+            // As below, the lanes' pairs combined: the max, then each sum
+            // rescaled to it.
+            let sum = reductions[k + 1];
+            write!(
+                source,
+                "{}    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    {a} r{k} = simd_max(m{k});\n    // A lane with no elements has no sum to rescale.\n    {a} r{} = simd_sum(m{k} == -INFINITY ? {a}(0) : s{k} * Exp::apply(m{k} - r{k}));\n",
+                hoisted(&e.hoisted),
+                e.lines,
+                k + 1
+            )
+            .unwrap();
+            e.row_locals.insert(r.output, format!("r{k}"));
+            e.row_locals.insert(sum.output, format!("r{}", k + 1));
+            continue;
+        }
         if online {
             // The max m and s = sum(exp(x - m)) together, s rescaled as m
             // grows, then the threadgroup's pairs combined.
@@ -752,6 +802,21 @@ fn row_kernel(
             true => value,
             false => format!("{a}({value})"),
         };
+        if simd {
+            let combine = match op {
+                "Add" => "simd_sum",
+                _ => "simd_max",
+            };
+            write!(
+                source,
+                "{}    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    {a} r{k} = {combine}(acc{k});\n",
+                hoisted(&e.hoisted),
+                e.lines
+            )
+            .unwrap();
+            e.row_locals.insert(r.output, format!("r{k}"));
+            continue;
+        }
         write!(
             source,
             "{}    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n",
@@ -769,8 +834,9 @@ fn row_kernel(
     // at each element, as the output is.
     let (mut once, mut each) = (String::new(), String::new());
     // Its partials: each thread's columns' sums (in registers, a column
-    // `c = t + e * REDUCE_THREADS` each), its block's rows added in order,
-    // then written as its block's.
+    // `c = t + e * lanes` each), its block's rows added in order, then
+    // written as its block's (a SIMD group's rows' sums, of every
+    // SIMD_ROWS-th row of the block, combined in order first).
     let (mut init, mut written) = (String::new(), String::new());
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
         if let Some(p) = partials.iter().position(|p| p.output == v) {
@@ -782,11 +848,21 @@ fn row_kernel(
             )
             .unwrap();
             writeln!(each, "        part{k}[e] += {a}({value});").unwrap();
-            writeln!(
-                written,
-                "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n        if (c < {n}u) {{\n            out{}[group.x * {n}u + c] = part{k}[e];\n        }}\n    }}",
-                k + 1
-            )
+            match simd {
+                true => {
+                    writeln!(decls, "    threadgroup {a} sums{k}[{SIMD_ROWS} * {n}];").unwrap();
+                    writeln!(
+                        written,
+                        "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * 32u;\n        if (c < {n}u) {{\n            sums{k}[sg * {n}u + c] = part{k}[e];\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint c = tid.y * 16 + tid.x; c < {n}u; c += REDUCE_THREADS) {{\n        {a} sum = sums{k}[c];\n        for (uint s = 1; s < {SIMD_ROWS}u; ++s) {{\n            sum += sums{k}[s * {n}u + c];\n        }}\n        out{}[group.x * {n}u + c] = sum;\n    }}",
+                        k + 1
+                    )
+                }
+                false => writeln!(
+                    written,
+                    "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n        if (c < {n}u) {{\n            out{}[group.x * {n}u + c] = part{k}[e];\n        }}\n    }}",
+                    k + 1
+                ),
+            }
             .unwrap();
             continue;
         }
@@ -810,8 +886,22 @@ fn row_kernel(
     .unwrap();
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
     let signature = format!(
-        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]])"
+        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]])"
     );
+    // Short rows: a SIMD group a row, SIMD_ROWS a threadgroup (none past
+    // the last row: they meet no barrier).
+    if simd && partials.is_empty() {
+        return named(format!(
+            "{signature} {{\n    uint row = group.x * {SIMD_ROWS}u + sg, t = lane;\n    if (row >= {rows}u) {{\n        return;\n    }}\n{source}}}\n"
+        ));
+    }
+    if simd {
+        let block = rows / row_groups(body);
+        let source: String = source.lines().map(|l| format!("    {l}\n")).collect();
+        return named(format!(
+            "{signature} {{\n    uint t = lane;\n{decls}{init}    for (uint row = group.x * {block}u + sg; row < (group.x + 1) * {block}u; row += {SIMD_ROWS}u) {{\n{source}    }}\n{written}}}\n"
+        ));
+    }
     if partials.is_empty() {
         return named(format!(
             "{signature} {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{decls}{source}}}\n"
@@ -1728,10 +1818,10 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
         e.hoisted, e.lines
     );
-    for (suffix, bm, bn) in [("", 128, 64), ("_small", 64, 64)] {
+    for (suffix, bm, bn, bk) in [("", 128, 64, "SG_BK"), ("_small", 32, 32, "SMALL_BK")] {
         write!(
             source,
-            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[{bm} * SG_BK], rt[SG_BK * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {w}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
+            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
         )
         .unwrap();
     }

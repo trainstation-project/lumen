@@ -1721,7 +1721,7 @@ fn skinny_dots_split_their_contraction() {
         g.set_outputs(&[d]).unwrap();
         g
     };
-    // 4 tiles: 16 chunks of 256 (32 would be chunks of 128).
+    // 8 tiles (of 32 x 32): 32 chunks of 128 (at most 32).
     let g = build(4, 256, 4096, DType::F32);
     let split = super::split_k::split_k(&g, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
@@ -1730,7 +1730,7 @@ fn skinny_dots_split_their_contraction() {
         ["reshape", "reshape", "dot_general", "reduce_sum"],
         "{split}"
     );
-    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 4, 256]);
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [32, 4, 256]);
     let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
@@ -1764,10 +1764,12 @@ fn skinny_dots_split_their_contraction() {
     for (w, g) in want.iter().zip(&got) {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
-    // Many tiles, or a short contraction: as it is.
+    // Many tiles, or a short contraction (one of chunks of at least 64,
+    // or shorter than 512): as it is.
     for g in [
         build(1024, 1024, 1024, DType::F32),
         build(4, 256, 300, DType::F32),
+        build(4, 256, 256, DType::F32),
     ] {
         let split = super::split_k::split_k(&g, false);
         assert_eq!(split.nodes().len(), 1, "{split}");

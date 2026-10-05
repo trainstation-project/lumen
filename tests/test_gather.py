@@ -149,16 +149,19 @@ def test_gather_checks_its_operands():
 
 
 @pytest.mark.mps
+@pytest.mark.parametrize("width, rows", [(64, 5), (7, 5)])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
-def test_scatter_add_on_mps_is_deterministic(dtype):
+def test_scatter_add_on_mps_is_deterministic(dtype, width, rows):
     """On MPS a scatter_add adds each element's updates in index order (a
-    thread a column, no atomics): the CPU's result bit for bit, for any
-    dtype (bfloat16 too, each sum rounded as the reference rounds it), the
-    same each run; a lookup's gradient too (deterministic training)."""
+    thread an element scanning the indices, its SIMD group's lanes 32 at a
+    time when they share a row: rows of 64; else one at a time: rows of 7;
+    of many rows and updates, a thread a column; no atomics): the CPU's result bit for bit, for any dtype
+    (bfloat16 too, each sum rounded as the reference rounds it), the same
+    each run; a lookup's gradient too (deterministic training)."""
     rng = np.random.default_rng(4)
-    x = (rng.standard_normal((5, 64)) * 4).astype(np.float32)
-    ids = rng.integers(0, 5, (300,))
-    u = (rng.standard_normal((300, 64)) * 4).astype(np.float32)
+    x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
+    ids = rng.integers(0, rows, (300,))
+    u = (rng.standard_normal((300, width)) * 4).astype(np.float32)
     f = lambda x, i, u: prims.scatter_add(x, i, u, 0)  # noqa: E731
     on = lambda device: [
         _tensor(a, device, dtype) if a.dtype == np.float32 else _tensor(a, device) for a in (x, ids, u)

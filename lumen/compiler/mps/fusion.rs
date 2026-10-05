@@ -404,12 +404,13 @@ pub(crate) fn fuse(
 
     // Producer-consumer multi-output fusion (XLA's MultiOutputFusion): an
     // expensive value with several readers is a root, stored once rather
-    // than recomputed in each. It is computed in the fusion of its first
+    // than recomputed in each; so is an output (an optimizer's moment, read
+    // by its weight's update). It is computed in the fusion of its first
     // reader instead, as another output of that fusion's kernel, when that
-    // reader is a fusion root computing it at its own index (through
-    // elementwise primitives); every other reader comes after it and reads
-    // the stored output. Later nodes first, so a value is not hosted by a
-    // fusion that is itself hosted.
+    // fusion (the root that reader is computed in) computes it at its own
+    // index (through elementwise primitives); every other reader comes
+    // after it and reads the stored output. Later nodes first, so a value
+    // is not hosted by a fusion that is itself hosted.
     // A contraction's epilogue's values read outside it: its fusion's.
     let mut host: Vec<Option<usize>> = dot_aux;
     for (i, node) in nodes.iter().enumerate().rev() {
@@ -418,8 +419,7 @@ pub(crate) fn fuse(
             && root[i]
             && fusible[i]
             && !is_reduction(node)
-            && !is_output[node.output]
-            && expensive(graph, node)
+            && (is_output[node.output] || expensive(graph, node))
             // A contraction's epilogue's end is its fusion's, never hosted;
             // nor a row kernel's root writing values of its own.
             && dot_of[i].is_none()
@@ -427,10 +427,21 @@ pub(crate) fn fuse(
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
-        // A reduction with an epilogue is in the fusion of its end.
+        // The root it is computed in: through readers fused into their one
+        // reader, to a root; a reduction with an epilogue is in the fusion
+        // of its end.
+        let reader = first;
+        let mut first = first;
+        while !root[first] && users[nodes[first].output].len() == 1 {
+            first = users[nodes[first].output][0];
+        }
         let fusion = ends[first].unwrap_or(first);
+        let after = users[node.output]
+            .iter()
+            .all(|&u| u == reader || u > fusion);
         // Row kernels read their input in several passes: they host nothing.
         if root[fusion]
+            && after
             && fusible[first]
             && !row_root(first)
             && dot_of[fusion].is_none()

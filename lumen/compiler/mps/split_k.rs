@@ -16,15 +16,19 @@ use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::dot_general::mps::SMALL_TILE;
 
-/// Dots of fewer output tiles (of the small matmul kernel's) are split.
-const MAX_TILES: usize = 64;
+/// Dots of fewer output tiles (of the small matmul kernel's: 32 x 32) are
+/// split.
+const MAX_TILES: usize = 256;
 /// The threadgroups a split dot launches, at most (on an M4 Pro: about 13
 /// per GPU core).
 const GROUPS: usize = 256;
 /// The most chunks.
 const MAX_SPLIT: usize = 32;
 /// The fewest elements of K a chunk takes.
-const MIN_CHUNK: usize = 256;
+const MIN_CHUNK: usize = 64;
+/// The shortest contraction split (a weight's gradient's, over a batch's
+/// tokens): a shorter one is a few steps of the matmul's loop.
+const MIN_K: usize = 512;
 
 /// `graph` with each dot of few output tiles and a long contraction split
 /// along it, its chunks added atomically if `atomic`.
@@ -148,11 +152,11 @@ pub(crate) fn atomic_dot(body: &Graph) -> Option<&Node> {
 
 /// The chunks to split the contraction of an `m` by `k` by `n` matmul
 /// into, if it has few output tiles: as many as fill [`GROUPS`]
-/// threadgroups (a power of two, at most [`MAX_SPLIT`], dividing `k` into
-/// chunks of at least [`MIN_CHUNK`]).
+/// threadgroups (a power of two, at most [`MAX_SPLIT`], dividing `k`, of
+/// at least [`MIN_K`], into chunks of at least [`MIN_CHUNK`]).
 fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
     let tiles = m.div_ceil(SMALL_TILE.0) * n.div_ceil(SMALL_TILE.1);
-    if tiles == 0 || tiles >= MAX_TILES {
+    if tiles == 0 || tiles >= MAX_TILES || k < MIN_K {
         return None;
     }
     let mut s = 1 << (GROUPS / tiles).min(MAX_SPLIT).ilog2();

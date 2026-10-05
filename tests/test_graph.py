@@ -330,11 +330,12 @@ def test_graph_and_plan_describe_themselves():
 @pytest.mark.mps
 def test_mps_plan_steps_and_profiled_kernels():
     try:
-        x = lumen.ones([64, 128], device="mps")
+        x = lumen.ones([64, 2048], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
     from lumen.profiler import ProfilerActivity, profile
 
+    # Rows long enough for a threadgroup each.
     graph = lumen.make_graph(lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1))(x)
     plan = lumen.graph.Plan(graph, "mps")
     # One step: the reduction fused with the ops computing its input.
@@ -349,7 +350,27 @@ def test_mps_plan_steps_and_profiled_kernels():
         lumen.mps.synchronize()
     kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert kernels == [fusion["kernel"]]
-    assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 128] * 64)
+    assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 2048] * 64, rel=1e-5)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("n", [16, 64])
+def test_short_rows_reduce_several_a_threadgroup(n):
+    """Rows too short for a threadgroup each (an attention head's 16, a
+    row of 64) are reduced as grouped lanes, several rows a threadgroup:
+    the CPU's sums, the same each run."""
+    x = rand(4096, n)
+    try:
+        X = lumen.from_numpy(x).to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1)  # noqa: E731
+    (step,) = lumen.graph.Plan(lumen.make_graph(f)(X), "mps").steps()
+    assert "reduce_grouped" in step["fusion"]["source"]
+    got = [lumen.to_numpy(lumen.compile(f)(X)) for _ in range(2)]
+    np.testing.assert_array_equal(got[0], got[1])
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x)))
+    np.testing.assert_allclose(got[0], want, rtol=1e-5, atol=1e-5)
 
 
 def test_dump_graph(tmp_path):
@@ -1257,6 +1278,38 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("n", [16, 64])
+@pytest.mark.parametrize(
+    "f",
+    [
+        lambda x, w, c: F.sum(F.rms_norm(x, x.shape[-1], w) * c),
+        lambda x, w, c: F.sum((_layer_norm(x, w) + w) * c),
+        lambda x, w, c: F.sum(F.softmax(x * w, -1) * c),
+    ],
+    ids=["rms norm", "layer norm", "softmax"],
+)
+def test_short_rows_are_a_simd_group_each(f, n):
+    """Row kernels of short rows (a model's width of 64, an attention
+    head's 16) reduce each row in a SIMD group, eight a threadgroup (none
+    left idle), forward and backward (its weight's gradient's blocks too,
+    each SIMD group's rows combined in order): the CPU's values, the same
+    bits each run; rows not a multiple of eight too."""
+    x, w, c = rand(1003, n), rand(n, seed=1), rand(1003, n, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    rows = [s for s in steps if s["fusion"] and "simd_sum" in s["fusion"]["source"]]
+    assert rows, [s["label"] for s in steps]
+    got = [[lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)] for _ in range(2)]
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, a, e in zip(*got, want):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize(
