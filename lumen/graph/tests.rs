@@ -493,6 +493,76 @@ fn plan_reuses_workspace() {
     assert_eq!(plan.workspace_bytes(), 0, "{plan}");
 }
 
+/// The steps run in the order of whichever schedule needs the least
+/// workspace (XLA's memory scheduler): here, three values each reduced as
+/// soon as it is computed, one alive at a time, not all three computed
+/// first as traced.
+#[test]
+fn plan_schedules_steps_to_shrink_the_workspace() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[1024]));
+    let values: Vec<_> = [Exp, Tanh, Neg]
+        .into_iter()
+        .map(|p| g.apply(p, &[x]).unwrap())
+        .collect();
+    let sum = ReduceSum {
+        axes: vec![0],
+        accum_dtype: DType::F32,
+    };
+    let sums: Vec<_> = values
+        .iter()
+        .map(|&v| g.apply(sum.clone(), &[v]).unwrap())
+        .collect();
+    let total = g.apply(Add, &[sums[0], sums[1]]).unwrap();
+    let total = g.apply(Add, &[total, sums[2]]).unwrap();
+    g.set_outputs(&[total]).unwrap();
+    let plan = check_against_reference(&g, &[data(&[1024], 4)]);
+    // One value of 4 KiB at a time (and the sums), not three.
+    assert!(plan.workspace_bytes() < 2 * 4096, "{plan}");
+    let ops: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
+    assert_eq!(&ops[..2], ["exp", "reduce_sum"], "{plan}");
+}
+
+/// With a memory limit, a value read early and late is computed again for
+/// its late reader rather than kept alive (XLA's rematerialization): here
+/// `h = exp(x)`, read by `tanh` and at the end, alive with `tanh(h)` (the
+/// rest is computed in place, in the output); its copy, computed at the
+/// end, is not. Nothing is recomputed without a limit, nor when the plan
+/// fits.
+#[test]
+fn plan_rematerializes_under_a_memory_limit() {
+    let mut g = Graph::new();
+    // Of 128 KiB each: at least XLA's smallest value to recompute.
+    const N: usize = 32 << 10;
+    let x = g.input(ty(DType::F32, &[N]));
+    let h = g.apply(Exp, &[x]).unwrap();
+    let b = g.apply(Tanh, &[h]).unwrap();
+    let e = g.apply(Exp, &[b]).unwrap();
+    let c = g.apply(Mul, &[e, b]).unwrap();
+    let d = g.apply(Mul, &[c, h]).unwrap();
+    g.set_outputs(&[d]).unwrap();
+    let inputs = [data(&[N], 4)];
+    let expected = reference::run(&g, &inputs).unwrap();
+    let plan = |limit| {
+        let options = super::PlanOptions {
+            memory_limit: limit,
+            ..Default::default()
+        };
+        let plan = Plan::compile_with(&g, &options);
+        let actual = plan.run(&inputs).unwrap();
+        assert_eq!(expected[0].to_vec::<f32>(), actual[0].to_vec::<f32>(), "{plan}");
+        let exps = plan.steps().iter().filter(|s| s.primitive == Exp).count();
+        (plan.workspace_bytes(), exps)
+    };
+    let (kept, exps) = plan(None);
+    // h and tanh(h) in the workspace; the rest in place, in the output.
+    assert_eq!((kept, exps), (2 * 4 * N, 2));
+    assert_eq!(plan(Some(kept)), (kept, 2));
+    let (recomputed, exps) = plan(Some(1));
+    // h dies at tanh: it and its copy are never alive together.
+    assert_eq!((recomputed, exps), (4 * N, 3));
+}
+
 #[test]
 fn plan_copies_aliased_outputs_and_drops_dead_code() {
     let mut g = Graph::new();

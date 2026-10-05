@@ -440,13 +440,6 @@ impl Plan {
                 }
             }
         }
-        if std::env::var("LUMEN_LIVE").is_ok() {
-            let label = |r: Var| nodes.iter().find(|n| n.output == r).map_or("input".to_string(), |n| format!("{}", graph.label(n)));
-            let mut v: Vec<_> = regions.iter().filter_map(|&(size, f, l, ref reg)| match reg { Region::Value(r) if size >= 1 << 20 => Some((l - f, f, l, size >> 20, label(*r))), _ => None }).collect();
-            v.sort_by_key(|x| Reverse(x.0));
-            eprintln!("LIVE {} steps", nodes.len());
-            for x in v.iter().take(40) { eprintln!("LIVE {:?}", x); }
-        }
         regions.sort_by_key(|&(size, ..)| Reverse(size));
         let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut scratch_at = vec![None; nodes.len()];
