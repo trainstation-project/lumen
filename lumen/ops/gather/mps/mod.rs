@@ -1,8 +1,9 @@
-//! gather and scatter_add on MPS (`kernels.metal`): a thread an element of
-//! the gathered values (a gather's result, a scatter's updates). A
-//! scatter_add whose value the plan put in its operand's buffer
-//! (`graph/plan.rs`: nothing reads the operand after it) adds the updates
-//! there, in place; otherwise it copies the operand first.
+//! gather and scatter_add on MPS (`kernels.metal`): a gather a thread an
+//! element of its result; a scatter_add a thread a column of its value,
+//! adding its updates in index order (deterministic). A scatter_add whose
+//! value the plan put in its operand's buffer (`graph/plan.rs`: nothing
+//! reads the operand after it) adds the updates there, in place; otherwise
+//! it copies the operand first.
 
 use crate::graph::Primitive;
 use crate::graph::plan::Step;
@@ -31,9 +32,9 @@ pub(crate) fn encode(
     let (n, m) = (x.shape[axis], indices.numel());
     let inner: usize = x.shape[axis + 1..].iter().product();
     let scatter = matches!(step.primitive, Primitive::ScatterAdd { .. });
-    // The gathered values: the result, or the updates.
+    // A gather's result's elements; a scatter's columns (outer * inner).
     let total = match scatter {
-        true => step.inputs[2].1.numel(),
+        true => step.output.1.numel() / n.max(1),
         false => step.output.1.numel(),
     };
     let (kernel, buffers) = match scatter {
@@ -42,24 +43,19 @@ pub(crate) fn encode(
             vec![inputs[0], inputs[1], output.cast_const()],
         ),
         true => {
-            let dtype = match x.dtype {
-                DType::F32 => "f32",
-                DType::I32 => "i32",
-                DType::U32 => "u32",
-                d => {
-                    return Err(format!(
-                        "{}: MPS adds float32, int32 and uint32 atomically, got {d}",
-                        step.label
-                    ));
-                }
-            };
+            if x.dtype == DType::Bool {
+                return Err(format!(
+                    "{}: booleans have no sum to scatter-add",
+                    step.label
+                ));
+            }
             // The operand's value, if not already in the output's buffer.
             if output.cast_const() != inputs[0] {
                 let name = step.label;
                 crate::ops::dynamic_slice::mps::copy(inputs[0], output, x, keep.clone(), name)?;
             }
             (
-                format!("scatter_add_{dtype}_{index}"),
+                format!("scatter_add_{}_{index}", x.dtype.name()),
                 vec![inputs[2], inputs[1], output.cast_const()],
             )
         }

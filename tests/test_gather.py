@@ -124,13 +124,25 @@ def test_gather_checks_its_operands():
 
 
 @pytest.mark.mps
-def test_scatter_add_on_mps_takes_atomic_dtypes():
-    """MPS adds float32, int32 and uint32 atomically: another dtype's
-    scatter_add raises (a gather's gradient accumulates in float32)."""
-    x = _tensor(np.zeros((4, 3), np.float32), "mps", "bfloat16")
-    ids = _tensor(np.array([0, 2]), "mps")
-    with pytest.raises(ValueError, match="atomically"):
-        lumen.compile(lambda x, i: prims.scatter_add(x, i, x[i], 0))(x, ids)
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
+def test_scatter_add_on_mps_is_deterministic(dtype):
+    """On MPS a scatter_add adds each element's updates in index order (a
+    thread a column, no atomics): the CPU's result bit for bit, for any
+    dtype (bfloat16 too, each sum rounded as the reference rounds it), the
+    same each run; a lookup's gradient too (deterministic training)."""
+    rng = np.random.default_rng(4)
+    x = (rng.standard_normal((5, 64)) * 4).astype(np.float32)
+    ids = rng.integers(0, 5, (300,))
+    u = (rng.standard_normal((300, 64)) * 4).astype(np.float32)
+    f = lambda x, i, u: prims.scatter_add(x, i, u, 0)  # noqa: E731
+    on = lambda device: [
+        _tensor(a, device, dtype) if a.dtype == np.float32 else _tensor(a, device) for a in (x, ids, u)
+    ]  # noqa: E731
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(*on("cpu")).to(dtype="float32"))
+    mps = lumen.compile(f, device="mps")
+    for _ in range(3):
+        got = lumen.to_numpy(mps(*on("mps")).to(dtype="float32"))
+        np.testing.assert_array_equal(got, want)
 
 
 def test_scatter_add_in_place():

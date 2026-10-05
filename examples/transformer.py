@@ -15,6 +15,11 @@ float32, its result float32 where float32 reads it (a residual, the
 logits) and bfloat16 where bfloat16 does (q, k, v, the MLP's hidden
 layer).
 
+Deterministic (``lumen.config.compiler.deterministic``): the kernels that
+would add in no fixed order (atomically: a split-K matmul's chunks, flash
+attention's dQ) sum in a fixed one, so a run's results are the same bits
+each time.
+
 After training, a few more steps run under the profiler (``lumen.profiler``,
 as ``torch.profiler``): its table of ops and kernels by MPS time, and a
 Chrome trace, ``transformer_trace.json`` (open it in Perfetto or
@@ -34,6 +39,9 @@ from lumen.profiler import ProfilerActivity, profile, record_function
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
 BATCH, STEPS, DROPOUT = 32, 300, 0.1
 PROFILED_STEPS = 10
+
+# Before compiling: a plan is compiled for the flags set when it is.
+lumen.config.compiler.deterministic = True
 
 
 def one_hot(ids, n):
