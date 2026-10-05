@@ -1,7 +1,8 @@
-"""AdamW, as ``torch.optim.AdamW``: ``opt.zero_grad()``, ``loss.backward()``,
+"""SGD and AdamW, as ``torch.optim.SGD`` (without momentum) and
+``torch.optim.AdamW``: ``opt.zero_grad()``, ``loss.backward()``,
 ``opt.step()``, inside the compiled training step.
 
-The optimizer is a module: its moments ``m`` and ``v`` are weights, placed
+The optimizer is a module: AdamW's moments ``m`` and ``v`` are weights, placed
 (zeroed) by the first compiled function taking it; its step count and
 hyperparameters are floats, runtime scalars on the host (a new learning rate
 needs no new compile). ``step`` assigns the new parameters, moments and step
@@ -15,6 +16,25 @@ would lose small gradients' contributions)."""
 
 import lumen
 import lumen.functional as F
+
+
+class SGD(lumen.nn.Module):
+    """``p - lr * g`` for each parameter ``p`` and its gradient ``g``."""
+
+    params: list
+    lr: float
+
+    def zero_grad(self):
+        for p in self.params:
+            p.grad = None
+
+    def step(self, grads=None):
+        """Update the parameters from their ``.grad`` (or ``grads``, one
+        per parameter in order: from ``lumen.grad``)."""
+        grads = [p.grad for p in self.params] if grads is None else grads
+        for p, g in zip(self.params, grads):
+            if g is not None:
+                p.copy_(p - self.lr * g)
 
 
 class AdamW(lumen.nn.Module):

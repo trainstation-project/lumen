@@ -31,6 +31,11 @@ pub struct CompilerConfig {
     /// written as another output of its kernel (XLA's MultiOutputFusion),
     /// rather than in a kernel of its own.
     pub multi_output_fusion: bool,
+    /// Run independent small loop fusions of as many elements (an
+    /// optimizer's update of each parameter, a cast of each weight) as one
+    /// kernel, each computed at every index as it was alone (XLA's
+    /// horizontal loop fusion).
+    pub horizontal_fusion: bool,
     /// In a row kernel, a softmax's max and its sum of `exp(x - max)` in one
     /// pass, the sum rescaled as the max grows (online softmax): a row of
     /// more elements than `row_cache` holds is read once less. On by
@@ -55,6 +60,14 @@ pub struct CompilerConfig {
     /// kernel rather than two; a split-K dot adds its chunks' products to
     /// its output, rather than writing them for a sum).
     pub deterministic: bool,
+    /// On MPS, run the large float16 dots of a compiled function's fixed
+    /// weights (parameters it does not write: inference, frozen layers),
+    /// and the float16 work after them, on the Apple Neural Engine, through
+    /// Core ML (`compiler::mps::ane`), its steps in the plan. Off by default;
+    /// not what the program computes (the Neural Engine accumulates its
+    /// dots wider than float16 but narrower than float32), so off runs
+    /// every dot on lumen's kernels.
+    pub neural_engine: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
@@ -83,10 +96,12 @@ impl Default for CompilerConfig {
             reduction_epilogues: true,
             contraction_epilogues: true,
             multi_output_fusion: true,
+            horizontal_fusion: true,
             online_softmax: true,
             flash_attention: true,
             split_k: true,
             deterministic: false,
+            neural_engine: false,
             row_cache: 8,
             memory_limit: 0,
         }

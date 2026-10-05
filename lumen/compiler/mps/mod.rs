@@ -6,12 +6,16 @@
 //! compiled, then the fused graph's [`Plan`], with the workspace scratch
 //! the kernels need ([`crate::ops::mps::scratch_bytes`]): no kernel
 //! allocates. A fusion step runs its kernel ([`encode`]); the rest run the
-//! primitives' kernels ([`crate::ops::mps`]).
+//! primitives' kernels ([`crate::ops::mps`]). With `neural_engine`,
+//! regions of float16 work on fixed weights run on the Apple Neural Engine
+//! instead, as Core ML steps ([`ane`]).
 
+pub(crate) mod ane;
 mod codegen;
 mod diamonds;
 mod dot_strength;
 mod fusion;
+mod horizontal;
 mod merge_dots;
 mod split_k;
 #[cfg(test)]
@@ -106,6 +110,25 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     // dots (a weight's gradient) as the dots swapped, reshapes, transposes
     // and casts moved.
     let graph = super::simplify::simplify_with(&graph, true);
+    // The large float16 dots of fixed weights (parameters the function does
+    // not write, nor any in their block) on the Neural Engine, whole (before
+    // split-K splits them).
+    let graph = match config.neural_engine {
+        true => {
+            let written = |i: usize| {
+                options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
+            };
+            let first_block = graph.inputs().len() - packed.len();
+            let fixed: Vec<bool> = (0..graph.inputs().len())
+                .map(|i| match i.checked_sub(first_block) {
+                    Some(b) => !packed[b].0.iter().any(|&m| written(m)),
+                    None => options.parameters.as_ref().is_some_and(|p| p[i]) && !written(i),
+                })
+                .collect();
+            ane::offload(&graph, &fixed)
+        }
+        false => graph,
+    };
     let graph = dot_strength::reduce_vector_dots(&graph);
     let graph = match config.split_k {
         true => split_k::split_k(&graph, !config.deterministic),
@@ -128,11 +151,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         loop {
             kernels.clear();
             let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
-            let fused = fusion::fuse(&graph, &rows, &vars, config, |body, by_value| {
+            let mut kernel = |body: &Graph, by_value: &[bool]| {
                 let (name, source) = codegen::kernel(body, by_value, config);
                 kernels.insert(name.clone(), source);
                 name
-            });
+            };
+            let fused = fusion::fuse(&graph, &rows, &vars, config, &mut kernel);
+            // Independent small loop fusions, one kernel each group.
+            let fused = match config.horizontal_fusion {
+                true => {
+                    let vars: Vec<Var> = scalars.iter().map(|&i| fused.inputs()[i]).collect();
+                    horizontal::fuse(&fused, &vars, &mut kernel)
+                }
+                false => fused,
+            };
             let unfused = |&i: &usize| {
                 let v = fused.inputs()[i];
                 let read = |n: &&Node| n.inputs.contains(&v);
@@ -441,6 +473,10 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    // A Core ML program's, on the Neural Engine.
+    if name.starts_with(crate::graph::NEURAL_ENGINE) {
+        return ane::encode(step, inputs, output, keep);
+    }
     // The kernel's inputs, then (a multi-output fusion's) other outputs; of
     // the inputs, device buffers and the by-value ones' bytes, read on the
     // host now (`setBytes`, before the kernel's own arguments).

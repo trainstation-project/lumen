@@ -202,6 +202,14 @@ uint64_t lumen_mps_stream_flush(void) {
     return total;
 }
 
+// How many ops have ever been encoded (committed or not).
+uint64_t lumen_mps_stream_encoded_total(void) {
+    os_unfair_lock_lock(&lock);
+    uint64_t total = encoded_total;
+    os_unfair_lock_unlock(&lock);
+    return total;
+}
+
 // The open command buffer (made if none is), its compute encoder ended so
 // the caller may encode its own work into it, after the ops encoded so far
 // and before those encoded after: valid until the stream commits it (the

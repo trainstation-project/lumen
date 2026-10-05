@@ -592,6 +592,20 @@ impl PyTensor {
         self.inner.is_parameter()
     }
 
+    /// How many times this parameter's value was written (PyTorch:
+    /// `Tensor._version`): by `copy_` into it, or by a compiled function
+    /// assigning it.
+    #[getter]
+    fn _version(&self) -> u64 {
+        self.inner.version()
+    }
+
+    /// Count a write of this parameter's value (a compiled function
+    /// assigned it).
+    fn _mark_written(&self) {
+        self.inner.mark_written();
+    }
+
     /// This parameter's memory on `device`, placed (zeroed) on first use.
     fn _placed(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
         let device = resolve_device(Some(device))?;

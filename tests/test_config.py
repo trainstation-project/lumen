@@ -70,7 +70,7 @@ def test_compiler_flags_defaults(compiler):
     attention and split-K (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
-    assert compiler.contraction_epilogues is True
+    assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
@@ -120,6 +120,12 @@ def test_compiler_flags_change_what_compiles(compiler):
     compiler.row_cache = 0
     (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" not in step["fusion"]["source"]
+    compiler.reset()
+
+    apart = lambda a, b: (F.exp(a) + 1.0, b * 2.0 - 1.0)  # noqa: E731
+    assert len(_labels(apart, x, x)) == 1
+    compiler.horizontal_fusion = False
+    assert len(_labels(apart, x, x)) == 2
 
 
 def _read_early_and_late(a, w):
