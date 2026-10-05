@@ -591,13 +591,25 @@ fn dots_of_weights_computed_elementwise_merge() {
             };
             let s = apply(&mut g, splat, &[s]);
             let scaled = apply(&mut g, Mul, &[w, s]);
-            let cast = apply(&mut g, Cast { new_dtype: DType::BF16 }, &[scaled]);
+            let cast = apply(
+                &mut g,
+                Cast {
+                    new_dtype: DType::BF16,
+                },
+                &[scaled],
+            );
             operands.push(cast);
             let y = apply(&mut g, dot.clone(), &[x, cast]);
             outs.push(apply(&mut g, Neg, &[y]));
         }
         // Another reader of the first operand: a dot of it with x^T.
-        let xt = apply(&mut g, Transpose { permutation: vec![1, 0] }, &[x]);
+        let xt = apply(
+            &mut g,
+            Transpose {
+                permutation: vec![1, 0],
+            },
+            &[x],
+        );
         let other = DotGeneral {
             lhs_contracting: vec![1],
             rhs_contracting: vec![0],
@@ -631,7 +643,10 @@ fn dots_of_weights_computed_elementwise_merge() {
     inputs.push(block(&[&inputs[1], &inputs[2], &inputs[3]], 0));
     let expected = reference::run(&g, &inputs[..4]).unwrap();
     let f32s = |t: &Tensor| t.to_dtype(DType::F32).unwrap().to_vec::<f32>();
-    for (e, a) in expected.iter().zip(reference::run(&merged, &inputs).unwrap()) {
+    for (e, a) in expected
+        .iter()
+        .zip(reference::run(&merged, &inputs).unwrap())
+    {
         assert_eq!(f32s(e), f32s(&a));
     }
     // A different scale for one: not the same chain.

@@ -116,7 +116,8 @@ pub(crate) fn merge_dots(
             return None;
         };
         let f = &nodes[producer[b.inputs[0]]?];
-        matches!(&f.primitive, Primitive::Full { shape, .. } if shape.is_empty()).then(|| f.primitive.clone())
+        matches!(&f.primitive, Primitive::Full { shape, .. } if shape.is_empty())
+            .then(|| f.primitive.clone())
     };
     let weight_of = |v: Var| -> Option<(Var, Vec<Link>)> {
         let (mut chain, mut x) = (Vec::new(), v);
@@ -205,20 +206,18 @@ pub(crate) fn merge_dots(
                 groups[g].nodes.push(i);
                 groups[g].weights.push(w);
             }
-            None => groups.extend(
-                candidates
-                    .into_iter()
-                    .map(|(side, other, dimension, chain, w)| Group {
-                        shared: node.inputs[side],
-                        side,
-                        primitive: node.primitive.clone(),
-                        other,
-                        dimension,
-                        chain,
-                        nodes: vec![i],
-                        weights: vec![w],
-                    }),
-            ),
+            None => groups.extend(candidates.into_iter().map(
+                |(side, other, dimension, chain, w)| Group {
+                    shared: node.inputs[side],
+                    side,
+                    primitive: node.primitive.clone(),
+                    other,
+                    dimension,
+                    chain,
+                    nodes: vec![i],
+                    weights: vec![w],
+                },
+            )),
         }
     }
     // A dot in two groups of two or more merges in the first; the rest of
@@ -250,7 +249,11 @@ pub(crate) fn merge_dots(
             let others: Vec<Var> = g
                 .nodes
                 .iter()
-                .map(|&m| weight_of(nodes[m].inputs[1 - g.side]).expect("a parameter").0)
+                .map(|&m| {
+                    weight_of(nodes[m].inputs[1 - g.side])
+                        .expect("a parameter")
+                        .0
+                })
                 .collect();
             let types: Vec<&TensorType> = others.iter().map(|&v| graph.type_of(v)).collect();
             let block = Primitive::Concatenate {
@@ -278,7 +281,9 @@ pub(crate) fn merge_dots(
                     };
                     ins.insert(*k, out.apply(b, &[s]).expect("a splat"));
                 }
-                value = out.apply(link.primitive.clone(), &ins).expect("the chain, of the block");
+                value = out
+                    .apply(link.primitive.clone(), &ins)
+                    .expect("the chain, of the block");
             }
             operands[1 - g.side] = value;
             // Each dot's operand, for its other readers: its part of the

@@ -199,7 +199,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
     for step in plan.steps_mut() {
         // Read whole (not as a view: one weight's part of it).
-        let whole = step.inputs.iter().zip(&step.views).filter(|(_, v)| v.is_none());
+        let whole = step
+            .inputs
+            .iter()
+            .zip(&step.views)
+            .filter(|(_, v)| v.is_none());
         let block = whole.map(|(input, _)| input).find_map(|(b, _)| match *b {
             Buffer::Input(i) if i >= first_block => Some(i - first_block),
             b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
@@ -212,7 +216,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             }
         } else if let Some(k) = block {
             let n = step.output.1.numel();
-            let of_block = step.inputs.iter().all(|(_, ty)| ty.numel() == n || ty.numel() == 1);
+            let of_block = step
+                .inputs
+                .iter()
+                .all(|(_, ty)| ty.numel() == n || ty.numel() == 1);
             if of_block {
                 derived.push((output, k));
             }
