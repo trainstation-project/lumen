@@ -92,6 +92,9 @@ pub(crate) fn encode(
         }
         DynamicSlice { .. } | DynamicUpdateSlice => super::dynamic_slice::mps::encode,
         Wait => super::wait::encode,
+        ToHost | ToDevice => {
+            unreachable!("a stage's transfers are between its plans (compiler::stages)")
+        }
         Full { .. } | Iota { .. } | RandomBits { .. } => super::factory::mps::encode,
         Fusion { .. } => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),

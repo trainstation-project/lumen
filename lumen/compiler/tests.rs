@@ -307,3 +307,98 @@ fn casts_move_past_layout_primitives() {
         same_values(&g, &moved, &inputs);
     }
 }
+
+/// `to_host(x * 3) * 2`: the product on the device, the rest on the host.
+fn to_host_graph() -> Graph {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2]));
+    let three = apply(&mut g, full(&[2], 3.0), &[]);
+    let y = apply(&mut g, Mul, &[x, three]);
+    let h = apply(&mut g, ToHost, &[y]);
+    let two = apply(&mut g, full(&[2], 2.0), &[]);
+    let z = apply(&mut g, Mul, &[h, two]);
+    g.set_outputs(&[z]).unwrap();
+    g
+}
+
+#[test]
+fn host_values_run_in_a_host_stage() {
+    let device = match crate::device::mps::is_available() {
+        true => crate::Device::Mps,
+        false => crate::Device::Meta,
+    };
+    let plan = super::compile(&to_host_graph(), device).unwrap();
+    let staged = plan.staged.as_ref().expect("a staged plan");
+    let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
+    assert_eq!(hosts, [false, true]);
+    assert_eq!(
+        staged.stages[1].inputs,
+        [crate::graph::Source::ToHost(0, 0)]
+    );
+    if device == crate::Device::Mps {
+        let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
+        let out = plan.run(&[x]).unwrap();
+        assert_eq!(out[0].device(), crate::Device::Cpu);
+        assert_eq!(out[0].to_vec::<f32>(), [6.0, 12.0]);
+    }
+}
+
+#[test]
+fn values_copied_back_at_once_pass_through_a_host_stage() {
+    // to_device(to_host(x * 3)) * 2: the host stage outputs its input.
+    let device = match crate::device::mps::is_available() {
+        true => crate::Device::Mps,
+        false => crate::Device::Meta,
+    };
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2]));
+    let three = apply(&mut g, full(&[2], 3.0), &[]);
+    let y = apply(&mut g, Mul, &[x, three]);
+    let h = apply(&mut g, ToHost, &[y]);
+    let d = apply(&mut g, ToDevice, &[h]);
+    let two = apply(&mut g, full(&[2], 2.0), &[]);
+    let z = apply(&mut g, Mul, &[d, two]);
+    g.set_outputs(&[z]).unwrap();
+    let plan = super::compile(&g, device).unwrap();
+    let staged = plan.staged.as_ref().expect("a staged plan");
+    let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
+    assert_eq!(hosts, [false, true, false]);
+    assert_eq!(
+        staged.stages[2].inputs,
+        [crate::graph::Source::ToDevice(1, 0)]
+    );
+    if device == crate::Device::Mps {
+        let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
+        let out = plan.run(&[x]).unwrap();
+        assert_eq!(out[0].device(), crate::Device::Mps);
+        assert_eq!(out[0].to_vec::<f32>(), [6.0, 12.0]);
+    }
+}
+
+#[test]
+fn programs_without_host_values_are_one_plan() {
+    // The copy of a device value back to the device is the value.
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2]));
+    let d = apply(&mut g, ToDevice, &[x]);
+    let y = apply(&mut g, Mul, &[d, x]);
+    g.set_outputs(&[y]).unwrap();
+    let plan = super::compile(&g, crate::Device::Meta).unwrap();
+    assert!(plan.staged.is_none());
+    let steps: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
+    assert_eq!(steps, ["mul"]);
+}
+
+#[test]
+fn ops_on_host_and_device_values_raise() {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2]));
+    let h = apply(&mut g, ToHost, &[x]);
+    let y = apply(&mut g, Add, &[h, x]);
+    g.set_outputs(&[y]).unwrap();
+    let error = super::compile(&g, crate::Device::Meta).unwrap_err();
+    assert!(
+        error.contains("Expected all tensors to be on the same device"),
+        "{error}"
+    );
+}

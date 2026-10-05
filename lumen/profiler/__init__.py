@@ -148,7 +148,8 @@ class profile:
 
     def events(self):
         """Every recorded event as a dict (``name``, ``kind`` = op /
-        user_range / memory / gpu, ``start_us``, ``duration_us``, ``thread``,
+        user_range / memory / gpu / host_kernel (a plan step's run on the
+        host, inside its op), ``start_us``, ``duration_us``, ``thread``,
         ``parent``, ``device``, ``inputs`` and ``outputs`` (with
         ``record_shapes``: each a list of ``(dtype, shape)``), ``accum``
         (with ``record_shapes``: the dtypes the op accumulates in, a dot's

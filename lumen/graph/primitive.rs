@@ -74,6 +74,15 @@ pub enum Primitive {
     /// the operand's memory ([`crate::ops::wait`]). Placed before what needs
     /// a value on the host.
     Wait,
+    /// Its operand, copied to the host (PyTorch: `Tensor.cpu`): the ops
+    /// reading it run on the host, a stage of their own, compiled for the
+    /// CPU (`compiler::stages`); the copy waits for the operand. A host
+    /// value's own (no copy), as are both on a CPU plan.
+    ToHost,
+    /// Its operand, a host value, copied to the plan's device (PyTorch:
+    /// `Tensor.to(device)`; `to_host`'s gradient), in stream order (the host
+    /// not waiting). A device value's own (no copy).
+    ToDevice,
     Reshape {
         new_sizes: Vec<usize>,
     },
@@ -193,6 +202,8 @@ impl Primitive {
             Cumsum { .. } => "cumsum",
             DotGeneral { .. } => "dot_general",
             Wait => "wait",
+            ToHost => "to_host",
+            ToDevice => "to_device",
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
@@ -284,7 +295,7 @@ impl Primitive {
                 Ok(x.clone())
             }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
-            Wait => Ok(args[0].clone()),
+            Wait | ToHost | ToDevice => Ok(args[0].clone()),
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
                 if pred.dtype != DType::Bool || pred.shape != x.shape {

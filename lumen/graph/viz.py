@@ -252,15 +252,16 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
-def collect(graph, plan, inputs, title, runs=5, device=None, run=None):
+def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=()):
     """Everything the page shows, as a JSON-able dict: ``graph``, its
     ``plan`` (fused, for ``device``, default the inputs') and its unfused
     plan, both profiled on ``inputs`` on that device (the graph's, then any
-    the plan adds), ``plan`` by ``run`` if given (else ``plan.run``)."""
+    the plan adds), ``plan`` by ``run`` if given (else ``plan.run``).
+    ``scalars`` are the graph's runtime scalars (``Plan``'s)."""
     device = device or (str(inputs[0].device) if inputs else "cpu")
     # The unfused plan for the same device: its steps are the graph's
     # primitives (after the device's rewrites), each its own kernel.
-    unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False)
+    unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False, scalars=list(scalars))
     timed = device not in ("cpu", "meta")
     graph_inputs = inputs[: len(graph.inputs())]
     run = run or (lambda: plan.run(inputs, device))

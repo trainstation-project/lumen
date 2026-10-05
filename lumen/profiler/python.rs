@@ -97,6 +97,7 @@ fn kind_name(kind: EventKind) -> &'static str {
         EventKind::UserRange => "user_range",
         EventKind::Memory => "memory",
         EventKind::Gpu => "gpu",
+        EventKind::HostKernel => "host_kernel",
     }
 }
 

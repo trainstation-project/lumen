@@ -41,6 +41,8 @@ _TRACES = []
 # and the stream's position, made at its first draw (None before), and the
 # numbers drawn so far.
 _RNG = []
+# Each trace's device: where its values are, unless on the host (``.cpu()``).
+_DEVICES = []
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -69,6 +71,14 @@ def _record(name, inputs, params, var):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+
+
+def _is_device(x):
+    """Whether ``x`` names a device (``"cpu"``, ``"mps"``, ``"cuda:0"``, a
+    ``lumen.device``), not a dtype."""
+    from lumen._C import device
+
+    return isinstance(x, device) or (isinstance(x, str) and x.split(":")[0] in ("cpu", "mps", "cuda", "meta"))
 
 
 def _tree_map(f, x):
@@ -138,7 +148,7 @@ def _scalars(args):
     return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
 
 
-def _trace(fn, args):
+def _trace(fn, args, device):
     """``fn`` traced on ``args``: the graph, and what ``fn`` returned (a
     traced tensor, or modules, lists and tuples of them: the structure the
     graph's outputs, its traced tensors in order, are returned in). The graph's inputs
@@ -151,10 +161,10 @@ def _trace(fn, args):
     returned last (None if none). Precision warnings point at the line computing the value
     they are about."""
     graph = Graph()
-    traced = [TracedTensor(graph, graph.input(a.dtype, a.shape)) if isinstance(a, Tensor) else a for a in args]
+    traced = [TracedTensor(graph, graph.input(a.dtype, a.shape), device) if isinstance(a, Tensor) else a for a in args]
 
     def scalar(_):
-        t = TracedTensor(graph, graph.input("float32", []))
+        t = TracedTensor(graph, graph.input("float32", []), device)
         t.weak = True
         return t
 
@@ -162,7 +172,7 @@ def _trace(fn, args):
     scalars = [scalar(v) for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
     weights = {}
     for t in _weights(args):
-        weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape))
+        weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape), device)
     module_scalars = iter(scalars)
     traced = [
         (
@@ -183,6 +193,7 @@ def _trace(fn, args):
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
     _TRACES.append(graph)
+    _DEVICES.append(device)
     _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
     _TAPES.append(tape)
@@ -192,6 +203,7 @@ def _trace(fn, args):
         out = fn(*traced)
     finally:
         _TRACES.pop()
+        _DEVICES.pop()
         rng = _RNG.pop()
         _SOURCES.pop()
         _TAPES.pop()
@@ -339,7 +351,7 @@ def compile(fn, device=None):
         scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
-            plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
+            plans[key] = (*_trace(fn, args, target), [], len(tensors), scalars)
         graph, out, _, drawn, entries, _, _ = plans[key]
         # The random state, if it draws numbers: inputs after the weights,
         # runtime scalars.
@@ -405,7 +417,14 @@ def compile(fn, device=None):
         else:
             outputs = plan.run_in(workspace, inputs)
         outputs = iter(outputs)
-        result = _tree_map(lambda _: next(outputs), out)
+
+        # A host value the plan has on the device (an input or a constant as
+        # it is: no host op computed it), copied.
+        def result_of(t):
+            value = next(outputs)
+            return value.cpu() if ran and t.device == "cpu" and value.device != "cpu" else value
+
+        result = _tree_map(result_of, out)
         if ran:
             # The weights it assigned, written back (functionalized: as
             # torch.compile does a mutation).
@@ -473,6 +492,7 @@ def compile(fn, device=None):
             runs=runs,
             device=target,
             run=lambda: plan.run_in(workspace, inputs),
+            scalars=scalars,
         )
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
@@ -488,7 +508,7 @@ def make_graph(fn):
 
     @functools.wraps(fn)
     def graph(*args):
-        return _trace(fn, args)[0]
+        return _trace(fn, args, _device(args, None))[0]
 
     return graph
 
@@ -759,9 +779,9 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "_var", "dtype", "shape", "weak", "grad", "_base", "_ops", "_seen", "_version")
+    __slots__ = ("graph", "_var", "dtype", "shape", "weak", "grad", "_base", "_ops", "_seen", "_version", "device")
 
-    def __init__(self, graph, var):
+    def __init__(self, graph, var, device=None):
         self.graph = graph
         self._var = var
         # A view's (torch's: ``reshape``, ``permute``, indexing): the tensor
@@ -774,6 +794,9 @@ class TracedTensor:
         self.weak = False
         # Its gradient, once ``.backward()`` computed one (torch's ``.grad``).
         self.grad = None
+        # Where it is: the trace's device, or the host (``"cpu"``: ``.cpu()``
+        # made it, or an op of host values).
+        self.device = device or (_DEVICES[-1] if _DEVICES else None)
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
         self.shape = tuple(shape)
@@ -1033,8 +1056,37 @@ class TracedTensor:
 
     # -- dtype conversion --------------------------------------------------
 
-    def to(self, dtype):
-        return self if dtype == self.dtype else prims.cast(self, dtype)
+    def to(self, *args, dtype=None, device=None, non_blocking=False, copy=False):
+        """It converted to ``dtype`` and/or on ``device`` (``Tensor.to``: a
+        dtype, a device, both, or another tensor, whose dtype it takes): on
+        the CPU, :meth:`cpu`; on another, a host value copied to the plan's
+        device (``prims.to_device``), a device value as it is."""
+        for a in args:
+            if isinstance(a, TracedTensor):
+                dtype = a.dtype
+            elif _is_device(a):
+                device = a
+            else:
+                dtype = a
+        out = self if dtype in (None, self.dtype) else prims.cast(self, dtype)
+        kind = None if device is None else str(device).split(":")[0]
+        if kind == "cpu":
+            out = out.cpu()
+        elif kind not in (None, "meta") and out.device == "cpu":
+            out = prims.to_device(out)
+        return out
+
+    def cpu(self):
+        """It on the host (``Tensor.cpu``): itself if it is there, else copied
+        there (``prims.to_host``: the plan waits for it and copies it). The
+        ops reading it run on the host, as PyTorch runs ops on CPU tensors on
+        the CPU (reading it and a device value in one op raises); returned,
+        it is a CPU tensor."""
+        if self.device == "cpu":
+            return self
+        out = prims.to_host(self)
+        out.weak = self.weak
+        return out
 
     def type_as(self, other):
         return self.to(other.dtype)

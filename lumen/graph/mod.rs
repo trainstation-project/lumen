@@ -20,6 +20,7 @@ use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
 pub use plan::{Plan, PlanOptions};
+pub(crate) use plan::{Source, Stage, Staged};
 pub use primitive::{FUSION_SEPARATOR, Primitive};
 
 use crate::DType;

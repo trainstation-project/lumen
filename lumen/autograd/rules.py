@@ -20,6 +20,10 @@ deflinear(prims.cast, lambda ct, x, new_dtype: [prims.cast(ct, x.dtype)])
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
 # A wait passes its cotangent through (PyTorch: wait_tensor's backward).
 deflinear(prims.wait, lambda ct, x: [ct])
+# A copy to the host takes its cotangent back to the device, and the other
+# way (torch's .cpu() and .to(device)).
+deflinear(prims.to_host, lambda ct, x: [prims.to_device(ct)])
+deflinear(prims.to_device, lambda ct, x: [prims.to_host(ct)])
 
 
 def _transpose_transpose(ct, x, permutation):
