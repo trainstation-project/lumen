@@ -1228,6 +1228,37 @@ def test_normalizations_train_in_one_row_kernel(f):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "f, kernels",
+    [
+        (lambda x, w, c: F.sum(F.rms_norm(x, 300, w) * c), 3),
+        (lambda x, w, c: F.sum(_layer_norm(x, w) * c), 4),
+        (lambda x, w, c: F.sum(F.softmax(x * w, -1) * c), None),
+    ],
+    ids=["rms norm", "layer norm", "softmax"],
+)
+def test_normalization_backwards_are_row_kernels(f, kernels):
+    """A normalization's backward reduces each row and applies the result
+    to the row's values, not one producer's (``dx = g·w / rms - x ·
+    Σ_row(…)``): beyond a diamond, a row fusion still, one row kernel for
+    x's gradient (a layer norm's two reductions in it), the weight's a sum
+    over rows of its own; the forward's kernels besides. The gradients the
+    CPU's."""
+    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    if kernels is not None:
+        assert len(steps) == kernels, [s["label"] for s in steps]
+    got = lumen.compile(grad)(X, W, C)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
 def test_ops_are_functions():
     """The ops are functions in lumen.functional (``import lumen.functional
     as F``), as torch's are; a traced tensor keeps only its operators, layout

@@ -560,12 +560,28 @@ fn row_kernel(
     let rows: usize = out_type.shape[..out_type.shape.len() - 1].iter().product();
     let mut e = Emitter::new(body, by_value);
     // Which values are the same across a row: the reductions', constants
-    // (index-free: no iota), one-element inputs (runtime scalars), and
-    // values of `rows` elements of those.
+    // (index-free: no iota), one-element inputs (runtime scalars), inputs of
+    // a value a row (`rows` elements, read at the row's index: a forward's
+    // saved statistics, in a backward's row fusion; not one a broadcast
+    // spreads along the row, a weight of a row's length), and values of
+    // `rows` elements of those.
+    let along_row = |v: Var| {
+        body.nodes().iter().any(|node| match &node.primitive {
+            Primitive::BroadcastInDim {
+                shape,
+                broadcast_dimensions,
+            } if node.inputs[0] == v => broadcast_dimensions
+                .iter()
+                .zip(&body.type_of(v).shape)
+                .any(|(&d, &size)| d + 1 == shape.len() && size > 1),
+            _ => false,
+        })
+    };
     let mut constant = vec![false; body.types.len()];
     for &v in body.inputs() {
-        constant[v] = body.type_of(v).numel() == 1;
-        e.invariant[v] = constant[v];
+        let numel = body.type_of(v).numel();
+        constant[v] = numel == 1;
+        e.invariant[v] = constant[v] || (numel == rows && !along_row(v));
     }
     for node in body.nodes() {
         let v = node.output;

@@ -35,6 +35,14 @@
 //! norm writes each row's `rstd` for its backward. Its broadcast too, where
 //! every other reader is a loop fusion's primitive: that fusion broadcasts
 //! the written value itself.
+//!
+//! Beyond diamonds (XLA's rewriter stops there), any row fusion
+//! ([`grown`]): an elementwise root of rows, and every fusible node before
+//! it read by its nodes alone, each a value of the rows' shape or of a row
+//! each (or a constant), reductions over a row among them, a reduction's
+//! value broadcast back along its row: a normalization's backward
+//! (`dx = g·w / rms - x · Σ_row(…)`, its row's values two, `g` and `x`,
+//! not one producer's), a softmax's (`y · (g - Σ_row(g·y))`).
 
 use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
@@ -82,7 +90,122 @@ pub(crate) fn diamonds(graph: &Graph) -> Vec<Row> {
         }
         rows.push(row);
     }
+    grown(&finder, &mut rows);
     rows
+}
+
+/// The row fusions beyond `rows` (diamonds): from each elementwise root of
+/// rows (`[rows..., n]`) not in one, last first, every node before it read
+/// by its nodes alone (no output), fusible, each a value of the root's
+/// shape, of a row each, or one element; or a reduction over a row of the
+/// root's shape (to a value of a row each); or a row fusion's root (read
+/// by its nodes alone, writing nothing else), the row fusion inside it
+/// whole (a chain: a layer norm's backward's two reductions). A diamond's
+/// root (writing nothing else) grows so too, from its nodes. One with a
+/// reduction is a row fusion: its value (of a row each) reaches the root
+/// (of rows) through a broadcast back along the row.
+fn grown(finder: &Finder, rows: &mut Vec<Row>) {
+    let graph = finder.graph;
+    let nodes = graph.nodes();
+    let mut taken = vec![false; nodes.len()];
+    for r in rows.iter() {
+        for &k in std::iter::once(&r.root).chain(&r.inner).chain(&r.reductions) {
+            taken[k] = true;
+        }
+    }
+    for i in (0..nodes.len()).rev() {
+        let root = &nodes[i];
+        // A diamond's root grows from its row (writing nothing else).
+        let own = rows.iter().position(|r| r.root == i && r.outputs.is_empty());
+        let free = !taken[i] || own.is_some();
+        if !finder.live[i] || !free || !elementwise(&root.primitive) || !fusible(graph, root) {
+            continue;
+        }
+        let ty = graph.type_of(root.output);
+        let Some(&n) = ty.shape.last() else { continue };
+        if n <= 1 {
+            continue;
+        }
+        let each = ty.numel() / n;
+        let shaped = |v: Var| {
+            let t = graph.type_of(v);
+            t.numel() == ty.numel() && t.shape.last() == Some(&n)
+        };
+        let per_row = |v: Var| graph.type_of(v).numel() == each;
+        let mut inside = vec![false; nodes.len()];
+        inside[i] = true;
+        // The row fusions it takes whole (its own, if a diamond's).
+        let mut absorbed: Vec<usize> = Vec::new();
+        if let Some(r) = own {
+            let row = &rows[r];
+            for &m in row.inner.iter().chain(&row.reductions) {
+                inside[m] = true;
+            }
+            absorbed.push(r);
+        }
+        for k in (0..i).rev() {
+            let node = &nodes[k];
+            let v = node.output;
+            let read_inside = !finder.output[v]
+                && !finder.readers[v].is_empty()
+                && finder.readers[v].iter().all(|&r| inside[r]);
+            if !finder.live[k] || inside[k] || !read_inside {
+                continue;
+            }
+            // An earlier row fusion's root (of these rows, writing nothing
+            // else): it, whole.
+            let earlier = rows
+                .iter()
+                .position(|r| r.root == k && r.outputs.is_empty() && shaped(v));
+            if let Some(r) = earlier {
+                let row = &rows[r];
+                for &m in std::iter::once(&row.root).chain(&row.inner).chain(&row.reductions) {
+                    inside[m] = true;
+                }
+                absorbed.push(r);
+                continue;
+            }
+            if taken[k] || !fusible(graph, node) {
+                continue;
+            }
+            inside[k] = match &node.primitive {
+                Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                    let x = node.inputs[0];
+                    shaped(x) && axes.as_slice() == [graph.type_of(x).shape.len() - 1] && per_row(v)
+                }
+                _ => shaped(v) || per_row(v) || graph.type_of(v).numel() == 1,
+            };
+        }
+        let is_reduction = |k: usize| {
+            matches!(
+                nodes[k].primitive,
+                Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+            )
+        };
+        let reductions: Vec<usize> = (0..i).filter(|&k| inside[k] && is_reduction(k)).collect();
+        // A diamond that took nothing more stays as it is.
+        let grew = own.is_none_or(|r| {
+            let row = &rows[r];
+            (0..i).filter(|&k| inside[k]).count() > row.inner.len() + row.reductions.len()
+        });
+        if reductions.is_empty() || !grew {
+            continue;
+        }
+        let inner: Vec<usize> = (0..i).filter(|&k| inside[k] && !is_reduction(k)).collect();
+        for &k in inner.iter().chain(&reductions).chain([&i]) {
+            taken[k] = true;
+        }
+        absorbed.sort_unstable();
+        for r in absorbed.into_iter().rev() {
+            rows.remove(r);
+        }
+        rows.push(Row {
+            root: i,
+            reductions,
+            inner,
+            outputs: Vec::new(),
+        });
+    }
 }
 
 struct Finder<'a> {
