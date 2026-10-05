@@ -549,7 +549,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!("operands of one dtype"),
             }
         }
-        Reshape { .. } => args[0].clone(),
+        Reshape { .. } | Wait => args[0].clone(),
         BroadcastInDim {
             broadcast_dimensions,
             ..
@@ -637,10 +637,10 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             gather(&values, out, |idx| ravel([idx[*dimension]], &range.shape))
         }
         RandomBits { offset, .. } => {
-            let Int(state) = args[0] else {
-                unreachable!("a uint64 state")
+            let (Int(seed), Int(start)) = (args[0], args[1]) else {
+                unreachable!("uint64 scalars")
             };
-            let (seed, start) = (state[0] as u64, (state[1] as u64).wrapping_add(*offset));
+            let (seed, start) = (seed[0] as u64, (start[0] as u64).wrapping_add(*offset));
             Int((0..out.numel() as u64)
                 .map(|i| philox_bits(seed, start.wrapping_add(i)) as i128)
                 .collect())

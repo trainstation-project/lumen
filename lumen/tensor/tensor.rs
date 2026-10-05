@@ -549,6 +549,15 @@ impl Tensor {
         }
     }
 
+    /// Wait for this tensor's value in place (PyTorch: `wait_tensor`): the
+    /// device work producing or using it has finished, so the host may read
+    /// or write it; the same tensor back. Every op touching a device
+    /// tensor's value on the host calls it first ([`crate::ops::wait`]).
+    pub fn wait_(&self) -> &Self {
+        crate::ops::wait::wait(self);
+        self
+    }
+
     /// The element at storage offset `offset`, as a 0-d view.
     fn element(&self, offset: usize) -> Self {
         Tensor {
@@ -637,6 +646,20 @@ impl Tensor {
             self.copy_into_placements(src)?;
             return Ok(self);
         }
+        // Both on MPS: a kernel copies, in stream order, with no host trip.
+        #[cfg(lumen_mps_linked)]
+        if self.device() == Device::Mps
+            && src.device() == Device::Mps
+            && self.is_contiguous()
+            && src.is_contiguous()
+        {
+            if self.numel() > 0 && self.data_ptr() != src.data_ptr() {
+                let (from, to) = (src.data_ptr().cast_const(), self.data_ptr());
+                let keep = vec![src.clone(), self.clone()];
+                crate::ops::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
+            }
+            return Ok(self);
+        }
         let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
         if self.is_contiguous() {
             copy_h2d(self, &host);
@@ -649,7 +672,7 @@ impl Tensor {
             ));
         }
         // A strided view of host-accessible memory: element by element.
-        self.storage.synchronize();
+        self.wait_();
         let size = self.dtype.size_of();
         let mut k = 0;
         for_each_index(&self.shape, |idx| {

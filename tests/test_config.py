@@ -252,7 +252,7 @@ def test_online_softmax_agrees(compiler, n):
     def run():
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             out = lumen.to_numpy(f(t))
-        (kernel,) = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
+        (kernel,) = [e["kernel"] for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
         return out, kernel
 
     online, online_kernel = run()

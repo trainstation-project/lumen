@@ -27,6 +27,7 @@ pub mod scan;
 mod tests;
 #[cfg(feature = "python")]
 pub(crate) mod tvm_ffi;
+pub mod wait;
 
 use std::any::Any;
 use std::collections::HashMap;

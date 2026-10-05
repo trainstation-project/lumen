@@ -21,11 +21,13 @@ FOR_BYTES(FULL)
 
 FOR_NUMERIC(IOTA)
 
-// Element j: philox_bits keyed by the seed at the state's offset plus
-// `offset` plus j.
-kernel void random_bits(device const ulong *state [[buffer(0)]],
-                        device uint *out [[buffer(1)]],
-                        constant ulong &offset [[buffer(2)]],
-                        ELEMENTWISE_ARGS(3)) {
-    FOR_EACH_ELEMENT(j, uint) { out[j] = philox_bits(state[0], state[1] + offset + j); }
+// Element j: philox_bits keyed by the seed at the stream's position `start`
+// plus `offset` plus j (the seed and start each a buffer's one element: a
+// fusion takes them by value).
+kernel void random_bits(device const ulong *seed [[buffer(0)]],
+                        device const ulong *start [[buffer(1)]],
+                        device uint *out [[buffer(2)]],
+                        constant ulong &offset [[buffer(3)]],
+                        ELEMENTWISE_ARGS(4)) {
+    FOR_EACH_ELEMENT(j, uint) { out[j] = philox_bits(*seed, *start + offset + j); }
 }

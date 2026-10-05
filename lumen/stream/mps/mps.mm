@@ -45,8 +45,17 @@ static void end_encoder(void) {
     encoder = nil;
 }
 
-// A sample buffer for kOpsPerCommit timed ops' GPU timestamps, or nil.
-static id<MTLCounterSampleBuffer> new_samples(id<MTLDevice> device) {
+// Metal allows 32 counter sample buffers alive at once: command buffers in
+// flight share a pool of these, each returned when its command buffer
+// completes, a new one waiting for one to return when all are in flight (a
+// host running far ahead of the GPU while profiling). Guarded by pool_lock.
+static constexpr long kSampleBuffers = 24;
+static os_unfair_lock pool_lock = OS_UNFAIR_LOCK_INIT;
+static NSMutableArray<id<MTLCounterSampleBuffer>> *free_samples = nil;
+static dispatch_semaphore_t sample_slots = nil;
+
+// A new sample buffer for kOpsPerCommit timed ops' GPU timestamps, or nil.
+static id<MTLCounterSampleBuffer> create_samples(id<MTLDevice> device) {
     if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
         return nil;
     }
@@ -60,6 +69,37 @@ static id<MTLCounterSampleBuffer> new_samples(id<MTLDevice> device) {
         }
     }
     return nil;
+}
+
+// A sample buffer from the pool (waiting while all are in flight), or nil.
+static id<MTLCounterSampleBuffer> new_samples(id<MTLDevice> device) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        free_samples = [NSMutableArray array];
+        sample_slots = dispatch_semaphore_create(kSampleBuffers);
+    });
+    dispatch_semaphore_wait(sample_slots, DISPATCH_TIME_FOREVER);
+    os_unfair_lock_lock(&pool_lock);
+    id<MTLCounterSampleBuffer> samples = free_samples.lastObject;
+    if (samples != nil) {
+        [free_samples removeLastObject];
+    }
+    os_unfair_lock_unlock(&pool_lock);
+    if (samples == nil) {
+        samples = create_samples(device);
+    }
+    if (samples == nil) {
+        dispatch_semaphore_signal(sample_slots);
+    }
+    return samples;
+}
+
+// Return a sample buffer new_samples gave, its timestamps read.
+static void return_samples(id<MTLCounterSampleBuffer> samples) {
+    os_unfair_lock_lock(&pool_lock);
+    [free_samples addObject:samples];
+    os_unfair_lock_unlock(&pool_lock);
+    dispatch_semaphore_signal(sample_slots);
 }
 
 // Commit the open command buffer; its handler calls every op's done.
@@ -97,6 +137,9 @@ static void commit(void) {
                 }
             }
             op.done(op.context, start, end, ok);
+        }
+        if (timestamps != nil) {
+            return_samples(timestamps);
         }
     }];
     [commands commit];

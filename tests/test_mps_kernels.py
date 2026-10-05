@@ -111,7 +111,11 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
         lumen.mps.synchronize()
     assert lumen.to_numpy(out).tolist() == [1, 7, 13, 19]
     assert lumen.to_numpy(y).tolist() == [1, 7, 13, 19]
-    names = [e["name"] for e in sorted(prof.events(), key=lambda e: e["start_us"]) if e["kind"] == "gpu"]
+    names = [
+        e["name"]
+        for e in sorted(prof.events(), key=lambda e: e["start_us"])
+        if e["kind"] == "gpu" and not e["name"].startswith("copy")
+    ]
     assert names == ["mul", "axpy", "mul → exp → mul"], names
 
 

@@ -532,7 +532,7 @@ fn with_bytes<R>(t: &Tensor, f: impl FnOnce(&[u8]) -> R) -> R {
         return with_bytes(&t.to(Device::Cpu), f);
     }
     // Device work writing it must finish first.
-    t.storage().synchronize();
+    t.wait_();
     // SAFETY: a contiguous tensor's n bytes from its data pointer are its
     // elements, in host-readable memory, kept alive by `t`.
     f(unsafe { std::slice::from_raw_parts(t.data_ptr().cast_const(), n) })

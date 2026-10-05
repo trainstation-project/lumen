@@ -37,8 +37,9 @@ __all__ = [
 
 # The graphs being traced, innermost last.
 _TRACES = []
-# Each trace's random state (``lumen.random``): its hidden input, made at
-# its first draw (None before), and the numbers drawn so far.
+# Each trace's random state (``lumen.random``): its hidden inputs, the seed
+# and the stream's position, made at its first draw (None before), and the
+# numbers drawn so far.
 _RNG = []
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
@@ -92,16 +93,16 @@ def _tree_leaves(x):
 
 def _random_bits(shape):
     """uint32 random bits of ``shape`` (``lumen.random``): the next run of
-    the stream, read from the trace's random state, a hidden input of the
-    graph (uint64 ``[seed, offset]``, after the weights) made at the first
-    draw."""
+    the stream, from the trace's random state: two hidden inputs of the
+    graph, after the weights, made at the first draw (the seed and the
+    stream's position, uint64 runtime scalars: kernels take them by value)."""
     graph = current_graph()
     rng = _RNG[-1]
     if rng["state"] is None:
-        rng["state"] = TracedTensor(graph, graph.input("uint64", [2]))
+        rng["state"] = [TracedTensor(graph, graph.input("uint64", [])) for _ in range(2)]
     offset = rng["drawn"]
     rng["drawn"] += math.prod(shape)
-    return prims.random_bits(rng["state"], shape, offset)
+    return prims.random_bits(*rng["state"], shape, offset)
 
 
 def current_graph():
@@ -145,7 +146,8 @@ def _trace(fn, args):
     float32 inputs, weakly typed: each takes its tensor operand's dtype),
     then the weights of the module arguments (``_weights``), each a whole
     meta tensor, then, if ``fn`` draws random numbers (``lumen.random``),
-    the random state (uint64 ``[seed, offset]``); the numbers it draws are
+    the random state (the seed and the stream's position, uint64 runtime
+    scalars); the numbers it draws are
     returned last (None if none). Precision warnings point at the line computing the value
     they are about."""
     graph = Graph()
@@ -339,10 +341,11 @@ def compile(fn, device=None):
         if key not in plans:
             plans[key] = (*_trace(fn, args), [], len(tensors), scalars)
         graph, out, _, drawn, entries, _, _ = plans[key]
-        # The random state, if it draws numbers: an input after the weights.
+        # The random state, if it draws numbers: inputs after the weights,
+        # runtime scalars.
         from lumen import random  # lazily: lumen.random imports this module
 
-        rng = [random._state()] if drawn is not None else []
+        rng = random._state() if drawn is not None else []
         weights = _weights(args)
         latest[:] = [key]
         if target == "meta":
@@ -350,6 +353,9 @@ def compile(fn, device=None):
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, tensors + weights + rng
         params = list(range(len(tensors), len(tensors) + len(weights)))
+        # The random state's scalars, after the weights.
+        start = len(tensors) + len(weights)
+        scalars = scalars + list(range(start, start + len(rng)))
         inputs = tensors + weights
 
         def inputs_for(plan):
@@ -444,8 +450,11 @@ def compile(fn, device=None):
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
         types = [graph.type_of(v) for v in graph.inputs()]
-        # The weights: the inputs after the tensors but the random state.
-        params = list(range(n_tensors, len(types) - (drawn is not None)))
+        # The weights: the inputs after the tensors but the random state,
+        # whose two scalars are runtime scalars.
+        n_rng = 2 if drawn is not None else 0
+        params = list(range(n_tensors, len(types) - n_rng))
+        scalars = scalars + list(range(len(types) - n_rng, len(types)))
         plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
         inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:

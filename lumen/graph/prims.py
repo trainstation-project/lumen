@@ -29,6 +29,7 @@ __all__ = [
     "cumsum",
     "dot_general",
     "reshape",
+    "wait",
     "broadcast_in_dim",
     "transpose",
     "slice",
@@ -154,6 +155,12 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
     )
 
 
+def wait(x):
+    """``x``, once the device work producing it has finished: the host
+    blocks until then (PyTorch: ``wait_tensor``). In place: no copy."""
+    return bind("wait", x)
+
+
 def reshape(x, new_sizes):
     return bind("reshape", x, new_sizes=tuple(new_sizes))
 
@@ -227,12 +234,12 @@ def full(shape, fill_value, dtype):
     return bind("full", shape=tuple(shape), fill_value=fill_value, dtype=dtype)
 
 
-def random_bits(state, shape, offset):
-    """uint32 random bits of ``shape``: Philox4x32-10 keyed by ``state``'s
-    seed, element ``i`` at counter ``state``'s offset plus ``offset`` plus
-    ``i`` (``state``: uint64 ``[seed, offset]``; XLA's ``RngBitGenerator``,
-    PyTorch's ``philox_rand``)."""
-    return bind("random_bits", state, shape=tuple(shape), offset=offset)
+def random_bits(seed, start, shape, offset):
+    """uint32 random bits of ``shape``: Philox4x32-10 keyed by ``seed``,
+    element ``i`` at counter ``start`` plus ``offset`` plus ``i`` (``seed``
+    and ``start``: uint64 scalars; XLA's ``RngBitGenerator``, PyTorch's
+    ``philox_rand``)."""
+    return bind("random_bits", seed, start, shape=tuple(shape), offset=offset)
 
 
 def iota(dtype, shape, dimension):

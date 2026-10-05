@@ -209,7 +209,9 @@ impl Plan {
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
-            if is_reshape(&node.primitive) {
+            // A wait's value is its operand's memory too (in place), but it
+            // is a step: the host waits there.
+            if is_reshape(&node.primitive) || matches!(node.primitive, Primitive::Wait) {
                 root[node.output] = root[node.inputs[0]];
             }
             // Each value it writes in place, with the operand position it
@@ -279,6 +281,7 @@ impl Plan {
                 Primitive::DynamicUpdateSlice
                     | Primitive::CustomCall { .. }
                     | Primitive::Reshape { .. }
+                    | Primitive::Wait
                     | Primitive::FusionOutput { .. }
             );
             let donated = graph.outputs().iter().enumerate().any(|(k, &o)| {
@@ -580,11 +583,15 @@ impl Plan {
             };
             return Ok(self.outputs.iter().map(meta).collect());
         }
-        let mut run = crate::profiler::record_op(op_name!("plan"), || self.inputs.clone());
-        run.outputs(|| self.outputs.clone());
         let inputs: Vec<Tensor> = inputs
             .iter()
-            .map(|t| dispatch_dtype!(t.dtype(), T => t.to(executor).contiguous::<T>()))
+            .zip(&self.inputs_at)
+            .map(|(t, at)| match at {
+                // Read on the host as its steps are encoded: its value, waited
+                // for (as `run_in` reads one).
+                Buffer::Scalar(_) => t.to(Device::Cpu),
+                _ => dispatch_dtype!(t.dtype(), T => t.to(executor).contiguous::<T>()),
+            })
             .collect();
         let options = |dtype| TensorOptions::new().dtype(dtype).device(executor);
         // SAFETY: every output and workspace byte a step reads was written
@@ -628,8 +635,6 @@ impl Plan {
                 workspace.numel()
             ));
         }
-        let mut run = crate::profiler::record_op(op_name!("plan"), || self.inputs.clone());
-        run.outputs(|| self.outputs.clone());
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
         // A parameter is read in place: as it is if contiguous, or if every

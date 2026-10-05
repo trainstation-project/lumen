@@ -64,6 +64,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             accum_dtype: dtype("accum_dtype")?,
             output_dtype: dtype("output_dtype")?,
         },
+        "wait" => Wait,
         "reshape" => Reshape {
             new_sizes: dims("new_sizes")?,
         },

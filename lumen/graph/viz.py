@@ -107,18 +107,17 @@ def profile_steps(plan, run, runs, device):
             by_parent.setdefault(e["parent"], []).append(e)
     nsteps = len(plan.steps())
     times = [[] for _ in range(nsteps)]  # per step, per run: [(kernel, us), ...]
-    for run in (e for e in events if e["name"] == "lumen::plan"):
-        steps = sorted(
-            (
-                e
-                for e in events
-                if e["parent"] == run["id"] and e["kind"] == "op" and not e["name"].startswith("lumen::")
-            ),
-            key=lambda e: e["start_us"],
-        )
-        if len(steps) != nsteps:
-            continue  # cannot line the ranges up with the steps
-        for i, step in enumerate(steps):
+    # Each run's steps, in order: its top-level ranges named after their
+    # primitives (lumen's own ops aside: the copies in, ...), the runs one
+    # after another.
+    ranges = sorted(
+        (e for e in events if e["kind"] == "op" and e["parent"] is None and not e["name"].startswith("lumen::")),
+        key=lambda e: e["start_us"],
+    )
+    if nsteps == 0 or len(ranges) % nsteps:
+        ranges = []  # cannot line the ranges up with the steps
+    for start in range(0, len(ranges), nsteps or 1):
+        for i, step in enumerate(ranges[start : start + nsteps]):
             gpu = sorted(by_parent.get(step["id"], []), key=lambda e: e["start_us"])
             times[i].append([(e.get("kernel") or e["name"], e["duration_us"]) for e in gpu])
     result = []

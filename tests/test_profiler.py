@@ -91,8 +91,7 @@ def test_plans_record_their_steps_types():
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         f(x, y)
     by_name = {e["name"]: e for e in prof.events()}
-    assert by_name["lumen::plan"]["inputs"] == [("int32", [2, 3])] * 2
-    assert by_name["lumen::plan"]["outputs"] == [("int32", [2])]
+    assert "lumen::plan" not in by_name  # each step its own range
     assert by_name["mul"]["inputs"] == [("int32", [2, 3])] * 2 and by_name["mul"]["outputs"] == [("int32", [2, 3])]
     assert by_name["reduce_sum"]["outputs"] == [("int32", [2])]
 
@@ -153,7 +152,7 @@ def test_device_fills_are_timed_on_the_gpu(activity):
         pytest.skip(f"{activity.value} not available in this build")
     with profile(activities=[ProfilerActivity.CPU, activity], profile_memory=True) as prof:
         lumen.zeros([1 << 16], device=activity.value)
-    gpu = [e for e in prof.events() if e["kind"] == "gpu"]
+    gpu = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     # MPS fills with its Fill compute kernel, as PyTorch does; CUDA with the
     # CuTe DSL kernel, whose name the DSL generates.
     assert len(gpu) == 1
@@ -204,7 +203,7 @@ def test_kernels_record_their_steps_types():
     f(x)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(x)
-    kernels = [e for e in prof.events() if e["kind"] == "gpu"]
+    kernels = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert kernels and all(k["outputs"] == [("float32", [4, 8])] for k in kernels)
     assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)
 
@@ -240,7 +239,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     (scaled,) = [e for n, e in ops.items() if n.endswith("mul") and "reduce" not in n]
     assert scaled["accum"] == []
     if device == "mps":
-        kernels = [e for e in prof.events() if e["kind"] == "gpu"]
+        kernels = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
         by_parent = {k["parent"]: k for k in kernels}
         assert by_parent[dot["id"]]["accum"] == ["float32"]
         path = tmp_path / "trace.json"
@@ -263,7 +262,7 @@ def test_split_reduction_launches_record_their_own_types():
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(x)
         lumen.mps.synchronize()
-    first, last = [e for e in prof.events() if e["kind"] == "gpu"]
+    first, last = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     (partials,) = first["outputs"]
     assert first["inputs"] == [("bfloat16", [4, 200_000])]
     assert partials[0] == "float32" and partials[1][0] == 4 and partials[1][1] > 1
@@ -303,10 +302,116 @@ def test_launches_are_named_after_what_they_compute():
             lumen.mps.synchronize()
         (op,) = [e for e in prof.events() if e["kind"] == "op" and "reduce_sum" in e["name"]]
         assert op["name"] == step
-        gpu = [e for e in prof.events() if e["kind"] == "gpu"]
+        gpu = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
         assert [k["name"] for k in gpu] == [name for name, _, _ in launches]
         assert all(k["parent"] == op["id"] for k in gpu)
         for k, (_, read, written) in zip(gpu, launches):
             (inp,), (out,) = k["inputs"], k["outputs"]
             assert inp == read if isinstance(read, tuple) else inp[0] == read, (k["name"], inp)
             assert out == written if isinstance(written, tuple) else out[0] == written, (k["name"], out)
+
+
+@pytest.mark.mps
+def test_kernels_queued_far_ahead_are_each_timed():
+    """Kernels queued ahead of the GPU are each timed: no two share a start
+    and duration, nor takes its command buffer's whole span (the untimed
+    fallback's times, which every op got once Metal's 32 counter sample
+    buffers were all held by command buffers in flight; now pooled). How far
+    the host gets ahead depends on the machine's load: this checks the
+    timing, not that the pool is exercised."""
+    import collections
+
+    import numpy as np
+
+    import lumen.functional as F
+
+    class Weight(lumen.nn.Module):
+        w: lumen.Tensor
+
+    model = Weight(lumen.empty([1024, 1024], device="meta"))
+
+    def chain(m, s):
+        x = m.w * s
+        for _ in range(32):
+            x = F.relu(x @ m.w) * 0.05
+        return F.sum(x)
+
+    f = lumen.compile(chain, device="mps")
+    try:
+        f(model, 1.0)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    model.load_state_dict({"w": lumen.from_numpy(np.full((1024, 1024), 1 / 1024, np.float32))})
+    # Matmuls slow enough that the host queues far ahead of the GPU.
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+        for _ in range(40):  # ~40 command buffers of 32 kernels, queued without waiting
+            f(model, 1.0)
+        lumen.mps.synchronize()
+    kernels = sorted((e for e in prof.events() if e["kind"] == "gpu"), key=lambda e: e["start_us"])
+    assert len(kernels) >= 40 * 33
+    times = collections.Counter((e["start_us"], e["duration_us"]) for e in kernels)
+    assert max(times.values()) == 1
+    # Each its own duration, not its command buffer's (32 kernels' span).
+    spans = sorted(e["duration_us"] for e in kernels)
+    assert spans[-1] < 10 * spans[len(spans) // 2]
+
+
+@pytest.mark.mps
+def test_host_waits_are_profiled():
+    """The host's waits are CPU ranges (the GPU does nothing for them):
+    ``lumen.mps.synchronize()`` as ``lumen::synchronize``, and a read of a
+    result (``item``) as ``lumen::wait`` in its transfer to the host
+    (``lumen::copy_d2h``), spanning the run's kernels."""
+    import numpy as np
+
+    f = lumen.compile(lambda x: F.sum(F.exp(x @ x)), device="mps")
+    x = lumen.from_numpy(np.ones((256, 256), np.float32) / 256)
+    try:
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+        f(x)
+        lumen.mps.synchronize()
+        f(x).item()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+    (sync,) = [e for e in events if e["name"] == "lumen::synchronize"]
+    (wait,) = [e for e in events if e["name"] == "lumen::wait"]
+    assert sync["kind"] == wait["kind"] == "op" and sync["device"] == wait["device"] == "cpu"
+    copy = by_id[wait["parent"]]
+    assert copy["name"] == "lumen::copy_d2h" and by_id[copy["parent"]]["name"] == "lumen::get"
+
+
+@pytest.mark.mps
+def test_device_transfers_are_profiled():
+    """Transfers between the host and MPS are ranges of their own: copying a
+    host input in, ``lumen::copy_h2d`` on the CPU (into staging memory, the
+    copy queued) and its ``copy_h2d`` kernel on the GPU; reading a result
+    back, ``lumen::copy_d2h`` on the CPU (a memcpy from shared memory: no
+    kernel), its ``lumen::wait`` inside it. Each the moved type in and out."""
+    import numpy as np
+
+    f = lumen.compile(lambda x: F.exp(x @ x), device="mps")
+    x = lumen.from_numpy(np.ones((64, 64), np.float32) / 64)
+    try:
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(x).tolist()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+
+    def one(name, kind):
+        (event,) = [e for e in events if e["name"] == name and e["kind"] == kind]
+        return event
+
+    h2d, d2h, wait = one("lumen::copy_h2d", "op"), one("lumen::copy_d2h", "op"), one("lumen::wait", "op")
+    assert h2d["inputs"] == h2d["outputs"] == [("float32", [64, 64])]
+    assert d2h["inputs"] == d2h["outputs"]
+    assert by_id[one("copy_h2d", "gpu")["parent"]] is h2d
+    assert by_id[wait["parent"]] is d2h
+    assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]

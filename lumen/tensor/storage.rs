@@ -92,16 +92,6 @@ impl Storage {
     pub fn data_ptr(&self) -> *mut u8 {
         self.data.as_ptr()
     }
-
-    /// Wait for device work in flight before the host touches the buffer:
-    /// MPS ops run asynchronously on the MPS stream (PyTorch syncs its
-    /// stream before host copies too).
-    pub(crate) fn synchronize(&self) {
-        #[cfg(lumen_mps_linked)]
-        if self.device == Device::Mps {
-            crate::stream::mps::synchronize();
-        }
-    }
 }
 
 /// View elements as their bytes. Sound for [`super::dtype::Element`] types, which are
