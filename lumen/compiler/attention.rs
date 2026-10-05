@@ -174,7 +174,8 @@ pub(crate) struct Backward {
     pub hv: usize,
     pub scores: Vec<Score>,
     pub causal: Option<i64>,
-    /// What `P^T (dP^T - D)` is multiplied by: the scale.
+    /// What `P^T (dP^T - D)` is multiplied by: the scale (1 if it is not,
+    /// the scores unscaled: `* 1` simplified away).
     pub ds_scale: f64,
     /// The operands' dtype, P's and dS's for their dots.
     pub dtype: DType,
@@ -869,18 +870,20 @@ impl<'a> Matcher<'a> {
             free(ty(do_).shape.len(), &[rb2, rc2])?,
         );
         let m1_out = m1.output;
-        let [m2] = self.readers[m1_out][..] else {
-            return None;
+        // Times the scale; none if it is 1 (`* 1` simplified away: scores
+        // not scaled).
+        let scaled = match self.readers[m1_out][..] {
+            [m2] if !self.output[m1_out] && matches!(nodes[m2].primitive, Mul) => {
+                let (a, b) = (nodes[m2].inputs[0], nodes[m2].inputs[1]);
+                let c = match a == m1_out {
+                    true => self.scalar(b),
+                    false => self.scalar(a),
+                };
+                c.map(|c| (c, nodes[m2].output))
+            }
+            _ => None,
         };
-        if self.output[m1_out] || !matches!(nodes[m2].primitive, Mul) {
-            return None;
-        }
-        let (a, b) = (nodes[m2].inputs[0], nodes[m2].inputs[1]);
-        let ds_scale = match a == m1_out {
-            true => self.scalar(b)?,
-            false => self.scalar(a)?,
-        };
-        let mut ds = nodes[m2].output;
+        let (ds_scale, mut ds) = scaled.unwrap_or((1.0, m1_out));
         if let [c] = self.readers[ds][..]
             && !self.output[ds]
             && matches!(nodes[c].primitive, Cast { .. })

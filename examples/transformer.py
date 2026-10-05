@@ -63,9 +63,14 @@ class Attention(lumen.nn.Module):
         tokens, dim = x.shape
         h = F.rms_norm(x, dim, self.norm)
         # [batch, seq, heads, head dim], as flash attention takes them.
-        q, k, v = ((h @ w).reshape(batch, tokens // batch, HEADS, dim // HEADS) for w in (self.wq, self.wk, self.wv))
+        # x @ w.t() (``nn.Linear``'s), one dot of the three: their weights
+        # one [3 * dim, dim] block (PyTorch's fused QKV weight), each a
+        # contiguous part of it the optimizer updates in place.
+        q, k, v = (
+            (h @ w.t()).reshape(batch, tokens // batch, HEADS, dim // HEADS) for w in (self.wq, self.wk, self.wv)
+        )
         a = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
-        return a.reshape(tokens, dim) @ self.wo
+        return a.reshape(tokens, dim) @ self.wo.t()
 
 
 class MLP(lumen.nn.Module):
@@ -77,7 +82,7 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        return F.relu(F.rms_norm(x, x.shape[-1], self.norm) @ self.w1) @ self.w2
+        return F.relu(F.rms_norm(x, x.shape[-1], self.norm) @ self.w1.t()) @ self.w2.t()
 
 
 class Block(lumen.nn.Module):
@@ -105,7 +110,7 @@ class Transformer(lumen.nn.Module):
         h = self.embed(ids)
         for layer in self.layers:
             h = layer(h, ids.shape[0], dropout_p)
-        return F.rms_norm(h, DIM, self.norm) @ self.head
+        return F.rms_norm(h, DIM, self.norm) @ self.head.t()
 
 
 @lumen.profiler.record_function("loss")
@@ -138,12 +143,12 @@ model = Transformer(
     layers=[
         Block(
             Attention(meta(DIM), meta(DIM, DIM), meta(DIM, DIM), meta(DIM, DIM), meta(DIM, DIM)),
-            MLP(meta(DIM), meta(DIM, HIDDEN), meta(HIDDEN, DIM)),
+            MLP(meta(DIM), meta(HIDDEN, DIM), meta(DIM, HIDDEN)),
         )
         for _ in range(LAYERS)
     ],
     norm=meta(DIM),
-    head=meta(DIM, VOCAB),
+    head=meta(VOCAB, DIM),
 )
 opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 
@@ -162,7 +167,7 @@ def init(name, shape):
     # Norm scales one; matrices normal, scaled by 1 / sqrt(fan in).
     if len(shape) == 1:
         return np.ones(shape, np.float32)
-    return (rng.standard_normal(shape) / np.sqrt(shape[0])).astype(np.float32)
+    return (rng.standard_normal(shape) / np.sqrt(shape[1])).astype(np.float32)
 
 
 model.load_state_dict({name: lumen.from_numpy(init(name, w.shape)) for name, w in model.named_parameters()})

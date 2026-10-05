@@ -468,3 +468,48 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
             e["name"] for e in json.loads(path.read_text())["traceEvents"] if e.get("cat") == "gpu_user_annotation"
         ]
         assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_holds_its_ops_gradients_as_backward(device):
+    """The gradient ops of what a ``record_function`` range traced run in
+    ``name (backward)``, nested as the forward's (each range of the
+    forward's scope), after the forward's ranges: the matmul's gradient in
+    ``outer (backward)`` / ``inner (backward)``."""
+
+    def f(x, w):
+        with record_function("outer"):
+            with record_function("inner"):
+                y = x @ w
+            z = F.exp(F.sum(y, -1))
+        return F.sum(z)
+
+    try:
+        g = lumen.compile(lumen.grad(f, (0, 1)), device=device)
+        x, w = lumen.full([16, 16], 0.01).to(device), lumen.full([16, 16], 0.01).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+
+    def ranges(e):
+        names = []
+        while e.get("parent") in by_id:
+            e = by_id[e["parent"]]
+            names.append(e["name"])
+        return names[::-1]
+
+    dots = [ranges(e) for e in events if e["kind"] == "op" and e["name"] == "dot_general"]
+    assert dots == [
+        ["outer", "inner"],
+        ["outer (backward)", "inner (backward)"],
+        ["outer (backward)", "inner (backward)"],
+    ], dots
+    names = [e["name"] for e in events if e["kind"] == "user_range"]
+    assert names[:2] == ["outer", "inner"] and set(names[2:]) == {"outer (backward)", "inner (backward)"}, names

@@ -18,6 +18,7 @@ Convert with ``.to(dtype)``.
 """
 
 import builtins
+import contextlib
 import dataclasses
 import functools
 import math
@@ -47,6 +48,9 @@ _DEVICES = []
 # outermost first: the scope of the nodes traced inside them, whose steps
 # the profiler shows inside them when the plan runs.
 _SCOPES = []
+# Each trace's values' scopes (a tuple of range names), those traced inside
+# a range: their gradient ops' are each name's backward (``_backward_scope``).
+_SCOPE_OF = []
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -75,6 +79,8 @@ def _record(name, inputs, params, var):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+    if _SCOPES and _SCOPES[-1]:
+        _SCOPE_OF[-1][var] = tuple(_SCOPES[-1])
 
 
 def _is_device(x):
@@ -132,6 +138,27 @@ def _exit_scope():
     if _TRACES:
         _SCOPES[-1].pop()
         _TRACES[-1]._set_scope(_SCOPES[-1])
+
+
+def _backward_scope(var, base):
+    """The scope of value ``var``'s gradient ops: ``base`` (the ranges open
+    where the backward runs), then each range ``var`` was traced in as
+    ``name (backward)``."""
+    return tuple(base) + tuple(f"{name} (backward)" for name in _SCOPE_OF[-1].get(var, ()))
+
+
+@contextlib.contextmanager
+def _scope(names):
+    """Trace inside the ``record_function`` ranges ``names`` (outermost
+    first), the open ones back after."""
+    saved = list(_SCOPES[-1])
+    _SCOPES[-1][:] = names
+    _TRACES[-1]._set_scope(_SCOPES[-1])
+    try:
+        yield
+    finally:
+        _SCOPES[-1][:] = saved
+        _TRACES[-1]._set_scope(saved)
 
 
 def current_graph():
@@ -213,6 +240,7 @@ def _trace(fn, args, device):
 
     _TRACES.append(graph)
     _SCOPES.append([])
+    _SCOPE_OF.append({})
     _DEVICES.append(device)
     _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
@@ -224,6 +252,7 @@ def _trace(fn, args, device):
     finally:
         _TRACES.pop()
         _SCOPES.pop()
+        _SCOPE_OF.pop()
         _DEVICES.pop()
         rng = _RNG.pop()
         _SOURCES.pop()
