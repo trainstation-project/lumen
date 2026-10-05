@@ -206,24 +206,46 @@ fn set_value(t: &Tensor, index: &[usize], value: &Bound<'_, PyAny>) -> PyResult<
     Ok(())
 }
 
-fn build_nested<'py, T>(py: Python<'py>, flat: &[T], shape: &[usize]) -> PyResult<Py<PyAny>>
+/// The nested lists of `shape` (a one-element list for a 0-d tensor) whose
+/// elements are `convert` of the values at `base` and `strides` (in
+/// elements): host memory, read in place, a Python number an element.
+fn nested_list<'py, T, P>(
+    py: Python<'py>,
+    base: *const T,
+    shape: &[usize],
+    strides: &[usize],
+    convert: &impl Fn(T) -> P,
+) -> PyResult<Py<PyAny>>
 where
-    T: Copy + IntoPyObject<'py>,
+    T: Copy,
+    P: IntoPyObject<'py>,
 {
-    if shape.len() <= 1 {
-        return Ok(PyList::new(py, flat.iter().copied())?.into_any().unbind());
+    // SAFETY (each read): `base` and the offsets the strides give stay in
+    // the host storage of the tensor `tolist` holds; elements are plain
+    // data of type `T`. `wrapping_add`: the memory is not an allocation
+    // Rust knows about (`Tensor::data_ptr`).
+    let read = |p: *const T| convert(unsafe { p.read_unaligned() });
+    match shape {
+        [] => Ok(PyList::new(py, [read(base)])?.into_any().unbind()),
+        [n] => {
+            let items = (0..*n).map(|i| read(base.wrapping_add(i * strides[0])));
+            Ok(PyList::new(py, items)?.into_any().unbind())
+        }
+        [n, inner @ ..] => {
+            let rows = (0..*n)
+                .map(|i| {
+                    nested_list(
+                        py,
+                        base.wrapping_add(i * strides[0]),
+                        inner,
+                        &strides[1..],
+                        convert,
+                    )
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(py, rows)?.into_any().unbind())
+        }
     }
-    // By row index: a zero-size inner dimension still has shape[0] rows.
-    let stride: usize = shape[1..].iter().product();
-    let mut rows = Vec::with_capacity(shape[0]);
-    for i in 0..shape[0] {
-        rows.push(build_nested(
-            py,
-            &flat[i * stride..(i + 1) * stride],
-            &shape[1..],
-        )?);
-    }
-    Ok(PyList::new(py, rows)?.into_any().unbind())
 }
 
 // ---------------------------------------------------------------------
@@ -616,39 +638,31 @@ impl PyTensor {
     /// element.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         has_data(&self.inner)?;
-        let shape = self.inner.shape();
-        match self.inner.dtype() {
-            DType::F32 => build_nested(py, &self.inner.to_vec::<f32>(), shape),
-            DType::F64 => build_nested(py, &self.inner.to_vec::<f64>(), shape),
-            DType::F16 => build_nested(
-                py,
-                &self
-                    .inner
-                    .to_vec::<f16>()
-                    .iter()
-                    .map(|v| v.to_f64())
-                    .collect::<Vec<_>>(),
-                shape,
-            ),
-            DType::BF16 => build_nested(
-                py,
-                &self
-                    .inner
-                    .to_vec::<bf16>()
-                    .iter()
-                    .map(|v| v.to_f64())
-                    .collect::<Vec<_>>(),
-                shape,
-            ),
-            DType::I8 => build_nested(py, &self.inner.to_vec::<i8>(), shape),
-            DType::I16 => build_nested(py, &self.inner.to_vec::<i16>(), shape),
-            DType::I32 => build_nested(py, &self.inner.to_vec::<i32>(), shape),
-            DType::I64 => build_nested(py, &self.inner.to_vec::<i64>(), shape),
-            DType::U8 => build_nested(py, &self.inner.to_vec::<u8>(), shape),
-            DType::U16 => build_nested(py, &self.inner.to_vec::<u16>(), shape),
-            DType::U32 => build_nested(py, &self.inner.to_vec::<u32>(), shape),
-            DType::U64 => build_nested(py, &self.inner.to_vec::<u64>(), shape),
-            DType::Bool => build_nested(py, &self.inner.to_vec::<bool>(), shape),
+        // `cpu`: one copy of the memory its view covers to the host (none if
+        // there already), its layout kept; then one pass, reading it in
+        // place.
+        let host = self.inner.to(core::Device::Cpu);
+        let (shape, strides) = (host.shape(), host.strides());
+        let ptr = host.data_ptr().cast_const();
+        fn same<T>(v: T) -> T {
+            v
+        }
+        match host.dtype() {
+            DType::F32 => nested_list(py, ptr.cast::<f32>(), shape, strides, &same),
+            DType::F64 => nested_list(py, ptr.cast::<f64>(), shape, strides, &same),
+            DType::F16 => nested_list(py, ptr.cast::<f16>(), shape, strides, &|v: f16| v.to_f64()),
+            DType::BF16 => nested_list(py, ptr.cast::<bf16>(), shape, strides, &|v: bf16| {
+                v.to_f64()
+            }),
+            DType::I8 => nested_list(py, ptr.cast::<i8>(), shape, strides, &same),
+            DType::I16 => nested_list(py, ptr.cast::<i16>(), shape, strides, &same),
+            DType::I32 => nested_list(py, ptr.cast::<i32>(), shape, strides, &same),
+            DType::I64 => nested_list(py, ptr.cast::<i64>(), shape, strides, &same),
+            DType::U8 => nested_list(py, ptr.cast::<u8>(), shape, strides, &same),
+            DType::U16 => nested_list(py, ptr.cast::<u16>(), shape, strides, &same),
+            DType::U32 => nested_list(py, ptr.cast::<u32>(), shape, strides, &same),
+            DType::U64 => nested_list(py, ptr.cast::<u64>(), shape, strides, &same),
+            DType::Bool => nested_list(py, ptr.cast::<bool>(), shape, strides, &same),
         }
     }
 
