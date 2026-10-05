@@ -187,6 +187,13 @@ impl PyGraph {
         map
     }
 
+    /// Give the nodes added from now on the `record_function` ranges
+    /// `names` (outermost first) as their scope ([`crate::graph::Node::scope`]).
+    fn _set_scope(&mut self, names: Vec<String>) {
+        let names: Vec<&'static str> = names.into_iter().map(crate::graph::intern).collect();
+        self.inner.set_scope(crate::graph::intern_scope(&names));
+    }
+
     /// The attentions traced so far (the compiler's matcher, as it runs
     /// them as flash attention), each a dict: its dots' operands `q`, `k`,
     /// `v` (values), its `scores` (the first dot's) and `out` (the second

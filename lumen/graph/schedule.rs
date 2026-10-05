@@ -210,6 +210,7 @@ impl Graph {
             inputs: self.inputs.clone(),
             nodes: order.iter().map(|&i| self.nodes[i].clone()).collect(),
             outputs: self.outputs.clone(),
+            scope: self.scope,
         }
     }
 }

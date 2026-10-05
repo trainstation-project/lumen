@@ -43,6 +43,10 @@ _TRACES = []
 _RNG = []
 # Each trace's device: where its values are, unless on the host (``.cpu()``).
 _DEVICES = []
+# Each trace's open ``record_function`` ranges (``lumen.profiler``),
+# outermost first: the scope of the nodes traced inside them, whose steps
+# the profiler shows inside them when the plan runs.
+_SCOPES = []
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -113,6 +117,21 @@ def _random_bits(shape):
     offset = rng["drawn"]
     rng["drawn"] += math.prod(shape)
     return prims.random_bits(*rng["state"], shape, offset)
+
+
+def _enter_scope(name):
+    """Open ``record_function`` range ``name`` in the trace, if one is
+    running: the nodes traced until it closes are in it."""
+    if _TRACES:
+        _SCOPES[-1].append(name)
+        _TRACES[-1]._set_scope(_SCOPES[-1])
+
+
+def _exit_scope():
+    """Close the trace's innermost ``record_function`` range, if one runs."""
+    if _TRACES:
+        _SCOPES[-1].pop()
+        _TRACES[-1]._set_scope(_SCOPES[-1])
 
 
 def current_graph():
@@ -193,6 +212,7 @@ def _trace(fn, args, device):
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
     _TRACES.append(graph)
+    _SCOPES.append([])
     _DEVICES.append(device)
     _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
@@ -203,6 +223,7 @@ def _trace(fn, args, device):
         out = fn(*traced)
     finally:
         _TRACES.pop()
+        _SCOPES.pop()
         _DEVICES.pop()
         rng = _RNG.pop()
         _SOURCES.pop()

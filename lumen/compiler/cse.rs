@@ -21,6 +21,7 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
     }
     let mut seen = Seen::new();
     for node in graph.nodes() {
+        out.set_scope(node.scope);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         // A custom op's function is opaque: each call made, as written.
         if let Primitive::CustomCall { .. } = node.primitive {

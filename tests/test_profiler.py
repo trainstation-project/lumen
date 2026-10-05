@@ -415,3 +415,56 @@ def test_device_transfers_are_profiled():
     assert by_id[one("copy_h2d", "gpu")["parent"]] is h2d
     assert by_id[wait["parent"]] is d2h
     assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_inside_a_compiled_function(device, tmp_path):
+    """A ``record_function`` range inside a compiled function (with or as a
+    decorator) holds the steps of the ops traced in it each time the plan
+    runs, nested as traced, one range a call; a fused kernel is in its main
+    op's (a reduction's, not its epilogue's); with MPS, each range's
+    kernels span it on the device timeline too."""
+
+    @record_function("inner")
+    def inner(x, w):
+        return x @ w
+
+    def f(x, w):
+        with record_function("outer"):
+            y = inner(x, w)
+            z = F.exp(F.sum(y, -1))
+        return z + 1.0
+
+    try:
+        g = lumen.compile(f, device=device)
+        x, w = lumen.ones([16, 16]).to(device), lumen.ones([16, 16]).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        for _ in range(2):
+            g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+    parent = lambda e: by_id.get(e["parent"], {}).get("name")  # noqa: E731
+    ranges = [(e["name"], parent(e)) for e in events if e["kind"] == "user_range"]
+    assert ranges == [("outer", None), ("inner", "outer")] * 2, ranges
+    steps = {e["name"]: parent(e) for e in events if e["kind"] == "op" and not e["name"].startswith("lumen::")}
+    # On MPS the sum, exp and add one kernel, in the sum's range; on the
+    # CPU each its own step, the add outside the range.
+    want = (
+        {"reduce_sum → exp → add": "outer"}
+        if device == "mps"
+        else {"reduce_sum": "outer", "exp": "outer", "add": None}
+    )
+    assert {k: steps.get(k, "missing") for k in ["dot_general", *want]} == {"dot_general": "inner", **want}, steps
+    if device == "mps":
+        path = tmp_path / "trace.json"
+        prof.export_chrome_trace(str(path))
+        spans = [
+            e["name"] for e in json.loads(path.read_text())["traceEvents"] if e.get("cat") == "gpu_user_annotation"
+        ]
+        assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans

@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use super::{Graph, Node, Primitive, TensorType, Var};
+use super::{Graph, Node, Primitive, Scope, TensorType, Var};
 use crate::ops::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
@@ -65,6 +65,45 @@ pub struct Step {
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
+    /// The `record_function` ranges its node was traced in: the profiler
+    /// shows the step inside them ([`OpenScopes`]).
+    pub scope: Scope,
+}
+
+/// The `record_function` ranges a plan's steps were traced in, open while
+/// they run (with a profiler running): each step's opened if not open yet,
+/// those it is not in closed, so consecutive steps of one scope share one
+/// range (a call of the function traced in it, as it ran uncompiled).
+#[derive(Default)]
+struct OpenScopes {
+    scope: Scope,
+    ranges: Vec<crate::profiler::RecordGuard>,
+}
+
+impl OpenScopes {
+    /// Open `scope`'s ranges, closing the open ones it is not in.
+    fn enter(&mut self, scope: Scope) {
+        let common = self
+            .scope
+            .iter()
+            .zip(scope)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // The innermost first.
+        while self.ranges.len() > common {
+            self.ranges.pop();
+        }
+        for name in &scope[common..] {
+            self.ranges.push(crate::profiler::record_function(*name));
+        }
+        self.scope = scope;
+    }
+}
+
+impl Drop for OpenScopes {
+    fn drop(&mut self) {
+        self.enter(&[]);
+    }
 }
 
 /// The scratch bytes a step's kernel needs while it runs, from its
@@ -557,6 +596,7 @@ impl Plan {
                     outputs.into_iter().map(|(_, v)| slot(v)).collect()
                 },
                 scratch,
+                scope: node.scope,
             })
             .collect();
         for (k, v) in copies {
@@ -570,6 +610,7 @@ impl Plan {
                 output: (Buffer::Output(k), ty(v)),
                 extra_outputs: Vec::new(),
                 scratch: None,
+                scope: &[],
             });
         }
         Plan {
@@ -954,7 +995,11 @@ impl Plan {
         {
             return Err("operands read as views run on MPS only".into());
         }
+        let mut scopes = crate::profiler::is_enabled().then(OpenScopes::default);
         for step in &self.steps {
+            if let Some(scopes) = &mut scopes {
+                scopes.enter(step.scope);
+            }
             if let Primitive::CustomCall {
                 kernel,
                 mutated,

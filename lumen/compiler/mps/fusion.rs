@@ -417,6 +417,10 @@ pub(crate) fn fuse(
         var[v] = fused.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        // Its scope its main node's: a contraction's or reduction's with an
+        // epilogue (the work, not the epilogue's end), else its root's.
+        let main = dot_of[i].or(epilogue[i]).unwrap_or(i);
+        fused.set_scope(nodes[main].scope);
         // A hosted value is its host fusion's output.
         if !live[i] || !root[i] || host[i].is_some() {
             continue;

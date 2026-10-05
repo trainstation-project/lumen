@@ -173,19 +173,30 @@ class profile:
 class record_function:
     """Time a named range; lumen ops inside it nest under it (PyTorch:
     ``torch.profiler.record_function``). Use as a ``with`` block or a
-    decorator. Free when no profiler is running."""
+    decorator. Free when no profiler is running.
+
+    Inside a compiled function (while ``lumen.compile`` traces it), the ops
+    traced in the range are in it: when the plan runs, the profiler shows
+    their steps (kernels) inside a range of that name, one each time the
+    plan runs through them, as uncompiled code would."""
 
     def __init__(self, name):
         self.name = name
         self._handle = None
 
     def __enter__(self):
+        from lumen.graph import tracer  # it imports lumen.profiler's package
+
+        tracer._enter_scope(self.name)
         self._handle = _C._record_function_enter(self.name)
         return self
 
     def __exit__(self, *exc):
+        from lumen.graph import tracer
+
         self._handle.exit()
         self._handle = None
+        tracer._exit_scope()
         return False
 
     def __call__(self, fn):

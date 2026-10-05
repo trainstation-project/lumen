@@ -139,6 +139,7 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
         if let Some(k) = first_of[i] {
             let g = &groups[k];
             let others: Vec<Var> = g

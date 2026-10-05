@@ -291,6 +291,7 @@ pub(crate) fn fuse_backward(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
         // A fusion's output: the fusion's. Any other node as it is (before
         // the fusions placed at it).
         if !fusions.iter().any(|(_, outs, _)| outs.contains(&i)) {
@@ -445,6 +446,7 @@ pub(crate) fn fuse(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
         // A log-sum-exp after its attention: the fusion's output already.
         if found
             .iter()
@@ -485,6 +487,8 @@ pub(crate) fn fuse(
             std::iter::once("flash_attention").chain(chain.iter().map(|&n| graph.label(&nodes[n])));
         let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
+        // Under the attention's scope, not its epilogue's end's.
+        out.set_scope(nodes[a.root].scope);
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out
             .apply(fusion, &reads)

@@ -80,6 +80,7 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
                 primitive: node.primitive.clone(),
                 inputs,
                 output: copy,
+                scope: node.scope,
             },
         );
         copies.push((node.output, copy));
