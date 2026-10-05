@@ -593,8 +593,8 @@ fn philox_matches_random123() {
     }
 }
 
-/// random_bits' element `i` is Philox's at counter `offset' + offset + i`
-/// (the state's offset, the primitive's): a draw is a run of one stream,
+/// random_bits' element `i` is Philox's at counter `start + offset + i`
+/// (its operand's position, the primitive's): a draw is a run of one stream,
 /// so draws at offsets apart by a draw's size never overlap, and one
 /// starting inside another repeats its numbers.
 #[test]
@@ -602,15 +602,17 @@ fn random_bits_are_a_counter_stream() {
     use crate::ops::reference::philox_bits;
     let draw = |offset: u64, shape: &[usize]| {
         let mut g = Graph::new();
-        let state = g.input(ty(DType::U64, &[2]));
+        let seed = g.input(ty(DType::U64, &[]));
+        let start = g.input(ty(DType::U64, &[]));
         let bits = RandomBits {
             shape: shape.to_vec(),
             offset,
         };
-        let r = g.apply(bits, &[state]).unwrap();
+        let r = g.apply(bits, &[seed, start]).unwrap();
         g.set_outputs(&[r]).unwrap();
-        let state = Tensor::from_slice(&[42u64 << 40 | 7, 1000], DType::U64);
-        reference::run(&g, &[state])
+        let seed = Tensor::from_slice(&[42u64 << 40 | 7], DType::U64).reshape(&[]);
+        let start = Tensor::from_slice(&[1000u64], DType::U64).reshape(&[]);
+        reference::run(&g, &[seed, start])
             .unwrap()
             .remove(0)
             .to_vec::<u32>()
@@ -1538,9 +1540,11 @@ pub(crate) mod mps {
     }
 
     /// random_bits on MPS agrees with the reference, bit for bit: alone
-    /// (its own kernel) and fused into what reads it (a uniform float, a
-    /// comparison: dropout's), through a counter crossing 2^32 (the carry
-    /// into its high word), at the state's offset plus the primitive's.
+    /// (its own kernel, the seed and start read from buffers) and fused into
+    /// what reads it (a uniform float, a comparison: dropout's), the seed
+    /// and start read from buffers or taken by value (runtime scalars, as
+    /// compiled functions pass them), through a counter crossing 2^32 (the
+    /// carry into its high word), at the start plus the primitive's offset.
     #[test]
     fn random_bits_run_on_mps() {
         if !available() {
@@ -1549,12 +1553,13 @@ pub(crate) mod mps {
         for shape in [&[7][..], &[1000, 33]] {
             for fused in [false, true] {
                 let mut g = Graph::new();
-                let state = g.input(ty(DType::U64, &[2]));
+                let seed = g.input(ty(DType::U64, &[]));
+                let start = g.input(ty(DType::U64, &[]));
                 let bits = RandomBits {
                     shape: shape.to_vec(),
                     offset: 3,
                 };
-                let r = g.apply(bits, &[state]).unwrap();
+                let r = g.apply(bits, &[seed, start]).unwrap();
                 let outputs = match fused {
                     false => vec![r],
                     true => {
@@ -1573,9 +1578,22 @@ pub(crate) mod mps {
                     }
                 };
                 g.set_outputs(&outputs).unwrap();
-                let state =
-                    Tensor::from_slice(&[0xDEAD_BEEF_0123_4567u64, 0xFFFF_FFF0], DType::U64);
-                check(&g, &[state]);
+                let scalar = |v: u64| Tensor::from_slice(&[v], DType::U64).reshape(&[]);
+                let inputs = [scalar(0xDEAD_BEEF_0123_4567), scalar(0xFFFF_FFF0)];
+                check(&g, &inputs);
+                if fused {
+                    let expected = reference::run(&g, &inputs).unwrap();
+                    let options = crate::compiler::Options {
+                        scalars: vec![true, true],
+                        ..Default::default()
+                    };
+                    let plan = crate::compiler::compile_with(&g, Device::Mps, &options).unwrap();
+                    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps)).collect();
+                    let actual = plan.run_on(&on_mps, Device::Mps).unwrap();
+                    for (e, a) in expected.iter().zip(&actual) {
+                        assert_eq!(as_f64(e), as_f64(a), "{plan}");
+                    }
+                }
             }
         }
     }

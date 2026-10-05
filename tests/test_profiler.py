@@ -91,8 +91,7 @@ def test_plans_record_their_steps_types():
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         f(x, y)
     by_name = {e["name"]: e for e in prof.events()}
-    assert by_name["lumen::plan"]["inputs"] == [("int32", [2, 3])] * 2
-    assert by_name["lumen::plan"]["outputs"] == [("int32", [2])]
+    assert "lumen::plan" not in by_name  # each step its own range
     assert by_name["mul"]["inputs"] == [("int32", [2, 3])] * 2 and by_name["mul"]["outputs"] == [("int32", [2, 3])]
     assert by_name["reduce_sum"]["outputs"] == [("int32", [2])]
 

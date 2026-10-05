@@ -119,11 +119,12 @@ def _between_calls(name):
 
 
 def _state():
-    """The generator's state as a compiled function's hidden input: uint64
-    ``[seed, offset]``."""
+    """The generator's state as a compiled function's hidden inputs: its
+    seed and offset, uint64 scalars (runtime scalars: kernels take them by
+    value, nothing copied to the device)."""
     from lumen.tensor import Tensor
 
-    return Tensor([_seed, _offset], dtype="uint64")
+    return [Tensor(_seed, dtype="uint64"), Tensor(_offset, dtype="uint64")]
 
 
 def _advance(drawn):

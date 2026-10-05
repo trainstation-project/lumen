@@ -1040,10 +1040,11 @@ impl<'a> Emitter<'a> {
                         return name;
                     }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
-                    // The state's two words, at its own indices.
+                    // The seed and the stream's position: by value (runtime
+                    // scalars), or each a buffer's one element.
                     RandomBits { offset, .. } => {
                         let seed = self.value(node.inputs[0], "0".into());
-                        let start = self.value(node.inputs[0], "1".into());
+                        let start = self.value(node.inputs[1], "0".into());
                         format!("philox_bits({seed}, {start} + {offset}ul + ulong({idx}))")
                     }
                     Iota { dimension, .. } => {

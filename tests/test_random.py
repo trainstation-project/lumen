@@ -345,3 +345,23 @@ def test_fork_rng():
     np.testing.assert_array_equal(inside, first)
     np.testing.assert_array_equal(after, first)
     assert lumen.get_rng_state().tolist()[8:] == [5, 0, 0, 0, 0, 0, 0, 0]
+
+
+@pytest.mark.mps
+def test_random_state_is_passed_by_value():
+    """The generator's seed and position reach kernels by value (runtime
+    scalars, as PyTorch passes its generator's): a compiled function that
+    drops out copies its input to MPS and nothing else."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    f = lumen.compile(lambda x: F.dropout(x, 0.5) * 2.0, device="mps")
+    x = lumen.from_numpy(np.ones(1024, np.float32))
+    try:
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(x)
+        lumen.mps.synchronize()
+    copies = [e["inputs"] for e in prof.events() if e["name"] == "lumen::copy_h2d"]
+    assert copies == [[("float32", [1024])]]

@@ -124,12 +124,13 @@ pub enum Primitive {
     },
     /// Random bits (XLA's `RngBitGenerator` with Philox, as PyTorch's
     /// `philox_rand`): element `i` (row-major) the first word of the
-    /// Philox4x32-10 block (Random123) keyed by the state's seed, at
-    /// counter `offset + offset' + i`, the state `[seed, offset']`
-    /// (uint64[2]). Counter-based: each element computed from its index
-    /// alone, so it fuses into its consumer (dropout's mask is never
-    /// stored), and a call's numbers are its counters' (the caller
-    /// advances `offset'` past them).
+    /// Philox4x32-10 block (Random123) keyed by its first operand, the seed,
+    /// at counter `start + offset + i`, its second the stream's position
+    /// `start` (each a uint64 scalar: kernels take them by value, as PyTorch
+    /// passes its generator's seed and offset). Counter-based: each element
+    /// computed from its index alone, so it fuses into its consumer
+    /// (dropout's mask is never stored), and a call's numbers are its
+    /// counters' (the caller advances `start` past them).
     RandomBits {
         shape: Vec<usize>,
         offset: u64,
@@ -233,6 +234,7 @@ impl Primitive {
         use Primitive::*;
         let arity = match self {
             Full { .. } | Iota { .. } => 0,
+            RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } => 2,
             Select => 3,
             Fusion { body, .. } => body.inputs().len(),
@@ -486,10 +488,11 @@ impl Primitive {
                 }
             }
             RandomBits { shape, .. } => {
-                if args[0].dtype != DType::U64 || args[0].shape != [2] {
+                let scalar = |t: &TensorType| t.dtype == DType::U64 && t.shape.is_empty();
+                if !args.iter().all(|t| scalar(t)) {
                     return err(format!(
-                        "needs a uint64[2] state (seed, offset), got {}",
-                        args[0]
+                        "needs uint64 scalars (seed, start), got {} and {}",
+                        args[0], args[1]
                     ));
                 }
                 Ok(TensorType::new(DType::U32, shape))

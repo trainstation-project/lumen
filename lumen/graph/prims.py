@@ -234,12 +234,12 @@ def full(shape, fill_value, dtype):
     return bind("full", shape=tuple(shape), fill_value=fill_value, dtype=dtype)
 
 
-def random_bits(state, shape, offset):
-    """uint32 random bits of ``shape``: Philox4x32-10 keyed by ``state``'s
-    seed, element ``i`` at counter ``state``'s offset plus ``offset`` plus
-    ``i`` (``state``: uint64 ``[seed, offset]``; XLA's ``RngBitGenerator``,
-    PyTorch's ``philox_rand``)."""
-    return bind("random_bits", state, shape=tuple(shape), offset=offset)
+def random_bits(seed, start, shape, offset):
+    """uint32 random bits of ``shape``: Philox4x32-10 keyed by ``seed``,
+    element ``i`` at counter ``start`` plus ``offset`` plus ``i`` (``seed``
+    and ``start``: uint64 scalars; XLA's ``RngBitGenerator``, PyTorch's
+    ``philox_rand``)."""
+    return bind("random_bits", seed, start, shape=tuple(shape), offset=offset)
 
 
 def iota(dtype, shape, dimension):
