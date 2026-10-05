@@ -9,7 +9,7 @@ use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
 use crate::graph::TensorType;
-use crate::ops::copy::{copy_d2h, copy_h2d};
+use crate::ops::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
 
 /// The device `options` name, CPU if unset.
