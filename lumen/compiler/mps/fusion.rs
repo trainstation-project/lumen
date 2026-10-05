@@ -53,6 +53,10 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Iota { .. }
             | RandomBits { .. }
     );
+    // A gather reads its operand at an index of the indices' value (an
+    // embedding's lookup), which the kernel indexes in 32 bits.
+    let gather = matches!(node.primitive, Gather { .. })
+        && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     // A reduction fuses the primitives computing its input (XLA's reduce
     // input fusion), whose elements it indexes in 32 bits.
     let reduction = matches!(node.primitive, ReduceSum { .. } | ReduceMax { .. })
@@ -63,7 +67,7 @@ pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
         .iter()
         .chain([&node.output])
         .any(|&v| graph.type_of(v).dtype == DType::F64);
-    (loop_op || reduction) && !f64
+    (loop_op || gather || reduction) && !f64
 }
 
 /// Whether `node` is a reduction: a fusion's root, never computed inside
@@ -208,7 +212,9 @@ pub(crate) fn fuse(
         }
     }
     // A contraction's epilogue (XLA's GEMM epilogue fusion): the
-    // elementwise primitives after a float dot reading it or each other
+    // elementwise primitives (and reshapes: an element's flat index is
+    // the same, a batch folded into a dot's rows unfolded) after a float
+    // dot reading it or each other
     // (reading anything else too: a bias, a residual; a silu reads its
     // input twice), computed in its kernel as it writes each output; the
     // epilogue's last primitive is the fusion's root, the dot inside it
@@ -253,7 +259,9 @@ pub(crate) fn fuse(
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let fuses = fusible[u] && elementwise(&un.primitive) && !in_row(u) && !claimed[u];
+            let step =
+                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
             if !fuses || !reads {
                 break;

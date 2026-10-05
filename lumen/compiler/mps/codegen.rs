@@ -988,6 +988,36 @@ impl<'a> Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
+                    // The operand at the entry its index picks (clamped
+                    // into the axis): element (o, t, r) of the result, t the
+                    // index's position, reads (o, index t, r) of it.
+                    Gather { axis } => {
+                        let x = body.type_of(node.inputs[0]);
+                        let m = body.type_of(node.inputs[1]).numel();
+                        let n = x.shape[*axis];
+                        let inner: usize = x.shape[axis + 1..].iter().product();
+                        let mut t = idx.clone();
+                        if inner != 1 {
+                            t = format!("{t} / {inner}u");
+                        }
+                        if m != ty.numel() / inner.max(1) {
+                            t = format!("({t}) % {m}u");
+                        }
+                        let t = self.index(t);
+                        let k = self.value(node.inputs[1], t);
+                        let k =
+                            self.index(format!("uint(clamp(long({k}), 0l, {}l))", n.max(1) - 1));
+                        let mut terms = Vec::new();
+                        if ty.numel() > m * inner {
+                            terms.push(format!("({idx} / {}u) * {}u", m * inner, n * inner));
+                        }
+                        terms.push(match inner {
+                            1 => k,
+                            _ => format!("{k} * {inner}u + {idx} % {inner}u"),
+                        });
+                        let i = self.index(terms.join(" + "));
+                        return self.value(node.inputs[0], i);
+                    }
                     // The operand holding the coordinate along `dimension`,
                     // each read only in its own branch (another's index
                     // would be out of its bounds).

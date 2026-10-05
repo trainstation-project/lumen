@@ -45,6 +45,30 @@ def test_gather(device, index_dtype, dtype, axis):
         np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
+@pytest.mark.mps
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_gather_fuses(index_dtype, axis):
+    """A gather computes its elements in the kernel reading them (a loop
+    fusion's, or a row kernel's: an embedding's lookup, its positions added,
+    then normalized), reading the operand at each picked (clamped) index:
+    no kernel of its own; the values the CPU's."""
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal((4, 5, 3)).astype(np.float32)
+    xt, ids = _tensor(x, "mps"), _tensor(IDS.astype(index_dtype), "mps")
+
+    def f(x, i):
+        g = prims.gather(x * 2.0, i, axis) + 1.0
+        return g, F.rms_norm(g, g.shape[-1])
+
+    labels = [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(xt, ids), "mps").steps()]
+    assert "gather" not in labels and any("gather" in label for label in labels), labels
+    got = lumen.compile(f)(xt, ids)
+    want = lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(IDS.astype(index_dtype)))
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
 @pytest.mark.parametrize("axis", [0, 1])

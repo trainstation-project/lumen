@@ -192,6 +192,18 @@ def test_matmul(a_shape, b_shape):
     np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
 
 
+def test_matmul_folds_a_batch_times_a_matrix():
+    """A batch times a matrix (``x @ w``, a weight) is one matmul of the
+    batch's rows, as torch folds it: the matrix read as it is, never
+    broadcast over the batch (a copy); its gradient one matmul too, not a
+    sum of the batch's."""
+    m = lambda *s: lumen.empty(list(s), device="meta")  # noqa: E731
+    g = lumen.make_graph(lambda x, w: x @ w)(m(2, 3, 4), m(4, 5))
+    assert "broadcast_in_dim" not in str(g) and "f32[6,5] = dot_general" in str(g), g
+    grad = lumen.make_graph(lumen.grad(lambda x, w: F.sum(x @ w), 1))(m(2, 3, 4), m(4, 5))
+    assert str(grad).count("dot_general") == 1 and "reduce_sum" not in str(grad), grad
+
+
 def test_reductions():
     x = rand(2, 3, 4)
     t = lumen.from_numpy(x)
@@ -1109,11 +1121,12 @@ class _ScaledMatmul(lumen.nn.Module):
     [
         (lambda x, w, y: F.relu(x @ w + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
         (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
+        (lambda x, w, y: x @ w + y, [(3, 40, 24), (24, 56), (3, 40, 56)], "float32"),
         (lambda x, w, y: F.relu(x @ w).float(), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
         (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
         (lambda x, w, y: _silu((x @ w).float()).to(dtype=x.dtype), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
     ],
-    ids=["bias relu", "batched residual", "relu cast", "times exp(y)", "silu in float32"],
+    ids=["bias relu", "batched residual", "folded residual", "relu cast", "times exp(y)", "silu in float32"],
 )
 def test_matmul_epilogues_fuse(f, shapes, dtype):
     """The elementwise primitives after a matmul (a bias, a residual, an

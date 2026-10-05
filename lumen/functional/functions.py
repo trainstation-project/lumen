@@ -344,6 +344,15 @@ def matmul(input, other, accum_dtype, output_dtype):
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
 
+    # A batch of rows times a matrix (``x @ w``, a weight): the batch folded
+    # into the rows, one matmul reading the matrix in place (torch's fold),
+    # not the matrix broadcast over the batch.
+    if input.ndim > 2 and other.ndim == 2:
+        k = input.shape[-1]
+        rows = input.reshape(math.prod(input.shape[:-1]), k)
+        out = prims.dot_general(rows, other, (((1,), (0,)), ((), ())), accum_dtype, output_dtype)
+        return out.reshape(*input.shape[:-1], other.shape[-1])
+
     x = input.unsqueeze(0) if input.ndim == 1 else input
     y = other.unsqueeze(-1) if other.ndim == 1 else other
 
