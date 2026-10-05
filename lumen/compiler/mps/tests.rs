@@ -420,7 +420,11 @@ fn reductions_are_normalized() {
         (vec![400, 1, 300], vec![0, 2], "reduce_rows"),
         (vec![4, 1, 64, 1, 300], vec![1, 2, 3, 4], "reduce_rows"),
         (vec![300, 1, 7, 1], vec![0, 1], "reduce_cols"),
-        (vec![300, 1, 7], vec![1], "reduce_rows"),
+        // Size-1 dimensions alone (a weight's gradient summed over the
+        // batch of 1 it was broadcast to): reducing nothing, a thread an
+        // element, not a threadgroup.
+        (vec![300, 1, 7], vec![1], "reduce_cols"),
+        (vec![1, 1024, 1024], vec![0], "reduce_cols"),
         (vec![40, 1, 7, 1, 300], vec![0, 1, 4], "reduce_grouped"),
     ] {
         let mut g = Graph::new();
