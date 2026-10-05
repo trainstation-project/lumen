@@ -10,16 +10,19 @@
 //! A parameter is a whole meta tensor: contiguous, over all of its storage
 //! (what the factories and safetensors give).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use super::tensor::Tensor;
 use crate::graph::{Primitive, TensorType};
 use crate::{Device, TensorOptions};
 
-/// A meta storage's placements (none for other storages).
+/// A meta storage's placements (none for other storages), and how many
+/// times its value was written (`version`).
 #[derive(Debug, Default)]
 pub(crate) struct Parameter {
     placed: Mutex<Vec<Placement>>,
+    version: AtomicU64,
 }
 
 /// A parameter's memory on a device: its own, or a view of the block it was
@@ -136,7 +139,25 @@ impl Tensor {
         for p in &placed {
             p.tensor.copy_(src)?;
         }
+        self.mark_written();
         Ok(())
+    }
+
+    /// How many times this parameter's value was written (PyTorch:
+    /// `Tensor._version`): by `copy_` into it, or by a compiled function
+    /// assigning it ([`mark_written`](Self::mark_written)). What reads its
+    /// value once (the ANE's programs bake it in) reads it again once this
+    /// changes.
+    pub fn version(&self) -> u64 {
+        self.storage().parameter.version.load(Ordering::Acquire)
+    }
+
+    /// Count a write of this parameter's value ([`version`](Self::version)).
+    pub fn mark_written(&self) {
+        self.storage()
+            .parameter
+            .version
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     fn placement(&self, device: Device) -> Option<Placement> {

@@ -70,6 +70,15 @@ class Plan:
     @property
     def workspace_bytes(self) -> int: ...
     @property
+    def neural_engine(self) -> bool:
+        """Whether it runs steps on the Apple Neural Engine (Core ML
+        programs, ``lumen.config.compiler.neural_engine``)."""
+
+    def _invalidate_neural_engine(self) -> None:
+        """Compile its Neural Engine steps' programs again on their next
+        run, from their weights' values then."""
+
+    @property
     def packed(self) -> list[tuple[list[int], int]]:
         """The inputs the compiler added after the graph's: each the block
         of these parameter inputs side by side along a dimension."""

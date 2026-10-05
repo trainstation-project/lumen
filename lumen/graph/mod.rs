@@ -21,7 +21,7 @@ use std::sync::{Mutex, PoisonError};
 
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
-pub use primitive::{FUSION_SEPARATOR, Primitive};
+pub use primitive::{FUSION_SEPARATOR, NEURAL_ENGINE, Primitive};
 
 use crate::DType;
 

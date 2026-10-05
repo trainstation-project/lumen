@@ -55,6 +55,14 @@ pub struct CompilerConfig {
     /// kernel rather than two; a split-K dot adds its chunks' products to
     /// its output, rather than writing them for a sum).
     pub deterministic: bool,
+    /// On MPS, run the large float16 dots of a compiled function's fixed
+    /// weights (parameters it does not write: inference, frozen layers),
+    /// and the float16 work after them, on the Apple Neural Engine, through
+    /// Core ML (`compiler::ane`), its steps in the plan. Off by default;
+    /// not what the program computes (the Neural Engine accumulates its
+    /// dots wider than float16 but narrower than float32), so off runs
+    /// every dot on lumen's kernels.
+    pub neural_engine: bool,
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
@@ -87,6 +95,7 @@ impl Default for CompilerConfig {
             flash_attention: true,
             split_k: true,
             deterministic: false,
+            neural_engine: false,
             row_cache: 8,
             memory_limit: 0,
         }

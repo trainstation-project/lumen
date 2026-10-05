@@ -13,6 +13,8 @@
 //!   `CPU` process, as a device's, a row per thread that ran them, linked to
 //!   its op (the dispatch) by an `ac2g` flow; the last timeline (each
 //!   process's `process_sort_index`: the dispatch, the devices, the CPU);
+//!   a Core ML step's (`coreml …`) on a `Neural Engine` process of its
+//!   own, after the devices';
 //! - each `record_function` range again on the device's (or the `CPU`'s)
 //!   timeline, category
 //!   `gpu_user_annotation` (Kineto's), spanning the GPU work issued inside
@@ -37,6 +39,12 @@ const ANNOTATION_TID: u64 = 8;
 /// (`CPU dispatch`), the real pid's too.
 pub(crate) fn host_pid() -> u64 {
     (1 << 32) + u64::from(std::process::id())
+}
+
+/// Process id of the Neural Engine's timeline (an MPS plan's Core ML steps:
+/// host kernels named `coreml …`), after the devices'.
+fn neural_engine_pid() -> u64 {
+    (2 << 32) + u64::from(std::process::id())
 }
 
 /// Process id of `device`'s timeline: the real pid for the CPU, so traces
@@ -134,8 +142,22 @@ pub(crate) fn trace(events: &[Event]) -> String {
     let mut devices: Vec<Device> = Vec::new();
     let mut host_threads: Vec<u64> = Vec::new();
     let host_pid = host_pid();
+    let mut neural_engine = false;
     for e in events {
         match e.kind {
+            // A Core ML step's (`compiler::ane`): on the Neural Engine's own
+            // timeline.
+            EventKind::HostKernel if e.name.starts_with("coreml") => {
+                neural_engine = true;
+                out.push(format!(
+                    "{{\"ph\":\"X\",\"cat\":\"kernel\",\"name\":{},\"pid\":{},\"tid\":{GPU_TID},\"ts\":{},\"dur\":{},\"args\":{{\"device\":-1,\"correlation\":{}}}}}",
+                    json_str(&e.name),
+                    neural_engine_pid(),
+                    us(e.start_ns),
+                    us(e.duration_ns()),
+                    e.id,
+                ));
+            }
             EventKind::HostKernel => {
                 if !host_threads.contains(&e.thread) {
                     host_threads.push(e.thread);
@@ -270,9 +292,16 @@ pub(crate) fn trace(events: &[Event]) -> String {
             ));
         }
     }
-    // In order: the dispatch, the devices, the CPU last.
+    if neural_engine {
+        out.push(format!(
+            "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{},\"tid\":0,\"args\":{{\"name\":\"Neural Engine\"}}}}",
+            neural_engine_pid(),
+        ));
+    }
+    // In order: the dispatch, the devices, the Neural Engine, the CPU last.
     let mut order = vec![cpu_pid];
     order.extend(devices.iter().map(|&d| pid(d)));
+    order.extend(neural_engine.then(neural_engine_pid));
     order.push(host_pid);
     for (index, pid) in order.into_iter().enumerate() {
         out.push(format!(

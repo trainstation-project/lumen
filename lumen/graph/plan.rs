@@ -323,7 +323,10 @@ impl Plan {
             // output a donated input of its type may take is left to donation
             // (below), as XLA's buffer assignment honors input-output aliases
             // first.
-            let step = !matches!(
+            // Nor a Core ML step's (its program reads and writes the
+            // buffers in no order it says).
+            let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(super::NEURAL_ENGINE));
+            let step = !neural_engine && !matches!(
                 node.primitive,
                 Primitive::DynamicUpdateSlice
                     | Primitive::CustomCall { .. }
@@ -859,7 +862,9 @@ impl Plan {
                                 )
                         }
                         // A contraction with its epilogue reads its dot's
-                        // operands as the dot does.
+                        // operands as the dot does (a Core ML step, at
+                        // any strides).
+                        Primitive::Fusion { name, .. } if name.starts_with(super::NEURAL_ENGINE) => true,
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
                                 && s.inputs[k].1.shape == self.inputs[i].shape

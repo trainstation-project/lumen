@@ -77,6 +77,12 @@ flags! {
     /// Run every kernel deterministically (off by default: a kernel may add
     /// atomically, in no fixed order: attention's backward's dQ, split-K).
     deterministic, set_deterministic: bool;
+    /// On MPS, run large float16 dots of a compiled function's fixed weights
+    /// (and the float16 work after them) on the Apple Neural Engine, through
+    /// Core ML (off by default): not what the program computes, the Neural
+    /// Engine accumulates its dots narrower than float32; off runs every
+    /// dot on lumen's kernels.
+    neural_engine, set_neural_engine: bool;
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).
     row_cache, set_row_cache: usize;

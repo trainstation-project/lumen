@@ -107,6 +107,25 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     // dots (a weight's gradient) as the dots swapped, reshapes, transposes
     // and casts moved.
     let graph = super::simplify::simplify_with(&graph, true);
+    // The large float16 dots of fixed weights (parameters the function does
+    // not write, nor any in their block) on the Neural Engine, whole (before
+    // split-K splits them).
+    let graph = match config.neural_engine {
+        true => {
+            let written = |i: usize| {
+                options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
+            };
+            let first_block = graph.inputs().len() - packed.len();
+            let fixed: Vec<bool> = (0..graph.inputs().len())
+                .map(|i| match i.checked_sub(first_block) {
+                    Some(b) => !packed[b].0.iter().any(|&m| written(m)),
+                    None => options.parameters.as_ref().is_some_and(|p| p[i]) && !written(i),
+                })
+                .collect();
+            super::ane::offload(&graph, &fixed)
+        }
+        false => graph,
+    };
     let graph = dot_strength::reduce_vector_dots(&graph);
     let graph = match config.split_k {
         true => split_k::split_k(&graph, !config.deterministic),
@@ -415,6 +434,10 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    // A Core ML program's, on the Neural Engine.
+    if name.starts_with(crate::graph::NEURAL_ENGINE) {
+        return crate::compiler::ane::encode(step, inputs, output);
+    }
     // The kernel's inputs, then (a multi-output fusion's) other outputs; of
     // the inputs, device buffers and the by-value ones' bytes, read on the
     // host now (`setBytes`, before the kernel's own arguments).
