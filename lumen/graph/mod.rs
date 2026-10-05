@@ -8,6 +8,8 @@
 pub(crate) mod custom;
 pub mod plan;
 pub mod primitive;
+mod remat;
+mod schedule;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 #[cfg(test)]

@@ -104,6 +104,11 @@ pub struct PlanOptions {
     /// memory of their own. The device compiler picks them: inputs only
     /// kernels taking scalars by value read.
     pub scalars: Vec<usize>,
+    /// The most workspace the plan should need, in bytes: above it, values
+    /// are recomputed where they are read later rather than kept alive
+    /// until then (XLA's rematerialization), until it fits or no
+    /// recomputation saves memory. `None`: no limit.
+    pub memory_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,10 +134,37 @@ impl Plan {
         Self::compile_with(graph, &PlanOptions::default())
     }
 
-    /// `graph`'s plan: its steps in order, each value (and kernel scratch)
-    /// placed in one workspace, values whose lifetimes do not overlap
-    /// sharing bytes; outputs in their own memory, or in a donated input's.
+    /// `graph`'s plan: its steps in an order of its nodes, each value (and
+    /// kernel scratch) placed in one workspace, values whose lifetimes do
+    /// not overlap sharing bytes; outputs in their own memory, or in a
+    /// donated input's. Of the trace's order and XLA's memory schedules
+    /// ([`schedule`](super::schedule)), the one whose workspace is
+    /// smallest, the earlier of equal ones (XLA's
+    /// `DefaultMemoryScheduler`, here measured, not estimated); then, while
+    /// its workspace exceeds [`PlanOptions::memory_limit`], values
+    /// recomputed where they are read rather than kept alive
+    /// ([`remat`](super::remat)).
     pub fn compile_with(graph: &Graph, options: &PlanOptions) -> Self {
+        let mut best = (graph.clone(), Self::compile_in_order(graph, options));
+        for order in [super::schedule::list(graph), super::schedule::dfs(graph)] {
+            let scheduled = graph.reordered(&order);
+            let plan = Self::compile_in_order(&scheduled, options);
+            if plan.workspace_bytes < best.1.workspace_bytes {
+                best = (scheduled, plan);
+            }
+        }
+        let (scheduled, plan) = best;
+        match options.memory_limit {
+            Some(limit) if plan.workspace_bytes > limit => {
+                super::remat::rematerialize(&scheduled, limit, |g| Self::compile_in_order(g, options))
+            }
+            _ => plan,
+        }
+    }
+
+    /// [`compile_with`](Self::compile_with), its steps in the order of
+    /// `graph`'s nodes.
+    fn compile_in_order(graph: &Graph, options: &PlanOptions) -> Self {
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
         let is_reshape = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
@@ -407,6 +439,13 @@ impl Plan {
                     regions.push((size, t, t, Region::Scratch(t)));
                 }
             }
+        }
+        if std::env::var("LUMEN_LIVE").is_ok() {
+            let label = |r: Var| nodes.iter().find(|n| n.output == r).map_or("input".to_string(), |n| format!("{}", graph.label(n)));
+            let mut v: Vec<_> = regions.iter().filter_map(|&(size, f, l, ref reg)| match reg { Region::Value(r) if size >= 1 << 20 => Some((l - f, f, l, size >> 20, label(*r))), _ => None }).collect();
+            v.sort_by_key(|x| Reverse(x.0));
+            eprintln!("LIVE {} steps", nodes.len());
+            for x in v.iter().take(40) { eprintln!("LIVE {:?}", x); }
         }
         regions.sort_by_key(|&(size, ..)| Reverse(size));
         let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();

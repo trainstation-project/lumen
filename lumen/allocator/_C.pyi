@@ -19,6 +19,7 @@ class CompilerConfig:
     split_k: bool
     deterministic: bool
     row_cache: int
+    memory_limit: int
 
     def reset(self) -> None: ...
 
