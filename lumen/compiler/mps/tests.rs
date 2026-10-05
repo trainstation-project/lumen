@@ -556,6 +556,46 @@ fn hierarchical_reductions_keep_their_dtype() {
     }
 }
 
+/// Weights the program assigns (donated: an optimizer's) merge only as
+/// contiguous parts of their block: `nn.Linear`'s `[out, in]` weights read
+/// as `x @ w.T`, side by side along their first dimension (PyTorch's fused
+/// QKV block), not `[in, out]` ones read as `x @ w`, whose parts would be
+/// strided.
+#[test]
+fn donated_weights_merge_only_contiguously() {
+    let merged = |rhs_contracting: usize, shape: [usize; 2]| {
+        let dot = DotGeneral {
+            lhs_contracting: vec![1],
+            rhs_contracting: vec![rhs_contracting],
+            lhs_batch: vec![],
+            rhs_batch: vec![],
+            accum_dtype: DType::F32,
+            output_dtype: DType::F32,
+        };
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[16, 32]));
+        let ws: Vec<Var> = (0..3).map(|_| g.input(ty(DType::F32, &shape))).collect();
+        let ys: Vec<Var> = ws
+            .iter()
+            .map(|&w| {
+                let y = apply(&mut g, dot.clone(), &[x, w]);
+                apply(&mut g, Neg, &[y])
+            })
+            .collect();
+        g.set_outputs(&ys).unwrap();
+        let packable = [false, true, true, true];
+        (
+            merge_dots(&g, &packable, &[]).1,
+            merge_dots(&g, &packable, &packable).1,
+        )
+    };
+    // `x @ w`, w [in, out]: side by side along `out`, each part strided.
+    assert_eq!(merged(0, [32, 64]), (vec![(vec![1, 2, 3], 1)], vec![]));
+    // `x @ w.T`, w [out, in]: along `out`, its first dimension, contiguous.
+    let along_first = vec![(vec![1, 2, 3], 0)];
+    assert_eq!(merged(1, [64, 32]), (along_first.clone(), along_first));
+}
+
 /// Dots sharing an operand merge only if they accumulate in the same
 /// dtype: `x @ w1` in float32 and `x @ w3` in bfloat16 stay two dots.
 #[test]
@@ -583,7 +623,7 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
             })
             .collect();
         g.set_outputs(&ys).unwrap();
-        merge_dots(&g, &[false, true, true, true])
+        merge_dots(&g, &[false, true, true, true], &[])
     };
     // All in float32: one dot of all three.
     let (merged, packs) = dots([DType::F32; 3]);
@@ -635,14 +675,24 @@ fn dots_sharing_an_operand_merge() {
     g.set_outputs(&[y]).unwrap();
     let dots = |g: &Graph| names(g).iter().filter(|&&n| n == "dot_general").count();
     // Only parameters merge.
-    assert_eq!(dots(&merge_dots(&g, &[false; 4]).0), 3);
-    let (merged, packs) = merge_dots(&g, &[false, true, true, true]);
+    assert_eq!(dots(&merge_dots(&g, &[false; 4], &[]).0), 3);
+    let (merged, packs) = merge_dots(&g, &[false, true, true, true], &[]);
     assert_eq!(packs, [(vec![1, 2], 1)]);
     assert_eq!(dots(&merged), 2, "{merged}");
     // The slices fuse into the gate.
     assert_eq!(
         names(&fuse(&merged)),
         ["dot_general", "fusion", "dot_general"]
+    );
+    // w3 read elsewhere too: a strided part of the block (columns), it
+    // would need a copy there: no merge.
+    let mut read_twice = g.clone();
+    let w3_again = apply(&mut read_twice, Neg, &[w3]);
+    read_twice.set_outputs(&[y, w3_again]).unwrap();
+    assert!(
+        merge_dots(&read_twice, &[false, true, true, true], &[])
+            .1
+            .is_empty()
     );
     let mut inputs = vec![
         data(&[16, 32], 1),
@@ -657,8 +707,9 @@ fn dots_sharing_an_operand_merge() {
         expected[0].to_vec::<f32>()
     );
 
-    // Shared rhs (lhs side by side, rows); a dot reading another's result,
-    // or of a parameter something else reads too, does not merge.
+    // Shared rhs (lhs side by side, rows); a dot reading another's result
+    // does not merge. One of a parameter something else reads too does: a
+    // contiguous part of the block (rows), it is read there in place.
     let mut g = Graph::new();
     let w = g.input(ty(DType::F32, &[32, 32]));
     let xs: Vec<Var> = [4, 6, 4]
@@ -674,15 +725,15 @@ fn dots_sharing_an_operand_merge() {
     let twice = apply(&mut g, matmul.clone(), &[xs[1], w]);
     outs.extend([apply(&mut g, Neg, &[dependent]), twice]);
     g.set_outputs(&outs).unwrap();
-    let (merged, packs) = merge_dots(&g, &[true; 4]);
-    assert_eq!(packs, [(vec![1, 3], 0)]);
-    assert_eq!(dots(&merged), 4, "{merged}");
+    let (merged, packs) = merge_dots(&g, &[true; 4], &[]);
+    assert_eq!(packs, [(vec![1, 2, 3], 0)]);
+    assert_eq!(dots(&merged), 3, "{merged}");
     let mut inputs: Vec<Tensor> = [vec![32, 32], vec![4, 32], vec![6, 32], vec![4, 32]]
         .iter()
         .enumerate()
         .map(|(i, shape)| data(shape, i as u64 + 1))
         .collect();
-    inputs.push(block(&[&inputs[1], &inputs[3]], 0));
+    inputs.push(block(&[&inputs[1], &inputs[2], &inputs[3]], 0));
     let expected = reference::run(&g, &inputs[..4]).unwrap();
     for (e, a) in expected
         .iter()

@@ -733,6 +733,64 @@ def test_attention_projections_merge_into_one_matmul():
     assert views == [(0, [96, 1]), (64, [96, 1])]
 
 
+class QKV(lumen.nn.Module):
+    """Three projections of x, ``nn.Linear``'s way: ``[out, in]`` weights
+    read as ``x @ w.t()``."""
+
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        return [x @ w.t() for w in (self.wq, self.wk, self.wv)]
+
+
+@pytest.mark.mps
+def test_trained_projections_merge_into_one_matmul():
+    """Weights a training step assigns (its optimizer's update, written over
+    them in place) merge too, as PyTorch's fused QKV weight: ``[out, in]``
+    weights side by side along their first dimension, each a contiguous
+    part of the block, updated there in place once no matmul reads the
+    block (the planner's block-aware donation). The weights after a few
+    steps are the unmerged program's."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def step(model, x, c):
+        q, k, v = model(x)
+        loss = F.sum((q * k + v) * c)
+        loss.backward()
+        for w in (model.wq, model.wk, model.wv):
+            w.copy_(w - 0.1 * w.grad)
+        return loss
+
+    x, c = lumen.from_numpy(rand(16, 32)), lumen.from_numpy(rand(16, 32, seed=9))
+    values = {n: lumen.from_numpy(rand(32, 32, seed=i + 1) / 4) for i, n in enumerate(("wq", "wk", "wv"))}
+    trained = {}
+    for merge in (True, False):
+        lumen.config.compiler.merge_dots = merge
+        try:
+            model = QKV(meta(32, 32), meta(32, 32), meta(32, 32))
+            f = lumen.compile(step, device="mps")
+            f(model, meta(16, 32), meta(16, 32))
+            model.load_state_dict(values)
+            with profile(activities=[ProfilerActivity.MPS]) as prof:
+                for _ in range(3):
+                    f(model, x, c)
+                lumen.mps.synchronize()
+        finally:
+            lumen.config.compiler.reset()
+        kernels = [e["name"] for e in prof.events() if e["kind"] == "gpu"]
+        assert ("3x dot_general" in kernels) == merge, kernels
+        trained[merge] = [lumen.to_numpy(w._placed("mps")) for w in (model.wq, model.wk, model.wv)]
+    for merged, unmerged in zip(trained[True], trained[False]):
+        np.testing.assert_allclose(merged, unmerged, rtol=1e-5, atol=1e-6)
+
+
 class Linear(lumen.nn.Module):
     w: lumen.Tensor
 
@@ -1075,7 +1133,9 @@ def test_normalizations_are_one_row_kernel(f):
     """Whatever normalizes rows by reductions of them is a normalization
     diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
     written: one row kernel on MPS, its reductions inside, agreeing with the
-    CPU. Nothing matches any one normalization."""
+    CPU. Nothing matches any one normalization. With no backward to read
+    its values of a row (an RMS norm's sqrt(mean + eps)), it writes its
+    output alone."""
     x, w = rand(64, 300), rand(300, seed=1)
     try:
         X, W = lumen.from_numpy(x).to("mps"), lumen.from_numpy(w).to("mps")
@@ -1083,6 +1143,7 @@ def test_normalizations_are_one_row_kernel(f):
         pytest.skip(str(e))
     (step,) = lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
     assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
+    assert step["extra_outputs"] == [], step["extra_outputs"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
 

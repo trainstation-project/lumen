@@ -5,6 +5,11 @@
 //!   was, but `-0 + 0`: `-0`, not `+0`, as XLA's);
 //! - a reshape of a reshape, a transpose of a transpose, a broadcast of a
 //!   broadcast: one; a reshape to `x`'s shape, an identity transpose: `x`;
+//! - a dot of an input's transpose: the dot of the input, at the
+//!   dimensions the transpose maps (XLA: `TransposeFolding`; `x @ w.t()`
+//!   reads the weight `w` as it is), where its free dimensions stay in
+//!   order (a computed value's transpose is left: the attention matcher
+//!   writes an attention's output in its transpose's layout);
 //! - with `matched` (once attention is matched: the MPS compiler's after its
 //!   matchers, whose patterns these change, or a device with none):
 //!   - a transpose of a dot swapping its operands' free dimensions (as
@@ -202,6 +207,9 @@ fn rewrite(
             }
             _ => None,
         },
+        // An operand's transpose folded into the dot (XLA's TransposeFolding):
+        // the dot reads the operand as it is, at its dimensions, no copy.
+        DotGeneral { .. } => folded(out, producer, primitive, inputs),
         _ => None,
     }
 }
@@ -450,6 +458,75 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
             output_dtype: *output_dtype,
         };
         Rewrite::Node(swapped, vec![x[1], x[0]])
+    })
+}
+
+/// `dot` of `x`, its operands' transposes of inputs folded into its
+/// dimension numbers (each input read as it is, at the dimensions the
+/// transpose maps them to), if either is one that keeps its free
+/// dimensions in order (so the dot's result is the same).
+fn folded(
+    out: &Graph,
+    producer: &HashMap<Var, usize>,
+    dot: &Primitive,
+    x: &[Var],
+) -> Option<Rewrite> {
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        accum_dtype,
+        output_dtype,
+    } = dot
+    else {
+        unreachable!("a dot")
+    };
+    let (mut dims, mut operands) = (
+        [
+            (lhs_contracting.clone(), lhs_batch.clone()),
+            (rhs_contracting.clone(), rhs_batch.clone()),
+        ],
+        x.to_vec(),
+    );
+    let mut changed = false;
+    for side in 0..2 {
+        let Some(Node {
+            primitive: Primitive::Transpose { permutation },
+            inputs,
+            ..
+        }) = node_of(out, producer, x[side])
+        else {
+            continue;
+        };
+        if !out.inputs().contains(&inputs[0]) {
+            continue;
+        }
+        let (contracting, batch) = &dims[side];
+        let rank = permutation.len();
+        let free: Vec<usize> = (0..rank)
+            .filter(|d| !contracting.contains(d) && !batch.contains(d))
+            .map(|d| permutation[d])
+            .collect();
+        if !free.is_sorted() {
+            continue;
+        }
+        let map = |ds: &[usize]| ds.iter().map(|&d| permutation[d]).collect::<Vec<_>>();
+        dims[side] = (map(contracting), map(batch));
+        operands[side] = inputs[0];
+        changed = true;
+    }
+    let [(lhs_contracting, lhs_batch), (rhs_contracting, rhs_batch)] = dims;
+    changed.then(|| {
+        let dot = Primitive::DotGeneral {
+            lhs_contracting,
+            rhs_contracting,
+            lhs_batch,
+            rhs_batch,
+            accum_dtype: *accum_dtype,
+            output_dtype: *output_dtype,
+        };
+        Rewrite::Node(dot, operands)
     })
 }
 

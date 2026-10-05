@@ -148,6 +148,12 @@ pub struct PlanOptions {
     /// until then (XLA's rematerialization), until it fits or no
     /// recomputation saves memory. `None`: no limit.
     pub memory_limit: Option<usize>,
+    /// Inputs that are blocks of others side by side (`(block, members)`,
+    /// input positions: [`Plan::packed`]'s, its members views of it): a
+    /// step reading a block reads each member, so a member's buffer takes
+    /// a donated output only once no step reads its block either (an
+    /// optimizer's update after the merged dots reading the old weights).
+    pub blocks: Vec<(usize, Vec<usize>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -499,7 +505,13 @@ impl Plan {
                 let u = graph.inputs()[i];
                 let writer = nodes[first[v]];
                 let read_by_writer = writer.inputs.iter().any(|&w| root[w] == u);
+                // Its blocks, which hold its memory too, read after it.
+                let block_read_later = options.blocks.iter().any(|(b, members)| {
+                    let b = graph.inputs()[*b];
+                    members.contains(&i) && !readers[b].is_empty() && last[root[b]] >= first[v]
+                });
                 let read_later = last[u] > first[v]
+                    || block_read_later
                     || (read_by_writer && !reads_in_place(graph, writer, v, u, &root));
                 let is_output = graph.outputs().iter().any(|&o| root[o] == u);
                 let its = !paired(i) || options.donate_into.contains(&(i, k));

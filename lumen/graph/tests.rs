@@ -758,6 +758,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         views: Vec::new(),
         scalars: Vec::new(),
         memory_limit: None,
+        blocks: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -826,6 +827,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
             views: Vec::new(),
             scalars: Vec::new(),
             memory_limit: None,
+            blocks: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -872,6 +874,49 @@ fn inputs_donated_into_an_output_hold_it_alone() {
     for (e, r) in expected.iter().zip(&result) {
         assert_eq!(e.to_vec::<f32>(), r.to_vec::<f32>());
     }
+}
+
+/// A donated input packed in a block (`PlanOptions::blocks`: a weight a
+/// merged dot reads as part of its block) takes its new value only once no
+/// step reads the block either: the block's readers read its old value.
+#[test]
+fn donated_inputs_in_a_block_wait_for_its_readers() {
+    let ty = TensorType::new(DType::F32, &[2, 3]);
+    // new = exp(w), w's new value; later = b * b, b the block holding w.
+    let mut g = Graph::new();
+    let w = g.input(ty.clone());
+    let b = g.input(TensorType::new(DType::F32, &[4, 3]));
+    let new = g.apply(Exp, &[w]).unwrap();
+    let later = g.apply(Mul, &[b, b]).unwrap();
+    g.set_outputs(&[later, new]).unwrap();
+    let plan = |blocks: Vec<(usize, Vec<usize>)>| {
+        Plan::compile_with(
+            &g,
+            &super::PlanOptions {
+                donate_into: vec![(0, 1)],
+                blocks,
+                ..Default::default()
+            },
+        )
+    };
+    // Alone, w takes its new value: nothing reads it after exp.
+    let alone = plan(Vec::new());
+    assert!(
+        alone.steps().iter().any(|s| s.output.0 == Buffer::Input(0)),
+        "{alone}"
+    );
+    // In b: only if each step reading b comes before the one writing it.
+    let packed = plan(vec![(1, vec![0])]);
+    let steps = packed.steps();
+    let writes = steps.iter().position(|s| s.output.0 == Buffer::Input(0));
+    let reads_block = steps
+        .iter()
+        .rposition(|s| s.inputs.iter().any(|(at, _)| *at == Buffer::Input(1)));
+    if let (Some(w), Some(r)) = (writes, reads_block) {
+        assert!(r < w, "{packed}");
+    }
+    // Here b is read after exp: w's new value takes new memory.
+    assert_eq!(writes, None, "{packed}");
 }
 
 /// A custom op's mutated operand (`CustomCall`, its function opaque) is its
@@ -960,6 +1005,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         views: Vec::new(),
         scalars: Vec::new(),
         memory_limit: None,
+        blocks: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];

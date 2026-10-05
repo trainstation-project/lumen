@@ -9,11 +9,18 @@
 //! Dots merge if they have the same dimension numbers and accumulation
 //! dtype (the same primitive: one kernel accumulates in one dtype) and the
 //! same operand on the same side, and their other operands are distinct packable
-//! parameters, read by that dot alone, differing only in their last free
-//! dimension (the one they are side by side along). Only dots whose results
+//! parameters, read by that dot alone (or, as contiguous parts of their
+//! block, read in place, by others too: an optimizer's update), differing
+//! only in their last free dimension (the one they are side by side along). Only dots whose results
 //! are read by primitives that fuse, or dots (and are not outputs), merge:
 //! those read their slices in place, where any other reader would need a
 //! copy of its own.
+//!
+//! A parameter the program assigns (donated: an optimizer's update, its new
+//! value written over it in place) merges only as a contiguous part of its
+//! block, side by side along its first dimension (past any of size 1): as
+//! PyTorch's fused QKV weights, `[3D, D]` blocks of `nn.Linear`'s `[out,
+//! in]` weights, each a slice an optimizer updates in place.
 
 use super::fusion::fusible;
 use crate::graph::primitive::free_dims;
@@ -34,8 +41,13 @@ struct Group {
 
 /// `graph` with each group of dots that share an operand merged into one,
 /// and the inputs it adds: each the block of these inputs (positions,
-/// among those `packable`) side by side along a dimension.
-pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<usize>, usize)>) {
+/// among those `packable`; those `donated` contiguous in it) side by side
+/// along a dimension.
+pub(crate) fn merge_dots(
+    graph: &Graph,
+    packable: &[bool],
+    donated: &[bool],
+) -> (Graph, Vec<(Vec<usize>, usize)>) {
     let nodes = graph.nodes();
     // Each packable input read by one node alone: its position. A
     // concatenate of packable inputs alone does not count: if they merge,
@@ -58,10 +70,14 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
     {
         reads[v] += 1;
     }
+    // Each packable input: its position, and whether one node alone reads
+    // it (else it merges only as a contiguous part of its block).
     let mut position: Vec<Option<usize>> = vec![None; graph.types.len()];
+    let mut alone = vec![false; graph.types.len()];
     for (i, &v) in graph.inputs().iter().enumerate() {
-        if packable.get(i) == Some(&true) && reads[v] == 1 {
+        if packable.get(i) == Some(&true) && reads[v] >= 1 {
             position[v] = Some(i);
+            alone[v] = reads[v] == 1;
         }
     }
     // Whether each value is read only in place: by fusible primitives, or
@@ -88,6 +104,14 @@ pub(crate) fn merge_dots(graph: &Graph, packable: &[bool]) -> (Graph, Vec<(Vec<u
             let Some(dimension) = concat_dimension(&node.primitive, side, other.shape.len()) else {
                 continue;
             };
+            // A donated parameter, or one read elsewhere too, only as a
+            // contiguous part of the block.
+            let w = node.inputs[1 - side];
+            let i = position[w].expect("a packable input");
+            let strided = other.shape[..dimension].iter().any(|&n| n != 1);
+            if strided && (donated.get(i) == Some(&true) || !alone[w]) {
+                continue;
+            }
             let mut key = other.clone();
             key.shape[dimension] = 0;
             candidates.push((side, key, dimension));

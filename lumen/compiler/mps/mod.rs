@@ -55,17 +55,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let config = &options.config;
     // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match config.fuse && config.merge_dots {
-        // Not a donated parameter: its new value is written over it, which
-        // a block holding it would not know.
+        // A donated parameter (a weight the program assigns: its new value
+        // written over it) only as a contiguous part of its block, which the
+        // new value is written into in place (`merge_dots`).
         true => {
-            let packable: Vec<bool> = (0..options.packable.len())
+            let donated: Vec<bool> = (0..options.packable.len())
                 .map(|i| {
-                    let donated = options.donate.contains(&i)
-                        || options.donate_into.iter().any(|&(j, _)| j == i);
-                    options.packable[i] && !donated
+                    options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
                 })
                 .collect();
-            merge_dots(graph, &packable)
+            merge_dots(graph, &options.packable, &donated)
         }
         false => (graph.clone(), Vec::new()),
     };
@@ -184,6 +183,13 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         views: dot_views(&fused),
         scalars,
         memory_limit: config.memory_limit(),
+        // The blocks it added, after the graph's inputs, each holding its
+        // members (donated ones written in place once no step reads it).
+        blocks: packed
+            .iter()
+            .enumerate()
+            .map(|(k, (members, _))| (merged.inputs().len() - packed.len() + k, members.clone()))
+            .collect(),
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named

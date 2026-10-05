@@ -19,6 +19,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Plan {
         // The host executor reads every input in place.
         scalars: positions(&options.scalars),
         memory_limit: options.config.memory_limit(),
+        blocks: Vec::new(),
     };
     Plan::compile_with(graph, &plan)
 }
