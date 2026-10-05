@@ -782,14 +782,24 @@ class QKV(lumen.nn.Module):
         return [x @ w.t() for w in (self.wq, self.wk, self.wv)]
 
 
+class MixedQKV(QKV):
+    """:class:`QKV` in mixed precision, by hand: float32 weights cast to
+    bfloat16 where the matmuls read them, the result float32."""
+
+    def __call__(self, x):
+        return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
+
+
 @pytest.mark.mps
-def test_trained_projections_merge_into_one_matmul():
+@pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
+def test_trained_projections_merge_into_one_matmul(module):
     """Weights a training step assigns (its optimizer's update, written over
     them in place) merge too, as PyTorch's fused QKV weight: ``[out, in]``
     weights side by side along their first dimension, each a contiguous
     part of the block, updated there in place once no matmul reads the
     block (the planner's block-aware donation). The weights after a few
-    steps are the unmerged program's."""
+    steps are the unmerged program's. In mixed precision too: the weights'
+    bfloat16 casts one cast of their block."""
     from lumen.profiler import ProfilerActivity, profile
 
     try:
@@ -811,7 +821,7 @@ def test_trained_projections_merge_into_one_matmul():
     for merge in (True, False):
         lumen.config.compiler.merge_dots = merge
         try:
-            model = QKV(meta(32, 32), meta(32, 32), meta(32, 32))
+            model = module(meta(32, 32), meta(32, 32), meta(32, 32))
             f = lumen.compile(step, device="mps")
             f(model, meta(16, 32), meta(16, 32))
             model.load_state_dict(values)

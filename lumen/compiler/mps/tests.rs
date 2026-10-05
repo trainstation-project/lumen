@@ -556,6 +556,89 @@ fn hierarchical_reductions_keep_their_dtype() {
     }
 }
 
+/// Dots of weights computed elementwise (mixed precision's bfloat16 copies,
+/// here scaled too: `cast(w * 0.5)`), the same chain for each, merge into
+/// one dot of the chain of their block, computed once; another reader of
+/// a dot's operand (a backward's dot) reads its part of it. Different
+/// chains do not merge.
+#[test]
+fn dots_of_weights_computed_elementwise_merge() {
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+    let build = |scales: [f64; 3]| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::BF16, &[16, 32]));
+        let ws: Vec<Var> = (0..3).map(|_| g.input(ty(DType::F32, &[64, 32]))).collect();
+        let mut outs = Vec::new();
+        let mut operands = Vec::new();
+        for (&w, scale) in ws.iter().zip(scales) {
+            // A scalar broadcast, as `w * scale` traces.
+            let fill = Full {
+                shape: vec![],
+                fill_value: Scalar::Float(scale),
+                dtype: DType::F32,
+            };
+            let s = apply(&mut g, fill, &[]);
+            let splat = BroadcastInDim {
+                shape: vec![64, 32],
+                broadcast_dimensions: vec![],
+            };
+            let s = apply(&mut g, splat, &[s]);
+            let scaled = apply(&mut g, Mul, &[w, s]);
+            let cast = apply(&mut g, Cast { new_dtype: DType::BF16 }, &[scaled]);
+            operands.push(cast);
+            let y = apply(&mut g, dot.clone(), &[x, cast]);
+            outs.push(apply(&mut g, Neg, &[y]));
+        }
+        // Another reader of the first operand: a dot of it with x^T.
+        let xt = apply(&mut g, Transpose { permutation: vec![1, 0] }, &[x]);
+        let other = DotGeneral {
+            lhs_contracting: vec![1],
+            rhs_contracting: vec![0],
+            lhs_batch: vec![],
+            rhs_batch: vec![],
+            accum_dtype: DType::F32,
+            output_dtype: DType::F32,
+        };
+        outs.push(apply(&mut g, other, &[xt, x]));
+        let again = apply(&mut g, dot.clone(), &[x, operands[0]]);
+        outs.push(apply(&mut g, Neg, &[again]));
+        g.set_outputs(&outs).unwrap();
+        g
+    };
+    let packable = [false, true, true, true];
+    let g = build([0.5; 3]);
+    let (merged, packs) = merge_dots(&g, &packable, &[]);
+    assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
+    // One cast of the block, read by the merged dot and (a part) the other.
+    let casts = names(&merged.prune().0)
+        .iter()
+        .filter(|&&n| n == "cast")
+        .count();
+    assert_eq!(casts, 1, "{merged}");
+    let mut inputs = vec![
+        data(&[16, 32], 1).to_dtype(DType::BF16).unwrap(),
+        data(&[64, 32], 2),
+        data(&[64, 32], 3),
+        data(&[64, 32], 4),
+    ];
+    inputs.push(block(&[&inputs[1], &inputs[2], &inputs[3]], 0));
+    let expected = reference::run(&g, &inputs[..4]).unwrap();
+    let f32s = |t: &Tensor| t.to_dtype(DType::F32).unwrap().to_vec::<f32>();
+    for (e, a) in expected.iter().zip(reference::run(&merged, &inputs).unwrap()) {
+        assert_eq!(f32s(e), f32s(&a));
+    }
+    // A different scale for one: not the same chain.
+    let (merged, packs) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[]);
+    assert_eq!(packs, [(vec![1, 3], 0)], "{merged}");
+}
+
 /// Weights the program assigns (donated: an optimizer's) merge only as
 /// contiguous parts of their block: `nn.Linear`'s `[out, in]` weights read
 /// as `x @ w.T`, side by side along their first dimension (PyTorch's fused

@@ -193,18 +193,29 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named
-    // `Nx dot_general`.
+    // `Nx dot_general`. So does one reading a value computed from a block
+    // alone, of its size (its weights' elementwise chain: a cast).
     let first_block = fused.inputs().len() - packed.len();
+    let mut derived: Vec<(Buffer, usize)> = Vec::new();
     for step in plan.steps_mut() {
-        if !matches!(step.primitive, Primitive::DotGeneral { .. }) {
-            continue;
-        }
-        let block = step.inputs.iter().find_map(|(b, _)| match *b {
+        // Read whole (not as a view: one weight's part of it).
+        let whole = step.inputs.iter().zip(&step.views).filter(|(_, v)| v.is_none());
+        let block = whole.map(|(input, _)| input).find_map(|(b, _)| match *b {
             Buffer::Input(i) if i >= first_block => Some(i - first_block),
-            _ => None,
+            b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
         });
-        if let Some(k) = block {
-            step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+        let output = step.output.0;
+        derived.retain(|(d, _)| *d != output);
+        if matches!(step.primitive, Primitive::DotGeneral { .. }) {
+            if let Some(k) = block {
+                step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+            }
+        } else if let Some(k) = block {
+            let n = step.output.1.numel();
+            let of_block = step.inputs.iter().all(|(_, ty)| ty.numel() == n || ty.numel() == 1);
+            if of_block {
+                derived.push((output, k));
+            }
         }
     }
     plan.packed = packed;

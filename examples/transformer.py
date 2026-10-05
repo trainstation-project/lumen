@@ -8,6 +8,13 @@ step is not given: a token's successor depends on the one before it, so
 the model has to attend back (causal attention, ``F.flash_attention``,
 which the MPS compiler runs as one kernel, its dropout drawn inside it).
 
+Mixed precision, by hand: the weights (AdamW's master copies), the
+residual stream, the norms and the loss are float32; each matmul's inputs
+are cast to bfloat16 where it reads them (``.bfloat16()``), accumulated in
+float32, its result float32 where float32 reads it (a residual, the
+logits) and bfloat16 where bfloat16 does (q, k, v, the MLP's hidden
+layer).
+
 After training, a few more steps run under the profiler (``lumen.profiler``,
 as ``torch.profiler``): its table of ops and kernels by MPS time, and a
 Chrome trace, ``transformer_trace.json`` (open it in Perfetto or
@@ -67,10 +74,12 @@ class Attention(lumen.nn.Module):
         # one [3 * dim, dim] block (PyTorch's fused QKV weight), each a
         # contiguous part of it the optimizer updates in place.
         q, k, v = (
-            (h @ w.t()).reshape(batch, tokens // batch, HEADS, dim // HEADS) for w in (self.wq, self.wk, self.wv)
+            (h.bfloat16() @ w.t().bfloat16()).reshape(batch, tokens // batch, HEADS, dim // HEADS)
+            for w in (self.wq, self.wk, self.wv)
         )
         a = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
-        return a.reshape(tokens, dim) @ self.wo.t()
+        # float32, as the residual it is added to.
+        return F.matmul(a.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "float32")
 
 
 class MLP(lumen.nn.Module):
@@ -82,7 +91,9 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        return F.relu(F.rms_norm(x, x.shape[-1], self.norm) @ self.w1.t()) @ self.w2.t()
+        h = F.relu(F.rms_norm(x.float(), x.shape[-1], self.norm).bfloat16() @ self.w1.t().bfloat16())
+        # float32, as the residual it is added to.
+        return F.matmul(h, self.w2.t().bfloat16(), "float32", "float32")
 
 
 class Block(lumen.nn.Module):
@@ -106,17 +117,21 @@ class Transformer(lumen.nn.Module):
     @lumen.profiler.record_function("transformer")
     def __call__(self, ids, dropout_p=0.0):
         """The logits of each position's next token, ``[batch * seq,
-        vocab]``, from token ids ``[batch, seq]``."""
+        vocab]``, float32 (the matmul's accumulator, not rounded to
+        bfloat16: the loss reads them in float32), from token ids
+        ``[batch, seq]``."""
         h = self.embed(ids)
         for layer in self.layers:
             h = layer(h, ids.shape[0], dropout_p)
-        return F.rms_norm(h, DIM, self.norm) @ self.head.t()
+        return F.matmul(
+            F.rms_norm(h.float(), DIM, self.norm).bfloat16(), self.head.t().bfloat16(), "float32", "float32"
+        )
 
 
 @lumen.profiler.record_function("loss")
 def cross_entropy(logits, targets):
     """The mean cross-entropy of ``logits`` ``[n, vocab]`` against
-    ``targets`` (token ids)."""
+    ``targets`` (token ids), in float32."""
     log_p = F.log_softmax(logits, -1)
     return -F.mean(F.sum(one_hot(targets.reshape(-1), log_p.shape[-1]) * log_p, -1))
 
@@ -134,21 +149,31 @@ def predict(model, x):
     return model(x)
 
 
-def meta(*shape, dtype="float32"):
-    return lumen.empty(list(shape), dtype=dtype, device="meta")
+def meta(*shape, dtype):
+    return lumen.empty(list(shape), dtype, device="meta")
 
 
 model = Transformer(
-    embed=Embedding(meta(VOCAB, DIM), meta(SEQ, DIM)),
+    embed=Embedding(meta(VOCAB, DIM, dtype=lumen.float32), meta(SEQ, DIM, dtype=lumen.float32)),
     layers=[
         Block(
-            Attention(meta(DIM), meta(DIM, DIM), meta(DIM, DIM), meta(DIM, DIM), meta(DIM, DIM)),
-            MLP(meta(DIM), meta(HIDDEN, DIM), meta(DIM, HIDDEN)),
+            Attention(
+                meta(DIM, dtype=lumen.float32),
+                meta(DIM, DIM, dtype=lumen.float32),
+                meta(DIM, DIM, dtype=lumen.float32),
+                meta(DIM, DIM, dtype=lumen.float32),
+                meta(DIM, DIM, dtype=lumen.float32),
+            ),
+            MLP(
+                meta(DIM, dtype=lumen.float32),
+                meta(HIDDEN, DIM, dtype=lumen.float32),
+                meta(DIM, HIDDEN, dtype=lumen.float32),
+            ),
         )
         for _ in range(LAYERS)
     ],
-    norm=meta(DIM),
-    head=meta(VOCAB, DIM),
+    norm=meta(DIM, dtype=lumen.float32),
+    head=meta(VOCAB, DIM, dtype=lumen.float32),
 )
 opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 

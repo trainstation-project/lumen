@@ -5,7 +5,8 @@
 //!   was, but `-0 + 0`: `-0`, not `+0`, as XLA's);
 //! - a reshape of a reshape, a transpose of a transpose, a broadcast of a
 //!   broadcast: one; a reshape to `x`'s shape, an identity transpose: `x`;
-//! - a dot of an input's transpose: the dot of the input, at the
+//! - a dot of an input's transpose (or of its cast: mixed precision's
+//!   `w.t().bfloat16()`): the dot of the input (or its cast), at the
 //!   dimensions the transpose maps (XLA: `TransposeFolding`; `x @ w.t()`
 //!   reads the weight `w` as it is), where its free dimensions stay in
 //!   order (a computed value's transpose is left: the attention matcher
@@ -76,9 +77,15 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
             Some(Rewrite::Node(p, ins)) => {
                 out.apply(p, &ins).expect("a rewrite is typed as the node")
             }
-            None => match matched {
-                true => moved(&mut out, &producer, &once, &node.primitive, &inputs),
-                false => None,
+            None => match &node.primitive {
+                // A dot of an input's transpose (or of the transpose's
+                // cast): the dot of the input (or its cast) at the
+                // dimensions the transpose maps.
+                Primitive::DotGeneral { .. } => {
+                    folded(&mut out, &producer, &node.primitive, &inputs)
+                }
+                _ if matched => moved(&mut out, &producer, &once, &node.primitive, &inputs),
+                _ => None,
             }
             .unwrap_or_else(|| {
                 out.apply(node.primitive.clone(), &inputs)
@@ -207,9 +214,6 @@ fn rewrite(
             }
             _ => None,
         },
-        // An operand's transpose folded into the dot (XLA's TransposeFolding):
-        // the dot reads the operand as it is, at its dimensions, no copy.
-        DotGeneral { .. } => folded(out, producer, primitive, inputs),
         _ => None,
     }
 }
@@ -462,15 +466,17 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
 }
 
 /// `dot` of `x`, its operands' transposes of inputs folded into its
-/// dimension numbers (each input read as it is, at the dimensions the
-/// transpose maps them to), if either is one that keeps its free
-/// dimensions in order (so the dot's result is the same).
+/// dimension numbers, added to `out`: each input read as it is, at the
+/// dimensions the transpose maps them to (a cast of the transpose, as
+/// mixed precision casts a weight: the cast of the input, read so), if
+/// either is one that keeps its free dimensions in order (so the dot's
+/// result is the same). Its value, if it folded either.
 fn folded(
-    out: &Graph,
+    out: &mut Graph,
     producer: &HashMap<Var, usize>,
     dot: &Primitive,
     x: &[Var],
-) -> Option<Rewrite> {
+) -> Option<Var> {
     let Primitive::DotGeneral {
         lhs_contracting,
         rhs_contracting,
@@ -491,15 +497,25 @@ fn folded(
     );
     let mut changed = false;
     for side in 0..2 {
+        // The operand's transpose of an input, and the cast after it.
+        let (cast, transposed) = match node_of(out, producer, x[side]) {
+            Some(Node {
+                primitive: cast @ Primitive::Cast { .. },
+                inputs,
+                ..
+            }) => (Some(cast.clone()), inputs[0]),
+            _ => (None, x[side]),
+        };
         let Some(Node {
             primitive: Primitive::Transpose { permutation },
             inputs,
             ..
-        }) = node_of(out, producer, x[side])
+        }) = node_of(out, producer, transposed)
         else {
             continue;
         };
-        if !out.inputs().contains(&inputs[0]) {
+        let (permutation, input) = (permutation.clone(), inputs[0]);
+        if !out.inputs().contains(&input) {
             continue;
         }
         let (contracting, batch) = &dims[side];
@@ -513,7 +529,10 @@ fn folded(
         }
         let map = |ds: &[usize]| ds.iter().map(|&d| permutation[d]).collect::<Vec<_>>();
         dims[side] = (map(contracting), map(batch));
-        operands[side] = inputs[0];
+        operands[side] = match cast {
+            Some(cast) => out.apply(cast, &[input]).expect("a cast of the input"),
+            None => input,
+        };
         changed = true;
     }
     let [(lhs_contracting, lhs_batch), (rhs_contracting, rhs_batch)] = dims;
@@ -526,7 +545,7 @@ fn folded(
             accum_dtype: *accum_dtype,
             output_dtype: *output_dtype,
         };
-        Rewrite::Node(dot, operands)
+        out.apply(dot, &operands).expect("the dot, folded")
     })
 }
 
