@@ -200,3 +200,43 @@ def test_errors():
         lumen.compile(lambda x: lumen.rand([3], dtype="int32"))(lumen.zeros([1]))
     with pytest.raises(ValueError, match="between 0 and 1"):
         lumen.compile(lambda x: F.dropout(x, 1.5))(lumen.zeros([1]))
+
+
+def _dropout_read_early_and_late(a, w):
+    h = F.dropout(a @ w, 0.5)
+    b = h @ w
+    e = (b @ w) @ b
+    return F.sum((e @ w) * h, -1)
+
+
+@pytest.mark.mps
+def test_rematerialized_dropout_draws_the_same_mask():
+    """Under ``memory_limit``, dropout's ``h`` (read by the first matmul and
+    by the last) is computed again for its late reader: the copy draws the
+    same numbers (the same state and offset; Philox is a function of
+    them), so the result is the same bit for bit, with the mask computed
+    twice and a value less of workspace."""
+    lumen.config.compiler.memory_limit = 0
+    meta = [lumen.empty([512, 512], device="meta")] * 2
+    rng = np.random.default_rng(0)
+    try:
+        a, w = (
+            lumen.from_numpy((rng.standard_normal((512, 512)) / 16).astype(np.float32)).to("mps") for _ in range(2)
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    results = []
+    try:
+        for limit in (0, 1):
+            lumen.config.compiler.memory_limit = limit
+            plan = lumen.graph.Plan(lumen.make_graph(_dropout_read_early_and_late)(*meta), "mps")
+            draws = sum("random_bits" in s["label"] for s in plan.steps())
+            lumen.manual_seed(7)
+            out = lumen.to_numpy(lumen.compile(_dropout_read_early_and_late)(a, w))
+            results.append((plan.workspace_bytes, draws, out))
+    finally:
+        lumen.config.compiler.reset()
+    (kept, once, y0), (recomputed, twice, y1) = results
+    assert (once, twice) == (1, 2)
+    assert recomputed == kept - 512 * 512 * 4
+    np.testing.assert_array_equal(y0, y1)
