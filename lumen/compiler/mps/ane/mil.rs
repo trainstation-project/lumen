@@ -22,9 +22,11 @@ pub(super) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
         DType::F32 => (11, "fp32"),
         DType::I32 => (23, "int32"),
         DType::Bool => (1, "bool"),
-        d => return Err(format!(
-            "Core ML programs compute float16, float32, int32 and bool values, not {d}"
-        )),
+        d => {
+            return Err(format!(
+                "Core ML programs compute float16, float32, int32 and bool values, not {d}"
+            ));
+        }
     })
 }
 
@@ -45,7 +47,10 @@ pub(super) fn array_dtype(dtype: DType) -> Result<i64, String> {
 fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     let mut t = Message::new().int(1, dtype).int(2, shape.len() as i64);
     for &d in shape {
-        t = t.message(3, Message::new().message(1, Message::new().int(1, d as i64)));
+        t = t.message(
+            3,
+            Message::new().message(1, Message::new().int(1, d as i64)),
+        );
     }
     Message::new().message(1, t)
 }
@@ -75,10 +80,14 @@ fn tensor_value(dtype: DType, data: &[u8]) -> Message {
             Message::new().message(1, Message::new().packed_floats(1, floats))
         }
         DType::I32 => {
-            let ints = words(4).map(|w| i64::from(i32::from_le_bytes(w.try_into().expect("4 bytes"))));
+            let ints =
+                words(4).map(|w| i64::from(i32::from_le_bytes(w.try_into().expect("4 bytes"))));
             Message::new().message(2, Message::new().packed_ints(1, ints))
         }
-        _ => Message::new().message(3, Message::new().packed_ints(1, data.iter().map(|&b| i64::from(b != 0)))),
+        _ => Message::new().message(
+            3,
+            Message::new().packed_ints(1, data.iter().map(|&b| i64::from(b != 0))),
+        ),
     }
 }
 
@@ -127,13 +136,26 @@ impl Lower<'_> {
     /// An operation `kind` of `inputs` (each a parameter and its
     /// arguments' names), its output `dtype` and `shape`: its output's
     /// name.
-    fn op(&mut self, kind: &str, inputs: &[(&str, Vec<String>)], dtype: DType, shape: &[usize]) -> Result<String, String> {
+    fn op(
+        &mut self,
+        kind: &str,
+        inputs: &[(&str, Vec<String>)],
+        dtype: DType,
+        shape: &[usize],
+    ) -> Result<String, String> {
         let name = self.fresh();
         self.named(name, kind, inputs, dtype, shape)
     }
 
     /// [`op`](Self::op), its output named `name`.
-    fn named(&mut self, name: String, kind: &str, inputs: &[(&str, Vec<String>)], dtype: DType, shape: &[usize]) -> Result<String, String> {
+    fn named(
+        &mut self,
+        name: String,
+        kind: &str,
+        inputs: &[(&str, Vec<String>)],
+        dtype: DType,
+        shape: &[usize],
+    ) -> Result<String, String> {
         let mut op = Message::new().string(1, kind);
         for (parameter, arguments) in inputs {
             let mut argument = Message::new();
@@ -157,7 +179,12 @@ impl Lower<'_> {
         let code = mil_dtype(dtype)?.0;
         let op = Message::new()
             .string(1, "const")
-            .message(3, Message::new().string(1, &name).message(2, tensor_type(code, shape)))
+            .message(
+                3,
+                Message::new()
+                    .string(1, &name)
+                    .message(2, tensor_type(code, shape)),
+            )
             .entry(5, "val", value(code, shape, tensor_value(dtype, data)))
             .entry(5, "name", string_value(&name));
         self.ops.push(op);
@@ -166,7 +193,10 @@ impl Lower<'_> {
 
     /// An int32 vector constant (a parameter: axes, a shape).
     fn ints(&mut self, values: &[usize]) -> Result<String, String> {
-        let data: Vec<u8> = values.iter().flat_map(|&v| (v as i32).to_le_bytes()).collect();
+        let data: Vec<u8> = values
+            .iter()
+            .flat_map(|&v| (v as i32).to_le_bytes())
+            .collect();
         self.constant(DType::I32, &[values.len()], &data)
     }
 
@@ -187,7 +217,12 @@ impl Lower<'_> {
         }
         let reps: Vec<usize> = ty.shape.iter().zip(&shape).map(|(&n, &s)| n / s).collect();
         let reps = self.ints(&reps)?;
-        let tiled = self.op("tile", &[("x", vec![name]), ("reps", vec![reps])], ty.dtype, &ty.shape)?;
+        let tiled = self.op(
+            "tile",
+            &[("x", vec![name]), ("reps", vec![reps])],
+            ty.dtype,
+            &ty.shape,
+        )?;
         self.vals[v] = Some((tiled.clone(), ty.shape.clone()));
         Ok(tiled)
     }
@@ -195,18 +230,34 @@ impl Lower<'_> {
     /// Reshape `name` (`dtype`) to `shape`.
     fn reshape(&mut self, name: String, dtype: DType, shape: &[usize]) -> Result<String, String> {
         let s = self.ints(shape)?;
-        self.op("reshape", &[("x", vec![name]), ("shape", vec![s])], dtype, shape)
+        self.op(
+            "reshape",
+            &[("x", vec![name]), ("shape", vec![s])],
+            dtype,
+            shape,
+        )
     }
 
     /// Transpose `name` (`dtype`, of `shape`) by `perm`, if it moves any
     /// dimension.
-    fn transpose(&mut self, name: String, dtype: DType, shape: &[usize], perm: &[usize]) -> Result<(String, Vec<usize>), String> {
+    fn transpose(
+        &mut self,
+        name: String,
+        dtype: DType,
+        shape: &[usize],
+        perm: &[usize],
+    ) -> Result<(String, Vec<usize>), String> {
         let out: Vec<usize> = perm.iter().map(|&p| shape[p]).collect();
         if perm.iter().enumerate().all(|(i, &p)| i == p) {
             return Ok((name, out));
         }
         let p = self.ints(perm)?;
-        let name = self.op("transpose", &[("x", vec![name]), ("perm", vec![p])], dtype, &out)?;
+        let name = self.op(
+            "transpose",
+            &[("x", vec![name]), ("perm", vec![p])],
+            dtype,
+            &out,
+        )?;
         Ok((name, out))
     }
 
@@ -215,11 +266,16 @@ impl Lower<'_> {
         let graph = self.graph;
         let ty = graph.type_of(node.output).clone();
         let input = |k: usize| node.inputs[k];
-        let elementwise = |this: &mut Self, kind: &str, params: &[&str]| -> Result<(String, Vec<usize>), String> {
+        let elementwise = |this: &mut Self,
+                           kind: &str,
+                           params: &[&str]|
+         -> Result<(String, Vec<usize>), String> {
             let mut args = Vec::new();
             let mut shape = vec![1; ty.shape.len()];
             for (k, &p) in params.iter().enumerate() {
-                let (name, s) = this.vals[input(k)].clone().ok_or("a value before its producer")?;
+                let (name, s) = this.vals[input(k)]
+                    .clone()
+                    .ok_or("a value before its producer")?;
                 shape = shape.iter().zip(&s).map(|(&a, &b)| a.max(b)).collect();
                 args.push((p, vec![name]));
             }
@@ -243,23 +299,46 @@ impl Lower<'_> {
             Select => elementwise(self, "select", &["cond", "a", "b"])?,
             Neg => {
                 // x * -1: exact, -0 kept.
-                let (x, shape) = self.vals[input(0)].clone().ok_or("a value before its producer")?;
-                let minus = self.constant(ty.dtype, &[], &scalar_bytes(ty.dtype, Scalar::Int(-1)))?;
-                let name = self.op("mul", &[("x", vec![x]), ("y", vec![minus])], ty.dtype, &shape)?;
+                let (x, shape) = self.vals[input(0)]
+                    .clone()
+                    .ok_or("a value before its producer")?;
+                let minus =
+                    self.constant(ty.dtype, &[], &scalar_bytes(ty.dtype, Scalar::Int(-1)))?;
+                let name = self.op(
+                    "mul",
+                    &[("x", vec![x]), ("y", vec![minus])],
+                    ty.dtype,
+                    &shape,
+                )?;
                 (name, shape)
             }
             Cast { new_dtype } => {
-                let (x, shape) = self.vals[input(0)].clone().ok_or("a value before its producer")?;
+                let (x, shape) = self.vals[input(0)]
+                    .clone()
+                    .ok_or("a value before its producer")?;
                 let d = self.constant_string(mil_dtype(*new_dtype)?.1)?;
-                let name = self.op("cast", &[("x", vec![x]), ("dtype", vec![d])], ty.dtype, &shape)?;
+                let name = self.op(
+                    "cast",
+                    &[("x", vec![x]), ("dtype", vec![d])],
+                    ty.dtype,
+                    &shape,
+                )?;
                 (name, shape)
             }
-            Full { shape, fill_value, dtype } => {
+            Full {
+                shape,
+                fill_value,
+                dtype,
+            } => {
                 let ones = vec![1; shape.len()];
                 let name = self.constant(*dtype, &ones, &scalar_bytes(*dtype, *fill_value))?;
                 (name, ones)
             }
-            Iota { dtype, shape, dimension } => {
+            Iota {
+                dtype,
+                shape,
+                dimension,
+            } => {
                 let mut compact = vec![1; shape.len()];
                 compact[*dimension] = shape[*dimension];
                 let data: Vec<u8> = (0..shape[*dimension])
@@ -268,7 +347,10 @@ impl Lower<'_> {
                 let name = self.constant(*dtype, &compact, &data)?;
                 (name, compact)
             }
-            BroadcastInDim { shape, broadcast_dimensions } => {
+            BroadcastInDim {
+                shape,
+                broadcast_dimensions,
+            } => {
                 let x = input(0);
                 let (name, xs) = self.vals[x].clone().ok_or("a value before its producer")?;
                 let dtype = ty.dtype;
@@ -287,11 +369,15 @@ impl Lower<'_> {
                 (name, compact)
             }
             Transpose { permutation } => {
-                let (name, xs) = self.vals[input(0)].clone().ok_or("a value before its producer")?;
+                let (name, xs) = self.vals[input(0)]
+                    .clone()
+                    .ok_or("a value before its producer")?;
                 self.transpose(name, ty.dtype, &xs, permutation)?
             }
             Reshape { new_sizes } => {
-                let (name, xs) = self.vals[input(0)].clone().ok_or("a value before its producer")?;
+                let (name, xs) = self.vals[input(0)]
+                    .clone()
+                    .ok_or("a value before its producer")?;
                 // The same everywhere: still so.
                 if xs.iter().all(|&d| d == 1) {
                     let ones = vec![1; new_sizes.len()];
@@ -310,7 +396,12 @@ impl Lower<'_> {
                     ReduceSum { accum_dtype, .. } => {
                         if *accum_dtype != xt.dtype {
                             let d = self.constant_string(mil_dtype(*accum_dtype)?.1)?;
-                            name = self.op("cast", &[("x", vec![name]), ("dtype", vec![d])], *accum_dtype, &xt.shape)?;
+                            name = self.op(
+                                "cast",
+                                &[("x", vec![name]), ("dtype", vec![d])],
+                                *accum_dtype,
+                                &xt.shape,
+                            )?;
                         }
                         "reduce_sum"
                     }
@@ -318,15 +409,30 @@ impl Lower<'_> {
                 };
                 let a = self.ints(axes)?;
                 let keep = self.boolean(false)?;
-                let args = [("x", vec![name]), ("axes", vec![a]), ("keep_dims", vec![keep])];
+                let args = [
+                    ("x", vec![name]),
+                    ("axes", vec![a]),
+                    ("keep_dims", vec![keep]),
+                ];
                 (self.op(kind, &args, ty.dtype, &ty.shape)?, ty.shape.clone())
             }
-            Slice { start_indices, limit_indices } => {
+            Slice {
+                start_indices,
+                limit_indices,
+            } => {
                 let x = self.full(input(0))?;
                 let (b, e) = (self.ints(start_indices)?, self.ints(limit_indices)?);
                 let s = self.ints(&vec![1; start_indices.len()])?;
-                let args = [("x", vec![x]), ("begin", vec![b]), ("end", vec![e]), ("stride", vec![s])];
-                (self.op("slice_by_index", &args, ty.dtype, &ty.shape)?, ty.shape.clone())
+                let args = [
+                    ("x", vec![x]),
+                    ("begin", vec![b]),
+                    ("end", vec![e]),
+                    ("stride", vec![s]),
+                ];
+                (
+                    self.op("slice_by_index", &args, ty.dtype, &ty.shape)?,
+                    ty.shape.clone(),
+                )
             }
             Concatenate { dimension } => {
                 let mut values = Vec::new();
@@ -334,11 +440,23 @@ impl Lower<'_> {
                     values.push(self.full(v)?);
                 }
                 let (axis, interleave) = (self.int(*dimension as i64)?, self.boolean(false)?);
-                let args = [("values", values), ("axis", vec![axis]), ("interleave", vec![interleave])];
-                (self.op("concat", &args, ty.dtype, &ty.shape)?, ty.shape.clone())
+                let args = [
+                    ("values", values),
+                    ("axis", vec![axis]),
+                    ("interleave", vec![interleave]),
+                ];
+                (
+                    self.op("concat", &args, ty.dtype, &ty.shape)?,
+                    ty.shape.clone(),
+                )
             }
             DotGeneral { .. } => self.dot(node)?,
-            p => return Err(format!("Core ML programs do not run {} (with these operands)", p.name())),
+            p => {
+                return Err(format!(
+                    "Core ML programs do not run {} (with these operands)",
+                    p.name()
+                ));
+            }
         })
     }
 
@@ -346,7 +464,12 @@ impl Lower<'_> {
         let name = self.fresh();
         let op = Message::new()
             .string(1, "const")
-            .message(3, Message::new().string(1, &name).message(2, tensor_type(2, &[])))
+            .message(
+                3,
+                Message::new()
+                    .string(1, &name)
+                    .message(2, tensor_type(2, &[])),
+            )
             .entry(5, "val", string_value(s))
             .entry(5, "name", string_value(&name));
         self.ops.push(op);
@@ -371,22 +494,32 @@ impl Lower<'_> {
         };
         let graph = self.graph;
         let ty = graph.type_of(node.output).clone();
-        let (l, r) = (graph.type_of(node.inputs[0]).clone(), graph.type_of(node.inputs[1]).clone());
+        let (l, r) = (
+            graph.type_of(node.inputs[0]).clone(),
+            graph.type_of(node.inputs[1]).clone(),
+        );
         // float16 operands, a float16 result: Core ML's float16 matmul; a
         // float32 result: of the operands widened (exactly), in float32.
         let dtype = match (l.dtype, *output_dtype) {
             (DType::F16, DType::F16) => DType::F16,
             (DType::F16 | DType::F32, DType::F32) => DType::F32,
-            (d, o) => return Err(format!("Core ML programs run dots of float16 or float32 operands, not {d} to {o}")),
+            (d, o) => {
+                return Err(format!(
+                    "Core ML programs run dots of float16 or float32 operands, not {d} to {o}"
+                ));
+            }
         };
         let free = |rank: usize, batch: &[usize], contracting: &[usize]| -> Vec<usize> {
-            (0..rank).filter(|d| !batch.contains(d) && !contracting.contains(d)).collect()
+            (0..rank)
+                .filter(|d| !batch.contains(d) && !contracting.contains(d))
+                .collect()
         };
         let (lf, rf) = (
             free(l.shape.len(), lhs_batch, lhs_contracting),
             free(r.shape.len(), rhs_batch, rhs_contracting),
         );
-        let size = |t: &TensorType, dims: &[usize]| dims.iter().map(|&d| t.shape[d]).product::<usize>();
+        let size =
+            |t: &TensorType, dims: &[usize]| dims.iter().map(|&d| t.shape[d]).product::<usize>();
         let (b, m, k, n) = (
             size(&l, lhs_batch),
             size(&l, &lf),
@@ -398,11 +531,21 @@ impl Lower<'_> {
             true => vec![b, rows, cols],
             false => vec![rows, cols],
         };
-        let operand = |this: &mut Self, v: Var, t: &TensorType, order: Vec<usize>, shape: Vec<usize>| -> Result<String, String> {
+        let operand = |this: &mut Self,
+                       v: Var,
+                       t: &TensorType,
+                       order: Vec<usize>,
+                       shape: Vec<usize>|
+         -> Result<String, String> {
             let mut name = this.full(v)?;
             if t.dtype != dtype {
                 let d = this.constant_string(mil_dtype(dtype)?.1)?;
-                name = this.op("cast", &[("x", vec![name]), ("dtype", vec![d])], dtype, &t.shape)?;
+                name = this.op(
+                    "cast",
+                    &[("x", vec![name]), ("dtype", vec![d])],
+                    dtype,
+                    &t.shape,
+                )?;
             }
             let (name, s) = this.transpose(name, dtype, &t.shape, &order)?;
             match s == shape {
@@ -434,7 +577,10 @@ impl Lower<'_> {
 /// contiguous) constants of it, the others the model's (`in0`, ...): its
 /// specification (`Model.proto`), an ML Program, and each of its
 /// operations' outputs with the node of `graph` it lowers.
-pub(super) fn lower(graph: &Graph, constants: &[Option<&[u8]>]) -> Result<(Vec<u8>, Owners), String> {
+pub(super) fn lower(
+    graph: &Graph,
+    constants: &[Option<&[u8]>],
+) -> Result<(Vec<u8>, Owners), String> {
     let mut lower = Lower {
         graph,
         ops: Vec::new(),
@@ -497,7 +643,13 @@ pub(super) fn lower(graph: &Graph, constants: &[Option<&[u8]>]) -> Result<(Vec<u
                 let args = [("x", vec![x]), ("shape", vec![s])];
                 lower.named(name.clone(), "reshape", &args, ty.dtype, &[1])?
             }
-            false => lower.named(name.clone(), "identity", &[("x", vec![x])], ty.dtype, &ty.shape)?,
+            false => lower.named(
+                name.clone(),
+                "identity",
+                &[("x", vec![x])],
+                ty.dtype,
+                &ty.shape,
+            )?,
         };
         outputs.push(name);
     }

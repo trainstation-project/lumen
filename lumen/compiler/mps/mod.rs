@@ -439,7 +439,7 @@ pub(crate) fn encode(
     };
     // A Core ML program's, on the Neural Engine.
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
-        return ane::encode(step, inputs, output);
+        return ane::encode(step, inputs, output, keep);
     }
     // The kernel's inputs, then (a multi-output fusion's) other outputs; of
     // the inputs, device buffers and the by-value ones' bytes, read on the

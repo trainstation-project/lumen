@@ -326,14 +326,15 @@ impl Plan {
             // Nor a Core ML step's (its program reads and writes the
             // buffers in no order it says).
             let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(super::NEURAL_ENGINE));
-            let step = !neural_engine && !matches!(
-                node.primitive,
-                Primitive::DynamicUpdateSlice
-                    | Primitive::CustomCall { .. }
-                    | Primitive::Reshape { .. }
-                    | Primitive::Wait
-                    | Primitive::FusionOutput { .. }
-            );
+            let step = !neural_engine
+                && !matches!(
+                    node.primitive,
+                    Primitive::DynamicUpdateSlice
+                        | Primitive::CustomCall { .. }
+                        | Primitive::Reshape { .. }
+                        | Primitive::Wait
+                        | Primitive::FusionOutput { .. }
+                );
             let donated = graph.outputs().iter().enumerate().any(|(k, &o)| {
                 o == node.output
                     && (options
@@ -864,7 +865,11 @@ impl Plan {
                         // A contraction with its epilogue reads its dot's
                         // operands as the dot does (a Core ML step, at
                         // any strides).
-                        Primitive::Fusion { name, .. } if name.starts_with(super::NEURAL_ENGINE) => true,
+                        Primitive::Fusion { name, .. }
+                            if name.starts_with(super::NEURAL_ENGINE) =>
+                        {
+                            true
+                        }
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
                                 && s.inputs[k].1.shape == self.inputs[i].shape

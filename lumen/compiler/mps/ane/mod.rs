@@ -28,13 +28,14 @@ mod proto;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use crate::DType;
 use crate::graph::plan::Step;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::tensor::contiguous_strides;
+use crate::{DType, Tensor};
 
 unsafe extern "C" {
     fn lumen_coreml_compile(spec: *const u8, len: usize, error: *mut *mut c_char) -> *mut c_void;
@@ -56,6 +57,10 @@ unsafe extern "C" {
     ) -> i32;
     fn lumen_coreml_free(model: *mut c_void);
     fn lumen_coreml_free_string(s: *mut c_char);
+    fn lumen_coreml_encode_signal(command_buffer: *mut c_void, value: u64);
+    fn lumen_coreml_encode_wait(command_buffer: *mut c_void, value: u64);
+    fn lumen_coreml_host_wait(value: u64);
+    fn lumen_coreml_host_signal(value: u64);
 }
 
 /// The fewest multiply-adds of a dot a region starts from: below it, the
@@ -69,8 +74,10 @@ struct Program {
 }
 
 // SAFETY: an MLModel's predictions may run from any thread (Core ML), and
-// the program is not changed after it is compiled.
+// the program is not changed after it is compiled; its predictions run on
+// one thread ([`Job`]).
 unsafe impl Send for Program {}
+unsafe impl Sync for Program {}
 
 impl Drop for Program {
     fn drop(&mut self) {
@@ -99,13 +106,19 @@ impl Program {
     /// `body` compiled, its inputs with `constants` baked in: the program,
     /// and the node of `body` each operation Core ML runs off the Neural
     /// Engine lowers (`None`: an input's or output's), by MLComputePlan.
-    fn compile(body: &Graph, constants: &[Option<&[u8]>]) -> Result<(Self, Vec<Option<usize>>), String> {
+    fn compile(
+        body: &Graph,
+        constants: &[Option<&[u8]>],
+    ) -> Result<(Self, Vec<Option<usize>>), String> {
         let (spec, owners) = mil::lower(body, constants)?;
         let mut error = std::ptr::null_mut();
         // SAFETY: `spec` is read during the call; `error` is set on failure.
         let model = unsafe { lumen_coreml_compile(spec.as_ptr(), spec.len(), &mut error) };
         if model.is_null() {
-            return Err(format!("Core ML could not compile the program: {}", take(error)));
+            return Err(format!(
+                "Core ML could not compile the program: {}",
+                take(error)
+            ));
         }
         let program = Program { model };
         // SAFETY: a live handle.
@@ -117,18 +130,30 @@ impl Program {
                 let (output, device) = (fields.next()?, fields.nth(1)?);
                 (device != "ane").then_some(output)
             })
-            .filter_map(|o| owners.iter().find(|(name, _)| name == o).map(|&(_, node)| node))
+            .filter_map(|o| {
+                owners
+                    .iter()
+                    .find(|(name, _)| name == o)
+                    .map(|&(_, node)| node)
+            })
             .collect();
         Ok((program, off))
     }
 
     /// The program run on `inputs` (each a buffer, its type and strides, in
     /// elements), writing `outputs` (contiguous buffers).
-    fn predict(&self, inputs: &[(*const u8, &TensorType, Vec<usize>)], outputs: &[(*mut u8, &TensorType)]) -> Result<(), String> {
+    fn predict(
+        &self,
+        inputs: &[(*const u8, &TensorType, Vec<usize>)],
+        outputs: &[(*mut u8, &TensorType)],
+    ) -> Result<(), String> {
         // Core ML's arrays have a dimension at least: a scalar is one of [1].
         let shape = |ty: &TensorType| mil::io_shape(&ty.shape).into_iter().map(|d| d as i64);
         let in_data: Vec<*const u8> = inputs.iter().map(|i| i.0).collect();
-        let in_dtypes = inputs.iter().map(|i| code(i.1.dtype)).collect::<Result<Vec<_>, _>>()?;
+        let in_dtypes = inputs
+            .iter()
+            .map(|i| code(i.1.dtype))
+            .collect::<Result<Vec<_>, _>>()?;
         let in_ranks: Vec<usize> = inputs.iter().map(|i| i.1.shape.len().max(1)).collect();
         let in_shapes: Vec<i64> = inputs.iter().flat_map(|i| shape(i.1)).collect();
         let in_strides: Vec<i64> = inputs
@@ -139,7 +164,10 @@ impl Program {
             })
             .collect();
         let out_data: Vec<*mut u8> = outputs.iter().map(|o| o.0).collect();
-        let out_dtypes = outputs.iter().map(|o| code(o.1.dtype)).collect::<Result<Vec<_>, _>>()?;
+        let out_dtypes = outputs
+            .iter()
+            .map(|o| code(o.1.dtype))
+            .collect::<Result<Vec<_>, _>>()?;
         let out_ranks: Vec<usize> = outputs.iter().map(|o| o.1.shape.len().max(1)).collect();
         let out_shapes: Vec<i64> = outputs.iter().flat_map(|o| shape(o.1)).collect();
         let mut error = std::ptr::null_mut();
@@ -165,7 +193,10 @@ impl Program {
         };
         match status {
             0 => Ok(()),
-            _ => Err(format!("Core ML could not run the program: {}", take(error))),
+            _ => Err(format!(
+                "Core ML could not run the program: {}",
+                take(error)
+            )),
         }
     }
 }
@@ -176,7 +207,7 @@ impl Program {
 struct Entry {
     body: Graph,
     constant: Vec<bool>,
-    program: Option<Program>,
+    program: Option<Arc<Program>>,
 }
 
 static PROGRAMS: Mutex<BTreeMap<String, Entry>> = Mutex::new(BTreeMap::new());
@@ -198,7 +229,12 @@ fn lowerable(graph: &Graph, node: &crate::graph::Node) -> bool {
         ReduceSum { axes, .. } | ReduceMax { axes } => !axes.is_empty(),
         _ => false,
     };
-    let typed = |v: &Var| matches!(graph.type_of(*v).dtype, DType::F16 | DType::F32 | DType::I32 | DType::Bool);
+    let typed = |v: &Var| {
+        matches!(
+            graph.type_of(*v).dtype,
+            DType::F16 | DType::F32 | DType::I32 | DType::Bool
+        )
+    };
     supported && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
@@ -236,19 +272,31 @@ pub(crate) fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     // and indices); a dot's of float16 operands, one a fixed weight's (not
     // a weight the function writes, read at run time).
     let computed = |node: &crate::graph::Node| {
-        let narrow = |v: &Var| weight[*v] || matches!(graph.type_of(*v).dtype, DType::F16 | DType::I32 | DType::Bool);
+        let narrow = |v: &Var| {
+            weight[*v]
+                || matches!(
+                    graph.type_of(*v).dtype,
+                    DType::F16 | DType::I32 | DType::Bool
+                )
+        };
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. });
         lowerable(graph, node)
             && node.inputs.iter().chain([&node.output]).all(narrow)
             && (!dot || (float16_dot(node) && node.inputs.iter().any(|&v| weight[v])))
     };
     let seed = |node: &crate::graph::Node| {
-        let Primitive::DotGeneral { lhs_contracting, .. } = &node.primitive else {
+        let Primitive::DotGeneral {
+            lhs_contracting, ..
+        } = &node.primitive
+        else {
             return false;
         };
         let (a, b) = (node.inputs[0], node.inputs[1]);
         // Multiply-adds: the output's elements, each a contraction.
-        let k: usize = lhs_contracting.iter().map(|&d| graph.type_of(a).shape[d]).product();
+        let k: usize = lhs_contracting
+            .iter()
+            .map(|&d| graph.type_of(a).shape[d])
+            .product();
         let macs = graph.type_of(node.output).numel() * k;
         float16_dot(node) && weight[a] != weight[b] && macs >= MIN_MACS
     };
@@ -280,7 +328,9 @@ pub(crate) fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
         // with what depends on it, until it runs all of it there.
         let mut built = None;
         for _ in 0..4 {
-            let b = build(graph, &producer, &readers, &output, &weight, fixed, &members);
+            let b = build(
+                graph, &producer, &readers, &output, &weight, fixed, &members,
+            );
             let Some(b) = b else { break };
             let zeros: Vec<Vec<u8>> = b
                 .reads
@@ -297,7 +347,9 @@ pub(crate) fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
                 .map(|(z, &c)| c.then_some(z.as_slice()))
                 .collect();
             // Core ML refusing it: none of it on the Neural Engine.
-            let Ok((_, off)) = Program::compile(&b.body, &constants) else { break };
+            let Ok((_, off)) = Program::compile(&b.body, &constants) else {
+                break;
+            };
             let off: Vec<usize> = off.into_iter().flatten().map(|k| b.nodes[k]).collect();
             if off.is_empty() {
                 built = Some(b);
@@ -315,7 +367,9 @@ pub(crate) fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
             });
         }
         if let Some(b) = built {
-            members.iter().for_each(|&k| region[k] = Some(regions.len()));
+            members
+                .iter()
+                .for_each(|&k| region[k] = Some(regions.len()));
             regions.push((members, b));
         }
     }
@@ -352,7 +406,10 @@ fn build(
     let mut all = vec![false; nodes.len()];
     members.iter().for_each(|&k| all[k] = true);
     // The fixed weights' values its nodes read, from the weights.
-    let mut stack: Vec<Var> = members.iter().flat_map(|&k| nodes[k].inputs.clone()).collect();
+    let mut stack: Vec<Var> = members
+        .iter()
+        .flat_map(|&k| nodes[k].inputs.clone())
+        .collect();
     while let Some(v) = stack.pop() {
         if let Some(p) = producer[v].filter(|&p| weight[v] && !all[p]) {
             all[p] = true;
@@ -450,8 +507,12 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
                 Err(r) => {
                     let (members, b) = regions[r].take().expect("a region emitted once");
                     let name = format!("{NEURAL_ENGINE}{}", NEXT.fetch_add(1, Ordering::Relaxed));
-                    let labels: Vec<&str> = members.iter().map(|&k| graph.label(&nodes[k])).collect();
-                    let label = intern(format!("coreml{FUSION_SEPARATOR}{}", labels.join(FUSION_SEPARATOR)));
+                    let labels: Vec<&str> =
+                        members.iter().map(|&k| graph.label(&nodes[k])).collect();
+                    let label = intern(format!(
+                        "coreml{FUSION_SEPARATOR}{}",
+                        labels.join(FUSION_SEPARATOR)
+                    ));
                     programs().insert(
                         name.clone(),
                         Entry {
@@ -461,8 +522,14 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
                         },
                     );
                     let reads: Vec<Var> = b.reads.iter().map(|&v| map[v]).collect();
-                    let fusion = Primitive::Fusion { name, label, body: b.body };
-                    let first = out.apply(fusion, &reads).expect("a region is typed as the graph");
+                    let fusion = Primitive::Fusion {
+                        name,
+                        label,
+                        body: b.body,
+                    };
+                    let first = out
+                        .apply(fusion, &reads)
+                        .expect("a region is typed as the graph");
                     map[b.outputs[0]] = first;
                     for (k, &v) in b.outputs.iter().enumerate().skip(1) {
                         let output = Primitive::FusionOutput {
@@ -475,9 +542,13 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
             }
         }
     }
-    assert!(waiting.is_empty(), "every region reads values computed before it");
+    assert!(
+        waiting.is_empty(),
+        "every region reads values computed before it"
+    );
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("outputs are values of the graph");
+    out.set_outputs(&outputs)
+        .expect("outputs are values of the graph");
     out
 }
 
@@ -493,7 +564,9 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
             rest /= n;
         }
         // SAFETY: an element of the value, in its buffer.
-        bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(data.add(offset * size), size) });
+        bytes.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(data.add(offset * size), size)
+        });
     }
     bytes
 }
@@ -502,13 +575,25 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
 /// for, its program compiled if it is not (from the weights' values now),
 /// then run on its buffers (`inputs`, then its other outputs after
 /// `output`).
-pub(crate) fn encode(step: &Step, inputs: &[*const u8], output: *mut u8) -> Result<(), String> {
+/// A Core ML step's run, in the MPS stream's order without the host
+/// waiting (as the stream's own work): the GPU signals once the work
+/// before it is done, a prediction thread ([`Job`]) waits for that, runs
+/// the program on the plan's buffers and signals in turn, and the GPU work
+/// after the step waits for that signal, so a later step (the next call's
+/// input copy too) never touches its buffers early, and
+/// [`crate::stream::mps::synchronize`] (every host read) waits for it too.
+/// `keep` keeps their memory alive until it has run. Its first run (its
+/// weights read on the host, baked into the program) waits.
+pub(crate) fn encode(
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
     let (inputs, extra) = inputs.split_at(body.inputs().len());
-    // It reads what the GPU wrote; what runs after it reads what it writes.
-    crate::stream::mps::synchronize();
     let mut programs = programs();
     let entry = programs
         .get_mut(name)
@@ -518,26 +603,128 @@ pub(crate) fn encode(step: &Step, inputs: &[*const u8], output: *mut u8) -> Resu
         None => contiguous_strides(&step.inputs[k].1.shape),
     };
     if entry.program.is_none() {
+        // Its weights' values, once the GPU work writing them is done.
+        crate::stream::mps::synchronize();
         let _compile = crate::profiler::record_host_kernel("coreml (compile)");
         let data: Vec<Option<Vec<u8>>> = (0..inputs.len())
-            .map(|k| entry.constant[k].then(|| contiguous(inputs[k], &step.inputs[k].1, &strides(k))))
+            .map(|k| {
+                entry.constant[k].then(|| contiguous(inputs[k], &step.inputs[k].1, &strides(k)))
+            })
             .collect();
         let constants: Vec<Option<&[u8]>> = data.iter().map(Option::as_deref).collect();
-        let (program, _) = Program::compile(&entry.body, &constants).map_err(|e| format!("{}: {e}", step.label))?;
-        entry.program = Some(program);
+        let (program, _) = Program::compile(&entry.body, &constants)
+            .map_err(|e| format!("{}: {e}", step.label))?;
+        entry.program = Some(Arc::new(program));
     }
-    let program = entry.program.as_ref().expect("compiled");
-    let ins: Vec<(*const u8, &TensorType, Vec<usize>)> = (0..inputs.len())
+    let program = Arc::clone(entry.program.as_ref().expect("compiled"));
+    let ins = (0..inputs.len())
         .filter(|&k| !entry.constant[k])
-        .map(|k| (inputs[k], &step.inputs[k].1, strides(k)))
+        .map(|k| (inputs[k], step.inputs[k].1.clone(), strides(k)))
         .collect();
-    let outs: Vec<(*mut u8, &TensorType)> = std::iter::once((output, &step.output.1))
-        .chain(extra.iter().zip(&step.extra_outputs).map(|(&p, (_, ty))| (p.cast_mut(), ty)))
+    drop(programs);
+    let outs = std::iter::once((output, step.output.1.clone()))
+        .chain(
+            extra
+                .iter()
+                .zip(&step.extra_outputs)
+                .map(|(&p, (_, ty))| (p.cast_mut(), ty.clone())),
+        )
         .collect();
-    let _kernel = crate::profiler::record_host_kernel(step.label);
-    program
-        .predict(&ins, &outs)
-        .map_err(|e| format!("{}: {e}", step.label))
+    let ready = EVENT.fetch_add(2, Ordering::Relaxed) + 1;
+    // SAFETY: the stream's open command buffer, encoded into before the
+    // stream commits it (the flush).
+    unsafe { lumen_coreml_encode_signal(crate::stream::mps::command_buffer(), ready) };
+    crate::stream::mps::flush();
+    let job = Job {
+        program,
+        ins,
+        outs,
+        ready,
+        _keep: keep,
+        label: step.label,
+        profile: crate::profiler::gpu_context(crate::device::Device::Mps),
+    };
+    jobs()
+        .send(job)
+        .map_err(|_| format!("{}: the Core ML thread has stopped", step.label))?;
+    // SAFETY: as above; the work encoded after it waits for the
+    // prediction, and synchronize for that work (`mark`).
+    unsafe { lumen_coreml_encode_wait(crate::stream::mps::command_buffer(), ready + 1) };
+    crate::stream::mps::mark();
+    Ok(())
+}
+
+/// The shared event's last value: each step takes two, the GPU's signal
+/// (the work before it done) and its prediction's (done).
+static EVENT: AtomicU64 = AtomicU64::new(0);
+
+/// A Core ML step's prediction, run on the prediction thread once the GPU
+/// signals `ready`, then signalling `ready + 1`: on the plan's buffers
+/// (`ins`: a buffer, its type and strides; `outs`: a buffer and its
+/// type), kept alive by `_keep`.
+struct Job {
+    program: Arc<Program>,
+    ins: Vec<(*const u8, TensorType, Vec<usize>)>,
+    outs: Vec<(*mut u8, TensorType)>,
+    ready: u64,
+    _keep: Vec<Tensor>,
+    label: &'static str,
+    profile: Option<crate::profiler::GpuContext>,
+}
+
+// SAFETY: its buffers are the plan's shared MTLBuffers' memory, kept alive
+// by `_keep`, touched by no one else until the event says so.
+unsafe impl Send for Job {}
+
+/// The prediction thread's queue (started with the first job): jobs run
+/// one at a time, in the order the steps ran.
+fn jobs() -> Sender<Job> {
+    static JOBS: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+    let sender = JOBS.get_or_init(|| {
+        let (sender, receiver) = channel::<Job>();
+        std::thread::Builder::new()
+            .name("lumen-coreml".into())
+            .spawn(move || {
+                for job in receiver {
+                    run(job);
+                }
+            })
+            .expect("the Core ML thread starts");
+        Mutex::new(sender)
+    });
+    sender
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Run `job`: wait for the GPU, predict, signal. A failed prediction is
+/// reported, as a failed MPS command buffer is, and signals still (the GPU
+/// work after it must not wait forever).
+fn run(job: Job) {
+    // SAFETY: a value the stream signals (encoded before the job was sent).
+    unsafe { lumen_coreml_host_wait(job.ready) };
+    let start = crate::profiler::now_ns();
+    let ins: Vec<(*const u8, &TensorType, Vec<usize>)> = job
+        .ins
+        .iter()
+        .map(|(p, ty, s)| (*p, ty, s.clone()))
+        .collect();
+    let outs: Vec<(*mut u8, &TensorType)> = job.outs.iter().map(|(p, ty)| (*p, ty)).collect();
+    let result = job.program.predict(&ins, &outs);
+    if let Some(context) = job.profile {
+        crate::profiler::record_host_kernel_in(
+            context,
+            job.label,
+            start,
+            crate::profiler::now_ns(),
+        );
+    }
+    if let Err(e) = result {
+        eprintln!("{}: {}: {e}", crate::LIBRARY_NAME, job.label);
+    }
+    // SAFETY: the value the GPU work after the step waits for.
+    unsafe { lumen_coreml_host_signal(job.ready + 1) };
 }
 
 /// Forget the programs of `steps`' `coreml_*` steps: compiled again on

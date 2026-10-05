@@ -5,6 +5,7 @@
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 
 #include <cstring>
 #include <vector>
@@ -226,6 +227,56 @@ extern "C" int32_t lumen_coreml_predict(void *handle,
         return 0;
     }
 }
+
+// The event ordering Core ML steps with the MPS stream (made with the first
+// signal encoded, on the stream's device): the GPU signals a value once the
+// work before a step is done, the step's prediction (on another thread)
+// waits for it, then signals the next value, which the GPU work after the
+// step waits for. Nothing blocks the host.
+static id<MTLSharedEvent> event = nil;
+static MTLSharedEventListener *listener = nil;
+
+static id<MTLSharedEvent> event_for(id<MTLDevice> device) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        event = [device newSharedEvent];
+        listener = [[MTLSharedEventListener alloc]
+            initWithDispatchQueue:dispatch_queue_create("lumen.coreml.event", DISPATCH_QUEUE_SERIAL)];
+    });
+    return event;
+}
+
+// Encode into `command_buffer` (the stream's open MTLCommandBuffer) the GPU
+// signalling `value` once the work before it is done.
+extern "C" void lumen_coreml_encode_signal(void *command_buffer, uint64_t value) {
+    id<MTLCommandBuffer> commands = (__bridge id<MTLCommandBuffer>)command_buffer;
+    [commands encodeSignalEvent:event_for(commands.device) value:value];
+}
+
+// Encode into `command_buffer` the GPU waiting for `value` before the work
+// after it.
+extern "C" void lumen_coreml_encode_wait(void *command_buffer, uint64_t value) {
+    id<MTLCommandBuffer> commands = (__bridge id<MTLCommandBuffer>)command_buffer;
+    [commands encodeWaitForEvent:event_for(commands.device) value:value];
+}
+
+// Block the calling thread until the event reaches `value` (a signal
+// encoded before).
+extern "C" void lumen_coreml_host_wait(uint64_t value) {
+    if (event.signaledValue >= value) {
+        return;
+    }
+    dispatch_semaphore_t reached = dispatch_semaphore_create(0);
+    [event notifyListener:listener
+                  atValue:value
+                    block:^(id<MTLSharedEvent>, uint64_t) {
+                        dispatch_semaphore_signal(reached);
+                    }];
+    dispatch_semaphore_wait(reached, DISPATCH_TIME_FOREVER);
+}
+
+// Signal `value` from the host.
+extern "C" void lumen_coreml_host_signal(uint64_t value) { event.signaledValue = value; }
 
 extern "C" void lumen_coreml_free(void *handle) {
     auto *program = static_cast<Program *>(handle);

@@ -44,6 +44,11 @@ pub(crate) fn mark() {
     unsafe { lumen_mps_stream_mark(completed, Box::into_raw(submission).cast()) };
 }
 
+/// Commit the work encoded so far, without waiting for it.
+pub(crate) fn flush() {
+    unsafe { lumen_mps_stream_flush() };
+}
+
 /// How many encoded ops the GPU has finished.
 static FINISHED: Mutex<u64> = Mutex::new(0);
 static COMPLETED: Condvar = Condvar::new();
