@@ -255,8 +255,9 @@ impl PyGraph {
     }
 
     /// The nodes in order, as dicts: `primitive` (its name), `text` (with
-    /// its parameters), `fusion` (see [`primitive_dict`]), and the `inputs`
-    /// and `output` values.
+    /// its parameters), `fusion` (see [`primitive_dict`]), the `inputs` and
+    /// `output` values, and its `scope` (the `record_function` ranges it was
+    /// traced in, outermost first).
     fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
             .nodes()
@@ -265,6 +266,7 @@ impl PyGraph {
                 let d = primitive_dict(py, &node.primitive)?;
                 d.set_item("inputs", node.inputs.clone())?;
                 d.set_item("output", node.output)?;
+                d.set_item("scope", node.scope.to_vec())?;
                 Ok(d)
             })
             .collect()
@@ -405,6 +407,7 @@ impl PyPlan {
                     .map(|v| v.as_ref().map(|v| (v.offset, v.strides.clone())));
                 d.set_item("views", views.collect::<Vec<_>>())?;
                 d.set_item("scratch", step.scratch)?;
+                d.set_item("scope", step.scope.to_vec())?;
                 Ok(d)
             })
             .collect()

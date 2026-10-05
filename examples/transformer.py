@@ -24,7 +24,9 @@ After training, a few more steps run under the profiler (``lumen.profiler``,
 as ``torch.profiler``): its table of ops and kernels by MPS time, and a
 Chrome trace, ``transformer_trace.json`` (open it in Perfetto or
 ``chrome://tracing``): each step a ``train step`` range, its kernels on the
-MPS timeline.
+MPS timeline. Then the training step's graph and plan as a page,
+``transformer_graph.html`` (``dump_graph``): the traced graph, the fused
+and unfused plans, each kernel profiled.
 
 Run on MPS: ``python examples/transformer.py``.
 """
@@ -114,10 +116,12 @@ class Block(lumen.nn.Module):
     @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
         r = x
-        x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
+        with lumen.profiler.record_function("rmsnorm"):
+            x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
         x = r.bfloat16() + self.attn(x, batch, dropout_p)
         r = x
-        x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
+        with lumen.profiler.record_function("rmsnorm"):
+            x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
         x = r + self.mlp(x)
         return x
 
@@ -247,3 +251,8 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_sha
 print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=20))
 prof.export_chrome_trace("transformer_trace.json")
 print("wrote transformer_trace.json")
+
+# The training step's graph and plan, profiled on new tensors of its
+# types (the model's weights untouched).
+train_step.dump_graph("transformer_graph.html")
+print("wrote transformer_graph.html")

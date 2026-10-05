@@ -2,7 +2,8 @@
 ``lumen.compile(fn).dump_graph(path)``. The page shows the fused plan and
 the traced graph as node graphs, and for every node its types, buffers, the
 kernels it launched (with GPU time) and their Metal source, generated
-(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``).
+(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``), and the
+module (``record_function`` ranges) it was traced in; a search finds nodes.
 
 From the command line, for a function and inputs of the given types:
 
@@ -107,11 +108,22 @@ def profile_steps(plan, run, runs, device):
             by_parent.setdefault(e["parent"], []).append(e)
     nsteps = len(plan.steps())
     times = [[] for _ in range(nsteps)]  # per step, per run: [(kernel, us), ...]
-    # Each run's steps, in order: its top-level ranges named after their
-    # primitives (lumen's own ops aside: the copies in, ...), the runs one
-    # after another.
+    # Each run's steps, in order: its ranges named after their primitives
+    # inside no other op (in their modules' record_function ranges, if
+    # traced in some; lumen's own ops aside: the copies in, ...), the runs
+    # one after another.
+    by_id = {e["id"]: e for e in events}
+
+    def in_op(e):
+        p = by_id.get(e["parent"])
+        while p is not None:
+            if p["kind"] == "op":
+                return True
+            p = by_id.get(p["parent"])
+        return False
+
     ranges = sorted(
-        (e for e in events if e["kind"] == "op" and e["parent"] is None and not e["name"].startswith("lumen::")),
+        (e for e in events if e["kind"] == "op" and not in_op(e) and not e["name"].startswith("lumen::")),
         key=lambda e: e["start_us"],
     )
     if nsteps == 0 or len(ranges) % nsteps:
@@ -179,6 +191,7 @@ def plan_view(plan, kernels):
             "inputs": [[b, type_text(d, s)] for b, d, s in step["inputs"]],
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,
+            "scope": step["scope"],
         }
         nodes.append(node)
         for src, b in sources:
@@ -219,6 +232,7 @@ def graph_view(graph, unfused, kernels):
             "inputs": [[f"%{v}", type_text(*graph.type_of(v))] for v in node["inputs"]],
             "kernels": [],
             "fusion": None,
+            "scope": node["scope"],
         }
         # The unfused plan's steps are the live nodes in graph order (it may
         # drop dead ones and alias reshapes), plus steps the device's
