@@ -592,7 +592,28 @@ impl PyTensor {
         set_value(&self.inner, &index, value)
     }
 
-    /// Nested-list copy of the logical contents (row-major).
+    /// Its one element as a Python number (PyTorch: `Tensor.item`): a
+    /// float, int or bool, read from its device.
+    fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let n = self.inner.numel();
+        if n != 1 {
+            return Err(PyRuntimeError::new_err(format!(
+                "a Tensor with {n} elements cannot be converted to Scalar"
+            )));
+        }
+        scalar_to_py(py, &self.inner, &vec![0; self.inner.ndim()])
+    }
+
+    /// This tensor on the host (PyTorch: `Tensor.cpu`): itself if it is
+    /// there, else one copy of the memory its view covers.
+    fn cpu(&self) -> PyResult<Self> {
+        has_data(&self.inner)?;
+        Ok(Self::wrap(self.inner.to(core::Device::Cpu)))
+    }
+
+    /// Nested-list copy of the logical contents (row-major): one copy of
+    /// the memory its view covers to the host, then a Python number an
+    /// element.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         has_data(&self.inner)?;
         let shape = self.inner.shape();
