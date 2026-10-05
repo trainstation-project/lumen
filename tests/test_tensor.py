@@ -1,5 +1,6 @@
 """Python-side tests pinning down the same storage semantics as the Rust tests."""
 
+import numpy as np
 import pytest
 
 import lumen
@@ -205,3 +206,51 @@ def test_to_converts_dtypes_and_moves():
         return
     assert (m.device, m.dtype) == ("mps", "float16")
     assert m.to("cpu", "float32").tolist() == [1.0, 2.5, -3.69921875, float("inf")]
+
+
+def test_item():
+    """``item``: a one-element tensor's element as a Python number (any
+    shape of one element), else an error."""
+    assert lumen.tensor([2.5]).item() == 2.5 and isinstance(lumen.tensor([2.5]).item(), float)
+    assert lumen.tensor([[7]]).item() == 7 and isinstance(lumen.tensor([[7]]).item(), int)
+    assert lumen.tensor([True]).item() is True
+    assert lumen.tensor(1.5, dtype="bfloat16").item() == 1.5
+    with pytest.raises(RuntimeError, match="2 elements cannot be converted to Scalar"):
+        lumen.tensor([1.0, 2.0]).item()
+
+
+@pytest.mark.mps
+def test_item_cpu_and_to_numpy_read_device_results():
+    """A compiled MPS function's results read on the host: ``item``,
+    ``cpu`` (one copy to the host) and ``to_numpy`` (that copy, through
+    DLPack), each the result's values."""
+    import lumen.functional as F
+
+    a = np.arange(12, dtype=np.float32).reshape(3, 4)
+    try:
+        y, total = lumen.compile(lambda x: (x * 2.0, F.sum(x)), device="mps")(lumen.from_numpy(a))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    assert y.device == "mps" and total.item() == 66.0
+    host = y.cpu()
+    assert host.device == "cpu" and host.tolist() == (a * 2).tolist()
+    np.testing.assert_array_equal(lumen.to_numpy(y), a * 2)
+
+
+def test_to_numpy_copies():
+    """``to_numpy``: an array of the tensor's dtype, shape and values (a
+    strided view's, in its logical order), its own memory; a host tensor's
+    ``cpu`` is itself; numpy has no bfloat16."""
+    for dtype in ["float32", "float16", "float64", "int8", "int64", "uint16", "uint64", "bool"]:
+        data = [[True, False], [False, True]] if dtype == "bool" else [[1, 2], [3, 4]]
+        t = lumen.tensor(data, dtype=dtype)
+        a = lumen.to_numpy(t)
+        assert a.dtype == np.dtype(dtype) and a.tolist() == data
+        a[0, 0] = a[1, 1]
+        assert t.tolist() == data
+    t = lumen.tensor([[1, 2], [3, 4]])
+    assert t.cpu().storage_id == t.storage_id
+    assert lumen.to_numpy(t.transpose(0, 1)).tolist() == [[1, 3], [2, 4]]
+    assert lumen.to_numpy(lumen.tensor(2.5)).shape == ()
+    with pytest.raises(TypeError, match="bfloat16"):
+        lumen.to_numpy(lumen.tensor([1.0], dtype="bfloat16"))

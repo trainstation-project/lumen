@@ -8,7 +8,7 @@
 //! - **dynamic**: kernels added at runtime with [`Op::register`] (PyTorch:
 //!   `TORCH_LIBRARY_IMPL`), for keys the op has no built-in kernel for.
 
-pub mod copy;
+pub mod device_transfer;
 pub mod dot_general;
 pub mod dummy_op;
 pub mod dynamic_slice;

@@ -146,10 +146,17 @@ def arange(n, dtype=None, device=None):
 
 
 def to_numpy(t):
-    """Copy a lumen.Tensor into a numpy array (via tolist())."""
+    """Copy a lumen.Tensor into a numpy array: one copy of its memory to the
+    host (``Tensor.cpu``), read by numpy through DLPack, no Python number
+    an element. numpy has no bfloat16: convert those first."""
     import numpy as np
 
-    return np.array(t.tolist(), dtype=np.dtype(t.dtype)).reshape(t.shape)
+    if t.dtype == "bfloat16":
+        raise TypeError("numpy has no bfloat16: convert the tensor first (t.to(dtype=lumen.float32))")
+    host = t.cpu()
+    array = np.from_dlpack(host)
+    # A host tensor is its own memory: copy it, so the array is the caller's.
+    return array.copy() if host.storage_id == t.storage_id else array
 
 
 def from_numpy(a):
