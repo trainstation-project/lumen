@@ -155,13 +155,14 @@ pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -
     let mut graph = graph.clone();
     let mut best = plan(&graph);
     let mut target = limit;
+    // At most a recomputation a node of the graph, in all.
+    let mut budget = graph.nodes.len();
     for _ in 0..ROUNDS {
         if best.workspace_bytes() <= limit {
             break;
         }
         let before = graph.nodes.len();
-        // At most a recomputation a node of the graph, each round.
-        for _ in 0..before {
+        while budget > 0 {
             let live = usage(&graph);
             let (peak_at, &peak) = live
                 .iter()
@@ -198,22 +199,27 @@ pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -
                     }
                 }
             }
+            // Taken if it lowers the peak, or frees a value's worth there.
             match pick {
-                Some(((p, at), candidate)) if (p, at) < (peak, peak) => graph = candidate,
+                Some(((p, at), candidate)) if p < peak || at + MIN_REMAT_BYTES <= peak => {
+                    graph = candidate;
+                    budget -= 1;
+                }
                 _ => break,
             }
         }
+        if graph.nodes.len() == before {
+            break;
+        }
         let measured = plan(&graph);
-        let model = usage(&graph).into_iter().max().unwrap_or(0);
-        if measured.workspace_bytes() >= best.workspace_bytes() && graph.nodes.len() == before {
+        if measured.workspace_bytes() >= best.workspace_bytes() {
             break;
         }
         // The plan's bytes beyond the model's (inputs copied in, kernel
         // scratch, fragmentation), taken off the target.
+        let model = usage(&graph).into_iter().max().unwrap_or(0);
         target = limit.saturating_sub(measured.workspace_bytes().saturating_sub(model));
-        if measured.workspace_bytes() < best.workspace_bytes() {
-            best = measured;
-        }
+        best = measured;
     }
     best
 }
