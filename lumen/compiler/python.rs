@@ -80,6 +80,11 @@ flags! {
     /// The most elements of a row each thread of a row kernel keeps in
     /// registers between passes (0: none).
     row_cache, set_row_cache: usize;
+    /// The most workspace a compiled function should need, in bytes: above
+    /// it, values are recomputed where they are read later rather than kept
+    /// alive (rematerialization), until it fits or nothing more can be
+    /// saved (0, the default: no limit).
+    memory_limit, set_memory_limit: usize;
 }
 
 /// A flag's value as Python writes it.

@@ -84,6 +84,7 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
                 views: Vec::new(),
                 // The host executor reads every input in place.
                 scalars: positions(&options.scalars),
+                memory_limit: options.config.memory_limit(),
             };
             Ok(Plan::compile_with(graph, &plan))
         }

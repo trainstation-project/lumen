@@ -183,6 +183,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         parameters,
         views: dot_views(&fused),
         scalars,
+        memory_limit: config.memory_limit(),
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named

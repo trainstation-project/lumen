@@ -10,6 +10,8 @@ pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+mod remat;
+mod schedule;
 #[cfg(test)]
 pub(crate) mod tests;
 

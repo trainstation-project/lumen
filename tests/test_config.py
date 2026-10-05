@@ -72,7 +72,7 @@ def test_compiler_flags_defaults(compiler):
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
-    assert compiler.split_k is True and compiler.deterministic is False
+    assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -120,6 +120,44 @@ def test_compiler_flags_change_what_compiles(compiler):
     compiler.row_cache = 0
     (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" not in step["fusion"]["source"]
+
+
+def _read_early_and_late(a, w):
+    h = a @ w
+    b = h @ w
+    e = (b @ w) @ b
+    return F.sum((e @ w) * h, -1)
+
+
+@pytest.mark.mps
+def test_memory_limit_recomputes(compiler):
+    """Under ``memory_limit``, a value read early and late is computed again
+    for its late reader rather than kept alive (rematerialization): ``h``,
+    alive with ``b``, ``b @ w`` and ``e`` where four values are, is
+    recomputed for the last matmul: a matmul more, a value less of
+    workspace, the same results."""
+    a, w = lumen.empty([512, 512], device="meta"), lumen.empty([512, 512], device="meta")
+
+    def plan():
+        try:
+            return lumen.graph.Plan(lumen.make_graph(_read_early_and_late)(a, w), "mps")
+        except RuntimeError as e:
+            pytest.skip(str(e))
+
+    def dots(p):
+        return sum("dot_general" in s["label"] for s in p.steps())
+
+    kept = plan()
+    compiler.memory_limit = 1
+    recomputed = plan()
+    assert recomputed.workspace_bytes == kept.workspace_bytes - 512 * 512 * 4
+    assert dots(recomputed) == dots(kept) + 1
+    rng = np.random.default_rng(0)
+    a, w = (lumen.from_numpy(rng.standard_normal((512, 512)).astype(np.float32) / 16).to("mps") for _ in range(2))
+    got = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w))
+    compiler.reset()
+    want = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w))
+    np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.mps

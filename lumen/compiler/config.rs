@@ -59,6 +59,19 @@ pub struct CompilerConfig {
     /// registers between its passes (rows of up to `row_cache` x 256 are
     /// read once); 0 keeps none.
     pub row_cache: usize,
+    /// The most workspace a plan should need, in bytes: above it, values
+    /// are recomputed where they are read later rather than kept alive
+    /// until then (XLA's rematerialization: a forward activation, in the
+    /// backward), until it fits or no recomputation saves memory. 0, the
+    /// default: no limit, nothing recomputed.
+    pub memory_limit: usize,
+}
+
+impl CompilerConfig {
+    /// [`memory_limit`](Self::memory_limit), if one is set.
+    pub(crate) fn memory_limit(&self) -> Option<usize> {
+        (self.memory_limit > 0).then_some(self.memory_limit)
+    }
 }
 
 impl Default for CompilerConfig {
@@ -75,6 +88,7 @@ impl Default for CompilerConfig {
             split_k: true,
             deterministic: false,
             row_cache: 8,
+            memory_limit: 0,
         }
     }
 }
