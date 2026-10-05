@@ -2,7 +2,7 @@ import math
 
 from lumen.autograd.function import Function
 from lumen.functional.attention.utils import _expand_heads, _scores
-from lumen.functional.functions import amax, exp, le, log, sum, where
+from lumen.functional.functions import _dropped, amax, exp, le, log, sum, where
 from lumen.graph import prims
 from lumen.graph.tracer import (
     TracedTensor,
@@ -19,10 +19,12 @@ class _FlashAttention(Function):
     """Attention with FlashAttention-2's backward (MLX's
     ``ScaledDotProductAttentionVJP``): the forward also gives each query
     row's log-sum-exp of its scores, from which the backward recomputes the
-    probabilities, never saving them."""
+    probabilities, never saving them. With dropout, the probabilities'
+    mask is the forward's (drawn again where the kernels need it, never
+    saved): dV reads P^T dropped, dS^T reads dP^T dropped."""
 
     @staticmethod
-    def forward(ctx, q, k, v, *, scale, causal):
+    def forward(ctx, q, k, v, *, scale, causal, dropout_p):
         n = q.shape[2]
         accum = _accum_dtype(q.dtype)
         s = _scores(q, _expand_heads(k, n), scale, causal)
@@ -31,6 +33,11 @@ class _FlashAttention(Function):
         e = exp(s - m)
         total = sum(e, -1, keepdim=True)
         p = (e / total).to(q.dtype)
+        # Dropout of the probabilities (F.dropout's), as rounded.
+        ctx.dropped = _dropped(p.shape, dropout_p) if dropout_p else None
+        ctx.keep = 1.0 / (1.0 - dropout_p)
+        if ctx.dropped is not None:
+            p = where(ctx.dropped, 0.0, p * ctx.keep)
         # [B, N, Sq, Hv], then [B, Sq, N, Hv].
         o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
         o = o.permute(0, 2, 1, 3)
@@ -60,9 +67,15 @@ class _FlashAttention(Function):
         # rounded (O by p @ v, dO by its producer) is widened.
         d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum, accum)
         d = d.permute(0, 2, 1).reshape(b, n, 1, sq)
-        # dP^T = V dO^T; dS^T = P^T (dP^T - D) * scale.
+        # dP^T = V dO^T (dropped); dS^T = P^T (dP^T - D) * scale.
         dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
+        if ctx.dropped is not None:
+            dropped = ctx.dropped.permute(0, 1, 3, 2)
+            dpt = where(dropped, 0.0, dpt * ctx.keep)
         dst = (pt * (dpt - d) * ctx.scale).to(dtype)
+        # dV reads P^T dropped.
+        if ctx.dropped is not None:
+            pt = where(dropped, 0.0, pt * ctx.keep)
         pt = pt.to(dtype)
         # [B, N, Sk, Hv], [B, N, Sk, H] and [B, N, Sq, H]: in float32.
         dv = prims.dot_general(pt, do, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
@@ -76,7 +89,7 @@ class _FlashAttention(Function):
         return dq.to(dtype), dk.to(dtype), dv.to(dtype)
 
 
-def flash_attention(query, key, value, scale=None, is_causal=False):
+def flash_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.0):
     """``softmax(query @ key^T * scale) @ value`` over each batch and head,
     as flash-attn lays them out: ``query`` ``[B, Sq, N, H]`` (batch,
     sequence, heads, head dim), ``key`` ``[B, Sk, Nkv, H]`` and ``value``
@@ -86,6 +99,10 @@ def flash_attention(query, key, value, scale=None, is_causal=False):
     ``is_causal`` masks out key ``j`` for query ``i`` where
     ``j > i + Sk - Sq`` (aligned to the bottom right, as flash-attn and
     MLX: with a KV cache, each new query sees every earlier key).
+    ``dropout_p`` drops each probability with that probability, scaling
+    the others by ``1 / (1 - dropout_p)`` (``F.dropout``'s mask, from
+    ``lumen.random``), as ``scaled_dot_product_attention`` does: the
+    kernels draw the mask where they need it, never storing it.
 
     Traced as its primitives: the scores (accumulated, and the softmax
     computed, in float32 or wider), the softmax, then the probabilities in
@@ -118,5 +135,7 @@ def flash_attention(query, key, value, scale=None, is_causal=False):
 
     if scale is None:
         scale = 1.0 / math.sqrt(h)
+    if not 0.0 <= dropout_p or round(dropout_p * 2**32) >= 2**32:
+        raise ValueError(f"flash_attention: dropout_p must be in [0, 1), got {dropout_p}")
 
-    return _FlashAttention.apply(q, k, v, scale=scale, causal=is_causal)
+    return _FlashAttention.apply(q, k, v, scale=scale, causal=is_causal, dropout_p=dropout_p)

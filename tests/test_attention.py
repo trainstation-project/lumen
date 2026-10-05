@@ -313,6 +313,65 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
 
 
 @pytest.mark.mps
+@pytest.mark.parametrize("deterministic", [False, True], ids=["", "deterministic"])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("attention", [F.flash_attention, F.naive_attention], ids=["flash", "naive"])
+@pytest.mark.parametrize("case", BACKWARD_CASES, ids=_ids(BACKWARD_CASES))
+def test_attention_dropout_is_in_its_kernels(case, attention, dtype, deterministic):
+    """``dropout_p`` (F.flash_attention's, or F.dropout of the probabilities
+    written out, as F.naive_attention does) runs in the attention's own
+    kernels on MPS, forward and backward: each draws the mask's random bits
+    where it reads a probability, none stored (no other kernel); the loss
+    and gradient the CPU's (the same bits, the program as traced)."""
+    (b, sq, sk, n, nkv, h, hv), causal = case
+    shapes = (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv), (b, sq, n, hv)
+    (q, k, v, w), arrays = tensors("mps", dtype, *shapes)
+
+    def loss(q, k, v, w):
+        return F.sum((attention(q, k, v, is_causal=causal, dropout_p=0.25) * w).float())
+
+    step = lumen.value_and_grad(loss, (0, 1, 2))
+    lumen.config.compiler.deterministic = deterministic
+    try:
+        labels = steps(step, q, k, v, w)
+        # The forward's label has its epilogue's primitives after it.
+        kernels = [label.split(" → ")[0] for label in labels]
+        for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic)]:
+            assert kernel in kernels, labels
+        assert not [label for label in labels if "random_bits" in label], labels
+        lumen.manual_seed(3)
+        got = lumen.compile(step)(q, k, v, w)
+    finally:
+        lumen.config.compiler.reset()
+    lumen.manual_seed(3)
+    cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
+    want = lumen.compile(step, device="cpu")(*cpu)
+    tol = {"float32": 1e-5, "bfloat16": 2e-2}[dtype]
+    for g, c in zip([got[0], *got[1]], [want[0], *want[1]]):
+        g, c = (lumen.to_numpy(t.to(dtype="float32")) for t in (g, c))
+        np.testing.assert_allclose(g, c, rtol=tol, atol=tol * np.abs(c).max())
+
+
+def test_attention_dropout_drops_the_probabilities():
+    """F.flash_attention's ``dropout_p``: F.dropout of the probabilities (as
+    F.naive_attention's, the same bits from the same seed); 0 is none; it
+    must be below 1."""
+    (q, k, v), _ = tensors("cpu", "float32", (1, 6, 2, 8), (1, 6, 2, 8), (1, 6, 2, 8))
+    run = {}
+    for name, fn, p in [
+        ("flash", F.flash_attention, 0.5),
+        ("naive", F.naive_attention, 0.5),
+        ("none", F.flash_attention, 0.0),
+    ]:
+        lumen.manual_seed(0)
+        run[name] = lumen.to_numpy(lumen.compile(lambda q, k, v: fn(q, k, v, dropout_p=p))(q, k, v))
+    np.testing.assert_allclose(run["flash"], run["naive"], rtol=1e-6, atol=1e-6)
+    assert not np.allclose(run["flash"], run["none"])
+    with pytest.raises(ValueError, match="dropout_p"):
+        lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, dropout_p=1.0))(q, k, v)
+
+
+@pytest.mark.mps
 def test_written_attention_trains_with_flash_attention():
     """Attention written out (``_written``) is flash attention in training
     too: its gradient's plan has the forward and both backward kernels."""

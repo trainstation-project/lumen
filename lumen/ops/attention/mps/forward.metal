@@ -22,6 +22,15 @@
 // rounds them. A causal mask lets query i see key j iff j <= i + offset. Each
 // output is written as epi(it, its flat index): Same, or a fusion's
 // epilogue (codegen.rs), writing Out.
+//
+// Each probability as P V reads it (rounded) is drop(it, b, i, j), batch
+// index b, query i, key j: NoDropout, or a generated dropout (codegen.rs)
+// drawing its random bits there; the softmax's sum reads them as they are.
+
+// No dropout: a probability as it is.
+struct NoDropout {
+    template <typename U> inline U operator()(U x, uint, uint, uint) const { return x; }
+};
 
 // Query rows a SIMD group takes, SIMD groups a threadgroup has (256
 // threads), and so query rows a threadgroup takes.
@@ -61,7 +70,8 @@ template <typename T,
           typename Ix,
           typename Score,
           typename Out = O,
-          typename Epi = Same>
+          typename Epi = Same,
+          typename Drop = NoDropout>
 inline void flash_attention(device const T *q,
                             device const T *k,
                             device const T *v,
@@ -80,7 +90,8 @@ inline void flash_attention(device const T *q,
                             uint sg,
                             uint lane,
                             uint t,
-                            Epi epi = Epi()) {
+                            Epi epi = Epi(),
+                            Drop drop = Drop()) {
     q += ix.q(b);
     k += ix.k(b);
     v += ix.v(b);
@@ -148,7 +159,9 @@ inline void flash_attention(device const T *q,
             thread auto &e = frag(s[jc]);
             float2 p = m_new == -INFINITY ? float2(0) : exp(e - m_new);
             sum += p.x + p.y;
-            frag(pm[jc]) = vec<T, 2>(p);
+            vec<T, 2> pr = vec<T, 2>(p);
+            uint key = k0 + jc * 8 + fc;
+            frag(pm[jc]) = vec<T, 2>(drop(pr.x, b, row, key), drop(pr.y, b, row, key + 1));
         }
         sum += simd_shuffle_xor(sum, 1);
         sum += simd_shuffle_xor(sum, 8);
@@ -198,7 +211,8 @@ template <typename T,
           typename Ix,
           typename Score,
           typename Out = O,
-          typename Epi = Same>
+          typename Epi = Same,
+          typename Drop = NoDropout>
 inline void attention_decode(device const T *q,
                              device const T *k,
                              device const T *v,
@@ -218,7 +232,8 @@ inline void attention_decode(device const T *q,
                              uint sg,
                              uint lane,
                              uint t,
-                             Epi epi = Epi()) {
+                             Epi epi = Epi(),
+                             Drop drop = Drop()) {
     constexpr uint QN = (D + 31) / 32, VN = (DV + 31) / 32;
     q += ix.q(b);
     k += ix.k(b);
@@ -249,8 +264,8 @@ inline void attention_decode(device const T *q,
         float factor = exp(m - m_new);
         float p = exp(s - m_new);
         l = l * factor + p;
-        // P rounded to T, as p v reads it.
-        float pt = float(T(p));
+        // P rounded to T (and dropped), as p v reads it.
+        float pt = float(drop(T(p), b, i, j));
         ATTN_UNROLL for (uint n = 0; n < VN; ++n) {
             uint d = lane + 32 * n;
             if (d < DV) {

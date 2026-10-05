@@ -1,6 +1,6 @@
 import math
 
-from lumen.functional.functions import le, softmax, where
+from lumen.functional.functions import dropout, le, softmax, where
 from lumen.graph import prims
 from lumen.graph.tracer import (
     TracedTensor,
@@ -13,7 +13,7 @@ from lumen.graph.tracer import (
 __all__ = ["naive_attention"]
 
 
-def naive_attention(query, key, value, scale=None, is_causal=False):
+def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.0):
     """:func:`flash_attention` written out as it was first
     (``main``'s): ``softmax(query @ key^T * scale) @ value`` over each batch and head,
     as flash-attn lays them out: ``query`` ``[B, Sq, N, H]`` (batch,
@@ -24,6 +24,8 @@ def naive_attention(query, key, value, scale=None, is_causal=False):
     ``is_causal`` masks out key ``j`` for query ``i`` where
     ``j > i + Sk - Sq`` (aligned to the bottom right, as flash-attn and
     MLX: with a KV cache, each new query sees every earlier key).
+    ``dropout_p`` drops each probability with that probability
+    (``F.dropout`` of them, as rounded).
 
     Traced as its primitives: the scores (accumulated, and the softmax
     computed, in float32 or wider), the softmax, then the probabilities in
@@ -71,7 +73,7 @@ def naive_attention(query, key, value, scale=None, is_causal=False):
         cols = prims.iota("int64", s.shape, 3)
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
 
-    p = softmax(s, -1).to(q.dtype)
+    p = dropout(softmax(s, -1).to(q.dtype), dropout_p)
     # [B, N, Sq, Hv], then [B, Sq, N, Hv].
     o = prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
 

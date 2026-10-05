@@ -4,7 +4,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::fusion;
 use crate::compiler::CompilerConfig;
-use crate::compiler::attention::{Access, Attention, Backward, Score};
+use crate::compiler::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
@@ -1189,8 +1189,11 @@ fn constant(dtype: DType, value: Scalar) -> String {
 /// The kernel of an attention fusion (`ops/attention`): its name and Metal
 /// source, instantiating `flash_attention`, or for few queries
 /// `attention_decode` (`ops/attention/mps/forward.metal`), with an indexer of its
-/// operands' strides. Its buffers: the body's inputs, then `out`.
+/// operands' strides. Its buffers: the body's inputs, then `out` (then its
+/// other outputs); with dropout, the random state (the body's last two
+/// inputs) after them all ([`random_state`]).
 pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
+    let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
     let input = |base: Var| {
         let k = body.inputs().iter().position(|&v| v == base);
         format!("in{}", k.expect("an input of the body"))
@@ -1219,11 +1222,11 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
             e.row_locals.insert(root, "r".into());
             let value = e.value(out, "j".into());
             let mut fields = String::new();
-            for (k, &v) in body.inputs().iter().enumerate() {
+            for (k, &v) in body.inputs()[..n].iter().enumerate() {
                 let vt = metal_type(body.type_of(v).dtype);
                 writeln!(fields, "    device const {vt} *in{k};").unwrap();
             }
-            let members: Vec<String> = (0..body.inputs().len()).map(|k| format!("in{k}")).collect();
+            let members: Vec<String> = (0..n).map(|k| format!("in{k}")).collect();
             (
                 format!(
                     "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}        return {value};\n    }}\n}};\n\n",
@@ -1233,8 +1236,7 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
             )
         }
     };
-    let mut params: Vec<String> = body
-        .inputs()
+    let mut params: Vec<String> = body.inputs()[..n]
         .iter()
         .enumerate()
         .map(|(k, &v)| {
@@ -1242,14 +1244,11 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
             format!("device const {vt} *in{k} [[buffer({k})]]")
         })
         .collect();
-    params.push(format!(
-        "device {w} *out [[buffer({})]]",
-        body.inputs().len()
-    ));
+    params.push(format!("device {w} *out [[buffer({n})]]"));
     // Its other outputs, in order: its own value, if read elsewhere too
     // (with an epilogue: a training forward's, the backward reads it); its
     // log-sum-exp (a training forward's).
-    let mut buffer = body.inputs().len();
+    let mut buffer = n;
     let raw = body.outputs()[1..].contains(&root);
     if raw {
         buffer += 1;
@@ -1262,6 +1261,20 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     }
     let raw_arg = if raw { "raw" } else { "nullptr" };
     let lse_arg = if lse { "lse" } else { "nullptr" };
+    // Its dropout's functor, after the epilogue's (`Same` if none).
+    let (drop, epi) = match &a.dropout {
+        Some(d) => {
+            params.extend(random_state(buffer + 1));
+            let epi = if epi.is_empty() {
+                ", Same()".to_owned()
+            } else {
+                epi
+            };
+            let drop = dropout_functor(d, a.dtype, a.sq, a.sk);
+            (drop, format!("{epi}, NAME_drop{{seed, start}}"))
+        }
+        None => (String::new(), epi),
+    };
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
     let score = score_functor(&a.scores);
@@ -1279,9 +1292,33 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         }
     };
     named(format!(
-        "{ix}{score}{epilogue}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        "{ix}{score}{epilogue}{drop}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
         params.join(", ")
     ))
+}
+
+/// The parameters of a dropout's random state (its seed and the stream's
+/// position) at buffers `first` and the next: by value, or bound as
+/// buffers holding them (the encoder binds either: `mps::encode`).
+fn random_state(first: usize) -> [String; 2] {
+    [
+        format!("constant ulong &seed [[buffer({first})]]"),
+        format!("constant ulong &start [[buffer({})]]", first + 1),
+    ]
+}
+
+/// A dropout's functor, `NAME_drop`, of a probability `x` (in `dtype`, as
+/// the program scales it) of batch index `b`, query `i` and key `j`: zero
+/// where its random bits (`random_bits`'s at that index of the
+/// `[batch..., sq, sk]` probabilities) are below the threshold, else
+/// scaled.
+fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> String {
+    let t = metal_type(dtype);
+    let scale = constant(dtype, Scalar::Float(d.scale));
+    let (offset, threshold) = (d.offset, d.threshold);
+    format!(
+        "struct NAME_drop {{\n    ulong seed, start;\n    inline {t} operator()({t} x, uint b, uint i, uint j) const {{\n        ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;\n        bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;\n        return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));\n    }}\n}};\n\n"
+    )
 }
 
 /// An operand's indexer method, `name(b)`: its batch index `b`'s offset
@@ -1366,9 +1403,10 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     );
     let score = score_functor(&b.scores);
     let t = metal_type(b.dtype);
-    let n = body.inputs().len();
-    let mut params: Vec<String> = body
-        .inputs()
+    // The inputs but a dropout's random state (the last two), which follows
+    // the outputs.
+    let n = body.inputs().len() - if b.dropout.is_some() { 2 } else { 0 };
+    let mut params: Vec<String> = body.inputs()[..n]
         .iter()
         .enumerate()
         .map(|(k, &v)| {
@@ -1393,6 +1431,15 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         };
         params.push(format!("device {ty} *{out} [[buffer({})]]", n + k));
     }
+    // Its dropout's functor (in float: dP's, and P's for dV).
+    let (drop, drop_arg) = match &b.dropout {
+        Some(d) => {
+            params.extend(random_state(n + outs.len()));
+            let drop = dropout_functor(d, DType::F32, b.sq, b.sk);
+            (drop, ", NAME_drop{seed, start}")
+        }
+        None => (String::new(), ""),
+    };
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let (q, k, v, g) = (
         input(b.q.base),
@@ -1410,17 +1457,17 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     };
     let call = match (dkdv, dq) {
         (true, true) => format!(
-            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
         (true, false) => format!(
-            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
         (false, _) => format!(
-            "threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];\n    flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score());"
+            "threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];\n    flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
     };
     named(format!(
-        "{ix}{score}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
+        "{ix}{score}{drop}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
         params.join(", ")
     ))
 }

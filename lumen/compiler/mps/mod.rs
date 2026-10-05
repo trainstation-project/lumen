@@ -430,6 +430,21 @@ pub(crate) fn encode(
         }
     }
     let inputs = device.as_slice();
+    // An attention's buffers: its inputs, its outputs, then a dropout's
+    // random state (its last two inputs: by value, `scalars`, or buffers).
+    let attention_buffers = |dropout: bool| -> Result<Vec<*const u8>, String> {
+        let state = match (dropout, scalars.len()) {
+            (false, _) | (true, 2) => 0,
+            (true, 0) => 2,
+            _ => return Err(format!("{}: its random state is half by value", step.label)),
+        };
+        let (ins, state) = inputs.split_at(inputs.len() - state);
+        let mut buffers = ins.to_vec();
+        buffers.push(output.cast_const());
+        buffers.extend(extra);
+        buffers.extend(state);
+        Ok(buffers)
+    };
     // An attention: a threadgroup a tile of queries (or a query, decoding)
     // of each batch index.
     if let Some(a) = attention::of_body(body) {
@@ -438,21 +453,17 @@ pub(crate) fn encode(
             true => a.sq,
             false => a.sq.div_ceil(64),
         };
-        let mut buffers = inputs.to_vec();
-        buffers.push(output.cast_const());
-        // Its log-sum-exp, if a training forward computes it.
-        buffers.extend(extra);
+        // Its log-sum-exp too, if a training forward computes it.
+        let buffers = attention_buffers(a.dropout.is_some())?;
         let grid = Grid::Groups([queries, batch, 1]);
-        return launch(name, &buffers, &[], grid, keep, step.label);
+        return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
     // An attention backward: a threadgroup a block of keys (dV and dK) or
     // of queries (dQ) of each batch index.
     if let Some(b) = attention::backward_of_body(body) {
         let batch: usize = b.batch.iter().product();
         let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
-        let mut buffers = inputs.to_vec();
-        buffers.push(output.cast_const());
-        buffers.extend(extra);
+        let buffers = attention_buffers(b.dropout.is_some())?;
         // dQ with dK and dV, added to atomically: zeroed first.
         if b.dv_out.is_some() && b.dq_out.is_some() {
             let n = body.type_of(body.outputs()[2]).numel();
@@ -465,7 +476,7 @@ pub(crate) fn encode(
             launch("fill_4", &[extra[1]], &args, grid, Vec::new(), "full (dQ)")?;
         }
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
-        return launch(name, &buffers, &[], grid, keep, step.label);
+        return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
     // A split dot whose chunks are added atomically: its output zeroed,
     // then a threadgroup a 64x64 tile of a chunk (`matmul_atomic`).

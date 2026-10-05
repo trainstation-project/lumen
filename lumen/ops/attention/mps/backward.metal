@@ -9,6 +9,10 @@
 // and dS are rounded to T for their products, which accumulate in float
 // and are written as float, at the strides of the layout their readers want
 // (the indexer's dk, dv, dq: [batch, rows, cols] or its transpose).
+//
+// With the forward's dropout, drop(x, b, i, j) (forward.metal's NoDropout,
+// or codegen.rs's, in float) is applied to dP and, for dV, to P, as the
+// forward applied it to query i's probability of key j.
 
 // dK = dS^T Q and dV = P^T dO: threadgroup (kblock, b) takes ATTN_BQ keys
 // of batch index b, its SIMD group sg 8 of them, their K, V, dK and dV rows
@@ -18,7 +22,15 @@
 // too: the keys' K rows staged in ks, each query block's dS^T in dss, and
 // dS K over the threadgroup's keys added to dq (zeroed before) atomically,
 // so in no fixed order (not deterministic).
-template <typename T, uint D, uint DV, uint BQ, bool CAUSAL, bool DQ, typename Ix, typename Score>
+template <typename T,
+          uint D,
+          uint DV,
+          uint BQ,
+          bool CAUSAL,
+          bool DQ,
+          typename Ix,
+          typename Score,
+          typename Drop = NoDropout>
 inline void flash_attention_dkdv(device const T *q,
                                  device const T *k,
                                  device const T *v,
@@ -44,7 +56,8 @@ inline void flash_attention_dkdv(device const T *q,
                                  uint sg,
                                  uint lane,
                                  uint t,
-                                 Score score) {
+                                 Score score,
+                                 Drop drop = Drop()) {
     q += ix.q(b);
     k += ix.k(b);
     v += ix.v(b);
@@ -119,8 +132,10 @@ inline void flash_attention_dkdv(device const T *q,
             ATTN_UNROLL for (uint u = 0; u < 2; ++u) {
                 uint i = ic * 8 + fc + u;
                 bool seen = q0 + i < sq && (!CAUSAL || int(row) <= int(q0 + i) + offset);
-                p[u] = seen ? exp(score(s[u]) - lses[i]) : 0.0f;
-                ds[u] = p[u] * (dp[u] - deltas[i]) * ds_scale;
+                float pu = seen ? exp(score(s[u]) - lses[i]) : 0.0f;
+                ds[u] = pu * (drop(dp[u], b, q0 + i, row) - deltas[i]) * ds_scale;
+                // dV reads P dropped.
+                p[u] = drop(pu, b, q0 + i, row);
             }
             simdgroup_matrix<T, 8, 8> pm, dsm;
             frag(pm) = vec<T, 2>(p);
@@ -180,7 +195,7 @@ inline void flash_attention_dkdv(device const T *q,
 // b, its SIMD group sg 8 of them, their Q, dO and dQ rows in simdgroup
 // matrices; keys in blocks of BK, K and V staged in threadgroup memory.
 // Key blocks past the last row's causal limit are skipped.
-template <typename T, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Score>
+template <typename T, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Score, typename Drop = NoDropout>
 inline void flash_attention_dq(device const T *q,
                                device const T *k,
                                device const T *v,
@@ -200,7 +215,8 @@ inline void flash_attention_dq(device const T *q,
                                uint sg,
                                uint lane,
                                uint t,
-                               Score score) {
+                               Score score,
+                               Drop drop = Drop()) {
     q += ix.q(b);
     k += ix.k(b);
     v += ix.v(b);
@@ -262,7 +278,7 @@ inline void flash_attention_dq(device const T *q,
                 int key = int(k0 + jc * 8 + fc + u);
                 bool seen = in_rows && key < int(sk) && (!CAUSAL || key <= int(row) + offset);
                 float p = seen ? exp(score(se[u]) - l) : 0.0f;
-                ds[u] = p * (dpe[u] - dl) * ds_scale;
+                ds[u] = p * (drop(dpe[u], b, row, uint(key)) - dl) * ds_scale;
             }
             simdgroup_matrix<T, 8, 8> dsm;
             frag(dsm) = vec<T, 2>(ds);
