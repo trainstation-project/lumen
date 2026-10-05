@@ -236,9 +236,10 @@ pub(crate) fn fuse(
     // A contraction's epilogue (XLA's GEMM epilogue fusion): the
     // elementwise primitives (and reshapes: an element's flat index is
     // the same, a batch folded into a dot's rows unfolded) after a float
-    // dot reading it or each other
-    // (reading anything else too: a bias, a residual; a silu reads its
-    // input twice), computed in its kernel as it writes each output; the
+    // dot reading it or each other (reading anything else too: a bias, a
+    // residual; a silu reads its input twice), up to a widening cast if
+    // the dot rounds its result narrower than it accumulates, computed in
+    // its kernel as it writes each output; the
     // epilogue's last primitive is the fusion's root, the dot inside it
     // (its operands read as they are). Its values read outside it (the
     // dot's, an activation's input, for a training step's backward) are
@@ -268,6 +269,23 @@ pub(crate) fn fuse(
         }
         // Nothing a row fusion computes (a normalization's scale).
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
+        // A dot rounding its result narrower than it accumulates (bfloat16
+        // of float32): no widening cast in its epilogue, which would read
+        // the rounded value back wider (where the program wants it wider,
+        // the dot's output_dtype says so).
+        let narrowed = match &node.primitive {
+            Primitive::DotGeneral {
+                accum_dtype,
+                output_dtype,
+                ..
+            } => output_dtype.size_of() < accum_dtype.size_of(),
+            _ => false,
+        };
+        let widens = |un: &Node| {
+            matches!(un.primitive, Primitive::Cast { .. })
+                && graph.type_of(un.output).dtype.size_of()
+                    > graph.type_of(un.inputs[0]).dtype.size_of()
+        };
         // The epilogue grown in order: its nodes (`taken`, their values
         // `after`), the values depending on the dot (no other operand may),
         // and the longest one whose values read outside it (but its last's)
@@ -283,7 +301,8 @@ pub(crate) fn fuse(
             }
             let step =
                 elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
-            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
+            let fuses =
+                fusible[u] && step && !in_row(u) && !claimed[u] && !(narrowed && widens(un));
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
             if !fuses || !reads {
                 break;

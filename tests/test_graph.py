@@ -1263,9 +1263,17 @@ class _ScaledMatmul(lumen.nn.Module):
         (lambda x, w, y: F.relu(x @ w + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
         (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
         (lambda x, w, y: x @ w + y, [(3, 40, 24), (24, 56), (3, 40, 56)], "float32"),
-        (lambda x, w, y: F.relu(x @ w).float(), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
+        (
+            lambda x, w, y: F.relu(F.matmul(x, w, "float32", "float32")).bfloat16(),
+            [(64, 96), (96, 80), (64, 80)],
+            "bfloat16",
+        ),
         (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
-        (lambda x, w, y: _silu((x @ w).float()).to(dtype=x.dtype), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
+        (
+            lambda x, w, y: _silu(F.matmul(x, w, "float32", "float32")).to(dtype=x.dtype),
+            [(64, 96), (96, 80), (64, 80)],
+            "bfloat16",
+        ),
     ],
     ids=["bias relu", "batched residual", "folded residual", "relu cast", "times exp(y)", "silu in float32"],
 )
@@ -1293,6 +1301,27 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
 
 def _silu(h):
     return h * F.sigmoid(h)
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
+    """A matmul whose result is rounded narrower than it accumulates
+    (bfloat16 of float32) keeps a widening cast of it out of its epilogue:
+    the epilogue fuses up to it (an add), the cast and what reads it a
+    kernel after. Its result wanted wider, its output_dtype says so (one
+    kernel)."""
+    m = lambda *s, d="bfloat16": lumen.empty(list(s), dtype=d, device="meta")  # noqa: E731
+    args = (m(64, 96), m(96, 80), m(64, 80, d="float32"))
+    labels = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]  # noqa: E731
+    # The rounding then widening is what the precision check warns of.
+    with pytest.warns(UserWarning, match="casts it back"):
+        assert labels(lambda x, w, r: (x @ w).float() + r) == ["dot_general", "cast(bfloat16 -> float32) → add"]
+    with pytest.warns(UserWarning, match="casts it back"):
+        assert labels(lambda x, w, r: ((x @ w) + 1.0).float() + r) == [
+            "dot_general → add",
+            "cast(bfloat16 -> float32) → add",
+        ]
+    assert labels(lambda x, w, r: F.matmul(x, w, "float32", "float32") + r) == ["dot_general → add"]
 
 
 @pytest.mark.mps
