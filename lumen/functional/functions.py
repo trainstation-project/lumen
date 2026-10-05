@@ -189,14 +189,19 @@ def dropout(input, p=0.5, training=True):
         raise ValueError(f"dropout probability has to be between 0 and 1, but got {p}")
     if not training or p == 0.0:
         return input
+    if round(p * 2**32) >= 2**32:
+        return where(prims.full(tuple(input.shape), True, "bool"), 0.0, input)
+    return where(_dropped(input.shape, p), 0.0, input * (1.0 / (1.0 - p)))
+
+
+def _dropped(shape, p):
+    """Which elements of ``shape`` dropout with probability ``p`` (below 1)
+    drops: those whose random bits (the generator's next ``numel``) are
+    below ``p * 2**32``."""
     from lumen import random
 
-    threshold = round(p * 2**32)
-    if threshold >= 2**32:
-        return where(prims.full(tuple(input.shape), True, "bool"), 0.0, input)
-    bits = random._bits(input.shape)
-    dropped = bits < prims.full(tuple(input.shape), threshold, "uint32")
-    return where(dropped, 0.0, input * (1.0 / (1.0 - p)))
+    bits = random._bits(shape)
+    return bits < prims.full(tuple(shape), round(p * 2**32), "uint32")
 
 
 # ---------------------------------------------------------------------

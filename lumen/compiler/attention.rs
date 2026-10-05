@@ -9,7 +9,7 @@
 //! What is matched, from the output back:
 //!
 //! ```text
-//! o = dot_general(p', v')              p' = [convert] p, contracting p's last dimension
+//! o = dot_general(p', v')              p' = [dropout] [convert] p, contracting p's last dimension
 //! p = e / broadcast(reduce_sum(e))     over the last dimension (a softmax)
 //! e = exp(x - broadcast(reduce_max(x)))
 //! x = [select(causal, ., -inf)] [convert] [* scale] [convert] s
@@ -27,6 +27,13 @@
 //! slices of a merged dot): each a strided view of a buffer, its head index
 //! divided for grouped queries. The causal mask is any predicate of the
 //! scores' row and column `iota`s equivalent to `j <= i + offset`.
+//!
+//! Dropout of the probabilities (`F.flash_attention`'s `dropout_p`, as
+//! `F.dropout` traces it: `select(bits < threshold, 0, p * scale)`, `bits`
+//! a `random_bits` of the probabilities' shape) is matched too
+//! ([`Dropout`]): the kernels draw each element's bits where they need
+//! them (the forward, and both backward kernels, from the same seed and
+//! counter), the mask never in memory.
 //!
 //! The tracer asks it too ([`traced`], `lumen.Graph.attentions`): before
 //! autodiff, each attention found becomes one node whose backward is
@@ -95,6 +102,27 @@ pub(crate) struct Attention {
     /// the output's.
     pub dtype: DType,
     pub out_dtype: DType,
+    /// The probabilities' dropout, if any: their rounding to `dtype`
+    /// multiplied by its scale in `dtype`.
+    pub dropout: Option<Dropout>,
+}
+
+/// Dropout of an attention's probabilities: element `(b, i, j)` (batch
+/// index `b`, the batch dimensions flattened, query `i`, key `j`) dropped
+/// where `philox_bits(seed, start + offset + (b * Sq + i) * Sk + j)` is
+/// below `threshold` (`random_bits`'s element at that index of the
+/// probabilities' shape), the others multiplied by `scale`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Dropout {
+    /// The random state: uint64 scalars, inputs of the fusion.
+    pub seed: Var,
+    pub start: Var,
+    pub offset: u64,
+    pub threshold: u32,
+    pub scale: f64,
+    /// Whether each element is dropped (`[batch..., Sq, Sk]`, bool), as
+    /// the program computes it: what a backward reads (`graph.attentions`).
+    pub mask: Var,
 }
 
 /// A step of the scores' way to the softmax, as traced.
@@ -150,6 +178,10 @@ pub(crate) struct Backward {
     pub ds_scale: f64,
     /// The operands' dtype, P's and dS's for their dots.
     pub dtype: DType,
+    /// The forward's dropout, if any, on `P^T` (for dV) and `dP^T`, each
+    /// multiplied by its scale in float32 (the mask `[batch..., Sq, Sk]`,
+    /// transposed).
+    pub dropout: Option<Dropout>,
 }
 
 /// The largest head dimension the backward kernels keep rows of in
@@ -224,6 +256,10 @@ pub(crate) fn fuse_backward(
             if !bases.contains(&acc.base) {
                 bases.push(acc.base);
             }
+        }
+        // A dropout's random state last (the kernels' last arguments).
+        if let Some(d) = &b.dropout {
+            bases.extend([d.seed, d.start]);
         }
         // The fusion goes where its inputs and first dot are computed: if
         // each output is read after (they may be the graph's outputs too).
@@ -432,6 +468,10 @@ pub(crate) fn fuse(
                 bases.push(b);
             }
         }
+        // A dropout's random state last (the kernel's last arguments).
+        if let Some(d) = &a.dropout {
+            bases.extend([d.seed, d.start]);
+        }
         // Its outputs: the epilogue's (or its own) value, its own too if
         // read elsewhere, its log-sum-exp.
         let raw = kept.then_some(nodes[a.root].output);
@@ -631,6 +671,67 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// The dropout `v` is, `select(mask, 0, x * scale)` (each read once):
+    /// `x`, the mask's random state and scale (see [`Self::mask`]), and the
+    /// dtype the scale is multiplied in.
+    fn dropout(&self, v: Var, shape: &[usize], transposed: bool) -> Option<(Var, Dropout, DType)> {
+        use Primitive::*;
+        let n = self
+            .node(v)
+            .filter(|n| matches!(n.primitive, Select) && self.single(v))?;
+        if self.scalar(n.inputs[1]) != Some(0.0) {
+            return None;
+        }
+        let m = n.inputs[2];
+        let mul = self
+            .node(m)
+            .filter(|n| matches!(n.primitive, Mul) && self.single(m))?;
+        let (a, b) = (mul.inputs[0], mul.inputs[1]);
+        let (scale, x) = match self.scalar(b) {
+            Some(c) => (c, a),
+            None => (self.scalar(a)?, b),
+        };
+        let mut dropout = self.mask(n.inputs[0], shape, transposed)?;
+        dropout.scale = scale;
+        Some((x, dropout, self.graph.type_of(m).dtype))
+    }
+
+    /// The random state of mask `v`, `bits < threshold` for `bits` a
+    /// `random_bits` of the probabilities' `shape` (`[batch..., Sq, Sk]`),
+    /// the last two dimensions swapped before or after the comparison if
+    /// `transposed` (a backward's, on `S^T`): its scale 1.
+    fn mask(&self, v: Var, shape: &[usize], transposed: bool) -> Option<Dropout> {
+        use Primitive::*;
+        let rank = shape.len();
+        let swaps = |p: &[usize]| {
+            let mut swapped: Vec<usize> = (0..rank).collect();
+            swapped.swap(rank - 2, rank - 1);
+            p == swapped
+        };
+        let (mut x, mut flipped, mut threshold) = (v, false, None);
+        loop {
+            let n = self.node(x)?;
+            match &n.primitive {
+                Transpose { permutation } if swaps(permutation) => flipped = !flipped,
+                Lt if threshold.is_none() => threshold = Some(self.scalar(n.inputs[1])?),
+                RandomBits { shape: s, offset } => {
+                    let t = threshold?;
+                    let whole = t.fract() == 0.0 && (0.0..4294967296.0).contains(&t);
+                    return (s == shape && flipped == transposed && whole).then(|| Dropout {
+                        seed: n.inputs[0],
+                        start: n.inputs[1],
+                        offset: *offset,
+                        threshold: t as u32,
+                        scale: 1.0,
+                        mask: v,
+                    });
+                }
+                _ => return None,
+            }
+            x = n.inputs[0];
+        }
+    }
+
     /// The attention backward whose `P^T` node `i` recomputes, if it is
     /// one (see [`Backward`]).
     fn backward(&self, i: usize) -> Option<Backward> {
@@ -681,10 +782,41 @@ impl<'a> Matcher<'a> {
             free(ty(q_).shape.len(), &[rb1, rc1])?,
         );
         let dtype = ty(q_).dtype;
-        // Its readers: dS^T's product, and dV's dot (perhaps through a cast).
-        let (mut m1, mut dv) = (None, None);
+        // The probabilities' shape, [batch..., Sq, Sk] (a dropout mask's).
+        let mut probabilities = ty(x).shape.clone();
+        probabilities.swap(nb, nb + 1);
+        // Its readers: dS^T's product, and dV's dot (perhaps through a
+        // dropout, in float32, then a cast).
+        let (mut m1, mut dv, mut dropout) = (None, None, None);
+        let scaled = |r: usize| {
+            nodes[r]
+                .inputs
+                .iter()
+                .any(|&u| u != pt && self.scalar(u).is_some())
+        };
         for &r in &self.readers[pt] {
             match &nodes[r].primitive {
+                Mul if dv.is_none() && scaled(r) => {
+                    let [sel] = self.readers[nodes[r].output][..] else {
+                        return None;
+                    };
+                    let p = nodes[sel].output;
+                    let (x, d, t) = self.dropout(p, &probabilities, true)?;
+                    let [c] = self.readers[p][..] else {
+                        return None;
+                    };
+                    let dot = match &nodes[c].primitive {
+                        Cast { .. } => match self.readers[nodes[c].output][..] {
+                            [d] if self.single(nodes[c].output) => Some(d),
+                            _ => None,
+                        },
+                        _ => Some(c),
+                    }?;
+                    let operand = nodes[dot].inputs[0];
+                    (x == pt && t == f32 && (operand == p || operand == nodes[c].output))
+                        .then_some(())?;
+                    (dv, dropout) = (Some(dot), Some(d));
+                }
                 Mul if m1.is_none() => m1 = Some(r),
                 Cast { .. } if dv.is_none() => {
                     let c = nodes[r].output;
@@ -708,6 +840,20 @@ impl<'a> Matcher<'a> {
             .node(other)
             .filter(|n| matches!(n.primitive, Sub) && self.single(other))?;
         let (dpt, d_b) = (sub2.inputs[0], sub2.inputs[1]);
+        // dP^T's dropout, as P^T's for dV (both, or neither for dP^T).
+        let dpt = match self.dropout(dpt, &probabilities, true) {
+            Some((x, d, t)) => {
+                let same = |e: &Dropout| {
+                    (e.seed, e.start, e.offset, e.threshold, e.scale)
+                        == (d.seed, d.start, d.offset, d.threshold, d.scale)
+                };
+                (t == f32 && dropout.as_ref().is_none_or(same)).then_some(())?;
+                dropout = Some(d);
+                x
+            }
+            None if dropout.is_some() => return None,
+            None => dpt,
+        };
         let dpt_node = self.producer[dpt].filter(|_| self.single(dpt))?;
         let (lc2, rc2, lb2, rb2, acc2, out2) = dot(dpt_node)?;
         let (v_, do_) = (nodes[dpt_node].inputs[0], nodes[dpt_node].inputs[1]);
@@ -824,6 +970,7 @@ impl<'a> Matcher<'a> {
             causal,
             ds_scale,
             dtype,
+            dropout,
         })
     }
 
@@ -961,11 +1108,16 @@ impl<'a> Matcher<'a> {
         if pr != nb + 2 || vr != nb + 2 || *lb2 != (0..nb).collect::<Vec<_>>() || *lc2 != [nb + 1] {
             return None;
         }
-        // The softmax: p = e / broadcast(sum(e)), e = exp(x - broadcast(max(x))).
+        // The softmax: p = e / broadcast(sum(e)), e = exp(x - broadcast(max(x))),
+        // perhaps its rounding's dropout.
         if !self.single(p_) {
             return None;
         }
-        let p = self.uncast(p_);
+        let (rounded, dropout) = match self.dropout(p_, &ty(p_).shape, false) {
+            Some((x, d, t)) => (x, Some((d, t))),
+            None => (p_, None),
+        };
+        let p = self.uncast(rounded);
         let div = self
             .node(p)
             .filter(|n| matches!(n.primitive, Div) && self.single(p))?;
@@ -1050,6 +1202,10 @@ impl<'a> Matcher<'a> {
         if !float || ty(k_).dtype != dtype || ty(v_).dtype != dtype || ty(p_).dtype != dtype {
             return None;
         }
+        // Dropout scales the rounded probabilities in their dtype.
+        if dropout.as_ref().is_some_and(|(_, t)| *t != dtype) {
+            return None;
+        }
         if !fits(h) || !fits(hv) || sq == 0 || sk == 0 || ty(v_).shape[rc2[0]] != sk {
             return None;
         }
@@ -1082,6 +1238,7 @@ impl<'a> Matcher<'a> {
             sum: l,
             dtype,
             out_dtype: ty(nodes[root].output).dtype,
+            dropout: dropout.map(|(d, _)| d),
         })
     }
 

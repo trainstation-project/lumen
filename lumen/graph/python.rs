@@ -187,8 +187,10 @@ impl PyGraph {
     /// dot's), the softmax's `max` and `sum`, the score's `chain`
     /// (`("round", dtype)` or `("mul", c, dtype)`, in order, from the dot's
     /// rounding), the `causal` offset (key `j` seen by query `i` iff
-    /// `j <= i + causal`) or None, and its `members`: the values it
-    /// computes from the operands to the output.
+    /// `j <= i + causal`) or None, its probabilities' `dropout` (the
+    /// `mask`, whether each is dropped, and the `scale` of the others) or
+    /// None, and its `members`: the values it computes from the operands
+    /// to the output.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         use crate::compiler::attention::{Score, traced};
         let nodes = self.inner.nodes();
@@ -218,6 +220,16 @@ impl PyGraph {
                     .collect::<PyResult<_>>()?;
                 d.set_item("chain", chain)?;
                 d.set_item("causal", a.causal)?;
+                let dropout = match &a.dropout {
+                    Some(drop) => {
+                        let dict = PyDict::new(py);
+                        dict.set_item("mask", drop.mask)?;
+                        dict.set_item("scale", drop.scale)?;
+                        dict.into_any()
+                    }
+                    None => py.None().into_bound(py),
+                };
+                d.set_item("dropout", dropout)?;
                 d.set_item("members", members)?;
                 Ok(d)
             })

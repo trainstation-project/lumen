@@ -33,7 +33,7 @@ def substitute(tape):
         members = set(m["members"])
         ctx = FunctionCtx()
         ctx.dot1, ctx.dot2 = tape[at[m["scores"]]][2], tape[at[m["out"]]][2]
-        ctx.chain, ctx.causal = m["chain"], m["causal"]
+        ctx.chain, ctx.causal, ctx.dropout = m["chain"], m["causal"], m["dropout"]
         q, k, v, o = (_value(m[name]) for name in ("q", "k", "v", "out"))
         lse = prims.add(_value(m["max"]), prims.log(_value(m["sum"])))
         ctx.save_for_backward(q, k, v, o, lse=lse)
@@ -97,9 +97,17 @@ class _Attention(Function):
         rows = tuple(range(nb + 1))
         d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum, accum)
         d = prims.broadcast_in_dim(prims.reshape(d, batch + [1, sq]), batch + [sk, sq], per_query)
-        # dP^T = V dO^T; dS^T = P^T (dP^T - D) * scale.
+        # dP^T = V dO^T (dropped, as the forward's probabilities); dS^T =
+        # P^T (dP^T - D) * scale.
         dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum, accum)
+        if ctx.dropout is not None:
+            swap = list(range(nb)) + [nb + 1, nb]
+            dropped, keep = prims.transpose(_value(ctx.dropout["mask"]), swap), ctx.dropout["scale"]
+            dpt = F.where(dropped, 0.0, dpt * keep)
         ds = prims.mul(prims.mul(pt, prims.sub(dpt, d)), prims.full(pt.shape, scale, accum))
+        # dV reads P^T dropped.
+        if ctx.dropout is not None:
+            pt = F.where(dropped, 0.0, pt * keep)
         ds, pt = (t if dtype == accum else prims.cast(t, dtype) for t in (ds, pt))
         # [batch..., Sk, Hv], [batch..., Sk, H], [batch..., Sq, H], in float32.
         dv = prims.dot_general(pt, g, (((nb + 1,), (nb,)), (every, every)), accum, accum)
