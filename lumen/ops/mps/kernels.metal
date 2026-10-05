@@ -162,6 +162,29 @@ template <typename D> inline D convert_value(half x) { return from_float<D>(floa
 template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }
 template <typename D> inline D convert_value(float x) { return from_float<D>(x); }
 
+// The first word of the Philox4x32-10 block (Random123's philox4x32) keyed
+// by `key` (its low word first) at `counter` (the block's first two words,
+// low first; the others 0): random_bits' element, as the reference
+// computes it (philox_bits, lumen/ops/reference.rs).
+inline uint philox_bits(ulong key, ulong counter) {
+    uint c0 = uint(counter), c1 = uint(counter >> 32), c2 = 0, c3 = 0;
+    uint k0 = uint(key), k1 = uint(key >> 32);
+    for (int round = 0; round < 10; ++round) {
+        if (round > 0) {
+            k0 += 0x9E3779B9u;
+            k1 += 0xBB67AE85u;
+        }
+        uint hi0 = mulhi(0xD2511F53u, c0), lo0 = 0xD2511F53u * c0;
+        uint hi1 = mulhi(0xCD9E8D57u, c2), lo1 = 0xCD9E8D57u * c2;
+        uint n0 = hi1 ^ c1 ^ k0, n2 = hi0 ^ c3 ^ k1;
+        c0 = n0;
+        c1 = lo1;
+        c2 = n2;
+        c3 = lo0;
+    }
+    return c0;
+}
+
 // Elementwise kernels take BYTES_PER_THREAD bytes of elements of T a
 // thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:
 // thread i of `threads` takes i, i + threads, ..., so each load across a

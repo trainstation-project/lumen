@@ -117,6 +117,18 @@ pub enum Primitive {
         shape: Vec<usize>,
         dimension: usize,
     },
+    /// Random bits (XLA's `RngBitGenerator` with Philox, as PyTorch's
+    /// `philox_rand`): element `i` (row-major) the first word of the
+    /// Philox4x32-10 block (Random123) keyed by the state's seed, at
+    /// counter `offset + offset' + i`, the state `[seed, offset']`
+    /// (uint64[2]). Counter-based: each element computed from its index
+    /// alone, so it fuses into its consumer (dropout's mask is never
+    /// stored), and a call's numbers are its counters' (the caller
+    /// advances `offset'` past them).
+    RandomBits {
+        shape: Vec<usize>,
+        offset: u64,
+    },
     /// `body` run as one kernel, `name`: what a device's graph compiler
     /// (`crate::compiler`) groups the primitives it fuses into. Its value is
     /// the body's first output; a body with more (a multi-output fusion)
@@ -183,6 +195,7 @@ impl Primitive {
             Concatenate { .. } => "concatenate",
             Full { .. } => "full",
             Iota { .. } => "iota",
+            RandomBits { .. } => "random_bits",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
             CustomCall { label, .. } => label,
@@ -465,6 +478,15 @@ impl Primitive {
                     None => err("mutates no operand: it would compute nothing".into()),
                 }
             }
+            RandomBits { shape, .. } => {
+                if args[0].dtype != DType::U64 || args[0].shape != [2] {
+                    return err(format!(
+                        "needs a uint64[2] state (seed, offset), got {}",
+                        args[0]
+                    ));
+                }
+                Ok(TensorType::new(DType::U32, shape))
+            }
             Iota {
                 dtype,
                 shape,
@@ -674,6 +696,9 @@ impl fmt::Display for Primitive {
                 "[dimension={dimension} dtype={dtype} shape={}]",
                 Tuple(shape)
             ),
+            RandomBits { shape, offset } => {
+                write!(f, "[offset={offset} shape={}]", Tuple(shape))
+            }
             _ => Ok(()),
         }
     }

@@ -105,6 +105,10 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             shape: dims("shape")?,
             dimension: get("dimension")?.extract()?,
         },
+        "random_bits" => RandomBits {
+            shape: dims("shape")?,
+            offset: get("offset")?.extract()?,
+        },
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown primitive {other:?}"

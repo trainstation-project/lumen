@@ -1040,6 +1040,12 @@ impl<'a> Emitter<'a> {
                         return name;
                     }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
+                    // The state's two words, at its own indices.
+                    RandomBits { offset, .. } => {
+                        let seed = self.value(node.inputs[0], "0".into());
+                        let start = self.value(node.inputs[0], "1".into());
+                        format!("philox_bits({seed}, {start} + {offset}ul + ulong({idx}))")
+                    }
                     Iota { dimension, .. } => {
                         let mut strides = vec![0; ty.shape.len()];
                         strides[*dimension] = 1;

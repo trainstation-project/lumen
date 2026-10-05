@@ -1,0 +1,202 @@
+"""Random numbers (``lumen.random``, modeled on PyTorch's generator):
+``lumen.manual_seed``, ``lumen.rand``, ``lumen.randn`` and ``F.dropout``,
+drawn from the ``random_bits`` primitive (Philox4x32-10) inside compiled
+functions: which numbers each draw reads (a Philox in Python here, against
+Random123's answers), the same on every device, a new run of the stream
+each call, and dropout's mask recomputed in its backward, never stored."""
+
+import math
+
+import numpy as np
+import pytest
+
+import lumen
+import lumen.functional as F
+
+DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
+
+
+def _philox(key, counter):
+    """Random123's philox4x32_10: the block at ``counter`` (4 words) keyed by
+    ``key`` (2 words)."""
+    c, k = list(counter), list(key)
+    mask = 0xFFFFFFFF
+    for r in range(10):
+        if r:
+            k = [(k[0] + 0x9E3779B9) & mask, (k[1] + 0xBB67AE85) & mask]
+        p0, p1 = 0xD2511F53 * c[0], 0xCD9E8D57 * c[2]
+        c = [(p1 >> 32) ^ c[1] ^ k[0], p1 & mask, (p0 >> 32) ^ c[3] ^ k[1], p0 & mask]
+    return c
+
+
+def _bits(seed, counters):
+    """``random_bits``' elements: Philox's first word at each counter."""
+    return np.array(
+        [_philox([seed & 0xFFFFFFFF, seed >> 32], [n & 0xFFFFFFFF, n >> 32, 0, 0])[0] for n in counters],
+        dtype=np.uint64,
+    )
+
+
+def test_python_philox_matches_random123():
+    assert _philox([0, 0], [0] * 4) == [0x6627E8D5, 0xE169C58D, 0xBC57AC4C, 0x9B00DBD8]
+    assert _philox([0xA4093822, 0x299F31D0], [0x243F6A88, 0x85A308D3, 0x13198A2E, 0x03707344]) == [
+        0xD16CFE09,
+        0x94FDCCEB,
+        0x5001E420,
+        0x24126EA1,
+    ]
+
+
+def _compile(fn, device):
+    """``fn`` compiled for ``device``, and a call of it on nothing but a
+    tensor there (whose values it ignores)."""
+    try:
+        x = lumen.zeros([1]).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(fn)
+    return lambda: [lumen.to_numpy(t).copy() for t in f(x)]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_draws_read_the_stream_in_order(device):
+    """Each draw reads the generator's next numbers: the draws of a call one
+    after another, the next call's after them; ``rand`` (float32) the top
+    24 bits of each, times 2**-24; ``manual_seed`` starts over."""
+    seed = (7 << 40) | 12345
+    f = _compile(lambda x: (lumen.rand([3, 5]), lumen.rand([4])), device)
+    lumen.manual_seed(seed)
+    first, second = f(), f()
+    bits = _bits(seed, range(2 * 19))
+    want = (bits >> 8).astype(np.float64) * 2.0**-24
+    np.testing.assert_array_equal(first[0].ravel(), want[:15])
+    np.testing.assert_array_equal(first[1], want[15:19])
+    np.testing.assert_array_equal(np.concatenate([a.ravel() for a in second]), want[19:])
+    lumen.manual_seed(seed)
+    np.testing.assert_array_equal(f()[0], first[0])
+    assert lumen.initial_seed() == seed
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype, k", [("float32", 24), ("bfloat16", 8), ("float16", 11)])
+def test_rand_is_exact_in_its_dtype(device, dtype, k):
+    """``rand`` in ``dtype``: the top ``k`` bits (its significand's) times
+    2**-k, exact, so never 1; every value a multiple of 2**-k."""
+    f = _compile(lambda x: (lumen.rand([4096], dtype=dtype).float(),), device)
+    lumen.manual_seed(3)
+    (u,) = f()
+    want = (_bits(3, range(4096)) >> (32 - k)).astype(np.float64) * 2.0**-k
+    np.testing.assert_array_equal(u, want)
+    assert u.max() < 1.0
+
+
+@pytest.mark.mps
+def test_devices_draw_the_same_numbers():
+    """The CPU and MPS draw the same numbers: ``rand`` and dropout bit for
+    bit, ``randn`` to float32 rounding (its log and sqrt)."""
+
+    def draws(x):
+        return lumen.rand([2000]), lumen.randn([2000]), F.dropout(lumen.ones([2000]), 0.3)
+
+    results = []
+    for device in ["cpu", "mps"]:
+        lumen.manual_seed(11)
+        results.append(_compile(draws, device)())
+    (u0, z0, d0), (u1, z1, d1) = results
+    np.testing.assert_array_equal(u0, u1)
+    np.testing.assert_array_equal(d0, d1)
+    np.testing.assert_allclose(z0, z1, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_randn_is_standard_normal(device):
+    """``randn``: ``sqrt(2) * erfinv(u)`` of its uniforms (``erf`` takes it
+    back), mean 0 and variance 1, no infinities (``u`` never -1 or 1)."""
+    n = 1 << 18
+    f = _compile(lambda x: (lumen.randn([n]),), device)
+    lumen.manual_seed(5)
+    (z,) = f()
+    assert np.isfinite(z).all()
+    assert abs(z.mean()) < 0.01 and abs(z.std() - 1) < 0.01
+    m = _bits(5, range(64)) >> 9
+    u = (2 * m + 1).astype(np.float64) * 2.0**-23 - 1
+    erf = np.array([math.erf(v / math.sqrt(2)) for v in z[:64].astype(np.float64)])
+    np.testing.assert_allclose(erf, u, atol=2e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dropout(device):
+    """``F.dropout``: the dropped about ``p`` of the elements, the others
+    scaled by ``1 / (1 - p)``; dropped where the draw's bits are below
+    ``p * 2**32``; the input as is unless training or for ``p`` 0, zeros for
+    ``p`` 1."""
+    n, p = 1 << 16, 0.3
+    try:
+        x = lumen.from_numpy(np.arange(1, n + 1, dtype=np.float32)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def drop(x):
+        return F.dropout(x, p), F.dropout(x, p, training=False), F.dropout(x, 0.0), F.dropout(x, 1.0)
+
+    lumen.manual_seed(9)
+    y, off, zero, one = (lumen.to_numpy(t) for t in lumen.compile(drop)(x))
+    a = np.arange(1, n + 1, dtype=np.float32)
+    dropped = _bits(9, range(n)) < round(p * 2**32)
+    np.testing.assert_array_equal(y, np.where(dropped, 0, a * np.float32(1 / (1 - p))))
+    assert abs(dropped.mean() - p) < 0.01
+    np.testing.assert_array_equal(off, a)
+    np.testing.assert_array_equal(zero, a)
+    np.testing.assert_array_equal(one, np.zeros(n, np.float32))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_dropout_backward_recomputes_its_mask(device):
+    """Dropout's gradient: the cotangent where the forward kept the element,
+    scaled, else 0; the mask recomputed by the backward's kernel from the
+    same numbers, not stored (on MPS: no workspace, each kernel drawing
+    its own bits)."""
+    shape = (256, 256)
+    try:
+        x = lumen.from_numpy(np.ones(shape, np.float32)).to(device)
+        w = lumen.from_numpy(np.full(shape, 3.0, np.float32)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def step(x, w):
+        y = F.dropout(x, 0.5)
+        F.sum(y * w).backward()
+        return y, x.grad
+
+    lumen.manual_seed(1)
+    y, dx = (lumen.to_numpy(t) for t in lumen.compile(step)(x, w))
+    np.testing.assert_array_equal(dx, np.where(y != 0, 6.0, 0.0).astype(np.float32))
+    if device == "mps":
+        plan = lumen.graph.Plan(lumen.make_graph(step)(x, w), "mps")
+        labels = [s["label"] for s in plan.steps()]
+        assert len(labels) == 2 and all(label.startswith("random_bits") for label in labels), labels
+        assert plan.workspace_bytes == 0
+
+
+def test_compiling_without_running_draws_nothing():
+    """A call on meta tensors compiles without running: the stream does not
+    move."""
+    f = lumen.compile(lambda x: lumen.rand(x.shape))
+    lumen.manual_seed(2)
+    f(lumen.empty([8], device="meta"))
+    (a,) = _compile(lambda x: (lumen.rand([8]),), "cpu")()
+    np.testing.assert_array_equal(a, (_bits(2, range(8)) >> 8).astype(np.float64) * 2.0**-24)
+
+
+def test_errors():
+    """Draws run inside compiled functions; seeds are 64-bit unsigned
+    integers; random floats need a float dtype; dropout's ``p`` a
+    probability."""
+    with pytest.raises(RuntimeError, match="lumen.compile"):
+        lumen.rand([3])
+    with pytest.raises(ValueError, match="2\\*\\*64"):
+        lumen.manual_seed(-1)
+    with pytest.raises(TypeError, match="floating-point"):
+        lumen.compile(lambda x: lumen.rand([3], dtype="int32"))(lumen.zeros([1]))
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        lumen.compile(lambda x: F.dropout(x, 1.5))(lumen.zeros([1]))
