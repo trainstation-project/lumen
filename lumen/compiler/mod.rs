@@ -8,22 +8,28 @@
 //!
 //! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.
+//! - [`cpu`]: the host's: the primitives as they are.
+//!
+//! A program with values on the host (`to_host`) runs in [`stages`], each
+//! compiled by its side's compiler.
 
 // Used by the MPS backend (its fusions) and the tracer (`Graph.attentions`).
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
 pub mod config;
+mod cpu;
 mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 mod simplify;
+mod stages;
 #[cfg(test)]
 mod tests;
 
 use crate::Device;
-use crate::graph::{Graph, Plan, PlanOptions, Primitive, Var};
+use crate::graph::{Graph, Plan, Primitive, Var};
 
 pub use config::CompilerConfig;
 
@@ -70,24 +76,20 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
 /// [`compile`] with `options`.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let graph = &simplify::simplify(&cse::cse(graph));
+    if device != Device::Cpu
+        && let Some(plan) = stages::compile(graph, device, options)?
+    {
+        return Ok(plan);
+    }
+    device_compile(&stages::without_transfers(graph), device, options)
+}
+
+/// `graph`, on one device, compiled by `device`'s compiler.
+fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
         #[cfg(lumen_mps_linked)]
         Device::Mps => mps::compile(graph, options),
-        _ => {
-            // No attention to match: the rewrites changing it too.
-            let graph = &simplify::simplify_with(graph, true);
-            let plan = PlanOptions {
-                scratch: None,
-                donate: options.donate.clone(),
-                donate_into: options.donate_into.clone(),
-                parameters: options.parameters.clone(),
-                views: Vec::new(),
-                // The host executor reads every input in place.
-                scalars: positions(&options.scalars),
-                memory_limit: options.config.memory_limit(),
-            };
-            Ok(Plan::compile_with(graph, &plan))
-        }
+        _ => Ok(cpu::compile(graph, options)),
     }
 }
 

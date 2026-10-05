@@ -54,7 +54,11 @@ def bind(name, *operands, **params):
     inputs = [x.var for x in operands]
     var = graph.apply(name, inputs, params)
     tracer._record(name, inputs, params, var)
-    return tracer.TracedTensor(graph, var)
+    out = tracer.TracedTensor(graph, var)
+    # On the host if copied there, or computed from host values there.
+    if name == "to_host" or (name != "to_device" and any(x.device == "cpu" for x in operands)):
+        out.device = "cpu"
+    return out
 
 
 def add(x, y):

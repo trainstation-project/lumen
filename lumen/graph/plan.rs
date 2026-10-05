@@ -127,6 +127,53 @@ pub struct Plan {
     /// parameter inputs along a dimension: one block they are placed in
     /// side by side ([`crate::Tensor::pack`]), so no step concatenates them.
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
+    /// A program on a device and the host: its stages, each its own plan
+    /// (`compiler::stages`), run in order instead of steps of its own.
+    pub(crate) staged: Option<Box<Staged>>,
+}
+
+/// A plan in stages: the parts of a program on a device and on the host
+/// (the ops reading `to_host` values, as PyTorch runs ops on CPU tensors on
+/// the CPU), each compiled by its device's compiler, run in order, the
+/// values crossing between them copied.
+#[derive(Debug, Clone)]
+pub(crate) struct Staged {
+    pub(crate) stages: Vec<Stage>,
+    /// Where each output of the program comes from.
+    pub(crate) outputs: Vec<Source>,
+}
+
+/// One stage of a [`Staged`] plan.
+#[derive(Debug, Clone)]
+pub(crate) struct Stage {
+    /// On the host (its plan the CPU's, run on its own memory), or on the
+    /// program's device (run in its slice of the program's workspace).
+    pub(crate) host: bool,
+    pub(crate) plan: Plan,
+    /// Where each of its plan's inputs comes from.
+    pub(crate) inputs: Vec<Source>,
+    /// The program's packed blocks its plan reads after its inputs, in its
+    /// [`Plan::packed`] order, by their index in the program's.
+    pub(crate) blocks: Vec<usize>,
+    /// Its workspace's offset in the program's (a device stage's).
+    pub(crate) offset: usize,
+}
+
+/// Where a stage's input, or the program's output, comes from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Source {
+    /// The program's input.
+    Input(usize),
+    /// Output `k` of stage `s`: on its device (a host stage's on the host:
+    /// a device stage reading it copies it in, `to_device`).
+    Stage(usize, usize),
+    /// Output `k` of device stage `s`, copied to the host (`to_host`: once
+    /// its value is computed).
+    ToHost(usize, usize),
+    /// Output `k` of host stage `s`, copied to the program's device
+    /// (`to_device`, a program's output: a device stage reading one copies
+    /// it in).
+    ToDevice(usize, usize),
 }
 
 impl Plan {
@@ -530,7 +577,99 @@ impl Plan {
             steps,
             workspace_bytes,
             packed: Vec::new(),
+            staged: None,
         }
+    }
+
+    /// A plan of `stages` ([`Staged`]): the program's inputs' and outputs'
+    /// types, the stages' steps in order (for its profile and views), its
+    /// workspace (its device stages', side by side), and its packed blocks.
+    pub(crate) fn staged(
+        inputs: Vec<TensorType>,
+        outputs: Vec<TensorType>,
+        staged: Staged,
+        steps: Vec<Step>,
+        workspace_bytes: usize,
+        packed: Vec<(Vec<usize>, usize)>,
+    ) -> Plan {
+        Plan {
+            aliases: vec![None; outputs.len()],
+            inputs,
+            outputs,
+            inputs_at: Vec::new(),
+            outputs_at: Vec::new(),
+            steps,
+            workspace_bytes,
+            packed,
+            staged: Some(Box::new(staged)),
+        }
+    }
+
+    /// Run a staged plan's stages in order: its device stages in their
+    /// slices of `workspace` (an owned plan's), else on `device`; its host
+    /// stages on the host; each value crossing copied (`to_host` once it is
+    /// computed, a device stage copying a host value in).
+    fn run_staged(
+        &self,
+        staged: &Staged,
+        inputs: &[Tensor],
+        workspace: Option<&Tensor>,
+        device: Device,
+    ) -> Result<Vec<Tensor>, String> {
+        // The program's inputs, then its packed blocks.
+        let n = self.inputs.len() - self.packed.len();
+        let mut values: Vec<Vec<Tensor>> = Vec::with_capacity(staged.stages.len());
+        let resolve = |values: &[Vec<Tensor>], source: Source| match source {
+            Source::Input(i) => inputs[i].clone(),
+            Source::Stage(s, k) => values[s][k].clone(),
+            Source::ToHost(s, k) => {
+                let value = &values[s][k];
+                let mut op = crate::profiler::record_op("to_host", || vec![value.ty()]);
+                op.outputs(|| vec![value.ty()]);
+                value.to(Device::Cpu)
+            }
+            Source::ToDevice(s, k) => {
+                let value = &values[s][k];
+                let mut op = crate::profiler::record_op("to_device", || vec![value.ty()]);
+                op.outputs(|| vec![value.ty()]);
+                value.to(device)
+            }
+        };
+        for stage in &staged.stages {
+            let mut ins: Vec<Tensor> = stage.inputs.iter().map(|&s| resolve(&values, s)).collect();
+            ins.extend(stage.blocks.iter().map(|&b| inputs[n + b].clone()));
+            let outputs = match (stage.host, workspace) {
+                (true, _) => {
+                    let ins: Vec<Tensor> = ins.iter().map(|t| t.to(Device::Cpu)).collect();
+                    stage.plan.run_on(&ins, Device::Cpu)?
+                }
+                (false, Some(ws)) => {
+                    let bytes = stage.plan.workspace_bytes();
+                    let slice = ws.view_bytes(stage.offset, DType::U8, &[bytes]);
+                    stage.plan.run_in(&slice, &ins)?
+                }
+                (false, None) => {
+                    let ins: Vec<Tensor> = ins.iter().map(|t| t.to(device)).collect();
+                    stage.plan.run_on(&ins, device)?
+                }
+            };
+            values.push(outputs);
+        }
+        // An input returned as it is, on the device (as a device plan's own
+        // copy of it).
+        Ok(staged
+            .outputs
+            .iter()
+            .map(|&s| match s {
+                Source::Input(i) => inputs[i].to(device),
+                s => resolve(&values, s),
+            })
+            .collect())
+    }
+
+    /// The types of its inputs (its packed blocks' last).
+    pub(crate) fn input_types(&self) -> &[TensorType] {
+        &self.inputs
     }
 
     pub fn steps(&self) -> &[Step] {
@@ -583,6 +722,9 @@ impl Plan {
             };
             return Ok(self.outputs.iter().map(meta).collect());
         }
+        if let Some(staged) = &self.staged {
+            return self.run_staged(staged, inputs, None, device);
+        }
         let inputs: Vec<Tensor> = inputs
             .iter()
             .zip(&self.inputs_at)
@@ -620,6 +762,9 @@ impl Plan {
     /// run in it overwrites them.
     pub fn run_in(&self, workspace: &Tensor, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         self.check_inputs(inputs)?;
+        if let Some(staged) = &self.staged {
+            return self.run_staged(staged, inputs, Some(workspace), workspace.device());
+        }
         let device = workspace.device();
         let executor = self.executor(device)?;
         if executor != device || workspace.dtype() != DType::U8 || !workspace.is_contiguous() {
@@ -976,6 +1121,18 @@ impl Plan {
 /// ```
 impl fmt::Display for Plan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(staged) = &self.staged {
+            write!(f, "staged plan (workspace {} bytes)", self.workspace_bytes)?;
+            for (s, stage) in staged.stages.iter().enumerate() {
+                let side = if stage.host { "host" } else { "device" };
+                write!(
+                    f,
+                    "\nstage {s} ({side}, inputs {:?}): {}",
+                    stage.inputs, stage.plan
+                )?;
+            }
+            return write!(f, "\noutputs {:?}", staged.outputs);
+        }
         write!(f, "plan (workspace {} bytes)", self.workspace_bytes)?;
         for step in &self.steps {
             let (out, ty) = &step.output;

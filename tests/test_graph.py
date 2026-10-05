@@ -1408,3 +1408,80 @@ def test_concatenate_runs_unfused():
     plan = lumen.graph.Plan(graph, "mps", fuse=False)
     (out,) = plan.run([a])
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_cpu_inside_a_compiled_function(device):
+    """``x.cpu()`` (and ``x.to("cpu")``, with a dtype too) inside a compiled
+    function, as in PyTorch: a traced tensor has a device (the plan's, or
+    ``cpu`` once on the host), and ``cpu()`` of a CPU tensor is the tensor
+    itself (assigning it assigns the argument); another device's is copied
+    to the host, its own tensor, returned as a CPU tensor."""
+    devices = []
+
+    def f(x):
+        y = x * 2.0
+        h = y.cpu()
+        devices.extend([x.device, h.device, (h + 1.0).device, h.to(device).device])
+        return h, F.sum(h + 1.0).to("cpu"), x.to("cpu", "float16"), x.to(device="cpu"), y, x.cpu().add_(0.5), x
+
+    try:
+        g = lumen.compile(f, device=device)
+        first = g(lumen.tensor([1.0, 2.0]))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    assert devices == [device, "cpu", "cpu", device]
+    h, total, half, moved, y, added, x = first
+    assert all(t.device == "cpu" for t in (h, total, half, moved, added))
+    assert y.device == x.device == device
+    assert half.dtype == "float16"
+    assert [h.tolist(), total.tolist(), half.tolist()] == [[2.0, 4.0], [8.0], [1.0, 2.0]]
+    # On the CPU, ``x.to(device="cpu")`` and ``x.cpu()`` are ``x``: adding
+    # to one adds to all.
+    expected = [1.5, 2.5] if device == "cpu" else [1.0, 2.0]
+    assert added.tolist() == [1.5, 2.5] and moved.tolist() == x.tolist() == expected
+
+
+def test_python_values_inside_a_compiled_function_raise():
+    """A traced tensor has no value while tracing: ``item``, ``tolist`` and
+    ``float`` raise (``cpu`` keeps a tensor: it works)."""
+    for body in (lambda x: x.item(), lambda x: x.tolist(), lambda x: float(F.sum(x))):
+        with pytest.raises((AttributeError, TypeError)):
+            lumen.compile(body)(lumen.tensor([1.0]))
+
+
+@pytest.mark.mps
+def test_cpu_inside_a_compiled_function_transfers():
+    """``.cpu()`` inside a compiled MPS function splits it into stages: the
+    ops before it on the device, then its copy to the host (``to_host``:
+    ``lumen::copy_d2h``, its ``lumen::wait`` inside), then the ops reading
+    it on the host, compiled for the CPU, as PyTorch runs ops on CPU
+    tensors (no kernels), the result a CPU tensor. An op reading host and
+    device values raises PyTorch's error. The gradient comes back to the
+    device (``to_device``)."""
+
+    def mid(x):
+        return (x * 3.0).cpu() * 2.0 + 1.0
+
+    x = lumen.tensor([1.0, 2.0])
+    try:
+        f = lumen.compile(mid, device="mps")
+        f(x)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+        y = f(x)
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+    assert [e["name"] for e in events if e["kind"] == "gpu"] == ["copy_h2d", "mul"]
+    (copy,) = [e for e in events if e["name"] == "lumen::copy_d2h"]
+    names = []
+    while copy.get("parent") in by_id:
+        copy = by_id[copy["parent"]]
+        names.append(copy["name"])
+    assert "to_host" in names
+    assert y.device == "cpu" and y.tolist() == [7.0, 13.0]
+    with pytest.raises(RuntimeError, match="Expected all tensors to be on the same device"):
+        lumen.compile(lambda x: x.cpu() + x, device="mps")(x)
+    grad = lumen.compile(lumen.grad(lambda x: F.sum((x * 3.0).cpu() * 5.0).to("mps")), device="mps")(x)
+    assert grad.device == "mps" and grad.tolist() == [15.0, 15.0]
