@@ -224,10 +224,19 @@ pub(crate) fn merge_dots(
     // the second, if still two or more, merge at their first.
     let mut merged = vec![false; nodes.len()];
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
+    // Each parameter in one block at most: a later group's dots of one an
+    // earlier group packed stay unmerged.
+    let mut packed = vec![false; graph.types.len()];
+    let weight =
+        |side: usize, i: usize| weight_of(nodes[i].inputs[1 - side]).expect("a parameter").0;
     for (k, g) in groups.iter_mut().enumerate() {
-        g.nodes.retain(|&i| !merged[i]);
+        let side = g.side;
+        g.nodes.retain(|&i| !merged[i] && !packed[weight(side, i)]);
         if g.nodes.len() > 1 {
-            g.nodes.iter().for_each(|&i| merged[i] = true);
+            for &i in &g.nodes {
+                merged[i] = true;
+                packed[weight(side, i)] = true;
+            }
             first_of[g.nodes[0]] = Some(k);
         }
     }
@@ -241,8 +250,14 @@ pub(crate) fn merge_dots(
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // The dots' operands each part of a block's chain: never computed
+    // again (a later dot's, traced after the first one's merge).
+    let mut parted = vec![false; graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
         out.set_scope(node.scope);
+        if parted[node.output] {
+            continue;
+        }
         if let Some(k) = first_of[i] {
             let g = &groups[k];
             // The parameters (behind their chains).
@@ -301,6 +316,7 @@ pub(crate) fn merge_dots(
                         limit_indices: limits,
                     };
                     map[v] = out.apply(part, &[value]).expect("within the block");
+                    parted[v] = true;
                     start += n;
                 }
             }

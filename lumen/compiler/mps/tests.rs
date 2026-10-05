@@ -559,7 +559,8 @@ fn hierarchical_reductions_keep_their_dtype() {
 /// Dots of weights computed elementwise (mixed precision's bfloat16 copies,
 /// here scaled too: `cast(w * 0.5)`), the same chain for each, merge into
 /// one dot of the chain of their block, computed once; another reader of
-/// a dot's operand (a backward's dot) reads its part of it. Different
+/// a dot's operand (a backward's dot) reads its part of it, the first
+/// dot's or a later one's (traced after the merged dot). Different
 /// chains do not merge.
 #[test]
 fn dots_of_weights_computed_elementwise_merge() {
@@ -619,8 +620,10 @@ fn dots_of_weights_computed_elementwise_merge() {
             output_dtype: DType::F32,
         };
         outs.push(apply(&mut g, other, &[xt, x]));
-        let again = apply(&mut g, dot.clone(), &[x, operands[0]]);
-        outs.push(apply(&mut g, Neg, &[again]));
+        for k in [0, 2] {
+            let again = apply(&mut g, dot.clone(), &[x, operands[k]]);
+            outs.push(apply(&mut g, Neg, &[again]));
+        }
         g.set_outputs(&outs).unwrap();
         g
     };

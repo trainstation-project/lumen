@@ -68,18 +68,19 @@ class Attention(lumen.nn.Module):
     @lumen.profiler.record_function("attention")
     def __call__(self, x, batch, dropout_p):
         tokens, dim = x.shape
-        h = F.rms_norm(x, dim, self.norm)
         # [batch, seq, heads, head dim], as flash attention takes them.
         # x @ w.t() (``nn.Linear``'s), one dot of the three: their weights
         # one [3 * dim, dim] block (PyTorch's fused QKV weight), each a
         # contiguous part of it the optimizer updates in place.
         q, k, v = (
-            (h.bfloat16() @ w.t().bfloat16()).reshape(batch, tokens // batch, HEADS, dim // HEADS)
+            (x.bfloat16() @ w.t().bfloat16()).reshape(batch, tokens // batch, HEADS, dim // HEADS)
             for w in (self.wq, self.wk, self.wv)
         )
-        a = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
+        print(q.dtype, k.dtype, v.dtype)
+        x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         # float32, as the residual it is added to.
-        return F.matmul(a.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "float32")
+        x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "bfloat16")
+        return x
 
 
 class MLP(lumen.nn.Module):
@@ -91,9 +92,9 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        h = F.relu(F.rms_norm(x.float(), x.shape[-1], self.norm).bfloat16() @ self.w1.t().bfloat16())
+        h = F.relu(x @ self.w1.t().bfloat16())
         # float32, as the residual it is added to.
-        return F.matmul(h, self.w2.t().bfloat16(), "float32", "float32")
+        return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 
 class Block(lumen.nn.Module):
@@ -104,8 +105,13 @@ class Block(lumen.nn.Module):
 
     @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
-        x = x + self.attn(x, batch, dropout_p)
-        return x + self.mlp(x)
+        r = x
+        x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
+        x = r.bfloat16() + self.attn(x, batch, dropout_p)
+        r = x
+        x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
+        x = r + self.mlp(x)
+        return x
 
 
 class Transformer(lumen.nn.Module):
