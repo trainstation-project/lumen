@@ -342,6 +342,72 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// A loop fusion's transposes that read their operand at a stride are
+/// tiled (XLA's transpose emitter): its kernel reads a tile of each along
+/// the operand's rows into threadgroup memory, then writes the output along
+/// its own. Two transposes of the same dimensions share the tiling, what
+/// their operands are computed from computed as the tile is read; tiles
+/// past the edges, batch dimensions and size-1 ones index as the loop
+/// kernel would. A dimension of fewer than 16 elements, or an innermost
+/// one the transpose keeps, is left to the loop kernel.
+#[test]
+fn transposes_in_fusions_are_tiled() {
+    let cases: [(&[usize], &[usize], bool); 6] = [
+        (&[50, 7, 70], &[2, 1, 0], true),
+        (&[40, 36], &[1, 0], true),
+        (&[4, 40, 1, 36], &[0, 3, 2, 1], true),
+        (&[33, 5, 3, 40], &[3, 1, 2, 0], true),
+        (&[300, 8], &[1, 0], false),
+        (&[6, 40, 32], &[1, 0, 2], false),
+    ];
+    for dtype in [DType::F32, DType::BF16, DType::I32] {
+        for (shape, permutation, tiled) in cases {
+            let out: Vec<usize> = permutation.iter().map(|&d| shape[d]).collect();
+            let mut g = Graph::new();
+            let x = g.input(ty(dtype, shape));
+            let y = g.input(ty(dtype, &out));
+            let transpose = || Transpose {
+                permutation: permutation.to_vec(),
+            };
+            // transpose(x * x) * y + transpose(x), then exp in float32.
+            let sq = apply(&mut g, Mul, &[x, x]);
+            let t = apply(&mut g, transpose(), &[sq]);
+            let m = apply(&mut g, Mul, &[t, y]);
+            let t2 = apply(&mut g, transpose(), &[x]);
+            let mut r = apply(&mut g, Add, &[m, t2]);
+            if dtype.is_float() {
+                let f = Cast {
+                    new_dtype: DType::F32,
+                };
+                r = apply(&mut g, f, &[r]);
+                r = apply(&mut g, Exp, &[r]);
+            }
+            g.set_outputs(&[r]).unwrap();
+            let fused = fuse(&g);
+            let Fusion { body, .. } = &fused.nodes()[0].primitive else {
+                panic!("{fused}")
+            };
+            assert_eq!(fused.nodes().len(), 1, "{fused}");
+            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+            assert_eq!(
+                codegen::transpose_tiling(body).is_some(),
+                tiled,
+                "{shape:?}"
+            );
+            assert_eq!(source.contains("threadgroup_barrier"), tiled, "{source}");
+            if tiled {
+                // Both transposes through tiles.
+                assert!(source.contains("tile1["), "{source}");
+            }
+            if available() {
+                // Small values: the exp stays in range.
+                let inputs = [values(dtype, shape, 1), values(dtype, &out, 2)];
+                check(&g, &inputs);
+            }
+        }
+    }
+}
+
 /// Reductions are normalized before they take a kernel, as XLA's
 /// reduction passes normalize them: size-1 dimensions dropped and adjacent
 /// reduced (or kept) ones merged, so axes apart only across size-1

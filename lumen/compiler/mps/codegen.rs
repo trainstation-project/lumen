@@ -25,6 +25,9 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -
     if let Some(root) = reduction_root(body) {
         return reduction(body, by_value, root);
     }
+    if let Some(tiling) = transpose_tiling(body) {
+        return transpose_kernel(body, by_value, &tiling);
+    }
     let mut emitter = Emitter::new(body, by_value);
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
@@ -258,6 +261,212 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         emitter.lines,
         io_params(body, by_value, written).0,
         members.join(", "),
+    ))
+}
+
+/// How a loop fusion with transposes reading their operand across its
+/// rows is tiled (XLA's transpose emitter, `emitters/transpose.cc`; on
+/// Triton, `fusion_block_level_rewriter.cc`): a threadgroup a 32x32 tile of
+/// the output's dimensions `a` (that the transposes' operands are
+/// contiguous along) and `b` (the output's innermost), for an index of the
+/// others (the batch). Each dimension is a run of the output's, read as one.
+pub(crate) struct TransposeTiling {
+    /// The transposes read through the tile (the heroes), in order.
+    heroes: Vec<Var>,
+    /// The elements of `a` and `b`, and the output's stride of `a`.
+    a: usize,
+    b: usize,
+    a_stride: usize,
+    /// The batch's dimensions: their sizes and the output's strides.
+    batch: Vec<(usize, usize)>,
+}
+
+impl TransposeTiling {
+    /// The kernel's threadgroups (of 16x16 threads, each 2x2 elements).
+    pub(crate) fn grid(&self) -> crate::ops::mps::Grid {
+        let batches = self.batch.iter().map(|d| d.0).product();
+        crate::ops::mps::Grid::Groups([self.a.div_ceil(TILE), self.b.div_ceil(TILE), batches])
+    }
+}
+
+/// A transpose tile's side.
+const TILE: usize = 32;
+
+/// The elements each of a tile's dimensions spans at least
+/// (`kMinDimensionToTransposeTiled`, XLA's `ir_emission_utils.h`): along
+/// fewer, the tile's threads mostly idle, and the loop kernel's strided
+/// reads are fewer.
+const MIN_TILED: usize = 16;
+
+/// The transposes a tile holds at most: 32x33 elements each, of
+/// threadgroup memory's 32 KiB.
+const MAX_HEROES: usize = 4;
+
+/// How fusion `body` is tiled, if it is a loop fusion with a transpose to
+/// tile ([`TransposeTiling`]; XLA's transpose heroes,
+/// `GetDescriptionForTiledTransposeEmitter`): one of the output's shape,
+/// its value reaching the outputs only through elementwise primitives
+/// (read at the output's index), whose operand's innermost dimension is
+/// not the output's, both spanning [`MIN_TILED`] elements. The loop
+/// kernel, a thread an output element, would read its operand at a
+/// stride. Other transposes of the same dimensions are tiled with it.
+pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
+    use Primitive::*;
+    if gemm_dot(body).is_some()
+        || reduction_root(body).is_some()
+        || !row_reductions(body).is_empty()
+    {
+        return None;
+    }
+    let out = body.type_of(body.outputs()[0]);
+    if out.numel() > u32::MAX as usize {
+        return None;
+    }
+    // The values read only at the output's index: of its shape, each an
+    // output or read by elementwise primitives alone, whose values are.
+    let nodes = body.nodes();
+    let mut used = vec![false; body.types.len()];
+    let mut elementwise_only = vec![true; body.types.len()];
+    for &v in body.outputs() {
+        used[v] = true;
+    }
+    let mut at_output = vec![false; body.types.len()];
+    for node in nodes.iter().rev() {
+        let v = node.output;
+        at_output[v] = used[v] && elementwise_only[v] && body.type_of(v).shape == out.shape;
+        let elementwise = matches!(
+            node.primitive,
+            Add | Sub
+                | Mul
+                | Div
+                | Max
+                | Eq
+                | Lt
+                | Neg
+                | Exp
+                | Log
+                | Sqrt
+                | Tanh
+                | Logistic
+                | Cast { .. }
+                | Select
+        );
+        for &x in &node.inputs {
+            used[x] = true;
+            elementwise_only[x] &= elementwise && at_output[v];
+        }
+    }
+    // A transpose's tile: the runs of the output's dimensions (size 1
+    // aside) whose operand strides chain, read as one: `a`, the run its
+    // operand is contiguous along, and `b`, the innermost, if they differ
+    // and each spans [`MIN_TILED`] elements.
+    let tile = |node: &Node| -> Option<[(usize, usize); 2]> {
+        let Transpose { permutation } = &node.primitive else {
+            return None;
+        };
+        if !at_output[node.output] {
+            return None;
+        }
+        let xs = contiguous_strides(&body.type_of(node.inputs[0]).shape);
+        // (first dimension, last dimension, operand stride of the last).
+        let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+        for d in (0..out.shape.len()).filter(|&d| out.shape[d] != 1) {
+            let stride = xs[permutation[d]];
+            match runs.last_mut() {
+                Some(run) if run.2 == stride * out.shape[d] => *run = (run.0, d, stride),
+                _ => runs.push((d, d, stride)),
+            }
+        }
+        let a = runs.iter().position(|r| r.2 == 1)?;
+        let b = runs.len() - 1;
+        let size = |r: (usize, usize, usize)| out.shape[r.0..=r.1].iter().product::<usize>();
+        (a < b && size(runs[a]).min(size(runs[b])) >= MIN_TILED)
+            .then(|| [(runs[a].0, runs[a].1), (runs[b].0, runs[b].1)])
+    };
+    let mut heroes = Vec::new();
+    let mut tiled = None;
+    for node in nodes {
+        let Some(t) = tile(node) else { continue };
+        if *tiled.get_or_insert(t) == t && heroes.len() < MAX_HEROES {
+            heroes.push(node.output);
+        }
+    }
+    let [(a0, a1), (b0, b1)] = tiled?;
+    let out_strides = contiguous_strides(&out.shape);
+    let size = |first: usize, last: usize| out.shape[first..=last].iter().product();
+    let batch = (0..out.shape.len())
+        .filter(|&d| out.shape[d] != 1 && !(a0..=a1).contains(&d) && !(b0..=b1).contains(&d))
+        .map(|d| (out.shape[d], out_strides[d]))
+        .collect();
+    Some(TransposeTiling {
+        heroes,
+        a: size(a0, a1),
+        b: size(b0, b1),
+        a_stride: out_strides[a1],
+        batch,
+    })
+}
+
+/// The kernel of a loop fusion tiled by `tiling` ([`transpose_tiling`]):
+/// each threadgroup reads its tile of each hero's operand along `a`, as the
+/// operand is laid out (computing what the operand is computed from, at
+/// those indices), into threadgroup memory; then computes the output along
+/// `b`, as it is laid out, each hero's value read from its tile.
+fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -> (String, String) {
+    let out = body.outputs()[0];
+    let out_type = metal_type(body.type_of(out).dtype);
+    let (params, _) = io_params(body, by_value, out_type);
+    let (a, b, sa) = (tiling.a, tiling.b, tiling.a_stride);
+    let (sizes, strides): (Vec<usize>, Vec<usize>) = tiling.batch.iter().copied().unzip();
+    let base = gather_index("group.z", &sizes, &strides);
+    let mut source = String::new();
+    for (k, &h) in tiling.heroes.iter().enumerate() {
+        let t = metal_type(body.type_of(h).dtype);
+        writeln!(source, "    threadgroup {t} tile{k}[{TILE}][{}];", TILE + 1).unwrap();
+    }
+    writeln!(source, "    uint base = {base};").unwrap();
+    writeln!(
+        source,
+        "    uint a0 = group.x * {TILE}, b0 = group.y * {TILE};"
+    )
+    .unwrap();
+    // Each thread's 2x2 elements of the tile, at (x, y) of it: `x` along
+    // `a` while loading, along `b` while computing.
+    let each = |code: &str, x: &str, y: &str| {
+        format!(
+            "    for (uint dy = 0; dy < {TILE}; dy += 16) {{\n    for (uint dx = 0; dx < {TILE}; dx += 16) {{\n        uint {x} = {x}0 + tid.x + dx, {y} = {y}0 + tid.y + dy;\n        if (a >= {a}u || b >= {b}u) continue;\n        uint j = base + a * {sa}u + b;\n{code}    }}\n    }}\n"
+        )
+    };
+    let mut load = Emitter::new(body, by_value);
+    let producer = |v: Var| body.nodes().iter().find(|n| n.output == v).unwrap();
+    let mut stores = String::new();
+    for (k, &h) in tiling.heroes.iter().enumerate() {
+        let node = producer(h);
+        let i = load.operand_index(node, "j".into());
+        let v = load.value(node.inputs[0], i);
+        writeln!(stores, "        tile{k}[tid.y + dy][tid.x + dx] = {v};").unwrap();
+    }
+    source.push_str(&each(&format!("{}{stores}", load.lines), "a", "b"));
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    let mut emitter = Emitter::new(body, by_value);
+    for (k, &h) in tiling.heroes.iter().enumerate() {
+        emitter.invariant[h] = true;
+        emitter
+            .row_locals
+            .insert(h, format!("tile{k}[tid.x + dx][tid.y + dy]"));
+    }
+    let result = emitter.value(out, "j".into());
+    let extra: Vec<String> = body.outputs()[1..]
+        .iter()
+        .map(|&v| emitter.value(v, "j".into()))
+        .collect();
+    let mut writes = format!("        out[j] = {result};\n");
+    for (e, value) in extra.iter().enumerate() {
+        writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
+    }
+    source.push_str(&each(&format!("{}{writes}", emitter.lines), "b", "a"));
+    named(format!(
+        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n{source}}}\n"
     ))
 }
 
