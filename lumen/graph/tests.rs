@@ -550,7 +550,11 @@ fn plan_rematerializes_under_a_memory_limit() {
         };
         let plan = Plan::compile_with(&g, &options);
         let actual = plan.run(&inputs).unwrap();
-        assert_eq!(expected[0].to_vec::<f32>(), actual[0].to_vec::<f32>(), "{plan}");
+        assert_eq!(
+            expected[0].to_vec::<f32>(),
+            actual[0].to_vec::<f32>(),
+            "{plan}"
+        );
         let exps = plan.steps().iter().filter(|s| s.primitive == Exp).count();
         (plan.workspace_bytes(), exps)
     };

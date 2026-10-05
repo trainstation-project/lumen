@@ -144,7 +144,9 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
     let Deps { operands, users } = deps(graph);
     let total = nodes.len() as i64;
-    let cap: i64 = (0..nodes.len()).map(|i| bytes(graph, nodes[i].output)).sum();
+    let cap: i64 = (0..nodes.len())
+        .map(|i| bytes(graph, nodes[i].output))
+        .sum();
     // (extra users, bytes), each of the node and every node it depends on
     // (counted once a path, capped as XLA's are).
     let mut stats = vec![(0i64, 0i64); nodes.len()];

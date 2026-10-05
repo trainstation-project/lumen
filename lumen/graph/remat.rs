@@ -19,7 +19,9 @@ fn recomputable(graph: &Graph, node: &Node) -> bool {
     !multi_output
         && !matches!(
             node.primitive,
-            Primitive::CustomCall { .. } | Primitive::FusionOutput { .. } | Primitive::Reshape { .. }
+            Primitive::CustomCall { .. }
+                | Primitive::FusionOutput { .. }
+                | Primitive::Reshape { .. }
         )
 }
 
@@ -65,7 +67,12 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
         let inputs = node
             .inputs
             .iter()
-            .map(|u| copies.iter().find(|&&(o, _)| o == *u).map_or(*u, |&(_, c)| c))
+            .map(|u| {
+                copies
+                    .iter()
+                    .find(|&&(o, _)| o == *u)
+                    .map_or(*u, |&(_, c)| c)
+            })
             .collect();
         g.nodes.insert(
             at + n,
@@ -77,7 +84,11 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
         );
         copies.push((node.output, copy));
     }
-    let copy = copies.iter().find(|&&(o, _)| o == v).expect("the value's copy").1;
+    let copy = copies
+        .iter()
+        .find(|&&(o, _)| o == v)
+        .expect("the value's copy")
+        .1;
     for later in &mut g.nodes[at + block.len()..] {
         for input in &mut later.inputs {
             if *input == v {

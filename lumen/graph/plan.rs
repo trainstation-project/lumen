@@ -156,7 +156,9 @@ impl Plan {
         let (scheduled, plan) = best;
         match options.memory_limit {
             Some(limit) if plan.workspace_bytes > limit => {
-                super::remat::rematerialize(&scheduled, limit, |g| Self::compile_in_order(g, options))
+                super::remat::rematerialize(&scheduled, limit, |g| {
+                    Self::compile_in_order(g, options)
+                })
             }
             _ => plan,
         }
