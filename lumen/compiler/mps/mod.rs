@@ -584,6 +584,13 @@ pub(crate) fn encode(
             keep,
         );
     }
+    // A loop fusion with a transpose to tile: a threadgroup a tile.
+    if let Some(tiling) = codegen::transpose_tiling(body) {
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        buffers.extend(extra);
+        return launch(name, &buffers, &scalars, tiling.grid(), keep, step.label);
+    }
     let out = &step.output.1;
     let n = out.numel();
     let grid = elementwise_grid(n, out.dtype);

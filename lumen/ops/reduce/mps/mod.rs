@@ -223,7 +223,9 @@ struct Split {
 }
 
 fn split(x: &TensorType, reduced: &[usize]) -> Split {
-    let first = reduced.first().copied().unwrap_or(x.shape.len());
+    // Reducing nothing (size-1 dimensions alone, normalized away): a
+    // column of one element each, a thread an element, not a row each.
+    let first = reduced.first().copied().unwrap_or(0);
     let end = reduced.last().map_or(first, |last| last + 1);
     let a: usize = x.shape[..first].iter().product();
     let count: usize = x.shape[first..end].iter().product();
