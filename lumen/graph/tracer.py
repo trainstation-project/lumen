@@ -492,6 +492,7 @@ def compile(fn, device=None):
             runs=runs,
             device=target,
             run=lambda: plan.run_in(workspace, inputs),
+            scalars=scalars,
         )
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
