@@ -43,7 +43,7 @@ BATCH, STEPS, DROPOUT = 32, 300, 0
 PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
-lumen.config.compiler.deterministic = False
+lumen.config.compiler.deterministic = True
 lumen.config.compiler.fuse = True
 
 
