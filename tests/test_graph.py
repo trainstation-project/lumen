@@ -813,6 +813,46 @@ class MixedQKV(QKV):
 
 @pytest.mark.mps
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
+def test_projections_of_several_inputs_each_read_one_block(module):
+    """The same weights projecting two inputs (a gradient accumulation's
+    passes, each its own activations): one block of them, each input's
+    three projections one matmul reading it (its chain, a bfloat16 copy,
+    computed once), the values as unmerged."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def f(model, x1, x2):
+        # Read by fusible primitives (not outputs as they are), so they merge.
+        return [F.relu(v) for v in [*model(x1), *model(x2)]]
+
+    model = module(meta(64, 64), meta(64, 64), meta(64, 64))
+    graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
+    labels = [s["label"] for s in steps]
+    assert labels.count("3x dot_general") == 2, labels
+    blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
+    assert len(blocks) == 3, blocks  # the two inputs, and one block (or its copy)
+    values = rand(64, 64), rand(64, 64, seed=1), rand(64, 64, seed=2)
+    xs = [lumen.from_numpy(rand(32, 64, seed=k)).to("mps") for k in (3, 4)]
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = module(meta(64, 64), meta(64, 64), meta(64, 64))
+            g = lumen.compile(f, device="mps")
+            g(model, meta(32, 64), meta(32, 64))
+            model.load_state_dict({k: lumen.from_numpy(v) for k, v in zip(["wq", "wk", "wv"], values)})
+            got.append([lumen.to_numpy(v) for v in g(model, *xs)])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_array_equal(merged, alone)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_trained_projections_merge_into_one_matmul(module):
     """Weights a training step assigns (its optimizer's update, written over
     them in place) merge too, as PyTorch's fused QKV weight: ``[out, in]``

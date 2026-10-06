@@ -76,6 +76,25 @@ def test_fusions_of_one_chain_are_labelled_by_their_count():
     assert label.startswith("3x ") and " | " not in label, label
 
 
+def test_fusions_of_different_record_function_calls_are_not_fused():
+    """Fusions traced in different ``record_function`` calls (two layers'
+    weight casts) stay apart, so each kernel runs in its own call's range
+    when profiled; the same fusions outside any range are one."""
+    args = _device(rand(64, 32), rand(64, 32, seed=1))
+
+    def in_calls(a, b):
+        outs = []
+        for x in (a, b):
+            with lumen.profiler.record_function("layer"):
+                outs.append(F.exp(x) * 2.0)
+        return tuple(outs)
+
+    steps = _steps(in_calls, *args)
+    assert len(steps) == 2 and not any(_merged(s["label"]) for s in steps), [s["label"] for s in steps]
+    assert all(s["scope"] == ["layer"] for s in steps), [s["scope"] for s in steps]
+    assert len(_steps(lambda a, b: (F.exp(a) * 2.0, F.exp(b) * 2.0), *args)) == 1
+
+
 def test_different_sizes_are_not_fused():
     """Fusions of different element counts stay apart (no concatenated
     buffer, XLA's other form)."""

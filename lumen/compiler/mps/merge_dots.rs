@@ -24,6 +24,11 @@
 //! one's side by side); any other reader of a dot's operand (a backward's
 //! dot of the same bfloat16 weight) reads its part of it.
 //!
+//! A parameter is in one block at most. Dots of the same parameters, in the
+//! same order through the same chain, sharing another operand (the same
+//! weights projecting another input: a gradient accumulation's next pass),
+//! merge too, reading that block (its chain computed once).
+//!
 //! A parameter the program assigns (donated: an optimizer's update, its new
 //! value written over it in place) merges only as a contiguous part of its
 //! block, side by side along its first dimension (past any of size 1): as
@@ -225,13 +230,35 @@ pub(crate) fn merge_dots(
     let mut merged = vec![false; nodes.len()];
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
     // Each parameter in one block at most: a later group's dots of one an
-    // earlier group packed stay unmerged.
+    // earlier group packed stay unmerged, unless they are of that block's
+    // parameters, in its order, through its chain (the same weights read
+    // again: a gradient accumulation's next forward), reading it too.
     let mut packed = vec![false; graph.types.len()];
+    let mut reuses: Vec<Option<usize>> = vec![None; groups.len()];
     let weight =
         |side: usize, i: usize| weight_of(nodes[i].inputs[1 - side]).expect("a parameter").0;
-    for (k, g) in groups.iter_mut().enumerate() {
-        let side = g.side;
-        g.nodes.retain(|&i| !merged[i] && !packed[weight(side, i)]);
+    for k in 0..groups.len() {
+        let side = groups[k].side;
+        groups[k].nodes.retain(|&i| !merged[i]);
+        let weights: Vec<Var> = groups[k].nodes.iter().map(|&i| weight(side, i)).collect();
+        let earlier = (0..k).find(|&e| {
+            let (g, b) = (&groups[k], &groups[e]);
+            reuses[e].is_none()
+                && b.nodes.len() > 1
+                && b.nodes
+                    .iter()
+                    .map(|&i| weight(b.side, i))
+                    .eq(weights.iter().copied())
+                && (b.side, &b.chain, b.dimension) == (g.side, &g.chain, g.dimension)
+        });
+        if let Some(e) = earlier {
+            groups[k].nodes.iter().for_each(|&i| merged[i] = true);
+            first_of[groups[k].nodes[0]] = Some(k);
+            reuses[k] = Some(e);
+            continue;
+        }
+        let g = &mut groups[k];
+        g.nodes.retain(|&i| !packed[weight(side, i)]);
         if g.nodes.len() > 1 {
             for &i in &g.nodes {
                 merged[i] = true;
@@ -253,6 +280,9 @@ pub(crate) fn merge_dots(
     // The dots' operands each part of a block's chain: never computed
     // again (a later dot's, traced after the first one's merge).
     let mut parted = vec![false; graph.types.len()];
+    // Each merged group's operand: its block's chain (the block itself if
+    // none), for the groups reusing it.
+    let mut chains: Vec<Option<Var>> = vec![None; groups.len()];
     for (i, node) in nodes.iter().enumerate() {
         out.set_scope(node.scope);
         if parted[node.output] {
@@ -260,55 +290,67 @@ pub(crate) fn merge_dots(
         }
         if let Some(k) = first_of[i] {
             let g = &groups[k];
-            // The parameters (behind their chains).
-            let others: Vec<Var> = g
-                .nodes
-                .iter()
-                .map(|&m| {
-                    weight_of(nodes[m].inputs[1 - g.side])
-                        .expect("a parameter")
-                        .0
-                })
-                .collect();
-            let types: Vec<&TensorType> = others.iter().map(|&v| graph.type_of(v)).collect();
-            let block = Primitive::Concatenate {
-                dimension: g.dimension,
-            }
-            .infer(&types)
-            .expect("operands equal but in the dimension");
-            packs.push((
-                others.iter().filter_map(|&v| position[v]).collect(),
-                g.dimension,
-            ));
             let mut operands = [map[g.shared]; 2];
-            let block = out.input(block);
-            blocks.push((others.clone(), g.dimension, block));
-            // Their chain: once, of the block.
-            let mut value = block;
-            for link in &g.chain {
-                let mut ins = vec![value];
-                if let Some((k, full)) = &link.splat {
-                    let s = out.apply(full.clone(), &[]).expect("a scalar");
-                    let shape = out.type_of(value).shape.clone();
-                    let b = Primitive::BroadcastInDim {
-                        shape,
-                        broadcast_dimensions: Vec::new(),
-                    };
-                    ins.insert(*k, out.apply(b, &[s]).expect("a splat"));
+            let value = match reuses[k] {
+                Some(e) => chains[e].expect("an earlier group's block"),
+                None => {
+                    // The parameters (behind their chains).
+                    let others: Vec<Var> = g
+                        .nodes
+                        .iter()
+                        .map(|&m| {
+                            weight_of(nodes[m].inputs[1 - g.side])
+                                .expect("a parameter")
+                                .0
+                        })
+                        .collect();
+                    let types: Vec<&TensorType> =
+                        others.iter().map(|&v| graph.type_of(v)).collect();
+                    let block = Primitive::Concatenate {
+                        dimension: g.dimension,
+                    }
+                    .infer(&types)
+                    .expect("operands equal but in the dimension");
+                    packs.push((
+                        others.iter().filter_map(|&v| position[v]).collect(),
+                        g.dimension,
+                    ));
+                    let block = out.input(block);
+                    blocks.push((others.clone(), g.dimension, block));
+                    // Their chain: once, of the block.
+                    let mut value = block;
+                    for link in &g.chain {
+                        let mut ins = vec![value];
+                        if let Some((k, full)) = &link.splat {
+                            let s = out.apply(full.clone(), &[]).expect("a scalar");
+                            let shape = out.type_of(value).shape.clone();
+                            let b = Primitive::BroadcastInDim {
+                                shape,
+                                broadcast_dimensions: Vec::new(),
+                            };
+                            ins.insert(*k, out.apply(b, &[s]).expect("a splat"));
+                        }
+                        value = out
+                            .apply(link.primitive.clone(), &ins)
+                            .expect("the chain, of the block");
+                    }
+                    chains[k] = Some(value);
+                    value
                 }
-                value = out
-                    .apply(link.primitive.clone(), &ins)
-                    .expect("the chain, of the block");
-            }
+            };
             operands[1 - g.side] = value;
             // Each dot's operand, for its other readers: its part of the
-            // block's chain.
+            // block's chain (once: a reusing group's may be the same).
             if !g.chain.is_empty() {
                 let shape = out.type_of(value).shape.clone();
                 let mut start = 0;
                 for &m in &g.nodes {
                     let v = nodes[m].inputs[1 - g.side];
                     let n = graph.type_of(v).shape[g.dimension];
+                    if parted[v] {
+                        start += n;
+                        continue;
+                    }
                     let (mut starts, mut limits) = (vec![0; shape.len()], shape.clone());
                     (starts[g.dimension], limits[g.dimension]) = (start, start + n);
                     let part = Primitive::Slice {
