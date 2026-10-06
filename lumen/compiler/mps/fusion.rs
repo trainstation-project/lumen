@@ -311,6 +311,13 @@ pub(crate) fn fuse(
         // `after`), the values depending on the dot (no other operand may),
         // and the longest one whose values read outside it (but its last's)
         // are few and read after it: those it writes too.
+        // A gated pair (two dots of one operand merged, read as their two
+        // halves, `codegen::gemm_pair`): the halves' slices step into the
+        // epilogue, which then ends at a value of both, of a half's shape,
+        // writing nothing else (its kernel holds the halves interleaved,
+        // `PAIRED`).
+        let pair: Option<[usize; 2]> = super::codegen::gemm_pair(graph, node)
+            .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
         let mut taken = vec![i];
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);
         (after[node.output], depends[node.output]) = (true, true);
@@ -320,8 +327,9 @@ pub(crate) fn fuse(
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let step =
-                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+            let step = elementwise(&un.primitive)
+                || matches!(un.primitive, Primitive::Reshape { .. })
+                || pair.is_some_and(|p| p.contains(&u));
             let fuses =
                 fusible[u] && step && !in_row(u) && !claimed[u] && !(narrowed && widens(un));
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
@@ -358,7 +366,14 @@ pub(crate) fn fuse(
                     .iter()
                     .all(|&w| kept.contains(&w) || w > u)
             });
-            if kept.first() == Some(&i) && read_after && aux.len() <= MAX_AUX {
+            let paired = pair.is_none_or(|p| {
+                let half = graph.type_of(nodes[p[0]].output).numel();
+                p.iter().all(|k| kept.contains(k))
+                    && aux.is_empty()
+                    && graph.type_of(un.output).numel() == half
+                    && elementwise(&un.primitive)
+            });
+            if kept.first() == Some(&i) && read_after && aux.len() <= MAX_AUX && paired {
                 end = Some((kept, aux));
             }
         }
@@ -564,7 +579,17 @@ pub(crate) fn fuse(
                 let body = body(graph, members, reads, node.output, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
-                let label = label(graph, &producer, members);
+                // A gated pair's halves are not computed (its kernel holds
+                // them interleaved): not in its label.
+                let half = |m: &&usize| {
+                    matches!(nodes[**m].primitive, Primitive::Slice { .. })
+                        && producer[nodes[**m].inputs[0]].is_some_and(|d| {
+                            members.contains(&d)
+                                && matches!(nodes[d].primitive, Primitive::DotGeneral { .. })
+                        })
+                };
+                let shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
+                let label = label(graph, &producer, &shown);
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
                 let out = out.expect("a fused graph is typed as the original");

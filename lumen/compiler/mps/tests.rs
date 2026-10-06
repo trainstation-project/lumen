@@ -780,11 +780,9 @@ fn dots_sharing_an_operand_merge() {
     let (merged, packs) = merge_dots(&g, &[false, true, true, true], &[]);
     assert_eq!(packs, [(vec![1, 2], 1)]);
     assert_eq!(dots(&merged), 2, "{merged}");
-    // The slices fuse into the gate.
-    assert_eq!(
-        names(&fuse(&merged)),
-        ["dot_general", "fusion", "dot_general"]
-    );
+    // The gate is the merged dot's epilogue (a gated pair: its halves'
+    // slices in it, codegen's `PAIRED`), then the down projection.
+    assert_eq!(names(&fuse(&merged)), ["fusion", "dot_general"]);
     // w3 read elsewhere too: a strided part of the block (columns), it
     // would need a copy there: no merge.
     let mut read_twice = g.clone();

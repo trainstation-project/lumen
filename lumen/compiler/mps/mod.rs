@@ -242,9 +242,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         });
         let output = step.output.0;
         derived.retain(|(d, _)| *d != output);
+        let gemm = matches!(&step.primitive, Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some());
         if matches!(step.primitive, Primitive::DotGeneral { .. }) {
             if let Some(k) = block {
                 step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+            }
+        } else if let (true, Some(k)) = (gemm, block) {
+            // A merged dot with its epilogue (a gated pair's): its dots too.
+            if let Some(rest) = step.label.strip_prefix("dot_general") {
+                step.label =
+                    crate::graph::intern(format!("{}x dot_general{rest}", packed[k].0.len()));
             }
         } else if let Some(k) = block {
             let n = step.output.1.numel();

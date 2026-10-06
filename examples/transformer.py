@@ -107,12 +107,15 @@ class MLP(lumen.nn.Module):
     """Pre-norm ReLU MLP, on ``[batch * seq, dim]``."""
 
     norm: lumen.Tensor
-    w1: lumen.Tensor
+    wg: lumen.Tensor
+    wu: lumen.Tensor
     w2: lumen.Tensor
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        h = F.relu(x @ self.w1.t().bfloat16())
+        g = F.relu(x @ self.wg.t().bfloat16())
+        u = x @ self.wu.t().bfloat16()
+        h = g * u
         # float32, as the residual it is added to.
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
@@ -165,12 +168,12 @@ def cross_entropy(logits, targets):
 
 
 def train_step(model, opt, x, y):
-    opt.zero_grad()
-    # loss = model(x, dropout_p=DROPOUT)
-    for i in range(3):
-        loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
-        loss.backward()
-    opt.step()
+    # opt.zero_grad()
+    loss = model(x, dropout_p=DROPOUT)
+    # for i in range(3):
+    #     loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
+    #     # loss.backward()
+    # opt.step()
     return loss
 
 
@@ -195,6 +198,7 @@ model = Transformer(
             ),
             MLP(
                 meta(DIM, dtype=lumen.float32),
+                meta(HIDDEN, DIM, dtype=lumen.float32),
                 meta(HIDDEN, DIM, dtype=lumen.float32),
                 meta(DIM, HIDDEN, dtype=lumen.float32),
             ),

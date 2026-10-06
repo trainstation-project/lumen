@@ -622,7 +622,7 @@ def test_indexing_and_splitting_follow_numpy():
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_packed_weights_are_one_matmul(device):
     """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
-    matmul, its halves read in place by the fused gate on MPS."""
+    matmul, on MPS the gate its epilogue (its halves a gated pair)."""
     x, w13 = rand(16, 32), rand(32, 128, seed=1)
     try:
         args = [lumen.from_numpy(a).to(device) for a in (x, w13)]
@@ -639,8 +639,9 @@ def test_packed_weights_are_one_matmul(device):
     graph = lumen.make_graph(gated)(*args)
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
     if device == "mps":
-        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice → slice")
-    assert steps.count("dot_general") == 1
+        assert steps == ["dot_general → max → mul"], steps
+    else:
+        assert steps.count("dot_general") == 1
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -668,7 +669,8 @@ class Gated(lumen.nn.Module):
 def test_dots_sharing_an_operand_merge(device):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
     x and a block holding w1 and w3 side by side (XLA's DotMerger, with the
-    weights placed together instead of concatenated)."""
+    weights placed together instead of concatenated), the gate its epilogue
+    (a gated pair: one kernel)."""
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
     model = Gated(meta(32, 64), meta(32, 64))
     f = lumen.compile(lambda model, x: model(x), device=device)
@@ -684,16 +686,16 @@ def test_dots_sharing_an_operand_merge(device):
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
-        assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
+        assert len(steps) == 1 and "concatenate" not in steps
         # Named for the dots it computes, in the plan and the profiler.
-        assert plan.steps()[0]["label"] == "2x dot_general"
+        assert plan.steps()[0]["label"] == "2x dot_general → max → mul"
         from lumen.profiler import ProfilerActivity, profile
 
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             f(model, lumen.from_numpy(x))
             lumen.mps.synchronize()
         names = {(e["kind"], e["name"]) for e in prof.events()}
-        assert {("op", "2x dot_general"), ("gpu", "2x dot_general")} <= names
+        assert {("op", "2x dot_general → max → mul"), ("gpu", "2x dot_general → max → mul")} <= names
     else:
         assert plan.packed == [] and steps.count("dot_general") == 2
 
@@ -809,6 +811,68 @@ class MixedQKV(QKV):
 
     def __call__(self, x):
         return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
+
+
+class SwiGLU(lumen.nn.Module):
+    """A gated MLP's up projection, ``silu(x @ w1.t()) * (x @ w3.t())``: in
+    float32, or (``mixed``) of bfloat16 operands, the gate in float32, the
+    result bfloat16 (read back as float32)."""
+
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x, mixed=False, gate=False):
+        if mixed:
+            g = F.matmul(x.bfloat16(), self.w1.t().bfloat16(), "float32", "float32")
+            u = F.matmul(x.bfloat16(), self.w3.t().bfloat16(), "float32", "float32")
+            z = (g * F.sigmoid(g) * u).bfloat16().float()
+        else:
+            g, u = x @ self.w1.t(), x @ self.w3.t()
+            z = g * F.sigmoid(g) * u
+        return (z, g) if gate else z
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("mixed", [False, True], ids=["float32", "mixed precision"])
+@pytest.mark.parametrize("hidden", [256, 344], ids=["even tiles", "ragged"])
+def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
+    """Two projections of one input combined elementwise (SwiGLU's gate and
+    value): one matmul of their block whose epilogue computes the gate (its
+    tile holding each pair's columns side by side, ``PAIRED``), neither
+    projection written out; the values the CPU's. One whose gate is an
+    output too is not paired (its dots unmerged), its values the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    m, d = 300, 128
+    values = {"w1": rand(hidden, d) / np.sqrt(d), "w3": rand(hidden, d, seed=1) / np.sqrt(d)}
+    x = rand(m, d, seed=2)
+    for gate in (False, True):
+        out = {}
+        for device in ("cpu", "mps"):
+            model = SwiGLU(meta(hidden, d), meta(hidden, d))
+
+            def f(model, x):
+                return model(x, mixed, gate)
+
+            g = lumen.compile(f, device=device)
+            g(model, meta(m, d))
+            model.load_state_dict({k: lumen.from_numpy(v.astype(np.float32)) for k, v in values.items()})
+            result = g(model, lumen.from_numpy(x))
+            out[device] = [lumen.to_numpy(v) for v in (result if gate else [result])]
+            if device == "mps":
+                graph = lumen.make_graph(f)(model, meta(m, d))
+                steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
+                dots = [s["label"] for s in steps if "dot_general" in s["label"]]
+                if gate:
+                    assert len(dots) == 2, dots
+                else:
+                    assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
+                    assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
+        tol = 2e-2 if mixed else 1e-5
+        for got, want in zip(out["mps"], out["cpu"]):
+            np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())
 
 
 @pytest.mark.mps

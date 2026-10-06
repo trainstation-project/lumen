@@ -159,7 +159,10 @@ inline void matmul_wide_impl(device const T *lhs,
 // increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
 // kernels; a fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out. With ATOMIC (a split-K dot's: its batch
 // index a chunk of the contraction), each output is added to out[m, n] (float, zeroed before) atomically instead, the
-// chunks' in no fixed order.
+// chunks' in no fixed order. With PAIRED (a gated pair's: two dots of one operand merged, their rhs blocks [W1 | W2]
+// side by side, N = 2H, combined elementwise, as SwiGLU's silu(x W1) * (x W2)), the tile's columns are the two
+// halves' interleaved: column 2j is column j of the block, 2j + 1 column H + j (each thread loads its column so), so a
+// lane holds both of a pair, and writes out[m, j] = epi(first, second, its flat index), out of H columns.
 #define SG_BK 16
 #define SMALL_BK 32 // the small tiles': fewer, deeper steps (each a round trip to memory)
 #define SG_COLS 2   // SIMD groups across the tile
@@ -174,7 +177,8 @@ template <typename T,
           uint BK,
           typename Out = O,
           typename Epi = Same,
-          bool ATOMIC = false>
+          bool ATOMIC = false,
+          bool PAIRED = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -196,7 +200,9 @@ inline void matmul_sg_impl(device const T *lhs,
     // column bc of tile rows br + RB t.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
-    device const T *r = rhs + group.z * p[6] + ulong(br) * rk + (n0 + bc) * p[8];
+    // Its rhs column (PAIRED: the halves' interleaved).
+    const ulong cn = PAIRED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
+    device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
     // Tiles inside the operands load without bounds checks.
@@ -246,23 +252,41 @@ inline void matmul_sg_impl(device const T *lhs,
     // of A in lt (which holds at least 8 x 64 floats), from which its lanes
     // write two elements each.
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
-    device Out *o = out + group.z * M * N;
-    UNROLL for (uint i = 0; i < FM; ++i) {
-        UNROLL for (uint j = 0; j < FN; ++j) {
-            simdgroup_store(c[i][j], stage, 8);
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint e = lane; e < 64; e += 32) {
-                ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
+    if constexpr (PAIRED) {
+        // A lane a pair: of row lane / 4, columns 2 (lane % 4) and the next.
+        const ulong H = N / 2;
+        device Out *o = out + group.z * M * H;
+        UNROLL for (uint i = 0; i < FM; ++i) {
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                simdgroup_store(c[i][j], stage, 8);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                const uint e = (lane / 4) * 8 + 2 * (lane % 4);
+                ulong m = m0 + (sy * FM + i) * 8 + lane / 4, n = n0 + (sx * FN + j) * 8 + 2 * (lane % 4);
                 if (m < M && n < N) {
-                    if constexpr (ATOMIC) {
-                        device atomic_float *sum = (device atomic_float *)(out + m * N + n);
-                        atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
-                    } else {
-                        o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
+                    o[m * H + n / 2] = epi(O(stage[e]), O(stage[e + 1]), group.z * M * H + m * H + n / 2);
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+    } else {
+        device Out *o = out + group.z * M * N;
+        UNROLL for (uint i = 0; i < FM; ++i) {
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                simdgroup_store(c[i][j], stage, 8);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint e = lane; e < 64; e += 32) {
+                    ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
+                    if (m < M && n < N) {
+                        if constexpr (ATOMIC) {
+                            device atomic_float *sum = (device atomic_float *)(out + m * N + n);
+                            atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
+                        } else {
+                            o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
+                        }
                     }
                 }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }
