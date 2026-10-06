@@ -188,10 +188,13 @@ def _ids(seed=1):
 
 def _compiled(fn, device, *args):
     """``fn`` compiled for ``device``, compiled (and its modules' weights
-    placed) by a call on ``args``."""
+    placed) by a call on ``args``: traced with lumen's precision warning
+    (a matmul's bfloat16 result, accumulated in float32, cast back to
+    float32: the model's residual reads it so, as the example's does)."""
     try:
         f = lumen.compile(fn, device=device)
-        f(*args)
+        with pytest.warns(UserWarning, match="the rounding loses precision"):
+            f(*args)
     except RuntimeError as e:
         pytest.skip(str(e))
     return f
@@ -278,7 +281,12 @@ def test_transformer_train_step_matches_cpu():
     and second moments, to bfloat16's precision; the same new weights where
     a gradient is clearly not zero, and within twice the update's size
     where it is so near zero that the two round it to opposite signs
-    (AdamW's first step is about ``lr * sign(g)``)."""
+    (AdamW's first step is about ``lr * sign(g)``).
+
+    bfloat16's precision, measured: each backend's gradients are 2-2.5%
+    (median, by norm; at most 4.6%) from the same step in float32, and the
+    two 2% (at most 3.4%) from each other: rounded at different places (a
+    fused kernel's, flash attention's), not wrongly."""
     results = {}
     for device in ("cpu", "mps"):
         model = _model()
@@ -299,8 +307,11 @@ def test_transformer_train_step_matches_cpu():
         diff = np.abs(got - want)
         if name.startswith("params."):
             g = cpu["m." + name.removeprefix("params.")]
-            clear = np.abs(g) > 1e-2 * np.abs(g).max()
+            # Clearly not zero: above the gradients' own differences (a few
+            # percent of the largest, bfloat16's rounding through the step).
+            clear = np.abs(g) > 1e-1 * np.abs(g).max()
             assert diff[clear].max() <= 1e-5, (name, diff[clear].max())
             assert diff.max() <= 2 * LR * (1 + 1e-3), (name, diff.max())
         else:
-            assert diff.max() <= 3e-2 * np.abs(want).max() + 1e-12, (name, diff.max(), np.abs(want).max())
+            error = np.linalg.norm(got - want) / np.linalg.norm(want)
+            assert error <= 5e-2, (name, error)
