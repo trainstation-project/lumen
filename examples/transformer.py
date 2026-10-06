@@ -43,7 +43,7 @@ BATCH, STEPS, DROPOUT = 32, 300, 0.1
 PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
-lumen.config.compiler.deterministic = True
+lumen.config.compiler.deterministic = False
 lumen.config.compiler.fuse = True
 
 
@@ -117,11 +117,11 @@ class Block(lumen.nn.Module):
     @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
         r = x
-        with lumen.profiler.record_function("rmsnorm"):
+        with lumen.profiler.record_function("attention rmsnorm"):
             x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
         x = r.bfloat16() + self.attn(x, batch, dropout_p)
         r = x
-        with lumen.profiler.record_function("rmsnorm"):
+        with lumen.profiler.record_function("mlp rmsnorm"):
             x = F.rms_norm(x.float(), x.size(-1), self.mlp.norm).bfloat16()
         x = r + self.mlp(x)
         return x

@@ -70,6 +70,7 @@ class AdamW(lumen.nn.Module):
         for p in self.params:
             p.grad = None
 
+    @lumen.profiler.record_function("optim-step")
     def step(self, grads=None):
         """Update the parameters from their ``.grad`` (or ``grads``, one
         per parameter in order: from ``lumen.grad``)."""
