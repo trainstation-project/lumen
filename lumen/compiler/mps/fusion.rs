@@ -327,11 +327,23 @@ pub(crate) fn fuse(
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
+            // A gated pair's backward: its two cotangents, each of the dot's
+            // shape, concatenated along its last dimension (`gated_backward`),
+            // the epilogue's end (codegen's expanding epilogue).
+            let shape = &graph.type_of(node.output).shape;
+            let expands = matches!(un.primitive, Primitive::Concatenate { dimension } if dimension + 1 == shape.len())
+                && un.inputs.len() == 2
+                && un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+                && pair.is_none();
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
-                || pair.is_some_and(|p| p.contains(&u));
-            let fuses =
-                fusible[u] && step && !in_row(u) && !claimed[u] && !(narrowed && widens(un));
+                || pair.is_some_and(|p| p.contains(&u))
+                || expands;
+            // A widening cast of the rounded value steps in too, but only a
+            // gated pair's backward's expanding epilogue may end past it
+            // (below): its cotangents in float32 from the rounded gradient,
+            // whatever the gate.
+            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
             if !fuses || !reads {
                 break;
@@ -373,8 +385,19 @@ pub(crate) fn fuse(
                     && graph.type_of(un.output).numel() == half
                     && elementwise(&un.primitive)
             });
-            if kept.first() == Some(&i) && read_after && aux.len() <= MAX_AUX && paired {
+            let upcast = narrowed && kept.iter().any(|&k| widens(&nodes[k]));
+            if kept.first() == Some(&i)
+                && read_after
+                && aux.len() <= MAX_AUX
+                && paired
+                && (!expands || aux.is_empty())
+                && (!upcast || expands)
+            {
                 end = Some((kept, aux));
+            }
+            // Nothing reads past an expanding epilogue's end in it.
+            if expands {
+                break;
             }
         }
         if let Some((taken, aux)) = end {

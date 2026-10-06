@@ -1800,6 +1800,26 @@ pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'
     }
 }
 
+/// A gated pair's backward's cotangents (`gemm_kernel`'s `EXPANDED`): the
+/// two values of `dot`'s shape its fusion's output concatenates along its
+/// last dimension, side by side, each computed at the dot's index.
+pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
+    let out = body.outputs()[0];
+    let node = body.nodes().iter().find(|n| n.output == out)?;
+    let shape = &body.type_of(dot.output).shape;
+    match (&node.primitive, node.inputs.as_slice()) {
+        (Primitive::Concatenate { dimension }, &[a, b])
+            if *dimension + 1 == shape.len()
+                && body.type_of(a).shape == *shape
+                && body.type_of(b).shape == *shape
+                && gemm_pair(body, dot).is_none() =>
+        {
+            Some([a, b])
+        }
+        _ => None,
+    }
+}
+
 /// The kernel of a contraction with its epilogue: the matmul template
 /// (`ops/dot_general/mps/kernels.metal`, on its large and, as `NAME_small`, small
 /// tiles, as its encoder launches it), writing each output through a
@@ -1842,7 +1862,15 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         let value = e.value(v, "j".into());
         writeln!(stores, "        out{}[i] = {value};", k + 1).unwrap();
     }
-    let value = e.value(out, "j".into());
+    // An expanding epilogue's two values (a Pair), else its output's.
+    let expanded = gemm_expanded(body, dot);
+    let value = match expanded {
+        Some([a, b]) => {
+            let (va, vb) = (e.value(a, "j".into()), e.value(b, "j".into()));
+            format!("Pair<{w}>{{{va}, {vb}}}")
+        }
+        None => e.value(out, "j".into()),
+    };
     let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
@@ -1870,12 +1898,17 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let (params, first) = io_params(body, by_value, w);
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
-    let (operands, paired) = match pair {
-        Some(_) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
-        None => (format!("{o} r"), "NAME_epi"),
+    let (operands, paired) = match (pair, expanded) {
+        (Some(_), _) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
+        (_, Some(_)) => (format!("{o} r"), "NAME_epi, false, false, true"),
+        _ => (format!("{o} r"), "NAME_epi"),
+    };
+    let returns = match expanded {
+        Some(_) => format!("Pair<{w}>"),
+        None => w.to_string(),
     };
     let mut source = format!(
-        "struct NAME_epi {{\n{fields}    inline {w} operator()({operands}, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
+        "struct NAME_epi {{\n{fields}    inline {returns} operator()({operands}, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
         e.hoisted, e.lines
     );
     for (suffix, bm, bn, bk) in [("", 128, 64, "SG_BK"), ("_small", 32, 32, "SMALL_BK")] {

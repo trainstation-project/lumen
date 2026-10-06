@@ -44,6 +44,7 @@ PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
 lumen.config.compiler.deterministic = True
+lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
 
 
@@ -113,9 +114,13 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        g = F.relu(x @ self.wg.t().bfloat16())
-        u = x @ self.wu.t().bfloat16()
+        # g = F.relu(x @ self.wg.t().bfloat16())
+        # u = x @ self.wu.t().bfloat16()
+        g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        g = F.sigmoid(g)
+        u = F.matmul(x, self.wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         h = g * u
+        h = h.bfloat16()
         # float32, as the residual it is added to.
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
@@ -168,12 +173,11 @@ def cross_entropy(logits, targets):
 
 
 def train_step(model, opt, x, y):
-    # opt.zero_grad()
-    loss = model(x, dropout_p=DROPOUT)
-    # for i in range(3):
-    #     loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
-    #     # loss.backward()
-    # opt.step()
+    opt.zero_grad()
+    for i in range(3):
+        loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
+        loss.backward()
+    opt.step()
     return loss
 
 

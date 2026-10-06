@@ -875,6 +875,80 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
             np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())
 
 
+class GatedMLP(lumen.nn.Module):
+    """A projection, then a gated MLP of bfloat16 matmuls (ReGLU, or
+    SwiGLU's gate in float32): the projection so its input needs a
+    gradient, as a layer's does in a model."""
+
+    w0: lumen.Tensor
+    wg: lumen.Tensor
+    wu: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, inp, swiglu):
+        x = F.matmul(inp, self.w0.t().bfloat16(), "float32", "bfloat16")
+        if swiglu:
+            g = F.matmul(x, self.wg.t().bfloat16(), "float32", "float32")
+            u = F.matmul(x, self.wu.t().bfloat16(), "float32", "float32")
+            h = (g * F.sigmoid(g) * u).bfloat16()
+        else:
+            h = F.relu(x @ self.wg.t().bfloat16()) * (x @ self.wu.t().bfloat16())
+        return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
+def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
+    """A gated pair's backward (``gated_backward``): its input's gradient one
+    dot of its cotangents side by side and the forward's weight block (K
+    twice as long, no copy of the weights), its weights' gradients one dot;
+    the cotangents the down projection's gradient GEMM's expanding
+    epilogue, written side by side, whatever the gate (SwiGLU's in float32,
+    from the rounded gradient widened: an upcast only that epilogue takes).
+    The gradients the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    # m apart from 2h: no two of its values alike in size.
+    m, d, h = 384, 64, 256
+    values = {
+        "w0": rand(d, d) / 8,
+        "wg": rand(h, d, seed=1) / 8,
+        "wu": rand(h, d, seed=2) / 8,
+        "w2": rand(d, h, seed=3) / 16,
+    }
+    x = rand(m, d, seed=4)
+
+    def step(model, x):
+        y = model(x.bfloat16(), swiglu).float()
+        F.sum(y * y).backward()
+        return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
+
+    grads = {}
+    for device in ("cpu", "mps"):
+        model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+        f = lumen.compile(step, device=device)
+        with pytest.warns(UserWarning, match="the rounding loses precision"):
+            f(model, meta(m, d))
+        model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+        grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    for got, want in zip(grads["mps"], grads["cpu"]):
+        assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+    with pytest.warns(UserWarning, match="the rounding loses precision"):
+        graph = lumen.make_graph(step)(model, meta(m, d))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    labels = [s["label"] for s in steps]
+    # The input's gradient: one dot of the block (K = 2h), written as x's
+    # gradient (the forward's merged dot writes [m, 2h]).
+    merged = [s for s in steps if s["label"].startswith("2x dot_general")]
+    assert [s["output"][2] for s in merged] == [[m, 2 * h], [m, d]], labels
+    expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert sum("concatenate" in label for label in labels) == 1, labels
+
+
 @pytest.mark.mps
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_projections_of_several_inputs_each_read_one_block(module):

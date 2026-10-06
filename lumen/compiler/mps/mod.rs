@@ -15,6 +15,7 @@ mod codegen;
 mod diamonds;
 mod dot_strength;
 mod fusion;
+mod gated_backward;
 mod horizontal;
 mod merge_dots;
 mod split_k;
@@ -57,6 +58,16 @@ const PRELUDE: &str = concat!(
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let config = &options.config;
+    // A gated pair's backward's dots merged (before `merge_dots`, which
+    // reads its weights' concatenate as the forward's block).
+    let rewritten;
+    let graph = match config.fuse && config.merge_dots && config.contraction_epilogues {
+        true => {
+            rewritten = gated_backward::gated_backward(graph);
+            &rewritten
+        }
+        false => graph,
+    };
     // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match config.fuse && config.merge_dots {
         // A donated parameter (a weight the program assigns: its new value

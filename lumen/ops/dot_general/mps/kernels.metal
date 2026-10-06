@@ -162,7 +162,12 @@ inline void matmul_wide_impl(device const T *lhs,
 // chunks' in no fixed order. With PAIRED (a gated pair's: two dots of one operand merged, their rhs blocks [W1 | W2]
 // side by side, N = 2H, combined elementwise, as SwiGLU's silu(x W1) * (x W2)), the tile's columns are the two
 // halves' interleaved: column 2j is column j of the block, 2j + 1 column H + j (each thread loads its column so), so a
-// lane holds both of a pair, and writes out[m, j] = epi(first, second, its flat index), out of H columns.
+// lane holds both of a pair, and writes out[m, j] = epi(first, second, its flat index), out of H columns. With
+// EXPANDED (a gated pair's backward: its two cotangents from the dot's value, side by side), epi returns a Pair, its
+// first written at out[m, n], its second at out[m, N + n], out of 2N columns.
+template <typename T> struct Pair {
+    T first, second;
+};
 #define SG_BK 16
 #define SMALL_BK 32 // the small tiles': fewer, deeper steps (each a round trip to memory)
 #define SG_COLS 2   // SIMD groups across the tile
@@ -178,7 +183,8 @@ template <typename T,
           typename Out = O,
           typename Epi = Same,
           bool ATOMIC = false,
-          bool PAIRED = false>
+          bool PAIRED = false,
+          bool EXPANDED = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -280,6 +286,11 @@ inline void matmul_sg_impl(device const T *lhs,
                         if constexpr (ATOMIC) {
                             device atomic_float *sum = (device atomic_float *)(out + m * N + n);
                             atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
+                        } else if constexpr (EXPANDED) {
+                            device Out *row = out + group.z * M * 2 * N + m * 2 * N;
+                            Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
+                            row[n] = both.first;
+                            row[N + n] = both.second;
                         } else {
                             o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
                         }
