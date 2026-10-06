@@ -193,7 +193,7 @@ def test_split_k_agrees(compiler, dtype):
     assert _labels(f, x, w) == ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     ordered = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.split_k = False
-    assert _labels(f, x, w) == ["dot_general"]
+    assert _labels(f, x, w) == ["dot_general" + rounded]
     traced = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for got in (split, ordered, traced):

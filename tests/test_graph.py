@@ -1539,10 +1539,13 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     labels = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]  # noqa: E731
     # The rounding then widening is what the precision check warns of.
     with pytest.warns(UserWarning, match="casts it back"):
-        assert labels(lambda x, w, r: (x @ w).float() + r) == ["dot_general", "cast(bfloat16 -> float32) → add"]
+        assert labels(lambda x, w, r: (x @ w).float() + r) == [
+            "dot_general → cast(float32 -> bfloat16)",
+            "cast(bfloat16 -> float32) → add",
+        ]
     with pytest.warns(UserWarning, match="casts it back"):
         assert labels(lambda x, w, r: ((x @ w) + 1.0).float() + r) == [
-            "dot_general → add",
+            "dot_general → cast(float32 -> bfloat16) → add",
             "cast(bfloat16 -> float32) → add",
         ]
     assert labels(lambda x, w, r: F.matmul(x, w, "float32", "float32") + r) == ["dot_general → add"]

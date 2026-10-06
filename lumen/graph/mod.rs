@@ -227,6 +227,17 @@ impl Graph {
                 self.types[node.inputs[0]].dtype.full_name(),
                 new_dtype.full_name()
             )),
+            // A dot rounding its accumulator to a narrower output as it
+            // writes it: that cast, its write-out's epilogue, named too.
+            Primitive::DotGeneral {
+                accum_dtype,
+                output_dtype,
+                ..
+            } if accum_dtype != output_dtype => intern(format!(
+                "dot_general{FUSION_SEPARATOR}cast({} -> {})",
+                accum_dtype.full_name(),
+                output_dtype.full_name()
+            )),
             ref p => p.name(),
         }
     }
