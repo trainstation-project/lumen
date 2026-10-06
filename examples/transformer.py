@@ -39,7 +39,7 @@ import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function
 
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
-BATCH, STEPS, DROPOUT = 32, 300, 0.1
+BATCH, STEPS, DROPOUT = 32, 300, 0
 PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
@@ -84,10 +84,11 @@ class Attention(lumen.nn.Module):
         # one [3 * dim, dim] block (PyTorch's fused QKV weight), each a
         # contiguous part of it the optimizer updates in place.
         q, k, v = (
-            (x.bfloat16() @ w.t().bfloat16()).reshape(batch, tokens // batch, HEADS, dim // HEADS)
+            F.matmul(x.bfloat16(), w.t().bfloat16(), accum_dtype="float32", output_dtype="bfloat16").reshape(
+                batch, tokens // batch, HEADS, dim // HEADS
+            )
             for w in (self.wq, self.wk, self.wv)
         )
-        print(q.dtype, k.dtype, v.dtype)
         x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         # float32, as the residual it is added to.
         x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "bfloat16")
@@ -158,8 +159,9 @@ def cross_entropy(logits, targets):
 def train_step(model, opt, x, y):
     opt.zero_grad()
     # loss = model(x, dropout_p=DROPOUT)
-    loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
-    loss.backward()
+    for i in range(3):
+        loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
+        loss.backward()
     opt.step()
     return loss
 
