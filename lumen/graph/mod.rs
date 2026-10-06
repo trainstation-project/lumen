@@ -71,7 +71,17 @@ pub struct Node {
 }
 
 /// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
-pub type Scope = &'static [&'static str];
+pub type Scope = &'static [Range];
+
+/// A `record_function` range a node was traced in: its name, and which call
+/// of it (each time the traced code entered it; a backward range, the
+/// forward call's). Steps of one call share its range when a plan runs
+/// them, those of another call open their own (reordered steps too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Range {
+    pub name: &'static str,
+    pub call: u64,
+}
 
 /// A function from typed inputs to outputs, in SSA form: each node
 /// defines one new value from earlier ones. Built by [`input`](Self::input)
@@ -293,15 +303,15 @@ pub(crate) fn intern(label: String) -> &'static str {
     interned
 }
 
-/// `names` as a [`Scope`], one shared copy per nesting.
+/// `ranges` as a [`Scope`], one shared copy per nesting.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub(crate) fn intern_scope(names: &[&'static str]) -> Scope {
-    static SCOPES: Mutex<BTreeSet<&'static [&'static str]>> = Mutex::new(BTreeSet::new());
+pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
+    static SCOPES: Mutex<BTreeSet<Scope>> = Mutex::new(BTreeSet::new());
     let mut scopes = SCOPES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&interned) = scopes.get(names) {
+    if let Some(&interned) = scopes.get(ranges) {
         return interned;
     }
-    let interned: Scope = Box::leak(names.to_vec().into_boxed_slice());
+    let interned: Scope = Box::leak(ranges.to_vec().into_boxed_slice());
     scopes.insert(interned);
     interned
 }

@@ -342,10 +342,17 @@ pub(crate) fn fuse(
             })
             .collect();
         let label = intern(labels.join(" | "));
-        // Its members' scope, if one.
-        let scope = nodes[g.members[0]].scope;
-        let same = g.members.iter().all(|&m| nodes[m].scope == scope);
-        out.set_scope(if same { scope } else { &[] });
+        // The ranges its members share (calls of the same outer ranges).
+        let first = nodes[g.members[0]].scope;
+        let shared = g.members.iter().fold(first.len(), |n, &m| {
+            first
+                .iter()
+                .zip(nodes[m].scope)
+                .take(n)
+                .take_while(|(a, b)| a == b)
+                .count()
+        });
+        out.set_scope(&first[..shared]);
         let reads: Vec<Var> = g.reads.iter().map(|&v| map[v]).collect();
         let fused = out
             .apply(Primitive::Fusion { name, label, body }, &reads)

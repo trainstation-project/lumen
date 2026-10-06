@@ -471,6 +471,37 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
+    """Each call of a ``record_function`` range is its own range when the
+    plan runs, as uncompiled code's, even with no step between them (two
+    layers' ``layer``), and so is each call's backward: steps keep the call
+    they were traced in, however the plan orders them (two calls' steps the
+    plan interleaves: a range each run of one call's steps)."""
+
+    def f(x, w):
+        for _ in range(2):
+            with record_function("layer"):
+                x = x @ w
+        # Its gradient reads the last layer's value: both layers' forward run.
+        return F.sum(x * x)
+
+    try:
+        g = lumen.compile(lumen.grad(f, (0, 1)), device=device)
+        x, w = lumen.full([16, 16], 0.01).to(device), lumen.full([16, 16], 0.01).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    names = [e["name"] for e in prof.events() if e["kind"] == "user_range"]
+    assert names.count("layer") == 2 and names.count("layer (backward)") >= 2, names
+    assert set(names) == {"layer", "layer (backward)"}, names
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
 def test_record_function_holds_its_ops_gradients_as_backward(device):
     """The gradient ops of what a ``record_function`` range traced run in
     ``name (backward)``, nested as the forward's (each range of the

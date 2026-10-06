@@ -21,6 +21,7 @@ import builtins
 import contextlib
 import dataclasses
 import functools
+import itertools
 import math
 import os
 import sys
@@ -45,12 +46,17 @@ _RNG = []
 # Each trace's device: where its values are, unless on the host (``.cpu()``).
 _DEVICES = []
 # Each trace's open ``record_function`` ranges (``lumen.profiler``),
-# outermost first: the scope of the nodes traced inside them, whose steps
-# the profiler shows inside them when the plan runs.
+# outermost first, each ``(name, call)``: the scope of the nodes traced
+# inside them, whose steps the profiler shows inside them when the plan
+# runs. ``call`` numbers each time a range was entered, so steps of two
+# calls of one name (two layers' ``attention``) open a range each, however
+# the plan orders them.
 _SCOPES = []
-# Each trace's values' scopes (a tuple of range names), those traced inside
-# a range: their gradient ops' are each name's backward (``_backward_scope``).
+# Each trace's values' scopes (a tuple of ranges), those traced inside a
+# range: their gradient ops' are each range's backward (``_backward_scope``).
 _SCOPE_OF = []
+# The calls of ranges entered so far.
+_CALLS = itertools.count()
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -129,7 +135,7 @@ def _enter_scope(name):
     """Open ``record_function`` range ``name`` in the trace, if one is
     running: the nodes traced until it closes are in it."""
     if _TRACES:
-        _SCOPES[-1].append(name)
+        _SCOPES[-1].append((name, next(_CALLS)))
         _TRACES[-1]._set_scope(_SCOPES[-1])
 
 
@@ -143,16 +149,17 @@ def _exit_scope():
 def _backward_scope(var, base):
     """The scope of value ``var``'s gradient ops: ``base`` (the ranges open
     where the backward runs), then each range ``var`` was traced in as
-    ``name (backward)``."""
-    return tuple(base) + tuple(f"{name} (backward)" for name in _SCOPE_OF[-1].get(var, ()))
+    ``name (backward)``, of the same call (one backward range per forward
+    call)."""
+    return tuple(base) + tuple((f"{name} (backward)", call) for name, call in _SCOPE_OF[-1].get(var, ()))
 
 
 @contextlib.contextmanager
-def _scope(names):
-    """Trace inside the ``record_function`` ranges ``names`` (outermost
-    first), the open ones back after."""
+def _scope(ranges):
+    """Trace inside the ``record_function`` ranges ``ranges`` (outermost
+    first, each ``(name, call)``), the open ones back after."""
     saved = list(_SCOPES[-1])
-    _SCOPES[-1][:] = names
+    _SCOPES[-1][:] = ranges
     _TRACES[-1]._set_scope(_SCOPES[-1])
     try:
         yield

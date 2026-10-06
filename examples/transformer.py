@@ -44,6 +44,7 @@ PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
 lumen.config.compiler.deterministic = True
+lumen.config.compiler.fuse = True
 
 
 def one_hot(ids, n):
@@ -141,9 +142,9 @@ class Transformer(lumen.nn.Module):
         h = self.embed(ids)
         for layer in self.layers:
             h = layer(h, ids.shape[0], dropout_p)
-        return F.matmul(
-            F.rms_norm(h.float(), DIM, self.norm).bfloat16(), self.head.t().bfloat16(), "float32", "float32"
-        )
+        with lumen.profiler.record_function("rmsnorm"):
+            h = F.rms_norm(h.float(), DIM, self.norm).bfloat16()
+        return F.matmul(h, self.head.t().bfloat16(), "float32", "float32")
 
 
 @lumen.profiler.record_function("loss")

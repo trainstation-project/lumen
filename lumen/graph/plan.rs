@@ -72,8 +72,9 @@ pub struct Step {
 
 /// The `record_function` ranges a plan's steps were traced in, open while
 /// they run (with a profiler running): each step's opened if not open yet,
-/// those it is not in closed, so consecutive steps of one scope share one
-/// range (a call of the function traced in it, as it ran uncompiled).
+/// those it is not in closed, so consecutive steps of one call share one
+/// range (as it ran uncompiled), and a step of another call of the same
+/// name (one the plan reordered among them) opens its own.
 #[derive(Default)]
 struct OpenScopes {
     scope: Scope,
@@ -93,8 +94,9 @@ impl OpenScopes {
         while self.ranges.len() > common {
             self.ranges.pop();
         }
-        for name in &scope[common..] {
-            self.ranges.push(crate::profiler::record_function(*name));
+        for range in &scope[common..] {
+            self.ranges
+                .push(crate::profiler::record_function(range.name));
         }
         self.scope = scope;
     }
