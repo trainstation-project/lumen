@@ -388,6 +388,7 @@ pub(crate) fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
         map[node.output] = out
             .apply(primitive, &inputs)
             .expect("a graph is typed as the original");
+        out.set_label(map[node.output], node.label);
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs)

@@ -324,6 +324,7 @@ pub(crate) fn fuse(
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a graph is typed as the original");
+            out.set_label(map[node.output], node.label);
             continue;
         };
         let g = &groups[k];

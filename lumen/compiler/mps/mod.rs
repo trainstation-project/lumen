@@ -333,6 +333,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
         map[node.output] = out
             .apply(primitive, &inputs)
             .expect("a rewrite keeps the node's type");
+        out.set_label(map[node.output], node.label);
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");

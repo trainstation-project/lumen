@@ -116,8 +116,13 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
                 out.apply(fusion, &[a, b]).expect("well typed")
             }
             false => {
+                // Labelled as what they are (the atomic one's fusion is
+                // `dot_general (split-K)`): ordinary primitives otherwise.
                 let partials = apply(&mut out, dot, &[a, b]);
-                apply(&mut out, sum, &[partials])
+                out.set_label(partials, Some("dot_general (split-K)"));
+                let sum = apply(&mut out, sum, &[partials]);
+                out.set_label(sum, Some("reduce_sum (split-K)"));
+                sum
             }
         };
         if *output_dtype != DType::F32 {

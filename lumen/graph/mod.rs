@@ -68,6 +68,10 @@ pub struct Node {
     /// passes keep an instruction's metadata): its step's ranges when a
     /// plan runs it.
     pub scope: Scope,
+    /// Its label, if not its primitive's ([`Graph::label`]): what a pass
+    /// made it for (a split-K dot's partials and their sum), as profiled.
+    /// The passes after the one setting it keep it.
+    pub label: Option<&'static str>,
 }
 
 /// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
@@ -126,8 +130,17 @@ impl Graph {
             inputs: inputs.to_vec(),
             output,
             scope: self.scope,
+            label: None,
         });
         Ok(output)
+    }
+
+    /// Label the node defining `v` ([`Node::label`]; `None`: its
+    /// primitive's).
+    pub(crate) fn set_label(&mut self, v: Var, label: Option<&'static str>) {
+        if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
+            node.label = label;
+        }
     }
 
     pub fn set_outputs(&mut self, outputs: &[Var]) -> Result<(), String> {
@@ -168,6 +181,7 @@ impl Graph {
                     .apply(node.primitive.clone(), &inputs)
                     .expect("a node of the graph"),
             );
+            pruned.set_label(map[node.output].expect("just made"), node.label);
         }
         let outputs: Vec<Var> = self
             .outputs
@@ -204,6 +218,9 @@ impl Graph {
     /// What `node` is profiled as: its primitive's name; a cast's, with
     /// its dtypes: `cast(float32 -> bfloat16)`.
     pub fn label(&self, node: &Node) -> &'static str {
+        if let Some(label) = node.label {
+            return label;
+        }
         match node.primitive {
             Primitive::Cast { new_dtype } => intern(format!(
                 "cast({} -> {})",

@@ -577,7 +577,11 @@ pub(crate) fn fuse(
             }
             _ => {
                 let inputs: Vec<Var> = node.inputs.iter().map(|&v| var[v]).collect();
-                fused.apply(node.primitive.clone(), &inputs)
+                let out = fused.apply(node.primitive.clone(), &inputs);
+                if let Ok(v) = out {
+                    fused.set_label(v, node.label);
+                }
+                out
             }
         };
         var[node.output] = out.expect("a fused graph is typed as the original");

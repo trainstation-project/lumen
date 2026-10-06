@@ -89,7 +89,15 @@ class Attention(lumen.nn.Module):
             )
             for w in (self.wq, self.wk, self.wv)
         )
-        x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
+
+        q = q.transpose(-2, -3)
+        k = k.transpose(-2, -3)
+        v = v.transpose(-2, -3)
+        x = F.matmul(q, k.transpose(-1, -2), accum_dtype="float32", output_dtype="float32")
+        x = F.softmax(x, dim=-1).to("bfloat16")
+        x = F.matmul(x, v, accum_dtype="float32", output_dtype="bfloat16")
+
+        # x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         # float32, as the residual it is added to.
         x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "bfloat16")
         return x
