@@ -227,11 +227,11 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
         if device == "mps":
             lumen.mps.synchronize()
     ops = {e["name"]: e for e in prof.events() if e["kind"] == "op"}
-    # The dot (on MPS with its epilogue, the cast to float32, fused in).
+    # The dot (its result rounded to bfloat16: the cast to float32 not in
+    # its epilogue, on MPS either).
     (dot,) = [e for n, e in ops.items() if n.startswith("dot_general")]
     assert dot["inputs"] == [("bfloat16", [4, 8]), ("bfloat16", [8, 16])]
-    out = "float32" if device == "mps" else "bfloat16"
-    assert dot["accum"] == ["float32"] and dot["outputs"] == [(out, [4, 16])]
+    assert dot["accum"] == ["float32"] and dot["outputs"] == [("bfloat16", [4, 16])]
     (total,) = [e for n, e in ops.items() if n.endswith("reduce_sum")]
     assert total["accum"] == ["float32"] and total["outputs"] == [("float32", [4])]
     (peak,) = [e for n, e in ops.items() if n.endswith("reduce_max")]
@@ -415,3 +415,132 @@ def test_device_transfers_are_profiled():
     assert by_id[one("copy_h2d", "gpu")["parent"]] is h2d
     assert by_id[wait["parent"]] is d2h
     assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_inside_a_compiled_function(device, tmp_path):
+    """A ``record_function`` range inside a compiled function (with or as a
+    decorator) holds the steps of the ops traced in it each time the plan
+    runs, nested as traced, one range a call; a fused kernel is in its main
+    op's (a reduction's, not its epilogue's); with MPS, each range's
+    kernels span it on the device timeline too."""
+
+    @record_function("inner")
+    def inner(x, w):
+        return x @ w
+
+    def f(x, w):
+        with record_function("outer"):
+            y = inner(x, w)
+            z = F.exp(F.sum(y, -1))
+        return z + 1.0
+
+    try:
+        g = lumen.compile(f, device=device)
+        x, w = lumen.ones([16, 16]).to(device), lumen.ones([16, 16]).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        for _ in range(2):
+            g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+    parent = lambda e: by_id.get(e["parent"], {}).get("name")  # noqa: E731
+    ranges = [(e["name"], parent(e)) for e in events if e["kind"] == "user_range"]
+    assert ranges == [("outer", None), ("inner", "outer")] * 2, ranges
+    steps = {e["name"]: parent(e) for e in events if e["kind"] == "op" and not e["name"].startswith("lumen::")}
+    # On MPS the sum, exp and add one kernel, in the sum's range; on the
+    # CPU each its own step, the add outside the range.
+    want = (
+        {"reduce_sum → exp → add": "outer"}
+        if device == "mps"
+        else {"reduce_sum": "outer", "exp": "outer", "add": None}
+    )
+    assert {k: steps.get(k, "missing") for k in ["dot_general", *want]} == {"dot_general": "inner", **want}, steps
+    if device == "mps":
+        path = tmp_path / "trace.json"
+        prof.export_chrome_trace(str(path))
+        spans = [
+            e["name"] for e in json.loads(path.read_text())["traceEvents"] if e.get("cat") == "gpu_user_annotation"
+        ]
+        assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
+    """Each call of a ``record_function`` range is its own range when the
+    plan runs, as uncompiled code's, even with no step between them (two
+    layers' ``layer``), and so is each call's backward: steps keep the call
+    they were traced in, however the plan orders them (two calls' steps the
+    plan interleaves: a range each run of one call's steps)."""
+
+    def f(x, w):
+        for _ in range(2):
+            with record_function("layer"):
+                x = x @ w
+        # Its gradient reads the last layer's value: both layers' forward run.
+        return F.sum(x * x)
+
+    try:
+        g = lumen.compile(lumen.grad(f, (0, 1)), device=device)
+        x, w = lumen.full([16, 16], 0.01).to(device), lumen.full([16, 16], 0.01).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    names = [e["name"] for e in prof.events() if e["kind"] == "user_range"]
+    assert names.count("layer") == 2 and names.count("layer (backward)") >= 2, names
+    assert set(names) == {"layer", "layer (backward)"}, names
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_record_function_holds_its_ops_gradients_as_backward(device):
+    """The gradient ops of what a ``record_function`` range traced run in
+    ``name (backward)``, nested as the forward's (each range of the
+    forward's scope), after the forward's ranges: the matmul's gradient in
+    ``outer (backward)`` / ``inner (backward)``."""
+
+    def f(x, w):
+        with record_function("outer"):
+            with record_function("inner"):
+                y = x @ w
+            z = F.exp(F.sum(y, -1))
+        return F.sum(z)
+
+    try:
+        g = lumen.compile(lumen.grad(f, (0, 1)), device=device)
+        x, w = lumen.full([16, 16], 0.01).to(device), lumen.full([16, 16], 0.01).to(device)
+        g(x, w)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
+    with profile(activities=activities) as prof:
+        g(x, w)
+        if device == "mps":
+            lumen.mps.synchronize()
+    events = prof.events()
+    by_id = {e["id"]: e for e in events}
+
+    def ranges(e):
+        names = []
+        while e.get("parent") in by_id:
+            e = by_id[e["parent"]]
+            names.append(e["name"])
+        return names[::-1]
+
+    dots = [ranges(e) for e in events if e["kind"] == "op" and e["name"] == "dot_general"]
+    assert dots == [
+        ["outer", "inner"],
+        ["outer (backward)", "inner (backward)"],
+        ["outer (backward)", "inner (backward)"],
+    ], dots
+    names = [e["name"] for e in events if e["kind"] == "user_range"]
+    assert names[:2] == ["outer", "inner"] and set(names[2:]) == {"outer (backward)", "inner (backward)"}, names

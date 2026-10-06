@@ -18,8 +18,10 @@ Convert with ``.to(dtype)``.
 """
 
 import builtins
+import contextlib
 import dataclasses
 import functools
+import itertools
 import math
 import os
 import sys
@@ -43,6 +45,18 @@ _TRACES = []
 _RNG = []
 # Each trace's device: where its values are, unless on the host (``.cpu()``).
 _DEVICES = []
+# Each trace's open ``record_function`` ranges (``lumen.profiler``),
+# outermost first, each ``(name, call)``: the scope of the nodes traced
+# inside them, whose steps the profiler shows inside them when the plan
+# runs. ``call`` numbers each time a range was entered, so steps of two
+# calls of one name (two layers' ``attention``) open a range each, however
+# the plan orders them.
+_SCOPES = []
+# Each trace's values' scopes (a tuple of ranges), those traced inside a
+# range: their gradient ops' are each range's backward (``_backward_scope``).
+_SCOPE_OF = []
+# The calls of ranges entered so far.
+_CALLS = itertools.count()
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
@@ -71,6 +85,8 @@ def _record(name, inputs, params, var):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+    if _SCOPES and _SCOPES[-1]:
+        _SCOPE_OF[-1][var] = tuple(_SCOPES[-1])
 
 
 def _is_device(x):
@@ -113,6 +129,43 @@ def _random_bits(shape):
     offset = rng["drawn"]
     rng["drawn"] += math.prod(shape)
     return prims.random_bits(*rng["state"], shape, offset)
+
+
+def _enter_scope(name):
+    """Open ``record_function`` range ``name`` in the trace, if one is
+    running: the nodes traced until it closes are in it."""
+    if _TRACES:
+        _SCOPES[-1].append((name, next(_CALLS)))
+        _TRACES[-1]._set_scope(_SCOPES[-1])
+
+
+def _exit_scope():
+    """Close the trace's innermost ``record_function`` range, if one runs."""
+    if _TRACES:
+        _SCOPES[-1].pop()
+        _TRACES[-1]._set_scope(_SCOPES[-1])
+
+
+def _backward_scope(var, base):
+    """The scope of value ``var``'s gradient ops: ``base`` (the ranges open
+    where the backward runs), then each range ``var`` was traced in as
+    ``name (backward)``, of the same call (one backward range per forward
+    call)."""
+    return tuple(base) + tuple((f"{name} (backward)", call) for name, call in _SCOPE_OF[-1].get(var, ()))
+
+
+@contextlib.contextmanager
+def _scope(ranges):
+    """Trace inside the ``record_function`` ranges ``ranges`` (outermost
+    first, each ``(name, call)``), the open ones back after."""
+    saved = list(_SCOPES[-1])
+    _SCOPES[-1][:] = ranges
+    _TRACES[-1]._set_scope(_SCOPES[-1])
+    try:
+        yield
+    finally:
+        _SCOPES[-1][:] = saved
+        _TRACES[-1]._set_scope(saved)
 
 
 def current_graph():
@@ -193,6 +246,8 @@ def _trace(fn, args, device):
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
     _TRACES.append(graph)
+    _SCOPES.append([])
+    _SCOPE_OF.append({})
     _DEVICES.append(device)
     _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
@@ -203,6 +258,8 @@ def _trace(fn, args, device):
         out = fn(*traced)
     finally:
         _TRACES.pop()
+        _SCOPES.pop()
+        _SCOPE_OF.pop()
         _DEVICES.pop()
         rng = _RNG.pop()
         _SOURCES.pop()
@@ -1214,7 +1271,11 @@ class TracedTensor:
 
     def __getitem__(self, key):
         """Basic indexing (torch, NumPy): integers (which drop their
-        dimension), slices with unit steps, and one ``...``."""
+        dimension), slices with unit steps, and one ``...``; or a tensor of
+        integer indices into the first dimension (``weight[ids]``, an
+        embedding's lookup: ``prims.gather``)."""
+        if isinstance(key, TracedTensor):
+            return prims.gather(self, key, 0)
         key = key if isinstance(key, tuple) else (key,)
         ellipses = [i for i, k in enumerate(key) if k is Ellipsis]
         if len(ellipses) > 1:

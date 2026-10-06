@@ -37,30 +37,40 @@ def _jvp_tape(tape, tangents, linearizing=False):
     node its ``backward`` transposes."""
 
     graph = tracer.current_graph()
+    base = list(tracer._SCOPES[-1])
 
     for name, inputs, params, out in tape:
-        ts = [tangents.get(v) for v in inputs]
+        # Linearizing (a backward's), each node's derivative in its ranges'
+        # backward (``attention (backward)``).
+        forward = out[0] if name == _FUNCTION else out
+        scope = tracer._backward_scope(forward, base) if linearizing else base
+        with tracer._scope(scope):
+            _jvp_node(graph, name, inputs, params, out, tangents, linearizing)
 
-        if name == _FUNCTION:
-            if any(t is not None for t in ts):
-                _function_jvp(params, ts, out, tangents, linearizing)
 
-            continue
+def _jvp_node(graph, name, inputs, params, out, tangents, linearizing):
+    """One node of :func:`_jvp_tape`: its tangent, into ``tangents``."""
+    ts = [tangents.get(v) for v in inputs]
 
-        if all(t is None for t in ts) or not _is_float(graph.type_of(out)[0]):
-            continue
+    if name == _FUNCTION:
+        if any(t is not None for t in ts):
+            _function_jvp(params, ts, out, tangents, linearizing)
+        return
 
-        primitive = getattr(prims, name, None)
-        if name == "custom_call":
-            raise NotImplementedError(f"custom op {params['op']} is not differentiable: its function is opaque")
-        if primitive not in primitive_jvps:
-            raise NotImplementedError(f"{name} has no JVP rule")
+    if all(t is None for t in ts) or not _is_float(graph.type_of(out)[0]):
+        return
 
-        ts = [_value(t) if t is not None else None for t in ts]
+    primitive = getattr(prims, name, None)
+    if name == "custom_call":
+        raise NotImplementedError(f"custom op {params['op']} is not differentiable: its function is opaque")
+    if primitive not in primitive_jvps:
+        raise NotImplementedError(f"{name} has no JVP rule")
 
-        t = primitive_jvps[primitive]([_value(v) for v in inputs], ts, _value(out), **params)
-        if t is not None:
-            tangents[out] = t.var
+    ts = [_value(t) if t is not None else None for t in ts]
+
+    t = primitive_jvps[primitive]([_value(v) for v in inputs], ts, _value(out), **params)
+    if t is not None:
+        tangents[out] = t.var
 
 
 def _check(fn_name, args):
@@ -153,24 +163,34 @@ def backward_pass(linear, linear_vars, cts):
     each node's transpose rule applied in reverse order (JAX's
     ``ad.backward_pass``)."""
     graph = tracer.current_graph()
+    base = list(tracer._SCOPES[-1])
     for name, inputs, params, out in reversed(linear):
-        if name == _FUNCTION:
-            _function_transpose(params, out, cts)
-            continue
-        ct = cts.pop(out, None)
-        if ct is None:
-            continue
-        operands = [
-            UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0]) if v in linear_vars else _value(v)
-            for v in inputs
-        ]
-        primitive = getattr(prims, name, None)
-        if primitive not in primitive_transposes:
-            raise NotImplementedError(f"{name} has no transpose rule")
-        for v, c in zip(inputs, primitive_transposes[primitive](_value(ct), *operands, **params)):
-            if c is not None and v in linear_vars:
-                _accumulate(cts, v, c)
+        # Each linear node transposed in the ranges it was made in (its
+        # forward node's backward), or those open here.
+        made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
+        with tracer._scope(list(made) if made else base):
+            _transpose_node(graph, name, inputs, params, out, linear_vars, cts)
     return cts
+
+
+def _transpose_node(graph, name, inputs, params, out, linear_vars, cts):
+    """One node of :func:`backward_pass`: its operands' cotangents, into
+    ``cts``."""
+    if name == _FUNCTION:
+        _function_transpose(params, out, cts)
+        return
+    ct = cts.pop(out, None)
+    if ct is None:
+        return
+    operands = [
+        UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0]) if v in linear_vars else _value(v) for v in inputs
+    ]
+    primitive = getattr(prims, name, None)
+    if primitive not in primitive_transposes:
+        raise NotImplementedError(f"{name} has no transpose rule")
+    for v, c in zip(inputs, primitive_transposes[primitive](_value(ct), *operands, **params)):
+        if c is not None and v in linear_vars:
+            _accumulate(cts, v, c)
 
 
 def vjp(fn, *primals):

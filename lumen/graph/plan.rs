@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use super::{Graph, Node, Primitive, TensorType, Var};
+use super::{Graph, Node, Primitive, Scope, TensorType, Var};
 use crate::ops::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
@@ -65,6 +65,47 @@ pub struct Step {
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
+    /// The `record_function` ranges its node was traced in: the profiler
+    /// shows the step inside them ([`OpenScopes`]).
+    pub scope: Scope,
+}
+
+/// The `record_function` ranges a plan's steps were traced in, open while
+/// they run (with a profiler running): each step's opened if not open yet,
+/// those it is not in closed, so consecutive steps of one call share one
+/// range (as it ran uncompiled), and a step of another call of the same
+/// name (one the plan reordered among them) opens its own.
+#[derive(Default)]
+struct OpenScopes {
+    scope: Scope,
+    ranges: Vec<crate::profiler::RecordGuard>,
+}
+
+impl OpenScopes {
+    /// Open `scope`'s ranges, closing the open ones it is not in.
+    fn enter(&mut self, scope: Scope) {
+        let common = self
+            .scope
+            .iter()
+            .zip(scope)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // The innermost first.
+        while self.ranges.len() > common {
+            self.ranges.pop();
+        }
+        for range in &scope[common..] {
+            self.ranges
+                .push(crate::profiler::record_function(range.name));
+        }
+        self.scope = scope;
+    }
+}
+
+impl Drop for OpenScopes {
+    fn drop(&mut self) {
+        self.enter(&[]);
+    }
 }
 
 /// The scratch bytes a step's kernel needs while it runs, from its
@@ -109,6 +150,12 @@ pub struct PlanOptions {
     /// until then (XLA's rematerialization), until it fits or no
     /// recomputation saves memory. `None`: no limit.
     pub memory_limit: Option<usize>,
+    /// Inputs that are blocks of others side by side (`(block, members)`,
+    /// input positions: [`Plan::packed`]'s, its members views of it): a
+    /// step reading a block reads each member, so a member's buffer takes
+    /// a donated output only once no step reads its block either (an
+    /// optimizer's update after the merged dots reading the old weights).
+    pub blocks: Vec<(usize, Vec<usize>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -257,11 +304,14 @@ impl Plan {
                 root[node.output] = root[node.inputs[0]];
             }
             // Each value it writes in place, with the operand position it
-            // replaces: a dynamic_update_slice's, its operand's; a custom
+            // replaces: a dynamic_update_slice's or scatter_add's, its
+            // operand's; a custom
             // op's, each mutated operand's (its own value the first, its
             // fusion outputs the others).
             let written: Vec<(Var, usize)> = match &node.primitive {
-                Primitive::DynamicUpdateSlice => vec![(node.output, 0)],
+                Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => {
+                    vec![(node.output, 0)]
+                }
                 Primitive::CustomCall { mutated, .. } => {
                     let mut written = vec![(node.output, mutated[0])];
                     for other in graph.nodes() {
@@ -325,6 +375,7 @@ impl Plan {
                 && !matches!(
                     node.primitive,
                     Primitive::DynamicUpdateSlice
+                        | Primitive::ScatterAdd { .. }
                         | Primitive::CustomCall { .. }
                         | Primitive::Reshape { .. }
                         | Primitive::Wait
@@ -452,7 +503,13 @@ impl Plan {
                 let u = graph.inputs()[i];
                 let writer = nodes[first[v]];
                 let read_by_writer = writer.inputs.iter().any(|&w| root[w] == u);
+                // Its blocks, which hold its memory too, read after it.
+                let block_read_later = options.blocks.iter().any(|(b, members)| {
+                    let b = graph.inputs()[*b];
+                    members.contains(&i) && !readers[b].is_empty() && last[root[b]] >= first[v]
+                });
                 let read_later = last[u] > first[v]
+                    || block_read_later
                     || (read_by_writer && !reads_in_place(graph, writer, v, u, &root));
                 let is_output = graph.outputs().iter().any(|&o| root[o] == u);
                 let its = !paired(i) || options.donate_into.contains(&(i, k));
@@ -549,6 +606,7 @@ impl Plan {
                     outputs.into_iter().map(|(_, v)| slot(v)).collect()
                 },
                 scratch,
+                scope: node.scope,
             })
             .collect();
         for (k, v) in copies {
@@ -562,6 +620,7 @@ impl Plan {
                 output: (Buffer::Output(k), ty(v)),
                 extra_outputs: Vec::new(),
                 scratch: None,
+                scope: &[],
             });
         }
         Plan {
@@ -971,7 +1030,11 @@ impl Plan {
         {
             return Err("operands read as views run on MPS only".into());
         }
+        let mut scopes = crate::profiler::is_enabled().then(OpenScopes::default);
         for step in &self.steps {
+            if let Some(scopes) = &mut scopes {
+                scopes.enter(step.scope);
+            }
             if let Primitive::CustomCall {
                 kernel,
                 mutated,
@@ -1226,7 +1289,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
                 true
             }),
         // Its operand alone, in place.
-        DynamicUpdateSlice => node.inputs[1..].iter().all(|&v| root[v] != r),
+        DynamicUpdateSlice | ScatterAdd { .. } => node.inputs[1..].iter().all(|&v| root[v] != r),
         // At the operand whose new value `out` is alone (its value is the
         // first mutated operand's; a fusion output of it at index k, the
         // k-th's).

@@ -385,6 +385,29 @@ def test_written_attention_trains_with_flash_attention():
         assert kernel in labels, labels
 
 
+@pytest.mark.mps
+@pytest.mark.parametrize("scale", [1.0, 0.125], ids=["unscaled", "scaled"])
+def test_written_attention_backward_is_flash_attention(scale):
+    """Attention written out trains with flash attention's backward kernels
+    whether its scores are scaled or not (``* 1`` simplified away, dS has no
+    scale to multiply by: 1); the gradients the CPU's."""
+    (q, k, v), arrays = tensors("mps", "float32", (2, 40, 32), (2, 40, 32), (2, 40, 32))
+
+    def loss(q, k, v):
+        return F.sum(F.tanh(F.softmax((q @ k.transpose(-1, -2)) * scale, -1) @ v))
+
+    grad = lumen.grad(loss, (0, 1, 2))
+    labels = steps(grad, q, k, v)
+    # The forward's label has its epilogue's primitives after it.
+    kernels = [label.split(" → ")[0] for label in labels]
+    for kernel in ["flash_attention", *backward_kernels(32, 32, "float32")]:
+        assert kernel in kernels, labels
+    got = lumen.compile(grad)(q, k, v)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-4, atol=1e-5)
+
+
 @pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
 def test_naive_attention_is_flash_attention(causal):
     """F.naive_attention (attention as main first wrote it) computes as

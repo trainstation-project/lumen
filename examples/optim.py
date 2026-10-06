@@ -7,7 +7,12 @@ The optimizer is a module: AdamW's moments ``m`` and ``v`` are weights, placed
 hyperparameters are floats, runtime scalars on the host (a new learning rate
 needs no new compile). ``step`` assigns the new parameters, moments and step
 count with ``copy_``, which the compiled function writes back after each
-call."""
+call.
+
+The moments are float32 whatever the parameters' dtype, and the update is
+computed in float32, the new value cast to the parameter's (as
+mixed-precision training keeps an optimizer's state: bfloat16 moments
+would lose small gradients' contributions)."""
 
 import lumen
 import lumen.functional as F
@@ -49,8 +54,8 @@ class AdamW(lumen.nn.Module):
 
         fields = dict(
             params=params,
-            m=[lumen.empty(list(p.shape), dtype=p.dtype, device="meta") for p in params] if m is None else m,
-            v=[lumen.empty(list(p.shape), dtype=p.dtype, device="meta") for p in params] if v is None else v,
+            m=[lumen.empty(list(p.shape), dtype="float32", device="meta") for p in params] if m is None else m,
+            v=[lumen.empty(list(p.shape), dtype="float32", device="meta") for p in params] if v is None else v,
             t=t,
             lr=lr,
             betas=tuple(betas),
@@ -65,6 +70,7 @@ class AdamW(lumen.nn.Module):
         for p in self.params:
             p.grad = None
 
+    @lumen.profiler.record_function("optim-step")
     def step(self, grads=None):
         """Update the parameters from their ``.grad`` (or ``grads``, one
         per parameter in order: from ``lumen.grad``)."""
@@ -77,6 +83,9 @@ class AdamW(lumen.nn.Module):
         for p, m, v, g in zip(self.params, self.m, self.v, grads):
             if g is None:
                 continue
+            # In float32 (the moments'), the new value cast to p's dtype.
+            g, w = g.float(), p.float()
             m.copy_(b1 * m + (1.0 - b1) * g)
             v.copy_(b2 * v + (1.0 - b2) * g * g)
-            p.copy_(p * (1.0 - self.lr * self.weight_decay) - self.lr * (m * c1) / (F.sqrt(v * c2) + self.eps))
+            new = w * (1.0 - self.lr * self.weight_decay) - self.lr * (m * c1) / (F.sqrt(v * c2) + self.eps)
+            p.copy_(new.to(dtype=p.dtype))

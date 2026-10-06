@@ -63,6 +63,24 @@ pub struct Node {
     pub primitive: Primitive,
     pub inputs: Vec<Var>,
     pub output: Var,
+    /// The `record_function` ranges open where it was traced, outermost
+    /// first (a pass gives the nodes it makes of one its scope, as XLA's
+    /// passes keep an instruction's metadata): its step's ranges when a
+    /// plan runs it.
+    pub scope: Scope,
+}
+
+/// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
+pub type Scope = &'static [Range];
+
+/// A `record_function` range a node was traced in: its name, and which call
+/// of it (each time the traced code entered it; a backward range, the
+/// forward call's). Steps of one call share its range when a plan runs
+/// them, those of another call open their own (reordered steps too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Range {
+    pub name: &'static str,
+    pub call: u64,
 }
 
 /// A function from typed inputs to outputs, in SSA form: each node
@@ -74,6 +92,8 @@ pub struct Graph {
     inputs: Vec<Var>,
     nodes: Vec<Node>,
     outputs: Vec<Var>,
+    /// The scope [`apply`](Self::apply) gives the nodes it adds.
+    scope: Scope,
 }
 
 impl Graph {
@@ -88,6 +108,12 @@ impl Graph {
         self.types.len() - 1
     }
 
+    /// Give the nodes added from now on `scope` (a pass: the scope of the
+    /// node it is rewriting).
+    pub fn set_scope(&mut self, scope: Scope) {
+        self.scope = scope;
+    }
+
     /// The value `primitive(inputs...)`, or why the types do not allow it.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check_vars(inputs)?;
@@ -99,6 +125,7 @@ impl Graph {
             primitive,
             inputs: inputs.to_vec(),
             output,
+            scope: self.scope,
         });
         Ok(output)
     }
@@ -130,6 +157,7 @@ impl Graph {
             map[v] = Some(pruned.input(self.types[v].clone()));
         }
         for node in self.nodes.iter().filter(|n| live[n.output]) {
+            pruned.set_scope(node.scope);
             let inputs: Vec<Var> = node
                 .inputs
                 .iter()
@@ -272,6 +300,19 @@ pub(crate) fn intern(label: String) -> &'static str {
     }
     let interned: &'static str = Box::leak(label.into_boxed_str());
     labels.insert(interned);
+    interned
+}
+
+/// `ranges` as a [`Scope`], one shared copy per nesting.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
+    static SCOPES: Mutex<BTreeSet<Scope>> = Mutex::new(BTreeSet::new());
+    let mut scopes = SCOPES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&interned) = scopes.get(ranges) {
+        return interned;
+    }
+    let interned: Scope = Box::leak(ranges.to_vec().into_boxed_slice());
+    scopes.insert(interned);
     interned
 }
 

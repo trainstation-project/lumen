@@ -154,19 +154,24 @@ inline void matmul_wide_impl(device const T *lhs,
 // (T, or float for half and bfloat: dot_general's accum_dtype), the output
 // of O (T or A: its output_dtype), each element rounded to it once: a threadgroup of 256 threads (8 SIMD groups in a
 // 4x2 grid) computes a BM x BN output tile (for 128x64, each SIMD group a 32x32 block of it as 4x2 8x8 accumulators).
-// BMx16 and 16xBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
+// BMxBK and BKxBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
 // fixed column of them, and loads the next k step's while the current one is multiplied. Each output sums over k in
 // increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
 // kernels; a fusion's epilogue (lumen/compiler/mps/codegen.rs), writing Out. With ATOMIC (a split-K dot's: its batch
 // index a chunk of the contraction), each output is added to out[m, n] (float, zeroed before) atomically instead, the
 // chunks' in no fixed order.
 #define SG_BK 16
-#define SG_COLS 2 // SIMD groups across the tile
+#define SMALL_BK 32 // the small tiles': fewer, deeper steps (each a round trip to memory)
+#define SG_COLS 2   // SIMD groups across the tile
+// The lhs tile's elements of T a threadgroup declares: its BM x BK, and at
+// least the 8 x 64 of A the epilogue stages in it.
+#define SG_LT(BM, BK, T, A) (BM * BK > 8 * 64 * sizeof(A) / sizeof(T) ? BM * BK : 8 * 64 * sizeof(A) / sizeof(T))
 template <typename T,
           typename A,
           typename O,
           uint BM,
           uint BN,
+          uint BK,
           typename Out = O,
           typename Epi = Same,
           bool ATOMIC = false>
@@ -182,21 +187,21 @@ inline void matmul_sg_impl(device const T *lhs,
                            uint lane,
                            Epi epi = Epi()) {
     constexpr uint FM = BM / (8 / SG_COLS) / 8, FN = BN / SG_COLS / 8;
-    constexpr uint LA = BM * SG_BK / 256, LB = SG_BK * BN / 256; // elements a thread loads
-    constexpr uint RA = 256 / SG_BK, RB = 256 / BN;              // rows apart
+    constexpr uint LA = BM * BK / 256, LB = BK * BN / 256; // elements a thread loads
+    constexpr uint RA = 256 / BK, RB = 256 / BN;           // rows apart
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;
     // This thread loads lhs column ac of tile rows ar + RA t, and rhs
     // column bc of tile rows br + RB t.
-    const uint ac = flat % SG_BK, ar = flat / SG_BK, bc = flat % BN, br = flat / BN;
+    const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + (n0 + bc) * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
     // Tiles inside the operands load without bounds checks.
     auto fetch = [&](ulong k0) {
-        bool full_k = k0 + SG_BK <= K;
+        bool full_k = k0 + BK <= K;
         if (full_m && full_k) {
             UNROLL for (uint t = 0; t < LA; ++t) { ra[t] = l[k0 * sk + ulong(RA * t) * sm]; }
         } else {
@@ -220,18 +225,16 @@ inline void matmul_sg_impl(device const T *lhs,
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }
     }
     fetch(0);
-    for (ulong k0 = 0; k0 < K; k0 += SG_BK) {
-        UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * SG_BK + ac] = ra[t]; }
+    for (ulong k0 = 0; k0 < K; k0 += BK) {
+        UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }
         UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * BN + bc] = rb[t]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (k0 + SG_BK < K) {
-            fetch(k0 + SG_BK);
+        if (k0 + BK < K) {
+            fetch(k0 + BK);
         }
-        UNROLL for (uint kk = 0; kk < SG_BK; kk += 8) {
+        UNROLL for (uint kk = 0; kk < BK; kk += 8) {
             simdgroup_matrix<T, 8, 8> a[FM], b[FN];
-            UNROLL for (uint i = 0; i < FM; ++i) {
-                simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * SG_BK + kk, SG_BK);
-            }
+            UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * BK + kk, BK); }
             UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * BN + sx * FN * 8 + j * 8, BN); }
             UNROLL for (uint i = 0; i < FM; ++i) {
                 UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_multiply_accumulate(c[i][j], a[i], b[j], c[i][j]); }
@@ -281,33 +284,33 @@ inline void matmul_sg_impl(device const T *lhs,
         matmul_wide_impl<T>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
-#define MATMUL_SG(KERNEL, T, A, O, BM, BN)                                                                        \
+#define MATMUL_SG(KERNEL, T, A, O, BM, BN, BK)                                                                    \
     kernel void KERNEL(                                                                                           \
         MATMUL_ARGS(T, O), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
-        threadgroup T lt[BM * SG_BK], rt[SG_BK * BN];                                                             \
-        matmul_sg_impl<T, A, O, BM, BN>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);           \
+        threadgroup T lt[SG_LT(BM, BK, T, A)], rt[BK * BN];                                                       \
+        matmul_sg_impl<T, A, O, BM, BN, BK>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);       \
     }
 
 // matmul_<dtype> on 128x64 tiles, and matmul_small_<dtype> on 64x64 tiles
 // for matmuls with too few 128x64 tiles to fill the GPU: in the operands'
 // dtype throughout; matmul[_small]_<dtype>_f32_<output> accumulating in
 // float, writing the operands' dtype or float.
-#define MATMUL_FLOAT(NAME, T)                  \
-    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64) \
-    MATMUL_SG(matmul_small_##NAME, T, T, T, 64, 64)
-#define MATMUL_WIDENED(NAME, T)                                      \
-    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64)      \
-    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 64, 64) \
-    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64)     \
-    MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 64, 64)
+#define MATMUL_FLOAT(NAME, T)                         \
+    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK) \
+    MATMUL_SG(matmul_small_##NAME, T, T, T, 32, 32, SMALL_BK)
+#define MATMUL_WIDENED(NAME, T)                                                \
+    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64, SG_BK)         \
+    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 32, 32, SMALL_BK) \
+    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64, SG_BK)        \
+    MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 32, 32, SMALL_BK)
 
 // matmul_atomic_<dtype>: a split-K dot's, on 64x64 tiles, accumulating in float, each chunk's (batch index's)
 // products added to the float output atomically.
 #define MATMUL_ATOMIC(NAME, T)                                                                                        \
     kernel void matmul_atomic_##NAME(                                                                                 \
         MATMUL_ARGS(T, float), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
-        threadgroup T lt[64 * SG_BK], rt[SG_BK * 64];                                                                 \
-        matmul_sg_impl<T, float, float, 64, 64, float, Same, true>(                                                   \
+        threadgroup T lt[SG_LT(64, SG_BK, T, float)], rt[SG_BK * 64];                                                 \
+        matmul_sg_impl<T, float, float, 64, 64, SG_BK, float, Same, true>(                                            \
             lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);                                           \
     }
 

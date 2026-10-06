@@ -450,6 +450,43 @@ impl Lower<'_> {
                     ty.shape.clone(),
                 )
             }
+            Gather { axis } => {
+                let (x, i) = (input(0), input(1));
+                let (n, it) = (graph.type_of(x).shape[*axis], graph.type_of(i).clone());
+                let x = self.full(x)?;
+                let i = self.full(i)?;
+                // Each index clamped into the axis, as the primitive does.
+                let lo = self.constant(it.dtype, &[], &scalar_bytes(it.dtype, Scalar::Int(0)))?;
+                let hi = self.constant(
+                    it.dtype,
+                    &[],
+                    &scalar_bytes(it.dtype, Scalar::Int(n as i64 - 1)),
+                )?;
+                let i = self.op(
+                    "maximum",
+                    &[("x", vec![i]), ("y", vec![lo])],
+                    it.dtype,
+                    &it.shape,
+                )?;
+                let i = self.op(
+                    "minimum",
+                    &[("x", vec![i]), ("y", vec![hi])],
+                    it.dtype,
+                    &it.shape,
+                )?;
+                let (a, b, check) = (self.int(*axis as i64)?, self.int(0)?, self.boolean(false)?);
+                let args = [
+                    ("x", vec![x]),
+                    ("indices", vec![i]),
+                    ("axis", vec![a]),
+                    ("batch_dims", vec![b]),
+                    ("validate_indices", vec![check]),
+                ];
+                (
+                    self.op("gather", &args, ty.dtype, &ty.shape)?,
+                    ty.shape.clone(),
+                )
+            }
             DotGeneral { .. } => self.dot(node)?,
             p => {
                 return Err(format!(

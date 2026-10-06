@@ -244,6 +244,16 @@ fn ravel(idx: impl IntoIterator<Item = usize>, shape: &[usize]) -> usize {
         .fold(0, |flat, (i, n)| flat * n + i)
 }
 
+/// A gather's (or scatter's) `indices`, each clamped into an axis of `n`.
+fn taken(indices: &Values, n: usize) -> Vec<usize> {
+    let Values::Int(v) = indices else {
+        unreachable!("integer indices")
+    };
+    v.iter()
+        .map(|&k| k.clamp(0, (n as i128 - 1).max(0)) as usize)
+        .collect()
+}
+
 /// A dynamic slice's start in each dimension of `x`: `indices` (integer
 /// scalars) each clamped so a block of `sizes` is inside `x`, as XLA's.
 fn starts(x: &TensorType, indices: &[&Values], sizes: &[usize]) -> Vec<usize> {
@@ -401,6 +411,62 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             match args[0] {
                 Int(v) => Int(at.iter().map(|&i| v[i]).collect()),
                 Float(v) => Float(at.iter().map(|&i| v[i]).collect()),
+            }
+        }
+        Gather { axis } => {
+            // Element (before, k..., after) is the operand's at (before,
+            // index k (clamped), after).
+            let (x, indices) = (types[0], types[1]);
+            let picked = taken(args[1], x.shape[*axis]);
+            gather(args[0], out, |idx| {
+                let k = picked[ravel(
+                    idx[*axis..*axis + indices.shape.len()].iter().copied(),
+                    &indices.shape,
+                )];
+                let at = idx[..*axis]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(k))
+                    .chain(idx[*axis + indices.shape.len()..].iter().copied());
+                ravel(at, &x.shape)
+            })
+        }
+        ScatterAdd { axis } => {
+            // The operand, each update added where a gather would read it
+            // (in row-major order, each sum rounded to the dtype).
+            let (x, indices, u) = (types[0], types[1], types[2]);
+            let picked = taken(args[1], x.shape[*axis]);
+            let mut at = Vec::with_capacity(u.numel());
+            if u.numel() > 0 {
+                for_each_index(&u.shape, |idx| {
+                    let k = picked[ravel(
+                        idx[*axis..*axis + indices.shape.len()].iter().copied(),
+                        &indices.shape,
+                    )];
+                    let at_x = idx[..*axis]
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(k))
+                        .chain(idx[*axis + indices.shape.len()..].iter().copied());
+                    at.push(ravel(at_x, &x.shape));
+                });
+            }
+            match (args[0], args[2]) {
+                (Int(v), Int(w)) => {
+                    let mut v = v.clone();
+                    at.iter()
+                        .zip(w)
+                        .for_each(|(&i, &e)| v[i] = wrap(v[i] + e, dtype));
+                    Int(v)
+                }
+                (Float(v), Float(w)) => {
+                    let mut v = v.clone();
+                    at.iter()
+                        .zip(w)
+                        .for_each(|(&i, &e)| v[i] = round(v[i] + e, dtype));
+                    Float(v)
+                }
+                _ => unreachable!("the updates have the operand's dtype"),
             }
         }
         DynamicUpdateSlice => {

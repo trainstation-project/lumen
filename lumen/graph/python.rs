@@ -85,6 +85,12 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             slice_sizes: dims("slice_sizes")?,
         },
         "dynamic_update_slice" => DynamicUpdateSlice,
+        "gather" => Gather {
+            axis: get("axis")?.extract()?,
+        },
+        "scatter_add" => ScatterAdd {
+            axis: get("axis")?.extract()?,
+        },
         "custom_call" => CustomCall {
             label: crate::graph::intern(get("op")?.extract()?),
             kernel: get("kernel")?.extract()?,
@@ -181,6 +187,20 @@ impl PyGraph {
         map
     }
 
+    /// Give the nodes added from now on the `record_function` ranges
+    /// `ranges` (outermost first, each a name and its call) as their scope
+    /// ([`crate::graph::Node::scope`]).
+    fn _set_scope(&mut self, ranges: Vec<(String, u64)>) {
+        let ranges: Vec<crate::graph::Range> = ranges
+            .into_iter()
+            .map(|(name, call)| crate::graph::Range {
+                name: crate::graph::intern(name),
+                call,
+            })
+            .collect();
+        self.inner.set_scope(crate::graph::intern_scope(&ranges));
+    }
+
     /// The attentions traced so far (the compiler's matcher, as it runs
     /// them as flash attention), each a dict: its dots' operands `q`, `k`,
     /// `v` (values), its `scores` (the first dot's) and `out` (the second
@@ -242,8 +262,9 @@ impl PyGraph {
     }
 
     /// The nodes in order, as dicts: `primitive` (its name), `text` (with
-    /// its parameters), `fusion` (see [`primitive_dict`]), and the `inputs`
-    /// and `output` values.
+    /// its parameters), `fusion` (see [`primitive_dict`]), the `inputs` and
+    /// `output` values, and its `scope` (the `record_function` ranges it was
+    /// traced in, outermost first).
     fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
             .nodes()
@@ -252,6 +273,7 @@ impl PyGraph {
                 let d = primitive_dict(py, &node.primitive)?;
                 d.set_item("inputs", node.inputs.clone())?;
                 d.set_item("output", node.output)?;
+                d.set_item("scope", scope_names(node.scope))?;
                 Ok(d)
             })
             .collect()
@@ -408,6 +430,7 @@ impl PyPlan {
                     .map(|v| v.as_ref().map(|v| (v.offset, v.strides.clone())));
                 d.set_item("views", views.collect::<Vec<_>>())?;
                 d.set_item("scratch", step.scratch)?;
+                d.set_item("scope", scope_names(step.scope))?;
                 Ok(d)
             })
             .collect()
@@ -504,4 +527,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
     m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)?;
     m.add_class::<PyPlan>()
+}
+
+/// A scope's range names, outermost first.
+fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
+    scope.iter().map(|r| r.name).collect()
 }

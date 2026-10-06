@@ -227,6 +227,7 @@ fn lowerable(graph: &Graph, node: &crate::graph::Node) -> bool {
         Reshape { .. } | Slice { .. } | Concatenate { .. } | DotGeneral { .. } => true,
         Div => graph.type_of(node.output).dtype.is_float(),
         ReduceSum { axes, .. } | ReduceMax { axes } => !axes.is_empty(),
+        Gather { .. } => graph.type_of(node.inputs[1]).dtype == DType::I32,
         _ => false,
     };
     let typed = |v: &Var| {
@@ -499,6 +500,7 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
             match waiting.remove(w) {
                 Ok(k) => {
                     let node = &nodes[k];
+                    out.set_scope(node.scope);
                     let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
                     map[node.output] = out
                         .apply(node.primitive.clone(), &inputs)
@@ -506,6 +508,7 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
                 }
                 Err(r) => {
                     let (members, b) = regions[r].take().expect("a region emitted once");
+                    out.set_scope(nodes[members[0]].scope);
                     let name = format!("{NEURAL_ENGINE}{}", NEXT.fetch_add(1, Ordering::Relaxed));
                     let labels: Vec<&str> =
                         members.iter().map(|&k| graph.label(&nodes[k])).collect();

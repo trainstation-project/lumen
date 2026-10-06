@@ -19,6 +19,7 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
+        out.set_scope(node.scope);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         map[node.output] = match &node.primitive {
             Primitive::DotGeneral {

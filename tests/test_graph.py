@@ -192,6 +192,18 @@ def test_matmul(a_shape, b_shape):
     np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
 
 
+def test_matmul_folds_a_batch_times_a_matrix():
+    """A batch times a matrix (``x @ w``, a weight) is one matmul of the
+    batch's rows, as torch folds it: the matrix read as it is, never
+    broadcast over the batch (a copy); its gradient one matmul too, not a
+    sum of the batch's."""
+    m = lambda *s: lumen.empty(list(s), device="meta")  # noqa: E731
+    g = lumen.make_graph(lambda x, w: x @ w)(m(2, 3, 4), m(4, 5))
+    assert "broadcast_in_dim" not in str(g) and "f32[6,5] = dot_general" in str(g), g
+    grad = lumen.make_graph(lumen.grad(lambda x, w: F.sum(x @ w), 1))(m(2, 3, 4), m(4, 5))
+    assert str(grad).count("dot_general") == 1 and "reduce_sum" not in str(grad), grad
+
+
 def test_reductions():
     x = rand(2, 3, 4)
     t = lumen.from_numpy(x)
@@ -318,11 +330,12 @@ def test_graph_and_plan_describe_themselves():
 @pytest.mark.mps
 def test_mps_plan_steps_and_profiled_kernels():
     try:
-        x = lumen.ones([64, 128], device="mps")
+        x = lumen.ones([64, 2048], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
     from lumen.profiler import ProfilerActivity, profile
 
+    # Rows long enough for a threadgroup each.
     graph = lumen.make_graph(lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1))(x)
     plan = lumen.graph.Plan(graph, "mps")
     # One step: the reduction fused with the ops computing its input.
@@ -337,7 +350,27 @@ def test_mps_plan_steps_and_profiled_kernels():
         lumen.mps.synchronize()
     kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert kernels == [fusion["kernel"]]
-    assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 128] * 64)
+    assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 2048] * 64, rel=1e-5)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("n", [16, 64])
+def test_short_rows_reduce_several_a_threadgroup(n):
+    """Rows too short for a threadgroup each (an attention head's 16, a
+    row of 64) are reduced as grouped lanes, several rows a threadgroup:
+    the CPU's sums, the same each run."""
+    x = rand(4096, n)
+    try:
+        X = lumen.from_numpy(x).to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1)  # noqa: E731
+    (step,) = lumen.graph.Plan(lumen.make_graph(f)(X), "mps").steps()
+    assert "reduce_grouped" in step["fusion"]["source"]
+    got = [lumen.to_numpy(lumen.compile(f)(X)) for _ in range(2)]
+    np.testing.assert_array_equal(got[0], got[1])
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x)))
+    np.testing.assert_allclose(got[0], want, rtol=1e-5, atol=1e-5)
 
 
 def test_dump_graph(tmp_path):
@@ -721,6 +754,151 @@ def test_attention_projections_merge_into_one_matmul():
     assert views == [(0, [96, 1]), (64, [96, 1])]
 
 
+class Heads(lumen.nn.Module):
+    """q, k and v projections of ``[batch * seq, dim]`` rows (``nn.Linear``'s
+    ``[out, in]`` weights, merged in training too), attended over 4 heads by
+    ``F.flash_attention``."""
+
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        q, k, v = ((x @ w.t()).reshape(2, 32, 4, 16) for w in (self.wq, self.wk, self.wv))
+        return F.flash_attention(q, k, v, is_causal=True).reshape(64, 64)
+
+
+@pytest.mark.mps
+def test_trained_attention_reads_merged_projections_in_place():
+    """In training, the attention's forward and backward kernels both read
+    q, k and v where the merged matmul writes them (each a strided view of
+    its result, read through its slice and reshape): no copy of each,
+    though two kernels read it."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    model = Heads(meta(64, 64), meta(64, 64), meta(64, 64))
+    grad = lumen.grad(lambda model, x: F.sum(model(x) * model(x)), (0, 1))
+    graph = lumen.make_graph(grad)(model, meta(64, 64))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3]).steps()
+    labels = [s["label"] for s in steps]
+    merged = steps[labels.index("3x dot_general")]["output"][0]
+    attention = [s for s in steps if s["label"].startswith("flash_attention")]
+    assert len(attention) >= 2, labels
+    for s in attention:
+        assert merged in [b for b, *_ in s["inputs"]], (s["label"], s["inputs"])
+    assert not [label for label in labels if label.startswith("slice")], labels
+
+
+class QKV(lumen.nn.Module):
+    """Three projections of x, ``nn.Linear``'s way: ``[out, in]`` weights
+    read as ``x @ w.t()``."""
+
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, x):
+        return [x @ w.t() for w in (self.wq, self.wk, self.wv)]
+
+
+class MixedQKV(QKV):
+    """:class:`QKV` in mixed precision, by hand: float32 weights cast to
+    bfloat16 where the matmuls read them, the result float32."""
+
+    def __call__(self, x):
+        return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
+def test_projections_of_several_inputs_each_read_one_block(module):
+    """The same weights projecting two inputs (a gradient accumulation's
+    passes, each its own activations): one block of them, each input's
+    three projections one matmul reading it (its chain, a bfloat16 copy,
+    computed once), the values as unmerged."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def f(model, x1, x2):
+        # Read by fusible primitives (not outputs as they are), so they merge.
+        return [F.relu(v) for v in [*model(x1), *model(x2)]]
+
+    model = module(meta(64, 64), meta(64, 64), meta(64, 64))
+    graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
+    labels = [s["label"] for s in steps]
+    assert labels.count("3x dot_general") == 2, labels
+    blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
+    assert len(blocks) == 3, blocks  # the two inputs, and one block (or its copy)
+    values = rand(64, 64), rand(64, 64, seed=1), rand(64, 64, seed=2)
+    xs = [lumen.from_numpy(rand(32, 64, seed=k)).to("mps") for k in (3, 4)]
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = module(meta(64, 64), meta(64, 64), meta(64, 64))
+            g = lumen.compile(f, device="mps")
+            g(model, meta(32, 64), meta(32, 64))
+            model.load_state_dict({k: lumen.from_numpy(v) for k, v in zip(["wq", "wk", "wv"], values)})
+            got.append([lumen.to_numpy(v) for v in g(model, *xs)])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_array_equal(merged, alone)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
+def test_trained_projections_merge_into_one_matmul(module):
+    """Weights a training step assigns (its optimizer's update, written over
+    them in place) merge too, as PyTorch's fused QKV weight: ``[out, in]``
+    weights side by side along their first dimension, each a contiguous
+    part of the block, updated there in place once no matmul reads the
+    block (the planner's block-aware donation). The weights after a few
+    steps are the unmerged program's. In mixed precision too: the weights'
+    bfloat16 casts one cast of their block."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def step(model, x, c):
+        q, k, v = model(x)
+        loss = F.sum((q * k + v) * c)
+        loss.backward()
+        for w in (model.wq, model.wk, model.wv):
+            w.copy_(w - 0.1 * w.grad)
+        return loss
+
+    x, c = lumen.from_numpy(rand(16, 32)), lumen.from_numpy(rand(16, 32, seed=9))
+    values = {n: lumen.from_numpy(rand(32, 32, seed=i + 1) / 4) for i, n in enumerate(("wq", "wk", "wv"))}
+    trained = {}
+    for merge in (True, False):
+        lumen.config.compiler.merge_dots = merge
+        try:
+            model = module(meta(32, 32), meta(32, 32), meta(32, 32))
+            f = lumen.compile(step, device="mps")
+            f(model, meta(16, 32), meta(16, 32))
+            model.load_state_dict(values)
+            with profile(activities=[ProfilerActivity.MPS]) as prof:
+                for _ in range(3):
+                    f(model, x, c)
+                lumen.mps.synchronize()
+        finally:
+            lumen.config.compiler.reset()
+        kernels = [e["name"] for e in prof.events() if e["kind"] == "gpu"]
+        assert ("3x dot_general" in kernels) == merge, kernels
+        trained[merge] = [lumen.to_numpy(w._placed("mps")) for w in (model.wq, model.wk, model.wv)]
+    for merged, unmerged in zip(trained[True], trained[False]):
+        np.testing.assert_allclose(merged, unmerged, rtol=1e-5, atol=1e-6)
+
+
 class Linear(lumen.nn.Module):
     w: lumen.Tensor
 
@@ -1063,7 +1241,9 @@ def test_normalizations_are_one_row_kernel(f):
     """Whatever normalizes rows by reductions of them is a normalization
     diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
     written: one row kernel on MPS, its reductions inside, agreeing with the
-    CPU. Nothing matches any one normalization."""
+    CPU. Nothing matches any one normalization. With no backward to read
+    its values of a row (an RMS norm's sqrt(mean + eps)), it writes its
+    output alone."""
     x, w = rand(64, 300), rand(300, seed=1)
     try:
         X, W = lumen.from_numpy(x).to("mps"), lumen.from_numpy(w).to("mps")
@@ -1071,8 +1251,141 @@ def test_normalizations_are_one_row_kernel(f):
         pytest.skip(str(e))
     (step,) = lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
     assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
+    assert step["extra_outputs"] == [], step["extra_outputs"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
+
+
+NORMALIZATIONS = [
+    lambda a, w: a / F.sqrt(F.mean(a * a, -1, keepdim=True) + 1e-6) * w,
+    lambda a, w: a / F.sqrt(F.sum(a * a, -1, keepdim=True) + 1e-6) * w,
+    lambda a, w: a * (1.0 / F.sqrt(F.mean(a * a, -1, keepdim=True))),
+    lambda a, w: (lambda e: e / F.sum(e, -1, keepdim=True))(F.exp(a - F.amax(a, -1, keepdim=True))),
+    _layer_norm,
+]
+
+
+@pytest.mark.parametrize(
+    "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
+)
+def test_normalizations_train_in_one_row_kernel(f):
+    """Trained, a normalization's forward is still one row kernel: the
+    values of a row its backward reads (an RMS norm's sqrt(mean + eps)) and
+    its value before its epilogue (``y`` of ``y * w``, for w's gradient)
+    are its outputs too, as a fused RMS norm writes each row's ``rstd``,
+    never computed again; the gradients the CPU's."""
+    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
+    labels = [s["label"] for s in lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
+    if "sqrt" in str(labels):
+        assert sum("sqrt" in label for label in labels) == 1, labels
+    got = lumen.compile(grad)(X, W, C)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "f, kernels",
+    [
+        (lambda x, w, c: F.sum(F.rms_norm(x, 300, w) * c), 3),
+        (lambda x, w, c: F.sum(_layer_norm(x, w) * c), 4),
+        (lambda x, w, c: F.sum(F.softmax(x * w, -1) * c), None),
+    ],
+    ids=["rms norm", "layer norm", "softmax"],
+)
+def test_normalization_backwards_are_row_kernels(f, kernels):
+    """A normalization's backward reduces each row and applies the result
+    to the row's values, not one producer's (``dx = g·w / rms - x ·
+    Σ_row(…)``): beyond a diamond, a row fusion still, one row kernel for
+    x's gradient (a layer norm's two reductions in it), the weight's a sum
+    over rows of its own; the forward's kernels besides. The gradients the
+    CPU's."""
+    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    if kernels is not None:
+        assert len(steps) == kernels, [s["label"] for s in steps]
+    got = lumen.compile(grad)(X, W, C)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("n", [16, 64])
+@pytest.mark.parametrize(
+    "f",
+    [
+        lambda x, w, c: F.sum(F.rms_norm(x, x.shape[-1], w) * c),
+        lambda x, w, c: F.sum((_layer_norm(x, w) + w) * c),
+        lambda x, w, c: F.sum(F.softmax(x * w, -1) * c),
+    ],
+    ids=["rms norm", "layer norm", "softmax"],
+)
+def test_short_rows_are_a_simd_group_each(f, n):
+    """Row kernels of short rows (a model's width of 64, an attention
+    head's 16) reduce each row in a SIMD group, eight a threadgroup (none
+    left idle), forward and backward (its weight's gradient's blocks too,
+    each SIMD group's rows combined in order): the CPU's values, the same
+    bits each run; rows not a multiple of eight too."""
+    x, w, c = rand(1003, n), rand(n, seed=1), rand(1003, n, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    rows = [s for s in steps if s["fusion"] and "simd_sum" in s["fusion"]["source"]]
+    assert rows, [s["label"] for s in steps]
+    got = [[lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)] for _ in range(2)]
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, a, e in zip(*got, want):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "f, sums",
+    [
+        (lambda x, w, c: F.sum(F.rms_norm(x, 64, w) * c), 1),
+        (lambda x, w, c: F.sum((_layer_norm(x, w) + w) * c), 2),
+    ],
+    ids=["rms norm", "layer norm"],
+)
+def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
+    """A normalization's weight's gradient (``Σ_rows g·y``), a sum over
+    rows its backward's row kernel reads the values of: that kernel adds
+    them as it goes (a threadgroup a block of rows, each column's sum in
+    registers), writing a block's sums each, then one kernel sums those
+    (a block at a time, in order): two kernels for the backward, the sums
+    the same bits every run, the gradients the CPU's."""
+    x, w, c = rand(1024, 64), rand(64, seed=1), rand(1024, 64, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    grad = lumen.grad(f, (0, 1))
+    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
+    assert len(backward) == 1, [s["label"] for s in steps]
+    assert len(backward[0]["extra_outputs"]) == sums
+    # The blocks' sums, each summed by one launch (unsplit: few blocks).
+    final = [s for s in steps if s["primitive"] == "reduce_sum"]
+    assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
+    got = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
+    again = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, a, e in zip(got, again, want):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
 def test_ops_are_functions():
@@ -1109,11 +1422,20 @@ class _ScaledMatmul(lumen.nn.Module):
     [
         (lambda x, w, y: F.relu(x @ w + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
         (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
-        (lambda x, w, y: F.relu(x @ w).float(), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
+        (lambda x, w, y: x @ w + y, [(3, 40, 24), (24, 56), (3, 40, 56)], "float32"),
+        (
+            lambda x, w, y: F.relu(F.matmul(x, w, "float32", "float32")).bfloat16(),
+            [(64, 96), (96, 80), (64, 80)],
+            "bfloat16",
+        ),
         (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
-        (lambda x, w, y: _silu((x @ w).float()).to(dtype=x.dtype), [(64, 96), (96, 80), (64, 80)], "bfloat16"),
+        (
+            lambda x, w, y: _silu(F.matmul(x, w, "float32", "float32")).to(dtype=x.dtype),
+            [(64, 96), (96, 80), (64, 80)],
+            "bfloat16",
+        ),
     ],
-    ids=["bias relu", "batched residual", "relu cast", "times exp(y)", "silu in float32"],
+    ids=["bias relu", "batched residual", "folded residual", "relu cast", "times exp(y)", "silu in float32"],
 )
 def test_matmul_epilogues_fuse(f, shapes, dtype):
     """The elementwise primitives after a matmul (a bias, a residual, an
@@ -1139,6 +1461,27 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
 
 def _silu(h):
     return h * F.sigmoid(h)
+
+
+@pytest.mark.mps
+def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
+    """A matmul whose result is rounded narrower than it accumulates
+    (bfloat16 of float32) keeps a widening cast of it out of its epilogue:
+    the epilogue fuses up to it (an add), the cast and what reads it a
+    kernel after. Its result wanted wider, its output_dtype says so (one
+    kernel)."""
+    m = lambda *s, d="bfloat16": lumen.empty(list(s), dtype=d, device="meta")  # noqa: E731
+    args = (m(64, 96), m(96, 80), m(64, 80, d="float32"))
+    labels = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]  # noqa: E731
+    # The rounding then widening is what the precision check warns of.
+    with pytest.warns(UserWarning, match="casts it back"):
+        assert labels(lambda x, w, r: (x @ w).float() + r) == ["dot_general", "cast(bfloat16 -> float32) → add"]
+    with pytest.warns(UserWarning, match="casts it back"):
+        assert labels(lambda x, w, r: ((x @ w) + 1.0).float() + r) == [
+            "dot_general → add",
+            "cast(bfloat16 -> float32) → add",
+        ]
+    assert labels(lambda x, w, r: F.matmul(x, w, "float32", "float32") + r) == ["dot_general → add"]
 
 
 @pytest.mark.mps

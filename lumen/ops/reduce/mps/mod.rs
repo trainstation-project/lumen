@@ -46,7 +46,8 @@ pub(crate) enum Layout {
     /// Any axes, a thread an output (`reduce`): inputs of 2^32 elements or
     /// more.
     Generic,
-    /// Any axes, lanes of threads an output (`reduce_grouped`).
+    /// Any axes, lanes of threads an output (`reduce_grouped`); rows too
+    /// short for a threadgroup each too.
     Grouped,
     /// Consecutive axes, viewed as [a, count, b]: rows when b = 1
     /// (`reduce_rows`), columns otherwise (`reduce_cols`); split into
@@ -58,13 +59,20 @@ pub(crate) enum Layout {
 
 pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
     let (x, reduced) = normalize(x, axes);
+    let grouped = x.numel() <= u32::MAX as usize;
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
-        return match split(&x, &reduced).b {
+        let Split { count, b, .. } = split(&x, &reduced);
+        // Rows too short for a threadgroup each (fewer elements than its
+        // threads' lanes would take: an attention's head, of 16): several
+        // a threadgroup, as grouped lanes.
+        let lanes = count.div_ceil((LANE_BYTES / x.dtype.size_of()).max(1));
+        return match b {
+            1 if grouped && lanes < REDUCE_THREADS => Layout::Grouped,
             1 => Layout::Rows,
             _ => Layout::Cols,
         };
     }
-    match x.numel() <= u32::MAX as usize {
+    match grouped {
         true => Layout::Grouped,
         false => Layout::Generic,
     }

@@ -174,7 +174,8 @@ pub(crate) struct Backward {
     pub hv: usize,
     pub scores: Vec<Score>,
     pub causal: Option<i64>,
-    /// What `P^T (dP^T - D)` is multiplied by: the scale.
+    /// What `P^T (dP^T - D)` is multiplied by: the scale (1 if it is not,
+    /// the scores unscaled: `* 1` simplified away).
     pub ds_scale: f64,
     /// The operands' dtype, P's and dS's for their dots.
     pub dtype: DType,
@@ -291,6 +292,7 @@ pub(crate) fn fuse_backward(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
         // A fusion's output: the fusion's. Any other node as it is (before
         // the fusions placed at it).
         if !fusions.iter().any(|(_, outs, _)| outs.contains(&i)) {
@@ -445,6 +447,7 @@ pub(crate) fn fuse(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        out.set_scope(node.scope);
         // A log-sum-exp after its attention: the fusion's output already.
         if found
             .iter()
@@ -485,6 +488,8 @@ pub(crate) fn fuse(
             std::iter::once("flash_attention").chain(chain.iter().map(|&n| graph.label(&nodes[n])));
         let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
+        // Under the attention's scope, not its epilogue's end's.
+        out.set_scope(nodes[a.root].scope);
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out
             .apply(fusion, &reads)
@@ -865,18 +870,20 @@ impl<'a> Matcher<'a> {
             free(ty(do_).shape.len(), &[rb2, rc2])?,
         );
         let m1_out = m1.output;
-        let [m2] = self.readers[m1_out][..] else {
-            return None;
+        // Times the scale; none if it is 1 (`* 1` simplified away: scores
+        // not scaled).
+        let scaled = match self.readers[m1_out][..] {
+            [m2] if !self.output[m1_out] && matches!(nodes[m2].primitive, Mul) => {
+                let (a, b) = (nodes[m2].inputs[0], nodes[m2].inputs[1]);
+                let c = match a == m1_out {
+                    true => self.scalar(b),
+                    false => self.scalar(a),
+                };
+                c.map(|c| (c, nodes[m2].output))
+            }
+            _ => None,
         };
-        if self.output[m1_out] || !matches!(nodes[m2].primitive, Mul) {
-            return None;
-        }
-        let (a, b) = (nodes[m2].inputs[0], nodes[m2].inputs[1]);
-        let ds_scale = match a == m1_out {
-            true => self.scalar(b)?,
-            false => self.scalar(a)?,
-        };
-        let mut ds = nodes[m2].output;
+        let (ds_scale, mut ds) = scaled.unwrap_or((1.0, m1_out));
         if let [c] = self.readers[ds][..]
             && !self.output[ds]
             && matches!(nodes[c].primitive, Cast { .. })
@@ -1325,8 +1332,10 @@ impl<'a> Matcher<'a> {
     }
 
     /// `v` as read from the buffer it comes from: back through transposes,
-    /// slices, broadcasts and reshapes read only once: that buffer, the
-    /// offset, and each of `v`'s dimensions' (stride, divisor).
+    /// slices, broadcasts and reshapes (read elsewhere too or not: a
+    /// layout, each reader reads through it, as a training step's forward
+    /// and backward kernels read q, k and v in a merged dot's result): that
+    /// buffer, the offset, and each of `v`'s dimensions' (stride, divisor).
     fn view(&self, v: Var) -> (Var, usize, Vec<(usize, usize)>) {
         use Primitive::*;
         let own = || {
@@ -1340,7 +1349,7 @@ impl<'a> Matcher<'a> {
                     .collect(),
             )
         };
-        let Some(n) = self.node(v).filter(|_| self.single(v)) else {
+        let Some(n) = self.node(v) else {
             return own();
         };
         let layout = matches!(

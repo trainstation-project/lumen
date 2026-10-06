@@ -120,6 +120,22 @@ pub enum Primitive {
     /// operand after it, its value is the operand's buffer, the update written
     /// there alone (in place: `graph/plan.rs`).
     DynamicUpdateSlice,
+    /// The operand's entries along `axis` that `indices` (its second
+    /// operand: int32 or int64, any shape) pick: its shape with `axis`
+    /// replaced by the indices' (`jnp.take`; MLX's `take`, `weight[ids]`: an
+    /// embedding's lookup). Each index is clamped into the axis, as XLA's
+    /// gather clamps.
+    Gather {
+        axis: usize,
+    },
+    /// The operand with `updates` (its third operand, shaped as a
+    /// [`Primitive::Gather`] of it at `indices`, its second) added at the
+    /// entries along `axis` the indices pick (clamped into it, as the
+    /// gather's), several at one entry each added: a gather's gradient
+    /// (`lax.scatter_add`, MLX's `scatter_add`).
+    ScatterAdd {
+        axis: usize,
+    },
     /// The operands one after another along `dimension`, their other
     /// dimensions equal (`lax.concatenate`).
     Concatenate {
@@ -215,6 +231,8 @@ impl Primitive {
             Slice { .. } => "slice",
             DynamicSlice { .. } => "dynamic_slice",
             DynamicUpdateSlice => "dynamic_update_slice",
+            Gather { .. } => "gather",
+            ScatterAdd { .. } => "scatter_add",
             Concatenate { .. } => "concatenate",
             Full { .. } => "full",
             Iota { .. } => "iota",
@@ -251,8 +269,8 @@ impl Primitive {
         let arity = match self {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
-            Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } => 2,
-            Select => 3,
+            Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
+            Select | ScatterAdd { .. } => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
             CustomCall { .. } => args.len(),
@@ -453,6 +471,17 @@ impl Primitive {
                 }
                 Ok(TensorType::new(x.dtype, slice_sizes))
             }
+            Gather { axis } => gathered(args[0], args[1], *axis).map_err(prefix),
+            ScatterAdd { axis } => {
+                let (x, updates) = (args[0], args[2]);
+                let want = gathered(x, args[1], *axis).map_err(prefix)?;
+                if *updates != want {
+                    return err(format!(
+                        "the updates {updates} are not {want}, a gather of {x}"
+                    ));
+                }
+                Ok(x.clone())
+            }
             DynamicUpdateSlice => {
                 let (x, update) = (args[0], args[1]);
                 check_indices(x, &args[2..]).map_err(prefix)?;
@@ -578,6 +607,26 @@ impl fmt::Display for Tuple<'_> {
 /// float32 for floats narrower than it (fp16, bf16, later fp8 and fp4).
 /// Ok if `indices` are start indices into `x`: integer scalars of one
 /// dtype, int32 or int64 (the MPS kernels', as XLA's).
+/// The type of a gather of `x` at `indices` along `axis`: `x`'s shape with
+/// `axis` replaced by the indices'.
+fn gathered(x: &TensorType, indices: &TensorType, axis: usize) -> Result<TensorType, String> {
+    if axis >= x.shape.len() {
+        return Err(format!("axis {axis} is not a dimension of {x}"));
+    }
+    if !matches!(indices.dtype, DType::I32 | DType::I64) {
+        return Err(format!(
+            "indices into {x} are int32 or int64, got {indices}"
+        ));
+    }
+    let shape: Vec<usize> = x.shape[..axis]
+        .iter()
+        .chain(&indices.shape)
+        .chain(&x.shape[axis + 1..])
+        .copied()
+        .collect();
+    Ok(TensorType::new(x.dtype, &shape))
+}
+
 fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> {
     let dtype = indices.first().map(|i| i.dtype);
     let valid = indices.iter().all(|i| {
@@ -686,6 +735,7 @@ impl fmt::Display for Primitive {
                 Tuple(shape)
             ),
             Transpose { permutation } => write!(f, "[permutation={}]", Tuple(permutation)),
+            Gather { axis } | ScatterAdd { axis } => write!(f, "[axis={axis}]"),
             Slice {
                 start_indices,
                 limit_indices,

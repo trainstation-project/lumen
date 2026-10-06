@@ -15,6 +15,7 @@ pub mod dynamic_slice;
 pub mod elementwise;
 pub mod factory;
 pub mod fill;
+pub mod gather;
 pub mod layout;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;

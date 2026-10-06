@@ -59,17 +59,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let config = &options.config;
     // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match config.fuse && config.merge_dots {
-        // Not a donated parameter: its new value is written over it, which
-        // a block holding it would not know.
+        // A donated parameter (a weight the program assigns: its new value
+        // written over it) only as a contiguous part of its block, which the
+        // new value is written into in place (`merge_dots`).
         true => {
-            let packable: Vec<bool> = (0..options.packable.len())
+            let donated: Vec<bool> = (0..options.packable.len())
                 .map(|i| {
-                    let donated = options.donate.contains(&i)
-                        || options.donate_into.iter().any(|&(j, _)| j == i);
-                    options.packable[i] && !donated
+                    options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
                 })
                 .collect();
-            merge_dots(graph, &packable)
+            merge_dots(graph, &options.packable, &donated)
         }
         false => (graph.clone(), Vec::new()),
     };
@@ -144,10 +143,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .collect();
     let fused = if config.fuse {
         // Normalization diamonds: each chain one fusion, its reductions
-        // inside.
-        let rows = match config.normalization_diamonds {
-            true => diamonds::diamonds(&graph),
-            false => Vec::new(),
+        // inside; and the sums over rows they compute as they go.
+        let (graph, rows) = match config.normalization_diamonds {
+            true => diamonds::partials(&graph, diamonds::diamonds(&graph)),
+            false => (graph.clone(), Vec::new()),
         };
         loop {
             kernels.clear();
@@ -216,21 +215,46 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         views: dot_views(&fused),
         scalars,
         memory_limit: config.memory_limit(),
+        // The blocks it added, after the graph's inputs, each holding its
+        // members (donated ones written in place once no step reads it).
+        blocks: packed
+            .iter()
+            .enumerate()
+            .map(|(k, (members, _))| (merged.inputs().len() - packed.len() + k, members.clone()))
+            .collect(),
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named
-    // `Nx dot_general`.
+    // `Nx dot_general`. So does one reading a value computed from a block
+    // alone, of its size (its weights' elementwise chain: a cast).
     let first_block = fused.inputs().len() - packed.len();
+    let mut derived: Vec<(Buffer, usize)> = Vec::new();
     for step in plan.steps_mut() {
-        if !matches!(step.primitive, Primitive::DotGeneral { .. }) {
-            continue;
-        }
-        let block = step.inputs.iter().find_map(|(b, _)| match *b {
+        // Read whole (not as a view: one weight's part of it).
+        let whole = step
+            .inputs
+            .iter()
+            .zip(&step.views)
+            .filter(|(_, v)| v.is_none());
+        let block = whole.map(|(input, _)| input).find_map(|(b, _)| match *b {
             Buffer::Input(i) if i >= first_block => Some(i - first_block),
-            _ => None,
+            b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
         });
-        if let Some(k) = block {
-            step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+        let output = step.output.0;
+        derived.retain(|(d, _)| *d != output);
+        if matches!(step.primitive, Primitive::DotGeneral { .. }) {
+            if let Some(k) = block {
+                step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+            }
+        } else if let Some(k) = block {
+            let n = step.output.1.numel();
+            let of_block = step
+                .inputs
+                .iter()
+                .all(|(_, ty)| ty.numel() == n || ty.numel() == 1);
+            if of_block {
+                derived.push((output, k));
+            }
         }
     }
     plan.packed = packed;
@@ -248,6 +272,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
+        out.set_scope(node.scope);
         let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let primitive = match &node.primitive {
             p @ Primitive::DotGeneral {
@@ -389,6 +414,7 @@ fn concatenates_alone(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
+        out.set_scope(node.scope);
         let primitive = match node.primitive {
             Primitive::Concatenate { .. } => {
                 let mut reads: Vec<Var> = Vec::new();
@@ -594,18 +620,18 @@ pub(crate) fn encode(
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
         return launch(&kernel, &buffers, &args, plan.grid, keep, step.label);
     }
-    // A row kernel: a threadgroup a row of the last dimension.
+    // A row kernel: a threadgroup a row of the last dimension (a block of
+    // rows, with partials).
     if !codegen::row_reductions(body).is_empty() {
-        let out = &step.output.1;
-        let n = out.shape.last().copied().unwrap_or(1);
-        let rows = out.numel().checked_div(n).unwrap_or(0);
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
+        // Its values of a row each read elsewhere too.
+        buffers.extend(extra);
         return launch(
             name,
             &buffers,
             &scalars,
-            Grid::Groups([rows, 1, 1]),
+            Grid::Groups([codegen::row_groups(body), 1, 1]),
             keep,
             step.label,
         );

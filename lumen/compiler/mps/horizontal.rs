@@ -24,12 +24,16 @@
 //! after it: members of groups alone (another group's, run later), so no
 //! other step moves. The members' operands live until it runs: those that
 //! would have died sooner may hold at most [`MAX_EXTENDED_BYTES`].
+//!
+//! Only fusions traced in the same `record_function` calls are one kernel
+//! (two layers' weight casts are two): a kernel runs in one call's ranges
+//! when profiled, so each member keeps its own.
 
 use std::collections::HashMap;
 
 use super::{codegen, fusion, split_k};
 use crate::compiler::attention;
-use crate::graph::{Graph, Node, Primitive, Var, intern};
+use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 
 /// The most fusions in one kernel (XLA's `kMaxFusionBatchSize`).
 const MAX_MEMBERS: usize = 32;
@@ -146,9 +150,11 @@ pub(crate) fn fuse(
     let mut groups: Vec<Group> = Vec::new();
     let mut group_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let bytes = |v: Var| graph.type_of(v).numel() * graph.type_of(v).dtype.size_of();
-    // Groups still growing, by their members' elements and (tiled as a
-    // transpose: by their tile, so of one shape) their shape.
-    let mut open: HashMap<(usize, Option<Vec<usize>>), Vec<usize>> = HashMap::new();
+    // Groups still growing, by their members' elements, (tiled as a
+    // transpose: by their tile, so of one shape) their shape, and their
+    // `record_function` calls (their scope).
+    type Key = (usize, Option<Vec<usize>>, Scope);
+    let mut open: HashMap<Key, Vec<usize>> = HashMap::new();
     for (c, node) in nodes.iter().enumerate() {
         // Each of a fusion's outputs read as a value of the graph.
         let whole = match &node.primitive {
@@ -163,7 +169,7 @@ pub(crate) fn fuse(
             Primitive::Fusion { body, .. } => codegen::transpose_tiling(body).is_some(),
             _ => false,
         };
-        let key = (ty.numel(), tiled.then(|| ty.shape.clone()));
+        let key = (ty.numel(), tiled.then(|| ty.shape.clone()), node.scope);
         let mut mine = node.inputs.clone();
         mine.sort_unstable();
         mine.dedup();
@@ -313,6 +319,7 @@ pub(crate) fn fuse(
     for i in order {
         let node = &nodes[i];
         let Some(k) = group_of[i] else {
+            out.set_scope(node.scope);
             let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
@@ -341,6 +348,8 @@ pub(crate) fn fuse(
             })
             .collect();
         let label = intern(labels.join(" | "));
+        // Its members' scope (one: they group by it).
+        out.set_scope(nodes[g.members[0]].scope);
         let reads: Vec<Var> = g.reads.iter().map(|&v| map[v]).collect();
         let fused = out
             .apply(Primitive::Fusion { name, label, body }, &reads)

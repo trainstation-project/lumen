@@ -37,6 +37,8 @@ __all__ = [
     "slice",
     "dynamic_slice",
     "dynamic_update_slice",
+    "gather",
+    "scatter_add",
     "concatenate",
     "full",
     "iota",
@@ -221,6 +223,22 @@ def dynamic_update_slice(x, update, start_indices):
     reads ``x`` after it, written in ``x``'s memory alone (in place: a
     donated input's, a weight assigned with ``copy_``)."""
     return bind("dynamic_update_slice", x, update, *_start_indices(start_indices))
+
+
+def gather(x, indices, axis):
+    """``x``'s entries along ``axis`` that ``indices`` (int32 or int64, any
+    shape) pick: ``x``'s shape with ``axis`` replaced by the indices'
+    (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index clamped into
+    the axis."""
+    return bind("gather", x, indices, axis=axis)
+
+
+def scatter_add(x, indices, updates, axis):
+    """``x`` with ``updates`` (shaped as :func:`gather` of it at ``indices``)
+    added at the entries along ``axis`` the indices pick, clamped as the
+    gather's (``lax.scatter_add``): a gather's gradient. Where nothing reads
+    ``x`` after it, added in ``x``'s memory (in place)."""
+    return bind("scatter_add", x, indices, updates, axis=axis)
 
 
 def _custom_call(operands, name, kernel, mutated, overlappable=()):
