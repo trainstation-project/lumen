@@ -45,7 +45,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in nodes {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let apply =
             |out: &mut Graph, p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");
@@ -59,6 +59,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         } = &node.primitive
         else {
             map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
+            out.set_label(map[node.output], node.label);
             continue;
         };
         let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
@@ -78,6 +79,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         };
         let Some((l, r, s)) = split else {
             map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
+            out.set_label(map[node.output], node.label);
             continue;
         };
         // Contracting dimension d as [S, K / S]: S a batch dimension.
@@ -116,8 +118,13 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
                 out.apply(fusion, &[a, b]).expect("well typed")
             }
             false => {
+                // Labelled as what they are (the atomic one's fusion is
+                // `dot_general (split-K)`): ordinary primitives otherwise.
                 let partials = apply(&mut out, dot, &[a, b]);
-                apply(&mut out, sum, &[partials])
+                out.set_label(partials, Some("dot_general (split-K)"));
+                let sum = apply(&mut out, sum, &[partials]);
+                out.set_label(sum, Some("reduce_sum (split-K)"));
+                sum
             }
         };
         if *output_dtype != DType::F32 {

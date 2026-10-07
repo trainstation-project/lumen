@@ -283,13 +283,20 @@ pub(crate) fn merge_dots(
     // Each merged group's operand: its block's chain (the block itself if
     // none), for the groups reusing it.
     let mut chains: Vec<Option<Var>> = vec![None; groups.len()];
+    // Each merged group's dots' operands (their parameters' chains: a
+    // bfloat16 copy each), its dimension, and its block's chain: a
+    // concatenate of those, side by side, is it (a gated pair's backward's
+    // `[W1 | W2]`, `gated_backward`).
+    let mut parts: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         if parted[node.output] {
             continue;
         }
         if let Some(k) = first_of[i] {
             let g = &groups[k];
+            // The merged dot (and its block's chain): all the group's lines.
+            out.set_origins(&g.nodes.iter().map(|&m| &nodes[m]).collect::<Vec<_>>());
             let mut operands = [map[g.shared]; 2];
             let value = match reuses[k] {
                 Some(e) => chains[e].expect("an earlier group's block"),
@@ -339,6 +346,14 @@ pub(crate) fn merge_dots(
                 }
             };
             operands[1 - g.side] = value;
+            parts.push((
+                g.nodes
+                    .iter()
+                    .map(|&m| nodes[m].inputs[1 - g.side])
+                    .collect(),
+                g.dimension,
+                value,
+            ));
             // Each dot's operand, for its other readers: its part of the
             // block's chain (once: a reusing group's may be the same).
             if !g.chain.is_empty() {
@@ -386,6 +401,7 @@ pub(crate) fn merge_dots(
                     start_indices: starts,
                     limit_indices: limits,
                 };
+                out.set_origin(&nodes[m]);
                 map[nodes[m].output] = out.apply(slice, &[result]).expect("within the result");
                 start += size;
             }
@@ -395,19 +411,21 @@ pub(crate) fn merge_dots(
             continue;
         }
         // A concatenate of a merged group's operands, as they are side by
-        // side: their block.
+        // side: their block (or its chain).
         if let Primitive::Concatenate { dimension } = node.primitive
-            && let Some((_, _, block)) = blocks
+            && let Some(&(_, _, block)) = blocks
                 .iter()
+                .chain(&parts)
                 .find(|(others, d, _)| *others == node.inputs && *d == dimension)
         {
-            map[node.output] = *block;
+            map[node.output] = block;
             continue;
         }
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         map[node.output] = out
             .apply(node.primitive.clone(), &inputs)
             .expect("the node's own operands");
+        out.set_label(map[node.output], node.label);
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");

@@ -220,6 +220,7 @@ fn body_of(graph: &Graph, producer: &[Option<usize>], outputs: &[Var], bases: &[
     for &n in &members {
         let node = &nodes[n];
         let ins: Vec<Var> = node.inputs.iter().map(|v| var[v]).collect();
+        body.set_origin(node);
         let v = body
             .apply(node.primitive.clone(), &ins)
             .expect("a node of the graph");
@@ -292,7 +293,7 @@ pub(crate) fn fuse_backward(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         // A fusion's output: the fusion's. Any other node as it is (before
         // the fusions placed at it).
         if !fusions.iter().any(|(_, outs, _)| outs.contains(&i)) {
@@ -300,6 +301,7 @@ pub(crate) fn fuse_backward(
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
+            out.set_label(map[node.output], node.label);
         }
         for (_, outs, bases) in fusions.iter().filter(|(at, _, _)| *at == i) {
             let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
@@ -447,7 +449,7 @@ pub(crate) fn fuse(
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         // A log-sum-exp after its attention: the fusion's output already.
         if found
             .iter()
@@ -461,6 +463,7 @@ pub(crate) fn fuse(
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
+            out.set_label(map[node.output], node.label);
             continue;
         };
         // The fusion's inputs: the buffers it reads; its body, every node
@@ -489,7 +492,7 @@ pub(crate) fn fuse(
         let label = crate::graph::intern(label.collect::<Vec<_>>().join(FUSION_SEPARATOR));
         let fusion = Primitive::Fusion { name, label, body };
         // Under the attention's scope, not its epilogue's end's.
-        out.set_scope(nodes[a.root].scope);
+        out.set_origin(&nodes[a.root]);
         let reads: Vec<Var> = bases.iter().map(|&b| map[b]).collect();
         map[node.output] = out
             .apply(fusion, &reads)

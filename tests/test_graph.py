@@ -388,6 +388,12 @@ def test_dump_graph(tmp_path):
         "broadcast_in_dim",
         "max",
     ]
+    # Each node's line of the program, its file's text with it: the
+    # lambda's, here.
+    lines = {tuple(src) for n in data["views"]["traced"]["nodes"] if n["kind"] == "node" for src in n["sources"]}
+    ((file, line),) = lines
+    assert file == __file__ and "F.relu(x @ w)" in data["code"][file].splitlines()[line - 1]
+    assert {tuple(src) for n in data["views"]["fused"]["nodes"] for src in n.get("sources", [])} == lines
     # Another signature, traced for the dump.
     data = f.dump_graph(
         tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16")
@@ -622,7 +628,7 @@ def test_indexing_and_splitting_follow_numpy():
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_packed_weights_are_one_matmul(device):
     """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
-    matmul, its halves read in place by the fused gate on MPS."""
+    matmul, on MPS the gate its epilogue (its halves a gated pair)."""
     x, w13 = rand(16, 32), rand(32, 128, seed=1)
     try:
         args = [lumen.from_numpy(a).to(device) for a in (x, w13)]
@@ -639,8 +645,9 @@ def test_packed_weights_are_one_matmul(device):
     graph = lumen.make_graph(gated)(*args)
     steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
     if device == "mps":
-        assert steps[0] == "dot_general" and len(steps) == 2 and steps[1].startswith("slice → slice")
-    assert steps.count("dot_general") == 1
+        assert steps == ["dot_general → max → mul"], steps
+    else:
+        assert steps.count("dot_general") == 1
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -668,7 +675,8 @@ class Gated(lumen.nn.Module):
 def test_dots_sharing_an_operand_merge(device):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
     x and a block holding w1 and w3 side by side (XLA's DotMerger, with the
-    weights placed together instead of concatenated)."""
+    weights placed together instead of concatenated), the gate its epilogue
+    (a gated pair: one kernel)."""
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
     model = Gated(meta(32, 64), meta(32, 64))
     f = lumen.compile(lambda model, x: model(x), device=device)
@@ -684,16 +692,16 @@ def test_dots_sharing_an_operand_merge(device):
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
-        assert steps[0] == "dot_general" and len(steps) == 2 and "concatenate" not in steps
+        assert len(steps) == 1 and "concatenate" not in steps
         # Named for the dots it computes, in the plan and the profiler.
-        assert plan.steps()[0]["label"] == "2x dot_general"
+        assert plan.steps()[0]["label"] == "2x dot_general → max → mul"
         from lumen.profiler import ProfilerActivity, profile
 
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             f(model, lumen.from_numpy(x))
             lumen.mps.synchronize()
         names = {(e["kind"], e["name"]) for e in prof.events()}
-        assert {("op", "2x dot_general"), ("gpu", "2x dot_general")} <= names
+        assert {("op", "2x dot_general → max → mul"), ("gpu", "2x dot_general → max → mul")} <= names
     else:
         assert plan.packed == [] and steps.count("dot_general") == 2
 
@@ -712,8 +720,9 @@ class Attention(lumen.nn.Module):
 def test_attention_projections_merge_into_one_matmul():
     """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
     of the three weights; the attention (one flash-attention kernel) reads
-    them in place. As traced, the matmuls reading q and v read them in
-    place, strided views of its result, and k's transpose fuses its slice."""
+    them in place. As traced, the matmuls reading q, k and v read them in
+    place, strided views of its result (k's transpose read as the dot's
+    dimensions)."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -735,7 +744,7 @@ def test_attention_projections_merge_into_one_matmul():
     merged, attention = plan.steps()
     assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
     assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
-    # As traced: its matmuls read q and v as strided views.
+    # As traced: its matmuls read q, k and v as strided views.
     lumen.config.compiler.flash_attention = False
     try:
         plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
@@ -751,7 +760,7 @@ def test_attention_projections_merge_into_one_matmul():
     ]
     assert "slice" not in [s["primitive"] for s in steps]
     views = [v for s in steps for v in s["views"] if v is not None]
-    assert views == [(0, [96, 1]), (64, [96, 1])]
+    assert views == [(0, [96, 1]), (32, [96, 1]), (64, [96, 1])]
 
 
 class Heads(lumen.nn.Module):
@@ -789,6 +798,9 @@ def test_trained_attention_reads_merged_projections_in_place():
     for s in attention:
         assert merged in [b for b, *_ in s["inputs"]], (s["label"], s["inputs"])
     assert not [label for label in labels if label.startswith("slice")], labels
+    # Not a gated pair's backward (q, k and v are three: no two of their
+    # gradients' dots merged, which would copy two of the block's weights).
+    assert not [label for label in labels if "concatenate" in label], labels
 
 
 class QKV(lumen.nn.Module):
@@ -809,6 +821,303 @@ class MixedQKV(QKV):
 
     def __call__(self, x):
         return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
+
+
+class SwiGLU(lumen.nn.Module):
+    """A gated MLP's up projection, ``silu(x @ w1.t()) * (x @ w3.t())``: in
+    float32, or (``mixed``) of bfloat16 operands, the gate in float32, the
+    result bfloat16 (read back as float32)."""
+
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x, mixed=False, gate=False):
+        if mixed:
+            g = F.matmul(x.bfloat16(), self.w1.t().bfloat16(), "float32", "float32")
+            u = F.matmul(x.bfloat16(), self.w3.t().bfloat16(), "float32", "float32")
+            z = (g * F.sigmoid(g) * u).bfloat16().float()
+        else:
+            g, u = x @ self.w1.t(), x @ self.w3.t()
+            z = g * F.sigmoid(g) * u
+        return (z, g) if gate else z
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("mixed", [False, True], ids=["float32", "mixed precision"])
+@pytest.mark.parametrize("hidden", [256, 344], ids=["even tiles", "ragged"])
+def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
+    """Two projections of one input combined elementwise (SwiGLU's gate and
+    value): one matmul of their block whose epilogue computes the gate (its
+    tile holding each pair's columns side by side, ``PAIRED``), neither
+    projection written out; the values the CPU's. One whose gate is an
+    output too is not paired (its dots unmerged), its values the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    m, d = 300, 128
+    values = {"w1": rand(hidden, d) / np.sqrt(d), "w3": rand(hidden, d, seed=1) / np.sqrt(d)}
+    x = rand(m, d, seed=2)
+    for gate in (False, True):
+        out = {}
+        for device in ("cpu", "mps"):
+            model = SwiGLU(meta(hidden, d), meta(hidden, d))
+
+            def f(model, x):
+                return model(x, mixed, gate)
+
+            g = lumen.compile(f, device=device)
+            g(model, meta(m, d))
+            model.load_state_dict({k: lumen.from_numpy(v.astype(np.float32)) for k, v in values.items()})
+            result = g(model, lumen.from_numpy(x))
+            out[device] = [lumen.to_numpy(v) for v in (result if gate else [result])]
+            if device == "mps":
+                graph = lumen.make_graph(f)(model, meta(m, d))
+                steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
+                dots = [s["label"] for s in steps if "dot_general" in s["label"]]
+                if gate:
+                    assert len(dots) == 2, dots
+                else:
+                    assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
+                    assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
+                    # Its lines of the program: both matmuls'.
+                    (merged,) = [s for s in steps if s["label"].startswith("2x")]
+                    code = open(__file__).read().splitlines()
+                    traced = "\n".join(code[line - 1] for file, line in merged["sources"] if file == __file__)
+                    assert "self.w1.t()" in traced and "self.w3.t()" in traced, merged["sources"]
+        tol = 2e-2 if mixed else 1e-5
+        for got, want in zip(out["mps"], out["cpu"]):
+            np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())
+
+
+class GatedMLP(lumen.nn.Module):
+    """A projection, then a gated MLP of bfloat16 matmuls (ReGLU, or
+    SwiGLU's gate in float32): the projection so its input needs a
+    gradient, as a layer's does in a model."""
+
+    w0: lumen.Tensor
+    wg: lumen.Tensor
+    wu: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, inp, swiglu):
+        x = F.matmul(inp, self.w0.t().bfloat16(), "float32", "bfloat16")
+        if swiglu:
+            g = F.matmul(x, self.wg.t().bfloat16(), "float32", "float32")
+            u = F.matmul(x, self.wu.t().bfloat16(), "float32", "float32")
+            h = (g * F.sigmoid(g) * u).bfloat16()
+        else:
+            h = F.relu(x @ self.wg.t().bfloat16()) * (x @ self.wu.t().bfloat16())
+        return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
+def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
+    """A gated pair's backward (``gated_backward``): its input's gradient one
+    dot of its cotangents side by side and the forward's weight block (K
+    twice as long, no copy of the weights), its weights' gradients one dot;
+    the cotangents the down projection's gradient GEMM's expanding
+    epilogue, written side by side, whatever the gate (SwiGLU's in float32,
+    from the rounded gradient widened: an upcast only that epilogue takes).
+    The forward the merged dot's paired epilogue, its halves (which the
+    backward reads) written by it too. The gradients the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    # m apart from 2h: no two of its values alike in size.
+    m, d, h = 384, 64, 256
+    values = {
+        "w0": rand(d, d) / 8,
+        "wg": rand(h, d, seed=1) / 8,
+        "wu": rand(h, d, seed=2) / 8,
+        "w2": rand(d, h, seed=3) / 16,
+    }
+    x = rand(m, d, seed=4)
+
+    def step(model, x):
+        y = model(x.bfloat16(), swiglu).float()
+        F.sum(y * y).backward()
+        return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
+
+    grads = {}
+    for device in ("cpu", "mps"):
+        model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+        f = lumen.compile(step, device=device)
+        with pytest.warns(UserWarning, match="the rounding loses precision"):
+            f(model, meta(m, d))
+        model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+        grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    for got, want in zip(grads["mps"], grads["cpu"]):
+        assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+    with pytest.warns(UserWarning, match="the rounding loses precision"):
+        graph = lumen.make_graph(step)(model, meta(m, d))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    labels = [s["label"] for s in steps]
+    # The forward: the pair's epilogue (writing h [m, h], and the halves the
+    # backward reads, no kernel of its own slicing them); the weights'
+    # gradients: one dot ([2h, d], named as the two it computes); the
+    # input's gradient: one dot of the block (K = 2h), written as x's.
+    merged = [s for s in steps if s["label"].startswith("2x dot_general")]
+    assert [s["output"][2] for s in merged] == [[m, h], [2 * h, d], [m, d]], labels
+    assert "mul" in merged[0]["label"] and not any(label.startswith("slice") for label in labels), labels
+    expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert sum("concatenate" in label for label in labels) == 1, labels
+
+
+class _GatedMLPFunction(lumen.autograd.Function):
+    """``sigmoid(x wg^T) * (x wu^T)`` then ``wd``, in bfloat16 matmuls, its
+    backward by hand (``examples/transformer.py``'s): the weights' gradients
+    ``g.t() @ x``, transposes of computed values."""
+
+    @staticmethod
+    def forward(ctx, x, wg, wu, wd):
+        g = F.matmul(x, wg.t().bfloat16(), "float32", "float32")
+        u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
+        ctx.save_for_backward(x, g, u, wg, wu, wd)
+        return F.matmul((F.sigmoid(g) * u).bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, g, u, wg, wu, wd = ctx.saved_tensors
+        s = F.sigmoid(g)
+        dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
+        dwd = F.matmul(dy.t(), (s * u).bfloat16(), "float32", "float32")
+        du = (dh * s).bfloat16()
+        dg = (dh * u * s * (1 - s)).bfloat16()
+        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32") + F.matmul(du, wu.bfloat16(), "float32", "float32")
+        dwg = F.matmul(dg.t(), x, "float32", "float32")
+        dwu = F.matmul(du.t(), x, "float32", "float32")
+        return dx.bfloat16(), dwg, dwu, dwd
+
+
+@pytest.mark.mps
+def test_hand_written_gated_backward_merges_as_autodiffs():
+    """A gated pair's backward written by hand (a ``Function``, its
+    weights' gradients ``g.t() @ x``): merged as autodiff's is, the
+    transposes read as the dots' dimensions (no copies): the cotangents
+    the down projection's gradient GEMM's expanding epilogue, x's gradient
+    one dot of the block, the weights' one dot. The gradients autodiff's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    m, d, h = 384, 64, 256
+    values = {
+        "w0": rand(d, d) / 8,
+        "wg": rand(h, d, seed=1) / 8,
+        "wu": rand(h, d, seed=2) / 8,
+        "w2": rand(d, h, seed=3) / 16,
+    }
+    x = rand(m, d, seed=4)
+
+    def autodiff(x, wg, wu, wd):
+        g = F.matmul(x, wg.t().bfloat16(), "float32", "float32")
+        u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
+        return F.matmul((F.sigmoid(g) * u).bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
+
+    def step(mlp):
+        def f(model, x):
+            x = F.matmul(x.bfloat16(), model.w0.t().bfloat16(), "float32", "bfloat16")
+            y = mlp(x, model.wg, model.wu, model.w2).float()
+            F.sum(y * y).backward()
+            return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
+
+        return f
+
+    grads = []
+    for mlp in (_GatedMLPFunction.apply, autodiff):
+        model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+        f = lumen.compile(step(mlp), device="mps")
+        with pytest.warns(UserWarning, match="the rounding loses precision"):
+            f(model, meta(m, d))
+        model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+        grads.append([lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))])
+    for got, want in zip(*grads):
+        assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+    with pytest.warns(UserWarning, match="the rounding loses precision"):
+        graph = lumen.make_graph(step(_GatedMLPFunction.apply))(model, meta(m, d))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    labels = [s["label"] for s in steps]
+    expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert sum("concatenate" in label for label in labels) == 1, labels
+    # The weights' gradients one dot of [dg | du] and x ([2h, d]).
+    assert any(s["primitive"] == "dot_general" and s["output"][2] == [2 * h, d] for s in steps), labels
+    # The one transpose the projection's (autodiff's) gradient's.
+    assert [s["output"][2] for s in steps if "transpose" in s["label"]] == [[d, d]], labels
+
+
+class _SavedNarrowMLP(lumen.autograd.Function):
+    """A gated MLP saving its gate and up projections rounded to bfloat16
+    (``examples/transformer.py``'s): its backward reads them so."""
+
+    @staticmethod
+    def forward(ctx, x, wg, wu, wd):
+        s = F.sigmoid(F.matmul(x, wg.t().bfloat16(), "float32", "float32"))
+        u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
+        ctx.save_for_backward(x, s.bfloat16(), u.bfloat16(), wg, wu, wd)
+        return F.matmul((s * u).bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, s, u, wg, wu, wd = ctx.saved_tensors
+        s, u = s.float(), u.float()
+        dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
+        dwd = F.matmul(dy.t(), (s * u).bfloat16(), "float32", "float32")
+        du = (dh * s).bfloat16()
+        dg = (dh * u * s * (1 - s)).bfloat16()
+        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32") + F.matmul(du, wu.bfloat16(), "float32", "float32")
+        dwg = F.matmul(dg.t(), x, "float32", "float32")
+        dwu = F.matmul(du.t(), x, "float32", "float32")
+        return dx.bfloat16(), dwg, dwu, dwd
+
+
+@pytest.mark.mps
+def test_values_saved_narrower_are_written_narrower():
+    """Values a matmul's epilogue computes that are read outside it only
+    rounded narrower (a backward's saved bfloat16 halves of a gated pair):
+    the epilogue writes the rounded values, as the program keeps them, not
+    the float32 ones for the backward to round. The gradients the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    m, d, h = 384, 64, 256
+    values = {
+        "w0": rand(d, d) / 8,
+        "wg": rand(h, d, seed=1) / 8,
+        "wu": rand(h, d, seed=2) / 8,
+        "w2": rand(d, h, seed=3) / 16,
+    }
+    x = rand(m, d, seed=4)
+
+    def step(model, x):
+        x = F.matmul(x.bfloat16(), model.w0.t().bfloat16(), "float32", "bfloat16")
+        y = _SavedNarrowMLP.apply(x, model.wg, model.wu, model.w2).float()
+        F.sum(y * y).backward()
+        return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
+
+    grads = {}
+    for device in ("cpu", "mps"):
+        model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+        f = lumen.compile(step, device=device)
+        with pytest.warns(UserWarning, match="the rounding loses precision"):
+            f(model, meta(m, d))
+        model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+        grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    for got, want in zip(grads["mps"], grads["cpu"]):
+        assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
+    with pytest.warns(UserWarning, match="the rounding loses precision"):
+        graph = lumen.make_graph(step)(model, meta(m, d))
+    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    (forward,) = [s for s in steps if s["label"].startswith("2x dot_general") and "logistic" in s["label"]]
+    assert [o[1:] for o in forward["extra_outputs"]] == [("bfloat16", [m, h])] * 2, forward["label"]
 
 
 @pytest.mark.mps
@@ -1469,19 +1778,79 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     (bfloat16 of float32) keeps a widening cast of it out of its epilogue:
     the epilogue fuses up to it (an add), the cast and what reads it a
     kernel after. Its result wanted wider, its output_dtype says so (one
-    kernel)."""
+    kernel). So too a float32 result the epilogue rounds (``.bfloat16()``,
+    a backward's rounded gradient) and widens again for a reader that
+    widens it itself: the kernel writes the bfloat16 value; widened for
+    an output, the cast is the epilogue's (no kernel of its own)."""
     m = lambda *s, d="bfloat16": lumen.empty(list(s), dtype=d, device="meta")  # noqa: E731
     args = (m(64, 96), m(96, 80), m(64, 80, d="float32"))
     labels = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]  # noqa: E731
     # The rounding then widening is what the precision check warns of.
     with pytest.warns(UserWarning, match="casts it back"):
-        assert labels(lambda x, w, r: (x @ w).float() + r) == ["dot_general", "cast(bfloat16 -> float32) → add"]
+        assert labels(lambda x, w, r: (x @ w).float() + r) == [
+            "dot_general → cast(float32 -> bfloat16)",
+            "cast(bfloat16 -> float32) → add",
+        ]
     with pytest.warns(UserWarning, match="casts it back"):
         assert labels(lambda x, w, r: ((x @ w) + 1.0).float() + r) == [
-            "dot_general → add",
+            "dot_general → cast(float32 -> bfloat16) → add",
             "cast(bfloat16 -> float32) → add",
         ]
     assert labels(lambda x, w, r: F.matmul(x, w, "float32", "float32") + r) == ["dot_general → add"]
+    rounded = lambda x, w: F.matmul(x, w, "float32", "float32").bfloat16().float()  # noqa: E731
+    assert labels(lambda x, w, r: rounded(x, w) * r) == [
+        "dot_general → cast(float32 -> bfloat16)",
+        "cast(bfloat16 -> float32) → mul",
+    ]
+    assert labels(lambda x, w, r: rounded(x, w)) == [
+        "dot_general → cast(float32 -> bfloat16) → cast(bfloat16 -> float32)"
+    ]
+
+
+@pytest.mark.mps
+def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
+    """A matmul of bfloat16 operands writing its float32 accumulator as it
+    is, read only rounded to bfloat16: the matmul writes bfloat16 (one
+    kernel, epilogues or not), the same bits. Read in float32 too, it
+    writes float32; rounded to another dtype (float16), the cast stays."""
+    rng = np.random.default_rng(0)
+    try:
+        x, w = (
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype="bfloat16")
+            for s in ((64, 96), (96, 80))
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def rounded(x, w):
+        y = F.matmul(x, w, "float32", "float32")
+        return y.bfloat16()
+
+    both = lambda x, w: (rounded(x, w), F.matmul(x, w, "float32", "float32"))  # noqa: E731
+
+    def dots(f, *args):
+        return [s["text"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]
+
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        (dot,) = dots(rounded, x, w)
+        assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
+        # Its lines: the matmul's and the cast's.
+        (step,) = lumen.graph.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
+        code = [open(f).read().splitlines()[line - 1].strip() for f, line in step["sources"]]
+        assert sorted(code) == ["return y.bfloat16()", 'y = F.matmul(x, w, "float32", "float32")'], code
+        assert [t.split("[")[0] for t in dots(both, x, w)] == ["dot_general", "cast"]
+    finally:
+        lumen.config.compiler.reset()
+    got = lumen.to_numpy(lumen.compile(rounded)(x, w).to(dtype="float32"))
+    want = lumen.to_numpy(lumen.compile(both)(x, w)[0].to(dtype="float32"))
+    np.testing.assert_array_equal(got, want)
+    half = lambda x, w: F.matmul(x, w, "float32", "float32").half()  # noqa: E731
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast"]
+    finally:
+        lumen.config.compiler.reset()
 
 
 @pytest.mark.mps

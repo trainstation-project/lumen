@@ -68,6 +68,10 @@ pub struct Step {
     /// The `record_function` ranges its node was traced in: the profiler
     /// shows the step inside them ([`OpenScopes`]).
     pub scope: Scope,
+    /// The lines of the traced program that computed what it does: its
+    /// node's, or a fusion's members' (through fusions in it), each once,
+    /// in order.
+    pub sources: Vec<(&'static str, u32)>,
 }
 
 /// The `record_function` ranges a plan's steps were traced in, open while
@@ -607,6 +611,11 @@ impl Plan {
                 },
                 scratch,
                 scope: node.scope,
+                sources: {
+                    let mut sources = Vec::new();
+                    sources_of(node, &mut sources);
+                    sources
+                },
             })
             .collect();
         for (k, v) in copies {
@@ -621,6 +630,7 @@ impl Plan {
                 extra_outputs: Vec::new(),
                 scratch: None,
                 scope: &[],
+                sources: Vec::new(),
             });
         }
         Plan {
@@ -1307,5 +1317,20 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
                 .all(|(j, &v)| (root[v] == r) == (j == position))
         }
         p => elementwise(p),
+    }
+}
+
+/// The source lines of `node` and, a fusion, of the nodes of its body (and
+/// theirs), appended to `sources` if not in it.
+fn sources_of(node: &Node, sources: &mut Vec<(&'static str, u32)>) {
+    for &s in node.sources {
+        if !sources.contains(&s) {
+            sources.push(s);
+        }
+    }
+    if let Primitive::Fusion { body, .. } = &node.primitive {
+        for n in body.nodes() {
+            sources_of(n, sources);
+        }
     }
 }

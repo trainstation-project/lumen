@@ -92,7 +92,9 @@ def test_neural_engine_runs_fixed_weights_dots(neural_engine):
     model = _model()
     f, plan = _compiled(lambda m, x: m(x), model, x)
     labels = [s["label"] for s in plan.steps()]
-    assert plan.neural_engine and labels == ["coreml → dot_general → add → max → dot_general"], labels
+    assert plan.neural_engine and labels == [
+        "coreml → dot_general → cast(float32 -> float16) → add → max → dot_general → cast(float32 -> float16)"
+    ], labels
     values = _values()
     _load(model, values)
     got = lumen.to_numpy(f(model, lumen.from_numpy(x).to("mps")))
@@ -143,7 +145,9 @@ def test_neural_engine_leaves_written_weights_on_mps(neural_engine):
     model.trained.copy_(lumen.from_numpy(np.eye(K, dtype=np.float16)))
     ops = _ops(f, model, x)
     coreml = [op for op in ops if op.startswith("coreml")]
-    assert coreml == ["coreml → dot_general → add → max → dot_general"], ops
+    assert coreml == [
+        "coreml → dot_general → cast(float32 -> float16) → add → max → dot_general → cast(float32 -> float16)"
+    ], ops
     small = MLP(*(lumen.empty(s, "float16", device="meta") for s in ([16, 32], [32], [32, 16])))
     _, plan = _compiled(lambda m, x: m(x), small, np.ones((8, 16), np.float16))
     assert not plan.neural_engine

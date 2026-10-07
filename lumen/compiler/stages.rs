@@ -36,7 +36,7 @@ pub(crate) fn without_transfers(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         map[node.output] = if transfer(&node.primitive) {
             map[node.inputs[0]]
         } else {
@@ -312,7 +312,7 @@ fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
             .iter()
             .map(|&u| value(p, builders, s, u))
             .collect();
-        builders[s].graph.set_scope(node.scope);
+        builders[s].graph.set_origin(node);
         builders[s]
             .graph
             .apply(node.primitive.clone(), &inputs)

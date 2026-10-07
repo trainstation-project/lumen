@@ -19,7 +19,7 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         map[node.output] = match &node.primitive {
             Primitive::DotGeneral {
@@ -66,8 +66,11 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
             _ => None,
         }
         .unwrap_or_else(|| {
-            out.apply(node.primitive.clone(), &inputs)
-                .expect("a node of the graph")
+            let v = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("a node of the graph");
+            out.set_label(v, node.label);
+            v
         });
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();

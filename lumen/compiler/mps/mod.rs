@@ -15,6 +15,7 @@ mod codegen;
 mod diamonds;
 mod dot_strength;
 mod fusion;
+mod gated_backward;
 mod horizontal;
 mod merge_dots;
 mod split_k;
@@ -57,6 +58,16 @@ const PRELUDE: &str = concat!(
 /// fusion kernels compiled.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let config = &options.config;
+    // A gated pair's backward's dots merged (before `merge_dots`, which
+    // reads its weights' concatenate as the forward's block).
+    let rewritten;
+    let graph = match config.fuse && config.merge_dots && config.contraction_epilogues {
+        true => {
+            rewritten = gated_backward::gated_backward(graph);
+            &rewritten
+        }
+        false => graph,
+    };
     // Merging needs fusion: the merged dot's readers read its slices.
     let (merged, packed) = match config.fuse && config.merge_dots {
         // A donated parameter (a weight the program assigns: its new value
@@ -242,9 +253,13 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         });
         let output = step.output.0;
         derived.retain(|(d, _)| *d != output);
-        if matches!(step.primitive, Primitive::DotGeneral { .. }) {
-            if let Some(k) = block {
-                step.label = crate::graph::intern(format!("{}x dot_general", packed[k].0.len()));
+        let gemm = matches!(&step.primitive, Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some());
+        if matches!(step.primitive, Primitive::DotGeneral { .. }) || gemm {
+            // Its epilogue, if any (a write-out cast, a gated pair's
+            // combination), kept after the count.
+            if let Some((k, rest)) = block.zip(step.label.strip_prefix("dot_general")) {
+                step.label =
+                    crate::graph::intern(format!("{}x dot_general{rest}", packed[k].0.len()));
             }
         } else if let Some(k) = block {
             let n = step.output.1.numel();
@@ -272,7 +287,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let primitive = match &node.primitive {
             p @ Primitive::DotGeneral {
@@ -333,6 +348,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
         map[node.output] = out
             .apply(primitive, &inputs)
             .expect("a rewrite keeps the node's type");
+        out.set_label(map[node.output], node.label);
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
@@ -414,7 +430,7 @@ fn concatenates_alone(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let primitive = match node.primitive {
             Primitive::Concatenate { .. } => {
                 let mut reads: Vec<Var> = Vec::new();

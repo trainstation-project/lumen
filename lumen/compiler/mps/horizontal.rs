@@ -319,11 +319,12 @@ pub(crate) fn fuse(
     for i in order {
         let node = &nodes[i];
         let Some(k) = group_of[i] else {
-            out.set_scope(node.scope);
+            out.set_origin(node);
             let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a graph is typed as the original");
+            out.set_label(map[node.output], node.label);
             continue;
         };
         let g = &groups[k];
@@ -349,7 +350,7 @@ pub(crate) fn fuse(
             .collect();
         let label = intern(labels.join(" | "));
         // Its members' scope (one: they group by it).
-        out.set_scope(nodes[g.members[0]].scope);
+        out.set_origin(&nodes[g.members[0]]);
         let reads: Vec<Var> = g.reads.iter().map(|&v| map[v]).collect();
         let fused = out
             .apply(Primitive::Fusion { name, label, body }, &reads)
@@ -421,6 +422,7 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], values: &[Vec<Var>]) ->
                     inner.inputs().iter().copied().zip(inputs).collect();
                 for n in inner.nodes() {
                     let ins: Vec<Var> = n.inputs.iter().map(|v| local[v]).collect();
+                    body.set_origin(n);
                     let v = body
                         .apply(n.primitive.clone(), &ins)
                         .expect("a member's body is typed");
@@ -428,7 +430,10 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], values: &[Vec<Var>]) ->
                 }
                 written.extend(inner.outputs().iter().map(|v| local[v]));
             }
-            p => written.push(body.apply(p.clone(), &inputs).expect("a member is typed")),
+            p => {
+                body.set_origin(node);
+                written.push(body.apply(p.clone(), &inputs).expect("a member is typed"))
+            }
         }
         outputs.extend(&values[m]);
     }

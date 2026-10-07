@@ -38,13 +38,65 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 1
 BATCH, STEPS, DROPOUT = 32, 300, 0
+# Gradient accumulation: each step's microbatches, a backward pass each.
+ACCUM = 1
 PROFILED_STEPS = 10
 
 # Before compiling: a plan is compiled for the flags set when it is.
 lumen.config.compiler.deterministic = True
+lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
+
+
+class _MLP(lumen.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, wg, wu, wd):
+        g = F.matmul(x, wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        u = F.matmul(x, wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+
+        g_sig = F.sigmoid(g)
+        h = g_sig * u
+
+        g_sig = g_sig.bfloat16()
+        u = u.bfloat16()
+        h = h.bfloat16()
+
+        ctx.save_for_backward(x, g_sig, u, wg, wu, wd)
+
+        y = F.matmul(h, wd.t().bfloat16(), "float32", "bfloat16")
+
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, g_sig, u, wg, wu, wd = ctx.saved_tensors
+
+        g_sig_f32 = g_sig.float()
+        u_f32 = u.float()
+
+        h = g_sig_f32 * u_f32
+        h = h.bfloat16()
+
+        # y = h @ wd.t(), in bfloat16.
+        dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
+        dwd = F.matmul(dy.t(), h, "float32", "float32")
+
+        # h = sigmoid(g) * u; sigmoid' = sigmoid * (1 - sigmoid).
+        du = (dh.float() * g_sig_f32).bfloat16()
+        dg_sig = dh * u_f32
+        dg = (dg_sig.float() * g_sig_f32 * (1 - g_sig_f32)).bfloat16()
+
+        # g = x @ wg.t(), u = x @ wu.t(), in bfloat16.
+        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32")
+        dx_ = F.matmul(du, wu.bfloat16(), "float32", "float32")
+        dx = dx + dx_
+
+        dwg = F.matmul(dg.t(), x, "float32", "float32")
+        dwu = F.matmul(du.t(), x, "float32", "float32")
+
+        return dx.bfloat16(), dwg, dwu, dwd
 
 
 def one_hot(ids, n):
@@ -89,7 +141,15 @@ class Attention(lumen.nn.Module):
             )
             for w in (self.wq, self.wk, self.wv)
         )
-        x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
+
+        q = q.transpose(-2, -3)
+        k = k.transpose(-2, -3)
+        v = v.transpose(-2, -3)
+        x = F.matmul(q, k.transpose(-1, -2), accum_dtype="float32", output_dtype="float32")
+        x = F.softmax(x, dim=-1).to("bfloat16")
+        x = F.matmul(x, v, accum_dtype="float32", output_dtype="bfloat16")
+
+        # x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         # float32, as the residual it is added to.
         x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "bfloat16")
         return x
@@ -99,14 +159,22 @@ class MLP(lumen.nn.Module):
     """Pre-norm ReLU MLP, on ``[batch * seq, dim]``."""
 
     norm: lumen.Tensor
-    w1: lumen.Tensor
-    w2: lumen.Tensor
+    wg: lumen.Tensor
+    wu: lumen.Tensor
+    wd: lumen.Tensor
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
-        h = F.relu(x @ self.w1.t().bfloat16())
+        return _MLP.apply(x, self.wg, self.wu, self.wd)
+        # g = F.relu(x @ self.wg.t().bfloat16())
+        # u = x @ self.wu.t().bfloat16()
+        g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        g = F.sigmoid(g)
+        u = F.matmul(x, self.wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        h = g * u
+        h = h.bfloat16()
         # float32, as the residual it is added to.
-        return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
+        return F.matmul(h, self.wd.t().bfloat16(), "float32", "bfloat16")
 
 
 class Block(lumen.nn.Module):
@@ -157,12 +225,22 @@ def cross_entropy(logits, targets):
 
 
 def train_step(model, opt, x, y):
+    """A step on microbatches ``x`` and ``y`` (``[ACCUM, BATCH, SEQ]``):
+    a backward pass of each, their gradients summed."""
     opt.zero_grad()
-    # loss = model(x, dropout_p=DROPOUT)
-    for i in range(3):
-        loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
+    for i in range(ACCUM):
+        loss = cross_entropy(model(x[i], dropout_p=DROPOUT), y[i])
         loss.backward()
+
+    c = 0
+    for p in model.parameters():
+        c += F.sum(p.grad)
+
+    for p in model.parameters():
+        p.grad = p.grad / c
+
     opt.step()
+
     return loss
 
 
@@ -188,6 +266,7 @@ model = Transformer(
             MLP(
                 meta(DIM, dtype=lumen.float32),
                 meta(HIDDEN, DIM, dtype=lumen.float32),
+                meta(HIDDEN, DIM, dtype=lumen.float32),
                 meta(DIM, HIDDEN, dtype=lumen.float32),
             ),
         )
@@ -203,7 +282,7 @@ opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 train_step = lumen.compile(train_step, device="mps")
 predict = lumen.compile(predict, device="mps")
 ids_meta = meta(BATCH, SEQ, dtype="int64")
-train_step(model, opt, ids_meta, ids_meta)
+train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int64")] * 2)
 predict(model, ids_meta)
 
 rng = np.random.default_rng(0)
@@ -229,9 +308,15 @@ def batch():
     return lumen.from_numpy(x), lumen.from_numpy(y), y
 
 
+def microbatches():
+    """A step's ``ACCUM`` batches, stacked: the tokens and the targets,
+    ``[ACCUM, BATCH, SEQ]`` int64 each."""
+    xs, ys, _ = zip(*(batch() for _ in range(ACCUM)))
+    return tuple(lumen.from_numpy(np.stack([lumen.to_numpy(t) for t in ts])) for ts in (xs, ys))
+
+
 for step in range(STEPS + 1):
-    x, y, _ = batch()
-    loss = train_step(model, opt, x, y)
+    loss = train_step(model, opt, *microbatches())
     # if step % 50 == 0:
     # print(f"step {step:3d}  loss {loss.item():.4f}")
 
@@ -244,7 +329,7 @@ print(f"accuracy {(guess[:, 1:] == targets[:, 1:]).mean():.3f}")
 # Profile a few more steps (their batches built first, so the trace holds
 # the steps alone), each in its own range; synchronize so the last step's
 # kernels are in it.
-batches = [batch()[:2] for _ in range(PROFILED_STEPS)]
+batches = [microbatches() for _ in range(PROFILED_STEPS)]
 lumen.mps.synchronize()
 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
     for x, y in batches:

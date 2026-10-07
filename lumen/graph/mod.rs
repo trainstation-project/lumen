@@ -68,10 +68,24 @@ pub struct Node {
     /// passes keep an instruction's metadata): its step's ranges when a
     /// plan runs it.
     pub scope: Scope,
+    /// The lines of the traced program that computed it (each the first
+    /// frame outside lumen), in order: the tracer's one; a pass's nodes,
+    /// those of the node it rewrites, or of all it merges into one
+    /// ([`Graph::set_origin`], [`Graph::set_origins`]).
+    pub sources: Lines,
+    /// Its label, if not its primitive's ([`Graph::label`]): what a pass
+    /// made it for (a split-K dot's partials and their sum; a gated pair's
+    /// merged weights' gradients, `2x dot_general`), as profiled. The
+    /// passes after the one setting it keep it.
+    pub label: Option<&'static str>,
 }
 
 /// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
 pub type Scope = &'static [Range];
+
+/// Lines of the traced program, each its file and line number
+/// ([`intern_lines`]).
+pub type Lines = &'static [(&'static str, u32)];
 
 /// A `record_function` range a node was traced in: its name, and which call
 /// of it (each time the traced code entered it; a backward range, the
@@ -94,6 +108,8 @@ pub struct Graph {
     outputs: Vec<Var>,
     /// The scope [`apply`](Self::apply) gives the nodes it adds.
     scope: Scope,
+    /// The source lines it gives them.
+    sources: Lines,
 }
 
 impl Graph {
@@ -114,6 +130,27 @@ impl Graph {
         self.scope = scope;
     }
 
+    /// Give the nodes added from now on `node`'s scope and source lines (a
+    /// pass: the node it is rewriting's).
+    pub fn set_origin(&mut self, node: &Node) {
+        self.scope = node.scope;
+        self.sources = node.sources;
+    }
+
+    /// Give the nodes added from now on the first of `nodes`' scope and
+    /// all their source lines, each once (a pass: the nodes it merges into
+    /// one, `merge_dots`' dots).
+    pub fn set_origins(&mut self, nodes: &[&Node]) {
+        self.scope = nodes.first().map_or(&[], |n| n.scope);
+        let mut lines = Vec::new();
+        for &line in nodes.iter().flat_map(|n| n.sources) {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        }
+        self.sources = intern_lines(&lines);
+    }
+
     /// The value `primitive(inputs...)`, or why the types do not allow it.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check_vars(inputs)?;
@@ -126,8 +163,27 @@ impl Graph {
             inputs: inputs.to_vec(),
             output,
             scope: self.scope,
+            sources: self.sources,
+            label: None,
         });
         Ok(output)
+    }
+
+    /// Give the node defining `v` the source lines `sources` (the
+    /// tracer's, known once it is applied).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    pub(crate) fn set_sources(&mut self, v: Var, sources: Lines) {
+        if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
+            node.sources = sources;
+        }
+    }
+
+    /// Label the node defining `v` ([`Node::label`]; `None`: its
+    /// primitive's).
+    pub(crate) fn set_label(&mut self, v: Var, label: Option<&'static str>) {
+        if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
+            node.label = label;
+        }
     }
 
     pub fn set_outputs(&mut self, outputs: &[Var]) -> Result<(), String> {
@@ -157,7 +213,7 @@ impl Graph {
             map[v] = Some(pruned.input(self.types[v].clone()));
         }
         for node in self.nodes.iter().filter(|n| live[n.output]) {
-            pruned.set_scope(node.scope);
+            pruned.set_origin(node);
             let inputs: Vec<Var> = node
                 .inputs
                 .iter()
@@ -168,6 +224,7 @@ impl Graph {
                     .apply(node.primitive.clone(), &inputs)
                     .expect("a node of the graph"),
             );
+            pruned.set_label(map[node.output].expect("just made"), node.label);
         }
         let outputs: Vec<Var> = self
             .outputs
@@ -204,11 +261,25 @@ impl Graph {
     /// What `node` is profiled as: its primitive's name; a cast's, with
     /// its dtypes: `cast(float32 -> bfloat16)`.
     pub fn label(&self, node: &Node) -> &'static str {
+        if let Some(label) = node.label {
+            return label;
+        }
         match node.primitive {
             Primitive::Cast { new_dtype } => intern(format!(
                 "cast({} -> {})",
                 self.types[node.inputs[0]].dtype.full_name(),
                 new_dtype.full_name()
+            )),
+            // A dot rounding its accumulator to a narrower output as it
+            // writes it: that cast, its write-out's epilogue, named too.
+            Primitive::DotGeneral {
+                accum_dtype,
+                output_dtype,
+                ..
+            } if accum_dtype != output_dtype => intern(format!(
+                "dot_general{FUSION_SEPARATOR}cast({} -> {})",
+                accum_dtype.full_name(),
+                output_dtype.full_name()
             )),
             ref p => p.name(),
         }
@@ -301,6 +372,18 @@ pub(crate) fn intern(label: String) -> &'static str {
     let interned: &'static str = Box::leak(label.into_boxed_str());
     labels.insert(interned);
     interned
+}
+
+/// `lines` as [`Lines`], one shared copy per list.
+pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
+    static LINES: Mutex<BTreeSet<Lines>> = Mutex::new(BTreeSet::new());
+    let mut interned = LINES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&lines) = interned.get(lines) {
+        return lines;
+    }
+    let lines: Lines = Box::leak(lines.to_vec().into_boxed_slice());
+    interned.insert(lines);
+    lines
 }
 
 /// `ranges` as a [`Scope`], one shared copy per nesting.

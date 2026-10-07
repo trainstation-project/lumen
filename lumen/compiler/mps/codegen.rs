@@ -1757,6 +1757,69 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
+/// A gated pair's halves (`gemm_kernel`'s `PAIRED`): the slices of
+/// `dot`'s value, its only readers, that are its two halves along its last
+/// dimension (the rhs's one free dimension; no batch), first then second.
+pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
+    let Primitive::DotGeneral {
+        lhs_batch,
+        rhs_contracting,
+        ..
+    } = &dot.primitive
+    else {
+        return None;
+    };
+    let shape = &body.type_of(dot.output).shape;
+    let rhs_rank = body.type_of(dot.inputs[1]).shape.len();
+    let (rank, n) = (shape.len(), *shape.last()?);
+    if !lhs_batch.is_empty() || rhs_rank != rhs_contracting.len() + 1 || n % 2 != 0 {
+        return None;
+    }
+    let readers: Vec<&Node> = body
+        .nodes()
+        .iter()
+        .filter(|node| node.inputs.contains(&dot.output))
+        .collect();
+    let half = |node: &&Node, start: usize| match &node.primitive {
+        Primitive::Slice {
+            start_indices,
+            limit_indices,
+        } => (0..rank).all(|d| match d == rank - 1 {
+            true => start_indices[d] == start && limit_indices[d] == start + n / 2,
+            false => start_indices[d] == 0 && limit_indices[d] == shape[d],
+        }),
+        _ => false,
+    };
+    match (readers.as_slice(), body.outputs().contains(&dot.output)) {
+        ([a, b], false) => match (half(a, 0) && half(b, n / 2), half(b, 0) && half(a, n / 2)) {
+            (true, _) => Some((a, b)),
+            (_, true) => Some((b, a)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A gated pair's backward's cotangents (`gemm_kernel`'s `EXPANDED`): the
+/// two values of `dot`'s shape its fusion's output concatenates along its
+/// last dimension, side by side, each computed at the dot's index.
+pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
+    let out = body.outputs()[0];
+    let node = body.nodes().iter().find(|n| n.output == out)?;
+    let shape = &body.type_of(dot.output).shape;
+    match (&node.primitive, node.inputs.as_slice()) {
+        (Primitive::Concatenate { dimension }, &[a, b])
+            if *dimension + 1 == shape.len()
+                && body.type_of(a).shape == *shape
+                && body.type_of(b).shape == *shape
+                && gemm_pair(body, dot).is_none() =>
+        {
+            Some([a, b])
+        }
+        _ => None,
+    }
+}
+
 /// The kernel of a contraction with its epilogue: the matmul template
 /// (`ops/dot_general/mps/kernels.metal`, on its large and, as `NAME_small`, small
 /// tiles, as its encoder launches it), writing each output through a
@@ -1777,8 +1840,21 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         metal_type(body.type_of(out).dtype),
     );
     let mut e = Emitter::new(body, by_value);
-    e.invariant[dot.output] = true;
-    e.row_locals.insert(dot.output, "r".into());
+    // A gated pair's epilogue reads its halves' values (`r1`, `r2`), not
+    // the dot's.
+    let pair = gemm_pair(body, dot);
+    match pair {
+        Some((first, second)) => {
+            for (v, name) in [(first.output, "r1"), (second.output, "r2")] {
+                e.invariant[v] = true;
+                e.row_locals.insert(v, name.into());
+            }
+        }
+        None => {
+            e.invariant[dot.output] = true;
+            e.row_locals.insert(dot.output, "r".into());
+        }
+    }
     // The epilogue's values read outside it (the fusion's other outputs:
     // the dot's, an activation's input), stored at the output's index.
     let mut stores = String::new();
@@ -1786,7 +1862,15 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         let value = e.value(v, "j".into());
         writeln!(stores, "        out{}[i] = {value};", k + 1).unwrap();
     }
-    let value = e.value(out, "j".into());
+    // An expanding epilogue's two values (a Pair), else its output's.
+    let expanded = gemm_expanded(body, dot);
+    let value = match expanded {
+        Some([a, b]) => {
+            let (va, vb) = (e.value(a, "j".into()), e.value(b, "j".into()));
+            format!("Pair<{w}>{{{va}, {vb}}}")
+        }
+        None => e.value(out, "j".into()),
+    };
     let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
@@ -1814,14 +1898,23 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let (params, first) = io_params(body, by_value, w);
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
+    let (operands, paired) = match (pair, expanded) {
+        (Some(_), _) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
+        (_, Some(_)) => (format!("{o} r"), "NAME_epi, false, false, true"),
+        _ => (format!("{o} r"), "NAME_epi"),
+    };
+    let returns = match expanded {
+        Some(_) => format!("Pair<{w}>"),
+        None => w.to_string(),
+    };
     let mut source = format!(
-        "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
+        "struct NAME_epi {{\n{fields}    inline {returns} operator()({operands}, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
         e.hoisted, e.lines
     );
     for (suffix, bm, bn, bk) in [("", 128, 64, "SG_BK"), ("_small", 32, 32, "SMALL_BK")] {
         write!(
             source,
-            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
+            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
         )
         .unwrap();
     }

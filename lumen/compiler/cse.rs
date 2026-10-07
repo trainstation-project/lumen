@@ -21,7 +21,7 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
     }
     let mut seen = Seen::new();
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         // A custom op's function is opaque: each call made, as written.
         if let Primitive::CustomCall { .. } = node.primitive {
@@ -42,6 +42,7 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
         let v = out
             .apply(node.primitive.clone(), &inputs)
             .expect("the node's own operands");
+        out.set_label(v, node.label);
         earlier.push((node.primitive.clone(), v));
         map[node.output] = v;
     }

@@ -85,6 +85,7 @@ def _record(name, inputs, params, var):
         frame = frame.f_back
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
+        _TRACES[-1]._set_source(var, *_SOURCES[-1][var])
     if _SCOPES and _SCOPES[-1]:
         _SCOPE_OF[-1][var] = tuple(_SCOPES[-1])
 

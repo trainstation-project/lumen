@@ -172,7 +172,8 @@ def test_split_k_agrees(compiler, dtype):
     """With ``split_k`` (the default) a matmul of few output tiles and a long
     contraction (a decode step's) is one kernel adding its chunks' products
     to its float32 output atomically (``deterministic``: one dot of the
-    chunks' partials, then their sum), rounded to bfloat16 once, after it;
+    chunks' partials, then their sum, each labelled split-K), rounded to
+    bfloat16 once, after it;
     each agrees with the dot as traced (off) to rounding. One of many tiles
     is not split."""
     rng = np.random.default_rng(0)
@@ -189,10 +190,10 @@ def test_split_k_agrees(compiler, dtype):
     split = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.deterministic = True
     rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
-    assert _labels(f, x, w) == ["dot_general", "reduce_sum" + rounded]
+    assert _labels(f, x, w) == ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     ordered = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.split_k = False
-    assert _labels(f, x, w) == ["dot_general"]
+    assert _labels(f, x, w) == ["dot_general" + rounded]
     traced = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for got in (split, ordered, traced):
@@ -228,7 +229,7 @@ def test_split_k_then_silu(compiler, dtype):
     plans = {
         "unsplit": ["dot_general → " + silu],
         "atomic": ["dot_general (split-K)", silu],
-        "deterministic": ["dot_general", "reduce_sum → " + silu],
+        "deterministic": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
     }
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for mode, plan in plans.items():

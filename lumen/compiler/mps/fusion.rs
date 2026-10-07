@@ -264,7 +264,9 @@ pub(crate) fn fuse(
     // epilogue's last primitive is the fusion's root, the dot inside it
     // (its operands read as they are). Its values read outside it (the
     // dot's, an activation's input, for a training step's backward) are
-    // written by the kernel too (XLA's GELU_AUX), hosted by its fusion.
+    // written by the kernel too (XLA's GELU_AUX), hosted by its fusion;
+    // one read outside only by a narrowing cast, as that cast (the bfloat16
+    // a backward saves, not the float32 it was rounded from).
     // Not for a dot reading a slice in place (a strided view, `dot_views`).
     let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
@@ -290,27 +292,31 @@ pub(crate) fn fuse(
         }
         // Nothing a row fusion computes (a normalization's scale).
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
-        // A dot rounding its result narrower than it accumulates (bfloat16
-        // of float32): no widening cast in its epilogue, which would read
-        // the rounded value back wider (where the program wants it wider,
-        // the dot's output_dtype says so).
-        let narrowed = match &node.primitive {
-            Primitive::DotGeneral {
-                accum_dtype,
-                output_dtype,
-                ..
-            } => output_dtype.size_of() < accum_dtype.size_of(),
-            _ => false,
-        };
-        let widens = |un: &Node| {
+        // No widening cast in an epilogue of a value it computes (the dot's
+        // result rounded narrower than it accumulates, bfloat16 of float32,
+        // `simplify` folding a narrowing cast into it; or anything after),
+        // whose readers outside it widen it as they read it (fusible): the
+        // kernel writes the narrow value, not the wide one (where the
+        // program wants it wider, the dot's output_dtype says so). A cast
+        // its readers would not fuse (an output's) steps in: its own kernel
+        // would read the narrow value back.
+        let cast_by = |un: &Node, grows: bool| {
+            let (from, to) = (graph.type_of(un.inputs[0]), graph.type_of(un.output));
             matches!(un.primitive, Primitive::Cast { .. })
-                && graph.type_of(un.output).dtype.size_of()
-                    > graph.type_of(un.inputs[0]).dtype.size_of()
+                && (to.dtype.size_of() > from.dtype.size_of()) == grows
+                && to.dtype.size_of() != from.dtype.size_of()
         };
         // The epilogue grown in order: its nodes (`taken`, their values
         // `after`), the values depending on the dot (no other operand may),
         // and the longest one whose values read outside it (but its last's)
         // are few and read after it: those it writes too.
+        // A gated pair (two dots of one operand merged, read as their two
+        // halves, `codegen::gemm_pair`): the halves' slices step into the
+        // epilogue, which then ends at a value of both, of a half's shape,
+        // writing nothing else (its kernel holds the halves interleaved,
+        // `PAIRED`).
+        let pair: Option<[usize; 2]> = super::codegen::gemm_pair(graph, node)
+            .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
         let mut taken = vec![i];
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);
         (after[node.output], depends[node.output]) = (true, true);
@@ -320,10 +326,23 @@ pub(crate) fn fuse(
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let step =
-                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
-            let fuses =
-                fusible[u] && step && !in_row(u) && !claimed[u] && !(narrowed && widens(un));
+            // A gated pair's backward: its two cotangents, each of the dot's
+            // shape, concatenated along its last dimension (`gated_backward`),
+            // the epilogue's end (codegen's expanding epilogue).
+            let shape = &graph.type_of(node.output).shape;
+            let expands = matches!(un.primitive, Primitive::Concatenate { dimension } if dimension + 1 == shape.len())
+                && un.inputs.len() == 2
+                && un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+                && pair.is_none();
+            let step = elementwise(&un.primitive)
+                || matches!(un.primitive, Primitive::Reshape { .. })
+                || pair.is_some_and(|p| p.contains(&u))
+                || expands;
+            // A widening cast of the rounded value steps in too, but only a
+            // gated pair's backward's expanding epilogue may end past it
+            // (below): its cotangents in float32 from the rounded gradient,
+            // whatever the gate.
+            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
             let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
             if !fuses || !reads {
                 break;
@@ -348,18 +367,72 @@ pub(crate) fn fuse(
                 let v = nodes[k].output;
                 is_output[v] || users[v].iter().any(|w| !kept.contains(w))
             };
+            // A value read outside only rounded narrower (saved for a
+            // backward in bfloat16): the rounded value written instead,
+            // its cast computed here (the bytes the program keeps).
+            let narrowed_aux = |k: usize| {
+                let v = nodes[k].output;
+                let mut readers = users[v].iter().copied().filter(|w| !kept.contains(w));
+                match (readers.next(), readers.next()) {
+                    (Some(c), None)
+                        if !is_output[v]
+                            && matches!(nodes[c].primitive, Primitive::Cast { .. })
+                            && graph.type_of(nodes[c].output).dtype.size_of()
+                                < graph.type_of(v).dtype.size_of()
+                            && live[c]
+                            && fusible[c]
+                            && !in_row(c)
+                            && !claimed[c] =>
+                    {
+                        c
+                    }
+                    _ => k,
+                }
+            };
             let aux: Vec<usize> = kept[..kept.len() - 1]
                 .iter()
                 .copied()
                 .filter(outside)
+                .map(narrowed_aux)
                 .collect();
             let read_after = aux.iter().all(|&k| {
                 users[nodes[k].output]
                     .iter()
                     .all(|&w| kept.contains(&w) || w > u)
             });
-            if kept.first() == Some(&i) && read_after && aux.len() <= MAX_AUX {
+            // Its values read outside it, if any, of a half's shape (each
+            // pair's halves, `y1` and `y2`, a training step's backward reads:
+            // written at the output's index, as other epilogues' are).
+            let paired = pair.is_none_or(|p| {
+                let half = graph.type_of(nodes[p[0]].output).numel();
+                p.iter().all(|k| kept.contains(k))
+                    && aux
+                        .iter()
+                        .all(|&k| graph.type_of(nodes[k].output).numel() == half)
+                    && !aux.contains(&i)
+                    && graph.type_of(un.output).numel() == half
+                    && elementwise(&un.primitive)
+            });
+            let computed = |v: Var| producer[v].is_some_and(|p| kept.contains(&p));
+            let fused_by_readers = |k: usize| {
+                let v = nodes[k].output;
+                !is_output[v] && users[v].iter().all(|&w| kept.contains(&w) || fusible[w])
+            };
+            let upcast = kept.iter().any(|&k| {
+                cast_by(&nodes[k], true) && computed(nodes[k].inputs[0]) && fused_by_readers(k)
+            });
+            if kept.first() == Some(&i)
+                && read_after
+                && aux.len() <= MAX_AUX
+                && paired
+                && (!expands || aux.is_empty())
+                && (!upcast || expands)
+            {
                 end = Some((kept, aux));
+            }
+            // Nothing reads past an expanding epilogue's end in it.
+            if expands {
+                break;
             }
         }
         if let Some((taken, aux)) = end {
@@ -370,7 +443,7 @@ pub(crate) fn fuse(
             }
             taken.iter().for_each(|&k| claimed[k] = true);
             for k in aux {
-                dot_aux[k] = Some(end);
+                (dot_aux[k], claimed[k]) = (Some(end), true);
             }
         }
     }
@@ -552,7 +625,7 @@ pub(crate) fn fuse(
         // Its scope its main node's: a contraction's or reduction's with an
         // epilogue (the work, not the epilogue's end), else its root's.
         let main = dot_of[i].or(epilogue[i]).unwrap_or(i);
-        fused.set_scope(nodes[main].scope);
+        fused.set_origin(&nodes[main]);
         // A hosted value is its host fusion's output.
         if !live[i] || !root[i] || host[i].is_some() {
             continue;
@@ -564,7 +637,24 @@ pub(crate) fn fuse(
                 let body = body(graph, members, reads, node.output, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
-                let label = label(graph, &producer, members);
+                // A gated pair's halves are not computed (its kernel holds
+                // them interleaved): not in its label.
+                let half = |m: &&usize| {
+                    matches!(nodes[**m].primitive, Primitive::Slice { .. })
+                        && producer[nodes[**m].inputs[0]].is_some_and(|d| {
+                            members.contains(&d)
+                                && matches!(nodes[d].primitive, Primitive::DotGeneral { .. })
+                        })
+                };
+                let mut shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
+                // A contraction's first (its write-out cast with it), then
+                // its epilogue, as its kernel computes them: what it is, and
+                // the values its epilogue reads (a gated backward's saved
+                // forward values), after.
+                if let Some(d) = dot_of[i] {
+                    shown.sort_by_key(|&m| m != d);
+                }
+                let label = label(graph, &producer, &shown);
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
                 let out = out.expect("a fused graph is typed as the original");
@@ -577,7 +667,11 @@ pub(crate) fn fuse(
             }
             _ => {
                 let inputs: Vec<Var> = node.inputs.iter().map(|&v| var[v]).collect();
-                fused.apply(node.primitive.clone(), &inputs)
+                let out = fused.apply(node.primitive.clone(), &inputs);
+                if let Ok(v) = out {
+                    fused.set_label(v, node.label);
+                }
+                out
             }
         };
         var[node.output] = out.expect("a fused graph is typed as the original");
@@ -652,6 +746,7 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], root: Var, hosted: &[Va
     for &i in members {
         let node = &graph.nodes()[i];
         let inputs: Vec<Var> = node.inputs.iter().map(|v| var[v]).collect();
+        body.set_origin(node);
         let out = body
             .apply(node.primitive.clone(), &inputs)
             .expect("a fusion body is typed as the original");
