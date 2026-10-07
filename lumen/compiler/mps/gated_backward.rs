@@ -95,13 +95,22 @@ pub(crate) fn gated_backward(graph: &Graph) -> Graph {
             if g[0] == g[1] || a[0] == a[1] || ty(g[0]) != ty(g[1]) || ty(a[0]) != ty(a[1]) {
                 return None;
             }
-            // The forward pair: dots of a1 and a2 with one operand x.
-            let (x, forward) = dots_of(a[0]).into_iter().find_map(|(d1, x)| {
+            // The forward pair: dots of a1 and a2 with one operand x, its
+            // only two such (not two of a wider group's, attention's q, k
+            // and v: their sum of three is not a pair's).
+            let (x, d1, forward) = dots_of(a[0]).into_iter().find_map(|(d1, x)| {
                 dots_of(a[1])
                     .into_iter()
                     .find(|&(d2, x2)| x2 == x && same(d1, d2) && d1 != e1 && d2 != e2)
-                    .map(|(d2, _)| (x, d1 < d2))
+                    .map(|(d2, _)| (x, d1, d1 < d2))
             })?;
+            let alike = dots_of(x)
+                .into_iter()
+                .filter(|&(d, w)| same(d, d1) && ty(w) == ty(a[0]))
+                .count();
+            if alike != 2 {
+                return None;
+            }
             // In the forward pair's order (its block's: `[W1 | W2]` as
             // `merge_dots` places it, the weights' gradient's halves so).
             let (dots, g, a) = match forward {

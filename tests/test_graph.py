@@ -791,6 +791,9 @@ def test_trained_attention_reads_merged_projections_in_place():
     for s in attention:
         assert merged in [b for b, *_ in s["inputs"]], (s["label"], s["inputs"])
     assert not [label for label in labels if label.startswith("slice")], labels
+    # Not a gated pair's backward (q, k and v are three: no two of their
+    # gradients' dots merged, which would copy two of the block's weights).
+    assert not [label for label in labels if "concatenate" in label], labels
 
 
 class QKV(lumen.nn.Module):
@@ -905,7 +908,8 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     the cotangents the down projection's gradient GEMM's expanding
     epilogue, written side by side, whatever the gate (SwiGLU's in float32,
     from the rounded gradient widened: an upcast only that epilogue takes).
-    The gradients the CPU's."""
+    The forward the merged dot's paired epilogue, its halves (which the
+    backward reads) written by it too. The gradients the CPU's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -940,10 +944,12 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
         graph = lumen.make_graph(step)(model, meta(m, d))
     steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
-    # The input's gradient: one dot of the block (K = 2h), written as x's
-    # gradient (the forward's merged dot writes [m, 2h]).
+    # The forward: the pair's epilogue (writing h [m, h], and the halves the
+    # backward reads, no kernel of its own slicing them); the input's
+    # gradient: one dot of the block (K = 2h), written as x's gradient.
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
-    assert [s["output"][2] for s in merged] == [[m, 2 * h], [m, d]], labels
+    assert [s["output"][2] for s in merged] == [[m, h], [m, d]], labels
+    assert "mul" in merged[0]["label"] and not any(label.startswith("slice") for label in labels), labels
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
     assert sum("concatenate" in label for label in labels) == 1, labels

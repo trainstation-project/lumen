@@ -378,10 +378,16 @@ pub(crate) fn fuse(
                     .iter()
                     .all(|&w| kept.contains(&w) || w > u)
             });
+            // Its values read outside it, if any, of a half's shape (each
+            // pair's halves, `y1` and `y2`, a training step's backward reads:
+            // written at the output's index, as other epilogues' are).
             let paired = pair.is_none_or(|p| {
                 let half = graph.type_of(nodes[p[0]].output).numel();
                 p.iter().all(|k| kept.contains(k))
-                    && aux.is_empty()
+                    && aux
+                        .iter()
+                        .all(|&k| graph.type_of(nodes[k].output).numel() == half)
+                    && !aux.contains(&i)
                     && graph.type_of(un.output).numel() == half
                     && elementwise(&un.primitive)
             });
@@ -611,7 +617,14 @@ pub(crate) fn fuse(
                                 && matches!(nodes[d].primitive, Primitive::DotGeneral { .. })
                         })
                 };
-                let shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
+                let mut shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
+                // A contraction's first (its write-out cast with it), then
+                // its epilogue, as its kernel computes them: what it is, and
+                // the values its epilogue reads (a gated backward's saved
+                // forward values), after.
+                if let Some(d) = dot_of[i] {
+                    shown.sort_by_key(|&m| m != d);
+                }
                 let label = label(graph, &producer, &shown);
                 let reads: Vec<Var> = reads.iter().map(|&v| var[v]).collect();
                 let out = fused.apply(Primitive::Fusion { name, label, body }, &reads);
