@@ -109,6 +109,7 @@ pub(crate) fn diamonds(graph: &Graph) -> Vec<Row> {
         rows.push(row);
     }
     grown(&finder, &mut rows);
+    consumed(&finder, &mut rows);
     rows
 }
 
@@ -144,69 +145,114 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
         if !finder.live[i] || !free || !elementwise(&root.primitive) || !fusible(graph, root) {
             continue;
         }
-        let ty = graph.type_of(root.output);
-        let Some(&n) = ty.shape.last() else { continue };
-        if n <= 1 {
-            continue;
-        }
-        let each = ty.numel() / n;
-        let shaped = |v: Var| {
-            let t = graph.type_of(v);
-            t.numel() == ty.numel() && t.shape.last() == Some(&n)
-        };
-        let per_row = |v: Var| graph.type_of(v).numel() == each;
-        let mut inside = vec![false; nodes.len()];
-        inside[i] = true;
-        // The row fusions it takes whole (its own, if a diamond's).
-        let mut absorbed: Vec<usize> = Vec::new();
-        if let Some(r) = own {
-            let row = &rows[r];
-            for &m in row.inner.iter().chain(&row.reductions) {
-                inside[m] = true;
-            }
-            absorbed.push(r);
-        }
-        for k in (0..i).rev() {
-            let node = &nodes[k];
-            let v = node.output;
-            let read_inside = !finder.output[v]
-                && !finder.readers[v].is_empty()
-                && finder.readers[v].iter().all(|&r| inside[r]);
-            if !finder.live[k] || inside[k] || !read_inside {
-                continue;
-            }
-            // An earlier row fusion's root (of these rows, writing nothing
-            // else): it, whole.
-            let earlier = rows
-                .iter()
-                .position(|r| r.root == k && r.outputs.is_empty() && shaped(v));
-            if let Some(r) = earlier {
-                let row = &rows[r];
-                for &m in std::iter::once(&row.root)
-                    .chain(&row.inner)
-                    .chain(&row.reductions)
-                {
-                    inside[m] = true;
-                }
-                absorbed.push(r);
-                continue;
-            }
-            if taken[k] || !fusible(graph, node) {
-                continue;
-            }
-            inside[k] = match &node.primitive {
-                Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
-                    let x = node.inputs[0];
-                    shaped(x) && axes.as_slice() == [graph.type_of(x).shape.len() - 1] && per_row(v)
-                }
-                _ => shaped(v) || per_row(v) || graph.type_of(v).numel() == 1,
-            };
-        }
         let is_reduction = |k: usize| {
             matches!(
                 nodes[k].primitive,
                 Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
             )
+        };
+        let ty = graph.type_of(root.output);
+        let rows_of: &[Row] = rows;
+        // From its rows (`rows` elements, `n` a row), the nodes inside (and
+        // the row fusions it takes whole: its own, if a diamond's).
+        let grow = |rows: usize, n: usize| -> (Vec<bool>, Vec<usize>, Vec<usize>) {
+            let each = rows / n;
+            let shaped = |v: Var| {
+                let t = graph.type_of(v);
+                t.numel() == rows && t.shape.last() == Some(&n)
+            };
+            let per_row = |v: Var| graph.type_of(v).numel() == each;
+            let mut inside = vec![false; nodes.len()];
+            inside[i] = true;
+            let mut absorbed: Vec<usize> = Vec::new();
+            // Values of a row each read after the root too (a cross
+            // entropy's logsumexp, for its gradient): written as well.
+            let mut outputs: Vec<usize> = Vec::new();
+            if let Some(r) = own {
+                let row = &rows_of[r];
+                for &m in row.inner.iter().chain(&row.reductions) {
+                    inside[m] = true;
+                }
+                absorbed.push(r);
+            }
+            for k in (0..i).rev() {
+                let node = &nodes[k];
+                let v = node.output;
+                let read_inside = !finder.output[v]
+                    && !finder.readers[v].is_empty()
+                    && finder.readers[v].iter().all(|&r| inside[r]);
+                let read_after = !finder.output[v]
+                    && per_row(v)
+                    && finder.readers[v].iter().any(|&r| inside[r])
+                    && finder.readers[v].iter().all(|&r| inside[r] || r > i);
+                if !finder.live[k] || inside[k] || !(read_inside || read_after) {
+                    continue;
+                }
+                // An earlier row fusion's root (of these rows, writing
+                // nothing read but here: a softmax's max, its logsumexp's):
+                // it, whole.
+                let own_reads = |r: &Row| {
+                    r.outputs.iter().all(|&o| {
+                        let w = nodes[o].output;
+                        !finder.output[w]
+                            && finder.readers[w].iter().all(|&u| {
+                                inside[u]
+                                    || u == r.root
+                                    || r.inner.contains(&u)
+                                    || r.reductions.contains(&u)
+                            })
+                    })
+                };
+                let earlier = rows_of
+                    .iter()
+                    .position(|r| r.root == k && shaped(v) && own_reads(r));
+                if let Some(r) = earlier {
+                    let row = &rows_of[r];
+                    for &m in std::iter::once(&row.root)
+                        .chain(&row.inner)
+                        .chain(&row.reductions)
+                    {
+                        inside[m] = true;
+                    }
+                    absorbed.push(r);
+                    continue;
+                }
+                if taken[k] || !fusible(graph, node) {
+                    continue;
+                }
+                inside[k] = match &node.primitive {
+                    Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                        let x = node.inputs[0];
+                        shaped(x)
+                            && axes.as_slice() == [graph.type_of(x).shape.len() - 1]
+                            && per_row(v)
+                    }
+                    _ => shaped(v) || per_row(v) || graph.type_of(v).numel() == 1,
+                };
+                if inside[k] && !read_inside {
+                    outputs.push(k);
+                }
+            }
+            (inside, absorbed, outputs)
+        };
+        let reduces = |inside: &[bool]| (0..i).any(|k| inside[k] && is_reduction(k));
+        // Of the root's rows; or, a value a row (a loss each), of the rows
+        // a reduction it reads (through values a row) reduces.
+        let mut grown = match ty.shape.last() {
+            Some(&n) if n > 1 => Some(grow(ty.numel(), n)),
+            _ => None,
+        };
+        // (Of several reductions: one, and its epilogue, is a reduction's
+        // own fusion.)
+        if !grown.as_ref().is_some_and(|(inside, _, _)| reduces(inside)) {
+            grown = row_length(finder, i)
+                .map(|n| grow(ty.numel() * n, n))
+                .filter(|(inside, _, _)| {
+                    (0..i).filter(|&k| inside[k] && is_reduction(k)).count() > 1
+                });
+        }
+        let Some((inside, mut absorbed, mut outputs)) = grown else {
+            continue;
         };
         let reductions: Vec<usize> = (0..i).filter(|&k| inside[k] && is_reduction(k)).collect();
         // A diamond that took nothing more stays as it is.
@@ -225,14 +271,211 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
         for r in absorbed.into_iter().rev() {
             rows.remove(r);
         }
+        outputs.sort_unstable();
         rows.push(Row {
             root: i,
             reductions,
             inner,
-            outputs: Vec::new(),
+            outputs,
             partials: Vec::new(),
         });
     }
+}
+
+/// Each row fusion of `rows` extended to an elementwise consumer of its
+/// values of the rows' shape after it (read by none such), computed from
+/// them, from values of its rows (a cross entropy's logits), from values
+/// of a row each computed from those (`g = 2·loss`, of `Σ loss²`) and from
+/// values not reading its own (`(exp(x - lse) - one_hot) · g`, its
+/// gradient, `g` a constant or an input: XMA's forward-backward kernel;
+/// not from every row's, `mean(loss)`): that consumer its root, its own
+/// root and the values read elsewhere (of a row each) its outputs, written
+/// once its reductions are done. Its readers before it wait for it (the
+/// fused graph's order), as none of its values reads them.
+fn consumed(finder: &Finder, rows: &mut [Row]) {
+    let graph = finder.graph;
+    let nodes = graph.nodes();
+    let is_reduction = |k: usize| {
+        matches!(
+            nodes[k].primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        )
+    };
+    for r in 0..rows.len() {
+        let row = &rows[r];
+        let Some(&first) = row.reductions.first() else {
+            continue;
+        };
+        let x = graph.type_of(nodes[first].inputs[0]);
+        let Some(&n) = x.shape.last() else { continue };
+        let (size, each) = (x.numel(), x.numel() / n.max(1));
+        let mine: Vec<usize> = std::iter::once(row.root)
+            .chain(row.inner.iter().copied())
+            .chain(row.reductions.iter().copied())
+            .collect();
+        let taken = |k: usize| {
+            rows.iter()
+                .any(|o| o.root == k || o.inner.contains(&k) || o.reductions.contains(&k))
+        };
+        let shaped = |v: Var| {
+            let t = graph.type_of(v);
+            t.numel() == size && t.shape.last() == Some(&n)
+        };
+        let fits = |v: Var| shaped(v) || [each, 1].contains(&graph.type_of(v).numel());
+        let cheap = |p: &Primitive| {
+            elementwise(p)
+                || matches!(
+                    p,
+                    Primitive::Reshape { .. }
+                        | Primitive::BroadcastInDim { .. }
+                        | Primitive::Iota { .. }
+                )
+        };
+        // The latest elementwise reader of its values of the rows' shape
+        // that its cone (its producers outside the row, cheap and taken by
+        // no other row) makes a fusion with it.
+        let candidate = |c: usize| {
+            finder.live[c]
+                && elementwise(&nodes[c].primitive)
+                && fusible(graph, &nodes[c])
+                && shaped(nodes[c].output)
+                && !taken(c)
+        };
+        // Not a part of a larger one (`softmax - one_hot` of `(softmax -
+        // one_hot) · g`): if that one is not computed here, its parts are
+        // not either, but computed with it (from the row's values written).
+        let candidates: Vec<usize> = (row.root + 1..nodes.len())
+            .rev()
+            .filter(|&c| {
+                candidate(c)
+                    && !finder.readers[nodes[c].output]
+                        .iter()
+                        .any(|&u| candidate(u))
+            })
+            .collect();
+        let found = candidates.into_iter().find_map(|c| {
+            let mut cone: Vec<usize> = vec![c];
+            let (mut leaves, mut stack, mut reaches) = (Vec::new(), nodes[c].inputs.clone(), false);
+            while let Some(v) = stack.pop() {
+                match finder.producer[v] {
+                    Some(p) if mine.contains(&p) => reaches = true,
+                    Some(p) if cone.contains(&p) => {}
+                    Some(p)
+                        if !taken(p)
+                            && fusible(graph, &nodes[p])
+                            && cheap(&nodes[p].primitive)
+                            && fits(v) =>
+                    {
+                        cone.push(p);
+                        stack.extend(&nodes[p].inputs);
+                    }
+                    _ => {
+                        if !leaves.contains(&v) {
+                            leaves.push(v);
+                        }
+                    }
+                }
+            }
+            // Its nodes read inside it alone (but its root).
+            let inside = |u: usize| cone.contains(&u) || mine.contains(&u);
+            let closed = cone[1..].iter().all(|&k| {
+                let v = nodes[k].output;
+                !finder.output[v] && finder.readers[v].iter().all(|&u| inside(u))
+            });
+            if !reaches || !closed {
+                return None;
+            }
+            // The row's values read elsewhere (of a row each): its outputs;
+            // nothing it reads computed from their readers.
+            let mut outputs = Vec::new();
+            let mut outside = Vec::new();
+            for &k in &mine {
+                let v = nodes[k].output;
+                let readers: Vec<usize> = finder.readers[v]
+                    .iter()
+                    .copied()
+                    .filter(|&u| !inside(u))
+                    .collect();
+                if finder.output[v] || !readers.is_empty() {
+                    if graph.type_of(v).numel() != each {
+                        return None;
+                    }
+                    outputs.push(k);
+                    outside.extend(readers);
+                }
+            }
+            let depends = |v: Var| {
+                let (mut stack, mut seen) = (vec![v], vec![false; graph.types.len()]);
+                while let Some(v) = stack.pop() {
+                    if std::mem::replace(&mut seen[v], true) {
+                        continue;
+                    }
+                    if let Some(p) = finder.producer[v] {
+                        if outside.contains(&p) {
+                            return true;
+                        }
+                        stack.extend(&nodes[p].inputs);
+                    }
+                }
+                false
+            };
+            (!leaves.iter().any(|&v| depends(v))).then_some((c, cone, outputs))
+        });
+        let Some((c, cone, mut outputs)) = found else {
+            continue;
+        };
+        let row = &mut rows[r];
+        let old = row.root;
+        row.inner.push(old);
+        row.inner.extend(cone.iter().copied().filter(|&k| k != c));
+        row.inner.retain(|&k| !is_reduction(k));
+        row.inner.sort_unstable();
+        row.inner.dedup();
+        outputs.sort_unstable();
+        row.outputs = outputs;
+        row.root = c;
+    }
+}
+
+/// The length of the rows a value a row (node `root`'s) is of: that of the
+/// operand of a reduction over its last dimension to a value a row, read
+/// back from it through elementwise primitives, reshapes and broadcasts
+/// (a cross entropy's `logsumexp - picked`); None if none.
+fn row_length(finder: &Finder, root: usize) -> Option<usize> {
+    let graph = finder.graph;
+    let nodes = graph.nodes();
+    let each = graph.type_of(nodes[root].output).numel();
+    let mut stack = nodes[root].inputs.clone();
+    let mut seen = vec![false; graph.types.len()];
+    while let Some(v) = stack.pop() {
+        let Some(k) = finder.producer[v].filter(|_| !std::mem::replace(&mut seen[v], true)) else {
+            continue;
+        };
+        let node = &nodes[k];
+        match &node.primitive {
+            Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                let x = graph.type_of(node.inputs[0]);
+                let last = x.shape.len().checked_sub(1)?;
+                if axes.as_slice() == [last]
+                    && graph.type_of(v).numel() == each
+                    && x.shape[last] > 1
+                {
+                    return Some(x.shape[last]);
+                }
+            }
+            p if (elementwise(p)
+                || matches!(
+                    p,
+                    Primitive::Reshape { .. } | Primitive::BroadcastInDim { .. }
+                ))
+                && graph.type_of(v).numel() == each =>
+            {
+                stack.extend(&node.inputs);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `graph` with each sum over rows (`Σ_rows v`: over every dimension but

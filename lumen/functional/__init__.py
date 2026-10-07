@@ -52,6 +52,7 @@ __all__ = [
     # normalizations
     "softmax",
     "log_softmax",
+    "cross_entropy",
     "rms_norm",
     # contractions
     "matmul",
