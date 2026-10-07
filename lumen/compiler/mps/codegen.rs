@@ -679,15 +679,40 @@ fn row_kernel(
             )
         }
     };
-    // The passes over the row: each reduction's, but (`online_softmax`) a
-    // softmax's max and its sum of exp(x - max) one pass, by the index of
-    // their first reduction.
-    let (mut passes, mut k) = (Vec::new(), 0);
+    // The passes over the row, each its reductions (their indices, and
+    // whether each is with the next one): those reading none of the
+    // pass's reductions together (a cross entropy's pick, beside its max
+    // and sum), and (`online_softmax`) a softmax's max and its sum of
+    // exp(x - max) together, the sum rescaled as the max grows.
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let reads = |v: Var, of: &[Var]| {
+        let (mut stack, mut seen) = (vec![v], Vec::new());
+        while let Some(v) = stack.pop() {
+            if of.contains(&v) {
+                return true;
+            }
+            if !seen.contains(&v) {
+                seen.push(v);
+                stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
+            }
+        }
+        false
+    };
+    let mut passes: Vec<Vec<(usize, bool)>> = Vec::new();
+    let mut k = 0;
     while k < reductions.len() {
         let online = config.online_softmax
             && k + 1 < reductions.len()
             && softmax_pair(body, reductions[k], reductions[k + 1]);
-        passes.push((k, online));
+        let inside: Vec<Var> = passes.last().map_or(Vec::new(), |pass| {
+            pass.iter()
+                .flat_map(|&(m, pair)| (m..=m + usize::from(pair)).map(|m| reductions[m].output))
+                .collect()
+        });
+        match passes.last_mut() {
+            Some(pass) if !reads(reductions[k].inputs[0], &inside) => pass.push((k, online)),
+            _ => passes.push(vec![(k, online)]),
+        }
         k += 1 + usize::from(online);
     }
     // Its partials' values of the rows (`diamonds::partials`: each summed
@@ -704,7 +729,7 @@ fn row_kernel(
     // values kept for later passes: each with the pass computing it.
     let roots: Vec<Vec<Var>> = passes
         .iter()
-        .map(|&(k, _)| vec![reductions[k].inputs[0]])
+        .map(|pass| pass.iter().map(|&(k, _)| reductions[k].inputs[0]).collect())
         .chain([std::iter::once(out).chain(summed.iter().copied()).collect()])
         .collect();
     // A row's threads: a SIMD group's lanes, or a threadgroup's.
@@ -740,7 +765,7 @@ fn row_kernel(
         }
     };
     // Pass `k`'s values kept from earlier passes, read from their
-    // registers; then its root's value, and the statements storing those
+    // registers; then its roots' values, and the statements storing those
     // it keeps.
     let pass = |e: &mut Emitter, k: usize| {
         (e.lines, e.hoisted) = (String::new(), String::new());
@@ -748,94 +773,102 @@ fn row_kernel(
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p < k) {
             e.values.insert((v, "j".into()), format!("kept{m}[e]"));
         }
-        let value = e.value(roots[k][0], "j".into());
+        let values: Vec<String> = roots[k].iter().map(|&v| e.value(v, "j".into())).collect();
         let mut stores = String::new();
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p == k) {
             let local = e.value(v, "j".into());
             writeln!(stores, "        kept{m}[e] = {local};").unwrap();
         }
-        (value, stores)
+        (values, stores)
     };
-    for (p, &(k, online)) in passes.iter().enumerate() {
-        let r = reductions[k];
-        let x = body.type_of(r.inputs[0]);
-        assert_eq!(
-            (x.shape.last(), body.type_of(r.output).numel()),
-            (Some(&n), rows),
-            "a reduction of rows"
-        );
-        let op = functor_of_reduction(&r.primitive);
-        // Accumulated in the reduction's output type (reduce_sum's
-        // accum_dtype): each element widened as read.
-        let a = metal_type(body.type_of(r.output).dtype);
-        let (value, stores) = pass(&mut e, p);
-        if online && simd {
-            // As below, the lanes' pairs combined: the max, then each sum
-            // rescaled to it.
-            let sum = reductions[k + 1];
-            write!(
-                source,
-                "{}    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    {a} r{k} = simd_max(m{k});\n    // A lane with no elements has no sum to rescale.\n    {a} r{} = simd_sum(m{k} == -INFINITY ? {a}(0) : s{k} * Exp::apply(m{k} - r{k}));\n",
-                hoisted(&e.hoisted),
-                e.lines,
-                k + 1
-            )
-            .unwrap();
-            e.row_locals.insert(r.output, format!("r{k}"));
-            e.row_locals.insert(sum.output, format!("r{}", k + 1));
-            continue;
-        }
-        if online {
-            // The max m and s = sum(exp(x - m)) together, s rescaled as m
-            // grows, then the threadgroup's pairs combined.
-            let sum = reductions[k + 1];
-            write!(
-                source,
-                "{}    {a} m{k} = -INFINITY, s{k} = 0;\n{header}{}        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n{stores}    }}\n    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
-                hoisted(&e.hoisted),
-                e.lines,
-                k + 1
-            )
-            .unwrap();
-            writeln!(
-                decls,
-                "    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];"
-            )
-            .unwrap();
-            e.row_locals.insert(r.output, format!("r{k}"));
-            e.row_locals.insert(sum.output, format!("r{}", k + 1));
-            continue;
-        }
-        let value = match body.type_of(r.output).dtype == x.dtype {
-            true => value,
-            false => format!("{a}({value})"),
-        };
-        if simd {
-            let combine = match op {
-                "Add" => "simd_sum",
-                _ => "simd_max",
+    for (p, members) in passes.iter().enumerate() {
+        let (values, stores) = pass(&mut e, p);
+        // Each reduction's accumulators before the loop, its step in it,
+        // and its threads' combining after it (into `r{k}`).
+        let (mut init, mut step, mut combine) = (String::new(), String::new(), String::new());
+        let mut locals: Vec<(Var, String)> = Vec::new();
+        for (&(k, online), value) in members.iter().zip(&values) {
+            let r = reductions[k];
+            let x = body.type_of(r.inputs[0]);
+            assert_eq!(
+                (x.shape.last(), body.type_of(r.output).numel()),
+                (Some(&n), rows),
+                "a reduction of rows"
+            );
+            // Accumulated in the reduction's output type (reduce_sum's
+            // accum_dtype): each element widened as read.
+            let a = metal_type(body.type_of(r.output).dtype);
+            if online {
+                // The max m and s = sum(exp(x - m)) together, s rescaled
+                // as m grows; then the threads' pairs combined.
+                let sum = reductions[k + 1];
+                writeln!(init, "    {a} m{k} = -INFINITY, s{k} = 0;").unwrap();
+                write!(
+                    step,
+                    "        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n"
+                )
+                .unwrap();
+                match simd {
+                    true => write!(
+                        combine,
+                        "    {a} r{k} = simd_max(m{k});\n    // A lane with no elements has no sum to rescale.\n    {a} r{} = simd_sum(m{k} == -INFINITY ? {a}(0) : s{k} * Exp::apply(m{k} - r{k}));\n",
+                        k + 1
+                    ),
+                    false => {
+                        writeln!(
+                            decls,
+                            "    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];"
+                        )
+                        .unwrap();
+                        write!(
+                            combine,
+                            "    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
+                            k + 1
+                        )
+                    }
+                }
+                .unwrap();
+                locals.push((r.output, format!("r{k}")));
+                locals.push((sum.output, format!("r{}", k + 1)));
+                continue;
+            }
+            let op = functor_of_reduction(&r.primitive);
+            let value = match body.type_of(r.output).dtype == x.dtype {
+                true => value.clone(),
+                false => format!("{a}({value})"),
             };
-            write!(
-                source,
-                "{}    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    {a} r{k} = {combine}(acc{k});\n",
-                hoisted(&e.hoisted),
-                e.lines
-            )
+            writeln!(init, "    {a} acc{k} = {op}::template identity<{a}>();").unwrap();
+            writeln!(step, "        acc{k} = {op}::apply(acc{k}, {value});").unwrap();
+            match simd {
+                true => {
+                    let lanes = match op {
+                        "Add" => "simd_sum",
+                        _ => "simd_max",
+                    };
+                    writeln!(combine, "    {a} r{k} = {lanes}(acc{k});")
+                }
+                false => {
+                    writeln!(decls, "    threadgroup {a} shared{k}[REDUCE_THREADS];").unwrap();
+                    write!(
+                        combine,
+                        "    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n"
+                    )
+                }
+            }
             .unwrap();
-            e.row_locals.insert(r.output, format!("r{k}"));
-            continue;
+            locals.push((r.output, format!("r{k}")));
         }
         write!(
             source,
-            "{}    {a} acc{k} = {op}::template identity<{a}>();\n{header}{}        acc{k} = {op}::apply(acc{k}, {value});\n{stores}    }}\n    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n",
+            "{}{init}{header}{}{step}{stores}    }}\n{combine}",
             hoisted(&e.hoisted),
             e.lines
         )
         .unwrap();
-        writeln!(decls, "    threadgroup {a} shared{k}[REDUCE_THREADS];").unwrap();
-        e.row_locals.insert(r.output, format!("r{k}"));
+        e.row_locals.extend(locals);
     }
-    let (value, _) = pass(&mut e, passes.len());
+    let (values, _) = pass(&mut e, passes.len());
+    let value = &values[0];
     // Its other outputs (`diamonds.rs`, `fusion.rs`: read elsewhere too):
     // values of a row each, written once a row by its first thread; the
     // others (an earlier value of the row, as its root's epilogue reads it)

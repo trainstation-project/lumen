@@ -1632,6 +1632,45 @@ def test_normalizations_train_in_one_row_kernel(f):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("n, vocab", [(64, 16), (300, 1000), (128, 32000)])
+def test_cross_entropy_is_one_row_kernel(n, vocab):
+    """``F.cross_entropy`` (``reduction="none"``): each row's ``logsumexp -
+    logit[label]``. On MPS one row kernel reads the logits once (an online
+    max and sum, and the label's logit picked by a one-hot sum, all one
+    loop over the row: none reads another's value), writing a loss
+    and a logsumexp a row; trained, its gradient ``(exp(x - lse) -
+    one_hot) · g`` one pass more, no reduction, nothing of the logits'
+    shape kept between them. Losses and gradients NumPy's."""
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal((n, vocab)) * 3).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    c = rng.standard_normal(n).astype(np.float32)
+
+    def step(x, t, c):
+        loss = F.cross_entropy(x, t)
+        F.sum(loss * c).backward()
+        return loss, x.grad
+
+    try:
+        X, T, C = (lumen.from_numpy(a).to("mps") for a in (x, t, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    (forward,) = lumen.graph.Plan(lumen.make_graph(F.cross_entropy)(X, T), "mps").steps()
+    assert forward["output"][2] == [n] and "reduce_max" in forward["label"], forward["label"]
+    source = forward["fusion"]["source"]
+    assert source.count("for (uint c") + source.count("for (uint e = 0") == 1, source
+    steps = lumen.graph.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
+    assert [s["output"][2] for s in steps] == [[n], [n, vocab]], [s["label"] for s in steps]
+    assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[1]["label"]
+    m = x.max(-1, keepdims=True).astype(np.float64)
+    lse = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0]
+    hit = np.zeros_like(x, dtype=np.float64)
+    hit[np.arange(n), t] = 1
+    loss, grad = (lumen.to_numpy(v) for v in lumen.compile(step)(X, T, C))
+    np.testing.assert_allclose(loss, lse - x[np.arange(n), t], rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(grad, (np.exp(x - lse[:, None]) - hit) * c[:, None], rtol=1e-5, atol=1e-6)
+
+
 def test_rms_norm_backward_recomputes_its_normalized_input():
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's

@@ -100,11 +100,6 @@ class _MLP(lumen.autograd.Function):
         return dx.bfloat16(), dwg, dwu, dwd
 
 
-def one_hot(ids, n):
-    """``ids`` (int64) as one-hot float32 rows of ``n``: ``[*ids.shape, n]``."""
-    return F.eq(ids.reshape(*ids.shape, 1), lumen.arange(n, dtype="int64")).to(dtype="float32")
-
-
 class Embedding(lumen.nn.Module):
     """Token ids ``[batch, seq]`` to ``[batch * seq, dim]``: each token's
     row of ``tokens`` (a lookup, ``tokens[ids]``, as MLX's
@@ -220,9 +215,9 @@ class Transformer(lumen.nn.Module):
 @lumen.profiler.record_function("loss")
 def cross_entropy(logits, targets):
     """The mean cross-entropy of ``logits`` ``[n, vocab]`` against
-    ``targets`` (token ids), in float32."""
-    log_p = F.log_softmax(logits, -1)
-    return -F.mean(F.sum(one_hot(targets.reshape(-1), log_p.shape[-1]) * log_p, -1))
+    ``targets`` (token ids), in float32 (``F.cross_entropy``: one row kernel
+    for the rows' losses)."""
+    return F.mean(F.cross_entropy(logits, targets.reshape(-1)))
 
 
 def train_step(model, opt, x, y):
