@@ -295,6 +295,8 @@ pub(crate) fn merge_dots(
         }
         if let Some(k) = first_of[i] {
             let g = &groups[k];
+            // The merged dot (and its block's chain): all the group's lines.
+            out.set_origins(&g.nodes.iter().map(|&m| &nodes[m]).collect::<Vec<_>>());
             let mut operands = [map[g.shared]; 2];
             let value = match reuses[k] {
                 Some(e) => chains[e].expect("an earlier group's block"),
@@ -399,6 +401,7 @@ pub(crate) fn merge_dots(
                     start_indices: starts,
                     limit_indices: limits,
                 };
+                out.set_origin(&nodes[m]);
                 map[nodes[m].output] = out.apply(slice, &[result]).expect("within the result");
                 start += size;
             }
@@ -422,6 +425,7 @@ pub(crate) fn merge_dots(
         map[node.output] = out
             .apply(node.primitive.clone(), &inputs)
             .expect("the node's own operands");
+        out.set_label(map[node.output], node.label);
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");

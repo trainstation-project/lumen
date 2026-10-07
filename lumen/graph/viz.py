@@ -235,7 +235,7 @@ def graph_view(graph, unfused, kernels):
             "kernels": [],
             "fusion": None,
             "scope": node["scope"],
-            "sources": [node["source"]] if node["source"] else [],
+            "sources": node["sources"],
         }
         # The unfused plan's steps are the live nodes in graph order (it may
         # drop dead ones and alias reshapes), plus steps the device's

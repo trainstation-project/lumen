@@ -1323,8 +1323,10 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
 /// The source lines of `node` and, a fusion, of the nodes of its body (and
 /// theirs), appended to `sources` if not in it.
 fn sources_of(node: &Node, sources: &mut Vec<(&'static str, u32)>) {
-    if let Some(s) = node.source.filter(|s| !sources.contains(s)) {
-        sources.push(s);
+    for &s in node.sources {
+        if !sources.contains(&s) {
+            sources.push(s);
+        }
     }
     if let Primitive::Fusion { body, .. } = &node.primitive {
         for n in body.nodes() {

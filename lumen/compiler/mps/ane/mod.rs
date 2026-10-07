@@ -505,6 +505,7 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
                     map[node.output] = out
                         .apply(node.primitive.clone(), &inputs)
                         .expect("a graph is typed as the original");
+                    out.set_label(map[node.output], node.label);
                 }
                 Err(r) => {
                     let (members, b) = regions[r].take().expect("a region emitted once");

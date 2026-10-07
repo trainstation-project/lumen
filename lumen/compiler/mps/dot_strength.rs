@@ -66,8 +66,11 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
             _ => None,
         }
         .unwrap_or_else(|| {
-            out.apply(node.primitive.clone(), &inputs)
-                .expect("a node of the graph")
+            let v = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("a node of the graph");
+            out.set_label(v, node.label);
+            v
         });
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();

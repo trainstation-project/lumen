@@ -40,8 +40,7 @@ class Graph:
         """Each node: ``primitive``, ``text`` (with its parameters),
         ``fusion`` (``kernel``, ``body``, Metal ``source``; or None),
         ``inputs`` and ``output`` values, ``scope`` (its ``record_function``
-        ranges) and ``source`` (the ``(file, line)`` that traced it, or
-        None)."""
+        ranges) and ``sources`` (the ``(file, line)``s that traced it)."""
 
     def set_outputs(self, outputs: Sequence[int]) -> None: ...
     def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...

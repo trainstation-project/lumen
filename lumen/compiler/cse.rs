@@ -42,6 +42,7 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
         let v = out
             .apply(node.primitive.clone(), &inputs)
             .expect("the node's own operands");
+        out.set_label(v, node.label);
         earlier.push((node.primitive.clone(), v));
         map[node.output] = v;
     }

@@ -264,7 +264,9 @@ pub(crate) fn fuse(
     // epilogue's last primitive is the fusion's root, the dot inside it
     // (its operands read as they are). Its values read outside it (the
     // dot's, an activation's input, for a training step's backward) are
-    // written by the kernel too (XLA's GELU_AUX), hosted by its fusion.
+    // written by the kernel too (XLA's GELU_AUX), hosted by its fusion;
+    // one read outside only by a narrowing cast, as that cast (the bfloat16
+    // a backward saves, not the float32 it was rounded from).
     // Not for a dot reading a slice in place (a strided view, `dot_views`).
     let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
@@ -290,22 +292,19 @@ pub(crate) fn fuse(
         }
         // Nothing a row fusion computes (a normalization's scale).
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
-        // A dot rounding its result narrower than it accumulates (bfloat16
-        // of float32): no widening cast in its epilogue, which would read
-        // the rounded value back wider (where the program wants it wider,
-        // the dot's output_dtype says so).
-        let narrowed = match &node.primitive {
-            Primitive::DotGeneral {
-                accum_dtype,
-                output_dtype,
-                ..
-            } => output_dtype.size_of() < accum_dtype.size_of(),
-            _ => false,
-        };
-        let widens = |un: &Node| {
+        // No widening cast in an epilogue of a value it computes (the dot's
+        // result rounded narrower than it accumulates, bfloat16 of float32,
+        // `simplify` folding a narrowing cast into it; or anything after),
+        // whose readers outside it widen it as they read it (fusible): the
+        // kernel writes the narrow value, not the wide one (where the
+        // program wants it wider, the dot's output_dtype says so). A cast
+        // its readers would not fuse (an output's) steps in: its own kernel
+        // would read the narrow value back.
+        let cast_by = |un: &Node, grows: bool| {
+            let (from, to) = (graph.type_of(un.inputs[0]), graph.type_of(un.output));
             matches!(un.primitive, Primitive::Cast { .. })
-                && graph.type_of(un.output).dtype.size_of()
-                    > graph.type_of(un.inputs[0]).dtype.size_of()
+                && (to.dtype.size_of() > from.dtype.size_of()) == grows
+                && to.dtype.size_of() != from.dtype.size_of()
         };
         // The epilogue grown in order: its nodes (`taken`, their values
         // `after`), the values depending on the dot (no other operand may),
@@ -368,10 +367,33 @@ pub(crate) fn fuse(
                 let v = nodes[k].output;
                 is_output[v] || users[v].iter().any(|w| !kept.contains(w))
             };
+            // A value read outside only rounded narrower (saved for a
+            // backward in bfloat16): the rounded value written instead,
+            // its cast computed here (the bytes the program keeps).
+            let narrowed_aux = |k: usize| {
+                let v = nodes[k].output;
+                let mut readers = users[v].iter().copied().filter(|w| !kept.contains(w));
+                match (readers.next(), readers.next()) {
+                    (Some(c), None)
+                        if !is_output[v]
+                            && matches!(nodes[c].primitive, Primitive::Cast { .. })
+                            && graph.type_of(nodes[c].output).dtype.size_of()
+                                < graph.type_of(v).dtype.size_of()
+                            && live[c]
+                            && fusible[c]
+                            && !in_row(c)
+                            && !claimed[c] =>
+                    {
+                        c
+                    }
+                    _ => k,
+                }
+            };
             let aux: Vec<usize> = kept[..kept.len() - 1]
                 .iter()
                 .copied()
                 .filter(outside)
+                .map(narrowed_aux)
                 .collect();
             let read_after = aux.iter().all(|&k| {
                 users[nodes[k].output]
@@ -391,7 +413,14 @@ pub(crate) fn fuse(
                     && graph.type_of(un.output).numel() == half
                     && elementwise(&un.primitive)
             });
-            let upcast = narrowed && kept.iter().any(|&k| widens(&nodes[k]));
+            let computed = |v: Var| producer[v].is_some_and(|p| kept.contains(&p));
+            let fused_by_readers = |k: usize| {
+                let v = nodes[k].output;
+                !is_output[v] && users[v].iter().all(|&w| kept.contains(&w) || fusible[w])
+            };
+            let upcast = kept.iter().any(|&k| {
+                cast_by(&nodes[k], true) && computed(nodes[k].inputs[0]) && fused_by_readers(k)
+            });
             if kept.first() == Some(&i)
                 && read_after
                 && aux.len() <= MAX_AUX
@@ -414,7 +443,7 @@ pub(crate) fn fuse(
             }
             taken.iter().for_each(|&k| claimed[k] = true);
             for k in aux {
-                dot_aux[k] = Some(end);
+                (dot_aux[k], claimed[k]) = (Some(end), true);
             }
         }
     }

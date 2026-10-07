@@ -301,6 +301,7 @@ pub(crate) fn fuse_backward(
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
+            out.set_label(map[node.output], node.label);
         }
         for (_, outs, bases) in fusions.iter().filter(|(at, _, _)| *at == i) {
             let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
@@ -462,6 +463,7 @@ pub(crate) fn fuse(
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("a node of the graph");
+            out.set_label(map[node.output], node.label);
             continue;
         };
         // The fusion's inputs: the buffers it reads; its body, every node

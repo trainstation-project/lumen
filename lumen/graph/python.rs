@@ -190,8 +190,9 @@ impl PyGraph {
     /// Give the node defining `var` its source line: `line` of `file` (the
     /// tracer's, the traced program's line that applied it).
     fn _set_source(&mut self, var: Var, file: String, line: u32) {
+        let line = (crate::graph::intern(file), line);
         self.inner
-            .set_source(var, Some((crate::graph::intern(file), line)));
+            .set_sources(var, crate::graph::intern_lines(&[line]));
     }
 
     /// Give the nodes added from now on the `record_function` ranges
@@ -271,8 +272,8 @@ impl PyGraph {
     /// The nodes in order, as dicts: `primitive` (its name), `text` (with
     /// its parameters), `fusion` (see [`primitive_dict`]), the `inputs` and
     /// `output` values, its `scope` (the `record_function` ranges it was
-    /// traced in, outermost first) and `source` (the `(file, line)` of the
-    /// traced program that computed it, or None).
+    /// traced in, outermost first) and `sources` (the `(file, line)`s of
+    /// the traced program that computed it).
     fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
             .nodes()
@@ -282,7 +283,7 @@ impl PyGraph {
                 d.set_item("inputs", node.inputs.clone())?;
                 d.set_item("output", node.output)?;
                 d.set_item("scope", scope_names(node.scope))?;
-                d.set_item("source", node.source)?;
+                d.set_item("sources", node.sources.to_vec())?;
                 Ok(d)
             })
             .collect()

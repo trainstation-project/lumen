@@ -15,6 +15,10 @@
 //!   matchers, whose patterns these change, or a device with none):
 //!   - a dot of a computed value's transpose (a hand-written backward's
 //!     `dy.t() @ h`): the dot of the value, as of an input's above;
+//!   - a cast of a dot's result it alone reads to its operands' narrower
+//!     dtype, the dot writing its accumulator as it is (bfloat16
+//!     operands, `F.matmul(x, w, "float32", "float32").bfloat16()`): the
+//!     dot writing that dtype (one rounding either way, the same bits);
 //!   - a transpose of a dot swapping its operands' free dimensions (as
 //!     autodiff's transpose of a dot gives a weight's gradient): the dot of
 //!     the operands swapped, so no copy;
@@ -77,6 +81,18 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
         let value = match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {
             Some(Rewrite::Value(v)) => v,
             Some(Rewrite::Node(p, ins)) => {
+                // Replacing the node and those it reads but the rewrite
+                // does not (`reshape(reshape(x))`, a dot rounding as the
+                // cast of it did): the lines of all of them.
+                let replaced: Vec<Node> = std::iter::once(node.clone())
+                    .chain(
+                        inputs
+                            .iter()
+                            .filter(|v| !ins.contains(v))
+                            .filter_map(|v| producer.get(v).map(|&k| out.nodes()[k].clone())),
+                    )
+                    .collect();
+                out.set_origins(&replaced.iter().collect::<Vec<_>>());
                 out.apply(p, &ins).expect("a rewrite is typed as the node")
             }
             None => match &node.primitive {
@@ -90,8 +106,11 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 _ => None,
             }
             .unwrap_or_else(|| {
-                out.apply(node.primitive.clone(), &inputs)
-                    .expect("a node of the graph")
+                let v = out
+                    .apply(node.primitive.clone(), &inputs)
+                    .expect("a node of the graph");
+                out.set_label(v, node.label);
+                v
             }),
         };
         // The nodes added: those before the last read by the next alone.
@@ -149,6 +168,39 @@ fn rewrite(
         Cast { new_dtype } if out.type_of(inputs[0]).dtype == *new_dtype => {
             Some(Rewrite::Value(inputs[0]))
         }
+        Cast { new_dtype } => match node(inputs[0]) {
+            Some(Node {
+                primitive:
+                    DotGeneral {
+                        lhs_contracting,
+                        rhs_contracting,
+                        lhs_batch,
+                        rhs_batch,
+                        accum_dtype,
+                        output_dtype,
+                    },
+                inputs: x,
+                output,
+                ..
+            }) if matched
+                && accum_dtype == output_dtype
+                && accum_dtype.is_float()
+                && new_dtype.size_of() < output_dtype.size_of()
+                && out.type_of(x[0]).dtype == *new_dtype
+                && once.get(output) == Some(&true) =>
+            {
+                let dot = DotGeneral {
+                    lhs_contracting: lhs_contracting.clone(),
+                    rhs_contracting: rhs_contracting.clone(),
+                    lhs_batch: lhs_batch.clone(),
+                    rhs_batch: rhs_batch.clone(),
+                    accum_dtype: *accum_dtype,
+                    output_dtype: *new_dtype,
+                };
+                Some(Rewrite::Node(dot, x.clone()))
+            }
+            _ => None,
+        },
         Reshape { new_sizes } => {
             if out.type_of(inputs[0]).shape == *new_sizes {
                 return Some(Rewrite::Value(inputs[0]));

@@ -16,7 +16,7 @@
 //! and the dots of `g1` and `g2` with `x` (the weights' gradients), if any,
 //! of them or their transposes (`g.t() @ x`, a hand-written backward's).
 
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var, intern};
 
 /// A matched pair's backward: the sum's node, its dots' operands (each dot
 /// `dot(g, a)` or `dot(a, g)`, `g_first` which), the contracting dimension
@@ -185,6 +185,8 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
     for &v in graph.inputs() {
         map[v] = Some(out.input(graph.type_of(v).clone()));
     }
+    // The node computing each value, if any.
+    let producer = |v: Var| nodes.iter().find(|n| n.output == v);
     // Each pair's `[g1 | g2]` and its weights' gradients' dot, once made.
     let mut stacked: Vec<Option<Var>> = vec![None; pairs.len()];
     let mut weights_dot: Vec<Option<Var>> = vec![None; pairs.len()];
@@ -215,11 +217,25 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
                     let (Some(g1), Some(g2)) = (map[p.g[0]], map[p.g[1]]) else {
                         return true;
                     };
+                    // The merged dots: the lines of the dots (and sum) each
+                    // replaces.
+                    let merged: Vec<&Node> = match r {
+                        0 => vec![node, &nodes[p.dots[0]], &nodes[p.dots[1]]],
+                        _ => p
+                            .weights
+                            .as_ref()
+                            .map_or(vec![node], |w| w.0.iter().map(|&f| &nodes[f]).collect()),
+                    };
+                    // `[g1 | g2]`: the lines computing the cotangents.
                     let stack = *stacked[k].get_or_insert_with(|| {
+                        out.set_origins(
+                            &p.g.iter().filter_map(|&g| producer(g)).collect::<Vec<_>>(),
+                        );
                         let concat = Primitive::Concatenate { dimension: p.g_dim };
                         out.apply(concat, &[g1, g2])
                             .expect("cotangents of one type")
                     });
+                    out.set_origins(&merged);
                     if r == 0 {
                         let (Some(a1), Some(a2)) = (map[p.a[0]], map[p.a[1]]) else {
                             return true;
@@ -240,8 +256,13 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
                     };
                     let merged = *weights_dot[k].get_or_insert_with(|| {
                         let ins = if g_lhs { [stack, x] } else { [x, stack] };
-                        out.apply(dot.clone(), &ins)
-                            .expect("the weights' gradients' dimension numbers")
+                        let v = out
+                            .apply(dot.clone(), &ins)
+                            .expect("the weights' gradients' dimension numbers");
+                        // Two dots, named as `merge_dots`' merged ones are.
+                        let label = out.label(out.nodes().last().expect("the dot"));
+                        out.set_label(v, Some(intern(format!("2x {label}"))));
+                        v
                     });
                     // The cotangent's free dimension in the result: the lhs's
                     // first, the rhs's after the lhs's.
@@ -254,6 +275,7 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
                         start_indices: starts,
                         limit_indices: limits,
                     };
+                    out.set_origin(node);
                     map[node.output] = Some(out.apply(slice, &[merged]).expect("its half"));
                     false
                 }

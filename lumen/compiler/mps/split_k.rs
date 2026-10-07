@@ -59,6 +59,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         } = &node.primitive
         else {
             map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
+            out.set_label(map[node.output], node.label);
             continue;
         };
         let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
@@ -78,6 +79,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         };
         let Some((l, r, s)) = split else {
             map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
+            out.set_label(map[node.output], node.label);
             continue;
         };
         // Contracting dimension d as [S, K / S]: S a batch dimension.
