@@ -7,31 +7,36 @@
 //! dtype once. Not what the program computes (the partials are added in
 //! another order): `lumen.config.compiler.split_k`.
 //!
-//! With `atomic` (unless `lumen.config.compiler.deterministic`), the dot
-//! and its sum are one fusion ([`atomic_dot`]): its kernel adds each
-//! chunk's products to the float32 output (zeroed first) atomically, in no
-//! fixed order, rather than writing them for a sum to read back.
+//! With `atomic` (unless `lumen.config.compiler.deterministic`), a dot
+//! whose partials would cost more to write and read back than its operands
+//! to read (a large output, a short contraction) has the dot and its sum
+//! one fusion ([`atomic_dot`]): its kernel adds each chunk's products to
+//! the float32 output (zeroed first) atomically, in no fixed order. Others
+//! write their partials for the sum, in order: on Apple GPUs the faster
+//! (atomic adds cost more than the partials' few megabytes).
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::ops::dot_general::mps::SMALL_TILE;
+use crate::ops::dot_general::mps::float_groups;
 
-/// Dots of fewer output tiles (of the small matmul kernel's: 32 x 32) are
-/// split.
-const MAX_TILES: usize = 256;
-/// The threadgroups a split dot launches, at most (on an M4 Pro: about 13
-/// per GPU core).
+/// The threadgroups that fill the GPU (on an M4 Pro: about 13 per GPU
+/// core): a dot's matmul launching fewer than half is split, into as many
+/// chunks as launch these (half or more: its few chunks' partials, or
+/// atomic adds, cost more than the idle threads).
 const GROUPS: usize = 256;
-/// The most chunks.
-const MAX_SPLIT: usize = 32;
-/// The fewest elements of K a chunk takes.
-const MIN_CHUNK: usize = 64;
+/// The most chunks (more add more partials, or atomic adds, than they
+/// save: 4 to 8 do best).
+const MAX_SPLIT: usize = 8;
+/// The fewest elements of K a chunk takes (a shorter one is a few steps of
+/// the matmul's loop: its partials cost more than they save).
+const MIN_CHUNK: usize = 256;
 /// The shortest contraction split (a weight's gradient's, over a batch's
-/// tokens): a shorter one is a few steps of the matmul's loop.
-const MIN_K: usize = 512;
+/// tokens): a shorter one is no slower whole.
+const MIN_K: usize = 2048;
 
-/// `graph` with each dot of few output tiles and a long contraction split
-/// along it, its chunks added atomically if `atomic`.
+/// `graph` with each dot launching few threadgroups and of a long
+/// contraction split along it, its chunks added atomically if `atomic` and
+/// its partials would cost more than its operands.
 pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
@@ -103,7 +108,11 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
             axes: vec![0],
             accum_dtype: DType::F32,
         };
-        let mut value = match atomic {
+        // Atomically if its partials (written, read back) would cost more
+        // than its operands.
+        let partials = 2 * s * lhs.numel() / lhs.shape[l] * (rhs.numel() / rhs.shape[r]) * 4;
+        let operands = (lhs.numel() + rhs.numel()) * lhs.dtype.size_of();
+        let mut value = match atomic && partials > operands {
             true => {
                 let mut body = Graph::new();
                 let ins = [a, b].map(|v| body.input(out.type_of(v).clone()));
@@ -158,15 +167,16 @@ pub(crate) fn atomic_dot(body: &Graph) -> Option<&Node> {
 }
 
 /// The chunks to split the contraction of an `m` by `k` by `n` matmul
-/// into, if it has few output tiles: as many as fill [`GROUPS`]
-/// threadgroups (a power of two, at most [`MAX_SPLIT`], dividing `k`, of
-/// at least [`MIN_K`], into chunks of at least [`MIN_CHUNK`]).
+/// into, if its matmul launches fewer than half [`GROUPS`] threadgroups (on
+/// its tiles: `ops/dot_general/mps`'s): the fewest that launch it (a power
+/// of two, at most [`MAX_SPLIT`], dividing `k`, of at least [`MIN_K`], into
+/// chunks of at least [`MIN_CHUNK`]).
 fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
-    let tiles = m.div_ceil(SMALL_TILE.0) * n.div_ceil(SMALL_TILE.1);
-    if tiles == 0 || tiles >= MAX_TILES || k < MIN_K {
+    let groups = float_groups(1, m, n);
+    if groups == 0 || 2 * groups >= GROUPS || k < MIN_K {
         return None;
     }
-    let mut s = 1 << (GROUPS / tiles).min(MAX_SPLIT).ilog2();
+    let mut s = GROUPS.div_ceil(groups).next_power_of_two().min(MAX_SPLIT);
     while s >= 2 && (!k.is_multiple_of(s) || k / s < MIN_CHUNK) {
         s /= 2;
     }

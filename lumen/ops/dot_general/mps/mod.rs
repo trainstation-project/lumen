@@ -13,12 +13,16 @@ use crate::ops::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
 /// The output tile of a threadgroup (`kernels.metal`): 128 x 64 for the float
-/// kernels and 64 x 64 for their `_small` variants, which matmuls with
-/// fewer than `SMALL_TILES` of the large tiles (or whose M fills less than
-/// half of the last) take; 64 x 64 (`MM_TILE`) for the 8- to 32-bit integer
-/// kernels and 32 x 32 (`WIDE_TILE`) for the 64-bit ones.
+/// kernels; 64 x 64 for their `_mid` variants, which matmuls whose M leaves
+/// 33 to 64 rows of a last large tile take (an M of 64: half a large tile
+/// idle, the small tiles reading the operands twice as often); 32 x 32 for
+/// their `_small` ones, which matmuls with fewer than `SMALL_TILES` of the
+/// large tiles (or whose M leaves 32 rows or fewer) take; 64 x 64
+/// (`MM_TILE`) for the 8- to 32-bit integer kernels and 32 x 32
+/// (`WIDE_TILE`) for the 64-bit ones.
 const FLOAT_TILE: (usize, usize) = (128, 64);
-pub(crate) const SMALL_TILE: (usize, usize) = (32, 32);
+const MID_TILE: (usize, usize) = (64, 64);
+const SMALL_TILE: (usize, usize) = (32, 32);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
@@ -96,10 +100,32 @@ pub(crate) fn reads_strided(
     collapsed(operands[k], strides, dims, split).is_some()
 }
 
-/// How a dot's matmul launches: on the small tiles or not, its grid, and
-/// its dimension arguments (`p` in `kernels.metal`).
+/// A float matmul of `b` `m` by `n` outputs' tiles: whether small, whether
+/// mid, and the tile (see [`FLOAT_TILE`]).
+fn float_tiles(b: usize, m: usize, n: usize) -> (bool, bool, (usize, usize)) {
+    let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
+    let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=32);
+    let mid = !small && matches!(m % FLOAT_TILE.0, 33..=64);
+    let tile = match (small, mid) {
+        (true, _) => SMALL_TILE,
+        (_, true) => MID_TILE,
+        _ => FLOAT_TILE,
+    };
+    (small, mid, tile)
+}
+
+/// The threadgroups a float matmul of `b` `m` by `n` outputs launches (a
+/// tile each).
+pub(crate) fn float_groups(b: usize, m: usize, n: usize) -> usize {
+    let (_, _, (tm, tn)) = float_tiles(b, m, n);
+    b * m.div_ceil(tm) * n.div_ceil(tn)
+}
+
+/// How a dot's matmul launches: on the small or the mid tiles (or the
+/// large), its grid, and its dimension arguments (`p` in `kernels.metal`).
 pub(crate) struct MatmulLaunch {
     pub small: bool,
+    pub mid: bool,
     pub grid: Grid,
     pub p: [usize; 9],
 }
@@ -135,16 +161,17 @@ pub(crate) fn plan_matmul(
         size(lhs, &order.lhs[order.lhs_split.1..]),
         size(rhs, &order.rhs[order.rhs_split.1..]),
     );
-    let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
-    let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=64);
-    let (tm, tn) = match (out.dtype.is_float(), small) {
-        (true, false) => FLOAT_TILE,
-        (true, true) => SMALL_TILE,
-        (false, _) if out.dtype.size_of() == 8 => WIDE_TILE,
-        (false, _) => INT_TILE,
+    let float = out.dtype.is_float();
+    let (small, mid, tile) = float_tiles(b, m, n);
+    let (small, mid) = (float && small, float && mid);
+    let (tm, tn) = match float {
+        true => tile,
+        false if out.dtype.size_of() == 8 => WIDE_TILE,
+        false => INT_TILE,
     };
     Ok(MatmulLaunch {
         small,
+        mid,
         grid: Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]),
         p: [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn],
     })
@@ -181,10 +208,11 @@ pub(crate) fn encode(
         (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
         (d, o) => format!("{d}_{}_{o}", accum_dtype(&step.primitive)),
     };
-    let kernel = match (out.dtype.is_float(), launch_.small) {
-        (true, false) => format!("matmul_{float}"),
-        (true, true) => format!("matmul_small_{float}"),
-        (false, _) => format!("matmul_{}", out.dtype),
+    let kernel = match (out.dtype.is_float(), launch_.small, launch_.mid) {
+        (true, true, _) => format!("matmul_small_{float}"),
+        (true, _, true) => format!("matmul_mid_{float}"),
+        (true, ..) => format!("matmul_{float}"),
+        (false, ..) => format!("matmul_{}", out.dtype),
     };
     launch(
         &kernel,

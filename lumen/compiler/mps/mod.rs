@@ -606,8 +606,8 @@ pub(crate) fn encode(
             step.label,
         );
     }
-    // A contraction with its epilogue: the matmul's launch (on the small
-    // tiles, `NAME_small`, as the primitive's would be).
+    // A contraction with its epilogue: the matmul's launch (on the mid or
+    // small tiles, `NAME_mid` or `NAME_small`, as the primitive's would be).
     if let Some(dot) = codegen::gemm_dot(body) {
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
@@ -631,9 +631,10 @@ pub(crate) fn encode(
             &rs,
             step.label,
         )?;
-        let kernel = match plan.small {
-            true => format!("{name}_small"),
-            false => name.clone(),
+        let kernel = match (plan.small, plan.mid) {
+            (true, _) => format!("{name}_small"),
+            (_, true) => format!("{name}_mid"),
+            _ => name.clone(),
         };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());

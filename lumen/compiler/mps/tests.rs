@@ -1697,10 +1697,11 @@ fn vector_dots_are_reduced() {
     }
 }
 
-/// A dot of few output tiles and a long contraction is split along it
-/// (XLA's SplitKRewriter): one dot of the chunks' partials (the operands
-/// reshaped: a new batch dimension), summed in float32, then cast to the
-/// dot's dtype; one of many tiles is not.
+/// A dot launching few threadgroups and of a long contraction is split
+/// along it (XLA's SplitKRewriter): one dot of the chunks' partials (the
+/// operands reshaped: a new batch dimension), summed in float32, then cast
+/// to the dot's dtype; atomically (one fusion) only where its partials
+/// would cost more than its operands; one of many tiles is not.
 #[test]
 fn skinny_dots_split_their_contraction() {
     let build = |m: usize, n: usize, k: usize, dtype: DType| {
@@ -1719,7 +1720,7 @@ fn skinny_dots_split_their_contraction() {
         g.set_outputs(&[d]).unwrap();
         g
     };
-    // 8 tiles (of 32 x 32): 32 chunks of 128 (at most 32).
+    // 8 threadgroups (of 32 x 32 tiles): 8 chunks of 512 (at most 8).
     let g = build(4, 256, 4096, DType::F32);
     let split = super::split_k::split_k(&g, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
@@ -1728,7 +1729,7 @@ fn skinny_dots_split_their_contraction() {
         ["reshape", "reshape", "dot_general", "reduce_sum"],
         "{split}"
     );
-    assert_eq!(split.type_of(split.nodes()[2].output).shape, [32, 4, 256]);
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [8, 4, 256]);
     let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
@@ -1745,29 +1746,31 @@ fn skinny_dots_split_their_contraction() {
         names,
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
-    // Atomically: the dot and the sum one fusion (its kernel adds the
-    // chunks' products to the output).
+    // Atomic adds allowed, its partials (8 x 4 x 256) cheaper than its
+    // operands: in order still. A larger output (4 x 352 x 352 float32
+    // partials, written and read back, against 352 x 2048 and 2048 x 352
+    // bfloat16 operands): the dot and the sum one fusion (its kernel adds
+    // the chunks' products to the output), rounded after.
+    let split = super::split_k::split_k(&g, true);
+    assert_eq!(split.nodes().len(), 4, "{split}");
+    let g = build(352, 352, 2048, DType::BF16);
     let split = super::split_k::split_k(&g, true);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
-        ["reshape", "reshape", "dot_general (split-K)"],
+        ["reshape", "reshape", "dot_general (split-K)", "cast"],
         "{split}"
     );
     let Primitive::Fusion { body, .. } = &split.nodes()[2].primitive else {
         unreachable!("a fusion")
     };
     assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
-    let got = reference::run(&split, &inputs).unwrap()[0].to_vec::<f32>();
-    for (w, g) in want.iter().zip(&got) {
-        assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
-    }
-    // Many tiles, or a short contraction (one of chunks of at least 64,
-    // or shorter than 512): as it is.
+    // Many tiles, a contraction no power of two divides, or a short one
+    // (shorter than 2048): as it is.
     for g in [
-        build(1024, 1024, 1024, DType::F32),
-        build(4, 256, 300, DType::F32),
-        build(4, 256, 256, DType::F32),
+        build(1024, 1024, 4096, DType::F32),
+        build(4, 256, 2049, DType::F32),
+        build(4, 256, 1024, DType::F32),
     ] {
         let split = super::split_k::split_k(&g, false);
         assert_eq!(split.nodes().len(), 1, "{split}");

@@ -2132,8 +2132,8 @@ pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
 }
 
 /// The kernel of a contraction with its epilogue: the matmul template
-/// (`ops/dot_general/mps/kernels.metal`, on its large and, as `NAME_small`, small
-/// tiles, as its encoder launches it), writing each output through a
+/// (`ops/dot_general/mps/kernels.metal`, on its large and, as `NAME_mid` and
+/// `NAME_small`, mid and small tiles, as its encoder launches it), writing each output through a
 /// functor computing the epilogue from the dot's value `r` and the
 /// output's flat index, as the loop emitter computes an element (reading
 /// the fusion's other inputs, a bias, a residual, at it).
@@ -2229,7 +2229,11 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         }};
         "
     );
-    for (suffix, bm, bn, bk) in [("", 128, 64, "SG_BK"), ("_small", 32, 32, "SMALL_BK")] {
+    for (suffix, bm, bn, bk) in [
+        ("", 128, 64, "SG_BK"),
+        ("_mid", 64, 64, "SG_BK"),
+        ("_small", 32, 32, "SMALL_BK"),
+    ] {
         writedoc!(
             source,
             "
