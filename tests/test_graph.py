@@ -1637,10 +1637,12 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
     """``F.cross_entropy`` (``reduction="none"``): each row's ``logsumexp -
     logit[label]``. On MPS one row kernel reads the logits once (an online
     max and sum, and the label's logit picked by a one-hot sum, all one
-    loop over the row: none reads another's value), writing a loss
-    and a logsumexp a row; trained, its gradient ``(exp(x - lse) -
-    one_hot) · g`` one pass more, no reduction, nothing of the logits'
-    shape kept between them. Losses and gradients NumPy's."""
+    loop over the row: none reads another's value), writing a loss a row.
+    Trained (``g`` not read from the losses), its gradient ``(exp(x - lse)
+    - one_hot) · g`` is the same kernel's second pass over the row (XMA's
+    forward-backward kernel), the losses its other output: one kernel,
+    nothing of the logits' shape but the gradient written. Losses and
+    gradients NumPy's."""
     rng = np.random.default_rng(0)
     x = (rng.standard_normal((n, vocab)) * 3).astype(np.float32)
     t = rng.integers(0, vocab, n).astype(np.int64)
@@ -1660,8 +1662,8 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
     source = forward["fusion"]["source"]
     assert source.count("for (uint c") + source.count("for (uint e = 0") == 1, source
     steps = lumen.graph.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
-    assert [s["output"][2] for s in steps] == [[n], [n, vocab]], [s["label"] for s in steps]
-    assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[1]["label"]
+    assert [s["output"][2] for s in steps] == [[n, vocab]], [s["label"] for s in steps]
+    assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]], steps[0]["label"]
     m = x.max(-1, keepdims=True).astype(np.float64)
     lse = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0]
     hit = np.zeros_like(x, dtype=np.float64)

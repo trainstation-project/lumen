@@ -311,7 +311,10 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
             .chain(row.inner.iter().copied())
             .chain(row.reductions.iter().copied())
             .collect();
-        let taken = |k: usize| rows.iter().any(|o| o.root == k || o.inner.contains(&k) || o.reductions.contains(&k));
+        let taken = |k: usize| {
+            rows.iter()
+                .any(|o| o.root == k || o.inner.contains(&k) || o.reductions.contains(&k))
+        };
         let shaped = |v: Var| {
             let t = graph.type_of(v);
             t.numel() == size && t.shape.last() == Some(&n)
@@ -321,7 +324,9 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
             elementwise(p)
                 || matches!(
                     p,
-                    Primitive::Reshape { .. } | Primitive::BroadcastInDim { .. } | Primitive::Iota { .. }
+                    Primitive::Reshape { .. }
+                        | Primitive::BroadcastInDim { .. }
+                        | Primitive::Iota { .. }
                 )
         };
         // The latest elementwise reader of its values of the rows' shape
@@ -329,7 +334,13 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
         // no other row) makes a fusion with it.
         let candidates: Vec<usize> = (row.root + 1..nodes.len())
             .rev()
-            .filter(|&c| finder.live[c] && elementwise(&nodes[c].primitive) && fusible(graph, &nodes[c]) && shaped(nodes[c].output) && !taken(c))
+            .filter(|&c| {
+                finder.live[c]
+                    && elementwise(&nodes[c].primitive)
+                    && fusible(graph, &nodes[c])
+                    && shaped(nodes[c].output)
+                    && !taken(c)
+            })
             .collect();
         let found = candidates.into_iter().find_map(|c| {
             let mut cone: Vec<usize> = vec![c];
@@ -338,7 +349,12 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                 match finder.producer[v] {
                     Some(p) if mine.contains(&p) => reaches = true,
                     Some(p) if cone.contains(&p) => {}
-                    Some(p) if !taken(p) && fusible(graph, &nodes[p]) && cheap(&nodes[p].primitive) && fits(v) => {
+                    Some(p)
+                        if !taken(p)
+                            && fusible(graph, &nodes[p])
+                            && cheap(&nodes[p].primitive)
+                            && fits(v) =>
+                    {
                         cone.push(p);
                         stack.extend(&nodes[p].inputs);
                     }
@@ -364,7 +380,11 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
             let mut outside = Vec::new();
             for &k in &mine {
                 let v = nodes[k].output;
-                let readers: Vec<usize> = finder.readers[v].iter().copied().filter(|&u| !inside(u)).collect();
+                let readers: Vec<usize> = finder.readers[v]
+                    .iter()
+                    .copied()
+                    .filter(|&u| !inside(u))
+                    .collect();
                 if finder.output[v] || !readers.is_empty() {
                     if graph.type_of(v).numel() != each {
                         return None;
