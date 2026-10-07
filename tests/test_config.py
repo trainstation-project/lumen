@@ -169,13 +169,14 @@ def test_memory_limit_recomputes(compiler):
 @pytest.mark.mps
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_agrees(compiler, dtype):
-    """With ``split_k`` (the default) a matmul of few output tiles and a long
-    contraction (a decode step's) is one kernel adding its chunks' products
-    to its float32 output atomically (``deterministic``: one dot of the
-    chunks' partials, then their sum, each labelled split-K), rounded to
-    bfloat16 once, after it;
-    each agrees with the dot as traced (off) to rounding. One of many tiles
-    is not split."""
+    """With ``split_k`` (the default) a matmul launching few threadgroups and
+    of a long contraction (a decode step's) is one dot of the chunks'
+    partials, then their sum (each labelled split-K), rounded to bfloat16
+    once, after it: atomic adds allowed (not ``deterministic``) or not, its
+    partials cost less than its operands. A larger output's (partials
+    costing more) is one kernel adding its chunks' products to its float32
+    output atomically, unless ``deterministic``. Each agrees with the dot
+    as traced (off) to rounding. One of many tiles is not split."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     try:
@@ -185,11 +186,10 @@ def test_split_k_agrees(compiler, dtype):
     f = lambda x, w: x @ w  # noqa: E731
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
     cast = "cast(float32 -> bfloat16)"
-    atomic = {"float32": ["dot_general (split-K)"], "bfloat16": ["dot_general (split-K)", cast]}[dtype]
-    assert _labels(f, x, w) == atomic
+    rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
+    assert _labels(f, x, w) == ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     split = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.deterministic = True
-    rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
     assert _labels(f, x, w) == ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     ordered = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
     compiler.split_k = False
@@ -201,6 +201,15 @@ def test_split_k_agrees(compiler, dtype):
     compiler.reset()
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, big, big) == ["dot_general"]
+    # A larger output: atomically (in bfloat16, its partials in float32).
+    a, b = (rng.standard_normal(s).astype(np.float32) for s in ((352, 2048), (2048, 352)))
+    x, w = (lumen.from_numpy(t).to("mps").to(dtype="bfloat16") for t in (a, b))
+    want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
+    assert _labels(f, x, w) == ["dot_general (split-K)", cast]
+    atomic = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    np.testing.assert_allclose(atomic, want, atol=2e-2 * np.abs(want).max())
+    compiler.deterministic = True
+    assert _labels(f, x, w) == ["dot_general (split-K)", "reduce_sum (split-K) → " + cast]
 
 
 @pytest.mark.mps
@@ -208,10 +217,10 @@ def test_split_k_agrees(compiler, dtype):
 def test_split_k_then_silu(compiler, dtype):
     """SiLU after a matmul of few output tiles and a long contraction: not
     split, it is the matmul's epilogue (one kernel); split, it needs every
-    chunk's products: with ``deterministic``, the epilogue of the
-    ``reduce_sum`` of the dot's partials (reading the sum twice); atomically,
-    a kernel after the split dot's. Each agrees with SiLU of the exact
-    product to rounding."""
+    chunk's products: the epilogue of the ``reduce_sum`` of the dot's
+    partials (reading the sum twice), atomic adds allowed or not (its
+    partials cost less than its operands). Each agrees with SiLU of the
+    exact product to rounding."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     try:
@@ -228,7 +237,7 @@ def test_split_k_then_silu(compiler, dtype):
     silu = "logistic → mul" + {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
     plans = {
         "unsplit": ["dot_general → " + silu],
-        "atomic": ["dot_general (split-K)", silu],
+        "atomic": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
         "deterministic": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
     }
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()

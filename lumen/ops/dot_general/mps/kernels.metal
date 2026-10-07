@@ -326,17 +326,22 @@ inline void matmul_sg_impl(device const T *lhs,
         matmul_sg_impl<T, A, O, BM, BN, BK>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);       \
     }
 
-// matmul_<dtype> on 128x64 tiles, and matmul_small_<dtype> on 64x64 tiles
-// for matmuls with too few 128x64 tiles to fill the GPU: in the operands'
+// matmul_<dtype> on 128x64 tiles, matmul_mid_<dtype> on 64x64 tiles for
+// matmuls whose M leaves at most half of a last 128x64 tile, and
+// matmul_small_<dtype> on 32x32 tiles for matmuls with too few 128x64
+// tiles to fill the GPU (or a last one of M at most 32): in the operands'
 // dtype throughout; matmul[_small]_<dtype>_f32_<output> accumulating in
 // float, writing the operands' dtype or float.
-#define MATMUL_FLOAT(NAME, T)                         \
-    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK) \
+#define MATMUL_FLOAT(NAME, T)                            \
+    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK)    \
+    MATMUL_SG(matmul_mid_##NAME, T, T, T, 64, 64, SG_BK) \
     MATMUL_SG(matmul_small_##NAME, T, T, T, 32, 32, SMALL_BK)
 #define MATMUL_WIDENED(NAME, T)                                                \
     MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64, SG_BK)         \
+    MATMUL_SG(matmul_mid_##NAME##_f32_##NAME, T, float, T, 64, 64, SG_BK)      \
     MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 32, 32, SMALL_BK) \
     MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64, SG_BK)        \
+    MATMUL_SG(matmul_mid_##NAME##_f32_f32, T, float, float, 64, 64, SG_BK)     \
     MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 32, 32, SMALL_BK)
 
 // matmul_atomic_<dtype>: a split-K dot's, on 64x64 tiles, accumulating in float, each chunk's (batch index's)

@@ -1915,6 +1915,41 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
     np.testing.assert_array_equal(fused, unfused)
 
 
+@pytest.mark.mps
+@pytest.mark.parametrize("m, tiles", [(64, "mid"), (192, "mid"), (16, "small"), (256, "large")])
+def test_matmul_tiles_fit_its_rows(m, tiles):
+    """A float matmul runs on 128x64 tiles; on 64x64 ones where M leaves 33
+    to 64 rows of a last one (M of 64, 192: half a large tile idle, the
+    32x32 tiles reading the operands twice as often); on 32x32 where it
+    leaves 32 or fewer (or the large tiles are too few to fill the GPU).
+    With an epilogue too (its kernel's ``_mid``, ``_small`` variant). The
+    results NumPy's."""
+    rng = np.random.default_rng(0)
+    k, n = 256, 2048
+    try:
+        a, b = (
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype="bfloat16")
+            for s in ((m, k), (k, n))
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    product = lumen.to_numpy(a.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(b.to(dtype="float32"))
+
+    def plain(a, b):
+        return F.matmul(a, b, "float32", "float32")
+
+    def fused(a, b):
+        return F.relu(plain(a, b))
+
+    for f, want in ((plain, product), (fused, np.maximum(product, 0))):
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+            got = lumen.to_numpy(lumen.compile(f)(a, b))
+        (kernel,) = {e["kernel"] for e in prof.events() if e["kind"] == "gpu"}
+        ran = "small" if "small" in kernel else "mid" if "mid" in kernel else "large"
+        assert ran == tiles, kernel
+        np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-3)
+
+
 def _silu(h):
     return h * F.sigmoid(h)
 

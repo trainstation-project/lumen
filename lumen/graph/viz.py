@@ -56,7 +56,7 @@ def type_text(dtype, shape):
 # ---------------------------------------------------------------------
 
 _SOURCES = [
-    (r"^matmul_small_", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
+    (r"^matmul_(small|mid)_", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(u64|i64)$", "dot_general/mps/kernels.metal", "inline void matmul_wide_impl"),
     (r"^matmul_", "dot_general/mps/kernels.metal", "inline void matmul_impl"),
