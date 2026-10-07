@@ -65,7 +65,7 @@ class _MLP(lumen.autograd.Function):
 
         ctx.save_for_backward(x, g_sig, u, wg, wu, wd)
 
-        y = F.matmul(h, wd.t().bfloat16(), "float32", "bfloat16")
+        y = F.matmul(h, wd.t().bfloat16(), "float32", "float32")
 
         return y
 
@@ -78,6 +78,7 @@ class _MLP(lumen.autograd.Function):
 
         h = g_sig_f32 * u_f32
         h = h.bfloat16()
+        dy = dy.bfloat16()
 
         # y = h @ wd.t(), in bfloat16.
         dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
@@ -151,7 +152,7 @@ class Attention(lumen.nn.Module):
 
         # x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         # float32, as the residual it is added to.
-        x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "bfloat16")
+        x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "float32")
         return x
 
 
@@ -187,11 +188,11 @@ class Block(lumen.nn.Module):
     def __call__(self, x, batch, dropout_p):
         r = x
         with lumen.profiler.record_function("attention rmsnorm"):
-            x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
-        x = r.bfloat16() + self.attn(x, batch, dropout_p)
+            x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.attn.norm).bfloat16()
+        x = r + self.attn(x, batch, dropout_p)
         r = x
         with lumen.profiler.record_function("mlp rmsnorm"):
-            x = F.rms_norm(x.float(), x.size(-1), self.mlp.norm).bfloat16()
+            x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.mlp.norm).bfloat16()
         x = r + self.mlp(x)
         return x
 
@@ -244,10 +245,6 @@ def train_step(model, opt, x, y):
     return loss
 
 
-def predict(model, x):
-    return model(x)
-
-
 def meta(*shape, dtype):
     return lumen.empty(list(shape), dtype, device="meta")
 
@@ -280,10 +277,8 @@ opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 # Compile from the shapes (placing the weights and the optimizer's moments
 # on the device), then load the initial weights.
 train_step = lumen.compile(train_step, device="mps")
-predict = lumen.compile(predict, device="mps")
 ids_meta = meta(BATCH, SEQ, dtype="int64")
 train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int64")] * 2)
-predict(model, ids_meta)
 
 rng = np.random.default_rng(0)
 
@@ -323,8 +318,6 @@ for step in range(STEPS + 1):
 # Accuracy on new sequences, past the first two tokens (the step is known
 # only from the second on), without dropout.
 x, _, targets = batch()
-guess = lumen.to_numpy(predict(model, x)).argmax(-1).reshape(BATCH, SEQ)
-print(f"accuracy {(guess[:, 1:] == targets[:, 1:]).mean():.3f}")
 
 # Profile a few more steps (their batches built first, so the trace holds
 # the steps alone), each in its own range; synchronize so the last step's
