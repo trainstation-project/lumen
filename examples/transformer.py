@@ -48,6 +48,41 @@ lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
 
 
+class _MLP(lumen.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, wg, wu, wd):
+        g = F.matmul(x, wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        g_sig = F.sigmoid(g)
+        u = F.matmul(x, wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
+        h = g_sig * u
+        y = F.matmul(h.bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
+        ctx.save_for_backward(x, g, u, wg, wu, wd)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, g, u, wg, wu, wd = ctx.saved_tensors
+
+        g_sig = F.sigmoid(g)
+        h = g_sig * u
+
+        # y = h @ wd.t(), in bfloat16.
+        dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
+        dwd = F.matmul(dy.t(), h.bfloat16(), "float32", "float32")
+
+        # h = sigmoid(g) * u; sigmoid' = sigmoid * (1 - sigmoid).
+        du = (dh * g_sig).bfloat16()
+        dg_sig = dh * u
+        dg = (dg_sig * g_sig * (1 - g_sig)).bfloat16()
+
+        # g = x @ wg.t(), u = x @ wu.t(), in bfloat16.
+        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32") + F.matmul(du, wu.bfloat16(), "float32", "float32")
+        dwg = F.matmul(dg.t(), x, "float32", "float32")
+        dwu = F.matmul(du.t(), x, "float32", "float32")
+
+        return dx.bfloat16(), dwg, dwu, dwd
+
+
 def one_hot(ids, n):
     """``ids`` (int64) as one-hot float32 rows of ``n``: ``[*ids.shape, n]``."""
     return F.eq(ids.reshape(*ids.shape, 1), lumen.arange(n, dtype="int64")).to(dtype="float32")
@@ -110,10 +145,11 @@ class MLP(lumen.nn.Module):
     norm: lumen.Tensor
     wg: lumen.Tensor
     wu: lumen.Tensor
-    w2: lumen.Tensor
+    wd: lumen.Tensor
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
+        return _MLP.apply(x, self.wg, self.wu, self.wd)
         # g = F.relu(x @ self.wg.t().bfloat16())
         # u = x @ self.wu.t().bfloat16()
         g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
@@ -122,7 +158,7 @@ class MLP(lumen.nn.Module):
         h = g * u
         h = h.bfloat16()
         # float32, as the residual it is added to.
-        return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
+        return F.matmul(h, self.wd.t().bfloat16(), "float32", "bfloat16")
 
 
 class Block(lumen.nn.Module):

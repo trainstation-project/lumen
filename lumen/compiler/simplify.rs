@@ -13,6 +13,8 @@
 //!   writes an attention's output in its transpose's layout);
 //! - with `matched` (once attention is matched: the MPS compiler's after its
 //!   matchers, whose patterns these change, or a device with none):
+//!   - a dot of a computed value's transpose (a hand-written backward's
+//!     `dy.t() @ h`): the dot of the value, as of an input's above;
 //!   - a transpose of a dot swapping its operands' free dimensions (as
 //!     autodiff's transpose of a dot gives a weight's gradient): the dot of
 //!     the operands swapped, so no copy;
@@ -82,7 +84,7 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 // cast): the dot of the input (or its cast) at the
                 // dimensions the transpose maps.
                 Primitive::DotGeneral { .. } => {
-                    folded(&mut out, &producer, &node.primitive, &inputs)
+                    folded(&mut out, &producer, matched, &node.primitive, &inputs)
                 }
                 _ if matched => moved(&mut out, &producer, &once, &node.primitive, &inputs),
                 _ => None,
@@ -470,10 +472,12 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
 /// dimensions the transpose maps them to (a cast of the transpose, as
 /// mixed precision casts a weight: the cast of the input, read so), if
 /// either is one that keeps its free dimensions in order (so the dot's
-/// result is the same). Its value, if it folded either.
+/// result is the same); with `matched`, of any value. Its value, if it
+/// folded either.
 fn folded(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
+    matched: bool,
     dot: &Primitive,
     x: &[Var],
 ) -> Option<Var> {
@@ -515,7 +519,7 @@ fn folded(
             continue;
         };
         let (permutation, input) = (permutation.clone(), inputs[0]);
-        if !out.inputs().contains(&input) {
+        if !matched && !out.inputs().contains(&input) {
             continue;
         }
         let (contracting, batch) = &dims[side];

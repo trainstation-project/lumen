@@ -13,14 +13,16 @@
 //! Matched on dots alone, whatever `f` is: a sum of two dots `dot(g1, a1)`
 //! and `dot(g2, a2)` (each read by the sum alone) whose `a1` and `a2` are
 //! the operands of two dots of one other operand `x` (the forward pair),
-//! and the dots of `g1` and `g2` with `x` (the weights' gradients), if any.
+//! and the dots of `g1` and `g2` with `x` (the weights' gradients), if any,
+//! of them or their transposes (`g.t() @ x`, a hand-written backward's).
 
 use crate::graph::{Graph, Node, Primitive, Var};
 
 /// A matched pair's backward: the sum's node, its dots' operands (each dot
 /// `dot(g, a)` or `dot(a, g)`, `g_first` which), the contracting dimension
 /// of each side, and the weights' gradients' dots (`dot(g, x)` or `dot(x,
-/// g)`), if any.
+/// g)`, of `g` or its transpose), if any: theirs, their dot as of `g`, and
+/// whether `g` is its lhs.
 struct Pair {
     sum: usize,
     dots: [usize; 2],
@@ -29,7 +31,7 @@ struct Pair {
     g_first: bool,
     g_dim: usize,
     a_dim: usize,
-    weights: Option<[usize; 2]>,
+    weights: Option<([usize; 2], Primitive, bool)>,
 }
 
 /// `graph` with each gated pair's backward's dots merged ([`Pair`]).
@@ -69,6 +71,27 @@ pub(crate) fn gated_backward(graph: &Graph) -> Graph {
                     (false, true) => Some((u, ins[0])),
                     _ => None,
                 }
+            })
+            .collect()
+    };
+    // The dots reading `g`, or its transpose: (dot, its other operand, the
+    // dot as of `g`, whether `g` is its lhs).
+    let reads_of = |g: Var| -> Vec<(usize, Var, Primitive, bool)> {
+        let transposes = users[g].iter().filter_map(|&t| match &nodes[t].primitive {
+            Primitive::Transpose { permutation } => Some((nodes[t].output, Some(permutation))),
+            _ => None,
+        });
+        std::iter::once((g, None))
+            .chain(transposes)
+            .flat_map(|(u, permutation)| {
+                dots_of(u).into_iter().filter_map(move |(d, other)| {
+                    let lhs = nodes[d].inputs[0] == u;
+                    let dot = match permutation {
+                        None => nodes[d].primitive.clone(),
+                        Some(p) => through(&nodes[d].primitive, lhs, p)?,
+                    };
+                    Some((d, other, dot, lhs))
+                })
             })
             .collect()
     };
@@ -118,12 +141,11 @@ pub(crate) fn gated_backward(graph: &Graph) -> Graph {
                 false => ([e2, e1], [g[1], g[0]], [a[1], a[0]]),
             };
             // The weights' gradients: the dots of g1 and g2 with x, alike.
-            let weights = dots_of(g[0]).into_iter().find_map(|(f1, x1)| {
-                let (f2, _) = dots_of(g[1])
+            let weights = reads_of(g[0]).into_iter().find_map(|(f1, x1, dot, lhs)| {
+                let (f2, ..) = reads_of(g[1])
                     .into_iter()
-                    .find(|&(f2, x2)| x2 == x && same(f1, f2))?;
-                let order = |f: usize, g: Var| nodes[f].inputs[0] == g;
-                (x1 == x && order(f1, g[0]) == order(f2, g[1])).then_some([f1, f2])
+                    .find(|(_, x2, dot2, lhs2)| *x2 == x && *dot2 == dot && *lhs2 == lhs)?;
+                (x1 == x).then_some(([f1, f2], dot, lhs))
             });
             let (g_dim, a_dim) = if g_first { (lc, rc) } else { (rc, lc) };
             Some(Pair {
@@ -138,7 +160,11 @@ pub(crate) fn gated_backward(graph: &Graph) -> Graph {
             })
         });
         if let Some(pair) = found {
-            for &k in pair.dots.iter().chain(pair.weights.iter().flatten()) {
+            for &k in pair
+                .dots
+                .iter()
+                .chain(pair.weights.iter().flat_map(|w| &w.0))
+            {
                 taken[k] = true;
             }
             pairs.push(pair);
@@ -170,7 +196,8 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
                 Some((k, 1))
             } else {
                 p.weights
-                    .and_then(|w| w.iter().position(|&f| f == i).map(|h| (k, 2 + h)))
+                    .as_ref()
+                    .and_then(|w| w.0.iter().position(|&f| f == i).map(|h| (k, 2 + h)))
             }
         })
     };
@@ -205,16 +232,15 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
                         return false;
                     }
                     // A weight's gradient: its half of the merged dot.
-                    let w = p.weights.expect("a weight's gradient");
-                    let f = &nodes[w[0]];
-                    let g_lhs = f.inputs[0] == p.g[0];
+                    let (w, dot, g_lhs) = p.weights.as_ref().expect("a weight's gradient");
+                    let (f, g_lhs) = (&nodes[w[0]], *g_lhs);
                     let x_rank = graph.type_of(f.inputs[usize::from(g_lhs)]).shape.len();
                     let Some(x) = map[f.inputs[usize::from(g_lhs)]] else {
                         return true;
                     };
                     let merged = *weights_dot[k].get_or_insert_with(|| {
                         let ins = if g_lhs { [stack, x] } else { [x, stack] };
-                        out.apply(f.primitive.clone(), &ins)
+                        out.apply(dot.clone(), &ins)
                             .expect("the weights' gradients' dimension numbers")
                     });
                     // The cotangent's free dimension in the result: the lhs's
@@ -264,4 +290,43 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
         .collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// `dot` reading its lhs's (`lhs`) or rhs's transpose by `permutation` as
+/// reading the operand itself: its dimension numbers there mapped, if its
+/// free dimensions stay in order (so the result is the same).
+fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitive> {
+    let Primitive::DotGeneral {
+        mut lhs_contracting,
+        mut rhs_contracting,
+        mut lhs_batch,
+        mut rhs_batch,
+        accum_dtype,
+        output_dtype,
+    } = dot.clone()
+    else {
+        return None;
+    };
+    let (contracting, batch) = match lhs {
+        true => (&mut lhs_contracting, &mut lhs_batch),
+        false => (&mut rhs_contracting, &mut rhs_batch),
+    };
+    let free: Vec<usize> = (0..permutation.len())
+        .filter(|d| !contracting.contains(d) && !batch.contains(d))
+        .map(|d| permutation[d])
+        .collect();
+    if !free.is_sorted() {
+        return None;
+    }
+    for d in contracting.iter_mut().chain(batch.iter_mut()) {
+        *d = permutation[*d];
+    }
+    Some(Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        accum_dtype,
+        output_dtype,
+    })
 }
