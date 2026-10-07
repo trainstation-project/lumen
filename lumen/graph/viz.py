@@ -2,8 +2,9 @@
 ``lumen.compile(fn).dump_graph(path)``. The page shows the fused plan and
 the traced graph as node graphs, and for every node its types, buffers, the
 kernels it launched (with GPU time) and their Metal source, generated
-(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``), and the
-module (``record_function`` ranges) it was traced in; a search finds nodes.
+(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``), the
+module (``record_function`` ranges) it was traced in and the lines of the
+traced program that computed it; a search finds nodes.
 
 From the command line, for a function and inputs of the given types:
 
@@ -192,6 +193,7 @@ def plan_view(plan, kernels):
             "kernels": _kernel_entries(kernels[i] if i < len(kernels) else []),
             "fusion": fusion,
             "scope": step["scope"],
+            "sources": step["sources"],
         }
         nodes.append(node)
         for src, b in sources:
@@ -233,6 +235,7 @@ def graph_view(graph, unfused, kernels):
             "kernels": [],
             "fusion": None,
             "scope": node["scope"],
+            "sources": [node["source"]] if node["source"] else [],
         }
         # The unfused plan's steps are the live nodes in graph order (it may
         # drop dead ones and alias reshapes), plus steps the device's
@@ -266,6 +269,19 @@ def graph_view(graph, unfused, kernels):
 # ---------------------------------------------------------------------
 
 
+def code_of(views):
+    """The text of each file of the traced program the nodes of ``views``
+    were traced at (their ``sources``), those it can read."""
+    files = {f for nodes in views for n in nodes for f, _ in n.get("sources", [])}
+    code = {}
+    for f in sorted(files):
+        try:
+            code[f] = pathlib.Path(f).read_text()
+        except (OSError, UnicodeDecodeError):
+            pass
+    return code
+
+
 def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=()):
     """Everything the page shows, as a JSON-able dict: ``graph``, its
     ``plan`` (fused, for ``device``, default the inputs') and its unfused
@@ -290,6 +306,7 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
             if k["file"]
         }
     )
+    views = {"fused": plan_view(plan, fused_kernels), "traced": graph_view(graph, unfused, unfused_kernels)}
     return {
         "title": title,
         "device": device,
@@ -300,8 +317,9 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
         "fused_text": str(plan),
         "unfused_text": str(unfused),
         "workspace": {"fused": plan.workspace_bytes, "unfused": unfused.workspace_bytes},
-        "views": {"fused": plan_view(plan, fused_kernels), "traced": graph_view(graph, unfused, unfused_kernels)},
+        "views": views,
         "sources": {f: (OPS / f).read_text() for f in files},
+        "code": code_of(view["nodes"] for view in views.values()),
         "prelude": (OPS / "mps" / "kernels.metal").read_text(),
     }
 

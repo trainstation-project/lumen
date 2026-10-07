@@ -388,6 +388,12 @@ def test_dump_graph(tmp_path):
         "broadcast_in_dim",
         "max",
     ]
+    # Each node's line of the program, its file's text with it: the
+    # lambda's, here.
+    lines = {tuple(src) for n in data["views"]["traced"]["nodes"] if n["kind"] == "node" for src in n["sources"]}
+    ((file, line),) = lines
+    assert file == __file__ and "F.relu(x @ w)" in data["code"][file].splitlines()[line - 1]
+    assert {tuple(src) for n in data["views"]["fused"]["nodes"] for src in n.get("sources", [])} == lines
     # Another signature, traced for the dump.
     data = f.dump_graph(
         tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16")

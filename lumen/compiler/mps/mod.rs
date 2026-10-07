@@ -287,7 +287,7 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let primitive = match &node.primitive {
             p @ Primitive::DotGeneral {
@@ -430,7 +430,7 @@ fn concatenates_alone(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in graph.nodes() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let primitive = match node.primitive {
             Primitive::Concatenate { .. } => {
                 let mut reads: Vec<Var> = Vec::new();

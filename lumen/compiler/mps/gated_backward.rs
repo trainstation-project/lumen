@@ -206,7 +206,7 @@ fn rewrite(graph: &Graph, pairs: &[Pair]) -> Graph {
         let before = pending.len();
         pending.retain(|&i| {
             let node: &Node = &nodes[i];
-            out.set_scope(node.scope);
+            out.set_origin(node);
             match role(i) {
                 // The sum's dots: its merged dot.
                 Some((_, 1)) => false,

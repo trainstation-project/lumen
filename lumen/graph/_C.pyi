@@ -39,7 +39,9 @@ class Graph:
     def nodes(self) -> list[dict[str, Any]]:
         """Each node: ``primitive``, ``text`` (with its parameters),
         ``fusion`` (``kernel``, ``body``, Metal ``source``; or None),
-        ``inputs`` and ``output`` values."""
+        ``inputs`` and ``output`` values, ``scope`` (its ``record_function``
+        ranges) and ``source`` (the ``(file, line)`` that traced it, or
+        None)."""
 
     def set_outputs(self, outputs: Sequence[int]) -> None: ...
     def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...
@@ -95,7 +97,9 @@ class Plan:
         ``extra_outputs`` likewise (a multi-output fusion's other outputs), ``views`` as each input's ``(element
         offset, strides)`` in its buffer if it reads it as a strided view (a
         slice; else None), and its kernel's ``scratch`` in the workspace as
-        ``(offset, bytes)`` (or None)."""
+        ``(offset, bytes)`` (or None), and ``sources``: the ``(file, line)``
+        of each line of the traced program it computes (a fusion's
+        members')."""
 
     def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
         """Run on ``device`` (where the inputs must be), or else the inputs'

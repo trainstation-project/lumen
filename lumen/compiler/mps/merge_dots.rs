@@ -289,7 +289,7 @@ pub(crate) fn merge_dots(
     // `[W1 | W2]`, `gated_backward`).
     let mut parts: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         if parted[node.output] {
             continue;
         }

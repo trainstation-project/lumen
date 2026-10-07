@@ -45,7 +45,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in nodes {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let apply =
             |out: &mut Graph, p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");

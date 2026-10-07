@@ -146,6 +146,7 @@ main.wide aside { display: none; }
     <button class="toggle" id="exact" aria-pressed="false" title="Exact match: the query, case-sensitive, is a whole name: a primitive, a type, a buffer, a kernel or a module">Exact</button>
     <span class="hits" id="hits" aria-live="polite"></span>
   </div>
+  <button class="toggle theme" id="theme" title="Colour theme: the system's, light or dark">System</button>
   <div class="totals" id="totals"></div>
 </header>
 <main id="main">
@@ -159,10 +160,12 @@ main.wide aside { display: none; }
       <button role="tab" data-pane="detail">Details</button>
       <button role="tab" data-pane="subgraph">Subgraph</button>
       <button role="tab" data-pane="code">Source</button>
+      <button role="tab" data-pane="program">Code</button>
     </div>
     <div class="detail pane" id="detail"><div class="empty">Select a node to see its types, buffers, kernels and source.</div></div>
     <div class="pane" id="subgraph"></div>
     <div class="code pane" id="code"></div>
+    <div class="code pane" id="program"></div>
   </aside>
 </main>
 <div id="text" hidden></div>
@@ -185,6 +188,20 @@ const tf = totals(DATA.views.fused), tt = totals(DATA.views.traced);
 document.getElementById("totals").innerHTML = DATA.device === "cpu"
   ? `<span>runs on the CPU: no kernels to time</span>`
   : `<span>fused <b>${fmtUs(tf.us)}</b> in <b>${tf.kernels}</b> kernels</span><span>unfused <b>${fmtUs(tt.us)}</b> in <b>${tt.kernels}</b></span><span>workspace <b>${(DATA.workspace.fused / 1024).toFixed(0)}</b> / ${(DATA.workspace.unfused / 1024).toFixed(0)} KiB</span>`;
+
+// ---------------------------------------------------------------- theme
+// The system's colours, or light or dark whatever it is (kept).
+const themeEl = document.getElementById("theme"), THEMES = ["system", "light", "dark"];
+function setTheme(t) {
+  if (t === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  themeEl.textContent = t[0].toUpperCase() + t.slice(1);
+  try { localStorage.setItem("lumen.viz.theme", t); } catch (e) {}
+}
+themeEl.onclick = () => setTheme(THEMES[(THEMES.indexOf(themeEl.textContent.toLowerCase()) + 1) % THEMES.length]);
+let savedTheme = null;
+try { savedTheme = localStorage.getItem("lumen.viz.theme"); } catch (e) {}
+setTheme(THEMES.includes(savedTheme) ? savedTheme : "system");
 
 // ---------------------------------------------------------------- kinds
 const KINDS = [
@@ -308,8 +325,9 @@ function render(name) {
 // Shift+Enter visit them in turn.
 const query = document.getElementById("search"), hitsEl = document.getElementById("hits"), exactEl = document.getElementById("exact");
 let hits = [], hit = -1, exact = false;
-const names = n => [n.label, ...n.label.split(DATA.fusion_separator), n.text, n.text && n.text.split("[")[0], n.type, n.buffer, (n.scope || []).join(" / "), ...(n.scope || []), n.fusion && n.fusion.kernel, ...(n.kernels || []).map(k => k.name)]
+const names = n => [n.label, ...n.label.split(DATA.fusion_separator), n.text, n.text && n.text.split("[")[0], n.type, n.buffer, (n.scope || []).join(" / "), ...(n.scope || []), n.fusion && n.fusion.kernel, ...(n.kernels || []).map(k => k.name), ...(n.sources || []).map(([f, l]) => `${baseName(f)}:${l}`)]
   .filter(Boolean);
+function baseName(f) { return f.split("/").pop(); }
 const haystack = n => names(n).join("\n").toLowerCase();
 function search(q) {
   const words = exact ? [q.trim()].filter(Boolean) : q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -397,6 +415,7 @@ let pane = stored("pane") || "detail";
 function showPane(p) {
   for (const b of paneTabs) b.setAttribute("aria-selected", String(b.dataset.pane === p));
   for (const b of paneTabs) document.getElementById(b.dataset.pane).hidden = b.dataset.pane !== p;
+  document.getElementById(p).querySelectorAll("pre.src").forEach(pre => pre.scrollToMark && pre.scrollToMark());
 }
 for (const b of paneTabs) b.onclick = () => { pane = b.dataset.pane; stored("pane", pane); showPane(pane); };
 function select(id) {
@@ -418,13 +437,16 @@ function select(id) {
   const row = (k, v) => { kv.appendChild(h("dt", "", k)); kv.appendChild(h("dd", "", v)); };
   if (n.text && n.kind !== "fusion") row("primitive", n.text);
   if ((n.scope || []).length) row("module", n.scope.join(" / "));
+  if ((n.sources || []).length) row("code", [...groupSources(n.sources)].map(([f, ls]) => `${baseName(f)}:${ls.join(", ")}`).join("  ·  "));
   (n.inputs || []).forEach(([b, t], i) => row(`input ${i}`, `${b}  ${t}`));
   if (kv.children.length) d.appendChild(kv);
   const sub = subgraph(n), subEl = document.getElementById("subgraph");
   subEl.innerHTML = "";
   if (sub) subEl.appendChild(subgraphPanel(sub, document.getElementById("aside").clientWidth - 34));
   paneTabs.find(b => b.dataset.pane === "subgraph").hidden = !sub;
-  showPane(pane === "subgraph" && !sub ? "detail" : pane);
+  const code = showProgram(n);
+  paneTabs.find(b => b.dataset.pane === "program").hidden = !code;
+  showPane((pane === "subgraph" && !sub) || (pane === "program" && !code) ? "detail" : pane);
   const ks = n.kernels || [];
   if (ks.length) {
     const t = h("table", "kernels");
@@ -507,7 +529,18 @@ function highlight(line) {
     .replace(/\b(\d+(\.\d+)?[uf]?|0x[0-9a-fA-F]+u?)\b/g, '<span class="nu">$1</span>');
   return out + (comment ? `<span class="co">${esc(comment)}</span>` : "");
 }
-function codeBlock(text, anchor) {
+// Python: its keywords and comments.
+const PY_KW = /\b(def|class|return|if|elif|else|for|while|in|not|and|or|is|import|from|as|with|lambda|yield|None|True|False|self|pass|raise|try|except|finally|global|nonlocal|assert|del|break|continue)\b/g;
+function highlightPython(line) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ci = line.indexOf("#");
+  const code = ci >= 0 ? line.slice(0, ci) : line, comment = ci >= 0 ? line.slice(ci) : "";
+  const out = esc(code).replace(PY_KW, '<span class="kw">$1</span>').replace(/\b(\d+(\.\d+)?)\b/g, '<span class="nu">$1</span>');
+  return out + (comment ? `<span class="co">${esc(comment)}</span>` : "");
+}
+// `text` with line numbers, highlighted (Metal, or Python with `marks`):
+// the definition at `anchor` marked, or the lines `marks` (numbers from 1).
+function codeBlock(text, anchor, marks) {
   const pre = h("pre", "src");
   const lines = text.split("\n");
   let start = -1, end = -1;
@@ -524,8 +557,14 @@ function codeBlock(text, anchor) {
       while (start > 0 && lines[start - 1].startsWith("template")) start--;
     }
   }
-  pre.innerHTML = lines.map((l, i) => `<span class="ln${i >= start && i <= end ? " mark" : ""}" data-n="${i + 1}">${highlight(l) || " "}</span>`).join("");
-  if (start >= 0) requestAnimationFrame(() => { const t = pre.children[start]; if (t) pre.scrollTop = t.offsetTop - 12; });
+  if (marks) start = Math.min(...marks) - 1;
+  const marked = i => (marks ? marks.has(i + 1) : i >= start && i <= end);
+  const hl = marks ? highlightPython : highlight;
+  pre.innerHTML = lines.map((l, i) => `<span class="ln${marked(i) ? " mark" : ""}" data-n="${i + 1}">${hl(l) || " "}</span>`).join("");
+  // Scrolled to its mark now, and again when its tab is shown (hidden, it
+  // has no layout).
+  pre.scrollToMark = () => { const t = pre.children[start]; if (start >= 0 && t) pre.scrollTop = t.offsetTop - (marks ? pre.clientHeight / 3 : 12); };
+  requestAnimationFrame(pre.scrollToMark);
   return pre;
 }
 function showCode(n) {
@@ -554,6 +593,36 @@ function showCode(n) {
   tabs.forEach((t, i) => { const b = h("button", "", t[0]); b.setAttribute("role", "tab"); b.onclick = () => show(i); bar.appendChild(b); });
   c.append(bar, head, body);
   show(0);
+}
+
+// The node's lines of the traced program, by file in order of first use:
+// a tab per file (its text kept in DATA.code), those lines marked. Whether
+// it has any.
+function groupSources(sources) {
+  const by = new Map();
+  for (const [f, l] of sources) { if (!by.has(f)) by.set(f, []); if (!by.get(f).includes(l)) by.get(f).push(l); }
+  for (const ls of by.values()) ls.sort((a, b) => a - b);
+  return by;
+}
+function showProgram(n) {
+  const c = document.getElementById("program");
+  c.innerHTML = "";
+  const files = [...groupSources(n.sources || [])].filter(([f]) => DATA.code && DATA.code[f] !== undefined);
+  if (!files.length) return false;
+  const bar = h("div", "code-tabs"), head = h("div", "code-head"), body = h("div");
+  bar.setAttribute("role", "tablist");
+  body.style.cssText = "flex:1;min-height:0;display:flex;flex-direction:column";
+  const show = i => {
+    [...bar.children].forEach((b, j) => b.setAttribute("aria-selected", String(i === j)));
+    const [f, ls] = files[i];
+    head.textContent = `${f} · line${ls.length > 1 ? "s" : ""} ${ls.join(", ")}`;
+    body.innerHTML = "";
+    body.appendChild(codeBlock(DATA.code[f], null, new Set(ls)));
+  };
+  files.forEach(([f], i) => { const b = h("button", "", baseName(f)); b.setAttribute("role", "tab"); b.onclick = () => show(i); bar.appendChild(b); });
+  c.append(bar, head, body);
+  show(0);
+  return true;
 }
 
 // ---------------------------------------------------------------- views

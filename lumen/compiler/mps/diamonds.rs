@@ -366,7 +366,7 @@ pub(crate) fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
     }
     let (mut index, mut added) = (vec![0; nodes.len()], Vec::new());
     for (i, node) in nodes.iter().enumerate() {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let mut primitive = node.primitive.clone();
         if let Some((r, groups)) = attach[i] {

@@ -596,7 +596,7 @@ pub(crate) fn fuse(
         // Its scope its main node's: a contraction's or reduction's with an
         // epilogue (the work, not the epilogue's end), else its root's.
         let main = dot_of[i].or(epilogue[i]).unwrap_or(i);
-        fused.set_scope(nodes[main].scope);
+        fused.set_origin(&nodes[main]);
         // A hosted value is its host fusion's output.
         if !live[i] || !root[i] || host[i].is_some() {
             continue;
@@ -717,6 +717,7 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], root: Var, hosted: &[Va
     for &i in members {
         let node = &graph.nodes()[i];
         let inputs: Vec<Var> = node.inputs.iter().map(|v| var[v]).collect();
+        body.set_origin(node);
         let out = body
             .apply(node.primitive.clone(), &inputs)
             .expect("a fusion body is typed as the original");

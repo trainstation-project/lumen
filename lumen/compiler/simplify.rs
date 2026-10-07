@@ -71,7 +71,7 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for node in nodes {
-        out.set_scope(node.scope);
+        out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let first = out.nodes().len();
         let value = match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {

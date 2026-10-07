@@ -68,6 +68,10 @@ pub struct Node {
     /// passes keep an instruction's metadata): its step's ranges when a
     /// plan runs it.
     pub scope: Scope,
+    /// The line of the traced program that computed it (the first frame
+    /// outside lumen), if known; a pass's nodes, the line of the node it
+    /// rewrites ([`Graph::set_origin`]).
+    pub source: Line,
     /// Its label, if not its primitive's ([`Graph::label`]): what a pass
     /// made it for (a split-K dot's partials and their sum), as profiled.
     /// The passes after the one setting it keep it.
@@ -76,6 +80,9 @@ pub struct Node {
 
 /// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
 pub type Scope = &'static [Range];
+
+/// A line of the traced program, if known: its file and line number.
+pub type Line = Option<(&'static str, u32)>;
 
 /// A `record_function` range a node was traced in: its name, and which call
 /// of it (each time the traced code entered it; a backward range, the
@@ -98,6 +105,8 @@ pub struct Graph {
     outputs: Vec<Var>,
     /// The scope [`apply`](Self::apply) gives the nodes it adds.
     scope: Scope,
+    /// The source line it gives them.
+    source: Line,
 }
 
 impl Graph {
@@ -118,6 +127,13 @@ impl Graph {
         self.scope = scope;
     }
 
+    /// Give the nodes added from now on `node`'s scope and source line (a
+    /// pass: the node it is rewriting's).
+    pub fn set_origin(&mut self, node: &Node) {
+        self.scope = node.scope;
+        self.source = node.source;
+    }
+
     /// The value `primitive(inputs...)`, or why the types do not allow it.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check_vars(inputs)?;
@@ -130,9 +146,19 @@ impl Graph {
             inputs: inputs.to_vec(),
             output,
             scope: self.scope,
+            source: self.source,
             label: None,
         });
         Ok(output)
+    }
+
+    /// Give the node defining `v` the source line `source` (the tracer's,
+    /// known once it is applied).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    pub(crate) fn set_source(&mut self, v: Var, source: Line) {
+        if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
+            node.source = source;
+        }
     }
 
     /// Label the node defining `v` ([`Node::label`]; `None`: its
@@ -170,7 +196,7 @@ impl Graph {
             map[v] = Some(pruned.input(self.types[v].clone()));
         }
         for node in self.nodes.iter().filter(|n| live[n.output]) {
-            pruned.set_scope(node.scope);
+            pruned.set_origin(node);
             let inputs: Vec<Var> = node
                 .inputs
                 .iter()
