@@ -38,7 +38,7 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 1
 BATCH, STEPS, DROPOUT = 32, 300, 0
 PROFILED_STEPS = 10
 
@@ -56,27 +56,29 @@ class _MLP(lumen.autograd.Function):
         u = F.matmul(x, wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         h = g_sig * u
         y = F.matmul(h.bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
-        ctx.save_for_backward(x, g, u, wg, wu, wd)
+        ctx.save_for_backward(x, g_sig.bfloat16(), u.bfloat16(), wg, wu, wd)
         return y
 
     @staticmethod
     def backward(ctx, dy):
-        x, g, u, wg, wu, wd = ctx.saved_tensors
+        x, g_sig, u, wg, wu, wd = ctx.saved_tensors
 
-        g_sig = F.sigmoid(g)
-        h = g_sig * u
+        h = g_sig * u.float()
+        h = h.bfloat16()
 
         # y = h @ wd.t(), in bfloat16.
         dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
-        dwd = F.matmul(dy.t(), h.bfloat16(), "float32", "float32")
+        dwd = F.matmul(dy.t(), h, "float32", "float32")
 
         # h = sigmoid(g) * u; sigmoid' = sigmoid * (1 - sigmoid).
         du = (dh * g_sig).bfloat16()
-        dg_sig = dh * u
+        dg_sig = dh * u.float()
         dg = (dg_sig * g_sig * (1 - g_sig)).bfloat16()
 
         # g = x @ wg.t(), u = x @ wu.t(), in bfloat16.
-        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32") + F.matmul(du, wu.bfloat16(), "float32", "float32")
+        dx = F.matmul(dg, wg.bfloat16(), "float32", "float32")
+        dx = dx + F.matmul(du, wu.bfloat16(), "float32", "float32")
+
         dwg = F.matmul(dg.t(), x, "float32", "float32")
         dwu = F.matmul(du.t(), x, "float32", "float32")
 
@@ -213,7 +215,16 @@ def train_step(model, opt, x, y):
     for i in range(3):
         loss = cross_entropy(model(x, dropout_p=DROPOUT), y)
         loss.backward()
+
+    c = 0
+    for p in model.parameters():
+        c += F.sum(p.grad)
+
+    for p in model.parameters():
+        p.grad = p.grad / c
+
     opt.step()
+
     return loss
 
 

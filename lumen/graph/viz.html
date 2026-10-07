@@ -66,7 +66,11 @@ main { flex: 1; display: flex; min-height: 0; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 aside { flex: 1 1 50%; min-width: 0; border-left: 1px solid var(--rule); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
-.detail { padding: 14px 16px; border-bottom: 1px solid var(--rule); overflow: auto; max-height: 48%; display: flex; flex-direction: column; gap: 10px; }
+.panel-tabs { display: flex; gap: 2px; margin: 8px 12px; padding: 3px; background: var(--sunken); border-radius: 7px; flex: none; align-self: flex-start; }
+.panel-tabs button { font: 500 13px var(--font-ui); color: var(--ink-2); background: none; border: 0; padding: 4px 12px; border-radius: 5px; cursor: pointer; }
+.panel-tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.pane { flex: 1; min-height: 0; border-top: 1px solid var(--rule); }
+.detail { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .detail h2 { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { font: 12px var(--font-mono); padding: 2px 7px; border-radius: 4px; background: var(--sunken); color: var(--ink-2); }
@@ -108,12 +112,22 @@ svg text { font-family: var(--font-ui); }
 .node.dim { opacity: .22; }
 .edge.dim { opacity: .12; }
 .node.hit rect.box { stroke: var(--accent); stroke-width: 3; }
+.toggle { font: 600 12px var(--font-mono); color: var(--ink-3); background: var(--sunken); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+.toggle[aria-pressed="true"] { color: var(--surface); background: var(--accent); border-color: var(--accent); }
+.controls button[aria-pressed="false"] { color: var(--ink-3); }
+/* The right panel hidden: the canvas takes the width. */
+main.wide aside { display: none; }
+/* A step's subgraph: the primitives its kernel runs. */
+.sub h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
+#subgraph { overflow: auto; padding: 14px 16px; }
+.sub .frame { overflow: auto; background: var(--bg); border: 1px solid var(--rule); border-radius: 6px; }
+.sub svg { display: block; margin: 0 auto; }
 
 @media (max-width: 820px) {
   main { flex-direction: column; }
   #canvas { min-height: 55vh; }
   aside { width: 100%; border-left: 0; border-top: 1px solid var(--rule); }
-  .detail { max-height: none; }
+  .pane { max-height: 70vh; }
   pre.src { max-height: 60vh; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -129,6 +143,7 @@ svg text { font-family: var(--font-ui); }
   </div>
   <div class="search" role="search">
     <input type="search" id="search" placeholder="Search nodes, kernels, modules  ( / )" aria-label="Search the graph">
+    <button class="toggle" id="exact" aria-pressed="false" title="Exact match: the query, case-sensitive, is a whole name: a primitive, a type, a buffer, a kernel or a module">Exact</button>
     <span class="hits" id="hits" aria-live="polite"></span>
   </div>
   <div class="totals" id="totals"></div>
@@ -137,11 +152,17 @@ svg text { font-family: var(--font-ui); }
   <div id="canvas">
     <svg id="svg" aria-label="Graph"><g id="viewport"></g></svg>
     <div class="legend" id="legend"></div>
-    <div class="controls"><button id="fit">Fit</button><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button></div>
+    <div class="controls"><button id="fit">Fit</button><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button><button id="panel" aria-pressed="true" title="Show or hide the details panel  ( ] )">Details</button></div>
   </div>
-  <aside>
-    <div class="detail" id="detail"><div class="empty">Select a node to see its types, buffers, kernels and source.</div></div>
-    <div class="code" id="code"></div>
+  <aside id="aside">
+    <div class="panel-tabs" role="tablist" aria-label="Details" id="panel-tabs">
+      <button role="tab" data-pane="detail">Details</button>
+      <button role="tab" data-pane="subgraph">Subgraph</button>
+      <button role="tab" data-pane="code">Source</button>
+    </div>
+    <div class="detail pane" id="detail"><div class="empty">Select a node to see its types, buffers, kernels and source.</div></div>
+    <div class="pane" id="subgraph"></div>
+    <div class="code pane" id="code"></div>
   </aside>
 </main>
 <div id="text" hidden></div>
@@ -234,6 +255,21 @@ const svg = document.getElementById("svg"), vp = document.getElementById("viewpo
 let view = null, geo = null, selected = null, tx = 0, ty = 0, scale = 1;
 const apply = () => vp.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`);
 
+// A node's box: its kind's colours, its label's lines, its type (and
+// `extra`) below.
+function drawNode(n, geo, parent, extra = "") {
+  const w = geo.W(n), hgt = geo.H(n), kind = kindOf(n);
+  const g = el("g", { class: "node", transform: `translate(${geo.x[n.id] - w / 2},${geo.y[n.id]})` }, parent);
+  el("rect", { class: "box", width: w, height: hgt, rx: kind === "io" ? 23 : 7, fill: `color-mix(in srgb, var(--k-${kind}) calc(var(--tint) * 100%), var(--surface))`, stroke: `var(--k-${kind})` }, g);
+  lines(n).forEach((line, i) => {
+    const t = el("text", { x: 12, y: 19 + LINE * i, "font-size": 13, "font-weight": 600, fill: "var(--ink)" }, g);
+    t.textContent = line;
+  });
+  const sub = el("text", { x: 12, y: hgt - 10, "font-size": 11, fill: "var(--ink-2)", "font-family": "var(--font-mono)" }, g);
+  sub.textContent = (n.type || "") + extra;
+  return g;
+}
+
 function render(name) {
   view = DATA.views[name];
   geo = layout(view);
@@ -247,17 +283,10 @@ function render(name) {
   }
   view.nodeEls = {};
   for (const n of view.nodes) {
-    const w = geo.W(n), hgt = geo.H(n), kind = kindOf(n), x0 = geo.x[n.id] - w / 2, y0 = geo.y[n.id];
-    const g = el("g", { class: "node", transform: `translate(${x0},${y0})`, tabindex: 0, role: "button", "aria-label": `${n.label} ${n.type || ""}` }, gNodes);
-    const io = kind === "io";
-    el("rect", { class: "box", width: w, height: hgt, rx: io ? 23 : 7, fill: `color-mix(in srgb, var(--k-${kind}) calc(var(--tint) * 100%), var(--surface))`, stroke: `var(--k-${kind})` }, g);
     const us = (n.kernels || []).reduce((s, k) => s + k.us, 0);
-    lines(n).forEach((line, i) => {
-      const t = el("text", { x: 12, y: 19 + LINE * i, "font-size": 13, "font-weight": 600, fill: "var(--ink)" }, g);
-      t.textContent = line;
-    });
-    const sub = el("text", { x: 12, y: hgt - 10, "font-size": 11, fill: "var(--ink-2)", "font-family": "var(--font-mono)" }, g);
-    sub.textContent = (n.type || "") + (us ? `  ·  ${fmtUs(us)}` : "");
+    const g = drawNode(n, geo, gNodes, us ? `  ·  ${fmtUs(us)}` : "");
+    const w = geo.W(n), hgt = geo.H(n), kind = kindOf(n);
+    g.setAttribute("tabindex", 0); g.setAttribute("role", "button"); g.setAttribute("aria-label", `${n.label} ${n.type || ""}`);
     if (us) el("rect", { x: 1, y: hgt - 4, width: Math.max(2, (w - 2) * us / total), height: 3, rx: 1.5, fill: `var(--k-${kind})` }, g);
     const t = el("title", {}, g); t.textContent = n.kind === "fusion" ? n.label : n.text || n.label;
     g.addEventListener("click", () => select(n.id));
@@ -273,15 +302,19 @@ function render(name) {
 
 // ---------------------------------------------------------------- search
 // Nodes matching every word of the query (label, primitive text, type,
-// buffer, kernels, module), case-insensitively: outlined, the rest dimmed;
-// Enter / Shift+Enter visit them in turn.
-const query = document.getElementById("search"), hitsEl = document.getElementById("hits");
-let hits = [], hit = -1;
-const haystack = n => [n.label, n.text, n.type, n.buffer, (n.scope || []).join(" / "), n.fusion && n.fusion.kernel, ...(n.kernels || []).map(k => k.name)]
-  .filter(Boolean).join("\n").toLowerCase();
+// buffer, kernels, module), case-insensitively; with Exact, the query as
+// typed is one of their names whole (a primitive of the label, its type,
+// buffer, a kernel, a module): outlined, the rest dimmed; Enter /
+// Shift+Enter visit them in turn.
+const query = document.getElementById("search"), hitsEl = document.getElementById("hits"), exactEl = document.getElementById("exact");
+let hits = [], hit = -1, exact = false;
+const names = n => [n.label, ...n.label.split(DATA.fusion_separator), n.text, n.text && n.text.split("[")[0], n.type, n.buffer, (n.scope || []).join(" / "), ...(n.scope || []), n.fusion && n.fusion.kernel, ...(n.kernels || []).map(k => k.name)]
+  .filter(Boolean);
+const haystack = n => names(n).join("\n").toLowerCase();
 function search(q) {
-  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-  hits = words.length ? view.nodes.filter(n => words.every(w => haystack(n).includes(w))).map(n => n.id) : [];
+  const words = exact ? [q.trim()].filter(Boolean) : q.toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = exact ? n => names(n).includes(words[0]) : n => words.every(w => haystack(n).includes(w));
+  hits = words.length ? view.nodes.filter(matches).map(n => n.id) : [];
   hit = -1;
   const on = new Set(hits), active = words.length > 0;
   for (const n of view.nodes) {
@@ -307,13 +340,30 @@ function center(id) {
   apply();
 }
 query.addEventListener("input", () => search(query.value));
+// The page's own settings (Exact, the panel), kept in this browser if it can.
+const stored = (k, v) => { try { if (v === undefined) return localStorage.getItem(`lumen.viz.${k}`); localStorage.setItem(`lumen.viz.${k}`, v); } catch (e) { return null; } };
+function setExact(on) { exact = on; exactEl.setAttribute("aria-pressed", String(on)); stored("exact", on ? "1" : "0"); if (view) search(query.value); }
+exactEl.onclick = () => { setExact(!exact); query.focus(); };
+setExact(stored("exact") === "1");
 query.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); visit(e.shiftKey ? -1 : 1); }
   else if (e.key === "Escape") { query.value = ""; search(""); query.blur(); }
 });
 document.addEventListener("keydown", e => {
-  if (e.key === "/" && document.activeElement !== query && !e.target.closest("input, textarea")) { e.preventDefault(); query.focus(); query.select(); }
+  if (e.target.closest("input, textarea")) return;
+  if (e.key === "/") { e.preventDefault(); query.focus(); query.select(); }
+  else if (e.key === "]") { e.preventDefault(); setPanel(document.getElementById("main").classList.contains("wide")); }
 });
+// The details panel shown or hidden (the graph fitted to the width it has).
+const panelEl = document.getElementById("panel");
+function setPanel(on) {
+  document.getElementById("main").classList.toggle("wide", !on);
+  panelEl.setAttribute("aria-pressed", String(on));
+  stored("panel", on ? "1" : "0");
+  if (view) requestAnimationFrame(fit);
+}
+panelEl.onclick = () => setPanel(document.getElementById("main").classList.contains("wide"));
+setPanel(stored("panel") !== "0");
 
 function fit() {
   const b = vp.getBBox(), r = svg.getBoundingClientRect();
@@ -339,6 +389,16 @@ document.getElementById("zin").onclick = () => zoom(1.25);
 document.getElementById("zout").onclick = () => zoom(0.8);
 
 // ---------------------------------------------------------------- details
+// The panel's tabs: the node's details, the primitives its step runs, its
+// kernels' source; one shown (the last chosen, kept), Subgraph only for a
+// plan step.
+const paneTabs = [...document.querySelectorAll("#panel-tabs button")];
+let pane = stored("pane") || "detail";
+function showPane(p) {
+  for (const b of paneTabs) b.setAttribute("aria-selected", String(b.dataset.pane === p));
+  for (const b of paneTabs) document.getElementById(b.dataset.pane).hidden = b.dataset.pane !== p;
+}
+for (const b of paneTabs) b.onclick = () => { pane = b.dataset.pane; stored("pane", pane); showPane(pane); };
 function select(id) {
   if (selected !== null && view.nodeEls[selected]) view.nodeEls[selected].classList.remove("sel");
   selected = id;
@@ -360,6 +420,11 @@ function select(id) {
   if ((n.scope || []).length) row("module", n.scope.join(" / "));
   (n.inputs || []).forEach(([b, t], i) => row(`input ${i}`, `${b}  ${t}`));
   if (kv.children.length) d.appendChild(kv);
+  const sub = subgraph(n), subEl = document.getElementById("subgraph");
+  subEl.innerHTML = "";
+  if (sub) subEl.appendChild(subgraphPanel(sub, document.getElementById("aside").clientWidth - 34));
+  paneTabs.find(b => b.dataset.pane === "subgraph").hidden = !sub;
+  showPane(pane === "subgraph" && !sub ? "detail" : pane);
   const ks = n.kernels || [];
   if (ks.length) {
     const t = h("table", "kernels");
@@ -374,6 +439,60 @@ function select(id) {
   } else if (n.note) d.appendChild(h("div", "note", n.note));
   else if (n.kind !== "input" && n.kind !== "output" && DATA.device !== "cpu") d.appendChild(h("div", "note", "No kernel ran for this step (it aliases its input, or has no elements)."));
   showCode(n);
+}
+
+// ---------------------------------------------------------------- subgraph
+// The primitives a plan step runs, as a graph: a fusion's body (its
+// `{ lambda %0:t ... . let %k:t = prim[params] %a %b ... in (%r) }`), its
+// inputs the step's buffers, or a step's one primitive. Null for nodes of
+// the traced graph (each one primitive), inputs and outputs.
+function subgraph(n) {
+  if (n.kind !== "fusion" && n.kind !== "step") return null;
+  const nodes = [], edges = [], of = {};
+  const input = (key, label, type) => { nodes.push({ id: nodes.length, kind: "input", label, type }); of[key] = nodes.length - 1; };
+  const op = (label, text, type) => { nodes.push({ id: nodes.length, kind: "node", label, text, type }); return nodes.length - 1; };
+  const output = (src, label) => { nodes.push({ id: nodes.length, kind: "output", label, type: nodes[src].type }); edges.push([src, nodes.length - 1]); };
+  if (n.kind === "step") {
+    (n.inputs || []).forEach(([b, t], i) => input(i, b, t));
+    const id = op(n.label, n.text, n.type);
+    (n.inputs || []).forEach((_, i) => edges.push([of[i], id]));
+    output(id, n.buffer);
+    return { nodes, edges };
+  }
+  const body = (n.fusion && n.fusion.body) || "";
+  const [head, ...rest] = body.split("\n");
+  [...head.matchAll(/%(\d+):(\w+\[[^\]]*\])/g)].forEach(([, v, t], i) => input(v, (n.inputs || [])[i] ? n.inputs[i][0] : `%${v}`, t));
+  let outs = [];
+  for (const line of rest) {
+    const m = line.match(/^\s*%(\d+):(\S+) = ([\w.]+)(.*)$/);
+    if (!m) { const o = line.match(/in \((.*)\)/); if (o) outs = [...o[1].matchAll(/%(\d+)/g)].map(r => r[1]); continue; }
+    const [, v, t, prim, tail] = m;
+    const operands = [...(tail.match(/((?:\s+%\d+)*)\s*$/)[1].matchAll(/%(\d+)/g))].map(r => r[1]);
+    const id = op(prim, line.trim().replace(/^%\d+:\S+ = /, ""), t);
+    of[v] = id;
+    for (const a of operands) if (of[a] !== undefined) edges.push([of[a], id]);
+  }
+  outs.forEach((v, i) => of[v] !== undefined && output(of[v], i === 0 ? n.buffer : `out ${i}`));
+  return nodes.length ? { nodes, edges } : null;
+}
+function subgraphPanel(sub, width) {
+  const box = h("section", "sub");
+  const ops = sub.nodes.filter(m => m.kind === "node").length;
+  box.appendChild(h("h3", "", `Generated from · ${ops} primitive${ops === 1 ? "" : "s"}`));
+  const g = layout(sub);
+  const x0 = Math.min(...sub.nodes.map(m => g.x[m.id] - g.W(m) / 2)) - 12, x1 = Math.max(...sub.nodes.map(m => g.x[m.id] + g.W(m) / 2)) + 12;
+  const y1 = Math.max(...sub.nodes.map(m => g.y[m.id] + g.H(m))) + 12;
+  const s = Math.max(0.5, Math.min(1, width / (x1 - x0)));
+  const frame = h("div", "frame");
+  const svgEl = el("svg", { width: (x1 - x0) * s, height: (y1 + 12) * s, viewBox: `${x0} -12 ${x1 - x0} ${y1 + 12}`, role: "img", "aria-label": "the step's primitives" }, frame);
+  const gEdges = el("g", {}, svgEl), gNodes = el("g", {}, svgEl);
+  for (const [a, b] of sub.edges) {
+    const xa = g.x[a], ya = g.y[a] + g.H(sub.nodes[a]), xb = g.x[b], yb = g.y[b], my = (ya + yb) / 2;
+    el("path", { class: "edge", d: `M${xa},${ya} C${xa},${my} ${xb},${my} ${xb},${yb}` }, gEdges);
+  }
+  for (const m of sub.nodes) { const t = el("title", {}, drawNode(m, g, gNodes)); t.textContent = m.text || m.label; }
+  box.appendChild(frame);
+  return box;
 }
 
 // ---------------------------------------------------------------- source
