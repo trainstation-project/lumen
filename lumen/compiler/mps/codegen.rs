@@ -660,8 +660,13 @@ fn row_kernel(
         constant[v] = !reduced
             && !matches!(node.primitive, Primitive::Iota { .. })
             && node.inputs.iter().all(|&u| constant[u]);
-        let of_rows =
-            body.type_of(v).numel() == rows && node.inputs.iter().all(|&u| e.invariant[u]);
+        // (A gather at an index the same across the row reads one element
+        // a row: a cross entropy's logit at its class.)
+        let reads = match node.primitive {
+            Primitive::Gather { .. } => &node.inputs[1..],
+            _ => &node.inputs[..],
+        };
+        let of_rows = body.type_of(v).numel() == rows && reads.iter().all(|&u| e.invariant[u]);
         e.invariant[v] = reduced || constant[v] || of_rows;
     }
     // Values the same across the row, computed once a row before the loop
@@ -800,12 +805,17 @@ fn row_kernel(
             let a = metal_type(body.type_of(r.output).dtype);
             if online {
                 // The max m and s = sum(exp(x - m)) together, s rescaled
-                // as m grows; then the threads' pairs combined.
+                // as m grows, without a branch (no divergence): of the
+                // max so far and the element, the smaller's exp relative
+                // to the larger (none while that is -inf: no element yet,
+                // or masked ones), then selected: a new max, the sum so far
+                // rescaled to it plus the element's 1; else the element's
+                // exp added. Then the threads' pairs combined.
                 let sum = reductions[k + 1];
                 writeln!(init, "    {a} m{k} = -INFINITY, s{k} = 0;").unwrap();
                 write!(
                     step,
-                    "        {a} x{k} = {value};\n        if (x{k} > m{k}) {{\n            s{k} = s{k} * Exp::apply(m{k} - x{k}) + {a}(1);\n            m{k} = x{k};\n        }} else {{\n            s{k} += Exp::apply(x{k} - m{k});\n        }}\n"
+                    "        {a} x{k} = {value};\n        {a} n{k} = Max::apply(m{k}, x{k});\n        {a} e{k} = select(Exp::apply(min(m{k}, x{k}) - n{k}), {a}(0), n{k} == -INFINITY);\n        s{k} = select(s{k} + e{k}, s{k} * e{k} + {a}(1), x{k} > m{k});\n        m{k} = n{k};\n"
                 )
                 .unwrap();
                 match simd {
@@ -939,6 +949,9 @@ fn row_kernel(
         )
         .unwrap(),
     }
+    // An element's column, `j % n` (an iota along the row, a one-hot's), is
+    // the loops' `c` (`j = row * n + c`, `c < n`): no division.
+    let source = source.replace(&format!("(j) % {n}u"), "c");
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
     let signature = format!(
         "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]])"

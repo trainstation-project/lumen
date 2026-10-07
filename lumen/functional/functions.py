@@ -299,12 +299,14 @@ def cross_entropy(input, target):
     """``torch.nn.functional.cross_entropy(input, target, reduction="none")``
     over the last dimension: each row's ``logsumexp(input) - input[target]``
     (``target`` its class, int32 or int64), of ``input``'s shape but that
-    dimension, in its dtype. Traced as those primitives, the row's logit
-    picked by a one-hot sum: the MPS compiler runs it as one row kernel (its
-    max, sum of exponentials and pick, a loss a row), writing each row's
+    dimension, in its dtype; each ``target`` a class, in ``[0, n)``. Traced
+    as those primitives, the row's logit read at its class (a gather of the
+    rows, one element a row): the MPS compiler runs it as one row kernel (an
+    online max and sum of exponentials, a loss a row), writing each row's
     ``logsumexp`` for its gradient, ``(exp(input - logsumexp) -
     one_hot(target)) · g``: a pass over the logits, no reduction (Liger's,
-    cut-cross-entropy's)."""
+    cut-cross-entropy's); the same kernel's second pass where ``g`` is known
+    with the losses."""
     x = _require_float(_lift(input), "cross_entropy")
     target = _lift(target)
     if tuple(target.shape) != tuple(x.shape[:-1]):
@@ -326,7 +328,10 @@ class _CrossEntropy(Function):
         m = amax(x, -1, keepdim=True)
         lse = m.reshape(*target.shape) + log(sum(exp(x - m), -1))
         ctx.save_for_backward(x, target, lse)
-        return lse - sum(_one_hot(target, x.shape[-1], x.dtype) * x, -1)
+        # Each row's logit at its class: element row * n + class of the rows.
+        rows, n = math.prod(target.shape), x.shape[-1]
+        at = prims.iota(target.dtype, [rows], 0) * n + target.reshape(rows)
+        return lse - prims.gather(x.reshape(rows * n), at, 0).reshape(*target.shape)
 
     @staticmethod
     def backward(ctx, g):
