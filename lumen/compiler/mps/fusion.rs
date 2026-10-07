@@ -159,6 +159,43 @@ pub(crate) fn fuse(
         }
         false
     };
+    // A value read again later where all it is computed from (through
+    // broadcasts and reshapes) is alive anyway: a normalization's `x / rms`,
+    // its backward reading `x` and `rms` (written for it): recomputed in
+    // its readers, not stored (a divide, not a value's memory until then).
+    let last_read = |v: Var| users[v].iter().copied().max();
+    let recomputed = |i: usize| {
+        let node = &nodes[i];
+        let Some(end) = last_read(node.output) else {
+            return false;
+        };
+        // Some value along the way alive until then (an input, a constant,
+        // an output, or one read then).
+        let alive = |v: Var| {
+            let mut v = v;
+            loop {
+                if producer[v].is_none()
+                    || constant(graph, &producer, v)
+                    || is_output[v]
+                    || last_read(v).is_some_and(|r| r >= end)
+                {
+                    return true;
+                }
+                match producer[v].filter(|&p| {
+                    matches!(
+                        nodes[p].primitive,
+                        Primitive::BroadcastInDim { .. } | Primitive::Reshape { .. }
+                    )
+                }) {
+                    Some(p) => v = nodes[p].inputs[0],
+                    None => return false,
+                }
+            }
+        };
+        elementwise(&node.primitive)
+            && !is_output[node.output]
+            && node.inputs.iter().all(|&v| alive(v))
+    };
     // The nodes each row computes, which no other row's root extends to.
     let owned = |u: usize, other: &Row| {
         rows.iter().any(|r| {
@@ -189,7 +226,8 @@ pub(crate) fn fuse(
                 if !extends {
                     break;
                 }
-                if users[v].len() > 1 {
+                // Read elsewhere too: written, unless recomputed there.
+                if users[v].len() > 1 && !recomputed(row.root) {
                     row.outputs.push(row.root);
                 }
                 row.inner.push(row.root);

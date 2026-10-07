@@ -1,7 +1,15 @@
 """Each primitive's JVP rule and, for a linear one, its transpose rule
 (JAX: ``jax/_src/lax/lax.py``)."""
 
-from lumen.autograd.core import UndefinedPrimal, _full, defjvp, deflinear, primitive_jvps, primitive_transposes
+from lumen.autograd.core import (
+    UndefinedPrimal,
+    _full,
+    _value,
+    defjvp,
+    deflinear,
+    primitive_jvps,
+    primitive_transposes,
+)
 from lumen.graph import prims, tracer
 
 deflinear(
@@ -16,7 +24,39 @@ deflinear(
     ],
 )
 deflinear(prims.neg, lambda ct, x: [prims.neg(ct)])
-deflinear(prims.cast, lambda ct, x, new_dtype: [prims.cast(ct, x.dtype)])
+
+
+def _widened(v, dtype):
+    """Value ``v``, a gradient's dots rounding their accumulator (``dtype``)
+    narrower, maybe transposed or summed (``x @ w.bfloat16()``'s gradient,
+    ``w``'s dot's ``x``; ``x``'s of several dots), computed with the dots
+    writing their accumulator instead; None if it is not one."""
+    node = tracer.producer(v)
+    if node is None:
+        return None
+    name, ins, p = node
+    if name == "transpose":
+        inner = _widened(ins[0], dtype)
+        return None if inner is None else prims.transpose(inner, p["permutation"])
+    if name == "add":
+        x, y = (_widened(i, dtype) for i in ins)
+        return None if x is None or y is None else prims.add(x, y)
+    if name == "dot_general" and p["accum_dtype"] == dtype and p["output_dtype"] != dtype:
+        return _dot(_value(ins[0]), _value(ins[1]), _dot_dims(p), p, dtype)
+    return None
+
+
+def _cast_transpose(ct, x, new_dtype):
+    """``ct`` cast back to ``x``'s dtype; a gradient's dots rounding their
+    accumulator to the narrower dtype only for this (``x @ w.bfloat16()``,
+    ``w`` float32: its gradient, its dot's), summed or transposed: those
+    dots writing their accumulator, ``x``'s dtype, instead (one rounding
+    fewer: Megatron-LM's weight gradients accumulated in float32)."""
+    widened = _widened(ct.var, x.dtype) if x.dtype != ct.dtype else None
+    return [prims.cast(ct, x.dtype) if widened is None else widened]
+
+
+deflinear(prims.cast, _cast_transpose)
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
 # A wait passes its cotangent through (PyTorch: wait_tensor's backward).
 deflinear(prims.wait, lambda ct, x: [ct])

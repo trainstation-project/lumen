@@ -823,6 +823,37 @@ class MixedQKV(QKV):
         return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
 
 
+def test_gradients_through_a_rounding_are_written_wide():
+    """A float32 value rounded to bfloat16 for matmuls (mixed precision's
+    weights, ``w.t().bfloat16()``; ``x.bfloat16()``, read by three): its
+    gradient the matmuls' writing their float32 accumulator (summed for
+    ``x``), not rounded to bfloat16 and cast back: no precision warning, no
+    cast to float32. The gradients NumPy's, to bfloat16 operands' rounding."""
+    n, d = 16, 32
+
+    def step(model, x):
+        F.sum(sum(F.sum(y * y) for y in model(x))).backward()
+        return x.grad, model.wq.grad, model.wk.grad, model.wv.grad
+
+    model = MixedQKV(meta(d, d), meta(d, d), meta(d, d))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        graph = lumen.make_graph(step)(model, meta(n, d))
+    assert not any(node["text"] == "cast[new_dtype=f32]" for node in graph.nodes())
+    values = {k: rand(d, d, seed=i) / 4 for i, k in enumerate(("wq", "wk", "wv"))}
+    x = rand(n, d, seed=3)
+    f = lumen.compile(step, device="cpu")
+    model = MixedQKV(meta(d, d), meta(d, d), meta(d, d))
+    f(model, meta(n, d))
+    model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+    got = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    ws = [values[k].astype(np.float64) for k in ("wq", "wk", "wv")]
+    ys = [x @ w.T for w in ws]
+    want = [sum(2 * y @ w for y, w in zip(ys, ws))] + [2 * y.T @ x for y in ys]
+    for g, w in zip(got, want):
+        assert np.linalg.norm(g - w) / np.linalg.norm(w) < 2e-2
+
+
 class SwiGLU(lumen.nn.Module):
     """A gated MLP's up projection, ``silu(x @ w1.t()) * (x @ w3.t())``: in
     float32, or (``mixed``) of bfloat16 operands, the gate in float32, the
@@ -961,8 +992,10 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     # gradients: one dot ([2h, d], named as the two it computes); the
     # input's gradient: one dot of the block (K = 2h), written as x's.
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
-    assert [s["output"][2] for s in merged] == [[m, h], [2 * h, d], [m, d]], labels
-    assert "mul" in merged[0]["label"] and not any(label.startswith("slice") for label in labels), labels
+    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [2 * h, d]]), labels
+    forward = [s for s in merged if s["output"][2] == [m, h]]
+    assert len(forward) == 1 and "mul" in forward[0]["label"], labels
+    assert not any(s["label"].startswith("slice") and s["output"][2] == [m, h] for s in steps), labels
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
@@ -1048,8 +1081,9 @@ def test_hand_written_gated_backward_merges_as_autodiffs():
     assert sum("concatenate" in label for label in labels) == 1, labels
     # The weights' gradients one dot of [dg | du] and x ([2h, d]).
     assert any(s["primitive"] == "dot_general" and s["output"][2] == [2 * h, d] for s in steps), labels
-    # The one transpose the projection's (autodiff's) gradient's.
-    assert [s["output"][2] for s in steps if "transpose" in s["label"]] == [[d, d]], labels
+    # No transpose: the projection's (autodiff's) gradient one float32 dot
+    # too, its transpose read as the dot's dimensions.
+    assert not any("transpose" in label for label in labels), labels
 
 
 class _SavedNarrowMLP(lumen.autograd.Function):
@@ -1596,6 +1630,33 @@ def test_normalizations_train_in_one_row_kernel(f):
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
+
+
+def test_rms_norm_backward_recomputes_its_normalized_input():
+    """A training step's RMS norm (its value read forward, its gradients
+    taken): its forward row kernel writes its output and each row's
+    ``sqrt(mean + eps)``, not ``x / rms`` (``x̂``, w's gradient's): the
+    backward, reading ``x`` and ``rms`` anyway, divides again, a value of
+    the rows' shape less kept from the forward. The loss and gradients the
+    CPU's."""
+    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+
+    def step(x, w, c):
+        loss = F.sum(F.rms_norm(x, 300, w) * c)
+        loss.backward()
+        return loss, x.grad, w.grad
+
+    try:
+        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    steps = lumen.graph.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
+    (forward,) = [s for s in steps if "sqrt" in s["label"]]
+    assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
+    got = lumen.compile(step)(X, W, C)
+    want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize(

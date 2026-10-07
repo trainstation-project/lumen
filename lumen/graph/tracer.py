@@ -60,6 +60,9 @@ _CALLS = itertools.count()
 # Each trace's values' source lines (``(filename, lineno)``): the line
 # outside lumen that computed each.
 _SOURCES = []
+# Each trace's values' ops: ``(name, input vars, params)`` of the one that
+# computed each (an autodiff rule's look at a cotangent's).
+_PRODUCERS = []
 
 
 # Frames in lumen's package are lumen's, not the traced program's.
@@ -83,6 +86,7 @@ def _record(name, inputs, params, var):
     frame = sys._getframe(1)
     while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE):
         frame = frame.f_back
+    _PRODUCERS[-1][var] = (name, inputs, params)
     if frame is not None:
         _SOURCES[-1][var] = (frame.f_code.co_filename, frame.f_lineno)
         _TRACES[-1]._set_source(var, *_SOURCES[-1][var])
@@ -169,6 +173,12 @@ def _scope(ranges):
         _TRACES[-1]._set_scope(saved)
 
 
+def producer(var):
+    """The op of the current trace that computed value ``var``: ``(name,
+    input vars, params)``, or None (an input)."""
+    return _PRODUCERS[-1].get(var)
+
+
 def current_graph():
     if not _TRACES:
         raise RuntimeError("lumen ops run only while tracing, inside a function passed to lumen.compile")
@@ -252,6 +262,7 @@ def _trace(fn, args, device):
     _DEVICES.append(device)
     _RNG.append({"state": None, "drawn": 0})
     _SOURCES.append(sources)
+    _PRODUCERS.append({})
     _TAPES.append(tape)
     _BACKWARD.append((tape, leaves))
 
@@ -264,6 +275,7 @@ def _trace(fn, args, device):
         _DEVICES.pop()
         rng = _RNG.pop()
         _SOURCES.pop()
+        _PRODUCERS.pop()
         _TAPES.pop()
         _BACKWARD.pop()
 
