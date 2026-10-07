@@ -532,11 +532,20 @@ pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
     }
 }
 
+/// A row kernel's rows and the length of each: of its reductions' operand
+/// (the output's shape, or, an output of a value a row, a loss each, the
+/// rows it reduces).
+fn row_shape(body: &Graph) -> (usize, usize) {
+    let reductions = row_reductions(body);
+    let x = body.type_of(reductions.first().expect("a row reduction").inputs[0]);
+    let n = x.shape.last().copied().unwrap_or(1).max(1);
+    (x.numel() / n, n)
+}
+
 /// The threadgroups a row kernel with `body` runs: a row each, or (with
 /// partials) a block of rows each.
 pub(crate) fn row_groups(body: &Graph) -> usize {
-    let out = body.type_of(body.outputs()[0]);
-    let rows = out.numel() / out.shape.last().copied().unwrap_or(1).max(1);
+    let (rows, _) = row_shape(body);
     match row_partials(body).first() {
         Some(p) => body.type_of(p.output).shape[0],
         None if simd_rows(body) => rows.div_ceil(SIMD_ROWS),
@@ -558,7 +567,7 @@ const SIMD_ROW: usize = 256;
 /// a fixed order) without threadgroup memory or barriers. Its reductions
 /// accumulate in a dtype those take (float, half, int).
 pub(crate) fn simd_rows(body: &Graph) -> bool {
-    let out = body.type_of(body.outputs()[0]);
+    let (_, n) = row_shape(body);
     let simd = |r: &&Node| {
         matches!(
             body.type_of(r.output).dtype,
@@ -566,7 +575,7 @@ pub(crate) fn simd_rows(body: &Graph) -> bool {
         )
     };
     let reductions = row_reductions(body);
-    out.shape.last().is_some_and(|&n| n <= SIMD_ROW) && reductions.iter().all(simd)
+    n <= SIMD_ROW && reductions.iter().all(simd)
 }
 
 /// The reductions of `body` but its root, over the last dimension of their
@@ -610,8 +619,7 @@ fn row_kernel(
 ) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
-    let n = *out_type.shape.last().expect("a dimension");
-    let rows: usize = out_type.shape[..out_type.shape.len() - 1].iter().product();
+    let (rows, n) = row_shape(body);
     let mut e = Emitter::new(body, by_value);
     // Which values are the same across a row: the reductions', constants
     // (index-free: no iota), one-element inputs (runtime scalars), inputs of
@@ -877,13 +885,27 @@ fn row_kernel(
         }
         .unwrap();
     }
-    write!(
-        source,
-        "{}{once}{header}{}        out[j] = {value};\n{each}    }}\n",
-        hoisted(&e.hoisted),
-        e.lines
-    )
-    .unwrap();
+    // An output of a value a row (a loss each): written once a row.
+    match out_type.numel() == rows && e.invariant[out] {
+        true => {
+            write!(
+                source,
+                "{}    if (t == 0) {{\n        out[row] = {value};\n    }}\n{once}",
+                hoisted(&e.hoisted)
+            )
+            .unwrap();
+            if !each.is_empty() {
+                writeln!(source, "{header}{}{each}    }}", e.lines).unwrap();
+            }
+        }
+        false => write!(
+            source,
+            "{}{once}{header}{}        out[j] = {value};\n{each}    }}\n",
+            hoisted(&e.hoisted),
+            e.lines
+        )
+        .unwrap(),
+    }
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
     let signature = format!(
         "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]])"
