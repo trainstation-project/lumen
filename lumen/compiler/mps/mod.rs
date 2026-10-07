@@ -47,7 +47,12 @@ unsafe extern "C" {
 /// `FOR_EACH_ELEMENT`, the reduction templates without their kernels).
 const PRELUDE: &str = concat!(
     include_str!("../../ops/mps/kernels.metal"),
-    "\n#define TEMPLATES_ONLY\n",
+    indoc::indoc!(
+        "
+
+        #define TEMPLATES_ONLY
+        "
+    ),
     include_str!("../../ops/reduce/mps/kernels.metal"),
     include_str!("../../ops/dot_general/mps/kernels.metal"),
     include_str!("../../ops/attention/mps/forward.metal"),

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use indoc::{formatdoc, writedoc};
+
 use super::fusion;
 use crate::compiler::CompilerConfig;
 use crate::compiler::attention::{Access, Attention, Backward, Dropout, Score};
@@ -39,20 +41,21 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -
         .collect();
     let out_type = metal_type(body.type_of(out).dtype);
     let (params, args) = io_params(body, by_value, out_type);
-    let mut writes = format!("        out[j] = {result};\n");
+    let mut writes = String::new();
+    writeln!(writes, "out[j] = {result};").unwrap();
     for (e, value) in extra.iter().enumerate() {
-        writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
+        writeln!(writes, "out{}[j] = {value};", e + 1).unwrap();
     }
-    let signature = format!("({params}ELEMENTWISE_ARGS({args}))");
-    let loop_body = format!(
-        "    FOR_EACH_ELEMENT(j, {out_type}) {{\n{}{writes}    }}\n",
-        emitter.lines
-    );
-    let mut hasher = DefaultHasher::new();
-    (&signature, &loop_body).hash(&mut hasher);
-    let name = format!("fusion_{:016x}", hasher.finish());
-    let source = format!("kernel void {name}{signature} {{\n{loop_body}}}\n");
-    (name, source)
+    let lines = &emitter.lines;
+    named(formatdoc!(
+        "
+        kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
+            FOR_EACH_ELEMENT(j, {out_type}) {{
+                {lines}{writes}
+            }}
+        }}
+        "
+    ))
 }
 
 /// The reduction a fusion with `body` computes, if its root is one (an input fusion, XLA's reduce input fusion): the fused primitives
@@ -178,9 +181,15 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         e.row_locals.insert(root.output, "r".into());
         let value = e.value(out, "i".into());
         let a = metal_type(body.type_of(root.output).dtype);
-        format!(
-            "struct NAME_epilogue {{\n    inline {o} operator()({a} r) const {{\n{}        return {value};\n    }}\n}};\n\n",
-            e.hoisted
+        let hoisted = &e.hoisted;
+        formatdoc!(
+            "
+            struct NAME_epilogue {{
+                inline {o} operator()({a} r) const {{
+                    {hoisted}return {value};
+                }}
+            }};
+            "
         )
     });
     let (op, axes) = match &root.primitive {
@@ -203,8 +212,10 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         reduce::Layout::Rows => {
             let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
-            let call = format!(
-                "{shared}\n    reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x{epi});"
+            let call = formatdoc!(
+                "
+                {shared}
+                reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x{epi});"
             );
             (args, call)
         }
@@ -236,8 +247,10 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
             ]
             .join(", ")
                 + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
-            let call = format!(
-                "{shared}\n    reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x{epi});"
+            let call = formatdoc!(
+                "
+                {shared}
+                reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x{epi});"
             );
             (args, call)
         }
@@ -247,20 +260,39 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     // partials (of the accumulation dtype) and applying the epilogue, with
     // the arguments of the primitive's kernels (ops/reduce/mps/kernels.metal).
     let last = match (&epilogue, split, reduce::layout(ty, axes)) {
-        (Some(_), true, reduce::Layout::Rows) => format!(
-            "\nkernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant ulong &count [[buffer(2)]], constant ulong &chunk [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]) {{\n    threadgroup {a} shared[REDUCE_THREADS];\n    reduce_rows<{op}, {a}>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());\n}}\n"
+        (Some(_), true, reduce::Layout::Rows) => formatdoc!(
+            "
+            kernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant ulong &count [[buffer(2)]], constant ulong &chunk [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]) {{
+                threadgroup {a} shared[REDUCE_THREADS];
+                reduce_rows<{op}, {a}>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());
+            }}
+            "
         ),
-        (Some(_), true, reduce::Layout::Cols) => format!(
-            "\nkernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant uint &cols [[buffer(2)]], constant ulong &count [[buffer(3)]], constant ulong &chunk [[buffer(4)]], constant uint &chunks [[buffer(5)]], uint i [[thread_position_in_grid]]) {{\n    reduce_cols<{op}, {a}>(in, out, cols, count, chunk, chunks, i, NAME_epilogue());\n}}\n"
+        (Some(_), true, reduce::Layout::Cols) => formatdoc!(
+            "
+            kernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant uint &cols [[buffer(2)]], constant ulong &count [[buffer(3)]], constant ulong &chunk [[buffer(4)]], constant uint &chunks [[buffer(5)]], uint i [[thread_position_in_grid]]) {{
+                reduce_cols<{op}, {a}>(in, out, cols, count, chunk, chunks, i, NAME_epilogue());
+            }}
+            "
         ),
         _ => String::new(),
     };
-    named(format!(
-        "{}struct NAME_input {{\n{fields}    inline {t} operator[](ulong i) const {{\n        uint j = uint(i);\n{}{writes}        return {element};\n    }}\n}};\n\nkernel void NAME({}{args}) {{\n    NAME_input input{{{}}};\n    {call}\n}}\n{last}",
-        epilogue.as_deref().unwrap_or(""),
-        emitter.lines,
-        io_params(body, by_value, written).0,
-        members.join(", "),
+    let (epilogue, lines) = (epilogue.as_deref().unwrap_or(""), &emitter.lines);
+    let (params, members) = (io_params(body, by_value, written).0, members.join(", "));
+    named(formatdoc!(
+        "
+        {epilogue}struct NAME_input {{
+            {fields}inline {t} operator[](ulong i) const {{
+                uint j = uint(i);
+                {lines}{writes}return {element};
+            }}
+        }};
+
+        kernel void NAME({params}{args}) {{
+            NAME_input input{{{members}}};
+            {call}
+        }}
+        {last}"
     ))
 }
 
@@ -433,8 +465,17 @@ fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -
     // Each thread's 2x2 elements of the tile, at (x, y) of it: `x` along
     // `a` while loading, along `b` while computing.
     let each = |code: &str, x: &str, y: &str| {
-        format!(
-            "    for (uint dy = 0; dy < {TILE}; dy += 16) {{\n    for (uint dx = 0; dx < {TILE}; dx += 16) {{\n        uint {x} = {x}0 + tid.x + dx, {y} = {y}0 + tid.y + dy;\n        if (a >= {a}u || b >= {b}u) continue;\n        uint j = base + a * {sa}u + b;\n{code}    }}\n    }}\n"
+        formatdoc!(
+            "
+            for (uint dy = 0; dy < {TILE}; dy += 16) {{
+                for (uint dx = 0; dx < {TILE}; dx += 16) {{
+                    uint {x} = {x}0 + tid.x + dx, {y} = {y}0 + tid.y + dy;
+                    if (a >= {a}u || b >= {b}u) continue;
+                    uint j = base + a * {sa}u + b;
+                    {code}
+                }}
+            }}
+            "
         )
     };
     let mut load = Emitter::new(body, by_value);
@@ -447,7 +488,7 @@ fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -
         writeln!(stores, "        tile{k}[tid.y + dy][tid.x + dx] = {v};").unwrap();
     }
     source.push_str(&each(&format!("{}{stores}", load.lines), "a", "b"));
-    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    writeln!(source, "threadgroup_barrier(mem_flags::mem_threadgroup);").unwrap();
     let mut emitter = Emitter::new(body, by_value);
     for (k, &h) in tiling.heroes.iter().enumerate() {
         emitter.invariant[h] = true;
@@ -460,19 +501,48 @@ fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -
         .iter()
         .map(|&v| emitter.value(v, "j".into()))
         .collect();
-    let mut writes = format!("        out[j] = {result};\n");
+    let mut writes = String::new();
+    writeln!(writes, "out[j] = {result};").unwrap();
     for (e, value) in extra.iter().enumerate() {
-        writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
+        writeln!(writes, "out{}[j] = {value};", e + 1).unwrap();
     }
     source.push_str(&each(&format!("{}{writes}", emitter.lines), "b", "a"));
-    named(format!(
-        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n{source}}}\n"
+    named(formatdoc!(
+        "
+        kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{
+            {source}
+        }}
+        "
     ))
+}
+
+/// `source` (Metal) indented by its braces: each line's own indentation
+/// dropped, then four spaces a level of the braces open before it (a line
+/// closing one, a level less); blank lines dropped, but one after each
+/// top-level definition. The templates above write their lines as they
+/// read best, relative to themselves; a kernel is indented as a whole.
+fn formatted(source: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        // Its code, not a comment (whose braces do not count).
+        let code = line.split("//").next().unwrap_or("");
+        let closing = code.chars().take_while(|&c| c == '}').count();
+        let level = depth.saturating_sub(closing);
+        writeln!(out, "{}{line}", "    ".repeat(level)).unwrap();
+        let opened = code.matches('{').count();
+        depth = (depth + opened).saturating_sub(code.matches('}').count());
+        if depth == 0 && code.ends_with(['}', ';']) && closing > 0 {
+            writeln!(out).unwrap();
+        }
+    }
+    out
 }
 
 /// A generated kernel's name and `source`, with `NAME` (the kernel's and
 /// its input type's) replaced by a hash of the source.
 fn named(source: String) -> (String, String) {
+    let source = formatted(&source);
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());
@@ -670,19 +740,14 @@ fn row_kernel(
         e.invariant[v] = reduced || constant[v] || of_rows;
     }
     // Values the same across the row, computed once a row before the loop
-    // reading them, at the kernel's indentation.
+    // reading them.
     let hoisted = |code: &str| match code.is_empty() {
         true => String::new(),
-        false => {
-            let lines: Vec<&str> = code
-                .lines()
-                .map(|l| l.strip_prefix("    ").unwrap_or(l))
-                .collect();
-            format!(
-                "    // the same across the row: once a row\n{}\n",
-                lines.join("\n")
-            )
-        }
+        false => formatdoc!(
+            "
+            // the same across the row: once a row
+            {code}"
+        ),
     };
     // The passes over the row, each its reductions (their indices, and
     // whether each is with the next one): those reading none of the
@@ -756,16 +821,29 @@ fn row_kernel(
     // A pass's loop over this thread's elements of the row: unrolled over
     // its registers when values are kept.
     let header = match kept.is_empty() && partials.is_empty() {
-        true => format!(
-            "    for (uint c = t; c < {n}u; c += {lanes}u) {{\n        uint j = row * {n}u + c;\n"
+        true => formatdoc!(
+            "
+            for (uint c = t; c < {n}u; c += {lanes}u) {{
+                uint j = row * {n}u + c;
+            "
         ),
         false => {
             let bound = match n % lanes {
                 0 => String::new(),
-                _ => format!("        if (c >= {n}u) {{\n            break;\n        }}\n"),
+                _ => formatdoc!(
+                    "
+                    if (c >= {n}u) {{
+                        break;
+                    }}
+                    "
+                ),
             };
-            format!(
-                "    _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * {lanes}u;\n{bound}        uint j = row * {n}u + c;\n"
+            formatdoc!(
+                "
+                _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < {per_thread}u; ++e) {{
+                    uint c = t + e * {lanes}u;
+                    {bound}uint j = row * {n}u + c;
+                "
             )
         }
     };
@@ -813,16 +891,26 @@ fn row_kernel(
                 // exp added. Then the threads' pairs combined.
                 let sum = reductions[k + 1];
                 writeln!(init, "    {a} m{k} = -INFINITY, s{k} = 0;").unwrap();
-                write!(
+                writedoc!(
                     step,
-                    "        {a} x{k} = {value};\n        {a} n{k} = Max::apply(m{k}, x{k});\n        {a} e{k} = select(Exp::apply(min(m{k}, x{k}) - n{k}), {a}(0), n{k} == -INFINITY);\n        s{k} = select(s{k} + e{k}, s{k} * e{k} + {a}(1), x{k} > m{k});\n        m{k} = n{k};\n"
+                    "
+                    {a} x{k} = {value};
+                    {a} n{k} = Max::apply(m{k}, x{k});
+                    {a} e{k} = select(Exp::apply(min(m{k}, x{k}) - n{k}), {a}(0), n{k} == -INFINITY);
+                    s{k} = select(s{k} + e{k}, s{k} * e{k} + {a}(1), x{k} > m{k});
+                    m{k} = n{k};
+                    "
                 )
                 .unwrap();
+                let k1 = k + 1;
                 match simd {
-                    true => write!(
+                    true => writedoc!(
                         combine,
-                        "    {a} r{k} = simd_max(m{k});\n    // A lane with no elements has no sum to rescale.\n    {a} r{} = simd_sum(m{k} == -INFINITY ? {a}(0) : s{k} * Exp::apply(m{k} - r{k}));\n",
-                        k + 1
+                        "
+                        {a} r{k} = simd_max(m{k});
+                        // A lane with no elements has no sum to rescale.
+                        {a} r{k1} = simd_sum(m{k} == -INFINITY ? {a}(0) : s{k} * Exp::apply(m{k} - r{k}));
+                        "
                     ),
                     false => {
                         writeln!(
@@ -830,10 +918,26 @@ fn row_kernel(
                             "    threadgroup {a} maxima{k}[REDUCE_THREADS], sums{k}[REDUCE_THREADS];"
                         )
                         .unwrap();
-                        write!(
+                        writedoc!(
                             combine,
-                            "    maxima{k}[t] = m{k};\n    sums{k}[t] = s{k};\n    for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < q) {{\n            {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);\n            // A thread with no elements has no sum to rescale.\n            {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);\n            {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);\n            maxima{k}[t] = mm;\n            sums{k}[t] = s1 + s2;\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = maxima{k}[0];\n    {a} r{} = sums{k}[0];\n",
-                            k + 1
+                            "
+                            maxima{k}[t] = m{k};
+                            sums{k}[t] = s{k};
+                            for (uint q = REDUCE_THREADS / 2; q > 0; q /= 2) {{
+                                threadgroup_barrier(mem_flags::mem_threadgroup);
+                                if (t < q) {{
+                                    {a} m1 = maxima{k}[t], m2 = maxima{k}[t + q], mm = Max::apply(m1, m2);
+                                    // A thread with no elements has no sum to rescale.
+                                    {a} s1 = m1 == -INFINITY ? {a}(0) : sums{k}[t] * Exp::apply(m1 - mm);
+                                    {a} s2 = m2 == -INFINITY ? {a}(0) : sums{k}[t + q] * Exp::apply(m2 - mm);
+                                    maxima{k}[t] = mm;
+                                    sums{k}[t] = s1 + s2;
+                                }}
+                            }}
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
+                            {a} r{k} = maxima{k}[0];
+                            {a} r{k1} = sums{k}[0];
+                            "
                         )
                     }
                 }
@@ -859,20 +963,31 @@ fn row_kernel(
                 }
                 false => {
                     writeln!(decls, "    threadgroup {a} shared{k}[REDUCE_THREADS];").unwrap();
-                    write!(
+                    writedoc!(
                         combine,
-                        "    shared{k}[t] = acc{k};\n    for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (t < s) {{\n            shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {a} r{k} = shared{k}[0];\n"
+                        "
+                        shared{k}[t] = acc{k};
+                        for (uint s = REDUCE_THREADS / 2; s > 0; s /= 2) {{
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
+                            if (t < s) {{
+                                shared{k}[t] = {op}::apply(shared{k}[t], shared{k}[t + s]);
+                            }}
+                        }}
+                        threadgroup_barrier(mem_flags::mem_threadgroup);
+                        {a} r{k} = shared{k}[0];
+                        "
                     )
                 }
             }
             .unwrap();
             locals.push((r.output, format!("r{k}")));
         }
-        write!(
+        let (hoisted, lines) = (hoisted(&e.hoisted), &e.lines);
+        writedoc!(
             source,
-            "{}{init}{header}{}{step}{stores}    }}\n{combine}",
-            hoisted(&e.hoisted),
-            e.lines
+            "
+            {hoisted}{init}{header}{lines}{step}{stores}}}
+            {combine}"
         )
         .unwrap();
         e.row_locals.extend(locals);
@@ -893,25 +1008,51 @@ fn row_kernel(
         if let Some(p) = partials.iter().position(|p| p.output == v) {
             let a = metal_type(body.type_of(v).dtype);
             let value = e.value(summed[p], "j".into());
-            writeln!(
+            writedoc!(
                 init,
-                "    {a} part{k}[{per_thread}];\n    for (uint e = 0; e < {per_thread}u; ++e) {{\n        part{k}[e] = 0;\n    }}"
+                "
+                {a} part{k}[{per_thread}];
+                for (uint e = 0; e < {per_thread}u; ++e) {{
+                    part{k}[e] = 0;
+                }}
+                "
             )
             .unwrap();
             writeln!(each, "        part{k}[e] += {a}({value});").unwrap();
+            let k1 = k + 1;
             match simd {
                 true => {
                     writeln!(decls, "    threadgroup {a} sums{k}[{SIMD_ROWS} * {n}];").unwrap();
-                    writeln!(
+                    writedoc!(
                         written,
-                        "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * 32u;\n        if (c < {n}u) {{\n            sums{k}[sg * {n}u + c] = part{k}[e];\n        }}\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint c = tid.y * 16 + tid.x; c < {n}u; c += REDUCE_THREADS) {{\n        {a} sum = sums{k}[c];\n        for (uint s = 1; s < {SIMD_ROWS}u; ++s) {{\n            sum += sums{k}[s * {n}u + c];\n        }}\n        out{}[group.x * {n}u + c] = sum;\n    }}",
-                        k + 1
+                        "
+                        for (uint e = 0; e < {per_thread}u; ++e) {{
+                            uint c = t + e * 32u;
+                            if (c < {n}u) {{
+                                sums{k}[sg * {n}u + c] = part{k}[e];
+                            }}
+                        }}
+                        threadgroup_barrier(mem_flags::mem_threadgroup);
+                        for (uint c = tid.y * 16 + tid.x; c < {n}u; c += REDUCE_THREADS) {{
+                            {a} sum = sums{k}[c];
+                            for (uint s = 1; s < {SIMD_ROWS}u; ++s) {{
+                                sum += sums{k}[s * {n}u + c];
+                            }}
+                            out{k1}[group.x * {n}u + c] = sum;
+                        }}
+                        "
                     )
                 }
-                false => writeln!(
+                false => writedoc!(
                     written,
-                    "    for (uint e = 0; e < {per_thread}u; ++e) {{\n        uint c = t + e * REDUCE_THREADS;\n        if (c < {n}u) {{\n            out{}[group.x * {n}u + c] = part{k}[e];\n        }}\n    }}",
-                    k + 1
+                    "
+                    for (uint e = 0; e < {per_thread}u; ++e) {{
+                        uint c = t + e * REDUCE_THREADS;
+                        if (c < {n}u) {{
+                            out{k1}[group.x * {n}u + c] = part{k}[e];
+                        }}
+                    }}
+                    "
                 ),
             }
             .unwrap();
@@ -919,9 +1060,13 @@ fn row_kernel(
         }
         let value = e.value(v, "j".into());
         match body.type_of(v).numel() == rows {
-            true => writeln!(
+            true => writedoc!(
                 once,
-                "    if (t == 0) {{\n        out{}[row] = {value};\n    }}",
+                "
+                if (t == 0) {{
+                    out{}[row] = {value};
+                }}
+                ",
                 k + 1
             ),
             false => writeln!(each, "        out{}[j] = {value};", k + 1),
@@ -931,23 +1076,31 @@ fn row_kernel(
     // An output of a value a row (a loss each): written once a row.
     match out_type.numel() == rows && e.invariant[out] {
         true => {
-            write!(
+            writedoc!(
                 source,
-                "{}    if (t == 0) {{\n        out[row] = {value};\n    }}\n{once}",
+                "
+                {}if (t == 0) {{
+                    out[row] = {value};
+                }}
+                {once}",
                 hoisted(&e.hoisted)
             )
             .unwrap();
             if !each.is_empty() {
-                writeln!(source, "{header}{}{each}    }}", e.lines).unwrap();
+                writeln!(source, "{header}{}{each}}}", e.lines).unwrap();
             }
         }
-        false => write!(
-            source,
-            "{}{once}{header}{}        out[j] = {value};\n{each}    }}\n",
-            hoisted(&e.hoisted),
-            e.lines
-        )
-        .unwrap(),
+        false => {
+            let (hoisted, lines) = (hoisted(&e.hoisted), &e.lines);
+            writedoc!(
+                source,
+                "
+                {hoisted}{once}{header}{lines}out[j] = {value};
+                {each}}}
+                "
+            )
+            .unwrap()
+        }
     }
     // An element's column, `j % n` (an iota along the row, a one-hot's), is
     // the loops' `c` (`j = row * n + c`, `c < n`): no division.
@@ -959,28 +1112,56 @@ fn row_kernel(
     // Short rows: a SIMD group a row, SIMD_ROWS a threadgroup (none past
     // the last row: they meet no barrier).
     if simd && partials.is_empty() {
-        return named(format!(
-            "{signature} {{\n    uint row = group.x * {SIMD_ROWS}u + sg, t = lane;\n    if (row >= {rows}u) {{\n        return;\n    }}\n{source}}}\n"
+        return named(formatdoc!(
+            "
+            {signature} {{
+                uint row = group.x * {SIMD_ROWS}u + sg, t = lane;
+                if (row >= {rows}u) {{
+                    return;
+                }}
+                {source}
+            }}
+            "
         ));
     }
     if simd {
         let block = rows / row_groups(body);
-        let source: String = source.lines().map(|l| format!("    {l}\n")).collect();
-        return named(format!(
-            "{signature} {{\n    uint t = lane;\n{decls}{init}    for (uint row = group.x * {block}u + sg; row < (group.x + 1) * {block}u; row += {SIMD_ROWS}u) {{\n{source}    }}\n{written}}}\n"
+        return named(formatdoc!(
+            "
+            {signature} {{
+                uint t = lane;
+                {decls}{init}for (uint row = group.x * {block}u + sg; row < (group.x + 1) * {block}u; row += {SIMD_ROWS}u) {{
+                    {source}
+                }}
+                {written}
+            }}
+            "
         ));
     }
     if partials.is_empty() {
-        return named(format!(
-            "{signature} {{\n    uint row = group.x, t = tid.y * 16 + tid.x;\n{decls}{source}}}\n"
+        return named(formatdoc!(
+            "
+            {signature} {{
+                uint row = group.x, t = tid.y * 16 + tid.x;
+                {decls}{source}
+            }}
+            "
         ));
     }
     // A block of rows a threadgroup, each as above, the threadgroup's
     // memory reused once every thread is done with the row.
     let block = rows / row_groups(body);
-    let source: String = source.lines().map(|l| format!("    {l}\n")).collect();
-    named(format!(
-        "{signature} {{\n    uint t = tid.y * 16 + tid.x;\n{decls}{init}    for (uint row = group.x * {block}u; row < (group.x + 1) * {block}u; ++row) {{\n{source}        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }}\n{written}}}\n"
+    named(formatdoc!(
+        "
+        {signature} {{
+            uint t = tid.y * 16 + tid.x;
+            {decls}{init}for (uint row = group.x * {block}u; row < (group.x + 1) * {block}u; ++row) {{
+                {source}
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }}
+            {written}
+        }}
+        "
     ))
 }
 
@@ -1338,7 +1519,8 @@ impl<'a> Emitter<'a> {
                             }
                             let i = self.index(terms.join(" + "));
                             let v = self.value(x, i);
-                            writeln!(self.lines, "        {name} = {v};\n        }}").unwrap();
+                            writeln!(self.lines, "{name} = {v};").unwrap();
+                            writeln!(self.lines, "}}").unwrap();
                             (self.values, self.indices) = saved;
                             start += n;
                         }
@@ -1504,8 +1686,15 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         format!("in{}", k.expect("an input of the body"))
     };
     let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
-    let ix = format!(
-        "struct NAME_ix {{\n{}\n{}\n{}\n{}\n}};\n\n",
+    let ix = formatdoc!(
+        "
+        struct NAME_ix {{
+            {}
+            {}
+            {}
+            {}
+        }};
+        ",
         index("q", &a.q),
         index("k", &a.k),
         index("v", &a.v),
@@ -1532,10 +1721,17 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
                 writeln!(fields, "    device const {vt} *in{k};").unwrap();
             }
             let members: Vec<String> = (0..n).map(|k| format!("in{k}")).collect();
+            let (hoisted, lines) = (&e.hoisted, &e.lines);
             (
-                format!(
-                    "struct NAME_epi {{\n{fields}    inline {w} operator()({o} r, ulong i) const {{\n        uint j = uint(i);\n{}{}        return {value};\n    }}\n}};\n\n",
-                    e.hoisted, e.lines
+                formatdoc!(
+                    "
+                    struct NAME_epi {{
+                        {fields}inline {w} operator()({o} r, ulong i) const {{
+                            uint j = uint(i);
+                            {hoisted}{lines}return {value};
+                        }}
+                    }};
+                    "
                 ),
                 format!(", NAME_epi{{{}}}", members.join(", ")),
             )
@@ -1586,19 +1782,27 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
-        true => format!(
-            "threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];\n    attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+        true => formatdoc!(
+            "
+            threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];
+            attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, maxima, sums, os, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
-            format!(
-                "threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];\n    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+            formatdoc!(
+                "
+                threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];
+                flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse}, NAME_ix, NAME_score, {w}>({q}, {k}, {v}, out, {raw_arg}, {lse_arg}, NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
-    named(format!(
-        "{ix}{score}{epilogue}{drop}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
-        params.join(", ")
+    let params = params.join(", ");
+    named(formatdoc!(
+        "
+        {ix}{score}{epilogue}{drop}kernel void NAME({params}, {args}) {{
+            {call}
+        }}
+        "
     ))
 }
 
@@ -1621,8 +1825,17 @@ fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> String {
     let t = metal_type(dtype);
     let scale = constant(dtype, Scalar::Float(d.scale));
     let (offset, threshold) = (d.offset, d.threshold);
-    format!(
-        "struct NAME_drop {{\n    ulong seed, start;\n    inline {t} operator()({t} x, uint b, uint i, uint j) const {{\n        ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;\n        bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;\n        return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));\n    }}\n}};\n\n"
+    formatdoc!(
+        "
+        struct NAME_drop {{
+            ulong seed, start;
+            inline {t} operator()({t} x, uint b, uint i, uint j) const {{
+                ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;
+                bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;
+                return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));
+            }}
+        }};
+        "
     )
 }
 
@@ -1631,12 +1844,18 @@ fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> String {
 /// and column strides, `NAME_ROW` and `NAME_COL`.
 fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
     let up = name.to_uppercase();
-    let mut code = format!(
-        "    static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;\n    inline ulong {name}(uint b) const {{\n        ulong o = {}ul;\n",
-        acc.row, acc.col, acc.offset
+    let mut code = formatdoc!(
+        "
+        static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;
+        inline ulong {name}(uint b) const {{
+            ulong o = {}ul;
+        ",
+        acc.row,
+        acc.col,
+        acc.offset
     );
     if !batch.is_empty() {
-        code += "        uint rest = b;\n";
+        writeln!(code, "uint rest = b;").unwrap();
     }
     for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate().rev() {
         let last = k == 0;
@@ -1655,7 +1874,13 @@ fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
             writeln!(code, "        rest /= {size}u;").unwrap();
         }
     }
-    code += "        return o;\n    }";
+    writedoc!(
+        code,
+        "
+            return o;
+        }}"
+    )
+    .unwrap();
     code
 }
 
@@ -1670,8 +1895,12 @@ fn score_functor(scores: &[Score]) -> String {
             Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
         };
     }
-    format!(
-        "struct NAME_score {{\n    inline float operator()(float s) const {{ return {score}; }}\n}};\n\n"
+    formatdoc!(
+        "
+        struct NAME_score {{
+            inline float operator()(float s) const {{ return {score}; }}
+        }};
+        "
     )
 }
 
@@ -1697,14 +1926,16 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     let outputs = outputs
         .iter()
         .filter_map(|(name, out)| out.as_ref().map(|(_, acc)| (*name, acc)));
-    let ix = format!(
-        "struct NAME_ix {{\n{}\n}};\n\n",
-        operands
-            .into_iter()
-            .chain(outputs)
-            .map(|(name, acc)| ix_method(name, acc, &b.batch))
-            .collect::<Vec<_>>()
-            .join("\n")
+    let mut methods = String::new();
+    for (name, acc) in operands.into_iter().chain(outputs) {
+        writeln!(methods, "{}", ix_method(name, acc, &b.batch)).unwrap();
+    }
+    let ix = formatdoc!(
+        "
+        struct NAME_ix {{
+            {methods}
+        }};
+        "
     );
     let score = score_functor(&b.scores);
     let t = metal_type(b.dtype);
@@ -1761,19 +1992,31 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         false => backward_block(b),
     };
     let call = match (dkdv, dq) {
-        (true, true) => format!(
-            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+        (true, true) => formatdoc!(
+            "
+            threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];
+            threadgroup float lses[{rows}], deltas[{rows}];
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
-        (true, false) => format!(
-            "threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];\n    threadgroup float lses[{rows}], deltas[{rows}];\n    flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+        (true, false) => formatdoc!(
+            "
+            threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
+            threadgroup float lses[{rows}], deltas[{rows}];
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
-        (false, _) => format!(
-            "threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];\n    flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+        (false, _) => formatdoc!(
+            "
+            threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];
+            flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
     };
-    named(format!(
-        "{ix}{score}{drop}kernel void NAME({}, {args}) {{\n    {call}\n}}\n",
-        params.join(", ")
+    let params = params.join(", ");
+    named(formatdoc!(
+        "
+        {ix}{score}{drop}kernel void NAME({params}, {args}) {{
+            {call}
+        }}
+        "
     ))
 }
 
@@ -1975,14 +2218,26 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         Some(_) => format!("Pair<{w}>"),
         None => w.to_string(),
     };
-    let mut source = format!(
-        "struct NAME_epi {{\n{fields}    inline {returns} operator()({operands}, ulong i) const {{\n        uint j = uint(i);\n{}{}{stores}        return {value};\n    }}\n}};\n",
-        e.hoisted, e.lines
+    let (hoisted, lines) = (&e.hoisted, &e.lines);
+    let mut source = formatdoc!(
+        "
+        struct NAME_epi {{
+            {fields}inline {returns} operator()({operands}, ulong i) const {{
+                uint j = uint(i);
+                {hoisted}{lines}{stores}return {value};
+            }}
+        }};
+        "
     );
     for (suffix, bm, bn, bk) in [("", 128, 64, "SG_BK"), ("_small", 32, 32, "SMALL_BK")] {
-        write!(
+        writedoc!(
             source,
-            "\nkernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{\n    threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];\n    matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});\n}}\n"
+            "
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
+                threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+            }}
+            "
         )
         .unwrap();
     }
