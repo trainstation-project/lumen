@@ -283,10 +283,12 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
 }
 
 /// Each row fusion of `rows` extended to an elementwise consumer of its
-/// values of the rows' shape after it, computed from them, from values of
-/// its rows (a cross entropy's logits) and from values not reading its
-/// own (`(exp(x - lse) - one_hot) · g`, its gradient, `g` a constant or an
-/// input: XMA's forward-backward kernel): that consumer its root, its own
+/// values of the rows' shape after it (read by none such), computed from
+/// them, from values of its rows (a cross entropy's logits), from values
+/// of a row each computed from those (`g = 2·loss`, of `Σ loss²`) and from
+/// values not reading its own (`(exp(x - lse) - one_hot) · g`, its
+/// gradient, `g` a constant or an input: XMA's forward-backward kernel;
+/// not from every row's, `mean(loss)`): that consumer its root, its own
 /// root and the values read elsewhere (of a row each) its outputs, written
 /// once its reductions are done. Its readers before it wait for it (the
 /// fused graph's order), as none of its values reads them.
@@ -332,14 +334,23 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
         // The latest elementwise reader of its values of the rows' shape
         // that its cone (its producers outside the row, cheap and taken by
         // no other row) makes a fusion with it.
+        let candidate = |c: usize| {
+            finder.live[c]
+                && elementwise(&nodes[c].primitive)
+                && fusible(graph, &nodes[c])
+                && shaped(nodes[c].output)
+                && !taken(c)
+        };
+        // Not a part of a larger one (`softmax - one_hot` of `(softmax -
+        // one_hot) · g`): if that one is not computed here, its parts are
+        // not either, but computed with it (from the row's values written).
         let candidates: Vec<usize> = (row.root + 1..nodes.len())
             .rev()
             .filter(|&c| {
-                finder.live[c]
-                    && elementwise(&nodes[c].primitive)
-                    && fusible(graph, &nodes[c])
-                    && shaped(nodes[c].output)
-                    && !taken(c)
+                candidate(c)
+                    && !finder.readers[nodes[c].output]
+                        .iter()
+                        .any(|&u| candidate(u))
             })
             .collect();
         let found = candidates.into_iter().find_map(|c| {

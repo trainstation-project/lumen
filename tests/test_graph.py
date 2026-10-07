@@ -1673,6 +1673,51 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
     np.testing.assert_allclose(grad, (np.exp(x - lse[:, None]) - hit) * c[:, None], rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("rows_read", ["its own", "every row's"])
+@pytest.mark.parametrize("n, vocab", [(64, 16), (128, 32000)])
+def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
+    """A cross entropy whose gradient's ``g`` reads the losses. Each row's
+    its own (``Σ loss²``, ``g = 2·loss``): computed once a row in its row
+    kernel after the reductions, the gradient its second pass (one
+    kernel). Every row's (``mean(loss)²``, ``g = 2·mean(loss)/n``): not
+    known until every row's loss is, so the gradient is a pass after the
+    row kernel (and the mean) reading ``lse``, which the row kernel writes
+    beside the losses; never ``softmax - one_hot`` written to be scaled
+    later. The gradients NumPy's."""
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal((n, vocab)) * 3).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    of = {"its own": lambda loss: F.sum(loss * loss), "every row's": lambda loss: F.mean(loss) * F.mean(loss)}
+
+    def step(x, t):
+        loss = F.cross_entropy(x, t)
+        of[rows_read](loss).backward()
+        return loss, x.grad
+
+    try:
+        X, T = (lumen.from_numpy(a).to("mps") for a in (x, t))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    steps = lumen.graph.Plan(lumen.make_graph(step)(X, T), "mps").steps()
+    labels = [s["label"] for s in steps]
+    if rows_read == "its own":
+        assert [s["output"][2] for s in steps] == [[n, vocab]], labels
+    else:
+        # The row kernel, then the mean (and ``g``, a row each), then the
+        # gradient.
+        assert [s["output"][2] for s in steps] == [[n], [n], [n, vocab]], labels
+        assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[2]["label"], labels
+    xr = x.astype(np.float64)
+    m = xr.max(-1, keepdims=True)
+    lse = (m + np.log(np.exp(xr - m).sum(-1, keepdims=True)))[:, 0]
+    hit = np.zeros_like(xr)
+    hit[np.arange(n), t] = 1
+    loss = lse - xr[np.arange(n), t]
+    g = 2 * loss[:, None] if rows_read == "its own" else 2 * loss.mean() / n
+    _, grad = (lumen.to_numpy(v) for v in lumen.compile(step)(X, T))
+    np.testing.assert_allclose(grad, g * (np.exp(xr - lse[:, None]) - hit), rtol=1e-4, atol=1e-5)
+
+
 def test_rms_norm_backward_recomputes_its_normalized_input():
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
