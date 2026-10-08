@@ -219,7 +219,10 @@ def cross_entropy(h, head, targets):
     float32) against ``targets`` (token ids), in float32
     (``F.linear_cross_entropy``: a chunk of rows at a time, the loss and its
     gradients together)."""
-    return F.mean(F.linear_cross_entropy(h, head.bfloat16(), targets.reshape(-1)))
+    logits = F.matmul(h, head.bfloat16().t(), "float32", "float32")
+    loss = F.cross_entropy(logits, targets.reshape(-1))
+    loss = F.mean(loss)
+    return loss
 
 
 def train_step(model, opt, x, y):
