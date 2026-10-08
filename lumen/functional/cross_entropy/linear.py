@@ -21,7 +21,12 @@ def linear_cross_entropy(input, weight, target):
     logits of a chunk at a time in memory)."""
     h = _require_float(_lift(input), "linear_cross_entropy")
     w = _lift(weight)
-    chunk = config.compiler.fused_linear_cross_entropy_chunk_size
-    if chunk is not None:
-        return _ChunkedLinearCrossEntropy.apply(h, w, _lift(target), chunk=chunk)
-    return cross_entropy(matmul(h, w.t(), "float32", "float32"), target)
+
+    chunk_size = config.compiler.fused_linear_cross_entropy_chunk_size
+    if chunk_size is None:
+        logits = matmul(h, w.t(), "float32", "float32")
+        loss = cross_entropy(logits, target)
+    else:
+        loss = _ChunkedLinearCrossEntropy.apply(h, w, _lift(target), chunk=chunk_size)
+
+    return loss
