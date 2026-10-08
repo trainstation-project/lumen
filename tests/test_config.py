@@ -67,13 +67,14 @@ def _labels(f, *args, device="mps"):
 
 def test_compiler_flags_defaults(compiler):
     """Every program runs as traced, but for online softmax, flash
-    attention and split-K (on)."""
+    attention, fused linear cross entropy and split-K (on)."""
     assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
-    assert compiler.fused_linear_cross_entropy_chunk_size is None
+    assert compiler.fused_linear_cross_entropy is True and compiler.fused_linear_cross_entropy_chunk_size is None
+    assert compiler.safe_kernels is False
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -118,6 +119,21 @@ def test_compiler_flags_change_what_compiles(compiler):
     assert "maxima" in online()["fusion"]["source"]
     compiler.online_softmax = False
     assert "maxima" not in online()["fusion"]["source"]
+    compiler.reset()
+
+    take = lambda x, i: x[i] * 2.0  # noqa: E731
+    table, ids = lumen.empty([16, 8], device="meta"), lumen.empty([4], dtype="int64", device="meta")
+    assert "select" not in " ".join(_labels(take, table, ids))
+    compiler.safe_kernels = True
+    assert "select" in " ".join(_labels(take, table, ids))
+    compiler.reset()
+
+    loss = lambda h, w, t: F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)  # noqa: E731
+    args = (lumen.empty([64, 32], device="meta"), lumen.empty([1000, 32], device="meta"))
+    args += (lumen.empty([64], dtype="int64", device="meta"),)
+    assert "linear_cross_entropy" in _labels(loss, *args)
+    compiler.fused_linear_cross_entropy = False
+    assert "linear_cross_entropy" not in _labels(loss, *args)
     compiler.reset()
 
     (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()

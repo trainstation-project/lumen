@@ -11,6 +11,7 @@
 //! instead, as Core ML steps ([`ane`]).
 
 pub(crate) mod ane;
+mod bounds;
 mod codegen;
 mod diamonds;
 mod dot_strength;
@@ -125,8 +126,14 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
     // A cross entropy of a dot's logits nothing else reads, its logits
     // never stored (matched, as attention, before the dots are moved).
-    let graph = match config.fuse {
+    let graph = match config.fuse && config.fused_linear_cross_entropy {
         true => linear_cross_entropy::linear_cross_entropy(&graph),
+        false => graph,
+    };
+    // Safe kernels: each index clamped into its axis, in the graph (after
+    // the linear cross entropy's match, which reads its gather's index).
+    let graph = match config.safe_kernels {
+        true => bounds::clamp_indices(&graph),
         false => graph,
     };
     // Now the attention's are matched (its kernels' layouts): transposes of

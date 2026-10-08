@@ -1461,9 +1461,9 @@ impl<'a> Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
-                    // The operand at the entry its index picks (clamped
-                    // into the axis): element (o, t, r) of the result, t the
-                    // index's position, reads (o, index t, r) of it.
+                    // The operand at the entry its index picks: element
+                    // (o, t, r) of the result, t the index's position, reads
+                    // (o, index t, r) of it.
                     Gather { axis } => {
                         let x = body.type_of(node.inputs[0]);
                         let m = body.type_of(node.inputs[1]).numel();
@@ -1478,8 +1478,8 @@ impl<'a> Emitter<'a> {
                         }
                         let t = self.index(t);
                         let k = self.value(node.inputs[1], t);
-                        let k =
-                            self.index(format!("uint(clamp(long({k}), 0l, {}l))", n.max(1) - 1));
+                        // As given (`safe_kernels` clamps it first: `bounds`).
+                        let k = self.index(format!("uint({k})"));
                         let mut terms = Vec::new();
                         if ty.numel() > m * inner {
                             terms.push(format!("({idx} / {}u) * {}u", m * inner, n * inner));

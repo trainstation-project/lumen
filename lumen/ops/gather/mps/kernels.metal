@@ -4,17 +4,17 @@
 // [outer, m, inner].
 //
 // gather_<bytes>_<i32|i64>: a thread an element of the result: the
-// operand's element at its index, clamped into the axis (XLA's gather).
+// operand's element at its index, read as given (one out of range the
+// program's error; lumen.config.compiler.safe_kernels clamps them first,
+// lumen/compiler/mps/bounds.rs).
 // Elements are moved as their bytes (E: uchar to ulong), so one kernel
 // serves every dtype of a size.
 //
 // scatter_add_<dtype>_<i32|i64>: each update added to `out` (the operand's
-// value: its buffer, or a copy of it) at its index, clamped as the
-// gather's. A thread a column (o, r) of `out`: it adds that column's
-// updates in index order, so no two threads write one element and the
-// sums' order is fixed (deterministic, the reference's bit for bit), for
-// any dtype. Its threads are outer * inner (an embedding's dimension),
-// each adding m updates.
+// value: its buffer, or a copy of it) at its index, as the gather's. A thread a column (o, r) of `out`: it adds that
+// column's updates in index order, so no two threads write one element and the sums' order is fixed (deterministic,
+// the reference's bit for bit), for any dtype. Its threads are outer * inner (an embedding's dimension), each adding m
+// updates.
 //
 // scatter_add_scan_<dtype>_<i32|i64>: the same sums, a thread an element
 // (o, k, r) of `out` instead: it scans the m indices in order, adding the
@@ -45,7 +45,7 @@
             return;                                                           \
         }                                                                     \
         ulong r = j % inner, t = j / inner % m, o = j / inner / m;            \
-        ulong k = ulong(clamp(long(index[t]), 0l, long(n) - 1));              \
+        ulong k = ulong(index[t]);                                            \
         out[j] = in[(o * n + k) * inner + r];                                 \
     }
 
@@ -65,7 +65,7 @@
         }                                                                           \
         ulong r = j % inner, o = j / inner;                                         \
         for (ulong t = 0; t < m; ++t) {                                             \
-            ulong k = ulong(clamp(long(index[t]), 0l, long(n) - 1));                \
+            ulong k = ulong(index[t]);                                              \
             device T *e = out + (o * n + k) * inner + r;                            \
             *e = Add::apply(*e, updates[(o * m + t) * inner + r]);                  \
         }                                                                           \
@@ -91,7 +91,7 @@
         for (ulong t0 = 0; t0 < m; t0 += SCAN_BLOCK) {                                          \
             threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
             if (t0 + flat < m) {                                                                \
-                rows[flat] = uint(clamp(long(index[t0 + flat]), 0l, long(n) - 1));              \
+                rows[flat] = uint(index[t0 + flat]);                                            \
             }                                                                                   \
             threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
             uint block = uint(min(ulong(SCAN_BLOCK), m - t0));                                  \

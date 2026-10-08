@@ -228,14 +228,15 @@ def dynamic_update_slice(x, update, start_indices):
 def gather(x, indices, axis):
     """``x``'s entries along ``axis`` that ``indices`` (int32 or int64, any
     shape) pick: ``x``'s shape with ``axis`` replaced by the indices'
-    (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index clamped into
-    the axis."""
+    (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index in the axis
+    (one out of it the program's error; clamped into it with
+    ``lumen.config.compiler.safe_kernels``)."""
     return bind("gather", x, indices, axis=axis)
 
 
 def scatter_add(x, indices, updates, axis):
     """``x`` with ``updates`` (shaped as :func:`gather` of it at ``indices``)
-    added at the entries along ``axis`` the indices pick, clamped as the
+    added at the entries along ``axis`` the indices pick, in range as the
     gather's (``lax.scatter_add``): a gather's gradient. Where nothing reads
     ``x`` after it, added in ``x``'s memory (in place)."""
     return bind("scatter_add", x, indices, updates, axis=axis)

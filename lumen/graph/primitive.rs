@@ -123,15 +123,16 @@ pub enum Primitive {
     /// The operand's entries along `axis` that `indices` (its second
     /// operand: int32 or int64, any shape) pick: its shape with `axis`
     /// replaced by the indices' (`jnp.take`; MLX's `take`, `weight[ids]`: an
-    /// embedding's lookup). Each index is clamped into the axis, as XLA's
-    /// gather clamps.
+    /// embedding's lookup). An index out of the axis is the program's error
+    /// (the reference clamps it into the axis, as XLA's gather does; a
+    /// device's kernels, with `lumen.config.compiler.safe_kernels`).
     Gather {
         axis: usize,
     },
     /// The operand with `updates` (its third operand, shaped as a
     /// [`Primitive::Gather`] of it at `indices`, its second) added at the
-    /// entries along `axis` the indices pick (clamped into it, as the
-    /// gather's), several at one entry each added: a gather's gradient
+    /// entries along `axis` the indices pick (in range, as the gather's),
+    /// several at one entry each added: a gather's gradient
     /// (`lax.scatter_add`, MLX's `scatter_add`).
     ScatterAdd {
         axis: usize,

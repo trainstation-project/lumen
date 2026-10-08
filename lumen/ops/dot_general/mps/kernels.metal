@@ -386,7 +386,7 @@ template <typename L, uint BM, uint BN> struct LceRows {
         UNROLL for (uint i = 0; i < FM; ++i) {
             const uint r = (sy * FM + i) * 8 + fr;
             const ulong row = m0 + r;
-            const ulong y = row < B ? ulong(clamp(long(target[row]), 0l, long(V) - 1)) : V;
+            const ulong y = row < B ? ulong(target[row]) : V;
             float m = -INFINITY;
             UNROLL for (uint j = 0; j < FN; ++j) {
                 const vec<float, 2> e = frag(c[i][j]);

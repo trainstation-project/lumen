@@ -2,8 +2,9 @@
 //! is compiled (Python: `lumen.config.compiler`). Each compile takes a
 //! snapshot ([`config`]) into its [`Options`](super::Options). The
 //! defaults run every program exactly as traced, but for `online_softmax`,
-//! `flash_attention` and `split_k` (on: rounding not the program's); turn
-//! them off to run softmax, attention and dots as traced too. Kernels may
+//! `flash_attention`, `fused_linear_cross_entropy` and `split_k` (on:
+//! rounding not the program's); turn them off to run softmax, attention,
+//! cross entropy and dots as traced too. Kernels may
 //! add atomically (in no fixed order) unless `deterministic`.
 
 use std::sync::{PoisonError, RwLock};
@@ -48,6 +49,12 @@ pub struct CompilerConfig {
     /// program computes (an online softmax across key blocks, `P` not
     /// normalized before `P @ V`), so off runs it exactly as traced.
     pub flash_attention: bool,
+    /// Run a cross entropy of a matmul's logits nothing else reads
+    /// (`F.linear_cross_entropy`, however written) as one linear cross
+    /// entropy: the logits never reach memory (Cut Cross-Entropy). On by
+    /// default; not what the program computes (each row's log-sum-exp adds
+    /// its logits in another order), so off runs it exactly as traced.
+    pub fused_linear_cross_entropy: bool,
     /// Split the contraction of a dot of few output tiles (small M and N,
     /// large K: a decode step's) across threadgroups, the partials summed
     /// in float32 (XLA's SplitKRewriter). On by default; not what the
@@ -84,6 +91,13 @@ pub struct CompilerConfig {
     /// linear cross entropy). None, the default: not chunked (the logits
     /// never stored where no gradient reads them).
     pub fused_linear_cross_entropy_chunk_size: Option<usize>,
+    /// Clamp the indices a program reads at (a gather's, a scatter-add's, a
+    /// linear cross entropy's classes) into range before the kernels read
+    /// them (XLA's gather semantics; `compiler::mps::bounds`): an index out
+    /// of range reads an element at the end of its axis, never past it. Off
+    /// by default: the kernels read at the indices as given, one out of
+    /// range the program's error (undefined, as an out-of-bounds read).
+    pub safe_kernels: bool,
 }
 
 impl CompilerConfig {
@@ -105,12 +119,14 @@ impl Default for CompilerConfig {
             horizontal_fusion: true,
             online_softmax: true,
             flash_attention: true,
+            fused_linear_cross_entropy: true,
             split_k: true,
             deterministic: false,
             neural_engine: false,
             row_cache: 8,
             memory_limit: 0,
             fused_linear_cross_entropy_chunk_size: None,
+            safe_kernels: false,
         }
     }
 }

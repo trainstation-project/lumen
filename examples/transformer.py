@@ -48,6 +48,8 @@ PROFILED_STEPS = 10
 lumen.config.compiler.deterministic = True
 lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
+lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+lumen.config.compiler.fused_linear_cross_entropy = False
 
 
 class _MLP(lumen.autograd.Function):
@@ -200,24 +202,24 @@ class Transformer(lumen.nn.Module):
 
     @lumen.profiler.record_function("transformer")
     def __call__(self, ids, dropout_p=0.0):
-        """The logits of each position's next token, ``[batch * seq,
-        vocab]``, float32 (the matmul's accumulator, not rounded to
-        bfloat16: the loss reads them in float32), from token ids
-        ``[batch, seq]``."""
+        """Each position's final hidden state, ``[batch * seq, dim]``,
+        bfloat16 (its next token's logits the head's, which the loss
+        computes), from token ids ``[batch, seq]``."""
         h = self.embed(ids)
         for layer in self.layers:
             h = layer(h, ids.shape[0], dropout_p)
         with lumen.profiler.record_function("rmsnorm"):
-            h = F.rms_norm(h.float(), DIM, self.norm).bfloat16()
-        return F.matmul(h, self.head.t().bfloat16(), "float32", "float32")
+            return F.rms_norm(h.float(), DIM, self.norm).bfloat16()
 
 
 @lumen.profiler.record_function("loss")
-def cross_entropy(logits, targets):
-    """The mean cross-entropy of ``logits`` ``[n, vocab]`` against
-    ``targets`` (token ids), in float32 (``F.cross_entropy``: one row kernel
-    for the rows' losses)."""
-    return F.mean(F.cross_entropy(logits, targets.reshape(-1)))
+def cross_entropy(h, head, targets):
+    """The mean cross-entropy of the logits ``h @ head.t()`` (``h``
+    ``[n, dim]``, ``head`` ``[vocab, dim]``, in bfloat16, accumulated in
+    float32) against ``targets`` (token ids), in float32
+    (``F.linear_cross_entropy``: a chunk of rows at a time, the loss and its
+    gradients together)."""
+    return F.mean(F.linear_cross_entropy(h, head.bfloat16(), targets.reshape(-1)))
 
 
 def train_step(model, opt, x, y):
@@ -225,7 +227,7 @@ def train_step(model, opt, x, y):
     a backward pass of each, their gradients summed."""
     opt.zero_grad()
     for i in range(ACCUM):
-        loss = cross_entropy(model(x[i], dropout_p=DROPOUT), y[i])
+        loss = cross_entropy(model(x[i], dropout_p=DROPOUT), model.head, y[i])
         loss.backward()
 
     c = 0

@@ -72,6 +72,11 @@ flags! {
     /// default): not what the program computes, its rounding differs; off
     /// runs attention exactly as traced.
     flash_attention, set_flash_attention: bool;
+    /// A cross entropy of a matmul's logits nothing else reads, however
+    /// written, as one linear cross entropy, the logits never stored (on by
+    /// default): not what the program computes, its rounding differs; off
+    /// runs it exactly as traced.
+    fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool;
     /// A dot of few output tiles and a long contraction split along it
     /// across threadgroups (on by default): not what the program computes,
     /// the partials are added in another order; off runs dots exactly as
@@ -98,6 +103,10 @@ flags! {
     /// computed with its losses a chunk at a time (XMA's chunked fused
     /// linear cross entropy); None, the default: not chunked.
     fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
+    /// Clamp the indices a gather, a scatter-add or a linear cross entropy
+    /// reads at into range before its kernel does (off by default: an index
+    /// out of range is the program's error, read as given).
+    safe_kernels, set_safe_kernels: bool;
 }
 
 /// A flag's value as Python writes it.
