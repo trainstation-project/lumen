@@ -118,6 +118,7 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             shape: dims("shape")?,
             offset: get("offset")?.extract()?,
         },
+        "linear_cross_entropy" => LinearCrossEntropy,
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown primitive {other:?}"

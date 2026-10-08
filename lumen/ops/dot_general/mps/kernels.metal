@@ -164,7 +164,9 @@ inline void matmul_wide_impl(device const T *lhs,
 // halves' interleaved: column 2j is column j of the block, 2j + 1 column H + j (each thread loads its column so), so a
 // lane holds both of a pair, and writes out[m, j] = epi(first, second, its flat index), out of H columns. With
 // EXPANDED (a gated pair's backward: its two cotangents from the dot's value, side by side), epi returns a Pair, its
-// first written at out[m, n], its second at out[m, N + n], out of 2N columns.
+// first written at out[m, n], its second at out[m, N + n], out of 2N columns. With TILE, nothing is written: the
+// accumulators (FM x FN 8x8 matrices of SIMD group (sy, sx)) are handed to epi.tile, which reduces them (a linear
+// cross entropy's rows of logits, lce_partials).
 template <typename T> struct Pair {
     T first, second;
 };
@@ -184,7 +186,8 @@ template <typename T,
           typename Epi = Same,
           bool ATOMIC = false,
           bool PAIRED = false,
-          bool EXPANDED = false>
+          bool EXPANDED = false,
+          bool TILE = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -258,7 +261,9 @@ inline void matmul_sg_impl(device const T *lhs,
     // of A in lt (which holds at least 8 x 64 floats), from which its lanes
     // write two elements each.
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
-    if constexpr (PAIRED) {
+    if constexpr (TILE) {
+        epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
+    } else if constexpr (PAIRED) {
         // A lane a pair: of row lane / 4, columns 2 (lane % 4) and the next.
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
@@ -354,6 +359,99 @@ inline void matmul_sg_impl(device const T *lhs,
             lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);                                           \
     }
 
+// linear_cross_entropy's two launches (Cut Cross-Entropy's: the logits h · wᵀ, [B, V], never stored). The first,
+// lce_partials_<dtype>_<class dtype>: a threadgroup a tile of them (BM x BN, accumulated in float: the matmul's large
+// 128 x 64 tile, or as the matmul would its _mid_ 64 x 64 or _small_ 32 x 32 for few rows), each of its rows reduced
+// from the accumulators (LceRows) to its max over the tile's classes and the sum of exp(logit - max): the partials,
+// maxima and sums ([B, tiles], tile group.x, of ceil(V / BN)); and a row's class's logit written to out[0, row] by the
+// lane holding it (its loss's place). Classes past V are not the row's. Its dimensions p are a matmul's: h as the lhs,
+// w (row-major [V, D]) read as the rhs transposed.
+template <typename L, uint BM, uint BN> struct LceRows {
+    device const L *target;
+    device float *out, *maxima, *sums;
+    threadgroup float *halves; // each tile row's (max, sum) over each SIMD group's columns: [BM][SG_COLS][2]
+    ulong B, V, column;        // column: the tile's, of ceil(V / BN)
+    // A lane's rows (one an 8x8 matrix row i) over its 2 FN columns, then the 4 lanes holding the row (lane bits 0
+    // and 3), then the SG_COLS SIMD groups across the tile (thread t < BM: row t), each sum rescaled to the larger
+    // max (none while that is -inf: a SIMD group's columns all past V).
+    template <uint FM, uint FN>
+    void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+              ulong m0,
+              ulong n0,
+              uint sy,
+              uint sx,
+              uint flat,
+              uint lane) {
+        const uint fr = frag_row(lane), fc = frag_col(lane);
+        UNROLL for (uint i = 0; i < FM; ++i) {
+            const uint r = (sy * FM + i) * 8 + fr;
+            const ulong row = m0 + r;
+            const ulong y = row < B ? ulong(clamp(long(target[row]), 0l, long(V) - 1)) : V;
+            float m = -INFINITY;
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                const vec<float, 2> e = frag(c[i][j]);
+                const ulong n = n0 + (sx * FN + j) * 8 + fc;
+                m = select(m, max(m, e[0]), n < V);
+                m = select(m, max(m, e[1]), n + 1 < V);
+                if (y == n || y == n + 1) {
+                    out[row] = e[y - n];
+                }
+            }
+            m = max(m, simd_shuffle_xor(m, 1));
+            m = max(m, simd_shuffle_xor(m, 8));
+            float s = 0;
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                const vec<float, 2> e = frag(c[i][j]);
+                const ulong n = n0 + (sx * FN + j) * 8 + fc;
+                s += select(0.0f, Exp::apply(e[0] - m), n < V) + select(0.0f, Exp::apply(e[1] - m), n + 1 < V);
+            }
+            s += simd_shuffle_xor(s, 1);
+            s += simd_shuffle_xor(s, 8);
+            if ((lane & 9) == 0) {
+                halves[(r * SG_COLS + sx) * 2] = m;
+                halves[(r * SG_COLS + sx) * 2 + 1] = s;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const ulong row = m0 + flat;
+        if (flat < BM && row < B) {
+            float m = -INFINITY;
+            UNROLL for (uint k = 0; k < SG_COLS; ++k) { m = max(m, halves[(flat * SG_COLS + k) * 2]); }
+            float s = 0;
+            UNROLL for (uint k = 0; k < SG_COLS; ++k) {
+                const float mk = halves[(flat * SG_COLS + k) * 2], sk = halves[(flat * SG_COLS + k) * 2 + 1];
+                s += select(sk * Exp::apply(mk - m), 0.0f, mk == -INFINITY);
+            }
+            const ulong tiles = (V + BN - 1) / BN;
+            maxima[row * tiles + column] = m;
+            sums[row * tiles + column] = s;
+        }
+    }
+};
+#define LCE_PARTIALS_TILE(KIND, NAME, T, LNAME, L, BM, BN, BK)                                             \
+    kernel void lce_partials_##KIND##NAME##_##LNAME(device const T *h [[buffer(0)]],                       \
+                                                    device const T *w [[buffer(1)]],                       \
+                                                    device const L *target [[buffer(2)]],                  \
+                                                    device float *out [[buffer(3)]],                       \
+                                                    device float *maxima [[buffer(4)]],                    \
+                                                    device float *sums [[buffer(5)]],                      \
+                                                    constant ulong *p [[buffer(6)]],                       \
+                                                    uint3 group [[threadgroup_position_in_grid]],          \
+                                                    uint3 tid [[thread_position_in_threadgroup]],          \
+                                                    uint sg [[simdgroup_index_in_threadgroup]],            \
+                                                    uint lane [[thread_index_in_simdgroup]]) {             \
+        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[BK * BN];                                            \
+        threadgroup float halves[BM * SG_COLS * 2];                                                        \
+        LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};                   \
+        matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, false, true>( \
+            h, w, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, rows);                              \
+    }
+#define LCE_PARTIALS(NAME, T, LNAME, L)                       \
+    LCE_PARTIALS_TILE(, NAME, T, LNAME, L, 128, 64, SG_BK)    \
+    LCE_PARTIALS_TILE(mid_, NAME, T, LNAME, L, 64, 64, SG_BK) \
+    LCE_PARTIALS_TILE(small_, NAME, T, LNAME, L, 32, 32, SMALL_BK)
+#define LCE_PARTIALS_CLASSES(NAME, T) LCE_PARTIALS(NAME, T, i32, int) LCE_PARTIALS(NAME, T, i64, long)
+
 // The generated kernels include the templates alone.
 #ifndef TEMPLATES_ONLY
 MATMUL(u8, uchar)
@@ -368,4 +466,35 @@ FOR_FLOAT(MATMUL_FLOAT)
 FOR_FLOAT(MATMUL_ATOMIC)
 MATMUL_WIDENED(f16, half)
 MATMUL_WIDENED(bf16, bfloat)
+FOR_FLOAT(LCE_PARTIALS_CLASSES)
+
+// The second, lce_combine: a SIMD group a row (8 a threadgroup), its tiles' (p[1]) (max, sum) pairs combined, each sum
+// rescaled to the larger max (none while that is -inf): out[1, row] = max + log(sum), the row's log-sum-exp, and
+// out[0, row] its loss, the log-sum-exp less the class's logit (the first's, there).
+kernel void lce_combine(device const float *maxima [[buffer(0)]],
+                        device const float *sums [[buffer(1)]],
+                        device float *out [[buffer(2)]],
+                        constant ulong *p [[buffer(3)]],
+                        uint3 group [[threadgroup_position_in_grid]],
+                        uint sg [[simdgroup_index_in_threadgroup]],
+                        uint lane [[thread_index_in_simdgroup]]) {
+    const ulong B = p[0], tiles = p[1], row = ulong(group.x) * 8 + sg;
+    if (row >= B) {
+        return;
+    }
+    float m = -INFINITY, s = 0;
+    for (ulong k = lane; k < tiles; k += 32) {
+        const float mk = maxima[row * tiles + k], sk = sums[row * tiles + k], n = max(m, mk);
+        s = select(s * Exp::apply(m - n), 0.0f, m == -INFINITY) +
+            select(sk * Exp::apply(mk - n), 0.0f, mk == -INFINITY);
+        m = n;
+    }
+    const float big = simd_max(m);
+    const float total = simd_sum(select(s * Exp::apply(m - big), 0.0f, m == -INFINITY));
+    if (lane == 0) {
+        const float lse = big + Log::apply(total);
+        out[B + row] = lse;
+        out[row] = lse - out[row];
+    }
+}
 #endif

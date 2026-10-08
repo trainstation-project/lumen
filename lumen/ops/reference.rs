@@ -711,6 +711,34 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 .map(|i| philox_bits(seed, start.wrapping_add(i)) as i128)
                 .collect())
         }
+        LinearCrossEntropy => {
+            let (Float(h), Float(w), Int(target)) = (args[0], args[1], args[2]) else {
+                unreachable!("float rows and weights, int classes")
+            };
+            let (b, d, v) = (types[0].shape[0], types[0].shape[1], types[1].shape[0]);
+            let (mut loss, mut lse) = (Vec::with_capacity(b), Vec::with_capacity(b));
+            for i in 0..b {
+                // Each logit as the dot computes it (in float32, each
+                // product and sum rounded); their log-sum-exp in float64.
+                let logits: Vec<f64> = (0..v)
+                    .map(|j| {
+                        (0..d).fold(0.0, |acc, k| {
+                            let product = round(h[i * d + k] * w[j * d + k], DType::F32);
+                            round(acc + product, DType::F32)
+                        })
+                    })
+                    .collect();
+                let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let sum: f64 = logits.iter().map(|&x| (x - max).exp()).sum();
+                let class = target[i].clamp(0, v as i128 - 1) as usize;
+                // The loss from the log-sum-exp as rounded, as the kernel's.
+                let l = round(max + sum.ln(), DType::F32);
+                loss.push(round(l - logits[class], DType::F32));
+                lse.push(l);
+            }
+            loss.extend(lse);
+            Float(loss)
+        }
         Fusion { body, .. } => {
             let inputs = args.iter().map(|&v| v.clone()).collect();
             eval_graph(body, inputs).remove(0)

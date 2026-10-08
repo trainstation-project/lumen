@@ -41,17 +41,6 @@ struct NoDropout {
 // registers (indexed by constants).
 #define ATTN_UNROLL _Pragma("clang loop unroll(full)")
 
-// Lane `lane`'s two elements (thread_elements) of an 8x8 simdgroup
-// matrix: at row frag_row(lane), columns frag_col(lane) and the next. The
-// 4 lanes holding a row differ in lane bits 0 and 3.
-inline uint frag_row(uint lane) { return ((lane / 4) & 4) + ((lane / 2) % 4); }
-inline uint frag_col(uint lane) { return ((lane / 4) & 2) * 2 + (lane % 2) * 2; }
-
-// A lane's two elements of simdgroup matrix `m` (MLX reads them so).
-template <typename T> inline thread vec<T, 2> &frag(thread simdgroup_matrix<T, 8, 8> &m) {
-    return reinterpret_cast<thread vec<T, 2> &>(m.thread_elements());
-}
-
 // Queries in tiles: threadgroup (qblock, b) takes ATTN_BQ query rows of
 // batch index b, its SIMD group sg 8 of them, its Q rows, scores S,
 // probabilities P and output O in simdgroup matrices (registers). Keys in

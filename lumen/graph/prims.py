@@ -279,6 +279,14 @@ def random_bits(seed, start, shape, offset):
     return bind("random_bits", seed, start, shape=tuple(shape), offset=offset)
 
 
+def linear_cross_entropy(h, w, target):
+    """Each row of ``h`` ``[B, D]``'s logits ``h · wᵀ`` (``w`` ``[V, D]``,
+    accumulated in float32, never stored) reduced to their log-sum-exp and
+    the logit of its class (``target`` ``[B]``, int32 or int64): float32
+    ``[B, 2]``, ``[lse, logit]`` a row (Cut Cross-Entropy's forward)."""
+    return bind("linear_cross_entropy", h, w, target)
+
+
 def iota(dtype, shape, dimension):
     """The index along ``dimension`` (``lax.broadcasted_iota``)."""
     return bind("iota", dtype=dtype, shape=tuple(shape), dimension=dimension)

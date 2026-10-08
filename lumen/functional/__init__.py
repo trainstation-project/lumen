@@ -15,6 +15,7 @@ reduce in their input's dtype. Convert first with ``.to(dtype)``
 """
 
 from lumen.functional.attention import flash_attention, naive_attention
+from lumen.functional.cross_entropy import cross_entropy, linear_cross_entropy
 from lumen.functional.functions import *
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "softmax",
     "log_softmax",
     "cross_entropy",
+    "linear_cross_entropy",
     "rms_norm",
     # contractions
     "matmul",
