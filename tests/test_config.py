@@ -73,6 +73,7 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
+    assert compiler.fused_linear_cross_entropy_chunk_size is None
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -80,6 +81,10 @@ def test_compiler_flags_defaults(compiler):
     assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
     compiler.reset()
     assert lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 8
+    compiler.fused_linear_cross_entropy_chunk_size = 128
+    assert "fused_linear_cross_entropy_chunk_size=128" in repr(compiler)
+    compiler.fused_linear_cross_entropy_chunk_size = None
+    assert "fused_linear_cross_entropy_chunk_size=None" in repr(compiler)
     with pytest.raises(TypeError):
         compiler.fuse = "yes"
     with pytest.raises(OverflowError):

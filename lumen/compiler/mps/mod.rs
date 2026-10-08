@@ -369,9 +369,10 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
 
 /// The slices of `graph` its dots read in place, as strided views of the
 /// sliced value ([`PlanOptions::views`]; the matmul kernels take any
-/// operand strides): those read by dots alone, each of which reads it in
-/// matmul form at those strides, that are not outputs or of a value that
-/// is such a view itself.
+/// operand strides): those read by dots alone (or contractions with their
+/// epilogues, [`fusion_reads_strided`]), each of which reads it in matmul
+/// form at those strides, that are not outputs or of a value that is such
+/// a view itself.
 fn dot_views(graph: &Graph) -> Vec<Var> {
     let nodes = graph.nodes();
     let mut views = Vec::new();
@@ -386,12 +387,15 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
         let strides = contiguous_strides(&graph.type_of(x).shape);
         let mut readers = nodes.iter().filter(|n| n.inputs.contains(&v)).peekable();
         let read = readers.peek().is_some();
-        let in_place = readers.all(|n| {
-            let Primitive::DotGeneral { .. } = n.primitive else {
-                return false;
-            };
-            let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
-            (0..2).all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
+        let in_place = readers.all(|n| match &n.primitive {
+            Primitive::DotGeneral { .. } => {
+                let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
+                (0..2)
+                    .all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
+            }
+            Primitive::Fusion { body, .. } => (0..n.inputs.len())
+                .all(|k| n.inputs[k] != v || fusion_reads_strided(body, k, &strides)),
+            _ => false,
         });
         if read && in_place {
             views.push(v);

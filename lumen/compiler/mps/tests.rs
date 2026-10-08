@@ -1628,8 +1628,10 @@ fn rms_norm_row_kernels_fuse_their_input() {
 }
 
 /// Dots whose epilogues meet (`relu(x @ w1) * (x @ w2) + (x @ w3)`): each
-/// node joins one dot's epilogue alone, the other dots' values its inputs,
-/// so no fusion computes two dots; as the reference computes it.
+/// node joins one dot's epilogue alone, the last dot's it reads (`relu`
+/// the first's, `*` the second's, `+` the third's), the other dots' values
+/// its inputs, so no fusion computes two dots, nor waits for a later one;
+/// as the reference computes it.
 #[test]
 fn dots_epilogues_do_not_overlap() {
     let mut g = Graph::new();
@@ -1664,7 +1666,7 @@ fn dots_epilogues_do_not_overlap() {
         data(&[16, 12], 4),
     ];
     let names = fused_primitives(&g, &inputs);
-    assert_eq!(names, ["dot_general", "dot_general", "fusion"], "{names:?}");
+    assert_eq!(names, ["fusion", "fusion", "fusion"], "{names:?}");
 }
 
 /// A dot with no free dimension on either side (a dot product per batch

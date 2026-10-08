@@ -94,14 +94,22 @@ flags! {
     /// alive (rematerialization), until it fits or nothing more can be
     /// saved (0, the default: no limit).
     memory_limit, set_memory_limit: usize;
+    /// The rows ``F.linear_cross_entropy`` takes at a time, its gradients
+    /// computed with its losses a chunk at a time (XMA's chunked fused
+    /// linear cross entropy); None, the default: not chunked.
+    fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
 }
 
 /// A flag's value as Python writes it.
-fn py_value(value: &dyn std::fmt::Display) -> String {
-    match value.to_string().as_str() {
+fn py_value(value: &dyn std::fmt::Debug) -> String {
+    match format!("{value:?}").as_str() {
         "true" => "True".into(),
         "false" => "False".into(),
-        v => v.into(),
+        v => v
+            .strip_prefix("Some(")
+            .and_then(|v| v.strip_suffix(')'))
+            .unwrap_or(v)
+            .into(),
     }
 }
 

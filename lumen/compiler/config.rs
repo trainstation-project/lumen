@@ -78,6 +78,12 @@ pub struct CompilerConfig {
     /// backward), until it fits or no recomputation saves memory. 0, the
     /// default: no limit, nothing recomputed.
     pub memory_limit: usize,
+    /// The rows `F.linear_cross_entropy` takes at a time (read as it is
+    /// traced): its logits, losses and gradient a chunk at a time, the
+    /// gradients computed with the losses (XMA's, Liger's chunked fused
+    /// linear cross entropy). None, the default: not chunked (the logits
+    /// never stored where no gradient reads them).
+    pub fused_linear_cross_entropy_chunk_size: Option<usize>,
 }
 
 impl CompilerConfig {
@@ -104,6 +110,7 @@ impl Default for CompilerConfig {
             neural_engine: false,
             row_cache: 8,
             memory_limit: 0,
+            fused_linear_cross_entropy_chunk_size: None,
         }
     }
 }

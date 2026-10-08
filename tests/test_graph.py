@@ -1801,6 +1801,63 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(both)(H, W, T)[0]), want, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("reduce", ["mean", "weighted"])
+@pytest.mark.parametrize("n, d, vocab, chunk", [(64, 32, 16, 16), (1000, 256, 5000, 128)])
+def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
+    """``F.linear_cross_entropy`` trained with
+    ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``: a chunk
+    of rows at a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the
+    last one short), its logits, losses and ``softmax - one_hot``, then its
+    rows' gradients. Every row's gradient the same (a mean's): computed
+    with the losses, scaled in the backward, three matmuls a chunk; each
+    row's own (a weighted sum's): the weight's from the logits recomputed,
+    four. Each chunk's weight gradient added by its own matmul's epilogue,
+    as it is computed (none kept for a later one), so the logits of a chunk
+    at a time in memory: of a large vocabulary, less than the unfused
+    program's. Its losses and gradients the unfused program's but where a
+    bfloat16 rounds apart (the unit gradient rounded, then scaled)."""
+    rng = np.random.default_rng(0)
+    h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
+    w = rng.standard_normal((vocab, d)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    c = (rng.random(n) / n).astype(np.float32)
+
+    def trained(f):
+        def step(h, w, t, c):
+            losses = f(h, w, t)
+            loss = F.mean(losses) if reduce == "mean" else F.sum(losses * c)
+            loss.backward()
+            return loss, h.grad, w.grad
+
+        return step
+
+    def unfused(h, w, t):
+        return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
+
+    try:
+        H, W, T, C = (lumen.from_numpy(a).to("mps") for a in (h, w, t, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    H, W = H.to(dtype="bfloat16"), W.to(dtype="bfloat16")
+    step = trained(F.linear_cross_entropy)
+    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
+    try:
+        plan = lumen.graph.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
+        got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
+    finally:
+        lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+    chunks = -(-n // chunk)
+    dots = sum("dot_general" in s["label"] for s in plan.steps())
+    assert dots == (3 if reduce == "mean" else 4) * chunks, [s["label"] for s in plan.steps()]
+    baseline = lumen.graph.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
+    if vocab > d:
+        assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)
+    want = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(trained(unfused))(H, W, T, C)]
+    np.testing.assert_allclose(got[0], want[0], rtol=1e-6)
+    for g, e in zip(got[1:], want[1:]):
+        np.testing.assert_allclose(g, e, rtol=2.0**-7, atol=2.0**-7 * np.abs(e).max())
+
+
 def test_rms_norm_backward_recomputes_its_normalized_input():
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
