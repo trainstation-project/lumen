@@ -58,7 +58,7 @@ def test_files_and_safe_open(tmp_path):
         assert f.metadata() == {"format": "lumen"}
         assert f.get_tensor("float32").tolist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 0.0]]
         meta = f.get_tensor("bfloat16", device="meta")  # the header only
-        assert (meta.device, meta.shape, meta.dtype) == ("meta", [2, 3], "bfloat16")
+        assert (meta.device, meta.shape, meta.dtype) == ("meta:0", [2, 3], "bfloat16")
         with pytest.raises(KeyError, match="missing"):
             f.get_tensor("missing")
     with pytest.raises(ValueError, match="closed"):
@@ -75,7 +75,7 @@ def test_load_onto_device(tmp_path, device):
     path = tmp_path / "model.safetensors"
     save_file(on_device, path)  # tensors on the device save as their elements
     loaded = load_file(path, device=device)
-    assert all(t.device == device for t in loaded.values())
+    assert all(t.device == f"{device}:0" for t in loaded.values())
     assert_same(tensors(), loaded)
 
 

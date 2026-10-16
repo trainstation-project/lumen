@@ -80,7 +80,7 @@ fn empty_files_and_metadata() {
 #[test]
 fn deserialization() {
     let serialized = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-    let loaded = deserialize(serialized, Device::Cpu).unwrap();
+    let loaded = deserialize(serialized, Device::Cpu(0)).unwrap();
     assert_eq!(loaded.len(), 1);
     let (name, t) = &loaded[0];
     assert_eq!(
@@ -93,11 +93,11 @@ fn deserialization() {
 #[test]
 fn empty_shapes_and_zero_sized_tensors() {
     let serialized = b"8\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[],\"data_offsets\":[0,4]}}\x00\x00\x00\x00";
-    let loaded = deserialize(serialized, Device::Cpu).unwrap();
+    let loaded = deserialize(serialized, Device::Cpu(0)).unwrap();
     assert!(loaded[0].1.shape().is_empty());
     assert_eq!(loaded[0].1.to_vec::<i32>(), [0]);
     let serialized = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,0],\"data_offsets\":[0, 0]}}";
-    let loaded = deserialize(serialized, Device::Cpu).unwrap();
+    let loaded = deserialize(serialized, Device::Cpu(0)).unwrap();
     assert_eq!(loaded[0].1.shape(), [2, 0]);
 }
 
@@ -242,7 +242,7 @@ fn assert_same(expected: &[(String, Tensor)], actual: &[(String, Tensor)]) {
 fn every_dtype_round_trips() {
     let tensors = tensors();
     let bytes = serialize(&named(&tensors), None).unwrap();
-    let loaded = deserialize(&bytes, Device::Cpu).unwrap();
+    let loaded = deserialize(&bytes, Device::Cpu(0)).unwrap();
     assert_same(&tensors, &loaded);
     // Decreasing alignment, so each tensor's offset is a multiple of its
     // element size.
@@ -269,12 +269,14 @@ fn files_round_trip_with_metadata() {
     );
     let file = SafeTensorsFile::open(&path).unwrap();
     assert_eq!(file.metadata().metadata(), Some(&metadata));
-    assert_same(&tensors, &file.tensors(Device::Cpu).unwrap());
+    assert_same(&tensors, &file.tensors(Device::Cpu(0)).unwrap());
     assert_eq!(
-        file.tensor("t_f32", Device::Cpu).unwrap().to_vec::<f32>(),
+        file.tensor("t_f32", Device::Cpu(0))
+            .unwrap()
+            .to_vec::<f32>(),
         [0.0, 3.0, 1.0, 4.0, 2.0, 0.0]
     );
-    assert_err(file.tensor("missing", Device::Cpu), |e| {
+    assert_err(file.tensor("missing", Device::Cpu(0)), |e| {
         matches!(e, Error::TensorNotFound(_))
     });
     std::fs::remove_dir_all(&dir).unwrap();
@@ -285,7 +287,7 @@ fn names_need_escaping() {
     let t = f32s(&[1.0], &[1]);
     let name = "a\"b\\c\n\u{1}é😀";
     let bytes = serialize(&[(name, &t)], None).unwrap();
-    assert_eq!(deserialize(&bytes, Device::Cpu).unwrap()[0].0, name);
+    assert_eq!(deserialize(&bytes, Device::Cpu(0)).unwrap()[0].0, name);
 }
 
 #[test]
@@ -296,7 +298,7 @@ fn saving_needs_contiguous_tensors() {
     });
     // A contiguous view is saved as its elements, not its storage.
     let row = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]).select(0, 1);
-    let loaded = deserialize(&serialize(&[("row", &row)], None).unwrap(), Device::Cpu).unwrap();
+    let loaded = deserialize(&serialize(&[("row", &row)], None).unwrap(), Device::Cpu(0)).unwrap();
     assert_eq!(loaded[0].1.to_vec::<f32>(), [3.0, 4.0, 5.0]);
 }
 
@@ -309,7 +311,7 @@ fn unsupported_dtypes_name_the_tensor() {
     // The header is valid; the tensor cannot be made.
     read_metadata(&file).unwrap();
     assert_err(
-        deserialize(&file, Device::Cpu),
+        deserialize(&file, Device::Cpu(0)),
         |e| matches!(e, Error::UnsupportedDtype(name, dtype) if name == "w" && dtype == "F8_E4M3"),
     );
 }
@@ -320,24 +322,24 @@ fn bools_load_as_zero_or_one() {
     let mut file = (header.len() as u64).to_le_bytes().to_vec();
     file.extend(header.as_bytes());
     file.extend([0u8, 7, 1]);
-    let loaded = deserialize(&file, Device::Cpu).unwrap();
+    let loaded = deserialize(&file, Device::Cpu(0)).unwrap();
     assert_eq!(loaded[0].1.to_vec::<bool>(), [false, true, true]);
 }
 
 #[test]
 fn tensors_load_onto_mps() {
-    if !crate::device::mps::is_available() {
+    if !crate::device::mps::MPS.is_available() {
         return;
     }
     let tensors = tensors();
     let bytes = serialize(&named(&tensors), None).unwrap();
-    let loaded = deserialize(&bytes, Device::Mps).unwrap();
-    assert!(loaded.iter().all(|(_, t)| t.device() == Device::Mps));
+    let loaded = deserialize(&bytes, Device::Mps(0)).unwrap();
+    assert!(loaded.iter().all(|(_, t)| t.device() == Device::Mps(0)));
     assert_same(&tensors, &loaded);
     // And MPS tensors save as their elements.
     let on_mps: Vec<(String, Tensor)> = tensors
         .iter()
-        .map(|(n, t)| (n.clone(), t.to(Device::Mps)))
+        .map(|(n, t)| (n.clone(), t.to(Device::Mps(0))))
         .collect();
     assert_eq!(serialize(&named(&on_mps), None).unwrap(), bytes);
 }
@@ -346,8 +348,8 @@ fn tensors_load_onto_mps() {
 fn meta_tensors_load_from_the_header_and_do_not_save() {
     let tensors = tensors();
     let bytes = serialize(&named(&tensors), None).unwrap();
-    let loaded = deserialize(&bytes, Device::Meta).unwrap();
-    assert!(loaded.iter().all(|(_, t)| t.device() == Device::Meta));
+    let loaded = deserialize(&bytes, Device::Meta(0)).unwrap();
+    assert!(loaded.iter().all(|(_, t)| t.device() == Device::Meta(0)));
     let by_name: BTreeMap<_, _> = loaded.iter().map(|(n, t)| (n.as_str(), t)).collect();
     for (name, t) in &tensors {
         assert_eq!(
@@ -358,7 +360,7 @@ fn meta_tensors_load_from_the_header_and_do_not_save() {
             (t.dtype(), t.shape())
         );
     }
-    let m = Tensor::zeros(&[2], TensorOptions::new().device(Device::Meta));
+    let m = Tensor::zeros(&[2], TensorOptions::new().device(Device::Meta(0)));
     assert_err(
         serialize(&[("m", &m)], None),
         |e| matches!(e, Error::MetaTensor(n) if n == "m"),
