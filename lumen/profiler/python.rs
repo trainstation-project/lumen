@@ -1,16 +1,10 @@
-//! Bindings for the profiler, registered into `lumen._C` by
-//! [`crate::python`]; the Python API (`lumen.profiler.profile`,
-//! `record_function`) is built on them in `lumen/profiler/__init__.py`.
-
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::tensor::python::dtype_name;
-
 use super::{Activity, Event, EventAvg, EventKind, Profile, ProfilerConfig, RecordGuard, SortBy};
 
-/// Nanoseconds as PyTorch's profiler reports times: microseconds.
 fn us(ns: u64) -> f64 {
     ns as f64 / 1000.0
 }
@@ -40,11 +34,9 @@ fn start(activities: Vec<String>, profile_memory: bool, record_shapes: bool) -> 
     .map_err(PyRuntimeError::new_err)
 }
 
-/// Why the CUDA activity is refused without CUPTI, and the way out.
 const CUDA_TIMING_MISSING: &str = "this build of lumen cannot time CUDA: build.rs did not find \
      CUPTI (libcupti). Set CUPTI_LIB_DIR to its directory and rebuild.";
 
-/// Whether this build times CUDA work: CUPTI was linked.
 #[pyfunction]
 #[pyo3(name = "_profiler_cuda_timing")]
 fn cuda_timing() -> bool {
@@ -64,7 +56,6 @@ fn enabled() -> bool {
     super::is_enabled()
 }
 
-/// An open `record_function` range; ends on `exit()` (or when collected).
 #[pyclass(name = "_RecordFunction", module = "lumen._C")]
 struct PyRecordFunction {
     guard: Option<RecordGuard>,
@@ -85,7 +76,6 @@ fn record_function_enter(name: String) -> PyRecordFunction {
     }
 }
 
-/// A finished session (`lumen.profiler.profile` wraps it).
 #[pyclass(name = "_Profile", module = "lumen._C")]
 struct PyProfile {
     inner: Profile,
@@ -174,7 +164,7 @@ impl PyProfile {
                     .ok_or_else(|| PyValueError::new_err(format!("unknown sort_by key {s:?}")))
             })
             .transpose()?;
-        // PyTorch: row_limit < 0 means no limit.
+
         let row_limit = row_limit.and_then(|n| usize::try_from(n).ok());
         Ok(self.inner.table(sort_by, row_limit))
     }

@@ -1,6 +1,3 @@
-"""The part of `lumen._C` that ``lumen/profiler/python.rs`` defines (see
-``lumen/_C.pyi``); ``lumen.profiler`` wraps it."""
-
 from typing import Any, Optional, Sequence
 
 def _profiler_start(activities: Sequence[str], profile_memory: bool, record_shapes: bool) -> None: ...

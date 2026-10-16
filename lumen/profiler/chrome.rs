@@ -1,27 +1,3 @@
-//! Chrome trace export in PyTorch's layout (`torch/profiler/_chrome_trace_export.py`,
-//! Kineto's `ChromeTraceLogger`), viewable in Perfetto or `chrome://tracing`.
-//!
-//! - ops: complete (`"ph":"X"`) events, category `cpu_op`, and ranges from
-//!   `record_function` with category `user_annotation`, on the `CPU
-//!   dispatch` process;
-//! - memory: instant (`"ph":"i"`) `[memory]` events with PyTorch's args
-//!   (`Device Type`, `Device Id`, `Addr`, `Bytes`, `Total Allocated`,
-//!   `Total Reserved`);
-//! - GPU work: complete events with category `gpu_memcpy` / `gpu_memset`
-//!   on a process per device, linked to the issuing op by an `ac2g` flow;
-//! - host kernels (a plan step's run on the host): category `kernel` on the
-//!   `CPU` process, as a device's, a row per thread that ran them, linked to
-//!   its op (the dispatch) by an `ac2g` flow; the last timeline (each
-//!   process's `process_sort_index`: the dispatch, the devices, the CPU);
-//!   a Core ML step's (`coreml …`) on a `Neural Engine` process of its
-//!   own, after the devices';
-//! - each `record_function` range again on the device's (or the `CPU`'s)
-//!   timeline, category
-//!   `gpu_user_annotation` (Kineto's), spanning the GPU work issued inside
-//!   it: from its first kernel's start to its last's end. On a track of its
-//!   own beside the kernels', since kernels may overlap (Metal runs
-//!   independent ones concurrently) and could not nest under it.
-
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -29,59 +5,47 @@ use super::{Event, EventKind};
 use crate::device::Device;
 use crate::graph::TensorType;
 
-/// Stream id GPU events are drawn on (Kineto's default stream is 7).
 const GPU_TID: u64 = 7;
-
-/// Track of the `record_function` ranges on a device's timeline.
 const ANNOTATION_TID: u64 = 8;
 
-/// Process id of the host kernels' timeline (`CPU`): apart from the ops'
-/// (`CPU dispatch`), the real pid's too.
 pub(crate) fn host_pid() -> u64 {
     (1 << 32) + u64::from(std::process::id())
 }
 
-/// Process id of the Neural Engine's timeline (an MPS plan's Core ML steps:
-/// host kernels named `coreml …`), after the devices'.
 fn neural_engine_pid() -> u64 {
     (2 << 32) + u64::from(std::process::id())
 }
 
-/// Process id of `device`'s timeline: the real pid for the CPU, so traces
-/// from several processes stay apart, and a fixed id per device.
 fn pid(device: Device) -> u64 {
     match device {
-        Device::Cpu => std::process::id().into(),
+        Device::Cpu(_) => std::process::id().into(),
         Device::Cuda(i) => i as u64,
-        Device::Mps | Device::Meta => 0,
+        Device::Mps(_) | Device::Meta(_) => 0,
     }
 }
 
-/// PyTorch's `DeviceType` numbering, used in `[memory]` args.
 fn device_type(device: Device) -> (i32, i64) {
     match device {
-        Device::Cpu => (0, -1),
+        Device::Cpu(_) => (0, -1),
         Device::Cuda(i) => (1, i as i64),
-        Device::Mps => (13, 0),
-        Device::Meta => (9, 0),
+        Device::Mps(_) => (13, 0),
+        Device::Meta(_) => (9, 0),
     }
 }
 
 fn process_name(device: Device) -> String {
     match device {
-        Device::Cpu => "CPU".to_owned(),
+        Device::Cpu(_) => "CPU".to_owned(),
         Device::Cuda(i) => format!("CUDA {i}"),
-        Device::Mps => "MPS".to_owned(),
-        Device::Meta => "Meta".to_owned(),
+        Device::Mps(_) => "MPS".to_owned(),
+        Device::Meta(_) => "Meta".to_owned(),
     }
 }
 
-/// `ns` as fractional microseconds, Chrome's time unit.
 fn us(ns: u64) -> String {
     format!("{}.{:03}", ns / 1000, ns % 1000)
 }
 
-/// `s` as a JSON string literal.
 pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -102,8 +66,6 @@ pub(crate) fn json_str(s: &str) -> String {
     out
 }
 
-/// `types`' shapes and dtypes, as the trace's `Input Dims` and `Input type`
-/// (PyTorch's; and `Output ...` for outputs) arguments.
 fn types_json(types: &[TensorType]) -> (String, String) {
     let dims: Vec<String> = types
         .iter()
@@ -119,8 +81,6 @@ fn types_json(types: &[TensorType]) -> (String, String) {
     )
 }
 
-/// `e`'s input, output and accumulation types as trace arguments, each
-/// preceded by a comma (none if it has none).
 fn types_args(e: &Event) -> String {
     let mut args = String::new();
     for (side, types) in [("Input", &e.inputs), ("Output", &e.outputs)] {
@@ -138,7 +98,7 @@ fn types_args(e: &Event) -> String {
 
 pub(crate) fn trace(events: &[Event]) -> String {
     let mut out: Vec<String> = Vec::new();
-    let cpu_pid = pid(Device::Cpu);
+    let cpu_pid = pid(Device::Cpu(0));
     let mut devices: Vec<Device> = Vec::new();
     let mut host_threads: Vec<u64> = Vec::new();
     let host_pid = host_pid();
@@ -251,8 +211,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
             }
         }
     }
-    // Each range's span, per device (the CPU's: its host kernels): the work
-    // whose chain of issuing ops and ranges includes it.
+
     let by_id: HashMap<u64, &Event> = events.iter().map(|e| (e.id, e)).collect();
     let mut spans: HashMap<(u64, Device), (u64, u64)> = HashMap::new();
     let work = |e: &&Event| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel);
@@ -266,18 +225,19 @@ pub(crate) fn trace(events: &[Event]) -> String {
             parent = range.parent;
         }
     }
+
     let mut spans: Vec<_> = spans.into_iter().collect();
     spans.sort_by_key(|&((id, _), (start, _))| (start, id));
     for ((id, device), (start, end)) in spans {
         out.push(format!(
             "{{\"ph\":\"X\",\"cat\":\"gpu_user_annotation\",\"name\":{},\"pid\":{},\"tid\":{ANNOTATION_TID},\"ts\":{},\"dur\":{},\"args\":{{\"External id\":{id}}}}}",
             json_str(&by_id[&id].name),
-            if device == Device::Cpu { host_pid } else { pid(device) },
+            if device == Device::Cpu(0) { host_pid } else { pid(device) },
             us(start),
             us(end - start),
         ));
     }
-    // Name the timelines.
+
     out.push(format!(
         "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{cpu_pid},\"tid\":0,\"args\":{{\"name\":\"CPU dispatch\"}}}}"
     ));

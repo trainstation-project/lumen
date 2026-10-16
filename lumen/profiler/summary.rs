@@ -159,7 +159,7 @@ impl Profile {
                     direct.child_cpu += event.duration_ns()
                 }
                 EventKind::Gpu => direct.self_device += event.duration_ns(),
-                EventKind::Memory if event.device == Device::Cpu => {
+                EventKind::Memory if event.device == Device::Cpu(0) => {
                     direct.self_cpu_mem += event.bytes
                 }
                 EventKind::Memory => direct.self_device_mem += event.bytes,
@@ -167,7 +167,7 @@ impl Profile {
             // Device work and memory also count toward every ancestor.
             let (device, cpu_mem, device_mem) = match event.kind {
                 EventKind::Gpu => (event.duration_ns(), 0, 0),
-                EventKind::Memory if event.device == Device::Cpu => (0, event.bytes, 0),
+                EventKind::Memory if event.device == Device::Cpu(0) => (0, event.bytes, 0),
                 EventKind::Memory => (0, 0, event.bytes),
                 _ => continue,
             };
@@ -232,8 +232,8 @@ impl Profile {
             if matches!(e.kind, EventKind::Gpu | EventKind::Memory) {
                 match e.device {
                     Device::Cuda(_) => cuda = true,
-                    Device::Mps => mps = true,
-                    Device::Cpu | Device::Meta => {}
+                    Device::Mps(_) => mps = true,
+                    Device::Cpu(_) | Device::Meta(_) => {}
                 }
             }
         }
@@ -271,7 +271,7 @@ impl Profile {
             && self
                 .events
                 .iter()
-                .any(|e| e.kind == EventKind::Memory && e.device != Device::Cpu);
+                .any(|e| e.kind == EventKind::Memory && e.device != Device::Cpu(0));
         let dev = self.device_name();
 
         let mut headers: Vec<String> = [
