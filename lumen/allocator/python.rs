@@ -1,26 +1,12 @@
-//! `lumen.config`: bindings for [`crate::allocator::config`] (and, as
-//! `lumen.config.compiler`, [`crate::compiler::config`]), registered into
-//! `lumen._C` by [`crate::python`].
-
 use pyo3::prelude::*;
 
 use crate as core;
 
-// ---------------------------------------------------------------------
-// lumen.config
-// ---------------------------------------------------------------------
-
-/// Process-wide runtime settings, exposed as the single instance
-/// `lumen.config` (PyTorch reads the equivalents from environment
-/// variables).
 #[pyclass(name = "Config", module = "lumen")]
 struct Config;
 
 #[pymethods]
 impl Config {
-    /// How many bytes each device's static allocator reserves (default
-    /// 1 GiB), read when the device first allocates; a device that has
-    /// allocated keeps its allocator.
     #[getter]
     fn static_allocator_bytes(&self) -> usize {
         core::allocator::config::static_allocator_bytes()
@@ -31,8 +17,6 @@ impl Config {
         core::allocator::config::set_static_allocator_bytes(nbytes);
     }
 
-    /// The graph compilers' flags (``lumen.config.compiler.online_softmax``,
-    /// ...), read when a graph is compiled.
     #[getter]
     fn compiler(&self) -> core::compiler::python::PyCompilerConfig {
         core::compiler::python::PyCompilerConfig
