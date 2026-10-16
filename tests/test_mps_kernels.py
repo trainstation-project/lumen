@@ -105,11 +105,11 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
     f = lumen.compile(step)
     x = _mps([0, 1, 2, 3])
     f(x, _mps([1, 1, 1, 1]))
-    lumen.Stream("mps").synchronize()
+    lumen.mps.synchronize()
     y = _mps([1, 1, 1, 1])
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         out = f(x, y)
-        lumen.Stream("mps").synchronize()
+        lumen.mps.synchronize()
     assert lumen.to_numpy(out).tolist() == [1, 7, 13, 19]
     assert lumen.to_numpy(y).tolist() == [1, 7, 13, 19]
     names = [

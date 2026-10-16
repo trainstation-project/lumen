@@ -74,7 +74,7 @@ def test_memory_events_carry_pytorchs_fields():
     memory = [e for e in prof.events() if e["kind"] == "memory"]
     assert [m["bytes"] for m in memory] == [80, -80]
     assert memory[0]["addr"] == memory[1]["addr"]
-    assert all(m["device"] == "cpu" and m["name"] == "[memory]" for m in memory)
+    assert all(m["device"] == "cpu:0" and m["name"] == "[memory]" for m in memory)
 
 
 def test_record_shapes():
@@ -379,7 +379,7 @@ def test_host_waits_are_profiled():
     by_id = {e["id"]: e for e in events}
     (sync,) = [e for e in events if e["name"] == "lumen::synchronize"]
     (wait,) = [e for e in events if e["name"] == "lumen::wait"]
-    assert sync["kind"] == wait["kind"] == "op" and sync["device"] == wait["device"] == "cpu"
+    assert sync["kind"] == wait["kind"] == "op" and sync["device"] == wait["device"] == "cpu:0"
     copy = by_id[wait["parent"]]
     assert copy["name"] == "lumen::copy_d2h" and by_id[copy["parent"]]["name"] == "lumen::get"
 

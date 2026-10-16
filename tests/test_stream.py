@@ -55,7 +55,7 @@ def test_mps_synchronize_waits_for_queued_work():
         pytest.skip(str(e))
     for i in range(100):
         t.fill_(float(i))  # queued, not waited on
-    lumen.Stream("mps").synchronize()
+    lumen.mps.synchronize()
     assert t[0] == 99.0 and t[(1 << 20) - 1] == 99.0
 
 
@@ -108,12 +108,12 @@ def test_mps_inputs_copy_in_without_waiting():
 
     call = _mps_heavy()
     call()
-    lumen.Stream("mps").synchronize()
+    lumen.mps.synchronize()
     start = time.perf_counter()
     for _ in range(4):
         call()
     queued = time.perf_counter() - start
-    lumen.Stream("mps").synchronize()
+    lumen.mps.synchronize()
     ran = time.perf_counter() - start
     assert queued < 0.5 * ran, (queued, ran)
 
@@ -165,7 +165,7 @@ def test_wait_is_an_in_place_op():
 
     call = _mps_heavy()
     call()
-    lumen.Stream("mps").synchronize()
+    lumen.mps.synchronize()
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         result = call()
         assert result.wait_() is result
