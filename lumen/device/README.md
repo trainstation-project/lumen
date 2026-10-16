@@ -21,7 +21,7 @@ profiler modules build on top of.
 | `_C.pyi` | Type stub for what `python.rs` defines (`device`, `DeviceLike`), re-exported by `lumen/_C.pyi`. |
 | `tests.rs` | Unit tests for backend naming, counts, `check()` and `is_available()` consistency. |
 
-## The `DeviceBackend` trait (`mod.rs:8`)
+## The `DeviceBackend` trait (`mod.rs:10`)
 
 ```rust
 pub trait DeviceBackend: Sync {
@@ -52,7 +52,7 @@ Note the convention: `is_available()` answers "does this backend work here?"
 while `check(index)` answers "is this *specific* device usable?" Tests rely
 on the two agreeing for MPS (`tests.rs:20`).
 
-## The `Device` enum (`mod.rs:29`)
+## The `Device` enum (`mod.rs:32`)
 
 ```rust
 pub enum Device { Cpu(usize), Mps(usize), Cuda(usize), Meta(usize) }
@@ -63,10 +63,10 @@ an index even when the backend only ever has one device (`Cpu(0)`, `Meta(0)`),
 which keeps the type uniform and lets generic code call `.index()` without
 matching.
 
-* `backend()` (`mod.rs:38`) — maps a variant to its `&'static dyn DeviceBackend`.
-* `index()` (`mod.rs:47`) — extracts the index from any variant.
-* `check()` (`mod.rs:55`) — `self.backend().check(self.index())`.
-* `Display` (`mod.rs:60`) — formats as `"<name>:<index>"`, e.g. `"cuda:0"`.
+* `backend()` (`mod.rs:40`) — maps a variant to its `&'static dyn DeviceBackend`.
+* `index()` (`mod.rs:49`) — extracts the index from any variant.
+* `check()` (`mod.rs:57`) — `self.backend().check(self.index())`.
+* `Display` (`mod.rs:62`) — formats as `"<name>:<index>"`, e.g. `"cuda:0"`.
   This intentionally lines up with `lumen.device` / `torch.device` strings on
   the Python side.
 
