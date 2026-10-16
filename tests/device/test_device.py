@@ -90,14 +90,19 @@ def test_module_and_name():
 
 
 def test_is_available():
-    """Whether a device can hold tensors in this build: the CPU and meta
-    always, CUDA and MPS where present, none past a type's devices."""
-    assert lumen.device("cpu").is_available() and lumen.device("meta").is_available()
-    assert not lumen.device("cpu:1").is_available()
-    for spec in ["mps", "cuda"]:
+    """Each device type's module (``lumen.cuda``, PyTorch's ``torch.cuda``):
+    available where it can hold tensors in this build."""
+    import lumen.cuda  # importable as modules too
+
+    assert lumen.cpu.device_count() == lumen.meta.device_count() == 1
+    with pytest.raises(ValueError, match="not a cuda device"):
+        lumen.cuda.synchronize("cpu")
+    for module in [lumen.cpu, lumen.meta, lumen.cuda, lumen.mps]:
         try:
-            lumen.zeros([1], device=spec)
+            lumen.zeros([1], device=module.__name__.split(".")[-1])
             placed = True
         except RuntimeError:
             placed = False
-        assert lumen.device(spec).is_available() == placed
+        assert module.is_available() == placed == (module.device_count() > 0)
+        if placed:
+            module.synchronize()

@@ -132,10 +132,6 @@ impl PyDevice {
         self.indexed.then(|| self.device.index())
     }
 
-    fn is_available(&self) -> bool {
-        self.device.check().is_ok()
-    }
-
     fn __str__(&self) -> String {
         match self.indexed {
             true => self.device.to_string(),
@@ -156,6 +152,58 @@ impl PyDevice {
     }
 }
 
+fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py, PyModule>> {
+    use pyo3::types::{PyCFunction, PyDict, PyTuple};
+    let m = PyModule::new(py, kind)?;
+    let backend = core::Device::of_type(kind, 0)
+        .expect("a device type")
+        .backend();
+    m.add_function(PyCFunction::new_closure(
+        py,
+        Some(c"device_count"),
+        None,
+        move |_: &Bound<'_, PyTuple>, _: Option<&Bound<'_, PyDict>>| backend.device_count(),
+    )?)?;
+    m.add_function(PyCFunction::new_closure(
+        py,
+        Some(c"is_available"),
+        None,
+        move |_: &Bound<'_, PyTuple>, _: Option<&Bound<'_, PyDict>>| backend.is_available(),
+    )?)?;
+    m.add_function(PyCFunction::new_closure(
+        py,
+        Some(c"synchronize"),
+        None,
+        move |args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<()> {
+            let given = match kwargs {
+                Some(k) => k.get_item("device")?,
+                None => None,
+            };
+            let given = given.or(args.get_item(0).ok());
+            let device = match given {
+                Some(d) if !d.is_none() => resolve_device(Some(&d))?,
+                _ => core::Device::of_type(kind, 0).expect("a device type"),
+            };
+            if device.backend().name() != kind {
+                return Err(PyValueError::new_err(format!(
+                    "{kind}.synchronize: {device} is not a {kind} device"
+                )));
+            }
+            let stream = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
+            let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
+            args.py().detach(|| stream.synchronize());
+            Ok(())
+        },
+    )?)?;
+    Ok(m)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let modules = m.py().import("sys")?.getattr("modules")?;
+    for kind in ["cpu", "cuda", "meta", "mps"] {
+        let sub = device_module(m.py(), kind)?;
+        modules.set_item(format!("{}.{kind}", crate::LIBRARY_NAME), &sub)?;
+        m.add_submodule(&sub)?;
+    }
     m.add_class::<PyDevice>()
 }

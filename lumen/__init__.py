@@ -1,4 +1,4 @@
-from lumen import autograd, custom_op, functional, graph, nn, ops, profiler, random, safetensors
+from lumen import autograd, cuda, custom_op, functional, graph, mps, nn, ops, profiler, random, safetensors
 from lumen._C import __version__
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
@@ -38,10 +38,12 @@ __all__ = [
     "Tensor",
     "__version__",
     "config",
+    "cuda",
     "custom_op",
     "device",
     "Stream",
     "graph",
+    "mps",
     "nn",
     "ops",
     "profiler",

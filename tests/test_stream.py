@@ -23,10 +23,9 @@ def test_every_device_has_a_stream():
 
 
 def test_the_stream_is_the_only_api():
-    """No per-device modules: a device's stream is how to wait for it, and
-    run Metal kernels of your own (MPS's)."""
+    """``lumen.Stream`` is the stream API (no per-device stream
+    functions)."""
     assert lumen.stream.__all__ == ["Stream"]
-    assert not hasattr(lumen, "mps") and not hasattr(lumen, "cuda")
     # torch.Stream's API: streams equal by device and stream, wait_stream
     # (nothing to wait for on a device's one stream); an external stream
     # (stream_id) is CUDA's alone.

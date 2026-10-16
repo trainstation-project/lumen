@@ -1,7 +1,7 @@
-"""Metal kernels of your own in lumen's MPS stream (``lumen.mps``): compiled
-from source and launched over tensors' memory (``compile``, ``launch``), or
-encoded into the stream's open command buffer (``command_buffer``,
-``buffer``); in a custom op (``lumen.ops.custom_op``), in order with a
+"""Metal kernels of your own in lumen's MPS stream: compiled from source
+and launched over tensors' memory (``lumen.custom_op.MetalKernel``, ``launch``), or
+encoded into the stream's open command buffer (``lumen.Stream("mps")``'s
+``command_buffer``, ``buffer``); in a custom op (``lumen.custom_op``), in order with a
 compiled function's steps, with no wait."""
 
 import ctypes
@@ -11,7 +11,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen.ops import custom_op
+from lumen.custom_op import MetalKernel, custom_op
 from lumen.profiler import ProfilerActivity, profile
 
 pytestmark = pytest.mark.mps
@@ -34,7 +34,7 @@ kernel void axpy(device float *y [[buffer(0)]], uint i [[thread_position_in_grid
 @pytest.fixture(scope="module")
 def kernels():
     try:
-        return lumen.mps.compile(AXPY), lumen.mps.compile(TWO, "iota")
+        return MetalKernel(AXPY), MetalKernel(TWO, "iota")
     except RuntimeError as e:
         pytest.skip(str(e))
 
@@ -51,16 +51,16 @@ def test_launch_runs_a_kernel_in_the_stream(kernels):
     axpy, iota = kernels
     assert (axpy.name, iota.name) == ("axpy", "iota")
     x, y = _mps([0, 1, 2, 3]), _mps([1, 1, 1, 1, 1])
-    lumen.mps.launch(axpy, [x, y.narrow(0, 1, 4)], [np.float32(2.0)], grid=(4,))
+    axpy.launch([x, y.narrow(0, 1, 4)], [np.float32(2.0)], grid=(4,))
     assert lumen.to_numpy(y).tolist() == [1, 1, 3, 5, 7]
     out = _mps(np.zeros(512), np.int32)
-    lumen.mps.launch(iota, [out], threadgroups=(2,))
+    iota.launch([out], threadgroups=(2,))
     assert lumen.to_numpy(out).tolist() == list(range(512))
     # TWO's axpy (zeroing) is another kernel of the name: axpy is still AXPY's.
-    zero = lumen.mps.compile(TWO, "axpy")
-    lumen.mps.launch(axpy, [x, y.narrow(0, 1, 4)], [np.float32(1.0)], grid=(4,))
+    zero = MetalKernel(TWO, "axpy")
+    axpy.launch([x, y.narrow(0, 1, 4)], [np.float32(1.0)], grid=(4,))
     assert lumen.to_numpy(y).tolist() == [1, 1, 4, 7, 10]
-    lumen.mps.launch(zero, [y], grid=(5,))
+    zero.launch([y], grid=(5,))
     assert lumen.to_numpy(y).tolist() == [0] * 5
 
 
@@ -68,21 +68,22 @@ def test_compile_and_launch_errors(kernels):
     axpy, _ = kernels
     x = _mps([0.0])
     with pytest.raises(ValueError, match="several kernels"):
-        lumen.mps.compile(TWO)
+        MetalKernel(TWO)
     with pytest.raises(ValueError, match="no kernel named"):
-        lumen.mps.compile(TWO, "relu")
-    with pytest.raises(RuntimeError, match="compiling"):
-        lumen.mps.compile("kernel void broken(")
-    with pytest.raises(TypeError, match="lumen.mps.compile"):
-        lumen.mps.launch("axpy", [x, x], [np.float32(1)], grid=(1,))
+        MetalKernel(TWO, "relu")
+    with pytest.raises(ValueError, match="compiling"):
+        MetalKernel("kernel void broken(")
     with pytest.raises(TypeError, match="one of grid and threadgroups"):
-        lumen.mps.launch(axpy, [x, x], [np.float32(1)])
+        axpy.launch([x, x], [np.float32(1)])
     with pytest.raises(TypeError, match="one of grid and threadgroups"):
-        lumen.mps.launch(axpy, [x, x], [np.float32(1)], grid=(1,), threadgroups=(1,))
-    with pytest.raises(ValueError, match="must be on MPS"):
-        lumen.mps.launch(axpy, [lumen.zeros([1]), x], [np.float32(1)], grid=(1,))
+        axpy.launch([x, x], [np.float32(1)], grid=(1,), threadgroups=(1,))
+    with pytest.raises(ValueError, match="must be on mps"):
+        axpy.launch([lumen.zeros([1]), x], [np.float32(1)], grid=(1,))
     with pytest.raises(ValueError, match="MTLBuffer"):
-        lumen.mps.buffer(lumen.zeros([1]))
+        lumen.Stream("mps").buffer(lumen.zeros([1]))
+    # Only an MPS stream runs Metal kernels.
+    with pytest.raises(ValueError, match="runs no Metal kernels"):
+        lumen.Stream("cpu").command_buffer()
 
 
 def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
@@ -94,7 +95,7 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
 
     @custom_op("test::mps_axpy", mutates_args=("y",))
     def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
-        lumen.mps.launch(kernel, [x, y], [np.float32(a)], grid=(y.numel,))
+        kernel.launch([x, y], [np.float32(a)], grid=(y.numel,))
 
     def step(x, y):
         x = x * 2.0
@@ -104,11 +105,11 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
     f = lumen.compile(step)
     x = _mps([0, 1, 2, 3])
     f(x, _mps([1, 1, 1, 1]))
-    lumen.mps.synchronize()
+    lumen.Stream("mps").synchronize()
     y = _mps([1, 1, 1, 1])
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
         out = f(x, y)
-        lumen.mps.synchronize()
+        lumen.Stream("mps").synchronize()
     assert lumen.to_numpy(out).tolist() == [1, 7, 13, 19]
     assert lumen.to_numpy(y).tolist() == [1, 7, 13, 19]
     names = [
@@ -140,8 +141,8 @@ def _send(restype, receiver, selector, *args, argtypes=()):
 def fill(out: lumen.Tensor, value: int) -> None:
     """Fill out's bytes with value: a blit encoder of our own on the stream's
     command buffer, over out's MTLBuffer."""
-    buffer, offset = lumen.mps.buffer(out)
-    blit = _send(ctypes.c_void_p, lumen.mps.command_buffer(), "blitCommandEncoder")
+    buffer, offset = lumen.Stream("mps").buffer(out)
+    blit = _send(ctypes.c_void_p, lumen.Stream("mps").command_buffer(), "blitCommandEncoder")
     _send(
         None,
         blit,
@@ -166,4 +167,4 @@ def test_custom_op_encodes_into_the_command_buffer():
 
     out = lumen.compile(step)(_mps([1, 2, 3], np.uint8))
     assert lumen.to_numpy(out).tolist() == [14, 14, 14]
-    assert lumen.mps.command_buffer() != 0
+    assert lumen.Stream("mps").command_buffer() != 0
