@@ -1,10 +1,10 @@
 use std::alloc::{self, Layout};
 use std::collections::BTreeSet;
 use std::ptr::NonNull;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use super::Allocator;
+use super::{Allocator, AllocatorBackend};
 use crate::device::Device;
 
 pub struct CpuAllocator;
@@ -27,6 +27,13 @@ impl CpuAllocator {
     }
 }
 
+impl AllocatorBackend for crate::device::cpu::Cpu {
+    fn allocator(&self, _index: usize) -> Arc<dyn Allocator> {
+        static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+        Arc::clone(CPU.get_or_init(|| Arc::new(CpuAllocator)))
+    }
+}
+
 impl Allocator for CpuAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         // 64-byte alignment to keep SIMD loads happy.
@@ -45,7 +52,7 @@ impl Allocator for CpuAllocator {
             // freed, as in PyTorch.
             let addr = ptr.as_ptr().addr();
             let total = ALLOCATED.fetch_add(nbytes, Ordering::Relaxed) + nbytes;
-            crate::profiler::report_memory(Device::Cpu, addr, nbytes as i64, total, total);
+            crate::profiler::report_memory(Device::Cpu(0), addr, nbytes as i64, total, total);
             PROFILED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -68,7 +75,7 @@ impl Allocator for CpuAllocator {
         {
             PROFILED_COUNT.fetch_sub(1, Ordering::Relaxed);
             let total = ALLOCATED.fetch_sub(nbytes, Ordering::Relaxed) - nbytes;
-            crate::profiler::report_memory(Device::Cpu, addr, -(nbytes as i64), total, total);
+            crate::profiler::report_memory(Device::Cpu(0), addr, -(nbytes as i64), total, total);
         }
         // SAFETY: the caller passes a live block of ours, allocated with
         // this layout.

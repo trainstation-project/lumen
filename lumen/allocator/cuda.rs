@@ -55,7 +55,7 @@ impl CudaBackend {
 impl Allocator for CudaBackend {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         // c10 sets the device context before every allocation.
-        crate::device::cuda::set_device(self.device_index as usize);
+        crate::device::cuda::CUDA.set_device(self.device_index as usize);
         let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
         // cudaMalloc guarantees 256-byte alignment.
@@ -70,7 +70,7 @@ impl Allocator for CudaBackend {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, _nbytes: usize) {
-        crate::device::cuda::set_device(self.device_index as usize);
+        crate::device::cuda::CUDA.set_device(self.device_index as usize);
         unsafe { ffi::cudaFree(ptr.as_ptr().cast()) };
     }
 }
@@ -99,4 +99,13 @@ pub fn get(device_index: usize) -> CudaAllocator {
             )
         })
         .clone()
+}
+
+impl super::AllocatorBackend for crate::device::cuda::Cuda {
+    fn allocator(&self, index: usize) -> std::sync::Arc<dyn super::Allocator> {
+        #[cfg(lumen_cuda_linked)]
+        return std::sync::Arc::new(get(index));
+        #[cfg(not(lumen_cuda_linked))]
+        unreachable!("no CUDA device {index} is available without CUDA")
+    }
 }
