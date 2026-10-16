@@ -3,6 +3,7 @@
 MPS and CUDA runs asynchronously, as in PyTorch. Reading a tensor waits for
 it; ``synchronize`` waits explicitly, e.g. before timing::
 
+    lumen.Stream("mps").synchronize()  # any device's stream
     lumen.mps.synchronize()
     lumen.cuda.synchronize()  # or synchronize(1), synchronize("cuda:1")
 
@@ -10,6 +11,7 @@ it; ``synchronize`` waits explicitly, e.g. before timing::
 ``lumen.stream.cuda``, modeled on ``torch.mps`` and ``torch.cuda``.
 """
 
+from lumen._C import Stream
 from lumen.stream import cuda, mps
 
-__all__ = ["cuda", "mps"]
+__all__ = ["Stream", "cuda", "mps"]

@@ -25,7 +25,7 @@ __all__ = ["Kernel", "buffer", "command_buffer", "compile", "launch", "synchroni
 def synchronize() -> None:
     """Wait for all work on the MPS stream to finish
     (``torch.mps.synchronize()``). Raises ``RuntimeError`` without MPS."""
-    _C._mps_synchronize()
+    _C.Stream("mps").synchronize()
 
 
 class Kernel:

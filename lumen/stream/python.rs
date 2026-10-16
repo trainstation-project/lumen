@@ -4,33 +4,35 @@ use pyo3::prelude::*;
 use crate as core;
 use crate::tensor::python::PyTensor;
 
-#[pyfunction]
-fn _mps_synchronize(py: Python<'_>) -> PyResult<()> {
-    let stream = core::stream::stream_for(core::Device::Mps(0)).map_err(PyRuntimeError::new_err)?;
-    let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
-    py.detach(|| stream.synchronize());
-    Ok(())
+#[pyclass(name = "Stream", module = "lumen", frozen)]
+pub(crate) struct PyStream {
+    device: core::Device,
+    inner: std::sync::Arc<dyn core::stream::Stream>,
 }
 
-#[pyfunction]
-#[pyo3(signature = (device = None))]
-fn _cuda_synchronize(py: Python<'_>, device: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-    let device = match device {
-        None => core::Device::Cuda(0),
-        Some(d) => match d.extract::<usize>() {
-            Ok(index) => core::Device::Cuda(index),
-            Err(_) => crate::device::python::resolve_device(Some(d))?,
-        },
-    };
-    let core::Device::Cuda(_) = device else {
-        return Err(PyValueError::new_err(format!(
-            "Expected a cuda device, but got: {device}"
-        )));
-    };
-    let stream = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
-    let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
-    py.detach(|| stream.synchronize());
-    Ok(())
+#[pymethods]
+impl PyStream {
+    #[new]
+    #[pyo3(signature = (device = None))]
+    fn new(device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let device = crate::device::python::resolve_device(device)?;
+        let inner = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
+        Ok(PyStream { device, inner })
+    }
+
+    #[getter]
+    fn device(&self) -> String {
+        self.device.to_string()
+    }
+
+    fn synchronize(&self, py: Python<'_>) {
+        let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
+        py.detach(|| self.inner.synchronize());
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{}.Stream(device='{}')", crate::LIBRARY_NAME, self.device)
+    }
 }
 
 #[pyfunction]
@@ -209,8 +211,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_mps_launch, m)?)?;
     m.add_function(wrap_pyfunction!(_mps_command_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(_mps_buffer, m)?)?;
-    m.add_function(wrap_pyfunction!(_mps_synchronize, m)?)?;
-    m.add_function(wrap_pyfunction!(_cuda_synchronize, m)?)?;
+    m.add_class::<PyStream>()?;
     m.add_function(wrap_pyfunction!(_cuda_is_available, m)?)?;
     m.add_function(wrap_pyfunction!(_cuda_stream_wait, m)?)
 }

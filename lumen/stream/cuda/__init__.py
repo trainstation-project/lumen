@@ -18,4 +18,7 @@ def synchronize(device: Optional[Union[int, str, _device]] = None) -> None:
     """Wait for all work on a CUDA device to finish
     (``torch.cuda.synchronize(device)``): an index, a CUDA device, or
     ``None`` for device 0. Raises ``RuntimeError`` without that device."""
-    _C._cuda_synchronize(device)
+    device = _device(f"cuda:{device or 0}" if device is None or isinstance(device, int) else device)
+    if device.type != "cuda":
+        raise ValueError(f"Expected a cuda device, but got: {device}")
+    _C.Stream(device).synchronize()
