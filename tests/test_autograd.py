@@ -496,7 +496,7 @@ def test_merged_dots_backward_plan():
     model = _QKV(*(lumen.empty([256, 128], device="meta") for _ in range(3)))
     graph = lumen.make_graph(_qkv_step)(model, lumen.empty([64, 256], device="meta"))
     params = list(range(1, len(graph.inputs())))
-    plan = lumen.graph.Plan(graph, "mps", parameters=params, packable=params)
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
     labels = [s["label"] for s in plan.steps()]
     assert plan.packed == [([1, 2, 3], 1)]
     assert labels.count("3x dot_general") == 2 and "concatenate" not in labels, labels
@@ -550,7 +550,7 @@ def test_projections_backward_writes_cotangents_side_by_side():
             if merge:
                 graph = lumen.make_graph(_projections_step)(model, lumen.from_numpy(x))
                 params = list(range(1, len(graph.inputs())))
-                plan = lumen.graph.Plan(graph, "mps", parameters=params, packable=params)
+                plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
                 labels = [s["label"] for s in plan.steps()]
                 assert plan.packed == [([1, 2, 3], 1)]
                 # The forward and x's gradient: dots of the packed block.

@@ -173,7 +173,7 @@ def test_dropout_backward_recomputes_its_mask(device):
     y, dx = (lumen.to_numpy(t) for t in lumen.compile(step)(x, w))
     np.testing.assert_array_equal(dx, np.where(y != 0, 6.0, 0.0).astype(np.float32))
     if device == "mps":
-        plan = lumen.graph.Plan(lumen.make_graph(step)(x, w), "mps")
+        plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(x, w), "mps")
         labels = [s["label"] for s in plan.steps()]
         assert len(labels) == 1 and labels[0].count("random_bits") == 2, labels
         assert plan.workspace_bytes == 0
@@ -230,7 +230,7 @@ def test_rematerialized_dropout_draws_the_same_mask():
     try:
         for limit in (0, 1):
             lumen.config.compiler.memory_limit = limit
-            plan = lumen.graph.Plan(lumen.make_graph(_dropout_read_early_and_late)(*meta), "mps")
+            plan = lumen.graph_compiler.Plan(lumen.make_graph(_dropout_read_early_and_late)(*meta), "mps")
             draws = sum("random_bits" in s["label"] for s in plan.steps())
             lumen.manual_seed(7)
             out = lumen.to_numpy(lumen.compile(_dropout_read_early_and_late)(a, w))

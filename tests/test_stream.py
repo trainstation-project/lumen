@@ -191,7 +191,7 @@ def test_wait_primitive(device):
 
     graph = lumen.make_graph(f)(lumen.empty([4], device="meta"))
     try:
-        plan = lumen.graph.Plan(graph, device)
+        plan = lumen.graph_compiler.Plan(graph, device)
     except RuntimeError as e:
         pytest.skip(str(e))
     (wait,) = [s for s in plan.steps() if s["primitive"] == "wait"]

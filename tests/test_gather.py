@@ -72,7 +72,7 @@ def test_gather_fuses(index_dtype, axis):
         g = prims.gather(x * 2.0, i, axis) + 1.0
         return g, F.rms_norm(g, g.shape[-1])
 
-    labels = [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(xt, ids), "mps").steps()]
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(xt, ids), "mps").steps()]
     assert "gather" not in labels and any("gather" in label for label in labels), labels
     got = lumen.compile(f)(xt, ids)
     want = lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(IDS.astype(index_dtype)))
@@ -190,5 +190,7 @@ def test_scatter_add_in_place():
     args = [
         lumen.empty(s, dtype=d, device="meta") for s, d in (([4, 6], "float32"), ([3], "int64"), ([3, 6], "float32"))
     ]
-    plan = str(lumen.graph.Plan(lumen.make_graph(lambda x, i, u: prims.scatter_add(x * 2.0, i, u, 0))(*args), "cpu"))
+    plan = str(
+        lumen.graph_compiler.Plan(lumen.make_graph(lambda x, i, u: prims.scatter_add(x * 2.0, i, u, 0))(*args), "cpu")
+    )
     assert "out0:f32[4,6] = scatter_add[axis=0] out0 " in plan, plan
