@@ -1,15 +1,3 @@
-//! The static allocator: one region per device, reserved once from its
-//! backend (one `cudaMalloc`, one `MTLBuffer`), handing out aligned offsets
-//! into it. An allocation is bookkeeping on the host, with no driver call,
-//! which is what compiled execution needs: its buffers are laid out up
-//! front and reused run after run.
-//!
-//! Free bytes are kept as a list of blocks, by offset. An allocation takes
-//! the lowest block that fits (first fit) and splits off the rest; freeing
-//! returns its block and merges it with free neighbours, so memory comes
-//! back whatever order allocations are freed in: a loop that keeps its
-//! inputs alive reuses the same bytes every iteration.
-
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
@@ -17,8 +5,6 @@ use std::sync::{Arc, Mutex};
 use super::Allocator;
 use crate::device::Device;
 
-/// A first-fit allocator over one region of `backend`'s memory. Cheap to
-/// clone: clones share the region.
 pub struct StaticAllocator<B: Allocator> {
     inner: Arc<Inner<B>>,
 }
@@ -59,9 +45,6 @@ struct Region(NonNull<u8>);
 unsafe impl Send for Region {}
 
 impl<B: Allocator> StaticAllocator<B> {
-    /// A static allocator of `capacity` bytes from `backend`, the memory of
-    /// `device`, handing out offsets aligned to `alignment` (a power of
-    /// two). Nothing is reserved until the first allocation.
     pub fn new(backend: B, device: Device, alignment: usize, capacity: usize) -> Self {
         assert!(
             alignment.is_power_of_two(),
@@ -83,13 +66,10 @@ impl<B: Allocator> StaticAllocator<B> {
         }
     }
 
-    /// The region's size in bytes.
     pub fn capacity(&self) -> usize {
         self.inner.capacity
     }
 
-    /// Bytes from the region's start to the end of its highest live
-    /// allocation.
     pub fn used(&self) -> usize {
         self.inner
             .lock()
@@ -98,15 +78,12 @@ impl<B: Allocator> StaticAllocator<B> {
             .map_or(0, |(offset, nbytes)| offset + nbytes)
     }
 
-    /// Bytes of allocations not yet freed.
     pub fn live_bytes(&self) -> usize {
         self.inner.lock().live_bytes
     }
 }
 
 impl<B: Allocator> Inner<B> {
-    /// The block an allocation of `nbytes` takes: rounded up to the
-    /// alignment, so every block starts aligned.
     fn block(&self, nbytes: usize) -> usize {
         nbytes.next_multiple_of(self.alignment)
     }
@@ -120,7 +97,7 @@ impl<B: Allocator> Inner<B> {
     fn free(&self, addr: usize, offset: usize, nbytes: usize) {
         let mut state = self.lock();
         if nbytes == 0 {
-            return; // took no block
+            return;
         }
         state.live.remove(&offset);
         state.live_bytes -= nbytes;
@@ -223,8 +200,6 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
 }
 
 impl<B: Allocator> Drop for Inner<B> {
-    /// Give the region back to the backend, once no allocation of it is
-    /// left: storages keep their allocator, and so it, alive.
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         if let Some(region) = state.region.take() {
