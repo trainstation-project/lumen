@@ -10,14 +10,7 @@ use crate::device::Device;
 pub struct CpuAllocator;
 
 static CPU_ALLOCATOR: CpuAllocator = CpuAllocator;
-
-/// Bytes of blocks allocated while memory profiling was on and not yet
-/// freed, for the profiler's memory events (PyTorch:
-/// `ProfiledCPUMemoryReporter`). Other blocks never touch it.
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-
-/// The addresses of those blocks, whose frees are reported too, and how
-/// many there are (so frees skip the lock while there are none).
 static PROFILED: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 static PROFILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -39,17 +32,13 @@ impl Allocator for CpuAllocator {
         // 64-byte alignment to keep SIMD loads happy.
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
         if nbytes == 0 {
-            // Layout with size 0 is fine; dangling but aligned.
             return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
         }
-        // Uninitialized memory, like C's `malloc`. Reading uninitialized
-        // memory is undefined behaviour in Rust.
+
         let raw = unsafe { alloc::alloc(layout) };
         let ptr = NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+
         if crate::profiler::memory_enabled() {
-            // Profiling memory: report this block now and when it is freed.
-            // Blocks allocated before the session are not reported when
-            // freed, as in PyTorch.
             let addr = ptr.as_ptr().addr();
             let total = ALLOCATED.fetch_add(nbytes, Ordering::Relaxed) + nbytes;
             crate::profiler::report_memory(Device::Cpu(0), addr, nbytes as i64, total, total);
@@ -66,7 +55,9 @@ impl Allocator for CpuAllocator {
         if nbytes == 0 {
             return;
         }
+
         let addr = ptr.as_ptr().addr();
+
         if PROFILED_COUNT.load(Ordering::Relaxed) > 0
             && PROFILED
                 .lock()
@@ -77,6 +68,7 @@ impl Allocator for CpuAllocator {
             let total = ALLOCATED.fetch_sub(nbytes, Ordering::Relaxed) - nbytes;
             crate::profiler::report_memory(Device::Cpu(0), addr, -(nbytes as i64), total, total);
         }
+
         // SAFETY: the caller passes a live block of ours, allocated with
         // this layout.
         unsafe { alloc::dealloc(ptr.as_ptr(), Layout::from_size_align_unchecked(nbytes, 64)) }

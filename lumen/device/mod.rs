@@ -7,7 +7,7 @@ pub(crate) mod python;
 
 use std::fmt;
 
-pub trait DeviceBackend: Sync {
+pub trait DeviceBackend: crate::allocator::AllocatorBackend {
     fn name(&self) -> &'static str;
     fn device_count(&self) -> usize;
     fn is_available(&self) -> bool {

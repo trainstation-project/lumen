@@ -5,6 +5,10 @@ piece of hardware is this tensor on, and can I actually use it?"*.
 
 Everything that needs to talk about a compute device references this module;
 nothing here allocates memory, launches kernels, or knows about tensors.
+Each device type's allocators come from `lumen/allocator/`: `DeviceBackend`
+requires `AllocatorBackend` (`allocator(index)`), which every device type
+implements next to its allocator (`allocator/cpu.rs`, `meta.rs`, `mps/`,
+`cuda.rs`), so `allocator_for(device)` is `device.backend().allocator(..)`.
 It is a pure capability/label layer that the allocator, stream, op and
 profiler modules build on top of.
 
