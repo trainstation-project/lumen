@@ -1,5 +1,5 @@
-use super::*;
-use crate::Tensor;
+use super::mps::*;
+use crate::{Device, Tensor};
 
 #[test]
 fn a_custom_kernel_launches_into_the_mps_stream() {

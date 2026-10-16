@@ -5,11 +5,9 @@ use pyo3::types::PyBytes;
 use crate as core;
 use crate::tensor::python::PyTensor;
 
-/// A Metal kernel of your own (`lumen.custom_op.MetalKernel(source, name)`), for a
-/// custom op to launch into lumen's MPS stream.
 #[pyclass(name = "MetalKernel", module = "lumen", frozen)]
 pub(crate) struct PyMetalKernel {
-    inner: core::custom_op::MetalKernel,
+    inner: core::custom_op::mps::MetalKernel,
 }
 
 #[pymethods]
@@ -18,7 +16,7 @@ impl PyMetalKernel {
     #[pyo3(signature = (source, name = None))]
     fn new(source: &str, name: Option<&str>) -> PyResult<Self> {
         let inner =
-            core::custom_op::MetalKernel::new(source, name).map_err(PyValueError::new_err)?;
+            core::custom_op::mps::MetalKernel::new(source, name).map_err(PyValueError::new_err)?;
         Ok(PyMetalKernel { inner })
     }
 
@@ -35,7 +33,7 @@ impl PyMetalKernel {
         grid: Option<Vec<usize>>,
         threadgroups: Option<Vec<usize>>,
     ) -> PyResult<()> {
-        use core::custom_op::Grid;
+        use core::custom_op::mps::Grid;
         let sizes = |mut s: Vec<usize>| {
             s.resize(3, 1);
             [s[0], s[1], s[2]]
