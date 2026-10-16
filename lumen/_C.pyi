@@ -31,7 +31,6 @@ from lumen.safetensors._C import _safetensors_save_file as _safetensors_save_fil
 from lumen.safetensors._C import _safetensors_serialize as _safetensors_serialize
 from lumen.safetensors._C import safe_open as safe_open
 from lumen.stream._C import Stream as Stream
-from lumen.stream._C import _cuda_is_available as _cuda_is_available
 from lumen.stream._C import _cuda_stream_wait as _cuda_stream_wait
 from lumen.stream._C import _mps_buffer as _mps_buffer
 from lumen.stream._C import _mps_command_buffer as _mps_command_buffer
