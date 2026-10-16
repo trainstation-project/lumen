@@ -12,7 +12,7 @@ from lumen.profiler._C import (
     _RecordFunction,
 )
 from lumen.safetensors._C import _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open
-from lumen.stream._C import Kernel, Stream, _cuda_stream_wait
+from lumen.stream._C import Kernel, Stream
 from lumen.tensor._C import Scalar, Tensor, _from_dlpack, _pack, _to_dlpack, _to_dlpack_versioned
 
 __version__: str
