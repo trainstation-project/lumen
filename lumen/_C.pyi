@@ -1,16 +1,16 @@
 """Type stub for the native `lumen._C` extension module.
 
 Each folder that defines bindings (a ``python.rs``) describes them in its own
-``_C.pyi`` (``lumen/tensor/_C.pyi``, ...), re-exported here; this file has
-what ``lumen/python.rs`` defines. The per-folder stubs are for type checkers
+``_C.pyi`` (``lumen/device/_C.pyi``, ``lumen/tensor/_C.pyi``, ...),
+re-exported here; this file has what ``lumen/python.rs`` defines. The per-folder stubs are for type checkers
 only: at runtime every name lives in ``lumen._C``.
 """
-
-from typing import Literal, Optional, Union, final
 
 from lumen.allocator._C import CompilerConfig as CompilerConfig
 from lumen.allocator._C import Config as Config
 from lumen.allocator._C import config as config
+from lumen.device._C import DeviceLike as DeviceLike
+from lumen.device._C import device as device
 from lumen.graph._C import FUSION_SEPARATOR as FUSION_SEPARATOR
 from lumen.graph._C import Graph as Graph
 from lumen.graph._C import Plan as Plan
@@ -47,18 +47,3 @@ from lumen.tensor._C import _to_dlpack_versioned as _to_dlpack_versioned
 
 __version__: str
 LIBRARY_NAME: str
-
-# A device argument (stub-only: there is no such name at runtime).
-DeviceLike = Union[str, "device"]
-
-@final
-class device:
-    """A device type plus an optional index, modeled on ``torch.device``."""
-
-    def __new__(cls, device: Union[str, "device"], index: Optional[int] = None) -> "device": ...
-    @property
-    def type(self) -> Literal["cpu", "mps", "cuda", "meta"]: ...
-    @property
-    def index(self) -> Optional[int]: ...
-    def __eq__(self, other: object, /) -> bool: ...
-    def __hash__(self) -> int: ...
