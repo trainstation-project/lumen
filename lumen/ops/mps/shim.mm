@@ -102,7 +102,7 @@ int lumen_mps_compile_kernels(const char *source) {
     return 0;
 }
 
-// Compile Metal `source` (a user's: lumen.mps.compile) and add a pipeline
+// Compile Metal `source` (a user's: lumen.ops.Kernel) and add a pipeline
 // for its kernel `name` (or its only kernel, if `name` is null) under `key`,
 // for lumen_mps_launch_kernel. Writes the kernel's name into `chosen` (or,
 // if there is no such kernel, or several and no `name`, the source's kernel

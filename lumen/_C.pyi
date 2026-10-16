@@ -1,7 +1,7 @@
 from lumen.allocator._C import CompilerConfig, Config, config
 from lumen.device._C import DeviceLike, device
 from lumen.graph._C import FUSION_SEPARATOR, Graph, Plan, _register_custom_op
-from lumen.ops._C import _dummy_op, _register_kernel, _registered_ops, _unregister_kernel
+from lumen.ops._C import Kernel, _dummy_op, _register_kernel, _registered_ops, _unregister_kernel
 from lumen.profiler._C import (
     _Profile,
     _profiler_cuda_timing,
@@ -12,7 +12,7 @@ from lumen.profiler._C import (
     _RecordFunction,
 )
 from lumen.safetensors._C import _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open
-from lumen.stream._C import Kernel, Stream
+from lumen.stream._C import Stream
 from lumen.tensor._C import Scalar, Tensor, _from_dlpack, _pack, _to_dlpack, _to_dlpack_versioned
 
 __version__: str

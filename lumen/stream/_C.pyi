@@ -1,7 +1,6 @@
-"""The part of `lumen._C` that ``lumen/stream/python.rs`` defines (see
-``lumen/_C.pyi``)."""
+from __future__ import annotations
 
-from typing import Any, Optional, Sequence, Union, final
+from typing import Optional, Union, final
 
 from lumen.device import device
 from lumen.tensor._C import Tensor
@@ -20,22 +19,5 @@ class Stream:
     def wait_stream(self, other: "Stream") -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
-    def compile(self, source: str, name: Optional[str] = None) -> "Kernel": ...
-    def launch(
-        self,
-        kernel: "Kernel",
-        tensors: Sequence[Tensor],
-        args: Sequence[Any] = (),
-        *,
-        grid: Optional[Sequence[int]] = None,
-        threadgroups: Optional[Sequence[int]] = None,
-    ) -> None: ...
     def command_buffer(self) -> int: ...
     def buffer(self, tensor: Tensor) -> tuple[int, int]: ...
-
-@final
-class Kernel:
-    """A Metal kernel of your own, compiled by an MPS stream."""
-
-    @property
-    def name(self) -> str: ...
