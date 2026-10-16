@@ -125,6 +125,10 @@ impl PyDevice {
         self.indexed.then(|| self.device.index())
     }
 
+    fn is_available(&self) -> bool {
+        self.device.check().is_ok()
+    }
+
     fn __str__(&self) -> String {
         match self.indexed {
             true => self.device.to_string(),

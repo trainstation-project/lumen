@@ -118,7 +118,7 @@ DLPack) waits for the stream first.""",
 def is_available() -> bool:
     """Whether a CUDA device can hold tensors in this build
     (``torch.cuda.is_available()``)."""
-    return _C._cuda_is_available()
+    return _C.device("cuda").is_available()
 
 
 cuda = _module("cuda", """``lumen.cuda``, modeled on ``torch.cuda``.""", [is_available])

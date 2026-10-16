@@ -36,11 +36,6 @@ impl PyStream {
 }
 
 #[pyfunction]
-fn _cuda_is_available() -> bool {
-    core::device::cuda::CUDA.is_available()
-}
-
-#[pyfunction]
 fn _cuda_stream_wait(index: usize, stream: usize) -> PyResult<()> {
     core::stream::stream_for(core::Device::Cuda(index)).map_err(PyRuntimeError::new_err)?;
     #[cfg(lumen_cuda_linked)]
@@ -212,6 +207,5 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_mps_command_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(_mps_buffer, m)?)?;
     m.add_class::<PyStream>()?;
-    m.add_function(wrap_pyfunction!(_cuda_is_available, m)?)?;
     m.add_function(wrap_pyfunction!(_cuda_stream_wait, m)?)
 }
