@@ -2,8 +2,9 @@ import numpy as np
 
 import lumen
 import lumen.functional as F
+from lumen.custom_op import Kernel, custom_op
 
-kernel = lumen.mps.compile(
+kernel = Kernel(
     """
     #include <metal_stdlib>
     using namespace metal;
@@ -16,11 +17,11 @@ kernel = lumen.mps.compile(
 )
 
 
-@lumen.ops.custom_op("example::bias_relu_", mutates_args=("y",))
+@custom_op("example::bias_relu_", mutates_args=("y",))
 def bias_relu_(y: lumen.Tensor, b: lumen.Tensor) -> None:
     """y = relu(y + b), b broadcast over y's rows, in place."""
-    assert y.device == "mps"
-    lumen.mps.launch(kernel, [y, b], [np.uint32(b.numel)], grid=(y.numel,))
+    assert y.device == "mps:0"
+    kernel.launch([y, b], [np.uint32(b.numel)], grid=(y.numel,))
 
 
 @lumen.compile
