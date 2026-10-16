@@ -14,9 +14,8 @@ result).
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | The `Allocator` trait, `DataPtr`, `allocator_for`. |
+| `mod.rs` | The `Allocator` trait, `DataPtr`, `allocator_for`, and `StaticAllocator` — the first-fit allocator over one region of a device's memory — with its per-device registry (`shared`). The heart of the folder. |
 | `config.rs` | Process-wide tunables (currently just the static allocator size), set from Python via `lumen.config`. |
-| `static_allocator.rs` | `StaticAllocator` — the first-fit allocator over one region of a device's memory, and the per-device registry (`shared`). The heart of the folder. |
 | `cpu.rs` | `CpuAllocator` — 64-byte-aligned `alloc`/`dealloc`, plus CPU memory profiling. |
 | `meta.rs` | `MetaAllocator` — hands out a dangling pointer; no storage exists. |
 | `cuda.rs` | `malloc` / `free`: raw `cudaMalloc` / `cudaFree` (FFI), for the static allocator's region. |
@@ -48,7 +47,7 @@ producer's deleter.
 `allocator_for(device)` is the public entry point. It calls `device.check()`
 first, then picks the device's one shared allocator with a `match`: the CPU's
 and the meta device's, else that device's `StaticAllocator`
-(`static_allocator::shared`, one per device, created on first use). Checking
+(`shared`, one per device, created on first use). Checking
 first means so an unavailable device produces the device module's error string
 (`"CUDA device 0 is not available (0 device(s) found)"`) rather than a panic
 from inside an allocator. `Storage::new` turns that `Err` into a panic;
@@ -117,7 +116,7 @@ guarantees.
 **Laziness and teardown.** `StaticAllocator::new(device, capacity)` reserves
 nothing; the first `try_allocate` reserves the region from the device's own
 memory (`malloc(device, capacity)`: the Metal shim, `cudaMalloc`, or the
-CPU's allocator in tests — a `match` on the device, in this file). Dropping
+CPU's allocator in tests — a `match` on the device, in `mod.rs`). Dropping
 it gives the region back with one `free`. The registry holds one `Arc` per
 device and every `DataPtr` keeps its allocator alive, so the region outlives
 all of its allocations.

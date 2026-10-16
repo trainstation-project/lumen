@@ -54,7 +54,7 @@ mod static_allocator {
     use std::ptr::NonNull;
     use std::sync::Arc;
 
-    use crate::allocator::static_allocator::StaticAllocator;
+    use crate::allocator::StaticAllocator;
     use crate::{Allocator, DataPtr, Device};
 
     fn allocator(capacity: usize) -> StaticAllocator {
@@ -251,7 +251,7 @@ mod cuda {
     #[cfg(lumen_cuda_linked)]
     mod device {
         use crate::allocator::allocator_for;
-        use crate::allocator::static_allocator::{ALIGNMENT, StaticAllocator};
+        use crate::allocator::{ALIGNMENT, StaticAllocator};
         use crate::{Allocator, Device, Storage};
 
         macro_rules! require_cuda {
@@ -303,7 +303,7 @@ mod cuda {
 #[cfg(lumen_mps_linked)]
 mod mps {
     use crate::allocator::allocator_for;
-    use crate::allocator::static_allocator::{ALIGNMENT, StaticAllocator};
+    use crate::allocator::{ALIGNMENT, StaticAllocator};
     use crate::{Allocator, Device, Storage};
 
     macro_rules! require_mps {
