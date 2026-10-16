@@ -10,6 +10,23 @@ def test_stream_modules_mirror_torch():
     assert lumen.cuda is lumen.stream.cuda
 
 
+def test_every_device_has_a_stream():
+    """``lumen.Stream(device)``: the device's stream, which every device type
+    has (the CPU's and the meta device's have no work to wait for); a
+    device that is not present has none."""
+    for spec in ["cpu", "meta:0", "mps"]:
+        try:
+            stream = lumen.Stream(spec)
+        except RuntimeError:
+            continue
+        assert stream.device == f"{lumen.device(spec).type}:0"
+        assert repr(stream) == f"lumen.Stream(device='{stream.device}')"
+        stream.synchronize()
+    assert lumen.Stream().device == "cpu:0"
+    with pytest.raises(RuntimeError, match="not available"):
+        lumen.Stream("cpu:1")
+
+
 def test_cuda_synchronize_rejects_other_devices():
     with pytest.raises(ValueError, match="cuda device"):
         lumen.cuda.synchronize("cpu")

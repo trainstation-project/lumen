@@ -30,7 +30,6 @@ pub mod safetensors;
 pub mod stream;
 pub mod tensor;
 
-pub use allocator::static_allocator::StaticAllocator;
 pub use allocator::{Allocator, CpuAllocator, DataPtr};
 pub use device::Device;
 pub use tensor::Tensor;
