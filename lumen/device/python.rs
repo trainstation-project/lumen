@@ -154,7 +154,7 @@ impl PyDevice {
 
 fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py, PyModule>> {
     use pyo3::types::{PyCFunction, PyDict, PyTuple};
-    let m = PyModule::new(py, kind)?;
+    let m = PyModule::new(py, &format!("{}.{kind}", crate::LIBRARY_NAME))?;
     let backend = core::Device::of_type(kind, 0)
         .expect("a device type")
         .backend();
@@ -202,8 +202,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
     for kind in ["cpu", "cuda", "meta", "mps"] {
         let sub = device_module(m.py(), kind)?;
-        modules.set_item(format!("{}.{kind}", crate::LIBRARY_NAME), &sub)?;
-        m.add_submodule(&sub)?;
+        modules.set_item(sub.name()?, &sub)?;
+        m.add(kind, sub)?;
     }
     m.add_class::<PyDevice>()
 }
