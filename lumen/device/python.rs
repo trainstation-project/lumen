@@ -30,7 +30,7 @@ pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core
     skip_from_py_object
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PyDevice {
+pub(crate) struct PyDevice {
     device: core::Device,
     indexed: bool,
 }
@@ -72,6 +72,13 @@ impl PyDevice {
             }
         };
         Self::checked(kind, index)
+    }
+
+    pub(crate) fn from_core(device: core::Device) -> Self {
+        PyDevice {
+            device,
+            indexed: true,
+        }
     }
 
     fn to_core(&self) -> core::Device {
@@ -123,6 +130,10 @@ impl PyDevice {
     #[getter]
     fn index(&self) -> Option<usize> {
         self.indexed.then(|| self.device.index())
+    }
+
+    fn is_available(&self) -> bool {
+        self.device.check().is_ok()
     }
 
     fn __str__(&self) -> String {

@@ -47,8 +47,7 @@ def device(request):
 
 
 def test_ops_is_exported_from_the_package():
-    assert set(lumen.ops.__all__) == {"CustomOp", "custom_op", "register", "registered_ops", "signature", "unregister"}
-    assert callable(lumen.ops.custom_op)
+    assert set(lumen.ops.__all__) == {"register", "registered_ops", "signature", "unregister"}
     assert callable(lumen.ops.register)
     assert callable(lumen.ops.registered_ops)
     assert callable(lumen.ops.signature)
@@ -213,7 +212,7 @@ def test_the_launcher_can_write_through_the_address(device):
     try:
         t = lumen.zeros([4], device=device)
         # The host write must follow the zeros' fill, queued on the MPS stream.
-        lumen.mps.synchronize()
+        lumen.Stream("mps").synchronize()
         _C._dummy_op(t, 3.0)
         assert t.tolist() == [3.0, 3.0, 3.0, 3.0]
     finally:

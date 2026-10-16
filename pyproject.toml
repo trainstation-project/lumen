@@ -38,7 +38,7 @@ profile = "black"
 line_length = 119
 
 [tool.pytest.ini_options]
-# Device test cases; see tests/test_tensor_devices.py and the Makefile.
+# Device test cases; see tests/device/test_tensor_devices.py and the Makefile.
 markers = [
     "mps: needs an MPS (Metal) device",
     "cuda: needs a CUDA device and a wheel built with the `cuda` feature",

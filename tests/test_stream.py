@@ -1,26 +1,49 @@
-"""Device streams: lumen.mps.synchronize and lumen.cuda.synchronize."""
+"""Device streams: ``lumen.Stream``, every device's, and its ``synchronize``."""
 
 import pytest
 
 import lumen
 
 
-def test_stream_modules_mirror_torch():
-    assert lumen.mps is lumen.stream.mps
-    assert lumen.cuda is lumen.stream.cuda
+def test_every_device_has_a_stream():
+    """``lumen.Stream(device)``: the device's stream, which every device type
+    has (the CPU's and the meta device's have no work to wait for); a
+    device that is not present has none."""
+    for spec in ["cpu", "meta:0", "mps"]:
+        try:
+            stream = lumen.Stream(spec)
+        except RuntimeError:
+            continue
+        assert stream.device == lumen.device(lumen.device(spec).type, 0) and stream.stream_id == 0
+        assert repr(stream) == f"lumen.Stream(device='{stream.device}')"
+        stream.synchronize()
+    assert lumen.Stream().device == lumen.device("cpu", 0)
+    with pytest.raises(RuntimeError, match="not available"):
+        lumen.Stream("cpu:1")
 
 
-def test_cuda_synchronize_rejects_other_devices():
-    with pytest.raises(ValueError, match="cuda device"):
-        lumen.cuda.synchronize("cpu")
+def test_the_stream_is_the_only_api():
+    """No per-device modules: a device's stream is how to wait for it, and
+    run Metal kernels of your own (MPS's)."""
+    assert lumen.stream.__all__ == ["Stream"]
+    assert not hasattr(lumen, "mps") and not hasattr(lumen, "cuda")
+    # torch.Stream's API: streams equal by device and stream, wait_stream
+    # (nothing to wait for on a device's one stream); an external stream
+    # (stream_id) is CUDA's alone.
+    cpu = lumen.Stream("cpu")
+    assert cpu == lumen.Stream("cpu:0") and hash(cpu) == hash(lumen.Stream()) and cpu != lumen.Stream("meta")
+    cpu.wait_stream(lumen.Stream("cpu"))
+    cpu.wait_stream(lumen.Stream("meta"))
+    with pytest.raises(ValueError, match="an external stream is CUDA's"):
+        lumen.Stream("cpu", stream_id=1)
 
 
-def test_cuda_synchronize_without_the_device_raises():
+def test_a_stream_of_an_absent_device_raises():
     try:
         lumen.zeros([1], device="cuda:7")
     except RuntimeError:
-        with pytest.raises(RuntimeError):
-            lumen.cuda.synchronize(7)
+        with pytest.raises(RuntimeError, match="not available"):
+            lumen.Stream("cuda:7")
     else:
         pytest.skip("cuda:7 exists")
 
@@ -33,19 +56,19 @@ def test_mps_synchronize_waits_for_queued_work():
         pytest.skip(str(e))
     for i in range(100):
         t.fill_(float(i))  # queued, not waited on
-    lumen.mps.synchronize()
+    lumen.Stream("mps").synchronize()
     assert t[0] == 99.0 and t[(1 << 20) - 1] == 99.0
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("device", [None, 0, "cuda", "cuda:0", lumen.device("cuda", 0)])
-def test_cuda_synchronize_forms(device):
+@pytest.mark.parametrize("device", ["cuda", "cuda:0", lumen.device("cuda", 0)])
+def test_cuda_stream_forms(device):
     try:
         t = lumen.zeros([1 << 20], device="cuda")
     except RuntimeError as e:
         pytest.skip(str(e))
     t.fill_(3.0)
-    lumen.cuda.synchronize(device)
+    lumen.Stream(device).synchronize()
     assert t[0] == 3.0
 
 
@@ -86,12 +109,12 @@ def test_mps_inputs_copy_in_without_waiting():
 
     call = _mps_heavy()
     call()
-    lumen.mps.synchronize()
+    lumen.Stream("mps").synchronize()
     start = time.perf_counter()
     for _ in range(4):
         call()
     queued = time.perf_counter() - start
-    lumen.mps.synchronize()
+    lumen.Stream("mps").synchronize()
     ran = time.perf_counter() - start
     assert queued < 0.5 * ran, (queued, ran)
 
@@ -143,7 +166,7 @@ def test_wait_is_an_in_place_op():
 
     call = _mps_heavy()
     call()
-    lumen.mps.synchronize()
+    lumen.Stream("mps").synchronize()
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         result = call()
         assert result.wait_() is result

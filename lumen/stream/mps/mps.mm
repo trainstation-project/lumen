@@ -9,8 +9,6 @@
 #include "mps.h"
 
 extern "C" {
-// The stream's command queue (unretained; it lives for the process), or
-// null without a Metal device.
 void *lumen_mps_stream_queue(void) {
     static id<MTLCommandQueue> queue = nil;
     static dispatch_once_t once;
@@ -21,40 +19,32 @@ void *lumen_mps_stream_queue(void) {
 }
 }
 
-// Committed at this many ops, so the GPU starts on them and their tensors
-// are released as they finish.
 static constexpr size_t kOpsPerCommit = 32;
 
 struct Op {
     lumen_mps_completion done;
     void *context;
-    long sample; // index of its start sample, or -1 if not timed
+    long sample;
 };
 
-// The open command buffer, guarded by lock.
 static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLCommandBuffer> commands = nil;
 static id<MTLComputeCommandEncoder> encoder = nil;
 static bool encoder_timed = false;
-static id<MTLCounterSampleBuffer> samples = nil; // timed ops' start/end
+static id<MTLCounterSampleBuffer> samples = nil;
 static std::vector<Op> ops;
-static uint64_t encoded_total = 0; // ops ever encoded
+static uint64_t encoded_total = 0;
 
 static void end_encoder(void) {
     [encoder endEncoding];
     encoder = nil;
 }
 
-// Metal allows 32 counter sample buffers alive at once: command buffers in
-// flight share a pool of these, each returned when its command buffer
-// completes, a new one waiting for one to return when all are in flight (a
-// host running far ahead of the GPU while profiling). Guarded by pool_lock.
 static constexpr long kSampleBuffers = 24;
 static os_unfair_lock pool_lock = OS_UNFAIR_LOCK_INIT;
 static NSMutableArray<id<MTLCounterSampleBuffer>> *free_samples = nil;
 static dispatch_semaphore_t sample_slots = nil;
 
-// A new sample buffer for kOpsPerCommit timed ops' GPU timestamps, or nil.
 static id<MTLCounterSampleBuffer> create_samples(id<MTLDevice> device) {
     if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
         return nil;
@@ -71,7 +61,6 @@ static id<MTLCounterSampleBuffer> create_samples(id<MTLDevice> device) {
     return nil;
 }
 
-// A sample buffer from the pool (waiting while all are in flight), or nil.
 static id<MTLCounterSampleBuffer> new_samples(id<MTLDevice> device) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -94,7 +83,6 @@ static id<MTLCounterSampleBuffer> new_samples(id<MTLDevice> device) {
     return samples;
 }
 
-// Return a sample buffer new_samples gave, its timestamps read.
 static void return_samples(id<MTLCounterSampleBuffer> samples) {
     os_unfair_lock_lock(&pool_lock);
     [free_samples addObject:samples];
@@ -102,7 +90,6 @@ static void return_samples(id<MTLCounterSampleBuffer> samples) {
     dispatch_semaphore_signal(sample_slots);
 }
 
-// Commit the open command buffer; its handler calls every op's done.
 static void commit(void) {
     if (commands == nil) {
         return;
@@ -113,8 +100,6 @@ static void commit(void) {
     id<MTLCounterSampleBuffer> timestamps = samples;
     std::vector<Op> committed = std::move(ops);
     ops.clear();
-    // One reading of the CPU (mach_absolute_time ns) and GPU clocks, to map
-    // the samples to host time.
     MTLTimestamp cpu = 0, gpu = 0;
     if (timestamps != nil) {
         [commands.device sampleTimestamps:&cpu gpuTimestamp:&gpu];
@@ -165,7 +150,6 @@ id<MTLComputeCommandEncoder> lumen_mps_stream_encoder(bool timed) {
     }
     if (encoder == nil) {
         if (timed) {
-            // Its own encoder, sampled at its start and end.
             MTLComputePassDescriptor *pass = [MTLComputePassDescriptor computePassDescriptor];
             pass.sampleBufferAttachments[0].sampleBuffer = samples;
             pass.sampleBufferAttachments[0].startOfEncoderSampleIndex = 2 * ops.size();
@@ -183,7 +167,7 @@ void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
     ops.push_back({done, context, encoder_timed ? (long)(2 * ops.size()) : -1});
     ++encoded_total;
     if (encoder_timed) {
-        end_encoder(); // so its end is sampled now
+        end_encoder();
     }
     if (ops.size() >= kOpsPerCommit) {
         commit();
@@ -192,8 +176,6 @@ void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
 }
 
 extern "C" {
-// Commit the ops encoded so far, returning how many ops have ever been
-// encoded (stream::mps::synchronize waits until that many have finished).
 uint64_t lumen_mps_stream_flush(void) {
     os_unfair_lock_lock(&lock);
     commit();
@@ -202,7 +184,6 @@ uint64_t lumen_mps_stream_flush(void) {
     return total;
 }
 
-// How many ops have ever been encoded (committed or not).
 uint64_t lumen_mps_stream_encoded_total(void) {
     os_unfair_lock_lock(&lock);
     uint64_t total = encoded_total;
@@ -210,10 +191,6 @@ uint64_t lumen_mps_stream_encoded_total(void) {
     return total;
 }
 
-// The open command buffer (made if none is), its compute encoder ended so
-// the caller may encode its own work into it, after the ops encoded so far
-// and before those encoded after: valid until the stream commits it (the
-// next flush, or op that fills it). Null without a Metal device.
 void *lumen_mps_stream_command_buffer(void) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
     if (queue == nil) {
@@ -231,9 +208,6 @@ void *lumen_mps_stream_command_buffer(void) {
     return buffer;
 }
 
-// Count work encoded into the open command buffer outside lumen's ops (a
-// custom op's, through lumen_mps_stream_command_buffer) as an op: done is
-// called when the buffer completes, which synchronize then waits for.
 void lumen_mps_stream_mark(lumen_mps_completion done, void *context) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
     os_unfair_lock_lock(&lock);
@@ -248,8 +222,6 @@ void lumen_mps_stream_mark(lumen_mps_completion done, void *context) {
     os_unfair_lock_unlock(&lock);
 }
 
-// The host clock Metal's GPUStartTime/GPUEndTime use (mach_absolute_time, as
-// seconds), so GPU times can be mapped onto the profiler's clock.
 double lumen_mps_stream_host_time(void) {
     static mach_timebase_info_data_t timebase;
     static dispatch_once_t once;

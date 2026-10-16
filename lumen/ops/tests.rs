@@ -27,21 +27,25 @@ fn cpu_only(key: DispatchKey) -> Option<Kernel> {
 
 #[test]
 fn dispatch_keys_follow_the_device() {
-    assert_eq!(DispatchKey::of(Device::Cpu), DispatchKey::Cpu);
+    assert_eq!(DispatchKey::of(Device::Cpu(0)), DispatchKey::Cpu);
     assert_eq!(DispatchKey::of(Device::Cuda(3)), DispatchKey::Cuda);
-    assert_eq!(DispatchKey::of(Device::Mps), DispatchKey::Mps);
+    assert_eq!(DispatchKey::of(Device::Mps(0)), DispatchKey::Mps);
 }
 
 #[test]
 fn the_static_registry_is_used_first() {
     static OP: Op<Kernel> = Op::new("test::static_first", cpu_only);
-    assert_eq!(OP.dispatch(Device::Cpu)(), "static");
+    assert_eq!(OP.dispatch(Device::Cpu(0))(), "static");
     let err = OP.register(DispatchKey::Cpu, registered).unwrap_err();
     assert!(
         err.contains("test::static_first") && err.contains("Cpu"),
         "{err}"
     );
-    assert_eq!(OP.dispatch(Device::Cpu)(), "static", "still the built-in");
+    assert_eq!(
+        OP.dispatch(Device::Cpu(0))(),
+        "static",
+        "still the built-in"
+    );
 }
 
 #[test]
@@ -49,9 +53,9 @@ fn the_dynamic_registry_fills_in_missing_keys() {
     static OP: Op<Kernel> = Op::new("test::dynamic_fallback", cpu_only);
     assert!(OP.kernel(DispatchKey::Mps).is_none());
     OP.register(DispatchKey::Mps, registered).unwrap();
-    assert_eq!(OP.dispatch(Device::Mps)(), "dynamic");
+    assert_eq!(OP.dispatch(Device::Mps(0))(), "dynamic");
     OP.register(DispatchKey::Mps, replacement).unwrap();
-    assert_eq!(OP.dispatch(Device::Mps)(), "replacement");
+    assert_eq!(OP.dispatch(Device::Mps(0))(), "replacement");
     assert!(OP.kernel(DispatchKey::Cuda).is_none(), "per key");
 }
 

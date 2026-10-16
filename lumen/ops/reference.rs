@@ -38,7 +38,7 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         }
     }
     let outputs = eval_graph(graph, inputs.iter().map(load).collect());
-    let device = inputs.first().map_or(Device::Cpu, Tensor::device);
+    let device = inputs.first().map_or(Device::Cpu(0), Tensor::device);
     Ok(graph
         .outputs()
         .iter()

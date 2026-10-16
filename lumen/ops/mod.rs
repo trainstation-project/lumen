@@ -50,10 +50,10 @@ impl DispatchKey {
     /// The key for tensors on `device`.
     pub fn of(device: Device) -> Self {
         match device {
-            Device::Cpu => DispatchKey::Cpu,
+            Device::Cpu(_) => DispatchKey::Cpu,
             Device::Cuda(_) => DispatchKey::Cuda,
-            Device::Mps => DispatchKey::Mps,
-            Device::Meta => DispatchKey::Meta,
+            Device::Mps(_) => DispatchKey::Mps,
+            Device::Meta(_) => DispatchKey::Meta,
         }
     }
 }

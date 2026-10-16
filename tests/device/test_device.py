@@ -87,3 +87,17 @@ def test_module_and_name():
     assert lumen.device is lumen._C.device
     assert lumen.device.__module__ == "lumen"
     assert lumen.device.__name__ == "device"
+
+
+def test_is_available():
+    """Whether a device can hold tensors in this build: the CPU and meta
+    always, CUDA and MPS where present, none past a type's devices."""
+    assert lumen.device("cpu").is_available() and lumen.device("meta").is_available()
+    assert not lumen.device("cpu:1").is_available()
+    for spec in ["mps", "cuda"]:
+        try:
+            lumen.zeros([1], device=spec)
+            placed = True
+        except RuntimeError:
+            placed = False
+        assert lumen.device(spec).is_available() == placed
