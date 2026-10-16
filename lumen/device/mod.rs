@@ -2,6 +2,8 @@ pub mod cpu;
 pub mod cuda;
 pub mod meta;
 pub mod mps;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 
 use std::fmt;
 

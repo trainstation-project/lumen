@@ -17,6 +17,8 @@ profiler modules build on top of.
 | `cuda.rs` | `Cuda` / `CUDA` — NVIDIA backend; queries `cudart` FFI when linked, otherwise reports zero devices. |
 | `mps.rs` | `Mps` / `MPS` — Apple Metal backend; queries the `lumen_mps_shim` FFI when linked. |
 | `meta.rs` | `Meta` / `META` — the placeholder/"no data" device, like `torch.device("meta")`. |
+| `python.rs` | The Python bindings (built with the `python` feature): `lumen.device` and `resolve_device`, registered into `lumen._C`. |
+| `_C.pyi` | Type stub for what `python.rs` defines (`device`, `DeviceLike`), re-exported by `lumen/_C.pyi`. |
 | `tests.rs` | Unit tests for backend naming, counts, `check()` and `is_available()` consistency. |
 
 ## The `DeviceBackend` trait (`mod.rs:8`)
@@ -139,16 +141,27 @@ FFI (`cuda.rs:3-18`) is fully gated behind `#[cfg(lumen_cuda_linked)]`, so
 
 ## Python side
 
-`lumen.device` in `lumen/python.rs:42-186` is the user-facing counterpart,
-modeled on `torch.device`: parse a string (`"cuda:1"`), compare, hash, pickle,
-and repr. It is deliberately *not* the same type as the core `Device` —
-`resolve_device` (`lumen/python.rs:23`) converts a Python device into a core
-`Device` and then calls `allocator_for(device)`, which is where `check()`
-turns into a Python `RuntimeError`. Because the core has no notion of a
-"current device" yet, an unindexed Python device maps to index 0
-(`lumen/python.rs:131`), whereas `torch` keeps `"cuda"` and `"cuda:0"`
-distinct as Python values (`tests/test_device.py:45`). Python behavior is
-covered by `tests/test_device.py`; Rust behavior by `lumen/device/tests.rs`.
+`lumen.device` lives in `python.rs`, next to the code it exposes (as every
+folder's bindings do; `lumen/python.rs` only assembles `lumen._C`, calling
+this folder's `register`). It is modeled on `torch.device`: parse a string
+(`"cuda:1"`, `"mps:0"`, `"cpu"`), compare, hash, pickle, and repr. Every
+type takes an index; an unindexed device keeps `index = None` as a Python
+value (so `"mps"` and `"mps:0"` stay distinct, as in `torch`), but names
+device 0 of its type, since the core has no notion of a current device yet.
+
+It is deliberately *not* the same type as the core `Device`:
+`resolve_device` converts a `device=` argument (`None`, a string or a
+`lumen.device`) into a core `Device`, then calls `allocator_for(device)`,
+which runs `check()`; its error becomes a Python `RuntimeError`
+(`lumen.zeros([2], device="cpu:1")` raises "cpu device 1 is not
+available"). The other folders' bindings (graph, ops, stream, safetensors)
+import `resolve_device` from here.
+
+Tensors report their device as the core `Device` prints it, always
+`"type:index"` (`"cpu:0"`, `"mps:0"`). The stub `_C.pyi` describes the
+class for type checkers only; at runtime it is `lumen._C.device`, exported
+as `lumen.device`. Python behavior is covered by `tests/test_device.py`;
+Rust behavior by `tests.rs`.
 
 ## Adding a new backend
 
