@@ -5,11 +5,6 @@ import pytest
 import lumen
 
 
-def test_stream_modules_mirror_torch():
-    assert lumen.mps is lumen.stream.mps
-    assert lumen.cuda is lumen.stream.cuda
-
-
 def test_every_device_has_a_stream():
     """``lumen.Stream(device)``: the device's stream, which every device type
     has (the CPU's and the meta device's have no work to wait for); a
@@ -19,18 +14,28 @@ def test_every_device_has_a_stream():
             stream = lumen.Stream(spec)
         except RuntimeError:
             continue
-        assert stream.device == f"{lumen.device(spec).type}:0"
+        assert stream.device == lumen.device(lumen.device(spec).type, 0) and stream.stream_id == 0
         assert repr(stream) == f"lumen.Stream(device='{stream.device}')"
         stream.synchronize()
-    assert lumen.Stream().device == "cpu:0"
+    assert lumen.Stream().device == lumen.device("cpu", 0)
     with pytest.raises(RuntimeError, match="not available"):
         lumen.Stream("cpu:1")
 
 
-def test_streams_are_the_only_synchronize():
-    """No per-device ``synchronize`` functions: a device's stream is how to
-    wait for it."""
-    assert not hasattr(lumen.mps, "synchronize") and not hasattr(lumen.cuda, "synchronize")
+def test_the_stream_is_the_only_api():
+    """No per-device modules: a device's stream is how to wait for it, and
+    run Metal kernels of your own (MPS's)."""
+    assert lumen.stream.__all__ == ["Stream"]
+    assert not hasattr(lumen, "mps") and not hasattr(lumen, "cuda")
+    # torch.Stream's API: streams equal by device and stream, wait_stream
+    # (nothing to wait for on a device's one stream); an external stream
+    # (stream_id) is CUDA's alone.
+    cpu = lumen.Stream("cpu")
+    assert cpu == lumen.Stream("cpu:0") and hash(cpu) == hash(lumen.Stream()) and cpu != lumen.Stream("meta")
+    cpu.wait_stream(lumen.Stream("cpu"))
+    cpu.wait_stream(lumen.Stream("meta"))
+    with pytest.raises(ValueError, match="an external stream is CUDA's"):
+        lumen.Stream("cpu", stream_id=1)
 
 
 def test_a_stream_of_an_absent_device_raises():

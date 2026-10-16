@@ -2,11 +2,10 @@ from lumen import autograd, functional, graph, nn, ops, profiler, random, safete
 from lumen._C import __version__
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
-from lumen.device import device  # rebinds `lumen.device` from the package to the class
+from lumen.device import device
 from lumen.graph import compile, make_graph, prims
 from lumen.random import get_rng_state, initial_seed, manual_seed, rand, randint, randn, set_rng_state
 from lumen.stream import Stream
-from lumen.tensor import tensor  # rebinds `lumen.tensor` from the package to the factory
 from lumen.tensor import (
     Tensor,
     arange,
@@ -26,6 +25,7 @@ from lumen.tensor import (
     int32,
     int64,
     ones,
+    tensor,
     to_numpy,
     uint8,
     uint16,
