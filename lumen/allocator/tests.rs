@@ -53,68 +53,32 @@ mod cpu {
 mod static_allocator {
     use std::ptr::NonNull;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::allocator::static_allocator::StaticAllocator;
-    use crate::{Allocator, CpuAllocator, DataPtr, Device};
+    use crate::{Allocator, DataPtr, Device};
 
-    struct Host {
-        reservations: Arc<AtomicUsize>,
-        releases: Arc<AtomicUsize>,
+    fn allocator(capacity: usize) -> StaticAllocator {
+        StaticAllocator::new(Device::Cpu(0), capacity)
     }
 
-    impl Allocator for Host {
-        fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-            self.reservations.fetch_add(1, Ordering::Relaxed);
-            CpuAllocator.allocate(nbytes)
-        }
-
-        unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
-            self.releases.fetch_add(1, Ordering::Relaxed);
-            unsafe { CpuAllocator.deallocate(ptr, nbytes) }
-        }
-    }
-
-    fn allocator(capacity: usize) -> StaticAllocator<Host> {
-        counted(capacity).0
-    }
-
-    fn counted(capacity: usize) -> (StaticAllocator<Host>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        let (reservations, releases) =
-            (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let host = Host {
-            reservations: Arc::clone(&reservations),
-            releases: Arc::clone(&releases),
-        };
-        (
-            StaticAllocator::new(host, Device::Cuda(0), 256, capacity),
-            reservations,
-            releases,
-        )
-    }
-
-    fn free(allocator: &StaticAllocator<Host>, ptr: NonNull<u8>, nbytes: usize) {
+    fn free(allocator: &StaticAllocator, ptr: NonNull<u8>, nbytes: usize) {
         unsafe { allocator.deallocate(ptr, nbytes) }
     }
 
     #[test]
-    fn the_region_is_reserved_once_and_released_with_the_allocator() {
-        let (allocator, reservations, releases) = counted(1 << 20);
-        assert_eq!(reservations.load(Ordering::Relaxed), 0);
+    fn the_region_is_reserved_on_first_use() {
+        let allocator = allocator(1 << 20);
+        assert_eq!((allocator.capacity(), allocator.used()), (1 << 20, 0));
         let (a, b) = (allocator.allocate(100), allocator.allocate(100));
-        assert_eq!(reservations.load(Ordering::Relaxed), 1);
-        assert_eq!(allocator.capacity(), 1 << 20);
+        assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 256);
         free(&allocator, a, 100);
         free(&allocator, b, 100);
-        assert_eq!(releases.load(Ordering::Relaxed), 0);
-        drop(allocator);
-        assert_eq!(releases.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn a_data_ptr_gives_its_allocation_back_on_drop() {
-        let allocator = allocator(4096);
-        let data = DataPtr::allocate(Arc::new(allocator.clone()), 100);
+        let allocator = Arc::new(allocator(4096));
+        let data = DataPtr::allocate(Arc::clone(&allocator) as Arc<dyn Allocator>, 100);
         assert_eq!((data.nbytes(), allocator.live_bytes()), (100, 100));
         drop(data);
         assert_eq!(allocator.live_bytes(), 0);
@@ -222,7 +186,7 @@ mod devices {
     }
 
     #[test]
-    fn every_device_type_gives_out_its_allocator() {
+    fn every_device_has_one_shared_allocator() {
         use std::sync::Arc;
         let devices = [
             Device::Cpu(0),
@@ -231,12 +195,11 @@ mod devices {
             Device::Cuda(0),
         ];
         for device in devices.into_iter().filter(|d| d.check().is_ok()) {
-            let a = device.backend().allocator(device.index());
-            let b = allocator_for(device).unwrap();
-            assert!(
-                Arc::ptr_eq(&a, &b) || device == Device::Mps(0) || device == Device::Cuda(0),
-                "{device}"
+            let (a, b) = (
+                allocator_for(device).unwrap(),
+                allocator_for(device).unwrap(),
             );
+            assert!(Arc::ptr_eq(&a, &b), "{device}");
             let ptr = a.allocate(64);
             unsafe { a.deallocate(ptr, 64) };
         }
@@ -287,8 +250,8 @@ mod cuda {
 
     #[cfg(lumen_cuda_linked)]
     mod device {
-        use crate::allocator::cuda::{self, CudaBackend};
-        use crate::allocator::static_allocator::StaticAllocator;
+        use crate::allocator::allocator_for;
+        use crate::allocator::static_allocator::{ALIGNMENT, StaticAllocator};
         use crate::{Allocator, Device, Storage};
 
         macro_rules! require_cuda {
@@ -313,15 +276,10 @@ mod cuda {
         #[test]
         fn the_allocator_reserves_device_memory_and_rewinds() {
             require_cuda!();
-            let allocator = StaticAllocator::new(
-                CudaBackend::new(0),
-                Device::Cuda(0),
-                cuda::ALIGNMENT,
-                1 << 20,
-            );
+            let allocator = StaticAllocator::new(Device::Cuda(0), 1 << 20);
             let a = allocator.allocate(1000);
             let b = allocator.allocate(1000);
-            assert_eq!(a.as_ptr().addr() % cuda::ALIGNMENT, 0);
+            assert_eq!(a.as_ptr().addr() % ALIGNMENT, 0);
             assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
             unsafe {
                 allocator.deallocate(a, 1000);
@@ -333,19 +291,19 @@ mod cuda {
         #[test]
         fn get_returns_the_same_global_instance() {
             require_cuda!();
-            let (a, b) = (cuda::get(0), cuda::get(0));
-            let size = 5 << 20;
-            let p = a.allocate(size);
-            assert!(b.live_bytes() >= size);
-            unsafe { a.deallocate(p, size) };
+            let (a, b) = (
+                allocator_for(Device::Cuda(0)).unwrap(),
+                allocator_for(Device::Cuda(0)).unwrap(),
+            );
+            assert!(std::sync::Arc::ptr_eq(&a, &b));
         }
     }
 }
 
 #[cfg(lumen_mps_linked)]
 mod mps {
-    use crate::allocator::mps;
-    use crate::allocator::static_allocator::StaticAllocator;
+    use crate::allocator::allocator_for;
+    use crate::allocator::static_allocator::{ALIGNMENT, StaticAllocator};
     use crate::{Allocator, Device, Storage};
 
     macro_rules! require_mps {
@@ -357,8 +315,8 @@ mod mps {
         };
     }
 
-    fn fresh() -> mps::MpsAllocator {
-        StaticAllocator::new(mps::MpsBackend, Device::Mps(0), mps::ALIGNMENT, 1 << 20)
+    fn fresh() -> StaticAllocator {
+        StaticAllocator::new(Device::Mps(0), 1 << 20)
     }
 
     #[test]
@@ -370,11 +328,11 @@ mod mps {
     #[test]
     fn get_returns_the_same_global_instance() {
         require_mps!();
-        let (a, b) = (mps::get(), mps::get());
-        let size = 5 << 20;
-        let p = a.allocate(size);
-        assert!(b.live_bytes() >= size);
-        unsafe { a.deallocate(p, size) };
+        let (a, b) = (
+            allocator_for(Device::Mps(0)).unwrap(),
+            allocator_for(Device::Mps(0)).unwrap(),
+        );
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
     #[test]
@@ -395,7 +353,7 @@ mod mps {
         let allocator = fresh();
         let a = allocator.allocate(1000);
         let b = allocator.allocate(1000);
-        assert_eq!(a.as_ptr().addr() % mps::ALIGNMENT, 0);
+        assert_eq!(a.as_ptr().addr() % ALIGNMENT, 0);
         assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
     }
 }

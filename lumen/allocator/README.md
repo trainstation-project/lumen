@@ -14,47 +14,42 @@ result).
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `Allocator` / `AllocatorBackend` traits, `DataPtr`, `allocator_for`. |
+| `mod.rs` | The `Allocator` trait, `DataPtr`, `allocator_for`. |
 | `config.rs` | Process-wide tunables (currently just the static allocator size), set from Python via `lumen.config`. |
-| `static_allocator.rs` | `StaticAllocator<B>` — the first-fit bump allocator over one backend region. The heart of the folder. |
+| `static_allocator.rs` | `StaticAllocator` — the first-fit allocator over one region of a device's memory, and the per-device registry (`shared`). The heart of the folder. |
 | `cpu.rs` | `CpuAllocator` — 64-byte-aligned `alloc`/`dealloc`, plus CPU memory profiling. |
 | `meta.rs` | `MetaAllocator` — hands out a dangling pointer; no storage exists. |
-| `cuda.rs` | `CudaBackend` (raw `cudaMalloc`/`cudaFree`) and the per-device `CudaAllocator = StaticAllocator<CudaBackend>`. |
-| `mps/mod.rs` | `MpsBackend` over the Metal shim, and `MpsAllocator = StaticAllocator<MpsBackend>`. |
+| `cuda.rs` | `malloc` / `free`: raw `cudaMalloc` / `cudaFree` (FFI), for the static allocator's region. |
+| `mps/mod.rs` | `malloc` / `free` over the Metal shim (FFI), for the static allocator's region. |
 | `mps/mps_shim.mm` | Objective-C++: `MTLBuffer` creation, the pointer→buffer map, and device limits. |
 | `python.rs` | `lumen.config` (`Config` pyclass), plus the `compiler` sub-config. |
 | `__init__.py`, `_C.pyi` | Python-side re-export and type stubs. |
 | `tests.rs` | CPU, static-allocator, device-crossing, CUDA and MPS test modules. |
 
-## The core traits
+## The `Allocator` trait
 
 ```rust
 pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> NonNull<u8>;
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize);
-    fn reclaim(&self) {}
-}
-
-pub trait AllocatorBackend: Sync {
-    fn allocator(&self, index: usize) -> Arc<dyn Allocator>;
 }
 ```
+
+The one abstraction: *who gives this memory back*. Three allocators implement
+it — `CpuAllocator`, `MetaAllocator`, `StaticAllocator` — plus DLPack's
+adopted buffers (`lumen/tensor/dlpack.rs`), which free through the
+producer's deleter.
 
 * `allocate` returns raw, uninitialized memory of at least `nbytes`, or
   panics (out-of-memory is a panic here, not a `Result`).
 * `deallocate` is `unsafe` because it trusts the caller to pass back a live
   block from the same allocator with the same size. It is only ever called
   from `DataPtr`'s `Drop` and from the tests.
-* `reclaim` is the escape hatch for memory that is freed but still pinned by
-  in-flight device work. Only `MpsBackend` implements it (it calls
-  `crate::stream::mps::synchronize()`); the default is a no-op. The static
-  allocator calls it when it runs out of room and retries before giving up.
-* `AllocatorBackend` is implemented *on the device types* (`crate::device::cpu::Cpu`,
-  `Cuda`, `Mps`, `Meta`) rather than on the allocators, so
-  `device.backend().allocator(index)` resolves a device to its allocator.
-
-`allocator_for(device)` is the public entry point: it calls `device.check()`
-first, so an unavailable device produces the device module's error string
+`allocator_for(device)` is the public entry point. It calls `device.check()`
+first, then picks the device's one shared allocator with a `match`: the CPU's
+and the meta device's, else that device's `StaticAllocator`
+(`static_allocator::shared`, one per device, created on first use). Checking
+first means so an unavailable device produces the device module's error string
 (`"CUDA device 0 is not available (0 device(s) found)"`) rather than a panic
 from inside an allocator. `Storage::new` turns that `Err` into a panic;
 `device/python.rs` turns it into a Python `RuntimeError`.
@@ -89,7 +84,7 @@ their own allocator instead of `allocator_for`.
 
 ## The static allocator
 
-`StaticAllocator<B>` is why this module is not just a thin `cudaMalloc` wrapper.
+`StaticAllocator` is why this module is not just a thin `cudaMalloc` wrapper.
 
 **Why it exists.** Compiled execution lays buffers out up front and reuses
 them run after run. Calling `cudaMalloc` per tensor would be far too slow and
@@ -116,24 +111,25 @@ on both sides, which is what makes a training loop that keeps its inputs
 alive reuse the same bytes every iteration instead of growing. A zero-byte
 allocation takes no block at all and returns any aligned offset.
 
-**Alignment.** Passed in per backend, always 256 here — matching
-`cudaMalloc`'s and Metal's guarantees (`cuda::ALIGNMENT`, `mps::ALIGNMENT`).
-It must be a power of two (asserted in `new`).
+**Alignment.** `ALIGNMENT` = 256, matching `cudaMalloc`'s and Metal's
+guarantees.
 
-**Laziness and teardown.** `new` reserves nothing; only the first
-`try_allocate` calls `backend.allocate(capacity)`. `Inner::drop` gives the
-region back with a single `backend.deallocate(region, capacity)`. Because
-clones share the `Arc<Inner>` and every `DataPtr` keeps its allocator alive,
-the region outlives all of its allocations.
+**Laziness and teardown.** `StaticAllocator::new(device, capacity)` reserves
+nothing; the first `try_allocate` reserves the region from the device's own
+memory (`malloc(device, capacity)`: the Metal shim, `cudaMalloc`, or the
+CPU's allocator in tests — a `match` on the device, in this file). Dropping
+it gives the region back with one `free`. The registry holds one `Arc` per
+device and every `DataPtr` keeps its allocator alive, so the region outlives
+all of its allocations.
 
 **Accounting.** `capacity()`, `used()` (bytes to the end of the highest live
 allocation) and `live_bytes()` are exposed for tests and diagnostics.
 
 **Out of memory** is a panic that names every useful number: device,
 requested bytes, free bytes, capacity, largest free block, and the exact knob
-to raise (`lumen.config.static_allocator_bytes`). Before panicking it calls
-`backend.reclaim()` once and retries — this is the MPS path where freed
-memory is still held by queued Metal work.
+to raise (`lumen.config.static_allocator_bytes`). Before panicking it waits
+for the device's work in flight (`synchronize(device)`: MPS's stream) once and
+retries — freed memory can still be held by queued Metal work.
 
 The allocator also reports every allocation and free to the profiler
 (`crate::profiler::report_memory`) with live/capacity totals. The call is
@@ -166,35 +162,21 @@ nothing. Meta tensors carry shape and dtype but no bytes; nothing ever
 dereferences the pointer.
 
 ### CUDA
-Two layers:
-
-* `CudaBackend` — an uncached, one-call-per-allocation wrapper over
-  `cudaMalloc`/`cudaFree` via a minimal `extern "C"` block. It calls
-  `CUDA.set_device(device_index)` **before both** allocation and free,
-  mirroring what c10 does; without that, memory could be allocated on the
-  wrong device or freed from a thread with a different current device.
-  Failure panics with `"CUDA out of memory: failed to allocate {n} bytes on
-  cuda:{i}"`. The whole backend is behind `#[cfg(lumen_cuda_linked)]`.
-* `CudaAllocator = StaticAllocator<CudaBackend>` — the type users actually
-  get. `cuda::get(device_index)` keeps a `OnceLock<Mutex<Vec<Option<...>>>>`
-  registry, one static allocator per device index, created on first use and
-  sized by `config::static_allocator_bytes()`. Concurrent calls for the same
-  index get clones of the same allocator.
-
-`ALIGNMENT` is 256. Since the region is one `cudaMalloc`, the alignment
-guarantee comes from the offsets being multiples of 256.
-
-When the crate is built without CUDA, `Cuda::allocator` is `unreachable!()` —
-reaching it would mean `device.check()` passed without a linked runtime, which
-cannot happen.
+`cuda.rs` is just the FFI: `malloc(index, nbytes)` and `free(index, ptr)`
+over `cudaMalloc`/`cudaFree`. Both call `CUDA.set_device(index)` first,
+mirroring c10; without that, memory could be allocated on the wrong device or
+freed from a thread with a different current device. Failure panics with
+`"CUDA out of memory: failed to allocate {n} bytes on cuda:{i}"`. Everything
+is behind `#[cfg(lumen_cuda_linked)]`. Each CUDA device's allocator is its
+`StaticAllocator` from the registry, sized by `config::static_allocator_bytes()`
+when created.
 
 ### MPS
-`MpsBackend` calls `lumen_mps_alloc` / `lumen_mps_free` (the shim) and is the
-only backend implementing `reclaim()`. `MpsAllocator = StaticAllocator<MpsBackend>`
-with `ALIGNMENT = 256`, a single global instance (`mps::get()`, asserting
-`MPS.is_available()` first). Its Metal storage mode is **Shared**, so the
-region is host-addressable — `tests.rs` writes and reads back through the raw
-pointer to prove it.
+`mps/mod.rs` is just the FFI: `malloc(nbytes)` and `free(ptr)` over
+`lumen_mps_alloc` / `lumen_mps_free` (the shim). The device's allocator is its
+`StaticAllocator`, whose region is a Shared-mode buffer, so it is
+host-addressable — `tests.rs` writes and reads back through the raw pointer to
+prove it.
 
 The shim (`mps/mps_shim.mm`) does the Objective-C work:
 
@@ -234,8 +216,8 @@ compiler's flags, defined in `lumen/compiler`).
   purely as an **availability check** at the Python boundary, converting the
   error into a `RuntimeError`.
 * The profiler receives allocation events through `StaticAllocator` and
-  `CpuAllocator`; `lumen/profiler/tests.rs` builds a
-  `StaticAllocator` over a fake backend to test them.
+  `CpuAllocator`; `lumen/profiler/tests.rs` builds a `StaticAllocator` on the
+  CPU's memory to test them.
 
 ## Tests
 
@@ -243,16 +225,15 @@ compiler's flags, defined in `lumen/compiler`).
 
 * `cpu` — singleton identity, 64-byte alignment, write/read round-trip,
   zero-byte safety, repeated alloc/free cycles.
-* `static_allocator` — the meat, using a `Host` wrapper that counts
-  reservations and releases so the laziness contract is directly testable:
-  the region is reserved once and released with the allocator, `DataPtr` gives
+* `static_allocator` — the meat, on a `StaticAllocator` over the CPU's
+  memory: the region is reserved on first use, `DataPtr` gives
   its allocation back on drop, allocations are aligned bumps, freed memory is
   reused while others are live, a loop with live inputs does not grow, freed
   neighbours merge, a full allocator refuses (and the panic names the
   setting), zero-byte allocations are fine, and the returned memory is
   actually usable.
 * `devices` — cross-device behavior that runs anywhere: CPU always available,
-  every available device type hands out its allocator, `Storage` is `Send +
+  every available device has one shared allocator, `Storage` is `Send +
   Sync`, and unavailable devices are reported rather than panicking
   unexpectedly.
 * `cuda` / `mps` — hardware-gated, with `require_cuda!` / `require_mps!`

@@ -1,8 +1,8 @@
 pub mod config;
 mod cpu;
-pub mod cuda;
+mod cuda;
 mod meta;
-pub mod mps;
+mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub mod static_allocator;
@@ -13,7 +13,7 @@ pub use cpu::CpuAllocator;
 pub use meta::MetaAllocator;
 
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::device::Device;
 
@@ -70,14 +70,15 @@ impl Drop for DataPtr {
 pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> NonNull<u8>;
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize);
-    fn reclaim(&self) {}
-}
-
-pub trait AllocatorBackend: Sync {
-    fn allocator(&self, index: usize) -> Arc<dyn Allocator>;
 }
 
 pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
     device.check()?;
-    Ok(device.backend().allocator(device.index()))
+    static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+    static META: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+    Ok(match device {
+        Device::Cpu(_) => Arc::clone(CPU.get_or_init(|| Arc::new(CpuAllocator))),
+        Device::Meta(_) => Arc::clone(META.get_or_init(|| Arc::new(MetaAllocator))),
+        Device::Mps(_) | Device::Cuda(_) => static_allocator::shared(device),
+    })
 }

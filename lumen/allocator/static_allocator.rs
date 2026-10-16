@@ -1,26 +1,64 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::Allocator;
 use crate::device::Device;
 
-pub struct StaticAllocator<B: Allocator> {
-    inner: Arc<Inner<B>>,
+pub const ALIGNMENT: usize = 256;
+
+pub fn shared(device: Device) -> Arc<dyn Allocator> {
+    static ALLOCATORS: OnceLock<Mutex<HashMap<Device, Arc<dyn Allocator>>>> = OnceLock::new();
+    let mut allocators = ALLOCATORS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let capacity = super::config::static_allocator_bytes();
+    Arc::clone(
+        allocators
+            .entry(device)
+            .or_insert_with(|| Arc::new(StaticAllocator::new(device, capacity))),
+    )
 }
 
-impl<B: Allocator> Clone for StaticAllocator<B> {
-    fn clone(&self) -> Self {
-        StaticAllocator {
-            inner: Arc::clone(&self.inner),
-        }
+// The device's own memory, the region reserved from it (the CPU's: the
+// system allocator's, for tests).
+fn malloc(device: Device, nbytes: usize) -> NonNull<u8> {
+    match device {
+        Device::Cpu(_) => super::CpuAllocator.allocate(nbytes),
+        #[cfg(lumen_mps_linked)]
+        Device::Mps(_) => super::mps::malloc(nbytes),
+        #[cfg(lumen_cuda_linked)]
+        Device::Cuda(index) => super::cuda::malloc(index, nbytes),
+        _ => unreachable!("{device} has no memory to reserve"),
     }
 }
 
-struct Inner<B: Allocator> {
-    backend: B,
+/// # Safety
+/// `ptr` and `nbytes` are a `malloc` of `device`'s, not yet freed.
+unsafe fn free(device: Device, ptr: NonNull<u8>, nbytes: usize) {
+    match device {
+        Device::Cpu(_) => unsafe { super::CpuAllocator.deallocate(ptr, nbytes) },
+        #[cfg(lumen_mps_linked)]
+        Device::Mps(_) => unsafe { super::mps::free(ptr) },
+        #[cfg(lumen_cuda_linked)]
+        Device::Cuda(index) => unsafe { super::cuda::free(index, ptr) },
+        _ => unreachable!("{device} has no memory to free"),
+    }
+}
+
+// Wait for device work in flight, which keeps freed memory alive (MPS work
+// holds its tensors until the GPU has run it).
+fn synchronize(device: Device) {
+    #[cfg(lumen_mps_linked)]
+    if let Device::Mps(_) = device {
+        crate::stream::mps::synchronize();
+    }
+    let _ = device;
+}
+
+pub struct StaticAllocator {
     device: Device,
-    alignment: usize,
     capacity: usize,
     state: Mutex<State>,
 }
@@ -44,48 +82,37 @@ struct Region(NonNull<u8>);
 // is only offset and handed out, never dereferenced here.
 unsafe impl Send for Region {}
 
-impl<B: Allocator> StaticAllocator<B> {
-    pub fn new(backend: B, device: Device, alignment: usize, capacity: usize) -> Self {
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
+impl StaticAllocator {
+    pub fn new(device: Device, capacity: usize) -> Self {
         StaticAllocator {
-            inner: Arc::new(Inner {
-                device,
-                backend,
-                alignment,
-                capacity,
-                state: Mutex::new(State {
-                    region: None,
-                    free: BTreeMap::from([(0, capacity - capacity % alignment)]),
-                    live: BTreeMap::new(),
-                    live_bytes: 0,
-                }),
+            device,
+            capacity,
+            state: Mutex::new(State {
+                region: None,
+                free: BTreeMap::from([(0, capacity - capacity % ALIGNMENT)]),
+                live: BTreeMap::new(),
+                live_bytes: 0,
             }),
         }
     }
 
     pub fn capacity(&self) -> usize {
-        self.inner.capacity
+        self.capacity
     }
 
     pub fn used(&self) -> usize {
-        self.inner
-            .lock()
+        self.lock()
             .live
             .last_key_value()
             .map_or(0, |(offset, nbytes)| offset + nbytes)
     }
 
     pub fn live_bytes(&self) -> usize {
-        self.inner.lock().live_bytes
+        self.lock().live_bytes
     }
-}
 
-impl<B: Allocator> Inner<B> {
     fn block(&self, nbytes: usize) -> usize {
-        nbytes.next_multiple_of(self.alignment)
+        nbytes.next_multiple_of(ALIGNMENT)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -122,19 +149,16 @@ impl<B: Allocator> Inner<B> {
             self.capacity,
         );
     }
-}
 
-impl<B: Allocator + 'static> StaticAllocator<B> {
     /// An allocation of `nbytes`, or `None` when the region has no room
     /// left. Reserves the region on first use (panicking if the backend
     /// cannot).
     pub(crate) fn try_allocate(&self, nbytes: usize) -> Option<NonNull<u8>> {
-        let inner = &self.inner;
-        let mut state = inner.lock();
+        let mut state = self.lock();
         if state.region.is_none() {
-            state.region = Some(Region(inner.backend.allocate(inner.capacity)));
+            state.region = Some(Region(malloc(self.device, self.capacity)));
         }
-        let block = inner.block(nbytes);
+        let block = self.block(nbytes);
         // An empty allocation takes no block: any aligned offset will do.
         let (&offset, &len) = match nbytes {
             0 => state.free.iter().next().unwrap_or((&0, &0)),
@@ -156,33 +180,27 @@ impl<B: Allocator + 'static> StaticAllocator<B> {
         drop(state);
 
         let addr = ptr.as_ptr().addr();
-        crate::profiler::report_memory(
-            inner.device,
-            addr,
-            nbytes as i64,
-            live_bytes,
-            inner.capacity,
-        );
+        crate::profiler::report_memory(self.device, addr, nbytes as i64, live_bytes, self.capacity);
         Some(ptr)
     }
 }
 
-impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
+impl Allocator for StaticAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         // Out of room: memory freed but held by device work in flight comes
         // back once that work is done.
         let data = self.try_allocate(nbytes).or_else(|| {
-            self.inner.backend.reclaim();
+            synchronize(self.device);
             self.try_allocate(nbytes)
         });
         data.unwrap_or_else(|| {
-            let state = self.inner.lock();
+            let state = self.lock();
             panic!(
                 "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
                  (largest block {}); raise {}.config.static_allocator_bytes",
-                self.inner.device,
+                self.device,
                 state.free.values().sum::<usize>(),
-                self.inner.capacity,
+                self.capacity,
                 state.free.values().max().unwrap_or(&0),
                 crate::LIBRARY_NAME,
             )
@@ -190,22 +208,22 @@ impl<B: Allocator + 'static> Allocator for StaticAllocator<B> {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
-        let base = match &self.inner.lock().region {
+        let base = match &self.lock().region {
             Some(region) => region.0.as_ptr().addr(),
             None => unreachable!("an allocation reserves the region first"),
         };
         let addr = ptr.as_ptr().addr();
-        self.inner.free(addr, addr - base, nbytes);
+        self.free(addr, addr - base, nbytes);
     }
 }
 
-impl<B: Allocator> Drop for Inner<B> {
+impl Drop for StaticAllocator {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         if let Some(region) = state.region.take() {
-            // SAFETY: the backend allocated the region with this size, and
+            // SAFETY: the device allocated the region with this size, and
             // nothing points into it any more.
-            unsafe { self.backend.deallocate(region.0, self.capacity) };
+            unsafe { free(self.device, region.0, self.capacity) };
         }
     }
 }

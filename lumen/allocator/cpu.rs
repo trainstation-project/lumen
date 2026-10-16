@@ -1,10 +1,10 @@
 use std::alloc::{self, Layout};
 use std::collections::BTreeSet;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{Allocator, AllocatorBackend};
+use super::Allocator;
 use crate::device::Device;
 
 pub struct CpuAllocator;
@@ -17,13 +17,6 @@ static PROFILED_COUNT: AtomicUsize = AtomicUsize::new(0);
 impl CpuAllocator {
     pub fn get() -> &'static dyn Allocator {
         &CPU_ALLOCATOR
-    }
-}
-
-impl AllocatorBackend for crate::device::cpu::Cpu {
-    fn allocator(&self, _index: usize) -> Arc<dyn Allocator> {
-        static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
-        Arc::clone(CPU.get_or_init(|| Arc::new(CpuAllocator)))
     }
 }
 
