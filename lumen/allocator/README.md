@@ -14,12 +14,12 @@ result).
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | The `Allocator` trait, `DataPtr`, `allocator_for`, and `StaticAllocator` — the first-fit allocator over one region of a device's memory — with its per-device registry (`shared`). The heart of the folder. |
+| `mod.rs` | The `Allocator` trait, `DataPtr`, `allocator_for`, and `Region` — the first-fit bookkeeping over one reserved range of a device's memory, which the MPS and CUDA allocators own. The heart of the folder. |
 | `config.rs` | Process-wide tunables (currently just the static allocator size), set from Python via `lumen.config`. |
 | `cpu.rs` | `CpuAllocator` — 64-byte-aligned `alloc`/`dealloc`, plus CPU memory profiling. |
 | `meta.rs` | `MetaAllocator` — hands out a dangling pointer; no storage exists. |
-| `cuda.rs` | `malloc` / `free`: raw `cudaMalloc` / `cudaFree` (FFI), for the static allocator's region. |
-| `mps/mod.rs` | `malloc` / `free` over the Metal shim (FFI), for the static allocator's region. |
+| `cuda.rs` | `CudaAllocator`: a `Region` over one `cudaMalloc` per device (FFI), and the per-device registry. |
+| `mps/mod.rs` | `MpsAllocator`: a `Region` over one Metal buffer (the shim's FFI), and its shared instance. |
 | `mps/mps_shim.mm` | Objective-C++: `MTLBuffer` creation, the pointer→buffer map, and device limits. |
 | `python.rs` | `lumen.config` (`Config` pyclass), plus the `compiler` sub-config. |
 | `__init__.py`, `_C.pyi` | Python-side re-export and type stubs. |
@@ -35,7 +35,7 @@ pub trait Allocator: Send + Sync {
 ```
 
 The one abstraction: *who gives this memory back*. Three allocators implement
-it — `CpuAllocator`, `MetaAllocator`, `StaticAllocator` — plus DLPack's
+it, one per device — `CpuAllocator`, `MetaAllocator`, `MpsAllocator`, `CudaAllocator` — plus DLPack's
 adopted buffers (`lumen/tensor/dlpack.rs`), which free through the
 producer's deleter.
 
@@ -45,9 +45,9 @@ producer's deleter.
   block from the same allocator with the same size. It is only ever called
   from `DataPtr`'s `Drop` and from the tests.
 `allocator_for(device)` is the public entry point. It calls `device.check()`
-first, then picks the device's one shared allocator with a `match`: the CPU's
-and the meta device's, else that device's `StaticAllocator`
-(`shared`, one per device, created on first use). Checking
+first, then picks the device's one shared allocator with a `match`: the CPU's,
+the meta device's, the Metal device's (`mps::allocator()`) or CUDA device
+`i`'s (`cuda::allocator(i)`), each created on first use. Checking
 first means so an unavailable device produces the device module's error string
 (`"CUDA device 0 is not available (0 device(s) found)"`) rather than a panic
 from inside an allocator. `Storage::new` turns that `Err` into a panic;
@@ -81,9 +81,11 @@ the responsibility of whatever code does dereference it.
 `nbytes()`; `Storage::with_allocator` lets callers (tests, DLPack) supply
 their own allocator instead of `allocator_for`.
 
-## The static allocator
+## The static allocators and `Region`
 
-`StaticAllocator` is why this module is not just a thin `cudaMalloc` wrapper.
+The MPS and CUDA allocators are why this module is not just a thin `cudaMalloc`
+wrapper. Their shared bookkeeping is `Region` — not an allocator itself, just
+the free list over a range its owner reserves.
 
 **Why it exists.** Compiled execution lays buffers out up front and reuses
 them run after run. Calling `cudaMalloc` per tensor would be far too slow and
@@ -113,13 +115,13 @@ allocation takes no block at all and returns any aligned offset.
 **Alignment.** `ALIGNMENT` = 256, matching `cudaMalloc`'s and Metal's
 guarantees.
 
-**Laziness and teardown.** `StaticAllocator::new(device, capacity)` reserves
-nothing; the first `try_allocate` reserves the region from the device's own
-memory (`malloc(device, capacity)`: the Metal shim, `cudaMalloc`, or the
-CPU's allocator in tests — a `match` on the device, in `mod.rs`). Dropping
-it gives the region back with one `free`. The registry holds one `Arc` per
-device and every `DataPtr` keeps its allocator alive, so the region outlives
-all of its allocations.
+**Laziness and teardown.** `Region::new(device, capacity)` reserves nothing;
+the first `take` reserves the range through its owner's `reserve` closure
+(`MpsAllocator`: the Metal shim; `CudaAllocator`: `cudaMalloc`; the CPU's
+allocator in tests). Dropping the owner gives the range back: it takes the
+start with `region.base()` and frees it with its FFI. Each device's allocator
+is one shared `Arc` and every `DataPtr` keeps its allocator alive, so the
+range outlives all of its allocations.
 
 **Accounting.** `capacity()`, `used()` (bytes to the end of the highest live
 allocation) and `live_bytes()` are exposed for tests and diagnostics.
@@ -145,7 +147,7 @@ happy, returns `alloc::handle_alloc_error` on failure, and treats `nbytes == 0`
 specially by returning a dangling but aligned pointer (a zero-size `Layout` is
 valid but of no use).
 
-CPU is also the one backend that does **not** use `StaticAllocator`: it
+CPU is also one of the backends that does **not** use a `Region`: it
 allocates exactly what is asked, directly. Its profiling works differently
 from the static allocator's: it first checks
 `crate::profiler::memory_enabled()` and, when a session is recording memory,
@@ -167,13 +169,13 @@ mirroring c10; without that, memory could be allocated on the wrong device or
 freed from a thread with a different current device. Failure panics with
 `"CUDA out of memory: failed to allocate {n} bytes on cuda:{i}"`. Everything
 is behind `#[cfg(lumen_cuda_linked)]`. Each CUDA device's allocator is its
-`StaticAllocator` from the registry, sized by `config::static_allocator_bytes()`
+`CudaAllocator` from the registry, sized by `config::static_allocator_bytes()`
 when created.
 
 ### MPS
 `mps/mod.rs` is just the FFI: `malloc(nbytes)` and `free(ptr)` over
 `lumen_mps_alloc` / `lumen_mps_free` (the shim). The device's allocator is its
-`StaticAllocator`, whose region is a Shared-mode buffer, so it is
+`MpsAllocator`, whose region is a Shared-mode buffer, so it is
 host-addressable — `tests.rs` writes and reads back through the raw pointer to
 prove it.
 
@@ -205,8 +207,8 @@ compiler's flags, defined in `lumen/compiler`).
 
 ## Usage across the crate
 
-* `lumen/lib.rs` re-exports `Allocator`, `CpuAllocator`, `DataPtr` and
-  `StaticAllocator` at the crate root.
+* `lumen/lib.rs` re-exports `Allocator`, `CpuAllocator` and `DataPtr` at the
+  crate root.
 * `lumen/tensor/storage.rs` is the main consumer: `Storage::new` calls
   `allocator_for` and panics on an unavailable device.
 * `lumen/tensor/dlpack.rs` uses `DataPtr::from_raw_parts` to take ownership of
@@ -214,8 +216,8 @@ compiler's flags, defined in `lumen/compiler`).
 * `lumen/device/python.rs` and `lumen/stream/python.rs` call `allocator_for`
   purely as an **availability check** at the Python boundary, converting the
   error into a `RuntimeError`.
-* The profiler receives allocation events through `StaticAllocator` and
-  `CpuAllocator`; `lumen/profiler/tests.rs` builds a `StaticAllocator` on the
+* The profiler receives allocation events through `Region` and
+  `CpuAllocator`; `lumen/profiler/tests.rs` drives a `Region` on the
   CPU's memory to test them.
 
 ## Tests
@@ -224,8 +226,9 @@ compiler's flags, defined in `lumen/compiler`).
 
 * `cpu` — singleton identity, 64-byte alignment, write/read round-trip,
   zero-byte safety, repeated alloc/free cycles.
-* `static_allocator` — the meat, on a `StaticAllocator` over the CPU's
-  memory: the region is reserved on first use, `DataPtr` gives
+* `region` — the meat, on a test allocator owning a `Region` over the CPU's
+  memory, counting its reservations and releases: the region is reserved
+  once and released with the allocator, `DataPtr` gives
   its allocation back on drop, allocations are aligned bumps, freed memory is
   reused while others are live, a loop with live inputs does not grow, freed
   neighbours merge, a full allocator refuses (and the panic names the
