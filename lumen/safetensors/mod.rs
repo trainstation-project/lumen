@@ -485,7 +485,7 @@ fn prepare<'a>(
     let mut offset = 0;
     let mut infos = Vec::with_capacity(order.len());
     for &(name, t) in &order {
-        if t.device() == Device::Meta {
+        if t.device() == Device::Meta(0) {
             return Err(Error::MetaTensor(name.to_owned()));
         }
         if !t.is_contiguous() {
@@ -515,9 +515,9 @@ fn prepare<'a>(
 fn host_accessible(device: Device) -> bool {
     match device {
         // Meta tensors are made in place too, though nothing is written.
-        Device::Cpu | Device::Meta => true,
+        Device::Cpu(_) | Device::Meta(_) => true,
         #[cfg(lumen_mps_linked)]
-        Device::Mps => true,
+        Device::Mps(_) => true,
         _ => false,
     }
 }
@@ -529,7 +529,7 @@ fn with_bytes<R>(t: &Tensor, f: impl FnOnce(&[u8]) -> R) -> R {
         return f(&[]);
     }
     if !host_accessible(t.device()) {
-        return with_bytes(&t.to(Device::Cpu), f);
+        return with_bytes(&t.to(Device::Cpu(0)), f);
     }
     // Device work writing it must finish first.
     t.wait_();
@@ -650,13 +650,13 @@ fn load_tensor(
     let host = if host_accessible(device) {
         device
     } else {
-        Device::Cpu
+        Device::Cpu(0)
     };
     let options = TensorOptions::new().dtype(dtype).device(host);
     // SAFETY: `fill` writes every byte before the tensor is returned (a meta
     // tensor has none).
     let t = unsafe { Tensor::empty(&info.shape, options) };
-    if host == Device::Meta {
+    if host == Device::Meta(0) {
         return Ok(t);
     }
     let n = info.data_offsets.1 - info.data_offsets.0;

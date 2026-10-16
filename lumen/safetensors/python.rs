@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use super::{Error, SafeTensorsFile};
-use crate::python::resolve_device;
+use crate::device::python::resolve_device;
 use crate::tensor::python::PyTensor;
 use crate::{Device, Tensor};
 
