@@ -17,6 +17,9 @@ profiler modules build on top of.
 | `cuda.rs` | `Cuda` / `CUDA` — NVIDIA backend; queries `cudart` FFI when linked, otherwise reports zero devices. |
 | `mps.rs` | `Mps` / `MPS` — Apple Metal backend; queries the `lumen_mps_shim` FFI when linked. |
 | `meta.rs` | `Meta` / `META` — the placeholder/"no data" device, like `torch.device("meta")`. |
+| `python.rs` | Python bindings (`python` feature): the `lumen.device` class and `resolve_device`, registered into `lumen._C`. |
+| `__init__.py` | The `lumen.device` package: re-exports the class (`from lumen.device import device`); `lumen/__init__.py` rebinds `lumen.device` to it. |
+| `_C.pyi` | Type stub for what `python.rs` defines, re-exported by `lumen/_C.pyi`. |
 | `tests.rs` | Unit tests for backend naming, counts, `check()` and `is_available()` consistency. |
 
 ## The `DeviceBackend` trait
@@ -138,14 +141,16 @@ compiles on machines with no CUDA headers or libraries.
 
 ## Python side
 
-`lumen.device` in `lumen/python.rs` is the user-facing counterpart, modeled on
+`lumen.device` in `python.rs` is the user-facing counterpart, modeled on
 `torch.device`: parse a string (`"cuda:1"`), compare, hash, pickle, and repr.
+Python code imports it from this package (`from lumen.device import device`);
+the other folders' bindings import `resolve_device` from `python.rs`.
 It is deliberately *not* the same type as the core `Device` — `resolve_device`
 converts a Python device into a core `Device` and then calls
 `allocator_for(device)`, which is where `check()` turns into a Python
 `RuntimeError`. Because the core has no notion of a "current device" yet, an
-unindexed Python device maps to index 0, whereas `torch` keeps `"cuda"` and
-`"cuda:0"` distinct as Python values. Python behavior is covered by
+unindexed Python device maps to index 0; it stays a distinct Python value
+(`"cuda"` vs `"cuda:0"`), as in `torch`. Python behavior is covered by
 `tests/test_device.py`; Rust behavior by `lumen/device/tests.rs`.
 
 ## Adding a new backend
