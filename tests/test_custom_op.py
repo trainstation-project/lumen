@@ -1,4 +1,4 @@
-"""Custom ops (``lumen.ops.custom_op``, PyTorch's ``torch.library.custom_op``):
+"""Custom ops (``lumen.custom_op``, PyTorch's ``torch.library.custom_op``):
 a function ``lumen.compile`` calls, opaque to it, returning nothing and
 mutating the arguments it names in ``mutates_args``: each reads its new
 value after the call (a view of it too; a weight or argument, written back);
@@ -9,7 +9,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen.ops import custom_op
+from lumen.custom_op import custom_op
 
 DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
 
