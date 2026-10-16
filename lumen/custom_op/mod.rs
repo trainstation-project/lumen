@@ -18,20 +18,20 @@ pub enum Grid {
     Groups([usize; 3]),
 }
 
-pub struct Kernel {
+pub struct MetalKernel {
     key: String,
     name: String,
 }
 
 static COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-impl Kernel {
+impl MetalKernel {
     /// Compile `source`'s kernel `name` (its only one if `None`).
     pub fn new(source: &str, name: Option<&str>) -> Result<Self, String> {
         let n = COMPILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key = format!("{}.custom_op.Kernel#{n}", crate::LIBRARY_NAME);
+        let key = format!("{}.custom_op.MetalKernel#{n}", crate::LIBRARY_NAME);
         let name = compile(source, name, &key)?;
-        Ok(Kernel { key, name })
+        Ok(MetalKernel { key, name })
     }
 
     pub fn name(&self) -> &str {

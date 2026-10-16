@@ -6,7 +6,7 @@ fn a_custom_kernel_launches_into_the_mps_stream() {
     const AXPY: &str =
         "kernel void axpy(device const float *x [[buffer(0)]], device float *y [[buffer(1)]],
         constant float &a [[buffer(2)]], uint i [[thread_position_in_grid]]) { y[i] += a * x[i]; }";
-    let Ok(kernel) = Kernel::new(AXPY, None) else {
+    let Ok(kernel) = MetalKernel::new(AXPY, None) else {
         assert!(!cfg!(lumen_mps_linked) || crate::Device::Mps(0).check().is_err());
         return;
     };

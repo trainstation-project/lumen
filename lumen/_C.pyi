@@ -1,7 +1,8 @@
 from lumen.allocator._C import CompilerConfig, Config, config
+from lumen.custom_op._C import MetalKernel
 from lumen.device._C import DeviceLike, device
 from lumen.graph._C import FUSION_SEPARATOR, Graph, Plan, _register_custom_op
-from lumen.ops._C import Kernel, _dummy_op, _register_kernel, _registered_ops, _unregister_kernel
+from lumen.ops._C import _dummy_op, _register_kernel, _registered_ops, _unregister_kernel
 from lumen.profiler._C import (
     _Profile,
     _profiler_cuda_timing,

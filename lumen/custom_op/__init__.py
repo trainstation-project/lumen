@@ -1,58 +1,11 @@
-"""Custom ops (PyTorch's ``torch.library.custom_op``): a function
-``lumen.compile`` calls but never traces into. The compilers see one opaque
-step reading its tensor arguments and writing in place those it names in
-``mutates_args``: it is never fused, simplified, merged with another call
-or looked into, and runs as written, in order with the other steps.
-
-A custom op returns nothing: its results are the arguments it mutates.
-Within a traced function, each mutated argument reads its new value after
-the call, as if assigned with ``copy_``: so do its views, and a weight or a
-tensor argument so mutated is written back after the call.
-
-An argument it mutates may be declared to overlap tensor arguments it
-reads (``overlappable={"out": "x"}``, or several, ``{"out": ("x", "y")}``):
-the function may be called with ``out`` in ``x``'s memory, so it must read
-each element of ``x`` before writing ``out``'s at that index, and not need
-``out``'s old value (it may be ``x``'s). Whether it is is the compiler's
-choice: ``out`` is its own memory where it can be (nothing reads its old
-value after the call), else ``x``'s where ``x`` dies at the call (of
-``out``'s type, read nowhere after it), saving the memory and the copy of
-``out`` (XLA: a custom call's output-operand aliasing).
-
-When the step runs, the function is called with its tensor arguments as
-lumen tensors on the plan's device (views of the plan's memory, no copy)
-and its other arguments as given: it writes the mutated ones in place. On
-MPS, nothing waits for the device: its own kernels, encoded into lumen's
-stream (``Kernel(...).launch``, ``lumen.Stream("mps").command_buffer()``), run in order
-with the plan's, after the earlier steps and before the later ones; host
-reads and writes (``lumen.to_numpy``, ``copy_``, DLPack) wait for the
-stream themselves. Host work is done by the time it returns. A mutated
-argument is the argument's own memory where nothing reads its old value
-after the call, else a copy of it (PyTorch: ``auto_functionalized``,
-reinplaced where it can be).
-
-    from lumen.custom_op import Kernel, custom_op
-
-    kernel = Kernel(AXPY_METAL_SOURCE)  # kernel void axpy(...)
-
-    @custom_op("mylib::axpy", mutates_args=("y",))
-    def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
-        kernel.launch([x, y], [np.float32(a)], grid=(y.numel,))
-
-    @lumen.compile
-    def step(x, y):
-        axpy(2.0, x, y)
-        return y * 1.0
-"""
-
 import functools
 import inspect
 
-from lumen._C import Kernel, _register_custom_op
+from lumen._C import MetalKernel, _register_custom_op
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
-__all__ = ["CustomOp", "Kernel", "custom_op"]
+__all__ = ["CustomOp", "MetalKernel", "custom_op"]
 
 
 def custom_op(name, fn=None, /, *, mutates_args, overlappable=None):

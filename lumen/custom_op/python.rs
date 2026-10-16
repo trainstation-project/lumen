@@ -5,20 +5,21 @@ use pyo3::types::PyBytes;
 use crate as core;
 use crate::tensor::python::PyTensor;
 
-/// A Metal kernel of your own (`lumen.custom_op.Kernel(source, name)`), for a
+/// A Metal kernel of your own (`lumen.custom_op.MetalKernel(source, name)`), for a
 /// custom op to launch into lumen's MPS stream.
-#[pyclass(name = "Kernel", module = "lumen", frozen)]
-pub(crate) struct PyKernel {
-    inner: core::custom_op::Kernel,
+#[pyclass(name = "MetalKernel", module = "lumen", frozen)]
+pub(crate) struct PyMetalKernel {
+    inner: core::custom_op::MetalKernel,
 }
 
 #[pymethods]
-impl PyKernel {
+impl PyMetalKernel {
     #[new]
     #[pyo3(signature = (source, name = None))]
     fn new(source: &str, name: Option<&str>) -> PyResult<Self> {
-        let inner = core::custom_op::Kernel::new(source, name).map_err(PyValueError::new_err)?;
-        Ok(PyKernel { inner })
+        let inner =
+            core::custom_op::MetalKernel::new(source, name).map_err(PyValueError::new_err)?;
+        Ok(PyMetalKernel { inner })
     }
 
     #[getter]
@@ -62,10 +63,14 @@ impl PyKernel {
     }
 
     fn __repr__(&self) -> String {
-        format!("<{}.Kernel {}>", crate::LIBRARY_NAME, self.inner.name())
+        format!(
+            "<{}.MetalKernel {}>",
+            crate::LIBRARY_NAME,
+            self.inner.name()
+        )
     }
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyKernel>()
+    m.add_class::<PyMetalKernel>()
 }
