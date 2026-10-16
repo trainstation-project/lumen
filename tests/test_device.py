@@ -1,5 +1,3 @@
-"""lumen.device, checked against torch.device semantics."""
-
 import pickle
 
 import pytest
@@ -60,11 +58,18 @@ def test_pickle_roundtrip():
 
 @pytest.mark.parametrize(
     "spec",
-    ["gpu", "cuda:", "cuda:x", "cuda:-1", "cuda:+1", "cuda:1:2", "CUDA", "mps:1", "cpu:1", ""],
+    ["gpu", "cuda:", "cuda:x", "cuda:-1", "cuda:+1", "cuda:1:2", "CUDA", ""],
 )
 def test_invalid_strings(spec):
     with pytest.raises(ValueError):
         lumen.device(spec)
+
+
+@pytest.mark.parametrize("spec", ["cpu:1", "mps:1", "meta:1"])
+def test_every_device_is_numbered(spec):
+    assert lumen.device(spec).index == 1
+    with pytest.raises(RuntimeError, match="device 1 is not available|MPS is not available"):
+        lumen.zeros([2], device=spec)
 
 
 def test_invalid_arguments():
