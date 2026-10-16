@@ -1,10 +1,4 @@
-//! Unit tests for tensors and storage, one module per topic. They live in
-//! the crate (not tests/) so they can reach private items. The `mps`
-//! module's tests skip where Metal is unavailable.
-
 mod dtype {
-    //! Tests for the dtype layer: sizes, names, and per-dtype tensor roundtrips.
-
     use crate::tensor::dtype::{bf16, f16};
     use crate::{DType, Device, Element, Tensor};
 
@@ -39,14 +33,13 @@ mod dtype {
         assert_eq!(DType::I8.to_string(), "i8");
     }
 
-    /// Every dtype can roundtrip values through a tensor: build, read, write.
     macro_rules! test_roundtrip {
         ($name:ident, $t:ty, $dtype:expr, $a:expr, $b:expr) => {
             #[test]
             fn $name() {
                 let a: $t = $a;
                 let b: $t = $b;
-                let t = Tensor::from_slice(&[a, b], Device::Cpu);
+                let t = Tensor::from_slice(&[a, b], Device::Cpu(0));
                 assert_eq!(t.dtype(), $dtype);
                 assert_eq!(t.numel(), 2);
                 assert_eq!(t.get::<$t>(&[0]), a);
@@ -107,16 +100,13 @@ mod dtype {
 }
 
 mod options {
-    //! Tensor factories and `TensorOptions`, checked against PyTorch's
-    //! semantics (`at::zeros(size, options)` and friends).
-
     use crate::tensor::dtype::f16;
     use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
     #[test]
     fn defaults_are_float32_on_cpu() {
         let t = Tensor::zeros(&[2, 3], TensorOptions::new());
-        assert_eq!((t.dtype(), t.device()), (DType::F32, Device::Cpu));
+        assert_eq!((t.dtype(), t.device()), (DType::F32, Device::Cpu(0)));
         assert_eq!(t.shape(), &[2, 3]);
         assert_eq!(Tensor::ones(&[2], TensorOptions::new()).dtype(), DType::F32);
     }
@@ -124,11 +114,11 @@ mod options {
     #[test]
     fn a_dtype_or_device_converts_into_options() {
         assert_eq!(Tensor::zeros(&[1], DType::I64).dtype(), DType::I64);
-        let t = Tensor::zeros(&[1], Device::Cpu);
-        assert_eq!((t.dtype(), t.device()), (DType::F32, Device::Cpu));
-        let opts = TensorOptions::new().dtype(DType::U8).device(Device::Cpu);
+        let t = Tensor::zeros(&[1], Device::Cpu(0));
+        assert_eq!((t.dtype(), t.device()), (DType::F32, Device::Cpu(0)));
+        let opts = TensorOptions::new().dtype(DType::U8).device(Device::Cpu(0));
         assert_eq!(opts.dtype_opt(), Some(DType::U8));
-        assert_eq!(opts.device_opt(), Some(Device::Cpu));
+        assert_eq!(opts.device_opt(), Some(Device::Cpu(0)));
         assert_eq!(TensorOptions::new().dtype_opt(), None);
     }
 
@@ -198,8 +188,6 @@ mod options {
 }
 
 mod fill {
-    //! `Tensor::fill_` / `zero_` on the CPU (PyTorch: `Tensor.fill_`, `zero_`).
-
     use crate::tensor::dtype::{bf16, f16};
     use crate::{DType, Device, Tensor};
 
@@ -245,7 +233,7 @@ mod fill {
 
     #[test]
     fn fill_of_an_empty_tensor_is_a_no_op() {
-        let t = Tensor::zeros(&[0, 3], Device::Cpu);
+        let t = Tensor::zeros(&[0, 3], Device::Cpu(0));
         t.fill_(1);
         assert_eq!(t.numel(), 0);
     }
@@ -275,7 +263,7 @@ mod storage_semantics {
         let t = Tensor::zeros(&[2, 3, 4], DType::F32);
         assert_eq!(t.numel(), 24);
         assert_eq!(t.dtype().size_of(), 4);
-        assert_eq!(t.device().to_string(), "cpu");
+        assert_eq!(t.device().to_string(), "cpu:0");
     }
 
     #[test]
@@ -384,24 +372,8 @@ mod storage_semantics {
 }
 
 mod device_kernels {
-    //! Tensor code paths that go through op dispatch and view/layout bookkeeping.
-    //!
-    //! These used to run on `OpaqueDevice`, a fake device that claimed
-    //! `Device::Mps` while keeping its bytes in a side table at addresses the
-    //! host could not touch. That device modelled "MPS but not unified", which
-    //! is no longer representable: MPS means unified memory (see
-    //! `ops/copy/mps/mod.rs`), so host-addressability follows from the device. The
-    //! allocator keeps nothing but allocate/free for it to override.
-    //!
-    //! So the tests below run on the real CPU device, where the same
-    //! view/strides/layout logic is exercised without a fake allocator. The
-    //! device paths themselves are covered for real in `mod mps` and
-    //! `mod cuda`, which need an actual GPU.
-
     use crate::{DType, Device, Tensor, TensorOptions};
 
-    /// A CPU tensor holding `values`, reshaped to `shape`. Constructed through
-    /// the normal dtype/device path, so every op below dispatches for real.
     fn tensor_on(values: &[f32], shape: &[usize]) -> Tensor {
         Tensor::from_slice(values, DType::F32).reshape(shape)
     }
@@ -410,12 +382,10 @@ mod device_kernels {
         tensor_on(values, shape)
     }
 
-    // ---------------- element access and views ----------------
-
     #[test]
     fn element_access_reads_and_writes_elements() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
-        assert_eq!(t.device(), Device::Cpu);
+        assert_eq!(t.device(), Device::Cpu(0));
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
@@ -428,7 +398,7 @@ mod device_kernels {
         let tt = t.transpose(0, 1);
         assert_eq!(tt.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
         let c = tt.contiguous::<f32>();
-        assert_eq!(c.device(), Device::Cpu, "contiguous stays on the device");
+        assert_eq!(c.device(), Device::Cpu(0), "contiguous stays on the device");
         assert!(c.is_contiguous());
         assert_eq!(c.to_vec::<f32>(), tt.to_vec::<f32>());
     }
@@ -437,9 +407,7 @@ mod device_kernels {
     fn to_same_device_is_a_no_op_copy() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
         let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
-        let same = view.to(Device::Cpu);
-        // Already there: shares storage rather than copying, so the view's
-        // offset into the shared span is kept.
+        let same = view.to(Device::Cpu(0));
         assert!(same.shares_storage_with(&view));
         assert_eq!(same.storage_offset(), view.storage_offset());
         assert_eq!(same.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
@@ -447,38 +415,28 @@ mod device_kernels {
 
     #[test]
     fn to_a_different_device_copies_only_the_view_and_keeps_its_layout() {
-        // A fresh storage on another device gets only the elements the view
-        // covers, rebased to offset 0, with the view's strides preserved.
-        // (The real cross-device hop needs a GPU; here the source is a
-        // device the host cannot reach, so every read goes through the copy
-        // op. The MPS and CUDA modules cover the actual devices.)
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
         let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
         assert_eq!(view.storage_offset(), 1);
-        // Same device: shares storage, so the offset is kept.
-        assert!(view.to(Device::Cpu).shares_storage_with(&view));
-        // The view's logical contents are what a copy would carry.
+        assert!(view.to(Device::Cpu(0)).shares_storage_with(&view));
         assert_eq!(view.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
     }
 
     #[test]
     fn to_the_same_device_shares_storage() {
         let t = Tensor::arange(4, DType::F32);
-        assert!(t.to(Device::Cpu).shares_storage_with(&t));
+        assert!(t.to(Device::Cpu(0)).shares_storage_with(&t));
     }
 
     #[test]
     fn empty_tensors_need_no_device_access() {
         let t = tensor(&[], &[0, 3]);
         assert_eq!(t.to_vec::<f32>(), Vec::<f32>::new());
-        assert_eq!(t.to(Device::Cpu).numel(), 0);
+        assert_eq!(t.to(Device::Cpu(0)).numel(), 0);
     }
-
-    // ---------------- fills ----------------
 
     #[test]
     fn zeroing_fresh_storage_writes_every_byte() {
-        // What `Tensor::zeros` does: uninitialized storage, then `zero_`.
         let t = unsafe { Tensor::empty(&[3], TensorOptions::new().dtype(DType::F32)) };
         t.zero_();
         assert_eq!(t.to_vec::<f32>(), vec![0.0; 3]);
@@ -496,7 +454,6 @@ mod device_kernels {
         let t = tensor(&[1.0, 2.0, 3.0], &[3]);
         t.fill_(2.5);
         assert_eq!(t.to_vec::<f32>(), vec![2.5; 3]);
-        // -0.0 has a sign byte, so its bytes differ too.
         t.fill_(-0.0);
         assert!(
             t.to_vec::<f32>()
@@ -512,35 +469,29 @@ mod device_kernels {
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
     }
 
-    // ---------------- empty ----------------
-
     #[test]
     fn empty_allocates_with_the_options_and_is_writable() {
-        // SAFETY: every element is written by `fill_` before it is read.
         let t = unsafe { Tensor::empty(&[2, 3], TensorOptions::new().dtype(DType::I32)) };
         assert_eq!(
             (t.dtype(), t.device(), t.shape()),
-            (DType::I32, Device::Cpu, &[2, 3][..])
+            (DType::I32, Device::Cpu(0), &[2, 3][..])
         );
         assert_eq!(t.storage().nbytes(), 6 * 4);
         assert_eq!(t.fill_(3).to_vec::<i32>(), vec![3; 6]);
         // Defaults: float32 on the CPU.
         let d = unsafe { Tensor::empty(&[1], TensorOptions::new()) };
-        assert_eq!((d.dtype(), d.device()), (DType::F32, Device::Cpu));
+        assert_eq!((d.dtype(), d.device()), (DType::F32, Device::Cpu(0)));
     }
 }
 
-#[cfg(lumen_mps_linked)] // needs a real Metal device
+#[cfg(lumen_mps_linked)]
 mod mps {
-    //! Tensors on the real Metal device (Apple Silicon).
-
     use crate::device::mps;
     use crate::{DType, Device, TensorOptions};
 
-    /// Skip guard: returns early from a test when Metal is unavailable.
     macro_rules! require_mps {
         () => {
-            if !mps::is_available() {
+            if !mps::MPS.is_available() {
                 eprintln!("Metal unavailable, skipping");
                 return;
             }
@@ -552,10 +503,12 @@ mod mps {
         require_mps!();
         let t = crate::Tensor::arange(
             6,
-            TensorOptions::new().dtype(DType::F32).device(Device::Mps),
+            TensorOptions::new()
+                .dtype(DType::F32)
+                .device(Device::Mps(0)),
         )
         .reshape(&[2, 3]);
-        assert_eq!(t.device(), Device::Mps);
+        assert_eq!(t.device(), Device::Mps(0));
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
@@ -568,15 +521,15 @@ mod mps {
     #[test]
     fn tensor_moves_between_cpu_and_mps() {
         require_mps!();
-        let cpu = crate::Tensor::from_slice(&[1i64, 2, 3, 4], Device::Cpu).reshape(&[2, 2]);
-        let on_mps = cpu.transpose(0, 1).to(Device::Mps);
-        assert_eq!(on_mps.device(), Device::Mps);
+        let cpu = crate::Tensor::from_slice(&[1i64, 2, 3, 4], Device::Cpu(0)).reshape(&[2, 2]);
+        let on_mps = cpu.transpose(0, 1).to(Device::Mps(0));
+        assert_eq!(on_mps.device(), Device::Mps(0));
         assert!(!on_mps.is_contiguous(), "layout is kept");
         assert_eq!(on_mps.to_vec::<i64>(), vec![1, 3, 2, 4]);
         let contiguous = on_mps.contiguous::<i64>();
-        assert_eq!(contiguous.device(), Device::Mps);
-        let back = contiguous.to(Device::Cpu);
-        assert_eq!(back.device(), Device::Cpu);
+        assert_eq!(contiguous.device(), Device::Mps(0));
+        let back = contiguous.to(Device::Cpu(0));
+        assert_eq!(back.device(), Device::Cpu(0));
         assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
     }
 
@@ -585,7 +538,9 @@ mod mps {
         require_mps!();
         let t = crate::Tensor::zeros(
             &[3, 5],
-            TensorOptions::new().dtype(DType::Bool).device(Device::Mps),
+            TensorOptions::new()
+                .dtype(DType::Bool)
+                .device(Device::Mps(0)),
         );
         assert!(t.to_vec::<bool>().iter().all(|&b| !b));
     }
@@ -594,7 +549,7 @@ mod mps {
     fn fill_on_mps_writes_every_element_size_on_the_gpu() {
         require_mps!();
         use crate::tensor::dtype::f16;
-        let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps);
+        let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps(0));
         let n = 3000; // several threadgroups
         let halves = crate::Tensor::full(&[n], 1.5, on_mps(DType::F16)); // fill_u16
         assert_eq!(halves.to_vec::<f16>(), vec![f16::from_f32(1.5); n]);
@@ -615,7 +570,9 @@ mod mps {
     #[test]
     fn fill_on_mps_uses_metal_and_respects_views() {
         require_mps!();
-        let opts = TensorOptions::new().dtype(DType::F32).device(Device::Mps);
+        let opts = TensorOptions::new()
+            .dtype(DType::F32)
+            .device(Device::Mps(0));
         let t = crate::Tensor::arange(12, opts).reshape(&[3, 4]);
         t.select(0, 1).zero_(); // contiguous: the dense Metal kernel at an offset
         t.select(1, 3).fill_(2.5); // strided: the strided Metal kernel
@@ -625,12 +582,14 @@ mod mps {
         );
         let bytes = crate::Tensor::zeros(
             &[5],
-            TensorOptions::new().dtype(DType::U8).device(Device::Mps),
+            TensorOptions::new().dtype(DType::U8).device(Device::Mps(0)),
         );
         assert_eq!(bytes.fill_(0xC3).to_vec::<u8>(), vec![0xC3; 5]);
         let ones = crate::Tensor::ones(
             &[4],
-            TensorOptions::new().dtype(DType::Bool).device(Device::Mps),
+            TensorOptions::new()
+                .dtype(DType::Bool)
+                .device(Device::Mps(0)),
         );
         assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
     }
@@ -638,11 +597,11 @@ mod mps {
     #[test]
     fn fills_on_mps_run_in_order() {
         require_mps!();
-        // Many fills of one tensor, encoded without waiting (and committed
-        // in batches): the last one wins.
         let t = crate::Tensor::zeros(
             &[1 << 20],
-            TensorOptions::new().dtype(DType::F32).device(Device::Mps),
+            TensorOptions::new()
+                .dtype(DType::F32)
+                .device(Device::Mps(0)),
         );
         for i in 0..100 {
             t.fill_(i as f32);
@@ -657,7 +616,7 @@ mod mps {
     fn strided_fills_on_mps_write_only_the_view() {
         require_mps!();
         use crate::tensor::dtype::f16;
-        let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps);
+        let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps(0));
         // A strided view of a permuted 3-D block, for each element size.
         let view = |t: &crate::Tensor| t.permute(&[2, 0, 1]).narrow(0, 1, 2).narrow(2, 0, 3);
         let expected = |fill: f64| -> Vec<f64> {
@@ -688,15 +647,12 @@ mod mps {
 
 #[cfg(lumen_cuda_linked)] // needs cudart and a GPU
 mod cuda {
-    //! Tensors on real CUDA devices. Each test skips when no GPU is visible.
-
     use crate::device::cuda;
     use crate::{DType, Device, Tensor, TensorOptions};
 
-    /// Skip guard: returns early from a test when there is no GPU.
     macro_rules! require_cuda {
         () => {
-            if !cuda::is_available() {
+            if !cuda::CUDA.is_available() {
                 eprintln!("no CUDA device, skipping");
                 return;
             }
@@ -724,22 +680,22 @@ mod cuda {
     #[test]
     fn tensor_moves_between_cpu_and_cuda() {
         require_cuda!();
-        let cpu = Tensor::from_slice(&[1i64, 2, 3, 4], Device::Cpu).reshape(&[2, 2]);
+        let cpu = Tensor::from_slice(&[1i64, 2, 3, 4], Device::Cpu(0)).reshape(&[2, 2]);
         let on_gpu = cpu.transpose(0, 1).to(Device::Cuda(0));
         assert_eq!(on_gpu.device(), Device::Cuda(0));
         assert!(!on_gpu.is_contiguous(), "layout is kept");
         assert_eq!(on_gpu.to_vec::<i64>(), vec![1, 3, 2, 4]);
         let contiguous = on_gpu.contiguous::<i64>();
         assert_eq!(contiguous.device(), Device::Cuda(0));
-        let back = contiguous.to(Device::Cpu);
-        assert_eq!(back.device(), Device::Cpu);
+        let back = contiguous.to(Device::Cpu(0));
+        assert_eq!(back.device(), Device::Cpu(0));
         assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
     }
 
     #[test]
     fn tensor_moves_between_gpus() {
         require_cuda!();
-        if cuda::device_count() < 2 {
+        if cuda::CUDA.device_count() < 2 {
             eprintln!("fewer than 2 CUDA devices, skipping");
             return;
         }
@@ -757,7 +713,7 @@ mod meta {
     use crate::{DType, Device, Tensor, TensorOptions};
 
     fn meta(dtype: DType) -> TensorOptions {
-        TensorOptions::new().dtype(dtype).device(Device::Meta)
+        TensorOptions::new().dtype(dtype).device(Device::Meta(0))
     }
 
     #[test]
@@ -767,7 +723,7 @@ mod meta {
             Tensor::ones(&[2, 3], meta(DType::F32)),
             Tensor::full(&[2, 3], 7, meta(DType::F32)),
         ] {
-            assert_eq!((t.device(), t.shape()), (Device::Meta, &[2, 3][..]));
+            assert_eq!((t.device(), t.shape()), (Device::Meta(0), &[2, 3][..]));
         }
         let t = Tensor::arange(5, meta(DType::I64));
         assert_eq!(t.shape(), [5]);
@@ -777,7 +733,7 @@ mod meta {
         let packed = view.contiguous::<f32>();
         assert_eq!(
             (packed.device(), packed.shape()),
-            (Device::Meta, &[3, 2][..])
+            (Device::Meta(0), &[3, 2][..])
         );
         assert!(packed.is_contiguous());
         t.fill_(1.0f32).zero_();
@@ -791,10 +747,10 @@ mod meta {
     #[test]
     fn to_meta_drops_the_data() {
         let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], DType::F32).reshape(&[3, 1]);
-        let m = t.to(Device::Meta);
+        let m = t.to(Device::Meta(0));
         assert_eq!(
             (m.device(), m.shape(), m.strides()),
-            (Device::Meta, &[3, 1][..], &[1, 1][..])
+            (Device::Meta(0), &[3, 1][..], &[1, 1][..])
         );
     }
 
@@ -807,7 +763,7 @@ mod meta {
     #[test]
     #[should_panic(expected = "cannot copy a meta tensor to cpu")]
     fn copying_out_panics() {
-        Tensor::zeros(&[2], meta(DType::F32)).to(Device::Cpu);
+        Tensor::zeros(&[2], meta(DType::F32)).to(Device::Cpu(0));
     }
 }
 
@@ -815,9 +771,6 @@ mod to_dtype {
     use crate::tensor::dtype::bf16;
     use crate::{DType, Device, Tensor};
 
-    /// A conversion as `cast` converts (floats round,
-    /// integers truncate toward zero), on the tensor's device; the same
-    /// tensor when the dtype does not change; types alone on meta.
     #[test]
     fn converts_on_the_tensors_device() {
         let x = Tensor::from_slice(&[1.0f32, 2.5, -3.7, 1e6], DType::F32);
@@ -833,17 +786,17 @@ mod to_dtype {
             [1, 2, -3, 1_000_000]
         );
         assert!(x.to_dtype(DType::F32).unwrap().shares_storage_with(&x));
-        let meta = Tensor::zeros(&[2, 3], Device::Meta)
+        let meta = Tensor::zeros(&[2, 3], Device::Meta(0))
             .to_dtype(DType::F16)
             .unwrap();
         assert_eq!(
             (meta.device(), meta.dtype(), meta.shape()),
-            (Device::Meta, DType::F16, &[2, 3][..])
+            (Device::Meta(0), DType::F16, &[2, 3][..])
         );
-        if crate::device::mps::is_available() {
-            let m = x.to(Device::Mps).to_dtype(DType::BF16).unwrap();
-            assert_eq!(m.device(), Device::Mps);
-            assert_eq!(m.to(Device::Cpu).to_vec::<bf16>(), expected);
+        if crate::device::mps::MPS.is_available() {
+            let m = x.to(Device::Mps(0)).to_dtype(DType::BF16).unwrap();
+            assert_eq!(m.device(), Device::Mps(0));
+            assert_eq!(m.to(Device::Cpu(0)).to_vec::<bf16>(), expected);
         }
     }
 }
