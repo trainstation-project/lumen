@@ -20,6 +20,7 @@ pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;
 pub mod compiler;
+pub mod custom_op;
 pub mod device;
 pub mod graph;
 pub mod ops;
