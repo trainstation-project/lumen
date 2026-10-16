@@ -175,14 +175,7 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
     ])
 }
 
-/// How a kernel's threads are laid out.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Grid {
-    /// A thread per index of an x-by-y-by-z grid (x varying fastest).
-    Threads([usize; 3]),
-    /// That many threadgroups of 16x16 threads.
-    Groups([usize; 3]),
-}
+pub(crate) use crate::custom_op::mps::Grid;
 
 /// Launch `kernel` for `step` over `grid`, on buffers `inputs` then
 /// `output` and argument bytes `args`.
