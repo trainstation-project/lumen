@@ -1058,9 +1058,12 @@ fn row_kernel(
             .unwrap();
             continue;
         }
-        let value = e.value(v, "j".into());
-        match body.type_of(v).numel() == rows {
-            true => writedoc!(
+        // A value a row computed in the loop (as a gather of the row reads
+        // it): at its row, written at the row's first element.
+        let per_row = body.type_of(v).numel() == rows;
+        let value = e.value(v, if per_row { "row" } else { "j" }.into());
+        match (per_row, e.invariant[v]) {
+            (true, true) => writedoc!(
                 once,
                 "
                 if (t == 0) {{
@@ -1069,7 +1072,12 @@ fn row_kernel(
                 ",
                 k + 1
             ),
-            false => writeln!(each, "        out{}[j] = {value};", k + 1),
+            (true, false) => writeln!(
+                each,
+                "        if (c == 0u) {{ out{}[row] = {value}; }}",
+                k + 1
+            ),
+            (false, _) => writeln!(each, "        out{}[j] = {value};", k + 1),
         }
         .unwrap();
     }
@@ -1091,11 +1099,20 @@ fn row_kernel(
             }
         }
         false => {
+            // A value a row computed in the loop: at its row, written at
+            // the row's first element.
+            let write = match out_type.numel() == rows {
+                true => format!(
+                    "if (c == 0u) {{ out[row] = {}; }}",
+                    e.value(out, "row".into())
+                ),
+                false => format!("out[j] = {value};"),
+            };
             let (hoisted, lines) = (hoisted(&e.hoisted), &e.lines);
             writedoc!(
                 source,
                 "
-                {hoisted}{once}{header}{lines}out[j] = {value};
+                {hoisted}{once}{header}{lines}{write}
                 {each}}}
                 "
             )
@@ -1444,9 +1461,9 @@ impl<'a> Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
-                    // The operand at the entry its index picks (clamped
-                    // into the axis): element (o, t, r) of the result, t the
-                    // index's position, reads (o, index t, r) of it.
+                    // The operand at the entry its index picks: element
+                    // (o, t, r) of the result, t the index's position, reads
+                    // (o, index t, r) of it.
                     Gather { axis } => {
                         let x = body.type_of(node.inputs[0]);
                         let m = body.type_of(node.inputs[1]).numel();
@@ -1461,8 +1478,8 @@ impl<'a> Emitter<'a> {
                         }
                         let t = self.index(t);
                         let k = self.value(node.inputs[1], t);
-                        let k =
-                            self.index(format!("uint(clamp(long({k}), 0l, {}l))", n.max(1) - 1));
+                        // As given (`safe_kernels` clamps it first: `bounds`).
+                        let k = self.index(format!("uint({k})"));
                         let mut terms = Vec::new();
                         if ty.numel() > m * inner {
                             terms.push(format!("({idx} / {}u) * {}u", m * inner, n * inner));

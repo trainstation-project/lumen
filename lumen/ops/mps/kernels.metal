@@ -254,3 +254,14 @@ inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint
 // float for bfloat.
 #define FOR_MATH_FLOAT(X) X(f16, half) X(f32, float)
 #define FOR_BYTES(X) X(1, uchar) X(2, ushort) X(4, uint) X(8, ulong)
+
+// Lane `lane`'s two elements (thread_elements) of an 8x8 simdgroup
+// matrix: at row frag_row(lane), columns frag_col(lane) and the next. The
+// 4 lanes holding a row differ in lane bits 0 and 3.
+inline uint frag_row(uint lane) { return ((lane / 4) & 4) + ((lane / 2) % 4); }
+inline uint frag_col(uint lane) { return ((lane / 4) & 2) * 2 + (lane % 2) * 2; }
+
+// A lane's two elements of simdgroup matrix `m` (MLX reads them so).
+template <typename T> inline thread vec<T, 2> &frag(thread simdgroup_matrix<T, 8, 8> &m) {
+    return reinterpret_cast<thread vec<T, 2> &>(m.thread_elements());
+}

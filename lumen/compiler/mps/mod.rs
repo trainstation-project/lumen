@@ -11,12 +11,14 @@
 //! instead, as Core ML steps ([`ane`]).
 
 pub(crate) mod ane;
+mod bounds;
 mod codegen;
 mod diamonds;
 mod dot_strength;
 mod fusion;
 mod gated_backward;
 mod horizontal;
+mod linear_cross_entropy;
 mod merge_dots;
 mod split_k;
 #[cfg(test)]
@@ -120,6 +122,18 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
                 name
             },
         ),
+        false => graph,
+    };
+    // A cross entropy of a dot's logits nothing else reads, its logits
+    // never stored (matched, as attention, before the dots are moved).
+    let graph = match config.fuse && config.fused_linear_cross_entropy {
+        true => linear_cross_entropy::linear_cross_entropy(&graph),
+        false => graph,
+    };
+    // Safe kernels: each index clamped into its axis, in the graph (after
+    // the linear cross entropy's match, which reads its gather's index).
+    let graph = match config.safe_kernels {
+        true => bounds::clamp_indices(&graph),
         false => graph,
     };
     // Now the attention's are matched (its kernels' layouts): transposes of
@@ -362,9 +376,10 @@ fn canonicalize_dots(graph: &Graph) -> Graph {
 
 /// The slices of `graph` its dots read in place, as strided views of the
 /// sliced value ([`PlanOptions::views`]; the matmul kernels take any
-/// operand strides): those read by dots alone, each of which reads it in
-/// matmul form at those strides, that are not outputs or of a value that
-/// is such a view itself.
+/// operand strides): those read by dots alone (or contractions with their
+/// epilogues, [`fusion_reads_strided`]), each of which reads it in matmul
+/// form at those strides, that are not outputs or of a value that is such
+/// a view itself.
 fn dot_views(graph: &Graph) -> Vec<Var> {
     let nodes = graph.nodes();
     let mut views = Vec::new();
@@ -379,12 +394,15 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
         let strides = contiguous_strides(&graph.type_of(x).shape);
         let mut readers = nodes.iter().filter(|n| n.inputs.contains(&v)).peekable();
         let read = readers.peek().is_some();
-        let in_place = readers.all(|n| {
-            let Primitive::DotGeneral { .. } = n.primitive else {
-                return false;
-            };
-            let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
-            (0..2).all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
+        let in_place = readers.all(|n| match &n.primitive {
+            Primitive::DotGeneral { .. } => {
+                let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
+                (0..2)
+                    .all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
+            }
+            Primitive::Fusion { body, .. } => (0..n.inputs.len())
+                .all(|k| n.inputs[k] != v || fusion_reads_strided(body, k, &strides)),
+            _ => false,
         });
         if read && in_place {
             views.push(v);

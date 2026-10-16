@@ -61,6 +61,11 @@ pub(crate) fn encode(
     if let Fusion { .. } = step.primitive {
         return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
     }
+    if let LinearCrossEntropy = step.primitive {
+        return super::dot_general::mps::encode_linear_cross_entropy(
+            step, inputs, output, scratch, keep,
+        );
+    }
 
     if let Concatenate { .. } = step.primitive {
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
@@ -97,7 +102,7 @@ pub(crate) fn encode(
             unreachable!("a stage's transfers are between its plans (compiler::stages)")
         }
         Full { .. } | Iota { .. } | RandomBits { .. } => super::factory::mps::encode,
-        Fusion { .. } => unreachable!("encoded above"),
+        Fusion { .. } | LinearCrossEntropy => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
         CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),
     };
@@ -117,6 +122,9 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
             axis, accum_dtype, ..
         } => super::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
         Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
+        Primitive::LinearCrossEntropy => {
+            super::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
+        }
         _ => 0,
     }
 }

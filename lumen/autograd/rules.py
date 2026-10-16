@@ -29,8 +29,9 @@ deflinear(prims.neg, lambda ct, x: [prims.neg(ct)])
 def _widened(v, dtype):
     """Value ``v``, a gradient's dots rounding their accumulator (``dtype``)
     narrower, maybe transposed or summed (``x @ w.bfloat16()``'s gradient,
-    ``w``'s dot's ``x``; ``x``'s of several dots), computed with the dots
-    writing their accumulator instead; None if it is not one."""
+    ``w``'s dot's ``x``; ``x``'s of several dots), or their sum in it cast
+    narrower, computed with the dots writing their accumulator instead;
+    None if it is not one."""
     node = tracer.producer(v)
     if node is None:
         return None
@@ -43,6 +44,10 @@ def _widened(v, dtype):
         return None if x is None or y is None else prims.add(x, y)
     if name == "dot_general" and p["accum_dtype"] == dtype and p["output_dtype"] != dtype:
         return _dot(_value(ins[0]), _value(ins[1]), _dot_dims(p), p, dtype)
+    # A sum of such dots kept in their accumulator, rounded once (a chunked
+    # gradient's: `lumen/autograd/cross_entropy.py`).
+    if name == "cast" and _value(ins[0]).dtype == dtype:
+        return _value(ins[0])
     return None
 
 

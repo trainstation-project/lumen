@@ -197,7 +197,12 @@ pub(crate) fn backward_of_body(body: &Graph) -> Option<Backward> {
 
 /// The fusion body computing `outputs` of `graph` from `bases` (its
 /// inputs): every node from them back to those.
-fn body_of(graph: &Graph, producer: &[Option<usize>], outputs: &[Var], bases: &[Var]) -> Graph {
+pub(crate) fn body_of(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    outputs: &[Var],
+    bases: &[Var],
+) -> Graph {
     let nodes = graph.nodes();
     let mut members = Vec::new();
     let mut stack: Vec<Var> = outputs.to_vec();

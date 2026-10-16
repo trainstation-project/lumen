@@ -228,14 +228,15 @@ def dynamic_update_slice(x, update, start_indices):
 def gather(x, indices, axis):
     """``x``'s entries along ``axis`` that ``indices`` (int32 or int64, any
     shape) pick: ``x``'s shape with ``axis`` replaced by the indices'
-    (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index clamped into
-    the axis."""
+    (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index in the axis
+    (one out of it the program's error; clamped into it with
+    ``lumen.config.compiler.safe_kernels``)."""
     return bind("gather", x, indices, axis=axis)
 
 
 def scatter_add(x, indices, updates, axis):
     """``x`` with ``updates`` (shaped as :func:`gather` of it at ``indices``)
-    added at the entries along ``axis`` the indices pick, clamped as the
+    added at the entries along ``axis`` the indices pick, in range as the
     gather's (``lax.scatter_add``): a gather's gradient. Where nothing reads
     ``x`` after it, added in ``x``'s memory (in place)."""
     return bind("scatter_add", x, indices, updates, axis=axis)
@@ -277,6 +278,14 @@ def random_bits(seed, start, shape, offset):
     and ``start``: uint64 scalars; XLA's ``RngBitGenerator``, PyTorch's
     ``philox_rand``)."""
     return bind("random_bits", seed, start, shape=tuple(shape), offset=offset)
+
+
+def linear_cross_entropy(h, w, target):
+    """Each row of ``h`` ``[B, D]``'s logits ``h · wᵀ`` (``w`` ``[V, D]``,
+    accumulated in float32, never stored) reduced to their log-sum-exp and
+    the logit of its class (``target`` ``[B]``, int32 or int64): float32
+    ``[B, 2]``, ``[lse, logit]`` a row (Cut Cross-Entropy's forward)."""
+    return bind("linear_cross_entropy", h, w, target)
 
 
 def iota(dtype, shape, dimension):

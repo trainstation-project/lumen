@@ -1718,6 +1718,152 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
     np.testing.assert_allclose(grad, g * (np.exp(xr - lse[:, None]) - hit), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize(
+    "n, d, vocab, dtype", [(5, 16, 7, "float32"), (300, 64, 1000, "float32"), (128, 256, 32000, "bfloat16")]
+)
+def test_linear_cross_entropy(device, n, d, vocab, dtype):
+    """``F.cross_entropy(F.matmul(h, w.t()), t)``, the MPS compiler's linear
+    cross entropy where nothing else reads the logits (not trained): one
+    step of two kernels: the matmul writing each row's
+    max and sum of exps a tile of 64 classes (and the label's logit), then
+    a kernel combining a row's tiles into its ``logsumexp``. Its losses and
+    gradients NumPy's (of the operands as rounded to ``dtype``)."""
+    if device == "cpu" and vocab > 1000:
+        pytest.skip("slow on the CPU")
+    rng = np.random.default_rng(0)
+    h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
+    w = rng.standard_normal((vocab, d)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    c = rng.standard_normal(n).astype(np.float32)
+
+    def loss(h, w, t):
+        return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
+
+    def step(h, w, t, c):
+        losses = loss(h, w, t)
+        F.sum(losses * c).backward()
+        return losses, h.grad, w.grad
+
+    try:
+        H, W, T, C = (lumen.from_numpy(a).to(device) for a in (h, w, t, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    H, W = H.to(dtype=dtype), W.to(dtype=dtype)
+    if device == "mps":
+        steps = lumen.graph.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
+        assert steps[0]["label"] == "linear_cross_entropy" and steps[0]["output"][2] == [2, n], steps
+    hr, wr = (lumen.to_numpy(v.to(dtype="float32")).astype(np.float64) for v in (H, W))
+    x = hr @ wr.T
+    m = x.max(-1, keepdims=True)
+    lse = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0]
+    hit = np.zeros_like(x)
+    hit[np.arange(n), t] = 1
+    dx = (np.exp(x - lse[:, None]) - hit) * c[:, None]
+    losses, dh, dw = (lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C))
+    np.testing.assert_allclose(losses, lse - x[np.arange(n), t], rtol=1e-5, atol=1e-5)
+    tol = dict(rtol=1e-4, atol=1e-5) if dtype == "float32" else dict(rtol=2e-2, atol=2e-3)
+    np.testing.assert_allclose(dh, dx @ wr, **tol)
+    np.testing.assert_allclose(dw, dx.T @ hr, **tol)
+
+
+@pytest.mark.parametrize("n, d, vocab", [(64, 32, 16), (256, 128, 32000)])
+def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
+    """``F.cross_entropy`` of a matmul's float32 logits (an LM head's, its
+    weight transposed and cast), nothing else reading them: the MPS
+    compiler matches it as ``linear_cross_entropy`` (its pass, as flash
+    attention's), no step writing the logits. With the logits read too
+    (returned), not matched. The losses NumPy's either way."""
+    rng = np.random.default_rng(0)
+    h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
+    w = rng.standard_normal((vocab, d)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+
+    def loss(h, w, t):
+        return F.cross_entropy(F.matmul(h, w.t().bfloat16(), "float32", "float32"), t)
+
+    def both(h, w, t):
+        logits = F.matmul(h, w.t().bfloat16(), "float32", "float32")
+        return F.cross_entropy(logits, t), logits
+
+    try:
+        H, W, T = (lumen.from_numpy(a).to("mps") for a in (h, w, t))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    H = H.to(dtype="bfloat16")
+    steps = lumen.graph.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
+    assert "linear_cross_entropy" in [s["label"] for s in steps], [s["label"] for s in steps]
+    assert all(s["output"][2] != [n, vocab] for s in steps), [s["label"] for s in steps]
+    steps = lumen.graph.Plan(lumen.make_graph(both)(H, W, T), "mps").steps()
+    assert "linear_cross_entropy" not in [s["label"] for s in steps], [s["label"] for s in steps]
+    hr = lumen.to_numpy(H.to(dtype="float32")).astype(np.float64)
+    wr = lumen.to_numpy(W.to(dtype="bfloat16").to(dtype="float32")).astype(np.float64)
+    x = hr @ wr.T
+    m = x.max(-1, keepdims=True)
+    want = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0] - x[np.arange(n), t]
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(loss)(H, W, T)), want, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(both)(H, W, T)[0]), want, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("reduce", ["mean", "weighted"])
+@pytest.mark.parametrize("n, d, vocab, chunk", [(64, 32, 16, 16), (1000, 256, 5000, 128)])
+def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
+    """A cross entropy of a matmul's logits trained with
+    ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``
+    (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
+    a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the last one
+    short), the chunk's logits recomputed, ``(softmax - one_hot) · g``
+    (any ``g``: a mean's, a weighted sum's), then its rows' gradients:
+    three matmuls a chunk; its forward, nothing else reading the logits,
+    one linear cross entropy. Each chunk's weight gradient added by its own
+    matmul's epilogue, as it is computed (none kept for a later one), so
+    the logits of a chunk at a time in memory: of a large vocabulary, less
+    than the unfused program's. Its losses and gradients the unfused
+    program's but where a bfloat16 rounds apart (the log-sum-exp's
+    order)."""
+    rng = np.random.default_rng(0)
+    h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
+    w = rng.standard_normal((vocab, d)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    c = (rng.random(n) / n).astype(np.float32)
+
+    def trained(f):
+        def step(h, w, t, c):
+            losses = f(h, w, t)
+            loss = F.mean(losses) if reduce == "mean" else F.sum(losses * c)
+            loss.backward()
+            return loss, h.grad, w.grad
+
+        return step
+
+    def unfused(h, w, t):
+        return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
+
+    try:
+        H, W, T, C = (lumen.from_numpy(a).to("mps") for a in (h, w, t, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    H, W = H.to(dtype="bfloat16"), W.to(dtype="bfloat16")
+    step = trained(unfused)
+    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
+    try:
+        plan = lumen.graph.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
+        got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
+    finally:
+        lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+    chunks = -(-n // chunk)
+    labels = [s["label"] for s in plan.steps()]
+    assert "linear_cross_entropy" in labels, labels
+    assert sum("dot_general" in label for label in labels) == 3 * chunks, labels
+    baseline = lumen.graph.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
+    if vocab > d:
+        assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)
+    want = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(trained(unfused))(H, W, T, C)]
+    np.testing.assert_allclose(got[0], want[0], rtol=1e-6)
+    for g, e in zip(got[1:], want[1:]):
+        np.testing.assert_allclose(g, e, rtol=2.0**-7, atol=2.0**-7 * np.abs(e).max())
+
+
 def test_rms_norm_backward_recomputes_its_normalized_input():
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's

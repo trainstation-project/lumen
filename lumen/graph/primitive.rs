@@ -123,15 +123,16 @@ pub enum Primitive {
     /// The operand's entries along `axis` that `indices` (its second
     /// operand: int32 or int64, any shape) pick: its shape with `axis`
     /// replaced by the indices' (`jnp.take`; MLX's `take`, `weight[ids]`: an
-    /// embedding's lookup). Each index is clamped into the axis, as XLA's
-    /// gather clamps.
+    /// embedding's lookup). An index out of the axis is the program's error
+    /// (the reference clamps it into the axis, as XLA's gather does; a
+    /// device's kernels, with `lumen.config.compiler.safe_kernels`).
     Gather {
         axis: usize,
     },
     /// The operand with `updates` (its third operand, shaped as a
     /// [`Primitive::Gather`] of it at `indices`, its second) added at the
-    /// entries along `axis` the indices pick (clamped into it, as the
-    /// gather's), several at one entry each added: a gather's gradient
+    /// entries along `axis` the indices pick (in range, as the gather's),
+    /// several at one entry each added: a gather's gradient
     /// (`lax.scatter_add`, MLX's `scatter_add`).
     ScatterAdd {
         axis: usize,
@@ -165,6 +166,14 @@ pub enum Primitive {
         shape: Vec<usize>,
         offset: u64,
     },
+    /// A linear layer's cross entropy, its logits never stored (Apple's Cut
+    /// Cross-Entropy): of rows `h` `[B, D]` (its first operand), classes'
+    /// weights `w` `[V, D]` and each row's class `target` `[B]` (int32 or
+    /// int64), each row's logits `h · wᵀ` (accumulated in float32) reduced
+    /// to their log-sum-exp: `[2, B]` of float32, each row's loss (the
+    /// log-sum-exp less the class's logit), then each row's log-sum-exp
+    /// (its gradient's).
+    LinearCrossEntropy,
     /// `body` run as one kernel, `name`: what a device's graph compiler
     /// (`crate::compiler`) groups the primitives it fuses into. Its value is
     /// the body's first output; a body with more (a multi-output fusion)
@@ -237,6 +246,7 @@ impl Primitive {
             Full { .. } => "full",
             Iota { .. } => "iota",
             RandomBits { .. } => "random_bits",
+            LinearCrossEntropy => "linear_cross_entropy",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
             CustomCall { label, .. } => label,
@@ -270,7 +280,7 @@ impl Primitive {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
-            Select | ScatterAdd { .. } => 3,
+            Select | ScatterAdd { .. } | LinearCrossEntropy => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
             CustomCall { .. } => args.len(),
@@ -531,6 +541,26 @@ impl Primitive {
                     Some(&m) => Ok(args[m].clone()),
                     None => err("mutates no operand: it would compute nothing".into()),
                 }
+            }
+            LinearCrossEntropy => {
+                let (h, w, target) = (args[0], args[1], args[2]);
+                let rows = |t: &TensorType| t.shape.len() == 2;
+                if !rows(h) || !rows(w) || h.shape[1] != w.shape[1] || h.dtype != w.dtype {
+                    return err(format!(
+                        "needs rows [B, D] and weights [V, D] of one dtype, got {h} and {w}"
+                    ));
+                }
+                if !h.dtype.is_float() {
+                    return err(format!("needs float rows, got {h}"));
+                }
+                if !matches!(target.dtype, DType::I32 | DType::I64) || target.shape != [h.shape[0]]
+                {
+                    return err(format!(
+                        "needs a class a row, int32 or int64 [{}], got {target}",
+                        h.shape[0]
+                    ));
+                }
+                Ok(TensorType::new(DType::F32, &[2, h.shape[0]]))
             }
             RandomBits { shape, .. } => {
                 let scalar = |t: &TensorType| t.dtype == DType::U64 && t.shape.is_empty();

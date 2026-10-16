@@ -305,13 +305,24 @@ pub(crate) fn fuse(
     // written by the kernel too (XLA's GELU_AUX), hosted by its fusion;
     // one read outside only by a narrowing cast, as that cast (the bfloat16
     // a backward saves, not the float32 it was rounded from).
-    // Not for a dot reading a slice in place (a strided view, `dot_views`).
+    // A slice it reads is read in place, as a plain dot's (a strided view,
+    // `dot_views`).
     let mut dot_end: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut dot_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut in_epilogue = vec![false; nodes.len()];
     let mut dot_aux: Vec<Option<usize>> = vec![None; nodes.len()];
     // Nodes an earlier dot's epilogue took: no other's.
     let mut claimed = vec![false; nodes.len()];
+    // The last dot each value depends on.
+    let mut last_dot: Vec<Option<usize>> = vec![None; n];
+    for (i, node) in nodes.iter().enumerate() {
+        let dot = matches!(node.primitive, Primitive::DotGeneral { .. }).then_some(i);
+        last_dot[node.output] = node
+            .inputs
+            .iter()
+            .map(|&v| last_dot[v])
+            .fold(dot, Option::max);
+    }
     for (i, node) in nodes.iter().enumerate() {
         let float = |v: Var| {
             matches!(
@@ -319,11 +330,8 @@ pub(crate) fn fuse(
                 DType::F16 | DType::BF16 | DType::F32
             )
         };
-        let sliced = |v: Var| {
-            producer[v].is_some_and(|p| matches!(nodes[p].primitive, Primitive::Slice { .. }))
-        };
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. })
-            && node.inputs.iter().all(|&v| float(v) && !sliced(v))
+            && node.inputs.iter().all(|&v| float(v))
             && float(node.output);
         if !config.contraction_epilogues || !live[i] || !dot {
             continue;
@@ -381,7 +389,15 @@ pub(crate) fn fuse(
             // (below): its cotangents in float32 from the rounded gradient,
             // whatever the gate.
             let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
-            let reads = un.inputs.iter().all(|&v| after[v] || !depends[v]);
+            // Its other operands of no later dot (a bias, a residual, a
+            // sum it adds to): a node reading a later dot's value is that
+            // dot's (run once both are; a sum of chunks' dots, each added
+            // by its own, not the first's, which would wait for them all).
+            let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
+            let reads = un
+                .inputs
+                .iter()
+                .all(|&v| after[v] || (!depends[v] && earlier(v)));
             if !fuses || !reads {
                 break;
             }
@@ -600,7 +616,15 @@ pub(crate) fn fuse(
             break fusions;
         }
         for f in too_big {
-            for &m in &fusions[f].as_ref().expect("a fusion").0 {
+            let (members, reads) = fusions[f].as_ref().expect("a fusion");
+            // One node (a concatenate) reading more: no smaller fusion.
+            assert!(
+                members.len() > 1,
+                "{}: reads {} values, more than a kernel binds ({MAX_INPUTS})",
+                nodes[f].primitive.name(),
+                reads.len()
+            );
+            for &m in members {
                 root[m] = true;
             }
             host.iter_mut()

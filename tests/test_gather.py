@@ -1,7 +1,10 @@
 """Gathers (``prims.gather``, ``weight[ids]``: an embedding's lookup) and
 scatter-adds (``prims.scatter_add``, a gather's gradient): entries along an
-axis at integer indices read when the program runs, each clamped into the
-axis, as XLA's gather (MLX's ``take``, ``scatter_add``)."""
+axis at integer indices read when the program runs (MLX's ``take``,
+``scatter_add``). Indices out of the axis here too, so with
+``lumen.config.compiler.safe_kernels`` (each clamped into the axis, as
+XLA's gather; the reference's always): without it, one out of range is the
+program's error."""
 
 import numpy as np
 import pytest
@@ -11,6 +14,14 @@ import lumen.functional as F
 from lumen import prims
 
 DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
+
+
+@pytest.fixture(autouse=True)
+def safe_kernels():
+    """Each test with its indices clamped (out of range here too)."""
+    lumen.config.compiler.safe_kernels = True
+    yield
+    lumen.config.compiler.safe_kernels = False
 
 
 def _tensor(a, device, dtype=None):

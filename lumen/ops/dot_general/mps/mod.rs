@@ -245,3 +245,82 @@ fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, us
         dims.last().map_or(0, |d| d.1),
     ))
 }
+
+/// A linear cross entropy's partials' bytes (`lce_partials`): each row's
+/// max and sum of exponentials over each tile's classes, in float32.
+pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> usize {
+    let (b, v) = (h.shape[0], w.shape[0]);
+    2 * b * v.div_ceil(float_tiles(1, b, v).2.1) * 4
+}
+
+/// [`Primitive::LinearCrossEntropy`]: its partials (`lce_partials`: a
+/// threadgroup a tile of the logits, the one a matmul of them would take,
+/// in `scratch`), then their
+/// combination into each row's log-sum-exp (`lce_combine`: a SIMD group a
+/// row).
+pub(crate) fn encode_linear_cross_entropy(
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+    scratch: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let (h, w, target) = (&step.inputs[0].1, &step.inputs[1].1, &step.inputs[2].1);
+    let (b, d, v) = (h.shape[0], h.shape[1], w.shape[0]);
+    if b == 0 || v == 0 {
+        return Ok(());
+    }
+    if scratch.is_null() {
+        return Err(format!(
+            "{}: needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))",
+            step.label
+        ));
+    }
+    let (small, mid, (tm, tn)) = float_tiles(1, b, v);
+    let kind = match (small, mid) {
+        (true, _) => "small_",
+        (_, true) => "mid_",
+        _ => "",
+    };
+    let tiles = v.div_ceil(tn);
+    let (maxima, sums) = (
+        scratch.cast_const(),
+        unsafe { scratch.add(b * tiles * 4) }.cast_const(),
+    );
+    // A matmul's dimensions (`p`): h the lhs [B, D], w read as the rhs
+    // transposed ([D, V] at strides 1 and D).
+    let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
+    let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
+    crate::profiler::next_launch("linear_cross_entropy (partials)", || {
+        (
+            step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
+            vec![partials.clone()],
+        )
+    });
+    launch(
+        &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
+        &[
+            inputs[0],
+            inputs[1],
+            inputs[2],
+            output.cast_const(),
+            maxima,
+            sums,
+        ],
+        &[p],
+        Grid::Groups([tiles, b.div_ceil(tm), 1]),
+        keep.clone(),
+        step.label,
+    )?;
+    crate::profiler::next_launch("linear_cross_entropy (combine)", || {
+        (vec![partials.clone()], vec![step.output.1.clone()])
+    });
+    launch(
+        "lce_combine",
+        &[maxima, sums, output.cast_const()],
+        &[dims_arg([b, tiles])],
+        Grid::Groups([b.div_ceil(8), 1, 1]),
+        keep,
+        step.label,
+    )
+}
