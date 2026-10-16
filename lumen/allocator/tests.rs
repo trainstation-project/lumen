@@ -1,9 +1,3 @@
-//! Unit tests for the allocators, one module per former test file. They
-//! live in the crate (not tests/) so they can reach private items.
-//!
-//! The `cuda` and `mps` modules hold the per-device tests, which skip where
-//! their device is unavailable.
-
 mod cpu {
     use crate::{Allocator, CpuAllocator};
 
@@ -63,8 +57,6 @@ mod cpu {
 }
 
 mod static_allocator {
-    //! The static allocator, over host memory posing as a device.
-
     use std::ptr::NonNull;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,8 +64,6 @@ mod static_allocator {
     use crate::allocator::static_allocator::StaticAllocator;
     use crate::{Allocator, CpuAllocator, DataPtr, Device};
 
-    /// Host memory posing as a CUDA device, counting reservations and
-    /// releases.
     struct Host {
         reservations: Arc<AtomicUsize>,
         releases: Arc<AtomicUsize>,
@@ -95,7 +85,6 @@ mod static_allocator {
         counted(capacity).0
     }
 
-    /// An allocator, and how often it reserved and released its region.
     fn counted(capacity: usize) -> (StaticAllocator<Host>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let (reservations, releases) =
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
@@ -110,7 +99,6 @@ mod static_allocator {
         )
     }
 
-    /// Free `ptr`, an allocation of `nbytes` from `allocator`.
     fn free(allocator: &StaticAllocator<Host>, ptr: NonNull<u8>, nbytes: usize) {
         unsafe { allocator.deallocate(ptr, nbytes) }
     }
@@ -240,17 +228,38 @@ mod devices {
 
     #[test]
     fn cpu_is_always_available() {
-        assert!(allocator_for(Device::Cpu).is_ok());
-        let t = Tensor::zeros(&[2], Device::Cpu);
-        assert_eq!(t.device(), Device::Cpu);
-        assert_eq!(Storage::new(8, Device::Cpu).device(), Device::Cpu);
+        assert!(allocator_for(Device::Cpu(0)).is_ok());
+        let t = Tensor::zeros(&[2], Device::Cpu(0));
+        assert_eq!(t.device(), Device::Cpu(0));
+        assert_eq!(Storage::new(8, Device::Cpu(0)).device(), Device::Cpu(0));
+    }
+
+    #[test]
+    fn every_device_type_gives_out_its_allocator() {
+        use std::sync::Arc;
+        let devices = [
+            Device::Cpu(0),
+            Device::Meta(0),
+            Device::Mps(0),
+            Device::Cuda(0),
+        ];
+        for device in devices.into_iter().filter(|d| d.check().is_ok()) {
+            let a = device.backend().allocator(device.index());
+            let b = allocator_for(device).unwrap();
+            assert!(
+                Arc::ptr_eq(&a, &b) || device == Device::Mps(0) || device == Device::Cuda(0),
+                "{device}"
+            );
+            let ptr = a.allocate(64);
+            unsafe { a.deallocate(ptr, 64) };
+        }
     }
 
     #[test]
     fn storage_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Storage>();
-        let storage = Storage::new(16, Device::Cpu);
+        let storage = Storage::new(16, Device::Cpu(0));
         std::thread::spawn(move || assert!(!storage.data_ptr().is_null()))
             .join()
             .unwrap();
@@ -258,37 +267,35 @@ mod devices {
 
     #[test]
     fn unavailable_devices_are_reported() {
-        if !crate::device::cuda::is_available() {
+        if !crate::device::cuda::CUDA.is_available() {
             let err = allocator_for(Device::Cuda(0)).err().unwrap();
             assert!(err.contains("CUDA device 0 is not available"), "{err}");
         }
-        let past_last = Device::Cuda(crate::device::cuda::device_count());
+        let past_last = Device::Cuda(crate::device::cuda::CUDA.device_count());
         assert!(allocator_for(past_last).is_err());
-        if !crate::device::mps::is_available() {
-            assert!(allocator_for(Device::Mps).is_err());
+        if !crate::device::mps::MPS.is_available() {
+            assert!(allocator_for(Device::Mps(0)).is_err());
         }
     }
 
     #[test]
     #[should_panic(expected = "is not available")]
     fn tensor_on_unavailable_device_panics() {
-        Tensor::zeros(&[1], Device::Cuda(crate::device::cuda::device_count()));
+        Tensor::zeros(&[1], Device::Cuda(crate::device::cuda::CUDA.device_count()));
     }
 }
 
 mod cuda {
-    //! The CUDA static allocator on a GPU. Each test skips when no device is visible.
-
     use crate::Device;
     use crate::allocator::allocator_for;
 
     #[test]
     fn availability_matches_the_device_count() {
         assert_eq!(
-            crate::device::cuda::is_available(),
-            crate::device::cuda::device_count() > 0
+            crate::device::cuda::CUDA.is_available(),
+            crate::device::cuda::CUDA.device_count() > 0
         );
-        assert!(allocator_for(Device::Cuda(crate::device::cuda::device_count())).is_err());
+        assert!(allocator_for(Device::Cuda(crate::device::cuda::CUDA.device_count())).is_err());
     }
 
     #[cfg(lumen_cuda_linked)]
@@ -297,10 +304,9 @@ mod cuda {
         use crate::allocator::static_allocator::StaticAllocator;
         use crate::{Allocator, Device, Storage};
 
-        /// Skip guard: returns early from a test when there is no GPU.
         macro_rules! require_cuda {
             () => {
-                if !crate::device::cuda::is_available() {
+                if !crate::device::cuda::CUDA.is_available() {
                     eprintln!("no CUDA device, skipping");
                     return;
                 }
@@ -310,7 +316,7 @@ mod cuda {
         #[test]
         fn reports_cuda_devices() {
             require_cuda!();
-            let last = crate::device::cuda::device_count() - 1;
+            let last = crate::device::cuda::CUDA.device_count() - 1;
             assert_eq!(
                 Storage::new(8, Device::Cuda(last)).device(),
                 Device::Cuda(last)
@@ -343,19 +349,14 @@ mod cuda {
             let (a, b) = (cuda::get(0), cuda::get(0));
             let size = 5 << 20;
             let p = a.allocate(size);
-            // Other tests allocate on the global static allocator in parallel; they only
-            // add to what is live.
             assert!(b.live_bytes() >= size);
             unsafe { a.deallocate(p, size) };
         }
     }
 }
 
-#[cfg(lumen_mps_linked)] // shim-backed types exist only when Metal is linked
+#[cfg(lumen_mps_linked)]
 mod mps {
-    //! The MPS allocator, on the real Metal device. Every test skips when Metal
-    //! is unavailable.
-
     use crate::allocator::mps;
     use crate::allocator::static_allocator::StaticAllocator;
     use crate::{Allocator, Device, Storage};
@@ -363,7 +364,7 @@ mod mps {
     /// Skip guard: returns early from a test when Metal is unavailable.
     macro_rules! require_mps {
         () => {
-            if !crate::device::mps::is_available() {
+            if !crate::device::mps::MPS.is_available() {
                 eprintln!("Metal unavailable, skipping");
                 return;
             }
@@ -371,13 +372,13 @@ mod mps {
     }
 
     fn fresh() -> mps::MpsAllocator {
-        StaticAllocator::new(mps::MpsBackend, Device::Mps, mps::ALIGNMENT, 1 << 20)
+        StaticAllocator::new(mps::MpsBackend, Device::Mps(0), mps::ALIGNMENT, 1 << 20)
     }
 
     #[test]
     fn reports_mps_device() {
         require_mps!();
-        assert_eq!(Storage::new(8, Device::Mps).device(), Device::Mps);
+        assert_eq!(Storage::new(8, Device::Mps(0)).device(), Device::Mps(0));
     }
 
     #[test]
@@ -386,8 +387,6 @@ mod mps {
         let (a, b) = (mps::get(), mps::get());
         let size = 5 << 20;
         let p = a.allocate(size);
-        // Other tests allocate on the global static allocator in parallel; they only add
-        // to what is live.
         assert!(b.live_bytes() >= size);
         unsafe { a.deallocate(p, size) };
     }
@@ -395,8 +394,6 @@ mod mps {
     #[test]
     fn unified_memory_is_host_writable() {
         require_mps!();
-        // A shared-mode MTLBuffer is ordinary CPU memory on Apple Silicon:
-        // write through the pointer and read it back.
         let allocator = fresh();
         let data = allocator.allocate(1024);
         let slice = unsafe { std::slice::from_raw_parts_mut(data.as_ptr(), 1024) };
