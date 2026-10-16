@@ -99,9 +99,9 @@ flags! {
     /// alive (rematerialization), until it fits or nothing more can be
     /// saved (0, the default: no limit).
     memory_limit, set_memory_limit: usize;
-    /// The rows ``F.linear_cross_entropy`` takes at a time, its gradients
-    /// computed with its losses a chunk at a time (XMA's chunked fused
-    /// linear cross entropy); None, the default: not chunked.
+    /// The rows a cross entropy of a matmul's logits is differentiated a
+    /// chunk at a time, the logits recomputed (Liger's chunked fused linear
+    /// cross entropy); None, the default: not chunked.
     fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
     /// Clamp the indices a gather, a scatter-add or a linear cross entropy
     /// reads at into range before its kernel does (off by default: an index

@@ -49,7 +49,7 @@ lumen.config.compiler.deterministic = True
 lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
 lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
-lumen.config.compiler.fused_linear_cross_entropy = False
+lumen.config.compiler.fused_linear_cross_entropy = True
 
 
 class _MLP(lumen.autograd.Function):
@@ -217,8 +217,8 @@ def cross_entropy(h, head, targets):
     """The mean cross-entropy of the logits ``h @ head.t()`` (``h``
     ``[n, dim]``, ``head`` ``[vocab, dim]``, in bfloat16, accumulated in
     float32) against ``targets`` (token ids), in float32
-    (``F.linear_cross_entropy``: a chunk of rows at a time, the loss and its
-    gradients together)."""
+    (``F.cross_entropy`` of the head's matmul: its gradient a chunk of rows
+    at a time, with ``fused_linear_cross_entropy_chunk_size``)."""
     logits = F.matmul(h, head.bfloat16().t(), "float32", "float32")
     loss = F.cross_entropy(logits, targets.reshape(-1))
     loss = F.mean(loss)

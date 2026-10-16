@@ -1723,8 +1723,9 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
     "n, d, vocab, dtype", [(5, 16, 7, "float32"), (300, 64, 1000, "float32"), (128, 256, 32000, "bfloat16")]
 )
 def test_linear_cross_entropy(device, n, d, vocab, dtype):
-    """``F.linear_cross_entropy(h, w, t)``: ``cross_entropy(h @ w.T, t)``
-    without the logits. On MPS one step of two kernels: the matmul writing each row's
+    """``F.cross_entropy(F.matmul(h, w.t()), t)``, the MPS compiler's linear
+    cross entropy where nothing else reads the logits (not trained): one
+    step of two kernels: the matmul writing each row's
     max and sum of exps a tile of 64 classes (and the label's logit), then
     a kernel combining a row's tiles into its ``logsumexp``. Its losses and
     gradients NumPy's (of the operands as rounded to ``dtype``)."""
@@ -1736,10 +1737,13 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype):
     t = rng.integers(0, vocab, n).astype(np.int64)
     c = rng.standard_normal(n).astype(np.float32)
 
+    def loss(h, w, t):
+        return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
+
     def step(h, w, t, c):
-        loss = F.linear_cross_entropy(h, w, t)
-        F.sum(loss * c).backward()
-        return loss, h.grad, w.grad
+        losses = loss(h, w, t)
+        F.sum(losses * c).backward()
+        return losses, h.grad, w.grad
 
     try:
         H, W, T, C = (lumen.from_numpy(a).to(device) for a in (h, w, t, c))
@@ -1747,7 +1751,7 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype):
         pytest.skip(str(e))
     H, W = H.to(dtype=dtype), W.to(dtype=dtype)
     if device == "mps":
-        steps = lumen.graph.Plan(lumen.make_graph(F.linear_cross_entropy)(H, W, T), "mps").steps()
+        steps = lumen.graph.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
         assert steps[0]["label"] == "linear_cross_entropy" and steps[0]["output"][2] == [2, n], steps
     hr, wr = (lumen.to_numpy(v.to(dtype="float32")).astype(np.float64) for v in (H, W))
     x = hr @ wr.T
@@ -1756,8 +1760,8 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype):
     hit = np.zeros_like(x)
     hit[np.arange(n), t] = 1
     dx = (np.exp(x - lse[:, None]) - hit) * c[:, None]
-    loss, dh, dw = (lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C))
-    np.testing.assert_allclose(loss, lse - x[np.arange(n), t], rtol=1e-5, atol=1e-5)
+    losses, dh, dw = (lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C))
+    np.testing.assert_allclose(losses, lse - x[np.arange(n), t], rtol=1e-5, atol=1e-5)
     tol = dict(rtol=1e-4, atol=1e-5) if dtype == "float32" else dict(rtol=2e-2, atol=2e-3)
     np.testing.assert_allclose(dh, dx @ wr, **tol)
     np.testing.assert_allclose(dw, dx.T @ hr, **tol)
@@ -1804,18 +1808,19 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
 @pytest.mark.parametrize("reduce", ["mean", "weighted"])
 @pytest.mark.parametrize("n, d, vocab, chunk", [(64, 32, 16, 16), (1000, 256, 5000, 128)])
 def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
-    """``F.linear_cross_entropy`` trained with
-    ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``: a chunk
-    of rows at a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the
-    last one short), its logits, losses and ``softmax - one_hot``, then its
-    rows' gradients. Every row's gradient the same (a mean's): computed
-    with the losses, scaled in the backward, three matmuls a chunk; each
-    row's own (a weighted sum's): the weight's from the logits recomputed,
-    four. Each chunk's weight gradient added by its own matmul's epilogue,
-    as it is computed (none kept for a later one), so the logits of a chunk
-    at a time in memory: of a large vocabulary, less than the unfused
-    program's. Its losses and gradients the unfused program's but where a
-    bfloat16 rounds apart (the unit gradient rounded, then scaled)."""
+    """A cross entropy of a matmul's logits trained with
+    ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``
+    (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
+    a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the last one
+    short), the chunk's logits recomputed, ``(softmax - one_hot) · g``
+    (any ``g``: a mean's, a weighted sum's), then its rows' gradients:
+    three matmuls a chunk; its forward, nothing else reading the logits,
+    one linear cross entropy. Each chunk's weight gradient added by its own
+    matmul's epilogue, as it is computed (none kept for a later one), so
+    the logits of a chunk at a time in memory: of a large vocabulary, less
+    than the unfused program's. Its losses and gradients the unfused
+    program's but where a bfloat16 rounds apart (the log-sum-exp's
+    order)."""
     rng = np.random.default_rng(0)
     h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
     w = rng.standard_normal((vocab, d)).astype(np.float32)
@@ -1839,7 +1844,7 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     except RuntimeError as e:
         pytest.skip(str(e))
     H, W = H.to(dtype="bfloat16"), W.to(dtype="bfloat16")
-    step = trained(F.linear_cross_entropy)
+    step = trained(unfused)
     lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
     try:
         plan = lumen.graph.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
@@ -1847,8 +1852,9 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     finally:
         lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
     chunks = -(-n // chunk)
-    dots = sum("dot_general" in s["label"] for s in plan.steps())
-    assert dots == (3 if reduce == "mean" else 4) * chunks, [s["label"] for s in plan.steps()]
+    labels = [s["label"] for s in plan.steps()]
+    assert "linear_cross_entropy" in labels, labels
+    assert sum("dot_general" in label for label in labels) == 3 * chunks, labels
     baseline = lumen.graph.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
     if vocab > d:
         assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)

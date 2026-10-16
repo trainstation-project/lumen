@@ -4,7 +4,7 @@ mode (``jvp``), linearize, transpose (``backward_pass``), and reverse mode
 
 import functools
 
-from lumen.autograd import attention, dots, rules
+from lumen.autograd import attention, cross_entropy, dots, rules
 from lumen.autograd.core import (
     UndefinedPrimal,
     _accumulate,
@@ -126,9 +126,11 @@ def _linearize_tape(tape, leaves):
     """The linear program of the nodes ``tape`` recorded, at ``leaves``:
     ``(seeds, linear, linear_vars, tangents)``, as :func:`linearize`. Each
     attention among them first becomes one node, whose backward is flash
-    attention's (``attention.substitute``); dots sharing an operand, one
+    attention's (``attention.substitute``); a cross entropy of a dot's
+    logits, one node whose backward takes a chunk of rows at a time
+    (``cross_entropy.substitute``); dots sharing an operand, one
     node differentiated as the one dot they run as (``dots.substitute``)."""
-    tape = dots.substitute(attention.substitute(tape), leaves)
+    tape = dots.substitute(cross_entropy.substitute(attention.substitute(tape)), leaves)
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
     _, lin_tape = _record(_jvp_tape, tape, tangents, True)

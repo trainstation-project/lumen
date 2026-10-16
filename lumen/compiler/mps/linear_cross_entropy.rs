@@ -3,7 +3,8 @@
 //! head's), however traced, run as [`Primitive::LinearCrossEntropy`] (two
 //! kernels, Cut Cross-Entropy's) when nothing else reads the logits: they
 //! never reach memory. As flash attention's ([`crate::compiler::attention`]),
-//! no call of its own needed (`F.linear_cross_entropy` traces as this).
+//! no call of its own needed (trained, `lumen/autograd/cross_entropy.py`
+//! makes the gradient not read the logits).
 //!
 //! What is matched, from the dot (`F.cross_entropy`'s forward as traced):
 //!
