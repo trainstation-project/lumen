@@ -126,8 +126,7 @@ compiles on machines with no CUDA headers or libraries.
 
 * `lumen/lib.rs` re-exports `Device` at the crate root (`use lumen::Device`).
 * Allocation and dispatch: `lumen/allocator/mod.rs`, `allocator/cpu.rs`,
-  `allocator/cuda.rs`, `allocator/mps/mod.rs` and
-  `allocator/static_allocator.rs` take a `Device` and select a backend by
+  `allocator/cuda.rs` and `allocator/mps/mod.rs` take a `Device` and select a backend by
   matching on it. The CUDA allocator calls `CUDA.set_device(..)` before
   touching memory, which is why `set_device` exists.
 * Ops and streams: `lumen/ops/mod.rs`, `lumen/ops/device_transfer/mod.rs`,
@@ -151,7 +150,8 @@ converts a Python device into a core `Device` and then calls
 `RuntimeError`. Because the core has no notion of a "current device" yet, an
 unindexed Python device maps to index 0; it stays a distinct Python value
 (`"cuda"` vs `"cuda:0"`), as in `torch`. Python behavior is covered by
-`tests/test_device.py`; Rust behavior by `lumen/device/tests.rs`.
+`tests/device/` (`test_device.py`: the class; `test_tensor_devices.py`:
+tensors on devices); Rust behavior by `lumen/device/tests.rs`.
 
 ## Adding a new backend
 

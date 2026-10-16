@@ -12,7 +12,7 @@ ci: fmt-check clang-format-check clippy test miri
 # The Rust tests are unit tests inside the crate (a `tests.rs` per module
 # folder). They never enable `python`: with pyo3 compiled in, test binaries
 # would link against libpython. The bindings are tested from Python
-# (tests/test_*.py) instead.
+# (tests/, test_*.py) instead.
 #
 # Device tests skip themselves when their device is missing, so one run
 # covers every machine. MPS needs nothing extra: Metal is a default feature,
