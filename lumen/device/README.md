@@ -151,7 +151,8 @@ converts a Python device into a core `Device` and then calls
 `RuntimeError`. Because the core has no notion of a "current device" yet, an
 unindexed Python device maps to index 0; it stays a distinct Python value
 (`"cuda"` vs `"cuda:0"`), as in `torch`. Python behavior is covered by
-`tests/test_device.py`; Rust behavior by `lumen/device/tests.rs`.
+`tests/device/` (`test_device.py`: the class; `test_tensor_devices.py`:
+tensors on devices); Rust behavior by `lumen/device/tests.rs`.
 
 ## Adding a new backend
 
