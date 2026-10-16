@@ -2,9 +2,9 @@ import numpy as np
 
 import lumen
 import lumen.functional as F
-from lumen.custom_op import Kernel, custom_op
+from lumen.custom_op import MetalKernel, custom_op
 
-kernel = Kernel(
+kernel = MetalKernel(
     """
     #include <metal_stdlib>
     using namespace metal;
