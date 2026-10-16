@@ -1,8 +1,3 @@
-//! Unit tests for the profiler. A session is process-wide and unit tests
-//! run in parallel, so every test that starts one holds [`exclusive`], and
-//! looks only at events from its own thread (other tests keep allocating).
-//! The `mps` and `cuda` modules profile real devices.
-
 use std::sync::{Mutex, MutexGuard};
 
 use super::*;
@@ -15,7 +10,6 @@ fn exclusive() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Run `f` in a session with `config`; return this thread's events.
 fn profile(config: ProfilerConfig, f: impl FnOnce()) -> Profile {
     let _lock = exclusive();
     start(config).expect("no session running");
@@ -50,8 +44,6 @@ fn row<'a>(rows: &'a [EventAvg], name: &str) -> &'a EventAvg {
         .unwrap_or_else(|| panic!("no row {name:?}"))
 }
 
-// ---------------- sessions ----------------
-
 #[test]
 fn nothing_is_recorded_without_a_session() {
     let _lock = exclusive();
@@ -83,8 +75,6 @@ fn events_from_an_earlier_session_are_dropped() {
     let p = stop().unwrap().for_thread(thread_id());
     assert!(named(&p, "straddles").is_empty());
 }
-
-// ---------------- ranges and ops ----------------
 
 #[test]
 fn record_function_ranges_nest() {
@@ -172,9 +162,6 @@ fn types_are_recorded_only_with_record_shapes() {
     assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
 }
 
-/// Device work shows the types of the op that issued it (inputs, outputs
-/// and accumulation dtypes), in the events and on the device side of the
-/// trace.
 #[test]
 fn device_events_have_their_ops_types() {
     let config = ProfilerConfig {
@@ -248,8 +235,6 @@ fn events_on_other_threads_carry_their_own_thread_id() {
     assert!(p.for_thread(here).events().iter().all(|e| e.thread == here));
 }
 
-// ---------------- memory ----------------
-
 #[test]
 fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     let p = profile(with_memory(), || {
@@ -260,7 +245,7 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     let (alloc, free) = (memory[0], memory[1]);
     assert_eq!((alloc.bytes, free.bytes), (24, -24));
     assert_eq!(alloc.addr, free.addr);
-    assert_eq!(alloc.device, Device::Cpu);
+    assert_eq!(alloc.device, Device::Cpu(0));
     assert_eq!(alloc.parent, Some(one(&p, "lumen::empty").id));
     assert_eq!(free.parent, None, "freed outside any op");
     let rows = p.key_averages();
@@ -295,32 +280,24 @@ fn memory_is_recorded_only_with_profile_memory() {
     assert!(named(&p, "[memory]").is_empty());
 }
 
-/// Host memory posing as device 3; enough to back an allocator.
-struct FakeDevice;
-
-impl crate::Allocator for FakeDevice {
-    fn allocate(&self, nbytes: usize) -> std::ptr::NonNull<u8> {
-        crate::Allocator::allocate(&crate::CpuAllocator, nbytes)
-    }
-
-    unsafe fn deallocate(&self, ptr: std::ptr::NonNull<u8>, nbytes: usize) {
-        unsafe { crate::Allocator::deallocate(&crate::CpuAllocator, ptr, nbytes) }
-    }
-}
-
 #[test]
-fn static_allocator_reports_allocations_with_its_totals() {
-    let allocator = crate::StaticAllocator::new(FakeDevice, Device::Cuda(3), 256, 2 << 20);
+fn region_reports_allocations_with_its_totals() {
+    use crate::Allocator;
+    let mut region = crate::allocator::Region::new(Device::Cpu(0), 2 << 20);
+    let reserve = |n| crate::CpuAllocator.allocate(n);
+    let first = region.take(1, reserve, || {});
+    region.give(first, 1);
     let p = profile(with_memory(), || {
-        let block = crate::Allocator::allocate(&allocator, 100);
-        unsafe { crate::Allocator::deallocate(&allocator, block, 100) };
+        let block = region.take(100, reserve, || {});
+        region.give(block, 100);
     });
+    let base = region.base().expect("reserved above");
+    unsafe { crate::CpuAllocator.deallocate(base, 2 << 20) };
     let memory: Vec<&Event> = named(&p, "[memory]")
         .into_iter()
-        .filter(|e| e.device == Device::Cuda(3))
+        .filter(|e| e.device == Device::Cpu(0))
         .collect();
     assert_eq!(memory.len(), 2, "{memory:#?}");
-    // 100 bytes live out of the static allocator's 2 MiB, then freed.
     assert_eq!(
         (
             memory[0].bytes,
@@ -339,8 +316,6 @@ fn static_allocator_reports_allocations_with_its_totals() {
     );
 }
 
-// ---------------- device work ----------------
-
 #[test]
 fn device_work_is_attributed_to_the_issuing_op() {
     let config = ProfilerConfig {
@@ -352,7 +327,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
         let _op = record_function("op");
         let t = now_ns();
         record_gpu("Memcpy HtoD", Device::Cuda(0), t, t + 1000);
-        record_gpu("Memcpy HtoD", Device::Mps, t, t + 1000); // MPS not enabled
+        record_gpu("Memcpy HtoD", Device::Mps(0), t, t + 1000); // MPS not enabled
     });
     let gpu = named(&p, "Memcpy HtoD");
     assert_eq!(gpu.len(), 1);
@@ -377,8 +352,6 @@ fn device_work_is_attributed_to_the_issuing_op() {
         (1000, 0)
     );
     assert!(copy.is_device_event && !op.is_device_event);
-    // The device total counts the copy once, not again under `op`, and both
-    // rows hold all of it (as in PyTorch).
     let table = p.table(None, None);
     assert!(table.contains("Self CUDA time total: 1.000us"), "{table}");
     let op_line = table.lines().find(|l| l.starts_with("op ")).unwrap();
@@ -395,8 +368,6 @@ fn device_work_needs_its_activity() {
     });
     assert!(named(&p, "Memset").is_empty());
 }
-
-// ---------------- summaries ----------------
 
 #[test]
 fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
@@ -437,8 +408,6 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
         "only CPU memory here:\n{table}"
     );
 
-    // `big` issued the GPU work directly, so it ties with the Memset row on
-    // device time; `lumen::zeros` (no device time) falls below the limit.
     let limited = p.table(Some(SortBy::DeviceTimeTotal), Some(2));
     let first_cells: Vec<&str> = limited
         .lines()
@@ -527,7 +496,6 @@ fn chrome_trace_has_pytorchs_event_layout() {
 
 #[test]
 fn host_kernels_are_apart_from_their_dispatch() {
-    // A CPU plan's step: its op (the dispatch), its kernel's run inside it.
     let mut g = crate::graph::Graph::new();
     let x = g.input(TensorType::new(DType::F32, &[4]));
     let y = g.apply(crate::graph::Primitive::Exp, &[x]).unwrap();
@@ -549,11 +517,9 @@ fn host_kernels_are_apart_from_their_dispatch() {
         .expect("its kernel");
     assert_eq!((kernel.name.as_str(), kernel.parent), ("exp", Some(op.id)));
     assert!(op.start_ns <= kernel.start_ns && kernel.end_ns <= op.end_ns);
-    // Its time is the op's child's: the op's own, the dispatch alone.
     let rows = p.key_averages();
     assert_eq!(row(&rows, "exp").count, 2);
     let trace = p.chrome_trace();
-    // On the CPU's timeline, as a device's; the ops on the dispatch's.
     let (host, dispatch) = (chrome::host_pid(), std::process::id());
     for needle in [
         format!(
@@ -577,10 +543,6 @@ fn json_strings_escape_control_characters() {
     );
 }
 
-// ---------------- real devices ----------------
-
-/// Assert `gpu` ran inside its op's CPU range, give or take `slack_ns` for
-/// the two clocks' alignment.
 #[cfg(lumen_cupti_linked)]
 fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(
@@ -591,19 +553,19 @@ fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(gpu.end_ns >= gpu.start_ns);
 }
 
-#[cfg(lumen_mps_linked)] // needs a real Metal device
+#[cfg(lumen_mps_linked)]
 mod mps {
     use super::*;
     use crate::TensorOptions;
     use crate::device::mps;
 
     fn on_mps(dtype: DType) -> TensorOptions {
-        TensorOptions::new().dtype(dtype).device(Device::Mps)
+        TensorOptions::new().dtype(dtype).device(Device::Mps(0))
     }
 
     #[test]
     fn metal_fills_are_timed_on_the_gpu() {
-        if !mps::is_available() {
+        if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let config = ProfilerConfig {
@@ -612,17 +574,14 @@ mod mps {
             record_shapes: false,
         };
         let p = profile(config, || {
-            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32)); // a Metal fill kernel
-            // The fill is asynchronous: wait for it, so the tensor is freed
-            // here rather than on the Metal thread that completes it.
+            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32));
             crate::stream::mps::synchronize();
             drop(t);
         });
         let fill = one(&p, "Fill");
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
         let zeros = one(&p, "lumen::zeros");
         assert_eq!(fill.parent, Some(zeros.id));
-        // Submitted by zeros, but may finish after it returns.
         assert!(
             fill.start_ns + 1_000_000 >= zeros.start_ns,
             "{fill:?} before {zeros:?}"
@@ -630,7 +589,7 @@ mod mps {
         assert!(fill.end_ns >= fill.start_ns);
         let memory: Vec<&Event> = named(&p, "[memory]")
             .into_iter()
-            .filter(|e| e.device == Device::Mps)
+            .filter(|e| e.device == Device::Mps(0))
             .collect();
         assert_eq!(memory.len(), 2);
         assert_eq!((memory[0].bytes, memory[1].bytes), (1 << 18, -(1 << 18)));
@@ -643,7 +602,7 @@ mod mps {
 
     #[test]
     fn metal_stream_work_runs_in_order() {
-        if !mps::is_available() {
+        if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let config = ProfilerConfig {
@@ -657,7 +616,6 @@ mod mps {
                 t.fill_(2.0f32);
             }
         });
-        // One after another on the GPU, give or take the clocks' alignment.
         let mut work: Vec<&Event> = p
             .events()
             .iter()
@@ -673,7 +631,7 @@ mod mps {
 
     #[test]
     fn metal_ones_is_a_gpu_fill_kernel() {
-        if !mps::is_available() {
+        if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let config = ProfilerConfig {
@@ -684,7 +642,7 @@ mod mps {
             drop(Tensor::ones(&[1 << 16], on_mps(DType::F32)))
         });
         let fill = one(&p, "Fill");
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
         assert_eq!(fill.parent, Some(one(&p, "lumen::ones").id));
         assert!(
             p.chrome_trace()
@@ -694,7 +652,7 @@ mod mps {
 
     #[test]
     fn metal_strided_fills_run_on_the_gpu() {
-        if !mps::is_available() {
+        if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let config = ProfilerConfig {
@@ -706,12 +664,12 @@ mod mps {
             t.transpose(0, 1).narrow(1, 0, 32).zero_();
         });
         let fill = one(&p, "Fill"); // the strided kernel
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps));
+        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
     }
 
     #[test]
     fn metal_fills_are_not_timed_without_the_mps_activity() {
-        if !mps::is_available() {
+        if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
         let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_mps(DType::U8))));
@@ -720,7 +678,7 @@ mod mps {
     }
 }
 
-#[cfg(lumen_cupti_linked)] // needs cudart, CUPTI and a GPU
+#[cfg(lumen_cupti_linked)]
 mod cuda {
     use super::*;
     use crate::TensorOptions;
@@ -728,7 +686,7 @@ mod cuda {
 
     #[test]
     fn cuda_copies_are_timed_on_the_gpu() {
-        if !cuda::is_available() {
+        if !cuda::CUDA.is_available() {
             return eprintln!("no CUDA device, skipping");
         }
         let config = ProfilerConfig {
@@ -759,7 +717,7 @@ mod cuda {
 
     #[test]
     fn cuda_work_is_not_timed_without_the_cuda_activity() {
-        if !cuda::is_available() {
+        if !cuda::CUDA.is_available() {
             return eprintln!("no CUDA device, skipping");
         }
         let on_gpu = TensorOptions::new()
@@ -791,7 +749,6 @@ fn ranges_are_annotated_on_the_gpu_timeline() {
         .filter(|l| l.contains("\"gpu_user_annotation\""))
         .collect();
     assert_eq!(annotations.len(), 2, "{trace}");
-    // "model" spans both kernels; "layer" only its own.
     let model = annotations
         .iter()
         .find(|l| l.contains("\"name\":\"model\""))
@@ -802,7 +759,6 @@ fn ranges_are_annotated_on_the_gpu_timeline() {
         .find(|l| l.contains("\"name\":\"layer\""))
         .unwrap();
     assert!(layer.contains("\"dur\":0.200"), "{layer}");
-    // On their own track, named, beside the kernels' (which may overlap).
     assert!(
         annotations.iter().all(|l| l.contains("\"tid\":8")),
         "{trace}"

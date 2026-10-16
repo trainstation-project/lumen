@@ -1,25 +1,3 @@
-"""The lumen profiler, modeled on ``torch.profiler`` (bindings in
-``lumen/profiler/python.rs``, core in ``lumen/profiler/mod.rs``)::
-
-    from lumen.profiler import ProfilerActivity, profile, record_function
-
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.MPS],
-        profile_memory=True,
-        record_shapes=True,
-    ) as prof:
-        with record_function("init"):
-            x = lumen.zeros([1024, 1024], device="mps")
-
-    print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
-    prof.export_chrome_trace("trace.json")  # open in Perfetto / chrome://tracing
-
-It records lumen's tensor ops (``lumen::zeros``, ``lumen::fill_``, ...) and
-``record_function`` ranges on the CPU clock, allocations and frees with
-``profile_memory``, and device-side timing of copies and fills for the CUDA
-and MPS activities. Times are in microseconds, as in PyTorch.
-"""
-
 import enum
 import functools
 
