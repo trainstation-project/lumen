@@ -8,6 +8,7 @@ use crate::tensor::python::PyTensor;
 #[pyclass(name = "Stream", module = "lumen", frozen)]
 pub(crate) struct PyStream {
     device: core::Device,
+    stream_id: usize,
     inner: std::sync::Arc<dyn core::stream::Stream>,
 }
 
@@ -30,6 +31,14 @@ impl PyKernel {
 static COMPILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl PyStream {
+    fn wait_host(&self) {
+        #[cfg(lumen_cuda_linked)]
+        if let (core::Device::Cuda(index), id @ 1..) = (self.device, self.stream_id) {
+            return core::stream::cuda::synchronize_external(index, id);
+        }
+        self.inner.synchronize();
+    }
+
     fn mps(&self, what: &str) -> PyResult<()> {
         match (self.device, cfg!(lumen_mps_linked)) {
             (core::Device::Mps(_), true) => Ok(()),
@@ -46,21 +55,62 @@ impl PyStream {
 #[pymethods]
 impl PyStream {
     #[new]
-    #[pyo3(signature = (device = None))]
-    fn new(device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    #[pyo3(signature = (device = None, *, stream_id = 0))]
+    fn new(device: Option<&Bound<'_, PyAny>>, stream_id: usize) -> PyResult<Self> {
         let device = crate::device::python::resolve_device(device)?;
         let inner = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
-        Ok(PyStream { device, inner })
+        if stream_id != 0 && !matches!(device, core::Device::Cuda(_)) {
+            return Err(PyValueError::new_err(format!(
+                "stream_id: {device} has only lumen's stream (an external stream is CUDA's)"
+            )));
+        }
+        Ok(PyStream {
+            device,
+            stream_id,
+            inner,
+        })
     }
 
     #[getter]
-    fn device(&self) -> String {
-        self.device.to_string()
+    fn device(&self) -> crate::device::python::PyDevice {
+        crate::device::python::PyDevice::from_core(self.device)
+    }
+
+    #[getter]
+    fn stream_id(&self) -> usize {
+        self.stream_id
     }
 
     fn synchronize(&self, py: Python<'_>) {
         let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
-        py.detach(|| self.inner.synchronize());
+        py.detach(|| self.wait_host());
+    }
+
+    fn wait_stream(&self, py: Python<'_>, other: PyRef<'_, PyStream>) {
+        if self.device == other.device && self.stream_id == other.stream_id {
+            return;
+        }
+        #[cfg(lumen_cuda_linked)]
+        if let (core::Device::Cuda(index), 0) = (other.device, other.stream_id)
+            && self.device == other.device
+        {
+            return core::stream::CudaStream { index }.wait(self.stream_id);
+        }
+        let other: &PyStream = &other;
+        py.detach(|| other.wait_host());
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyStream>()
+            .is_ok_and(|o| (o.get().device, o.get().stream_id) == (self.device, self.stream_id))
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.device, self.stream_id).hash(&mut hasher);
+        hasher.finish()
     }
 
     #[pyo3(signature = (source, name = None))]
@@ -147,18 +197,15 @@ impl PyStream {
     }
 
     fn __repr__(&self) -> String {
-        format!("{}.Stream(device='{}')", crate::LIBRARY_NAME, self.device)
+        match self.stream_id {
+            0 => format!("{}.Stream(device='{}')", crate::LIBRARY_NAME, self.device),
+            id => format!(
+                "{}.Stream(device='{}', stream_id={id:#x})",
+                crate::LIBRARY_NAME,
+                self.device
+            ),
+        }
     }
-}
-
-#[pyfunction]
-fn _cuda_stream_wait(index: usize, stream: usize) -> PyResult<()> {
-    core::stream::stream_for(core::Device::Cuda(index)).map_err(PyRuntimeError::new_err)?;
-    #[cfg(lumen_cuda_linked)]
-    core::stream::CudaStream { index }.wait(stream);
-    #[cfg(not(lumen_cuda_linked))]
-    let _ = stream;
-    Ok(())
 }
 
 #[cfg(lumen_mps_linked)]
@@ -241,6 +288,5 @@ fn buffer_of(_t: &core::Tensor) -> PyResult<(usize, usize)> {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStream>()?;
-    m.add_class::<PyKernel>()?;
-    m.add_function(wrap_pyfunction!(_cuda_stream_wait, m)?)
+    m.add_class::<PyKernel>()
 }

@@ -10,6 +10,7 @@ mod ffi {
         pub fn cudaDeviceSynchronize() -> i32;
         pub fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
         pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
+        pub fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
         pub fn cudaStreamWaitEvent(stream: *mut c_void, event: *mut c_void, flags: u32) -> i32;
         pub fn cudaEventDestroy(event: *mut c_void) -> i32;
     }
@@ -34,6 +35,11 @@ impl CudaStream {
 pub fn synchronize(device_index: usize) {
     CUDA.set_device(device_index);
     unsafe { ffi::cudaDeviceSynchronize() };
+}
+
+pub fn synchronize_external(device_index: usize, stream: usize) {
+    CUDA.set_device(device_index);
+    unsafe { ffi::cudaStreamSynchronize(stream as *mut c_void) };
 }
 
 const EVENT_DISABLE_TIMING: u32 = 2;
