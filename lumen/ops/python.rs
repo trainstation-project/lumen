@@ -1,30 +1,3 @@
-//! Kernels written in Python (CUDA kernels authored with CuTe DSL, for
-//! now), registered into the dispatcher at runtime with
-//! `lumen.ops.register`.
-//!
-//! Only the kernel is Python. A registered kernel is a compile hook,
-//! `compile(dtype, shape, strides, vector_size)`, returning a
-//! `launch(address, value, stream)` for that one layout and vector size
-//! (how many elements, contiguous along the first dimension, a thread may
-//! store at once: [`crate::ops::vector_size`]); everything around it is
-//! Rust: dispatch, the layout, the vector size, a cache of launchers (so
-//! each compiles once), the data pointer and the value. A launcher that is a TVM-FFI function (what the
-//! CuTe DSL compiles with `--enable-tvm-ffi`) is called through its C ABI
-//! ([`crate::ops::tvm_ffi`]), so a cached launch runs no Python at all; any
-//! other callable is called through Python.
-//!
-//! Rust cannot hold a Python callable inside an [`Op`](crate::ops::Op): the
-//! dispatcher requires `K: Copy + Send + Sync`, and a `Py<PyAny>` is none
-//! of those. So a Python kernel is represented by a small `Copy` handle —
-//! an index into the process-wide table below — and the call goes back
-//! through the GIL when the op runs.
-//!
-//! Registration is by op *name*, not by op value: `Op` is a static with no
-//! registry of its own, and naming it lets a Python kernel attach to any op
-//! without that op having to exist in Rust yet. A registered kernel is
-//! asked *before* the built-in one for its device, so the built-in stays
-//! reachable as the fallback.
-
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 

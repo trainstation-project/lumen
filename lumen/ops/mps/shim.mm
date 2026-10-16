@@ -1,9 +1,3 @@
-// Launches the graph primitives' Metal kernels (lumen/ops/*/mps/kernels.metal,
-// compiled as one library), and the fused kernels the MPS graph compiler
-// generates (lumen/compiler/mps), into lumen's MPS stream. Generic: Rust
-// (lumen/ops/*/mps/mod.rs) names the kernel and passes its buffers and
-// argument bytes, bound in that order.
-
 #include "../../stream/mps/mps.h"
 #include "primitive_kernels.h"
 #import <Foundation/Foundation.h>
@@ -17,9 +11,6 @@
 
 id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset);
 
-// `source` compiled into a library on the stream's device, with IEEE
-// semantics (NaN, infinities) rather than fast math, to match the reference
-// executor (nil if that fails, with why in `error`).
 static id<MTLLibrary> compile(NSString *source, NSError **error) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
     if (queue == nil) {
@@ -33,7 +24,6 @@ static id<MTLLibrary> compile(NSString *source, NSError **error) {
     return [queue.device newLibraryWithSource:source options:options error:error];
 }
 
-// The kernels' library, compiled on first use (nil if that fails).
 static id<MTLLibrary> library(void) {
     static id<MTLLibrary> lib = nil;
     static dispatch_once_t once;
@@ -47,12 +37,9 @@ static id<MTLLibrary> library(void) {
     return lib;
 }
 
-// Pipelines by kernel name: the primitives' on first use, and those of
-// lumen_mps_compile_kernels.
 static os_unfair_lock cache_lock = OS_UNFAIR_LOCK_INIT;
 static auto *cache = new std::unordered_map<std::string, id<MTLComputePipelineState>>();
 
-// The pipeline for kernel `name`, created on first use.
 static id<MTLComputePipelineState> pipeline(const char *name) {
     os_unfair_lock_lock(&cache_lock);
     auto it = cache->find(name);
@@ -70,9 +57,6 @@ static id<MTLComputePipelineState> pipeline(const char *name) {
 }
 
 extern "C" {
-// Compile Metal `source` (generated kernels, lumen/compiler/mps) and add a
-// pipeline for each of its kernels, which lumen_mps_launch_kernel then
-// launches by name. A kernel already added keeps its pipeline.
 int lumen_mps_compile_kernels(const char *source) {
     @autoreleasepool {
         NSError *error = nil;
@@ -102,13 +86,6 @@ int lumen_mps_compile_kernels(const char *source) {
     return 0;
 }
 
-// Compile Metal `source` (a user's: lumen.ops.Kernel) and add a pipeline
-// for its kernel `name` (or its only kernel, if `name` is null) under `key`,
-// for lumen_mps_launch_kernel. Writes the kernel's name into `chosen` (or,
-// if there is no such kernel, or several and no `name`, the source's kernel
-// names, comma-separated). Returns 0, or -1 if the source does not compile
-// (Metal's error logged), -2 if the pipeline cannot be made, -3 if `name` is
-// null and the source has several kernels, -4 if it has none named `name`.
 int lumen_mps_compile_kernel(const char *source, const char *name, const char *key, char *chosen, size_t len) {
     @autoreleasepool {
         NSError *error = nil;

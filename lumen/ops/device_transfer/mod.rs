@@ -95,7 +95,7 @@ fn transfer(
     src: &Tensor,
     device: Device,
 ) -> Option<crate::profiler::RecordGuard> {
-    if device == Device::Cpu {
+    if device == Device::Cpu(0) {
         return None;
     }
     let mut guard = crate::profiler::record_op(op.name(), || vec![src.ty()]);
@@ -109,7 +109,7 @@ fn transfer(
 fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
     assert_eq!(
         host.device(),
-        Device::Cpu,
+        Device::Cpu(0),
         "the host side of a copy must be a CPU tensor"
     );
     assert_eq!(dst.dtype(), src.dtype(), "copy between dtypes");
