@@ -1,6 +1,3 @@
-//! Tensor: a strided view over a shared [`Storage`] (PyTorch:
-//! `c10::TensorImpl`).
-
 use std::sync::Arc;
 
 use super::dtype::{DType, Element, bf16, dispatch_dtype, f16};
@@ -12,28 +9,20 @@ use crate::graph::TensorType;
 use crate::ops::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
 
-/// The device `options` name, CPU if unset.
 fn device_of(options: &TensorOptions) -> Device {
-    options.device_opt().unwrap_or(Device::Cpu)
+    options.device_opt().unwrap_or(Device::Cpu(0))
 }
 
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Arc<Storage>,
     dtype: DType,
-    /// Sizes of each dimension (PyTorch: `sizes`).
     shape: Vec<usize>,
-    /// Stride of each dimension, in elements (PyTorch: `strides`).
     strides: Vec<usize>,
-    /// Offset into the storage, in elements (PyTorch: `storage_offset`).
     offset: usize,
 }
 
 impl Tensor {
-    // ------------------------------------------------------------------
-    // Constructors
-    // ------------------------------------------------------------------
-
     /// A contiguous tensor over `storage` (offset 0).
     pub(super) fn wrap(storage: Arc<Storage>, dtype: DType, shape: &[usize]) -> Self {
         Tensor {
@@ -45,16 +34,6 @@ impl Tensor {
         }
     }
 
-    /// A tensor whose memory is left uninitialized (PyTorch: `at::empty`);
-    /// every other factory is `empty` plus a write.
-    ///
-    /// # Safety
-    /// Unlike PyTorch's, this is `unsafe`: reading uninitialized memory is
-    /// undefined behavior in Rust. Every element must be written (e.g. with
-    /// [`fill_`](Self::fill_) or [`set`](Self::set)) before it is read.
-    ///
-    /// # Panics
-    /// If the device is not available.
     pub unsafe fn empty(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("empty"), Vec::new);
         let options = options.into();
@@ -64,25 +43,12 @@ impl Tensor {
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
-    /// An uninitialized contiguous tensor like `self`: same dtype, shape and
-    /// allocator (PyTorch: `at::empty_like`). Using the allocator itself,
-    /// not a lookup by device, keeps tensors on custom allocators there.
-    ///
-    /// # Safety
-    /// As for [`empty`](Self::empty).
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
         let storage = Storage::with_allocator(self.nbytes(), allocator, self.device());
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 
-    // Factories follow PyTorch's C++ API (`at::zeros(size, options)` and
-    // friends): `options` is anything convertible to [`TensorOptions`] — a
-    // `DType`, a `Device`, or both via the builder. Unset fields default to
-    // float32 (or the dtype inferred from a value) on the CPU. All panic if
-    // the device is not available.
-
-    /// A tensor of zeros (PyTorch: `at::zeros`).
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("zeros"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
@@ -90,8 +56,6 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// A tensor of ones (PyTorch: `at::ones`; float32 unless the options
-    /// say otherwise).
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("ones"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
@@ -99,9 +63,6 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// A tensor filled with `fill_value` (PyTorch: `at::full`). Without a
-    /// dtype in `options`, it is inferred from the value: `bool` -> bool,
-    /// integers -> int64, floats -> float32.
     pub fn full(
         size: &[usize],
         fill_value: impl Into<Scalar>,
@@ -115,9 +76,6 @@ impl Tensor {
         recorded(op, Self::filled(size, fill_value, options.dtype(dtype)))
     }
 
-    /// `[0, 1, ..., ceil(end) - 1]` (PyTorch: `at::arange(end, options)`).
-    /// Without a dtype in `options`, it is inferred from `end` like
-    /// [`full`](Self::full).
     pub fn arange(end: impl Into<Scalar>, options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("arange"), Vec::new);
         let (end, options) = (end.into(), options.into());
@@ -130,9 +88,6 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// A 1-D tensor holding a copy of `data` (PyTorch: `torch::tensor`).
-    /// The dtype is `T`'s unless `options` sets one, in which case the
-    /// values are converted; reshape for more dimensions.
     pub fn from_slice<T: Element>(data: &[T], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("from_slice"), Vec::new);
         let options = options.into();
@@ -148,62 +103,43 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// A tensor of `value` converted to the options' dtype (default
-    /// float32).
     fn filled(size: &[usize], value: Scalar, options: TensorOptions) -> Self {
-        // SAFETY: `fill_` of a fresh contiguous tensor writes every element
-        // (a device memset when it can).
         let t = unsafe { Self::empty(size, options) };
         t.fill_(value);
         t
     }
 
-    /// A 1-D tensor holding a copy of `data` on `device`.
     fn from_values<T: Element>(data: &[T], device: Device) -> Self {
         let options = TensorOptions::new().dtype(T::DTYPE).device(device);
-        // SAFETY: the write below covers every element.
         let t = unsafe { Self::empty(&[data.len()], options) };
         t.write(data);
         t
     }
 
-    /// A 1-D CPU tensor holding a copy of `data`: the host side of a copy
-    /// into a device tensor.
     fn host<T: Element>(data: &[T]) -> Self {
-        // SAFETY: the write below covers every element.
         let t = unsafe { Self::empty(&[data.len()], T::DTYPE) };
         t.write(data);
         t
     }
 
-    /// Copy `data` into this contiguous tensor of as many elements: straight
-    /// into host memory on the CPU, else from a host tensor with
-    /// [`copy_h2d`]. Same data-race caveat as [`set`](Self::set).
     fn write<T: Element>(&self, data: &[T]) {
         self.check_dtype::<T>();
-        if self.device() == Device::Meta {
+        if self.device() == Device::Meta(0) {
             return;
         }
-        if self.device() != Device::Cpu {
+        if self.device() != Device::Cpu(0) {
             return copy_h2d(self, &Self::host(data));
         }
         assert!(self.is_contiguous() && self.numel() == data.len());
-        // SAFETY: CPU storage is host memory, and the view's elements are in
-        // bounds of it; `data` is a distinct host buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr().cast(), self.data_ptr(), size_of_val(data))
         }
     }
 
-    // ------------------------------------------------------------------
-    // Metadata
-    // ------------------------------------------------------------------
-
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
-    /// The storage this tensor views (PyTorch: `Tensor::storage`).
     pub fn storage(&self) -> &Storage {
         &self.storage
     }
@@ -212,10 +148,6 @@ impl Tensor {
         self.storage.device()
     }
 
-    /// The address of the first element, in the device's address space
-    /// (PyTorch: `Tensor::data_ptr`). `wrapping_add`, not `add`: device
-    /// memory is not an allocation Rust knows about, and `add` is undefined
-    /// behavior outside one.
     pub(crate) fn data_ptr(&self) -> *mut u8 {
         self.storage
             .data_ptr()
@@ -238,7 +170,6 @@ impl Tensor {
         self.shape.iter().product()
     }
 
-    /// Bytes the view's elements take (PyTorch: `Tensor::nbytes`).
     pub(crate) fn nbytes(&self) -> usize {
         self.numel() * self.dtype.size_of()
     }
@@ -247,20 +178,14 @@ impl Tensor {
         self.offset
     }
 
-    /// Id of the underlying storage; two tensors alias the same buffer iff
-    /// their storage ids match (PyTorch: `t.untyped_storage()._cdata`).
     pub fn storage_id(&self) -> usize {
         self.storage.id()
     }
 
-    /// True if `other` is a view onto the same storage (JAX: two arrays
-    /// sharing a `PjRtBuffer`).
     pub fn shares_storage_with(&self, other: &Tensor) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
 
-    /// A view over `storage` with the given layout, which must lie within
-    /// it (PyTorch: `at::from_blob`'s tensor, e.g. a DLPack import).
     #[cfg(feature = "python")]
     pub(crate) fn from_storage(
         storage: Arc<Storage>,
@@ -278,9 +203,6 @@ impl Tensor {
         }
     }
 
-    /// A contiguous `dtype` view of `shape` at `byte_offset` into this
-    /// contiguous byte tensor (a plan's workspace), which must hold it at an
-    /// offset aligned for `dtype`.
     pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
         let start = self.offset * self.dtype.size_of() + byte_offset;
         let size = dtype.size_of();
@@ -302,7 +224,6 @@ impl Tensor {
         }
     }
 
-    /// This tensor's type: its dtype and shape.
     pub(crate) fn ty(&self) -> TensorType {
         TensorType::new(self.dtype, &self.shape)
     }
@@ -311,12 +232,6 @@ impl Tensor {
         self.strides == contiguous_strides(&self.shape)
     }
 
-    // ------------------------------------------------------------------
-    // Views (share storage, no copy)
-    // ------------------------------------------------------------------
-
-    /// Reshape. Only valid on contiguous tensors (PyTorch `Tensor::view`);
-    /// call [`Tensor::contiguous`] first if needed.
     pub fn reshape(&self, shape: &[usize]) -> Self {
         let op = crate::profiler::record_op(op_name!("reshape"), || vec![self.ty()]);
         assert!(
@@ -341,7 +256,6 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// Narrow `dim` to `[start, start + len)` — a view with a bumped offset.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("narrow"), || vec![self.ty()]);
         assert!(dim < self.ndim(), "dim {dim} out of range");
@@ -356,13 +270,11 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// Index one dimension, removing it (`t.select(0, i)` == `t[i]`).
     pub fn select(&self, dim: usize, index: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("select"), || vec![self.ty()]);
         recorded(op, self.narrow(dim, index, 1).squeeze_dim(dim))
     }
 
-    /// Transpose two dims by swapping sizes/strides (PyTorch: `transpose`).
     pub fn transpose(&self, a: usize, b: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("transpose"), || vec![self.ty()]);
         assert!(a < self.ndim() && b < self.ndim(), "dim out of range");
@@ -372,7 +284,6 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// Permute all dims (PyTorch: `permute`, JAX: `lax.transpose`).
     pub fn permute(&self, dims: &[usize]) -> Self {
         let op = crate::profiler::record_op(op_name!("permute"), || vec![self.ty()]);
         assert_eq!(dims.len(), self.ndim(), "permute must list every dim");
@@ -413,19 +324,12 @@ impl Tensor {
         recorded(op, t)
     }
 
-    // ------------------------------------------------------------------
-    // Copying
-    // ------------------------------------------------------------------
-
-    /// Materialize a contiguous copy with fresh storage on the same device
-    /// (PyTorch: `Tensor::contiguous`; JAX arrays are always "contiguous"
-    /// in this sense since layout is opaque).
     pub fn contiguous<T: Element>(&self) -> Self {
         let op = crate::profiler::record_op(op_name!("contiguous"), || vec![self.ty()]);
         if self.is_contiguous() {
             return recorded(op, self.clone());
         }
-        if self.device() == Device::Meta {
+        if self.device() == Device::Meta(0) {
             // SAFETY: meta storage holds no data.
             return recorded(op, unsafe { self.empty_like() });
         }
@@ -436,22 +340,11 @@ impl Tensor {
         recorded(op, t)
     }
 
-    /// This tensor on `device` (PyTorch: `Tensor::to`). Returns `self`
-    /// (sharing storage) if already there; otherwise copies the elements
-    /// the view covers into fresh storage on `device`, keeping its shape
-    /// and strides.
-    ///
-    /// # Panics
-    /// If `device` is not available.
     pub fn to(&self, device: Device) -> Self {
         let op = crate::profiler::record_op(op_name!("to"), || vec![self.ty()]);
         recorded(op, self.copy_to(device))
     }
 
-    /// This tensor's elements converted to `dtype`, in new storage on its
-    /// device (PyTorch: `Tensor.to(dtype)`), as the `cast`
-    /// primitive converts them: a one-step graph, compiled for the device
-    /// and run on its kernels. Itself if it is already `dtype`.
     pub fn to_dtype(&self, dtype: DType) -> Result<Self, String> {
         if dtype == self.dtype {
             return Ok(self.clone());
@@ -466,19 +359,16 @@ impl Tensor {
         Ok(plan.run_on(std::slice::from_ref(self), device)?.remove(0))
     }
 
-    /// [`to`](Self::to) without the profiler record: the storage range the
-    /// view covers, copied to fresh storage on `device` with the copy ops
-    /// (through the host between two devices).
     pub(crate) fn copy_to(&self, device: Device) -> Self {
         if device == self.device() {
             return self.clone();
         }
         assert!(
-            self.device() != Device::Meta,
+            self.device() != Device::Meta(0),
             "cannot copy a meta tensor to {device}: meta tensors have no data"
         );
-        if device != Device::Cpu && self.device() != Device::Cpu {
-            return self.copy_to(Device::Cpu).copy_to(device);
+        if device != Device::Cpu(0) && self.device() != Device::Cpu(0) {
+            return self.copy_to(Device::Cpu(0)).copy_to(device);
         }
         let span = self.span();
         // SAFETY: the copy below covers every element of the span (none, on
@@ -486,8 +376,8 @@ impl Tensor {
         let options = TensorOptions::new().dtype(self.dtype).device(device);
         let out = unsafe { Self::empty(&span.shape, options) };
         match device {
-            Device::Meta => {}
-            Device::Cpu => copy_d2h(&out, &span),
+            Device::Meta(_) => {}
+            Device::Cpu(_) => copy_d2h(&out, &span),
             _ => copy_h2d(&out, &span),
         }
         Tensor {
@@ -499,24 +389,23 @@ impl Tensor {
         }
     }
 
-    /// Copy the logical contents out in row-major order.
     pub fn to_vec<T: Element>(&self) -> Vec<T> {
         let _op = crate::profiler::record_op(op_name!("to_vec"), || vec![self.ty()]);
         self.check_dtype::<T>();
         self.values()
     }
 
-    /// [`to_vec`](Self::to_vec) without the profiler record or dtype check.
     fn values<T: Element>(&self) -> Vec<T> {
-        assert!(self.device() != Device::Meta, "meta tensors have no data");
+        assert!(
+            self.device() != Device::Meta(0),
+            "meta tensors have no data"
+        );
         let mut out = Vec::with_capacity(self.numel());
         if self.numel() == 0 {
             return out;
         }
-        // One copy of the storage range the view covers to the host, then a
-        // host-side gather: a per-element copy would be a device round trip
-        // each.
-        let host = self.copy_to(Device::Cpu);
+
+        let host = self.copy_to(Device::Cpu(0));
         let base = host.storage.data_ptr().cast_const().cast::<T>();
         for_each_index(&self.shape, |idx| {
             let off = host.offset + flat_offset(&idx, &host.strides);
@@ -549,16 +438,11 @@ impl Tensor {
         }
     }
 
-    /// Wait for this tensor's value in place (PyTorch: `wait_tensor`): the
-    /// device work producing or using it has finished, so the host may read
-    /// or write it; the same tensor back. Every op touching a device
-    /// tensor's value on the host calls it first ([`crate::ops::wait`]).
     pub fn wait_(&self) -> &Self {
         crate::ops::wait::wait(self);
         self
     }
 
-    /// The element at storage offset `offset`, as a 0-d view.
     fn element(&self, offset: usize) -> Self {
         Tensor {
             storage: Arc::clone(&self.storage),
@@ -568,10 +452,6 @@ impl Tensor {
             offset,
         }
     }
-
-    // ------------------------------------------------------------------
-    // Element access
-    // ------------------------------------------------------------------
 
     fn check_dtype<T: Element>(&self) {
         assert_eq!(
@@ -583,7 +463,6 @@ impl Tensor {
         );
     }
 
-    /// Element offset of `index` within the storage.
     fn physical_offset(&self, index: &[usize]) -> usize {
         assert_eq!(index.len(), self.ndim(), "expected {} indices", self.ndim());
         for (d, &i) in index.iter().enumerate() {
@@ -599,13 +478,6 @@ impl Tensor {
         self.element(off).values::<T>()[0]
     }
 
-    /// Write through the view; aliases sharing this storage see the change
-    /// (PyTorch semantics).
-    ///
-    /// # Safety
-    /// Like PyTorch, this mutates shared data through a shared reference —
-    /// the caller must ensure no data races (single-threaded or externally
-    /// synchronized use).
     pub fn set<T: Element>(&self, index: &[usize], value: T) {
         let mut op = crate::profiler::record_op(op_name!("set"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -614,11 +486,6 @@ impl Tensor {
         self.element(off).write(&[value]);
     }
 
-    /// Set every element of the view to `value`, converted to the tensor's
-    /// dtype (PyTorch: `Tensor::fill_`). Writes through to aliases, with the
-    /// same data-race caveat as [`set`](Self::set).
-    ///
-    /// Runs the `fill_` kernel for the tensor's device (see [`crate::ops`]).
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
         let mut op = crate::profiler::record_op(op_name!("fill_"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -626,9 +493,6 @@ impl Tensor {
         self
     }
 
-    /// Copy `src`'s elements (of this view's dtype and shape, on any
-    /// device) into this view (PyTorch: `Tensor::copy_`). Writes through to
-    /// aliases, with the same data-race caveat as [`set`](Self::set).
     pub fn copy_(&self, src: &Tensor) -> Result<&Self, String> {
         let mut op = crate::profiler::record_op(op_name!("copy_"), || vec![src.ty(), self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -638,18 +502,17 @@ impl Tensor {
                 src.dtype, src.shape, self.dtype, self.shape
             ));
         }
-        if src.device() == Device::Meta {
+        if src.device() == Device::Meta(0) {
             return Err("copy_: meta tensors have no data".into());
         }
-        if self.device() == Device::Meta {
-            // A placed parameter: into its memory.
+        if self.device() == Device::Meta(0) {
             self.copy_into_placements(src)?;
             return Ok(self);
         }
-        // Both on MPS: a kernel copies, in stream order, with no host trip.
+
         #[cfg(lumen_mps_linked)]
-        if self.device() == Device::Mps
-            && src.device() == Device::Mps
+        if self.device() == Device::Mps(0)
+            && src.device() == Device::Mps(0)
             && self.is_contiguous()
             && src.is_contiguous()
         {
@@ -660,18 +523,18 @@ impl Tensor {
             }
             return Ok(self);
         }
-        let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu).contiguous::<T>());
+        let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu(0)).contiguous::<T>());
         if self.is_contiguous() {
             copy_h2d(self, &host);
             return Ok(self);
         }
-        if !matches!(self.device(), Device::Cpu | Device::Mps) {
+        if !matches!(self.device(), Device::Cpu(_) | Device::Mps(_)) {
             return Err(format!(
                 "copy_: a strided view on {} is not supported",
                 self.device()
             ));
         }
-        // A strided view of host-accessible memory: element by element.
+
         self.wait_();
         let size = self.dtype.size_of();
         let mut k = 0;
@@ -691,7 +554,6 @@ impl Tensor {
         Ok(self)
     }
 
-    /// Set every element to zero (PyTorch: `Tensor::zero_`).
     pub fn zero_(&self) -> &Self {
         let mut op = crate::profiler::record_op(op_name!("zero_"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -699,17 +561,11 @@ impl Tensor {
     }
 }
 
-// ----------------------------------------------------------------------
-// Stride helpers
-// ----------------------------------------------------------------------
-
-/// `t`, recorded as the output of `op` (a profiled op).
 fn recorded(mut op: RecordGuard, t: Tensor) -> Tensor {
     op.outputs(|| vec![t.ty()]);
     t
 }
 
-/// Row-major (C-contiguous) strides for `shape`.
 pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![1; shape.len()];
     for d in (0..shape.len().saturating_sub(1)).rev() {
@@ -720,7 +576,7 @@ pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
 
 impl std::fmt::Display for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.device() == Device::Meta {
+        if self.device() == Device::Meta(0) {
             return write!(
                 f,
                 "Tensor(shape={:?}, dtype={}, device=meta)",
@@ -765,7 +621,7 @@ pub(crate) fn for_each_index(shape: &[usize], mut f: impl FnMut(Vec<usize>)) {
     let mut idx = vec![0; shape.len()];
     loop {
         f(idx.clone());
-        // Increment like an odometer, last dim fastest (row-major).
+
         let mut d = shape.len();
         loop {
             if d == 0 {

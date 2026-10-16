@@ -1,5 +1,3 @@
-"""Python-side tests pinning down the same storage semantics as the Rust tests."""
-
 import numpy as np
 import pytest
 
@@ -11,7 +9,7 @@ def test_construct_and_infer_dtype():
     t = Tensor([[0.0, 1.0], [2.0, 3.0]])
     assert t.shape == [2, 2]
     assert t.dtype == "float32"
-    assert t.device == "cpu"
+    assert t.device == "cpu:0"
 
     t = Tensor([1, 2, 3])
     assert t.dtype == "int64"
@@ -170,7 +168,7 @@ def test_empty_has_the_requested_shape_dtype_and_device():
     t = lumen.empty([2, 3], dtype=lumen.int32)
     assert t.shape == [2, 3]
     assert t.dtype == "int32"
-    assert t.device == "cpu"
+    assert t.device == "cpu:0"
     assert lumen.empty([4]).dtype == "float32"  # torch's default dtype
     # Contents are unspecified until written; write, then read.
     assert t.fill_(7).tolist() == [[7, 7, 7], [7, 7, 7]]
@@ -197,14 +195,14 @@ def test_to_converts_dtypes_and_moves():
     assert x.to(dtype="int32").tolist() == [1, 2, -3, 1000000]
     assert x.to(dtype="float32").shares_storage_with(x) and x.to("cpu").shares_storage_with(x)
     meta = x.to("meta", "float16")
-    assert (meta.device, meta.dtype) == ("meta", "float16")
+    assert (meta.device, meta.dtype) == ("meta:0", "float16")
     with pytest.raises(ValueError, match="device"):
         x.to("float16")  # a device, positionally
     try:
         m = x.to("mps", lumen.float16)
     except RuntimeError:
         return
-    assert (m.device, m.dtype) == ("mps", "float16")
+    assert (m.device, m.dtype) == ("mps:0", "float16")
     assert m.to("cpu", "float32").tolist() == [1.0, 2.5, -3.69921875, float("inf")]
 
 
@@ -231,9 +229,9 @@ def test_item_cpu_and_to_numpy_read_device_results():
         y, total = lumen.compile(lambda x: (x * 2.0, F.sum(x)), device="mps")(lumen.from_numpy(a))
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert y.device == "mps" and total.item() == 66.0
+    assert y.device == "mps:0" and total.item() == 66.0
     host = y.cpu()
-    assert host.device == "cpu" and host.tolist() == (a * 2).tolist()
+    assert host.device == "cpu:0" and host.tolist() == (a * 2).tolist()
     np.testing.assert_array_equal(lumen.to_numpy(y), a * 2)
 
 

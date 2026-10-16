@@ -296,7 +296,7 @@ def test_mps_kernels_match_cpu(dtype):
     actual = fn(*(t.to("mps") for t in cpu))
     tol = {"float32": 1e-4, "float16": 1e-2, "bfloat16": 5e-2}[dtype]
     for e, a in zip(expected, actual):
-        assert a.device == "mps"
+        assert a.device == "mps:0"
         np.testing.assert_allclose(lumen.to_numpy(a), e, rtol=tol, atol=tol)
 
 
@@ -381,7 +381,7 @@ def test_dump_graph(tmp_path):
     data = f.dump_graph(tmp_path / "graph.html", json_path=tmp_path / "graph.json")
     page = (tmp_path / "graph.html").read_text()
     assert page.startswith("<!doctype html>") and "<title>&lt;lambda&gt; · lumen graph</title>" in page
-    assert data["inputs"] == ["f32[2,3]", "f32[3,4]"] and data["device"] == "cpu"
+    assert data["inputs"] == ["f32[2,3]", "f32[3,4]"] and data["device"] == "cpu:0"
     assert [n["label"] for n in data["views"]["traced"]["nodes"] if n["kind"] == "node"] == [
         "dot_general",
         "full",
@@ -408,9 +408,9 @@ def test_dump_graph(tmp_path):
 
 def test_meta_tensors_have_no_data():
     x = lumen.empty([2, 3], device="meta")
-    assert (x.device, x.shape, x.dtype) == ("meta", [2, 3], "float32")
+    assert (x.device, x.shape, x.dtype) == ("meta:0", [2, 3], "float32")
     assert repr(x) == "Tensor(shape=[2, 3], dtype=f32, device=meta)"
-    assert lumen.ones([2, 3], device="meta").device == "meta"  # nothing filled
+    assert lumen.ones([2, 3], device="meta").device == "meta:0"  # nothing filled
     assert lumen.tensor([1.0, 2.0]).to("meta").shape == [2]  # data dropped
     assert x.transpose(0, 1).contiguous().shape == [3, 2]  # views, no copies
     for read in (x.tolist, lambda: x.to("cpu"), lambda: x[0, 0], lambda: lumen.to_numpy(x), x.__dlpack__):
@@ -427,7 +427,7 @@ def test_tracing_and_running_on_meta_tensors():
     # A compiled function runs nothing on meta tensors: meta results, of
     # the types real ones would have (shape inference).
     y, s = lumen.compile(f)(x, w)
-    assert (y.device, y.shape, s.shape) == ("meta", [8, 16], [8])
+    assert (y.device, y.shape, s.shape) == ("meta:0", [8, 16], [8])
     assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
 
 
@@ -445,7 +445,7 @@ def test_compiled_init_runs_once_per_call(tmp_path):
     # Results are views of the function's workspace, which each call reuses.
     assert a.tolist() == b.tolist() == [[0.5, 1.5, 2.5]] * 2 and b.shares_storage_with(make())
     data = make.dump_graph(tmp_path / "init.html")
-    assert data["inputs"] == [] and data["device"] == "cpu"
+    assert data["inputs"] == [] and data["device"] == "cpu:0"
 
 
 @pytest.mark.mps
@@ -456,18 +456,18 @@ def test_compiled_init_on_device(tmp_path):
         pytest.skip(str(e))
     make = lumen.compile(lambda: (lumen.ones([4, 8]) * 2.0, lumen.arange(8)), device="mps")
     w, i = make()
-    assert (w.device, i.device) == ("mps", "mps")
+    assert (w.device, i.device) == ("mps:0", "mps:0")
     assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
     # Tensor arguments with data are copied in, from any device.
     assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
     # Profiled on the device it creates tensors on.
     data = make.dump_graph(tmp_path / "init.html")
-    assert data["device"] == "mps" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+    assert data["device"] == "mps:0" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
     # Meta tensors trace a dump with no data; it is profiled on `device`.
     f = lumen.compile(lambda x, w: x @ w)
     meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
     data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
-    assert data["device"] == "mps" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
+    assert data["device"] == "mps:0" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
     assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
 
 
@@ -528,7 +528,7 @@ def test_module_weights_are_placed_once_and_shared(device):
         y = f(model, meta(2, 4))
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert (y.device, y.shape) == ("meta", [2, 4])
+    assert (y.device, y.shape) == ("meta:0", [2, 4])
     values = {n: rand(*t.shape, seed=i + 1) for i, (n, t) in enumerate(model.named_parameters())}
     model.load_state_dict({n: lumen.from_numpy(v) for n, v in values.items()})
     x = rand(2, 4)
@@ -2470,10 +2470,10 @@ def test_cpu_inside_a_compiled_function(device):
         first = g(lumen.tensor([1.0, 2.0]))
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert devices == [device, "cpu", "cpu", device]
+    assert devices == [f"{device}:0", "cpu:0", "cpu:0", f"{device}:0"]
     h, total, half, moved, y, added, x = first
-    assert all(t.device == "cpu" for t in (h, total, half, moved, added))
-    assert y.device == x.device == device
+    assert all(t.device == "cpu:0" for t in (h, total, half, moved, added))
+    assert y.device == x.device == f"{device}:0"
     assert half.dtype == "float16"
     assert [h.tolist(), total.tolist(), half.tolist()] == [[2.0, 4.0], [8.0], [1.0, 2.0]]
     # On the CPU, ``x.to(device="cpu")`` and ``x.cpu()`` are ``x``: adding
@@ -2520,8 +2520,8 @@ def test_cpu_inside_a_compiled_function_transfers():
         copy = by_id[copy["parent"]]
         names.append(copy["name"])
     assert "to_host" in names
-    assert y.device == "cpu" and y.tolist() == [7.0, 13.0]
+    assert y.device == "cpu:0" and y.tolist() == [7.0, 13.0]
     with pytest.raises(RuntimeError, match="Expected all tensors to be on the same device"):
         lumen.compile(lambda x: x.cpu() + x, device="mps")(x)
     grad = lumen.compile(lumen.grad(lambda x: F.sum((x * 3.0).cpu() * 5.0).to("mps")), device="mps")(x)
-    assert grad.device == "mps" and grad.tolist() == [15.0, 15.0]
+    assert grad.device == "mps:0" and grad.tolist() == [15.0, 15.0]

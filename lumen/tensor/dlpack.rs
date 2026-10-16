@@ -1,19 +1,3 @@
-//! DLPack capsules for [`crate::Tensor`], after PyTorch
-//! (`aten/src/ATen/DLConvertor.cpp`, `torch/csrc/Module.cpp` and
-//! `torch/csrc/utils/tensor_new.cpp`). The protocol around them —
-//! `Tensor.__dlpack__`'s stream and version handling, `from_dlpack`'s
-//! negotiation — is Python, in `lumen/tensor/dlpack.py`, as it is in
-//! `torch/_tensor.py` and `torch/utils/dlpack.py`.
-//!
-//! Export: a capsule named `"dltensor"` (or `"dltensor_versioned"`) holds a
-//! managed tensor whose context owns a handle on the tensor, so the buffer
-//! outlives the exporter for as long as the consumer needs it. Nothing is
-//! copied.
-//!
-//! Import: the producer's buffer is adopted as a storage whose deleter is
-//! the producer's own, and the capsule is renamed `"used_dltensor"` so it
-//! cannot be consumed twice.
-
 use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
@@ -29,19 +13,16 @@ use crate::tensor::dtype::DType;
 use crate::tensor::storage::Storage;
 use crate::{Device, Tensor};
 
-// `DLDeviceType` values (`dlpack.h`).
 const K_DL_CPU: i32 = 1;
 const K_DL_CUDA: i32 = 2;
 const K_DL_METAL: i32 = 8;
 
-// `DLDataTypeCode` values (`dlpack.h`).
 const K_DL_INT: u8 = 0;
 const K_DL_UINT: u8 = 1;
 const K_DL_FLOAT: u8 = 2;
 const K_DL_BFLOAT: u8 = 4;
 const K_DL_BOOL: u8 = 6;
 
-/// The DLPack version exported, and the newest major version imported.
 const DLPACK_MAJOR_VERSION: u32 = 1;
 const DLPACK_MINOR_VERSION: u32 = 0;
 
@@ -90,16 +71,12 @@ struct DLManagedTensorVersioned {
     version: DLPackVersion,
     manager_ctx: *mut c_void,
     deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
-    /// Bitmask of `DLPACK_FLAG_BITMASK_*`; lumen sets and reads none.
     flags: u64,
     dl_tensor: DLTensor,
 }
 
-/// What differs between the two managed tensors (PyTorch: `DLPackTraits`).
 trait Managed: Sized + 'static {
-    /// The capsule name while unconsumed.
     const CAPSULE: &'static CStr;
-    /// The name a consumer renames it to.
     const USED: &'static CStr;
 
     fn new(dl_tensor: DLTensor, deleter: unsafe extern "C" fn(*mut Self)) -> Self;
@@ -107,7 +84,6 @@ trait Managed: Sized + 'static {
     fn manager_ctx(&mut self) -> &mut *mut c_void;
     fn deleter(&self) -> Option<unsafe extern "C" fn(*mut Self)>;
 
-    /// Refuse a layout this module cannot read.
     fn check_version(&self) -> PyResult<()> {
         Ok(())
     }
@@ -178,14 +154,6 @@ impl Managed for DLManagedTensorVersioned {
     }
 }
 
-// ---------------------------------------------------------------------
-// export
-// ---------------------------------------------------------------------
-
-/// What an exported managed tensor owns (PyTorch: `ATenDLMTensor`): a
-/// handle on the tensor, which keeps its storage alive, the shape and
-/// strides its `DLTensor` points into, and the managed tensor itself, which
-/// the capsule points at. All but `tensor` are only held, never read.
 #[allow(dead_code)]
 struct LumenDLMTensor<T> {
     handle: Tensor,
@@ -194,10 +162,6 @@ struct LumenDLMTensor<T> {
     tensor: T,
 }
 
-/// The deleter of an exported managed tensor: frees its context.
-///
-/// # Safety
-/// `arg` is a managed tensor from [`to_managed`], freed at most once.
 unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
     // SAFETY: the context is the `LumenDLMTensor` that `to_managed` leaked.
     unsafe {
@@ -207,17 +171,12 @@ unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
     }
 }
 
-/// The managed tensor for `t` (PyTorch: `toDLPackImpl`), owned by the
-/// caller until its deleter runs.
 fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
-    // Its values written: the consumer reads them as it likes.
     t.wait_();
     let shape: Vec<i64> = t.shape().iter().map(|&d| d as i64).collect();
     let strides: Vec<i64> = t.strides().iter().map(|&s| s as i64).collect();
-    // Metal buffers are addressed from their base, as in PyTorch; elsewhere
-    // `data` points at the first element.
     let (data, byte_offset) = match t.device() {
-        Device::Mps => (
+        Device::Mps(_) => (
             t.storage().data_ptr(),
             (t.storage_offset() * t.dtype().size_of()) as u64,
         ),
@@ -228,8 +187,6 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
         device: dl_device(t.device()),
         ndim: t.ndim() as i32,
         dtype: dl_dtype(t.dtype()),
-        // The vectors' buffers do not move when the vectors move into the
-        // context below.
         shape: shape.as_ptr().cast_mut(),
         strides: strides.as_ptr().cast_mut(),
         byte_offset,
@@ -247,15 +204,7 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
     }
 }
 
-/// The capsule destructor (PyTorch: `DLPack_Capsule_Destructor`): frees the
-/// managed tensor unless a consumer took it, which it does by renaming the
-/// capsule.
-///
-/// # Safety
-/// `capsule` is a capsule from [`to_capsule`] being destroyed.
 unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject) {
-    // `PyCapsule_IsValid` checks the name without setting an exception,
-    // which a destructor must not leave behind.
     unsafe {
         if ffi::PyCapsule_IsValid(capsule, T::CAPSULE.as_ptr()) == 0 {
             return;
@@ -268,14 +217,12 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
 }
 
 fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
-    if t.device() == Device::Meta {
+    if t.device() == Device::Meta(0) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
             "meta tensors have no data to export",
         ));
     }
     let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
-    // SAFETY: the capsule owns the managed tensor, and its destructor frees
-    // it unless a consumer takes it.
     unsafe {
         PyCapsule::new_with_pointer_and_destructor(
             py,
@@ -286,13 +233,10 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
     }
 }
 
-/// `t` as an unversioned `"dltensor"` capsule (PyTorch: `_C._to_dlpack`).
 pub(crate) fn to_dlpack<'py>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
     to_capsule::<DLManagedTensor>(py, t)
 }
 
-/// `t` as a `"dltensor_versioned"` capsule (PyTorch:
-/// `_C._to_dlpack_versioned`).
 pub(crate) fn to_dlpack_versioned<'py>(
     py: Python<'py>,
     t: &Tensor,
@@ -302,10 +246,10 @@ pub(crate) fn to_dlpack_versioned<'py>(
 
 fn dl_device(device: Device) -> DLDevice {
     let (device_type, device_id) = match device {
-        Device::Cpu => (K_DL_CPU, 0),
+        Device::Cpu(_) => (K_DL_CPU, 0),
         Device::Cuda(index) => (K_DL_CUDA, index as i32),
-        Device::Mps => (K_DL_METAL, 0),
-        Device::Meta => unreachable!("meta tensors are not exported (to_capsule)"),
+        Device::Mps(_) => (K_DL_METAL, 0),
+        Device::Meta(_) => unreachable!("meta tensors are not exported (to_capsule)"),
     };
     DLDevice {
         device_type,
@@ -328,12 +272,6 @@ fn dl_dtype(dtype: DType) -> DLDataType {
     }
 }
 
-// ---------------------------------------------------------------------
-// import
-// ---------------------------------------------------------------------
-
-/// A tensor over the buffer a DLPack capsule describes, versioned or not
-/// (PyTorch: `tensor_fromDLPack`).
 pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     // SAFETY: `PyCapsule_IsValid` only reads the capsule's name.
     let is = |name: &CStr| unsafe { ffi::PyCapsule_IsValid(capsule.as_ptr(), name.as_ptr()) } != 0;
@@ -349,8 +287,6 @@ pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     }
 }
 
-/// Adopt the managed tensor in `capsule`, named `T::CAPSULE`, and rename the
-/// capsule so it is not consumed again.
 fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     // SAFETY: the caller checked the name, so the pointer is the producer's
     // managed tensor, live until its deleter runs.
@@ -368,24 +304,18 @@ fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> 
     Ok(adopt(managed, layout))
 }
 
-/// What a `DLTensor` describes, checked to be representable.
 struct DLLayout {
     data: *mut u8,
     device: Device,
     dtype: DType,
     shape: Vec<usize>,
     strides: Vec<usize>,
-    /// In elements from `data`.
     offset: usize,
-    /// The bytes from `data` the view reaches.
     nbytes: usize,
 }
 
-/// Check and read `dl` (PyTorch: `fromDLPackImpl`).
 fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     let device = device_of(dl.device)?;
-    // The device must exist in this build: new tensors derived from this one
-    // allocate from its allocator.
     allocator_for(device).map_err(PyBufferError::new_err)?;
     let dtype = dtype_of(dl.dtype)?;
     let ndim = usize::try_from(dl.ndim)
@@ -445,37 +375,23 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     })
 }
 
-/// A producer's managed tensor, which the allocator of the storage that
-/// adopts its buffer releases.
 struct Producer<T>(*mut T);
 
-// SAFETY: the pointer is only used to call the producer's deleter, once,
-// holding the GIL.
 unsafe impl<T> Send for Producer<T> {}
 unsafe impl<T> Sync for Producer<T> {}
 
 impl<T: Managed> Producer<T> {
     fn release(self) {
-        // Producer deleters may touch Python objects (NumPy's releases the
-        // array), so run them holding the GIL, as PyTorch does.
-        Python::attach(|_| {
-            // SAFETY: the managed tensor is ours since the capsule was
-            // renamed, and it is released exactly once.
-            unsafe {
-                if let Some(deleter) = (*self.0).deleter() {
-                    deleter(self.0);
-                }
+        Python::attach(|_| unsafe {
+            if let Some(deleter) = (*self.0).deleter() {
+                deleter(self.0);
             }
         });
     }
 }
 
-/// The allocator of a storage over a producer's buffer: it frees that buffer
-/// with the producer's deleter, once, and passes everything else (tensors
-/// made from this one, e.g. by `empty_like`) to the device's allocator.
 struct Adopted<T> {
     device: Arc<dyn Allocator>,
-    /// The buffer's address and its producer, until released.
     buffer: Mutex<Option<(usize, Producer<T>)>>,
 }
 
@@ -499,8 +415,6 @@ impl<T: Managed> Allocator for Adopted<T> {
     }
 }
 
-/// A tensor over `layout`'s buffer whose storage frees it with the
-/// producer's deleter (PyTorch: `at::from_blob` with a deleter).
 fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
     let data = NonNull::new(layout.data).unwrap_or(NonNull::dangling());
     let allocator = Adopted {
@@ -521,9 +435,9 @@ fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
 
 fn device_of(device: DLDevice) -> PyResult<Device> {
     match device.device_type {
-        K_DL_CPU => Ok(Device::Cpu),
+        K_DL_CPU => Ok(Device::Cpu(0)),
         K_DL_CUDA => Ok(Device::Cuda(device.device_id as usize)),
-        K_DL_METAL => Ok(Device::Mps),
+        K_DL_METAL => Ok(Device::Mps(0)),
         other => Err(PyBufferError::new_err(format!(
             "unsupported DLPack device type {other}"
         ))),

@@ -231,4 +231,4 @@ def test_mps_dlpack_device():
     except RuntimeError as e:
         pytest.skip(str(e))
     assert t.__dlpack_device__() == (8, 0)
-    assert lumen.from_dlpack(t.narrow(0, 0, 1)).device == "mps"
+    assert lumen.from_dlpack(t.narrow(0, 0, 1)).device == "mps:0"

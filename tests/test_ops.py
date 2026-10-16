@@ -212,7 +212,7 @@ def test_the_launcher_can_write_through_the_address(device):
     try:
         t = lumen.zeros([4], device=device)
         # The host write must follow the zeros' fill, queued on the MPS stream.
-        lumen.Stream("mps").synchronize()
+        lumen.mps.synchronize()
         _C._dummy_op(t, 3.0)
         assert t.tolist() == [3.0, 3.0, 3.0, 3.0]
     finally:
