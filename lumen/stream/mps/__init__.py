@@ -19,13 +19,7 @@ DLPack) waits for the stream first.
 
 from lumen import _C
 
-__all__ = ["Kernel", "buffer", "command_buffer", "compile", "launch", "synchronize"]
-
-
-def synchronize() -> None:
-    """Wait for all work on the MPS stream to finish
-    (``torch.mps.synchronize()``). Raises ``RuntimeError`` without MPS."""
-    _C.Stream("mps").synchronize()
+__all__ = ["Kernel", "buffer", "command_buffer", "compile", "launch"]
 
 
 class Kernel:
@@ -71,7 +65,7 @@ def command_buffer():
     encoder of yours, ended before lumen's next MPS work), it runs after
     what was submitted before and before what is submitted after. Valid
     until the stream commits it: until lumen's next MPS work or
-    ``synchronize``; in a custom op, for its call."""
+    ``lumen.Stream("mps").synchronize()``; in a custom op, for its call."""
     return _C._mps_command_buffer()
 
 
