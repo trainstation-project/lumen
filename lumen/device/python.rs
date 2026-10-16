@@ -21,37 +21,6 @@ pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core
     Ok(device)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum DeviceType {
-    Cpu,
-    Mps,
-    Cuda,
-    Meta,
-}
-
-impl DeviceType {
-    fn parse(name: &str) -> PyResult<Self> {
-        match name {
-            "cpu" => Ok(DeviceType::Cpu),
-            "mps" => Ok(DeviceType::Mps),
-            "cuda" => Ok(DeviceType::Cuda),
-            "meta" => Ok(DeviceType::Meta),
-            other => Err(PyValueError::new_err(format!(
-                "Expected one of cpu, mps, cuda, meta device type at start of device string: {other}"
-            ))),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            DeviceType::Cpu => "cpu",
-            DeviceType::Mps => "mps",
-            DeviceType::Cuda => "cuda",
-            DeviceType::Meta => "meta",
-        }
-    }
-}
-
 #[pyclass(
     name = "device",
     module = "lumen",
@@ -62,12 +31,12 @@ impl DeviceType {
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PyDevice {
-    kind: DeviceType,
-    index: Option<usize>,
+    device: core::Device,
+    indexed: bool,
 }
 
 impl PyDevice {
-    fn checked(kind: DeviceType, index: Option<i64>) -> PyResult<Self> {
+    fn checked(kind: &str, index: Option<i64>) -> PyResult<Self> {
         let index = match index {
             None => None,
             Some(i) if i < 0 => {
@@ -77,7 +46,15 @@ impl PyDevice {
             }
             Some(i) => Some(i as usize),
         };
-        Ok(PyDevice { kind, index })
+        let device = core::Device::of_type(kind, index.unwrap_or(0)).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Expected one of cpu, mps, cuda, meta device type at start of device string: {kind}"
+            ))
+        })?;
+        Ok(PyDevice {
+            device,
+            indexed: index.is_some(),
+        })
     }
 
     fn parse(spec: &str) -> PyResult<Self> {
@@ -94,17 +71,15 @@ impl PyDevice {
                 (kind, Some(parsed))
             }
         };
-        Self::checked(DeviceType::parse(kind)?, index)
+        Self::checked(kind, index)
     }
 
     fn to_core(&self) -> core::Device {
-        let index = self.index.unwrap_or(0);
-        match self.kind {
-            DeviceType::Cpu => core::Device::Cpu(index),
-            DeviceType::Mps => core::Device::Mps(index),
-            DeviceType::Cuda => core::Device::Cuda(index),
-            DeviceType::Meta => core::Device::Meta(index),
-        }
+        self.device
+    }
+
+    fn name(&self) -> &'static str {
+        self.device.backend().name()
     }
 }
 
@@ -136,31 +111,31 @@ impl PyDevice {
                 "type (string) must not include an index because index was passed \
                  explicitly: {spec}"
             ))),
-            Some(_) => Self::checked(DeviceType::parse(spec)?, index),
+            Some(_) => Self::checked(spec, index),
         }
     }
 
     #[getter(r#type)]
     fn kind(&self) -> &'static str {
-        self.kind.name()
+        self.name()
     }
 
     #[getter]
     fn index(&self) -> Option<usize> {
-        self.index
+        self.indexed.then(|| self.device.index())
     }
 
     fn __str__(&self) -> String {
-        match self.index {
-            None => self.kind.name().to_owned(),
-            Some(i) => format!("{}:{i}", self.kind.name()),
+        match self.indexed {
+            true => self.device.to_string(),
+            false => self.name().to_owned(),
         }
     }
 
     fn __repr__(&self) -> String {
-        match self.index {
-            None => format!("device(type='{}')", self.kind.name()),
-            Some(i) => format!("device(type='{}', index={i})", self.kind.name()),
+        match self.index() {
+            None => format!("device(type='{}')", self.name()),
+            Some(i) => format!("device(type='{}', index={i})", self.name()),
         }
     }
 

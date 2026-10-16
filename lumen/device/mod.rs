@@ -37,6 +37,16 @@ pub enum Device {
 }
 
 impl Device {
+    pub fn of_type(name: &str, index: usize) -> Option<Device> {
+        match name {
+            "cpu" => Some(Device::Cpu(index)),
+            "mps" => Some(Device::Mps(index)),
+            "cuda" => Some(Device::Cuda(index)),
+            "meta" => Some(Device::Meta(index)),
+            _ => None,
+        }
+    }
+
     pub fn backend(self) -> &'static dyn DeviceBackend {
         match self {
             Device::Cpu(_) => cpu::CPU,
