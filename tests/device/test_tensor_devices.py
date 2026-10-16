@@ -1,17 +1,12 @@
-"""Tensors on devices: the device= argument and Tensor.to()."""
-
 import pytest
 
 import lumen
 
-# Device cases carry a marker (select them with `-m mps`, `-m cuda`) and
-# skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 def _require(device):
-    """Skip unless tensors can be created on `device` in this build."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -19,14 +14,14 @@ def _require(device):
 
 
 def test_default_device_is_cpu():
-    assert lumen.zeros([2]).device == "cpu"
-    assert lumen.tensor([1, 2]).device == "cpu"
+    assert lumen.zeros([2]).device == "cpu:0"
+    assert lumen.tensor([1, 2]).device == "cpu:0"
 
 
 @pytest.mark.parametrize("device", ["cpu", lumen.device("cpu"), None])
 def test_cpu_device_forms(device):
     t = lumen.arange(3, device=device)
-    assert t.device == "cpu"
+    assert t.device == "cpu:0"
     assert t.tolist() == [0.0, 1.0, 2.0]
 
 
@@ -73,7 +68,7 @@ def test_to_and_back(device):
     assert moved.tolist() == cpu.tolist()
     assert moved.contiguous().device == moved.device
     back = moved.to("cpu")
-    assert back.device == "cpu"
+    assert back.device == "cpu:0"
     assert back.tolist() == cpu.tolist()
 
 
