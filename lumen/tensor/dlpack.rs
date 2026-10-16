@@ -382,11 +382,9 @@ unsafe impl<T> Sync for Producer<T> {}
 
 impl<T: Managed> Producer<T> {
     fn release(self) {
-        Python::attach(|_| {
-            unsafe {
-                if let Some(deleter) = (*self.0).deleter() {
-                    deleter(self.0);
-                }
+        Python::attach(|_| unsafe {
+            if let Some(deleter) = (*self.0).deleter() {
+                deleter(self.0);
             }
         });
     }
