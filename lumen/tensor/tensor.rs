@@ -355,7 +355,7 @@ impl Tensor {
         let y = g.apply(convert, &[x])?;
         g.set_outputs(&[y])?;
         let device = self.device();
-        let plan = crate::compiler::compile(&g, device)?;
+        let plan = crate::graph_compiler::compile(&g, device)?;
         Ok(plan.run_on(std::slice::from_ref(self), device)?.remove(0))
     }
 
