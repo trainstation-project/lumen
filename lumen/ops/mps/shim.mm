@@ -40,7 +40,6 @@ static id<MTLLibrary> library(void) {
 static os_unfair_lock cache_lock = OS_UNFAIR_LOCK_INIT;
 static auto *cache = new std::unordered_map<std::string, id<MTLComputePipelineState>>();
 
-// The pipeline for kernel `name`, created on first use.
 static id<MTLComputePipelineState> pipeline(const char *name) {
     os_unfair_lock_lock(&cache_lock);
     auto it = cache->find(name);
