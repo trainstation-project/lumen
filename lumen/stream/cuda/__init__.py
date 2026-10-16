@@ -3,6 +3,7 @@
 from typing import Optional, Union
 
 from lumen import _C
+from lumen.device import device as _device
 
 __all__ = ["is_available", "synchronize"]
 
@@ -13,7 +14,7 @@ def is_available() -> bool:
     return _C._cuda_is_available()
 
 
-def synchronize(device: Optional[Union[int, str, "_C.device"]] = None) -> None:
+def synchronize(device: Optional[Union[int, str, _device]] = None) -> None:
     """Wait for all work on a CUDA device to finish
     (``torch.cuda.synchronize(device)``): an index, a CUDA device, or
     ``None`` for device 0. Raises ``RuntimeError`` without that device."""

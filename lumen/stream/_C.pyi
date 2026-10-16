@@ -3,7 +3,7 @@
 
 from typing import Optional, Sequence, Union
 
-from lumen._C import device
+from lumen.device import device
 from lumen.tensor._C import Tensor
 
 def _mps_synchronize() -> None: ...
