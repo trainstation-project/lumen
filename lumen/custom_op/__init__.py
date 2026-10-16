@@ -23,7 +23,7 @@ When the step runs, the function is called with its tensor arguments as
 lumen tensors on the plan's device (views of the plan's memory, no copy)
 and its other arguments as given: it writes the mutated ones in place. On
 MPS, nothing waits for the device: its own kernels, encoded into lumen's
-stream (``lumen.mps.launch``, ``lumen.mps.command_buffer``), run in order
+stream (``Kernel(...).launch``, ``lumen.Stream("mps").command_buffer()``), run in order
 with the plan's, after the earlier steps and before the later ones; host
 reads and writes (``lumen.to_numpy``, ``copy_``, DLPack) wait for the
 stream themselves. Host work is done by the time it returns. A mutated
@@ -31,11 +31,13 @@ argument is the argument's own memory where nothing reads its old value
 after the call, else a copy of it (PyTorch: ``auto_functionalized``,
 reinplaced where it can be).
 
-    kernel = lumen.mps.compile(AXPY_METAL_SOURCE)  # kernel void axpy(...)
+    from lumen.custom_op import Kernel, custom_op
 
-    @lumen.ops.custom_op("mylib::axpy", mutates_args=("y",))
+    kernel = Kernel(AXPY_METAL_SOURCE)  # kernel void axpy(...)
+
+    @custom_op("mylib::axpy", mutates_args=("y",))
     def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
-        lumen.mps.launch(kernel, [x, y], [np.float32(a)], grid=(y.numel,))
+        kernel.launch([x, y], [np.float32(a)], grid=(y.numel,))
 
     @lumen.compile
     def step(x, y):
@@ -46,11 +48,11 @@ reinplaced where it can be).
 import functools
 import inspect
 
-from lumen._C import _register_custom_op
+from lumen._C import Kernel, _register_custom_op
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
-__all__ = ["CustomOp", "custom_op"]
+__all__ = ["CustomOp", "Kernel", "custom_op"]
 
 
 def custom_op(name, fn=None, /, *, mutates_args, overlappable=None):
