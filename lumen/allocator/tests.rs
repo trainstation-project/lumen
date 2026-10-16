@@ -5,8 +5,6 @@ mod cpu {
     fn get_returns_the_same_global_instance() {
         let a = CpuAllocator::get();
         let b = CpuAllocator::get();
-        // Both references point at the one static CPU_ALLOCATOR. Compare data
-        // addresses only: vtable pointers of `&dyn` aren't guaranteed unique.
         assert!(std::ptr::addr_eq(a, b));
     }
 
@@ -24,8 +22,6 @@ mod cpu {
     #[test]
     fn can_write_and_read_back_through_the_pointer() {
         let data = CpuAllocator.allocate(64);
-        // SAFETY: 64 bytes were allocated above; we stay in bounds and free
-        // them after.
         unsafe {
             let bytes = std::slice::from_raw_parts_mut(data.as_ptr(), 64);
             for (i, b) in bytes.iter_mut().enumerate() {
@@ -40,14 +36,12 @@ mod cpu {
     #[test]
     fn zero_byte_allocation_is_safe() {
         let data = CpuAllocator.allocate(0);
-        // Dangling but aligned; must not be dereferenced, must free cleanly.
         assert_eq!(data.as_ptr() as usize % 64, 0);
         unsafe { CpuAllocator.deallocate(data, 0) };
     }
 
     #[test]
     fn repeated_alloc_and_free_cycles_do_not_crash() {
-        // Exercises deallocate (dealloc with the matching layout).
         for i in 0..100 {
             let nbytes = 1 << (i % 12);
             let data = CpuAllocator.allocate(nbytes);
@@ -147,7 +141,6 @@ mod static_allocator {
         free(&allocator, a, 100);
         assert_eq!(allocator.used(), 256 + 100);
         assert_eq!(allocator.live_bytes(), 100);
-        // a's block is free again although b is live: first fit takes it.
         let c = allocator.allocate(200);
         assert_eq!(c, a);
         free(&allocator, b, 100);
@@ -157,8 +150,6 @@ mod static_allocator {
 
     #[test]
     fn a_loop_with_live_inputs_does_not_grow() {
-        // A compiled function called in a loop: its inputs stay live while
-        // each call's workspace and output come and go.
         let allocator = allocator(4096);
         let _inputs = (allocator.allocate(1000), allocator.allocate(1000));
         for _ in 0..100 {
@@ -174,8 +165,6 @@ mod static_allocator {
     fn freed_neighbours_merge() {
         let allocator = allocator(1024);
         let blocks: Vec<_> = (0..4).map(|_| allocator.allocate(256)).collect();
-        // Freed out of order, the four blocks merge back into one that holds
-        // the whole region.
         for i in [2, 0, 3, 1] {
             free(&allocator, blocks[i], 256);
         }
@@ -221,8 +210,6 @@ mod static_allocator {
 }
 
 mod devices {
-    //! Device selection for tensors and storage, on any machine.
-
     use crate::allocator::allocator_for;
     use crate::{Device, Storage, Tensor};
 
@@ -361,7 +348,6 @@ mod mps {
     use crate::allocator::static_allocator::StaticAllocator;
     use crate::{Allocator, Device, Storage};
 
-    /// Skip guard: returns early from a test when Metal is unavailable.
     macro_rules! require_mps {
         () => {
             if !crate::device::mps::MPS.is_available() {
