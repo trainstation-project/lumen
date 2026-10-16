@@ -1,16 +1,8 @@
-"""DLPack interop, after PyTorch: ``Tensor.__dlpack__`` and
-``__dlpack_device__`` (``torch/_tensor.py``) and ``from_dlpack``
-(``torch/utils/dlpack.py``). The capsules themselves are built and consumed
-in Rust (``lumen/tensor/dlpack.rs``).
-
-lumen's CUDA work runs on the legacy default stream, so that is the stream
-a CUDA exchange is ordered against.
-"""
-
 import enum
 
 from lumen import _C
 from lumen._C import LIBRARY_NAME
+from lumen.device import device
 
 __all__ = ["DLDeviceType", "from_dlpack"]
 
@@ -32,8 +24,8 @@ _DEVICE_TYPES = {
 
 def __dlpack_device__(self):
     """``(device_type, device_id)`` of this tensor's device."""
-    device = _C.device(self.device)
-    return (_DEVICE_TYPES[device.type], device.index or 0)
+    d = device(self.device)
+    return (_DEVICE_TYPES[d.type], d.index or 0)
 
 
 def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
@@ -61,14 +53,14 @@ def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
 
     if stream is not None and not isinstance(stream, int):
         raise TypeError("stream must be ``int`` or ``None``")
-    device = _C.device(self.device)
-    if device.type == "cuda":
+    d = device(self.device)
+    if d.type == "cuda":
         if stream == 0:
             raise ValueError("stream 0 is ambiguous on CUDA; use 1 for the legacy default stream")
         if stream == 2:
             raise BufferError("the per-thread default stream is not supported")
         if stream not in (None, -1, 1):
-            _C._cuda_stream_wait(device.index or 0, stream)
+            _C.Stream(d, stream_id=stream).wait_stream(_C.Stream(d))
     elif stream not in (None, -1):
         raise ValueError(f"stream must be None or -1 for a tensor on {self.device}")
 
@@ -84,7 +76,7 @@ def _device_of(dl_device):
     if device_type not in names:
         raise BufferError(f"unsupported DLPack device type {device_type}")
     name = names[device_type]
-    return f"cuda:{device_id}" if name == "cuda" else name
+    return f"{name}:{device_id}"
 
 
 def from_dlpack(ext_tensor):
