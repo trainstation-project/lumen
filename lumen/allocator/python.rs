@@ -18,8 +18,8 @@ impl Config {
     }
 
     #[getter]
-    fn compiler(&self) -> core::compiler::python::PyCompilerConfig {
-        core::compiler::python::PyCompilerConfig
+    fn compiler(&self) -> core::graph_compiler::python::PyCompilerConfig {
+        core::graph_compiler::python::PyCompilerConfig
     }
 
     fn __repr__(&self) -> String {
