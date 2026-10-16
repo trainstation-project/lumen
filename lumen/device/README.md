@@ -5,10 +5,6 @@ piece of hardware is this tensor on, and can I actually use it?"*.
 
 Everything that needs to talk about a compute device references this module;
 nothing here allocates memory, launches kernels, or knows about tensors.
-Each device type's allocators come from `lumen/allocator/`: `DeviceBackend`
-requires `AllocatorBackend` (`allocator(index)`), which every device type
-implements next to its allocator (`allocator/cpu.rs`, `meta.rs`, `mps/`,
-`cuda.rs`), so `allocator_for(device)` is `device.backend().allocator(..)`.
 It is a pure capability/label layer that the allocator, stream, op and
 profiler modules build on top of.
 
@@ -130,8 +126,7 @@ compiles on machines with no CUDA headers or libraries.
 
 * `lumen/lib.rs` re-exports `Device` at the crate root (`use lumen::Device`).
 * Allocation and dispatch: `lumen/allocator/mod.rs`, `allocator/cpu.rs`,
-  `allocator/cuda.rs`, `allocator/mps/mod.rs` and
-  `allocator/static_allocator.rs` take a `Device` and select a backend by
+  `allocator/cuda.rs` and `allocator/mps/mod.rs` take a `Device` and select a backend by
   matching on it. The CUDA allocator calls `CUDA.set_device(..)` before
   touching memory, which is why `set_device` exists.
 * Ops and streams: `lumen/ops/mod.rs`, `lumen/ops/device_transfer/mod.rs`,

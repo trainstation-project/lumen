@@ -1,5 +1,12 @@
 #[cfg(lumen_mps_linked)]
 use std::ptr::NonNull;
+#[cfg(lumen_mps_linked)]
+use std::sync::{Arc, OnceLock};
+
+#[cfg(lumen_mps_linked)]
+use super::{Allocator, Region};
+#[cfg(lumen_mps_linked)]
+use crate::device::Device;
 
 #[cfg(lumen_mps_linked)]
 mod ffi {
@@ -10,13 +17,57 @@ mod ffi {
 }
 
 #[cfg(lumen_mps_linked)]
-pub(super) fn malloc(nbytes: usize) -> NonNull<u8> {
+fn malloc(nbytes: usize) -> NonNull<u8> {
     NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })
         .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
 }
 
 /// SAFETY: `ptr` is a `malloc` of ours, not yet freed.
 #[cfg(lumen_mps_linked)]
-pub(super) unsafe fn free(ptr: NonNull<u8>) {
+unsafe fn free(ptr: NonNull<u8>) {
     unsafe { ffi::lumen_mps_free(ptr.as_ptr()) }
+}
+
+#[cfg(lumen_mps_linked)]
+pub struct MpsAllocator {
+    region: Region,
+}
+
+#[cfg(lumen_mps_linked)]
+impl MpsAllocator {
+    pub fn new(capacity: usize) -> Self {
+        MpsAllocator {
+            region: Region::new(Device::Mps(0), capacity),
+        }
+    }
+}
+
+#[cfg(lumen_mps_linked)]
+impl Allocator for MpsAllocator {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+        // Submitted MPS work keeps its tensors alive until the GPU has run it.
+        self.region
+            .take(nbytes, malloc, crate::stream::mps::synchronize)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        self.region.give(ptr, nbytes)
+    }
+}
+
+#[cfg(lumen_mps_linked)]
+impl Drop for MpsAllocator {
+    fn drop(&mut self) {
+        if let Some(base) = self.region.base() {
+            // SAFETY: our buffer, which nothing points into any more.
+            unsafe { free(base) }
+        }
+    }
+}
+
+#[cfg(lumen_mps_linked)]
+pub(super) fn allocator() -> Arc<dyn Allocator> {
+    static ALLOCATOR: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+    let capacity = super::config::static_allocator_bytes();
+    Arc::clone(ALLOCATOR.get_or_init(|| Arc::new(MpsAllocator::new(capacity))))
 }

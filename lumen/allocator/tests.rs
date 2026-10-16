@@ -50,29 +50,85 @@ mod cpu {
     }
 }
 
-mod static_allocator {
+mod region {
     use std::ptr::NonNull;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::allocator::StaticAllocator;
-    use crate::{Allocator, DataPtr, Device};
+    use crate::allocator::Region;
+    use crate::{Allocator, CpuAllocator, DataPtr, Device};
 
-    fn allocator(capacity: usize) -> StaticAllocator {
-        StaticAllocator::new(Device::Cpu(0), capacity)
+    struct Host {
+        region: Region,
+        reservations: Arc<AtomicUsize>,
+        releases: Arc<AtomicUsize>,
     }
 
-    fn free(allocator: &StaticAllocator, ptr: NonNull<u8>, nbytes: usize) {
-        unsafe { allocator.deallocate(ptr, nbytes) }
+    impl Allocator for Host {
+        fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+            let reserve = |n| {
+                self.reservations.fetch_add(1, Ordering::Relaxed);
+                CpuAllocator.allocate(n)
+            };
+            self.region.take(nbytes, reserve, || {})
+        }
+
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+            self.region.give(ptr, nbytes)
+        }
+    }
+
+    impl Drop for Host {
+        fn drop(&mut self) {
+            if let Some(base) = self.region.base() {
+                self.releases.fetch_add(1, Ordering::Relaxed);
+                unsafe { CpuAllocator.deallocate(base, self.region.capacity()) }
+            }
+        }
+    }
+
+    impl std::ops::Deref for Host {
+        type Target = Region;
+
+        fn deref(&self) -> &Region {
+            &self.region
+        }
+    }
+
+    fn counted(capacity: usize) -> (Host, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (reservations, releases) =
+            (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let host = Host {
+            region: Region::new(Device::Cpu(0), capacity),
+            reservations: Arc::clone(&reservations),
+            releases: Arc::clone(&releases),
+        };
+        (host, reservations, releases)
+    }
+
+    fn allocator(capacity: usize) -> Host {
+        counted(capacity).0
+    }
+
+    fn free(allocator: &Host, ptr: NonNull<u8>, nbytes: usize) {
+        unsafe { Allocator::deallocate(allocator, ptr, nbytes) }
     }
 
     #[test]
-    fn the_region_is_reserved_on_first_use() {
-        let allocator = allocator(1 << 20);
-        assert_eq!((allocator.capacity(), allocator.used()), (1 << 20, 0));
-        let (a, b) = (allocator.allocate(100), allocator.allocate(100));
-        assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 256);
+    fn the_region_is_reserved_once_and_released_with_the_allocator() {
+        let (allocator, reservations, releases) = counted(1 << 20);
+        assert_eq!(reservations.load(Ordering::Relaxed), 0);
+        let (a, b) = (
+            Allocator::allocate(&allocator, 100),
+            Allocator::allocate(&allocator, 100),
+        );
+        assert_eq!(reservations.load(Ordering::Relaxed), 1);
+        assert_eq!(allocator.capacity(), 1 << 20);
         free(&allocator, a, 100);
         free(&allocator, b, 100);
+        assert_eq!(releases.load(Ordering::Relaxed), 0);
+        drop(allocator);
+        assert_eq!(releases.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -87,9 +143,9 @@ mod static_allocator {
     #[test]
     fn allocations_are_aligned_bumps() {
         let allocator = allocator(1 << 20);
-        let a = allocator.allocate(100);
-        let b = allocator.allocate(10);
-        let c = allocator.allocate(300);
+        let a = Allocator::allocate(&allocator, 100);
+        let b = Allocator::allocate(&allocator, 10);
+        let c = Allocator::allocate(&allocator, 300);
         let base = a.as_ptr().addr();
         assert_eq!(b.as_ptr().addr() - base, 256);
         assert_eq!(c.as_ptr().addr() - base, 512);
@@ -100,12 +156,12 @@ mod static_allocator {
     #[test]
     fn freed_memory_is_reused_while_others_are_live() {
         let allocator = allocator(1 << 20);
-        let a = allocator.allocate(100);
-        let b = allocator.allocate(100);
+        let a = Allocator::allocate(&allocator, 100);
+        let b = Allocator::allocate(&allocator, 100);
         free(&allocator, a, 100);
         assert_eq!(allocator.used(), 256 + 100);
         assert_eq!(allocator.live_bytes(), 100);
-        let c = allocator.allocate(200);
+        let c = Allocator::allocate(&allocator, 200);
         assert_eq!(c, a);
         free(&allocator, b, 100);
         free(&allocator, c, 200);
@@ -115,10 +171,13 @@ mod static_allocator {
     #[test]
     fn a_loop_with_live_inputs_does_not_grow() {
         let allocator = allocator(4096);
-        let _inputs = (allocator.allocate(1000), allocator.allocate(1000));
+        let _inputs = (
+            Allocator::allocate(&allocator, 1000),
+            Allocator::allocate(&allocator, 1000),
+        );
         for _ in 0..100 {
-            let workspace = allocator.allocate(700);
-            let output = allocator.allocate(300);
+            let workspace = Allocator::allocate(&allocator, 700);
+            let output = Allocator::allocate(&allocator, 300);
             free(&allocator, workspace, 700);
             free(&allocator, output, 300);
         }
@@ -128,35 +187,43 @@ mod static_allocator {
     #[test]
     fn freed_neighbours_merge() {
         let allocator = allocator(1024);
-        let blocks: Vec<_> = (0..4).map(|_| allocator.allocate(256)).collect();
+        let blocks: Vec<_> = (0..4)
+            .map(|_| Allocator::allocate(&allocator, 256))
+            .collect();
         for i in [2, 0, 3, 1] {
             free(&allocator, blocks[i], 256);
         }
-        assert_eq!(allocator.allocate(1024), blocks[0]);
+        assert_eq!(Allocator::allocate(&allocator, 1024), blocks[0]);
     }
 
     #[test]
     fn a_full_allocator_refuses_allocations() {
         let allocator = allocator(1024);
-        let _a = allocator.allocate(1000);
+        let _a = Allocator::allocate(&allocator, 1000);
         assert!(
-            allocator.try_allocate(1).is_none(),
+            allocator
+                .try_take(1, |n| CpuAllocator.allocate(n))
+                .is_none(),
             "the next offset is past the end"
         );
-        assert!(allocator.try_allocate(1 << 20).is_none());
+        assert!(
+            allocator
+                .try_take(1 << 20, |n| CpuAllocator.allocate(n))
+                .is_none()
+        );
     }
 
     #[test]
     #[should_panic(expected = "static_allocator_bytes")]
     fn allocating_past_the_end_names_the_setting() {
-        allocator(1024).allocate(2048);
+        Allocator::allocate(&allocator(1024), 2048);
     }
 
     #[test]
     fn zero_byte_allocations_are_fine() {
         let allocator = allocator(1024);
-        let a = allocator.allocate(0);
-        let b = allocator.allocate(8);
+        let a = Allocator::allocate(&allocator, 0);
+        let b = Allocator::allocate(&allocator, 8);
         assert_eq!(a, b, "an empty allocation takes no room");
         free(&allocator, a, 0);
         free(&allocator, b, 8);
@@ -166,7 +233,7 @@ mod static_allocator {
     #[test]
     fn the_memory_is_usable() {
         let allocator = allocator(4096);
-        let data = allocator.allocate(1024);
+        let data = Allocator::allocate(&allocator, 1024);
         let slice = unsafe { std::slice::from_raw_parts_mut(data.as_ptr(), 1024) };
         slice.fill(0xAB);
         assert!(slice.iter().all(|&b| b == 0xAB));
@@ -251,7 +318,7 @@ mod cuda {
     #[cfg(lumen_cuda_linked)]
     mod device {
         use crate::allocator::allocator_for;
-        use crate::allocator::{ALIGNMENT, StaticAllocator};
+        use crate::allocator::{ALIGNMENT, CudaAllocator};
         use crate::{Allocator, Device, Storage};
 
         macro_rules! require_cuda {
@@ -276,7 +343,7 @@ mod cuda {
         #[test]
         fn the_allocator_reserves_device_memory_and_rewinds() {
             require_cuda!();
-            let allocator = StaticAllocator::new(Device::Cuda(0), 1 << 20);
+            let allocator = CudaAllocator::new(0, 1 << 20);
             let a = allocator.allocate(1000);
             let b = allocator.allocate(1000);
             assert_eq!(a.as_ptr().addr() % ALIGNMENT, 0);
@@ -303,7 +370,7 @@ mod cuda {
 #[cfg(lumen_mps_linked)]
 mod mps {
     use crate::allocator::allocator_for;
-    use crate::allocator::{ALIGNMENT, StaticAllocator};
+    use crate::allocator::{ALIGNMENT, MpsAllocator};
     use crate::{Allocator, Device, Storage};
 
     macro_rules! require_mps {
@@ -315,8 +382,8 @@ mod mps {
         };
     }
 
-    fn fresh() -> StaticAllocator {
-        StaticAllocator::new(Device::Mps(0), 1 << 20)
+    fn fresh() -> MpsAllocator {
+        MpsAllocator::new(1 << 20)
     }
 
     #[test]

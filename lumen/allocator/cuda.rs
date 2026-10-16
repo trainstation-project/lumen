@@ -1,5 +1,14 @@
 #[cfg(lumen_cuda_linked)]
+use std::collections::HashMap;
+#[cfg(lumen_cuda_linked)]
 use std::ptr::NonNull;
+#[cfg(lumen_cuda_linked)]
+use std::sync::{Arc, Mutex, OnceLock};
+
+#[cfg(lumen_cuda_linked)]
+use super::{Allocator, Region};
+#[cfg(lumen_cuda_linked)]
+use crate::device::Device;
 
 #[cfg(lumen_cuda_linked)]
 use crate::device::DeviceBackend;
@@ -18,7 +27,7 @@ mod ffi {
 }
 
 #[cfg(lumen_cuda_linked)]
-pub(super) fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
+fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
     // c10 sets the device context before every allocation.
     CUDA.set_device(index);
     let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -33,7 +42,59 @@ pub(super) fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
 /// # Safety
 /// `ptr` is a `malloc` of device `index`'s, not yet freed.
 #[cfg(lumen_cuda_linked)]
-pub(super) unsafe fn free(index: usize, ptr: NonNull<u8>) {
+unsafe fn free(index: usize, ptr: NonNull<u8>) {
     CUDA.set_device(index);
     unsafe { ffi::cudaFree(ptr.as_ptr().cast()) };
+}
+
+#[cfg(lumen_cuda_linked)]
+pub struct CudaAllocator {
+    index: usize,
+    region: Region,
+}
+
+#[cfg(lumen_cuda_linked)]
+impl CudaAllocator {
+    pub fn new(index: usize, capacity: usize) -> Self {
+        CudaAllocator {
+            index,
+            region: Region::new(Device::Cuda(index), capacity),
+        }
+    }
+}
+
+#[cfg(lumen_cuda_linked)]
+impl Allocator for CudaAllocator {
+    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+        self.region.take(nbytes, |n| malloc(self.index, n), || {})
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        self.region.give(ptr, nbytes)
+    }
+}
+
+#[cfg(lumen_cuda_linked)]
+impl Drop for CudaAllocator {
+    fn drop(&mut self) {
+        if let Some(base) = self.region.base() {
+            // SAFETY: our allocation, which nothing points into any more.
+            unsafe { free(self.index, base) }
+        }
+    }
+}
+
+#[cfg(lumen_cuda_linked)]
+pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
+    static ALLOCATORS: OnceLock<Mutex<HashMap<usize, Arc<dyn Allocator>>>> = OnceLock::new();
+    let mut allocators = ALLOCATORS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let capacity = super::config::static_allocator_bytes();
+    Arc::clone(
+        allocators
+            .entry(index)
+            .or_insert_with(|| Arc::new(CudaAllocator::new(index, capacity))),
+    )
 }
