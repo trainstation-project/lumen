@@ -1,19 +1,12 @@
-//! `lumen.Tensor`: bindings for [`crate::Tensor`], registered into
-//! `lumen._C` by [`crate::python`].
-
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
 use crate as core;
-use crate::python::resolve_device;
+use crate::device::python::resolve_device;
 use crate::tensor::dtype::{bf16, f16};
 use crate::{DType, Scalar, Tensor, TensorOptions};
-
-// ---------------------------------------------------------------------
-// dtype helpers
-// ---------------------------------------------------------------------
 
 pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
     match s {
@@ -41,11 +34,6 @@ pub(crate) fn dtype_name(dtype: DType) -> &'static str {
     dtype.full_name()
 }
 
-// ---------------------------------------------------------------------
-// nested-list ingestion
-// ---------------------------------------------------------------------
-
-/// Flatten a (possibly nested) list of scalars, recording the shape.
 fn flatten<'py>(
     obj: &Bound<'py, PyAny>,
     depth: usize,
@@ -69,8 +57,6 @@ fn flatten<'py>(
     Ok(())
 }
 
-/// Infer a dtype from Python scalars (bool ⊂ int ⊂ float), unless the
-/// caller pinned one explicitly.
 fn infer_dtype(flat: &[Bound<'_, PyAny>]) -> PyResult<DType> {
     let mut all_bool = true;
     let mut all_int = true;
@@ -117,7 +103,7 @@ fn tensor_from_flat(
             Tensor::from_slice(&v, device).reshape(shape)
         }};
     }
-    // f16/bf16 have no Python scalar type; convert through f64.
+
     macro_rules! build_half {
         ($t:ty) => {{
             let v: Vec<$t> = flat
@@ -127,6 +113,7 @@ fn tensor_from_flat(
             Tensor::from_slice(&v, device).reshape(shape)
         }};
     }
+
     Ok(match dtype {
         DType::F32 => build!(f32),
         DType::F64 => build!(f64),
@@ -144,13 +131,8 @@ fn tensor_from_flat(
     })
 }
 
-// ---------------------------------------------------------------------
-// scalar / list conversion back to Python
-// ---------------------------------------------------------------------
-
-/// Errors for a meta tensor, which has no data to read.
 fn has_data(t: &Tensor) -> PyResult<()> {
-    if t.device() == core::Device::Meta {
+    if t.device() == core::Device::Meta(0) {
         return Err(PyRuntimeError::new_err(
             "meta tensors have no data: make the tensor by running a function (lumen.compile) or loading it",
         ));
@@ -206,9 +188,6 @@ fn set_value(t: &Tensor, index: &[usize], value: &Bound<'_, PyAny>) -> PyResult<
     Ok(())
 }
 
-/// The nested lists of `shape` (a one-element list for a 0-d tensor) whose
-/// elements are `convert` of the values at `base` and `strides` (in
-/// elements): host memory, read in place, a Python number an element.
 fn nested_list<'py, T, P>(
     py: Python<'py>,
     base: *const T,
@@ -220,10 +199,6 @@ where
     T: Copy,
     P: IntoPyObject<'py>,
 {
-    // SAFETY (each read): `base` and the offsets the strides give stay in
-    // the host storage of the tensor `tolist` holds; elements are plain
-    // data of type `T`. `wrapping_add`: the memory is not an allocation
-    // Rust knows about (`Tensor::data_ptr`).
     let read = |p: *const T| convert(unsafe { p.read_unaligned() });
     match shape {
         [] => Ok(PyList::new(py, [read(base)])?.into_any().unbind()),
@@ -248,12 +223,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------------
-// factory arguments
-// ---------------------------------------------------------------------
-
-/// `dtype=` / `device=` arguments as `TensorOptions` (PyTorch's Python
-/// factories take the same two keywords).
 fn options(dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<TensorOptions> {
     let options = TensorOptions::new().device(resolve_device(device)?);
     Ok(match dtype {
@@ -262,7 +231,6 @@ fn options(dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<T
     })
 }
 
-/// A Python bool/int/float as a [`Scalar`].
 pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if value.is_instance_of::<PyBool>() {
         Ok(Scalar::Bool(value.extract()?))
@@ -278,13 +246,7 @@ pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
 }
 
-// ---------------------------------------------------------------------
-// the Tensor class
-// ---------------------------------------------------------------------
-
-/// A strided view over a shared storage. Views never copy; writes through
-/// one view are visible through all aliases of the same storage.
-#[pyclass(name = "Tensor", module = "lumen")] // reports as lumen.Tensor, though defined in lumen._C
+#[pyclass(name = "Tensor", module = "lumen")]
 pub(crate) struct PyTensor {
     pub(crate) inner: Tensor,
 }
@@ -294,7 +256,6 @@ impl PyTensor {
         PyTensor { inner }
     }
 
-    /// Normalize a (possibly negative) index along `dim`.
     fn normalize_index(&self, dim: usize, index: isize) -> PyResult<usize> {
         let n = self.inner.shape()[dim] as isize;
         let i = if index < 0 { index + n } else { index };
@@ -306,7 +267,6 @@ impl PyTensor {
         Ok(i as usize)
     }
 
-    /// Normalize a full index tuple (negative values allowed per dim).
     fn normalize_indices(&self, index: Vec<isize>) -> PyResult<Vec<usize>> {
         if index.len() != self.inner.ndim() {
             return Err(PyIndexError::new_err(format!(
@@ -325,9 +285,6 @@ impl PyTensor {
 
 #[pymethods]
 impl PyTensor {
-    /// `Tensor(data, shape=None, dtype=None)` — from a (nested) list.
-    /// Dtype is inferred (bool/int64/float32) unless given, e.g.
-    /// `Tensor([1, 2, 3], dtype="float32")`.
     #[new]
     #[pyo3(signature = (data, shape=None, dtype=None, device=None))]
     fn new(
@@ -348,12 +305,6 @@ impl PyTensor {
         Ok(Self::wrap(tensor_from_flat(&flat, &shape, dtype, device)?))
     }
 
-    /// A tensor whose memory is left uninitialized (PyTorch: `torch.empty`).
-    ///
-    /// As with `torch.empty`, the values are unspecified until written
-    /// (`fill_`, `t[i] = v`, ...). Reading an element before writing it is
-    /// more than garbage here: it is undefined behavior in the Rust core
-    /// (see `Tensor::empty`), which Python cannot rule out.
     #[staticmethod]
     #[pyo3(signature = (shape, dtype=None, device=None))]
     fn empty(
@@ -362,8 +313,6 @@ impl PyTensor {
         device: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let options = options(dtype, device)?;
-        // Not upheld here: `Tensor::empty` requires writing every element
-        // before reading it, and Python callers are trusted to (see above).
         Ok(Self::wrap(unsafe { Tensor::empty(&shape, options) }))
     }
 
@@ -378,8 +327,6 @@ impl PyTensor {
         Ok(Self::wrap(Tensor::zeros(&shape, options)))
     }
 
-    /// A tensor of ones, float32 unless `dtype` says otherwise (PyTorch:
-    /// `torch.ones`).
     #[staticmethod]
     #[pyo3(signature = (shape, dtype=None, device=None))]
     fn ones(
@@ -399,8 +346,6 @@ impl PyTensor {
         dtype: Option<&str>,
         device: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        // Without a dtype, `Tensor::full` infers it from the value like
-        // torch.full: bool -> bool, int -> int64, float -> float32.
         let options = options(dtype, device)?;
         Ok(Self::wrap(Tensor::full(&shape, to_scalar(value)?, options)))
     }
@@ -408,13 +353,9 @@ impl PyTensor {
     #[staticmethod]
     #[pyo3(signature = (n, dtype=None, device=None))]
     fn arange(n: usize, dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        // lumen's Python arange defaults to float32 (torch.arange infers
-        // int64 from an int end, as the Rust `Tensor::arange` does).
         let options = options(Some(dtype.unwrap_or("float32")), device)?;
         Ok(Self::wrap(Tensor::arange(n, options)))
     }
-
-    // ----------------------------- metadata -----------------------------
 
     #[getter]
     fn shape(&self) -> Vec<usize> {
@@ -451,8 +392,6 @@ impl PyTensor {
         self.inner.storage_offset()
     }
 
-    /// Identity of the underlying storage; equal iff two tensors alias the
-    /// same buffer (PyTorch: `t.untyped_storage()._cdata`).
     #[getter]
     fn storage_id(&self) -> usize {
         self.inner.storage_id()
@@ -465,8 +404,6 @@ impl PyTensor {
     fn shares_storage_with(&self, other: &PyTensor) -> bool {
         self.inner.shares_storage_with(&other.inner)
     }
-
-    // ----------------------------- views -----------------------------
 
     fn reshape(&self, shape: Vec<usize>) -> PyResult<Self> {
         Ok(Self::wrap(self.inner.reshape(&shape)))
@@ -515,16 +452,12 @@ impl PyTensor {
         }))
     }
 
-    /// This tensor converted to `dtype` and/or on `device` (PyTorch:
-    /// `Tensor.to`). Returns a view of the same storage if nothing changes;
-    /// a conversion (as `cast` converts: floats round,
-    /// integers truncate) runs on the tensor's device, before any move.
     #[pyo3(signature = (device = None, dtype = None))]
     fn to(&self, device: Option<&Bound<'_, PyAny>>, dtype: Option<&str>) -> PyResult<Self> {
         let device = device.map(|d| resolve_device(Some(d))).transpose()?;
         let mut t = self.inner.clone();
         if let Some(dtype) = dtype {
-            if t.device() != core::Device::Meta {
+            if t.device() != core::Device::Meta(0) {
                 has_data(&t)?;
             }
             t = t
@@ -532,7 +465,7 @@ impl PyTensor {
                 .map_err(PyRuntimeError::new_err)?;
         }
         if let Some(device) = device.filter(|&d| d != t.device()) {
-            if device != core::Device::Meta {
+            if device != core::Device::Meta(0) {
                 has_data(&t)?;
             }
             t = t.to(device);
@@ -540,40 +473,26 @@ impl PyTensor {
         Ok(Self::wrap(t))
     }
 
-    /// Set every element to `value` in place and return the tensor
-    /// (PyTorch: `Tensor.fill_`); uses the device's memset when it can.
     fn fill_<'py>(slf: PyRef<'py, Self>, value: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
         slf.inner.fill_(to_scalar(value)?);
         Ok(slf)
     }
 
-    /// Wait for this tensor's value in place and return the tensor
-    /// (PyTorch: `wait_tensor`): the device work producing or using it has
-    /// finished. Every read of its value (`tolist`, `item`, `cpu`, DLPack)
-    /// waits first; this is the wait alone.
     fn wait_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf.inner.wait_();
         slf
     }
 
-    /// Set every element to zero in place and return the tensor
-    /// (PyTorch: `Tensor.zero_`).
     fn zero_(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf.inner.zero_();
         slf
     }
 
-    /// Copy `src`'s elements (same dtype and shape, any device) into this
-    /// tensor in place and return it (PyTorch: `Tensor.copy_`): how data
-    /// gets into a placed parameter.
     fn copy_<'py>(slf: PyRef<'py, Self>, src: PyRef<'_, Self>) -> PyResult<PyRef<'py, Self>> {
         slf.inner.copy_(&src.inner).map_err(PyValueError::new_err)?;
         Ok(slf)
     }
 
-    /// A copy of this tensor in new storage on its device (PyTorch:
-    /// `Tensor.clone`): how to keep a compiled function's result past its
-    /// next call.
     fn clone(&self) -> PyResult<Self> {
         has_data(&self.inner)?;
         let options = TensorOptions::new()
@@ -585,28 +504,20 @@ impl PyTensor {
         Ok(Self::wrap(t))
     }
 
-    /// Whether this can be a parameter of a compiled function: a whole
-    /// meta tensor (`lumen/tensor/parameter.rs`).
     #[getter]
     fn _is_parameter(&self) -> bool {
         self.inner.is_parameter()
     }
 
-    /// How many times this parameter's value was written (PyTorch:
-    /// `Tensor._version`): by `copy_` into it, or by a compiled function
-    /// assigning it.
     #[getter]
     fn _version(&self) -> u64 {
         self.inner.version()
     }
 
-    /// Count a write of this parameter's value (a compiled function
-    /// assigned it).
     fn _mark_written(&self) {
         self.inner.mark_written();
     }
 
-    /// This parameter's memory on `device`, placed (zeroed) on first use.
     fn _placed(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
         let device = resolve_device(Some(device))?;
         self.inner
@@ -615,17 +526,9 @@ impl PyTensor {
             .map_err(PyValueError::new_err)
     }
 
-    /// The address of the first element in the device's address space
-    /// (PyTorch: `Tensor.data_ptr`).
-    ///
-    /// A raw escape hatch for interop that cannot use DLPack; unlike
-    /// `__dlpack__`, the caller must keep this tensor alive and honor the
-    /// shape/strides/dtype itself, or it writes to freed or wrong memory.
     fn data_ptr(&self) -> usize {
         self.inner.data_ptr() as usize
     }
-
-    // ----------------------------- element access -----------------------------
 
     fn get(&self, py: Python<'_>, index: Vec<isize>) -> PyResult<Py<PyAny>> {
         let index = self.normalize_indices(index)?;
@@ -637,8 +540,6 @@ impl PyTensor {
         set_value(&self.inner, &index, value)
     }
 
-    /// Its one element as a Python number (PyTorch: `Tensor.item`): a
-    /// float, int or bool, read from its device.
     fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let n = self.inner.numel();
         if n != 1 {
@@ -649,22 +550,14 @@ impl PyTensor {
         scalar_to_py(py, &self.inner, &vec![0; self.inner.ndim()])
     }
 
-    /// This tensor on the host (PyTorch: `Tensor.cpu`): itself if it is
-    /// there, else one copy of the memory its view covers.
     fn cpu(&self) -> PyResult<Self> {
         has_data(&self.inner)?;
-        Ok(Self::wrap(self.inner.to(core::Device::Cpu)))
+        Ok(Self::wrap(self.inner.to(core::Device::Cpu(0))))
     }
 
-    /// Nested-list copy of the logical contents (row-major): one copy of
-    /// the memory its view covers to the host, then a Python number an
-    /// element.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         has_data(&self.inner)?;
-        // `cpu`: one copy of the memory its view covers to the host (none if
-        // there already), its layout kept; then one pass, reading it in
-        // place.
-        let host = self.inner.to(core::Device::Cpu);
+        let host = self.inner.to(core::Device::Cpu(0));
         let (shape, strides) = (host.shape(), host.strides());
         let ptr = host.data_ptr().cast_const();
         fn same<T>(v: T) -> T {
@@ -689,8 +582,6 @@ impl PyTensor {
         }
     }
 
-    // ----------------------------- dunder -----------------------------
-
     fn __repr__(&self) -> String {
         format!("{}", self.inner)
     }
@@ -703,12 +594,10 @@ impl PyTensor {
             .ok_or_else(|| PyTypeError::new_err("len() of a 0-d tensor"))
     }
 
-    /// `t[i]` → row view (shares storage); `t[i, j, ...]` → scalar.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let i = self.normalize_index(0, i)?;
             let view = self.inner.select(0, i);
-            // NumPy behavior: indexing a 1-d tensor yields a scalar.
             if view.ndim() == 0 {
                 return scalar_to_py(py, &view, &[]);
             }
@@ -736,9 +625,6 @@ impl PyTensor {
     }
 }
 
-/// The parameters `members` side by side along `dimension` in one block on
-/// `device` (placed so if none is placed yet), or `None` if they are placed
-/// otherwise (`lumen/tensor/parameter.rs`).
 #[pyfunction]
 fn _pack(
     members: Vec<PyRef<'_, PyTensor>>,
@@ -758,22 +644,16 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_from_dlpack, m)?)
 }
 
-/// `t` as an unversioned DLPack capsule (PyTorch: `torch._C._to_dlpack`).
-/// Backs `Tensor.__dlpack__`.
 #[pyfunction]
 fn _to_dlpack<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
     crate::tensor::dlpack::to_dlpack(py, &t.inner)
 }
 
-/// `t` as a versioned DLPack capsule (PyTorch:
-/// `torch._C._to_dlpack_versioned`). Backs `Tensor.__dlpack__`.
 #[pyfunction]
 fn _to_dlpack_versioned<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
     crate::tensor::dlpack::to_dlpack_versioned(py, &t.inner)
 }
 
-/// A tensor over the buffer of a DLPack capsule, which it consumes
-/// (PyTorch: `torch._C._from_dlpack`). Backs `lumen.from_dlpack`.
 #[pyfunction]
 fn _from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<PyTensor> {
     Ok(PyTensor::wrap(crate::tensor::dlpack::from_dlpack(capsule)?))
