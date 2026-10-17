@@ -36,7 +36,7 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
     assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
     assert compiler.fused_linear_cross_entropy is True and compiler.fused_linear_cross_entropy_chunk_size is None
-    assert compiler.safe_kernels is False
+    assert compiler.safe_kernels is False and compiler.dump_to is None
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     # Every instance reads and writes the same flags.
@@ -119,6 +119,31 @@ def _read_early_and_late(a, w):
 
 
 @pytest.mark.mps
+def test_dump_to_writes_each_pass(compiler, tmp_path):
+    """``dump_to``: each compiled graph written before its passes and after
+    each, a file each, named by its pipeline, step and pass (XLA's
+    ``--xla_dump_to``); the MPS pipeline's last pass generates the kernels."""
+    f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
+    graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
+    compiler.dump_to = str(tmp_path)
+    devices = ["cpu"] + (["mps"] if lumen.mps.is_available() else [])
+    for device in devices:
+        lumen.graph_compiler.Plan(graph, device)
+    steps = {p.name.split(".", 1)[1] for p in tmp_path.iterdir()}
+    assert {"frontend.00.input.txt", "frontend.01.cse.txt", "frontend.02.simplify.txt"} <= steps
+    assert "cpu.01.simplify.txt" in steps
+    if "mps" in devices:
+        mps = sorted(s for s in steps if s.startswith("mps."))
+        assert mps[-1].endswith(".codegen.txt") and any(".loop_fusion." in s for s in mps)
+        assert (
+            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-1]))).read_text()
+        )
+    compiler.reset()
+    count = len(list(tmp_path.iterdir()))
+    lumen.graph_compiler.Plan(graph, "cpu")
+    assert len(list(tmp_path.iterdir())) == count
+
+
 def test_memory_limit_recomputes(compiler):
     """Under ``memory_limit``, a value read early and late is computed again
     for its late reader rather than kept alive (rematerialization): ``h``,

@@ -116,6 +116,7 @@ flags! {
     /// reads at into range before its kernel does (off by default: an index
     /// out of range is the program's error, read as given).
     safe_kernels, set_safe_kernels: bool;
+    dump_to, set_dump_to: Option<String>;
 }
 
 /// A flag's value as Python writes it.

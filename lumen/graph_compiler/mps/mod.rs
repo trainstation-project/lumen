@@ -27,10 +27,10 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, c_char};
 use std::sync::{Mutex, PoisonError};
 
-use self::merge_dots::merge_dots;
-use super::Options;
+use super::pass::{Module, Pass, Pipeline, Rewrite};
+use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::attention;
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
@@ -64,178 +64,142 @@ const PRELUDE: &str = concat!(
 
 /// `graph` canonicalized, fused (as `options.config` says) and planned, its
 /// fusion kernels compiled.
-pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
-    let config = &options.config;
+/// What the MPS passes rewrite: the graph, and what they found for the
+/// passes after them and the plan.
+pub(crate) struct MpsModule<'a> {
+    graph: Graph,
+    options: &'a Options,
+    /// The parameter blocks dot merging added ([`merge_dots`]), after the
+    /// graph's inputs.
+    packed: Vec<(Vec<usize>, usize)>,
+    /// The normalization diamonds' rows, by node: valid until the graph
+    /// next changes (the loop fusion reading them).
+    rows: Vec<diamonds::Row>,
+    /// The runtime scalars a fusion kernel may take by value, by input
+    /// position (the passes keep inputs in order).
+    scalars: Vec<usize>,
+    /// The kernels fusions asked for, by their placeholder names
+    /// ([`request`]), and the source [`Codegen`] generated for them, by
+    /// kernel name.
+    kernels: Vec<Kernel>,
+    sources: BTreeMap<String, String>,
+}
+
+impl Module for MpsModule<'_> {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn graph_mut(&mut self) -> &mut Graph {
+        &mut self.graph
+    }
+
+    fn options(&self) -> &Options {
+        self.options
+    }
+}
+
+/// A fusion's kernel, generated after the passes ([`Codegen`]).
+enum Kernel {
+    /// A loop fusion's, taking its inputs marked by value as `setBytes`.
+    Loop(Vec<bool>),
+    Attention,
+    AttentionBackward,
+}
+
+/// What a fusion awaiting its kernel is named, then the kernel's index.
+const PENDING: &str = "pending#";
+
+/// A fusion's name until [`Codegen`] generates `kernel`.
+fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
+    kernels.push(kernel);
+    format!("{PENDING}{}", kernels.len() - 1)
+}
+
+/// The MPS passes `config` turns on, in order.
+fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
+    let mut p = Pipeline::new("mps");
     // A gated pair's backward's dots merged (before `merge_dots`, which
     // reads its weights' concatenate as the forward's block).
-    let rewritten;
-    let graph = match config.fuse && config.merge_dots && config.contraction_epilogues {
-        true => {
-            rewritten = gated_backward::gated_backward(graph);
-            &rewritten
-        }
-        false => graph,
-    };
+    if config.fuse && config.merge_dots && config.contraction_epilogues {
+        p.add(Rewrite("gated_backward", |g, _| {
+            gated_backward::gated_backward(g)
+        }));
+    }
     // Merging needs fusion: the merged dot's readers read its slices.
-    let (merged, packed) = match config.fuse && config.merge_dots {
-        // A donated parameter (a weight the program assigns: its new value
-        // written over it) only as a contiguous part of its block, which the
-        // new value is written into in place (`merge_dots`).
-        true => {
-            let donated: Vec<bool> = (0..options.packable.len())
-                .map(|i| {
-                    options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
-                })
-                .collect();
-            merge_dots(graph, &options.packable, &donated)
-        }
-        false => (graph.clone(), Vec::new()),
-    };
-    let graph = &merged;
-    let mut kernels = BTreeMap::new();
-    // Attention as one flash-attention kernel, matched before dots are
-    // put in matmul form (which would copy its operands).
-    let mut attention_kernels = BTreeMap::new();
-    let scalar_vars: Vec<Var> = (0..graph.inputs().len())
-        .filter(|&i| options.scalars.get(i) == Some(&true))
-        .map(|i| graph.inputs()[i])
-        .collect();
-    let graph = match config.fuse && config.flash_attention {
-        true => attention::fuse(graph, config.contraction_epilogues, &scalar_vars, |body| {
-            let a = attention::of_body(body).expect("an attention");
-            let (name, source) = codegen::attention_kernel(body, &a);
-            attention_kernels.insert(name.clone(), source);
-            name
-        }),
-        false => graph.clone(),
-    };
-    // Its backward as one kernel adding dQ atomically (unless
-    // `deterministic`, or its blocks do not fit), or two (dV and dK, dQ), the
-    // probabilities recomputed from the forward's log-sum-exp.
-    let graph = match config.fuse && config.flash_attention {
-        true => attention::fuse_backward(
-            &graph,
-            |b| !config.deterministic && codegen::backward_block_with_dq(b).is_some(),
-            |body| {
-                let b = attention::backward_of_body(body).expect("an attention backward");
-                let (name, source) = codegen::attention_backward_kernel(body, &b);
-                attention_kernels.insert(name.clone(), source);
-                name
-            },
-        ),
-        false => graph,
-    };
+    if config.fuse && config.merge_dots {
+        p.add(merge_dots::MergeDots);
+    }
+    // Attention as one flash-attention kernel, matched before dots are put
+    // in matmul form (which would copy its operands); its backward too.
+    if config.fuse && config.flash_attention {
+        p.add(FlashAttention).add(FlashAttentionBackward);
+    }
     // A cross entropy of a dot's logits nothing else reads, its logits
     // never stored (matched, as attention, before the dots are moved).
-    let graph = match config.fuse && config.fused_linear_cross_entropy {
-        true => linear_cross_entropy::linear_cross_entropy(&graph),
-        false => graph,
-    };
-    // Safe kernels: each index clamped into its axis, in the graph (after
-    // the linear cross entropy's match, which reads its gather's index).
-    let graph = match config.safe_kernels {
-        true => bounds::clamp_indices(&graph),
-        false => graph,
-    };
-    // Now the attention's are matched (its kernels' layouts): transposes of
-    // dots (a weight's gradient) as the dots swapped, reshapes, transposes
-    // and casts moved.
-    let graph = super::simplify::simplify_with(&graph, true);
-    // The large float16 dots of fixed weights (parameters the function does
-    // not write, nor any in their block) on the Neural Engine, whole (before
-    // split-K splits them).
-    let graph = match config.neural_engine {
-        true => {
-            let written = |i: usize| {
-                options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
-            };
-            let first_block = graph.inputs().len() - packed.len();
-            let fixed: Vec<bool> = (0..graph.inputs().len())
-                .map(|i| match i.checked_sub(first_block) {
-                    Some(b) => !packed[b].0.iter().any(|&m| written(m)),
-                    None => options.parameters.as_ref().is_some_and(|p| p[i]) && !written(i),
-                })
-                .collect();
-            ane::offload(&graph, &fixed)
-        }
-        false => graph,
-    };
-    let graph = dot_strength::reduce_vector_dots(&graph);
-    let graph = match config.split_k {
-        true => split_k::split_k(&graph, !config.deterministic),
-        false => graph,
-    };
-    let graph = canonicalize_dots(&graph);
-    // Runtime scalars a fusion kernel takes by value (`setBytes`), by input
-    // position (the passes keep inputs in order): those every step reading
-    // them is a fusion of; any other, a buffer.
-    let mut scalars: Vec<usize> = (0..graph.inputs().len())
-        .filter(|&i| options.scalars.get(i) == Some(&true))
-        .collect();
-    let fused = if config.fuse {
-        // Normalization diamonds: each chain one fusion, its reductions
-        // inside; and the sums over rows they compute as they go.
-        let (graph, rows) = match config.normalization_diamonds {
-            true => diamonds::partials(&graph, diamonds::diamonds(&graph)),
-            false => (graph.clone(), Vec::new()),
-        };
-        loop {
-            kernels.clear();
-            let vars: Vec<Var> = scalars.iter().map(|&i| graph.inputs()[i]).collect();
-            let mut kernel = |body: &Graph, by_value: &[bool]| {
-                let (name, source) = codegen::kernel(body, by_value, config);
-                kernels.insert(name.clone(), source);
-                name
-            };
-            let fused = fusion::fuse(&graph, &rows, &vars, config, &mut kernel);
-            // Independent small loop fusions, one kernel each group.
-            let fused = match config.horizontal_fusion {
-                true => {
-                    let vars: Vec<Var> = scalars.iter().map(|&i| fused.inputs()[i]).collect();
-                    horizontal::fuse(&fused, &vars, &mut kernel)
-                }
-                false => fused,
-            };
-            let unfused = |&i: &usize| {
-                let v = fused.inputs()[i];
-                let read = |n: &&Node| n.inputs.contains(&v);
-                let mut readers = fused.nodes().iter().filter(read);
-                readers.any(|n| !matches!(n.primitive, Primitive::Fusion { .. }))
-                    || fused.outputs().contains(&v)
-            };
-            let before = scalars.len();
-            scalars.retain(|i| !unfused(i));
-            if scalars.len() == before {
-                break fused;
-            }
-        }
-    } else {
-        scalars.clear();
-        // A concatenate has no kernel but a fusion's: each its own.
-        concatenates_alone(&graph, |body| {
-            let (name, source) = codegen::kernel(body, &[], config);
-            kernels.insert(name.clone(), source);
-            name
-        })
-    };
-    kernels.extend(attention_kernels);
-    if !kernels.is_empty() {
-        let source: String = std::iter::once(PRELUDE)
-            .chain(kernels.values().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let source = CString::new(source).expect("Metal source has no NUL");
-        // SAFETY: a NUL-terminated string, read during the call.
-        let status = unsafe { lumen_mps_compile_kernels(source.as_ptr()) };
-        if status != 0 {
-            return Err(format!("compiling the fused MPS kernels failed ({status})"));
-        }
-        let mut sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
-        sources.extend(kernels);
+    if config.fuse && config.fused_linear_cross_entropy {
+        p.add(Rewrite("linear_cross_entropy", |g, _| {
+            linear_cross_entropy::linear_cross_entropy(g)
+        }));
     }
+    // After the linear cross entropy's match, which reads its gather's index.
+    if config.safe_kernels {
+        p.add(Rewrite("clamp_indices", |g, _| bounds::clamp_indices(g)));
+    }
+    // Now the attention's are matched (its kernels' layouts): transposes of
+    // dots swapped, reshapes, transposes and casts moved.
+    p.add(Rewrite("simplify", |g, _| {
+        super::simplify::simplify_with(g, true)
+    }));
+    // Whole dots on the Neural Engine, before split-K splits them.
+    if config.neural_engine {
+        p.add(ane::NeuralEngine);
+    }
+    p.add(Rewrite("dot_strength", |g, _| {
+        dot_strength::reduce_vector_dots(g)
+    }));
+    if config.split_k {
+        p.add(Rewrite("split_k", |g, c| {
+            split_k::split_k(g, !c.deterministic)
+        }));
+    }
+    p.add(Rewrite("canonicalize_dots", |g, _| canonicalize_dots(g)));
+    if config.fuse {
+        if config.normalization_diamonds {
+            p.add(diamonds::Diamonds);
+        }
+        p.add(fusion::LoopFusion);
+    } else {
+        p.add(ConcatenatesAlone);
+    }
+    p.add(Codegen);
+    p
+}
+
+/// `graph` rewritten by the MPS passes (as `options.config` says) and
+/// planned, its fusion kernels compiled.
+pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+    let config = &options.config;
+    let mut module = MpsModule {
+        graph: graph.clone(),
+        options,
+        packed: Vec::new(),
+        rows: Vec::new(),
+        scalars: super::positions(&options.scalars),
+        kernels: Vec::new(),
+        sources: BTreeMap::new(),
+    };
+    pipeline(config).run(&mut module)?;
+    compile_kernels(std::mem::take(&mut module.sources))?;
+    let MpsModule {
+        graph: fused,
+        packed,
+        scalars,
+        ..
+    } = module;
     // The blocks it added are parameters too.
     let parameters = options.parameters.clone().map(|mut p| {
-        p.resize(merged.inputs().len(), true);
+        p.resize(fused.inputs().len(), true);
         p
     });
     let plan = PlanOptions {
@@ -251,7 +215,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         blocks: packed
             .iter()
             .enumerate()
-            .map(|(k, (members, _))| (merged.inputs().len() - packed.len() + k, members.clone()))
+            .map(|(k, (members, _))| (fused.inputs().len() - packed.len() + k, members.clone()))
             .collect(),
     };
     let mut plan = Plan::compile_with(&fused, &plan);
@@ -294,6 +258,124 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     }
     plan.packed = packed;
     Ok(plan)
+}
+
+/// Compile `sources` (generated kernels, by name) into the Metal library,
+/// for their fusions' steps to launch by name.
+fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let source: String = std::iter::once(PRELUDE)
+        .chain(sources.values().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = CString::new(source).expect("Metal source has no NUL");
+    // SAFETY: a NUL-terminated string, read during the call.
+    let status = unsafe { lumen_mps_compile_kernels(source.as_ptr()) };
+    if status != 0 {
+        return Err(format!("compiling the fused MPS kernels failed ({status})"));
+    }
+    let mut compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+    compiled.extend(sources);
+    Ok(())
+}
+
+/// Each attention one fusion ([`attention::fuse`]): a flash-attention
+/// kernel.
+struct FlashAttention;
+
+impl<'a> Pass<MpsModule<'a>> for FlashAttention {
+    fn name(&self) -> &'static str {
+        "flash_attention"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let scalars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
+        let epilogues = m.options.config.contraction_epilogues;
+        let kernels = &mut m.kernels;
+        m.graph = attention::fuse(&m.graph, epilogues, &scalars, |_| {
+            request(kernels, Kernel::Attention)
+        });
+        Ok(())
+    }
+}
+
+/// Each attention's backward one kernel adding dQ atomically (unless
+/// `deterministic`, or its blocks do not fit), or two (dV and dK, dQ), the
+/// probabilities recomputed from the forward's log-sum-exp.
+struct FlashAttentionBackward;
+
+impl<'a> Pass<MpsModule<'a>> for FlashAttentionBackward {
+    fn name(&self) -> &'static str {
+        "flash_attention_backward"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let deterministic = m.options.config.deterministic;
+        let kernels = &mut m.kernels;
+        m.graph = attention::fuse_backward(
+            &m.graph,
+            |b| !deterministic && codegen::backward_block_with_dq(b).is_some(),
+            |_| request(kernels, Kernel::AttentionBackward),
+        );
+        Ok(())
+    }
+}
+
+/// Unfused, each concatenate a fusion of its own: it has no kernel but a
+/// fusion's. No kernel takes a runtime scalar by value.
+struct ConcatenatesAlone;
+
+impl<'a> Pass<MpsModule<'a>> for ConcatenatesAlone {
+    fn name(&self) -> &'static str {
+        "concatenates_alone"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        m.scalars.clear();
+        let kernels = &mut m.kernels;
+        m.graph = concatenates_alone(&m.graph, |_| request(kernels, Kernel::Loop(Vec::new())));
+        Ok(())
+    }
+}
+
+/// Each fusion's kernel generated as Metal source ([`codegen`]), the
+/// fusion named by it (the name its step launches); a kernel generated
+/// once for all the fusions sharing it.
+struct Codegen;
+
+impl<'a> Pass<MpsModule<'a>> for Codegen {
+    fn name(&self) -> &'static str {
+        "codegen"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let config = &m.options.config;
+        for node in &mut m.graph.nodes {
+            let Primitive::Fusion { name, body, .. } = &mut node.primitive else {
+                continue;
+            };
+            let Some(k) = name.strip_prefix(PENDING) else {
+                continue;
+            };
+            let k: usize = k.parse().expect("a requested kernel's index");
+            let (kernel, source) = match &m.kernels[k] {
+                Kernel::Loop(by_value) => codegen::kernel(body, by_value, config),
+                Kernel::Attention => {
+                    let a = attention::of_body(body).expect("an attention");
+                    codegen::attention_kernel(body, &a)
+                }
+                Kernel::AttentionBackward => {
+                    let b = attention::backward_of_body(body).expect("an attention backward");
+                    codegen::attention_backward_kernel(body, &b)
+                }
+            };
+            m.sources.insert(kernel.clone(), source);
+            *name = kernel;
+        }
+        Ok(())
+    }
 }
 
 /// `graph` with each dot_general whose operands' dimensions do not collapse

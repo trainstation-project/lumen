@@ -178,6 +178,7 @@ fn overflowing_shapes_are_rejected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "a header of MAX_HEADER_SIZE bytes, too slow for Miri")]
 fn oversized_headers_are_not_written() {
     let metadata = BTreeMap::from([("big".to_string(), "a".repeat(MAX_HEADER_SIZE))]);
     assert_err(serialize(&[], Some(metadata)), |e| {

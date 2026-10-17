@@ -44,8 +44,10 @@
 //! (`dx = g·w / rms - x · Σ_row(…)`, its row's values two, `g` and `x`,
 //! not one producer's), a softmax's (`y · (g - Σ_row(g·y))`).
 
+use super::MpsModule;
 use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::pass::Pass;
 use crate::ops::reduce::mps::REDUCE_THREADS;
 
 /// The most threadgroups a row kernel with partials runs (each a block of
@@ -927,5 +929,21 @@ impl<'a> Finder<'a> {
         }
         outputs.sort_unstable();
         Some(outputs)
+    }
+}
+
+/// Normalization diamonds: each chain one row, its reductions inside, and
+/// the sums over rows they compute as they go ([`partials`]), for the loop
+/// fusion after it.
+pub(crate) struct Diamonds;
+
+impl<'a> Pass<MpsModule<'a>> for Diamonds {
+    fn name(&self) -> &'static str {
+        "normalization_diamonds"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        (m.graph, m.rows) = partials(&m.graph, diamonds(&m.graph));
+        Ok(())
     }
 }

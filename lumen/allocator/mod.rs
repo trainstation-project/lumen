@@ -39,6 +39,10 @@ impl DataPtr {
         }
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be `nbytes` bytes `allocator` allocated, owned by the
+    /// result alone: it gives them back to `allocator` when dropped.
     pub unsafe fn from_raw_parts(
         ptr: NonNull<u8>,
         nbytes: usize,
@@ -73,6 +77,10 @@ impl Drop for DataPtr {
 
 pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> NonNull<u8>;
+    /// # Safety
+    ///
+    /// `ptr` must be `nbytes` bytes this allocator allocated, not yet
+    /// given back, and unused after the call.
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize);
 }
 

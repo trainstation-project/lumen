@@ -383,3 +383,63 @@ fn ops_on_host_and_device_values_raise() {
         "{error}"
     );
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
+fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
+    use super::pass::{GraphModule, Pass, Pipeline, Rewrite};
+    use super::{CompilerConfig, Options};
+
+    struct Negate;
+    impl Pass<GraphModule<'_>> for Negate {
+        fn name(&self) -> &'static str {
+            "negate"
+        }
+        fn run(&mut self, m: &mut GraphModule<'_>) -> Result<(), String> {
+            let mut g = m.graph.clone();
+            let out = apply(&mut g, Neg, &[m.graph.outputs()[0]]);
+            g.set_outputs(&[out]).unwrap();
+            m.graph = g;
+            Ok(())
+        }
+    }
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[4]));
+    let y = apply(&mut g, Exp, &[x]);
+    let z = apply(&mut g, Exp, &[x]);
+    let s = apply(&mut g, Add, &[y, z]);
+    g.set_outputs(&[s]).unwrap();
+    let dir = std::env::temp_dir().join(format!("lumen-passes-{}", std::process::id()));
+    let options = Options {
+        config: CompilerConfig {
+            dump_to: Some(dir.to_string_lossy().into_owned()),
+            ..CompilerConfig::default()
+        },
+        ..Options::default()
+    };
+    let mut module = GraphModule {
+        graph: g,
+        options: &options,
+    };
+    Pipeline::new("test")
+        .add(Rewrite("cse", |g, _| cse(g)))
+        .add(Negate)
+        .run(&mut module)
+        .unwrap();
+    // cse, then the negation after it.
+    assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    let steps: Vec<&str> = files.iter().map(|f| f.split_once('.').unwrap().1).collect();
+    assert_eq!(
+        steps,
+        ["test.00.input.txt", "test.01.cse.txt", "test.02.negate.txt"]
+    );
+    let last = std::fs::read_to_string(dir.join(&files[2])).unwrap();
+    assert_eq!(last, module.graph.to_string());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

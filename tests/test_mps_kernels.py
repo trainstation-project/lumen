@@ -5,6 +5,7 @@ encoded into the stream's open command buffer (``lumen.Stream("mps")``'s
 compiled function's steps, with no wait."""
 
 import ctypes
+import sys
 
 import numpy as np
 import pytest
@@ -15,6 +16,9 @@ from lumen.custom_op import MetalKernel, custom_op
 from lumen.profiler import ProfilerActivity, profile
 
 pytestmark = pytest.mark.mps
+
+if sys.platform != "darwin":
+    pytest.skip("Metal kernels run on macOS only", allow_module_level=True)
 
 AXPY = """
 kernel void axpy(device const float *x [[buffer(0)]], device float *y [[buffer(1)]],

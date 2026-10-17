@@ -168,6 +168,7 @@ fn plan_schedules_steps_to_shrink_the_workspace() {
 /// end, is not. Nothing is recomputed without a limit, nor when the plan
 /// fits.
 #[test]
+#[cfg_attr(miri, ignore = "128 KiB values, too slow for Miri")]
 fn plan_rematerializes_under_a_memory_limit() {
     let mut g = Graph::new();
     // Of 128 KiB each: at least XLA's smallest value to recompute.

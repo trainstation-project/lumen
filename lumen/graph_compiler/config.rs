@@ -99,6 +99,10 @@ pub struct CompilerConfig {
     /// by default: the kernels read at the indices as given, one out of
     /// range the program's error (undefined, as an out-of-bounds read).
     pub safe_kernels: bool,
+    /// A directory to write each compiled graph into, before its passes
+    /// and after each (XLA's `--xla_dump_to`; `graph_compiler::pass`).
+    /// None, the default: nothing written.
+    pub dump_to: Option<String>,
 }
 
 impl CompilerConfig {
@@ -128,6 +132,7 @@ impl Default for CompilerConfig {
             memory_limit: 0,
             fused_linear_cross_entropy_chunk_size: None,
             safe_kernels: false,
+            dump_to: None,
         }
     }
 }

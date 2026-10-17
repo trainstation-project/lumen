@@ -34,6 +34,10 @@ impl Tensor {
         }
     }
 
+    /// # Safety
+    ///
+    /// Its elements are uninitialized: each must be written before it is
+    /// read.
     pub unsafe fn empty(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("empty"), Vec::new);
         let options = options.into();

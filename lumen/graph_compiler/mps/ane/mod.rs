@@ -29,8 +29,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+use super::MpsModule;
 use crate::codegen::mps::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
+use crate::graph_compiler::pass::Pass;
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
@@ -760,5 +762,30 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
         {
             entry.program = None;
         }
+    }
+}
+
+pub(crate) struct NeuralEngine;
+
+impl<'a> Pass<MpsModule<'a>> for NeuralEngine {
+    fn name(&self) -> &'static str {
+        "neural_engine"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let options = m.options;
+        let written = |i: usize| {
+            options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
+        };
+        let inputs = m.graph.inputs().len();
+        let first_block = inputs - m.packed.len();
+        let fixed: Vec<bool> = (0..inputs)
+            .map(|i| match i.checked_sub(first_block) {
+                Some(b) => !m.packed[b].0.iter().any(|&w| written(w)),
+                None => options.parameters.as_ref().is_some_and(|p| p[i]) && !written(i),
+            })
+            .collect();
+        m.graph = offload(&m.graph, &fixed);
+        Ok(())
     }
 }

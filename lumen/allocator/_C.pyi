@@ -1,3 +1,5 @@
+from typing import Optional
+
 class CompilerConfig:
     fuse: bool
     merge_dots: bool
@@ -13,6 +15,7 @@ class CompilerConfig:
     neural_engine: bool
     row_cache: int
     memory_limit: int
+    dump_to: Optional[str]
 
     def reset(self) -> None: ...
 
