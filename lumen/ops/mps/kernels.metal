@@ -1,31 +1,7 @@
-// Shared by the Metal kernels of the graph primitives (lumen/ops/*/mps/
-// *.metal): type traits, scalar conversions, op functors, index helpers and
-// the dtype lists that instantiate kernels. build.rs concatenates this file
-// and the op files into one source, compiled at runtime into one library;
-// lumen/ops/mps/shim.mm launches its kernels. The MPS graph compiler
-// (lumen/compiler/mps) also prepends it to the fused kernels it generates.
-//
-// Kernels are templates instantiated per op and dtype, named after the
-// primitive, <op>_<dtype> (add_f32, reduce_sum_i64, ...), or <kernel>_<bytes>
-// for dtype-agnostic ones (gather_4, ...). Semantics follow the reference executor
-// (lumen/ops/reference.rs): integers wrap, integer division by zero
-// gives -1, max propagates NaN, float-to-integer conversion saturates (NaN
-// to 0), and every op computes in its operands' dtype: half in half,
-// bfloat in bfloat (no bfloat exp, log, sqrt, tanh or logistic: Metal's
-// compute in float, so the graph rejects them, lumen/graph/primitive.rs).
-// Metal has no float64.
-
 #include <metal_stdlib>
 
 using namespace metal;
 
-// ---------------------------------------------------------------------
-// type traits
-// ---------------------------------------------------------------------
-
-// The identity epilogue: what a kernel writes, as computed (a generated
-// kernel's epilogue computes the elementwise primitives after it, given
-// the value and, with `j`, its flat index in the output).
 struct Same {
     template <typename T> T operator()(T x) const { return x; }
     template <typename T> T operator()(T x, ulong j) const { return x; }
@@ -39,7 +15,6 @@ template <> inline bool is_float_t<float>() { return true; }
 template <typename T> inline bool is_bool_t() { return false; }
 template <> inline bool is_bool_t<bool>() { return true; }
 
-// Integer ranges, for saturating conversions (0 for other types).
 template <typename T> inline T lo_t() { return T(0); }
 template <typename T> inline T hi_t() { return T(0); }
 #define RANGE(T, LO, HI)                          \
@@ -55,7 +30,6 @@ RANGE(short, -32768, 32767)
 RANGE(int, -2147483647 - 1, 2147483647)
 RANGE(long, -9223372036854775807l - 1, 9223372036854775807l)
 
-// A float converted to D: saturating for integers, NaN to 0.
 template <typename D> inline D from_float(float f) {
     if (is_bool_t<D>()) {
         return D(f != 0.0f);
@@ -75,7 +49,6 @@ template <typename D> inline D from_float(float f) {
     return D(f);
 }
 
-// An integer (or bool) converted to D: wrapping for integers.
 template <typename D, typename S> inline D from_int(S x) {
     if (is_bool_t<D>()) {
         return D(x != S(0));
@@ -93,16 +66,14 @@ template <typename A> inline A div_op(A x, A y) {
     if (y == A(0)) {
         return A(-1);
     }
-    if (A(-1) < A(0) && y == A(-1)) { // signed: MIN / -1 wraps
+    if (A(-1) < A(0) && y == A(-1)) {
         return A(0) - x;
     }
     return x / y;
 }
 
-// NaN propagates (x != x for a NaN; false for the other types).
 template <typename A> inline A max_op(A x, A y) { return x != x || y != y ? x + y : (x > y ? x : y); }
 
-// Binary ops shared by elementwise and reduce, as functors.
 struct Add {
     template <typename A> static A apply(A x, A y) { return x + y; }
     template <typename A> static A identity() { return A(0); }
@@ -114,8 +85,6 @@ struct Max {
     template <typename A> static A identity() { return is_bool_t<A>() ? A(false) : from_float<A>(-INFINITY); }
 };
 
-// The other elementwise ops, as functors: shared by the elementwise
-// kernels and the fused kernels lumen/compiler/mps generates.
 struct Sub {
     template <typename A> static A apply(A x, A y) { return x - y; }
 };
@@ -156,16 +125,11 @@ struct Logistic {
     template <typename A> static A apply(A x) { return A(1) / (A(1) + exp(-x)); }
 };
 
-// x converted to D: from_float for float sources, from_int for the rest.
 template <typename D, typename S> inline D convert_value(S x) { return from_int<D>(x); }
 template <typename D> inline D convert_value(half x) { return from_float<D>(float(x)); }
 template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }
 template <typename D> inline D convert_value(float x) { return from_float<D>(x); }
 
-// The first word of the Philox4x32-10 block (Random123's philox4x32) keyed
-// by `key` (its low word first) at `counter` (the block's first two words,
-// low first; the others 0): random_bits' element, as the reference
-// computes it (philox_bits, lumen/ops/reference.rs).
 inline uint philox_bits(ulong key, ulong counter) {
     uint c0 = uint(counter), c1 = uint(counter >> 32), c2 = 0, c3 = 0;
     uint k0 = uint(key), k1 = uint(key >> 32);
@@ -185,12 +149,6 @@ inline uint philox_bits(ulong key, ulong counter) {
     return c0;
 }
 
-// Elementwise kernels take BYTES_PER_THREAD bytes of elements of T a
-// thread (4 floats, 8 halfs, 16 bytes, 2 longs), spaced a grid apart:
-// thread i of `threads` takes i, i + threads, ..., so each load across a
-// SIMD group is contiguous. Launched over ceil(n / per_thread<T>())
-// threads (lumen/ops/*/mps/mod.rs). ELEMENTWISE_ARGS are the kernel
-// parameters the loop needs, after the kernel's buffers.
 #define BYTES_PER_THREAD 16
 template <typename T> constexpr uint per_thread() {
     return sizeof(T) >= BYTES_PER_THREAD ? 1 : BYTES_PER_THREAD / sizeof(T);
@@ -199,7 +157,6 @@ template <typename T> constexpr uint per_thread() {
     constant uint &n [[buffer(N)]], uint i [[thread_position_in_grid]], uint threads [[threads_per_grid]]
 #define FOR_EACH_ELEMENT(j, T) for (uint j = i, k_ = 0; k_ < per_thread<T>() && j < n; ++k_, j += threads)
 
-// The flat offset of row-major index `idx` of `sizes` under `strides`.
 inline ulong offset_of(ulong idx, uint ndim, constant ulong *sizes, constant ulong *strides) {
     ulong offset = 0;
     for (int d = int(ndim) - 1; d >= 0; --d) {
@@ -209,9 +166,6 @@ inline ulong offset_of(ulong idx, uint ndim, constant ulong *sizes, constant ulo
     return offset;
 }
 
-// offset_of in 32-bit arithmetic, for kernels whose tensors have fewer than
-// 2^32 elements: GPUs divide 64-bit integers slowly. What is left of the
-// index at the outermost dimension is its coordinate, with no division.
 inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint *strides) {
     uint offset = 0;
     for (int d = int(ndim) - 1; d > 0; --d) {
@@ -250,18 +204,12 @@ inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint
 
 #define FOR_ALL(X) X(bool, bool) FOR_NUMERIC(X)
 #define FOR_FLOAT(X) X(f16, half) X(bf16, bfloat) X(f32, float)
-// The float dtypes with exp, log, sqrt and tanh: Metal's take and return
-// float for bfloat.
 #define FOR_MATH_FLOAT(X) X(f16, half) X(f32, float)
 #define FOR_BYTES(X) X(1, uchar) X(2, ushort) X(4, uint) X(8, ulong)
 
-// Lane `lane`'s two elements (thread_elements) of an 8x8 simdgroup
-// matrix: at row frag_row(lane), columns frag_col(lane) and the next. The
-// 4 lanes holding a row differ in lane bits 0 and 3.
 inline uint frag_row(uint lane) { return ((lane / 4) & 4) + ((lane / 2) % 4); }
 inline uint frag_col(uint lane) { return ((lane / 4) & 2) * 2 + (lane % 2) * 2; }
 
-// A lane's two elements of simdgroup matrix `m` (MLX reads them so).
 template <typename T> inline thread vec<T, 2> &frag(thread simdgroup_matrix<T, 8, 8> &m) {
     return reinterpret_cast<thread vec<T, 2> &>(m.thread_elements());
 }
