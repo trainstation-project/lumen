@@ -14,9 +14,9 @@
 
 use super::diamonds::Row;
 use crate::DType;
-use crate::compiler::CompilerConfig;
-pub(super) use crate::compiler::{constant, elementwise};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::CompilerConfig;
+pub(crate) use crate::graph_compiler::{constant, elementwise};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
 const MAX_INPUTS: usize = 29;
@@ -748,7 +748,7 @@ pub(crate) fn fuse(
 /// A fusion's label (as profiled): its `members`' labels, leaving out the
 /// constants (`full → broadcast_in_dim`, literals in its kernel) unless
 /// they are all it computes.
-pub(super) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
+pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
     let nodes = graph.nodes();
     let names = |all: bool| -> Vec<&str> {
         members

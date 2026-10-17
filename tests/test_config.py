@@ -22,7 +22,7 @@ def _manual_softmax(a):
 
 def _labels(f, *args, device="mps"):
     try:
-        return [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), device).steps()]
+        return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()]
     except RuntimeError as e:
         pytest.skip(str(e))
 
@@ -77,7 +77,7 @@ def test_compiler_flags_change_what_compiles(compiler):
     compiler.reset()
 
     big = lumen.empty([8, 65536], device="meta")
-    online = lambda: lumen.graph.Plan(lumen.make_graph(_manual_softmax)(big), "mps").steps()[0]  # noqa: E731
+    online = lambda: lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(big), "mps").steps()[0]  # noqa: E731
     assert "maxima" in online()["fusion"]["source"]
     compiler.online_softmax = False
     assert "maxima" not in online()["fusion"]["source"]
@@ -98,10 +98,10 @@ def test_compiler_flags_change_what_compiles(compiler):
     assert "linear_cross_entropy" not in _labels(loss, *args)
     compiler.reset()
 
-    (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" in step["fusion"]["source"]
     compiler.row_cache = 0
-    (step,) = lumen.graph.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" not in step["fusion"]["source"]
     compiler.reset()
 
@@ -129,7 +129,7 @@ def test_memory_limit_recomputes(compiler):
 
     def plan():
         try:
-            return lumen.graph.Plan(lumen.make_graph(_read_early_and_late)(a, w), "mps")
+            return lumen.graph_compiler.Plan(lumen.make_graph(_read_early_and_late)(a, w), "mps")
         except RuntimeError as e:
             pytest.skip(str(e))
 

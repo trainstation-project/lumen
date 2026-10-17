@@ -1,15 +1,7 @@
-//! Graph-plan steps as Metal kernels on MPS. [`encode`] hands each step to
-//! its op (`lumen/ops/<op>/mps/mod.rs`), which picks the kernel in its
-//! `kernels.metal` and computes the arguments (shapes, strides); [`launch`]
-//! runs it through `shim.mm` into lumen's MPS stream without waiting (see
-//! [`crate::stream::mps`]). Values are contiguous, so a kernel only needs
-//! strides where it reads in another order (broadcast, transpose,
-//! reductions and contractions).
-
 use std::ffi::{CString, c_char, c_void};
 
-use crate::graph::plan::Step;
 use crate::graph::{Primitive, TensorType};
+use crate::graph_compiler::plan::Step;
 use crate::stream::mps::{self, Completion};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
@@ -32,10 +24,6 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// Encode `step` reading `inputs` and writing `output` (null for a value
-/// with no elements), with the workspace bytes the planner set aside for its
-/// kernel at `scratch` (null if none; see [`scratch_bytes`]), keeping `keep`
-/// alive until the GPU has run it.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -59,7 +47,7 @@ pub(crate) fn encode(
         return super::scan::mps::encode(step, inputs, output, scratch, keep);
     }
     if let Fusion { .. } = step.primitive {
-        return crate::compiler::mps::encode(step, inputs, output, scratch, keep);
+        return crate::graph_compiler::mps::encode(step, inputs, output, scratch, keep);
     }
     if let LinearCrossEntropy = step.primitive {
         return super::dot_general::mps::encode_linear_cross_entropy(
@@ -109,9 +97,6 @@ pub(crate) fn encode(
     encode(step, inputs, output, keep)
 }
 
-/// The workspace bytes a step's MPS kernel needs while it runs, which the
-/// planner sets aside ([`crate::graph::PlanOptions::scratch`]): a split
-/// reduction's partials.
 pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
     match p {
         Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
@@ -121,7 +106,7 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         Primitive::Cumsum {
             axis, accum_dtype, ..
         } => super::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
-        Primitive::Fusion { body, .. } => crate::compiler::mps::fusion_scratch_bytes(body),
+        Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
         Primitive::LinearCrossEntropy => {
             super::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
         }
@@ -137,8 +122,6 @@ pub(crate) fn u64_arg(v: usize) -> Vec<u8> {
     (v as u64).to_ne_bytes().to_vec()
 }
 
-/// A `constant ulong *` argument (never empty: Metal binds no zero-length
-/// bytes, and the kernels read only the first `ndim`).
 pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u64> = v.into_iter().map(|d| d as u64).collect();
     if v.is_empty() {
@@ -147,8 +130,6 @@ pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     as_bytes(&v).to_vec()
 }
 
-/// [`dims_arg`] as `constant uint *`, for kernels indexing in 32 bits
-/// (their tensors have fewer than 2^32 elements).
 pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u32> = v.into_iter().map(|d| d as u32).collect();
     if v.is_empty() {
@@ -157,16 +138,12 @@ pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     as_bytes(&v).to_vec()
 }
 
-/// `value` as one element of `dtype`, converted as the reference does.
 pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
     dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec())
 }
 
-/// Bytes of elements an elementwise kernel's thread takes
-/// (`BYTES_PER_THREAD` in `kernels.metal`).
 pub(crate) const BYTES_PER_THREAD: usize = 16;
 
-/// The grid of an elementwise kernel over `n` elements of `dtype`.
 pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
     Grid::Threads([
         n.div_ceil((BYTES_PER_THREAD / dtype.size_of()).max(1)),
@@ -177,8 +154,6 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
 
 pub(crate) use crate::custom_op::mps::Grid;
 
-/// Launch `kernel` for `step` over `grid`, on buffers `inputs` then
-/// `output` and argument bytes `args`.
 pub(crate) fn launch_step(
     step: &Step,
     kernel: &str,
@@ -193,7 +168,6 @@ pub(crate) fn launch_step(
     launch(kernel, &buffers, args, grid, keep, step.label)
 }
 
-/// Launch `kernel` over `grid`, recorded in the profiler as `name`.
 pub(crate) fn launch(
     kernel: &str,
     buffers: &[*const u8],

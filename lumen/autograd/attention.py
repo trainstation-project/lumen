@@ -1,6 +1,6 @@
 """Attention's derivative, FlashAttention-2's: the pass before autodiff that
 finds the attentions a traced program computes (however written: the
-compiler's matcher, ``lumen/compiler/attention.rs``) and makes each one node
+compiler's matcher, ``lumen/graph_compiler/attention.rs``) and makes each one node
 of the tape, its backward recomputing the probabilities from each query's
 log-sum-exp rather than reading them (MLX's ``ScaledDotProductAttentionVJP``).
 

@@ -23,17 +23,15 @@
 //! 512x4096x2048: its error 2.7x float32's rounded once), so it is opt-in.
 //! No dot of a float32 result is offloaded (Core ML runs those on the CPU).
 
-mod mil;
-mod proto;
-
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use crate::graph::plan::Step;
+use crate::codegen::mps::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
+use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
@@ -659,7 +657,7 @@ pub(crate) fn encode(
         done,
         _keep: keep,
         label: step.label,
-        profile: crate::profiler::gpu_context(crate::device::Device::Mps),
+        profile: crate::profiler::gpu_context(crate::device::Device::Mps(0)),
     };
     jobs()
         .send(job)

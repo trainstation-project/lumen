@@ -17,7 +17,7 @@ fn kernels(key: DispatchKey) -> Option<WaitKernel> {
 
 #[cfg(lumen_mps_linked)]
 pub(crate) fn encode(
-    _step: &crate::graph::plan::Step,
+    _step: &crate::graph_compiler::plan::Step,
     _inputs: &[*const u8],
     _output: *mut u8,
     keep: Vec<Tensor>,

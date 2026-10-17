@@ -21,17 +21,24 @@ mod cpu;
 mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
+pub mod plan;
+#[cfg(test)]
+pub(crate) mod plan_tests;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+mod remat;
+mod schedule;
 mod simplify;
 mod stages;
 #[cfg(test)]
 mod tests;
 
 use crate::Device;
-use crate::graph::{Graph, Plan, Primitive, Var};
+use crate::graph::{Graph, Primitive, Var};
 
 pub use config::CompilerConfig;
+pub use plan::{Plan, PlanOptions};
+pub(crate) use plan::{Source, Stage, Staged};
 
 /// How to compile a graph.
 #[derive(Debug, Clone)]
@@ -47,7 +54,7 @@ pub struct Options {
     /// ([`PlanOptions::parameters`]).
     pub parameters: Option<Vec<bool>>,
     /// Parameters not yet placed, which the compiler may place side by
-    /// side in blocks ([`Plan::packed`](crate::graph::Plan)).
+    /// side in blocks ([`Plan::packed`](crate::graph_compiler::Plan)).
     pub packable: Vec<bool>,
     /// One-element inputs the kernels may take by value (runtime scalars,
     /// [`PlanOptions::scalars`]): where every kernel reading one can.
@@ -76,7 +83,7 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
 /// [`compile`] with `options`.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let graph = &simplify::simplify(&cse::cse(graph));
-    if device != Device::Cpu
+    if device != Device::Cpu(0)
         && let Some(plan) = stages::compile(graph, device, options)?
     {
         return Ok(plan);
@@ -88,7 +95,7 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
         #[cfg(lumen_mps_linked)]
-        Device::Mps => mps::compile(graph, options),
+        Device::Mps(_) => mps::compile(graph, options),
         _ => Ok(cpu::compile(graph, options)),
     }
 }

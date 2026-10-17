@@ -1,42 +1,3 @@
-//! Algebraic simplification (XLA: `AlgebraicSimplifier`):
-//!
-//! - `x * 1`, `1 * x`, `x / 1`, `x + 0`, `0 + x`, `x - 0`, `neg(neg(x))`,
-//!   `select(p, x, x)`, a cast to `x`'s own dtype: `x` (each value as it
-//!   was, but `-0 + 0`: `-0`, not `+0`, as XLA's);
-//! - a reshape of a reshape, a transpose of a transpose, a broadcast of a
-//!   broadcast: one; a reshape to `x`'s shape, an identity transpose: `x`;
-//! - a dot of an input's transpose (or of its cast: mixed precision's
-//!   `w.t().bfloat16()`): the dot of the input (or its cast), at the
-//!   dimensions the transpose maps (XLA: `TransposeFolding`; `x @ w.t()`
-//!   reads the weight `w` as it is), where its free dimensions stay in
-//!   order (a computed value's transpose is left: the attention matcher
-//!   writes an attention's output in its transpose's layout);
-//! - with `matched` (once attention is matched: the MPS compiler's after its
-//!   matchers, whose patterns these change, or a device with none):
-//!   - a dot of a computed value's transpose (a hand-written backward's
-//!     `dy.t() @ h`): the dot of the value, as of an input's above;
-//!   - a cast of a dot's result it alone reads to its operands' narrower
-//!     dtype, the dot writing its accumulator as it is (bfloat16
-//!     operands, `F.matmul(x, w, "float32", "float32").bfloat16()`): the
-//!     dot writing that dtype (one rounding either way, the same bits);
-//!   - a transpose of a dot swapping its operands' free dimensions (as
-//!     autodiff's transpose of a dot gives a weight's gradient): the dot of
-//!     the operands swapped, so no copy;
-//!   - an elementwise primitive (not a cast) of the same reshape or
-//!     transpose of values of one shape, or of constants: the reshape or
-//!     transpose of it, on those values (XLA: `ReshapeMover`), so it joins
-//!     the fusion before (a dot's epilogue);
-//!   - a reshape, transpose, slice or concatenate of widening casts: the
-//!     cast of it; a narrowing cast of one: it of narrowing casts (XLA:
-//!     `ConvertMover`), so the layout primitive moves the narrow values.
-//!
-//! Each moved value is read by the primitive moved past alone. A dot's
-//! batch dimensions are not merged (XLA: `DotDimensionMerger`): the MPS
-//! matmul collapses them itself (`collapsed`, `ops/dot_general/mps`), and
-//! a reshape after a dot would keep its epilogue out of its kernel.
-//!
-//! Dead nodes are dropped, and repeated ones merged again (CSE).
-
 use std::collections::HashMap;
 
 use super::cse::cse;
@@ -44,13 +5,10 @@ use crate::graph::{Graph, Node, Primitive, Var};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Element, Scalar};
 
-/// `graph` simplified.
 pub(crate) fn simplify(graph: &Graph) -> Graph {
     simplify_with(graph, false)
 }
 
-/// `graph` simplified, with the rewrites changing what the attention
-/// matcher matches too if `matched`.
 pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
     // The values read once, by a node (not an output): a dot's that a

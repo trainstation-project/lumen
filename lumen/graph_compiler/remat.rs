@@ -6,7 +6,8 @@
 //! compute: running out of memory is worse than running slower. Here each
 //! candidate's saving is measured by planning it.
 
-use super::{Graph, Node, Plan, Primitive, Var};
+use super::Plan;
+use crate::graph::{Graph, Node, Primitive, Var};
 
 /// Whether node `node` may be computed again: not a custom op (whose kernel
 /// may have effects the graph does not show, XLA's `kCustomCall`), a fusion

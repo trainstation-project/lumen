@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use super::{Graph, Node, Primitive, Scope, TensorType, Var};
+use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, Var};
 use crate::ops::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
@@ -374,7 +374,7 @@ impl Plan {
             // first.
             // Nor a Core ML step's (its program reads and writes the
             // buffers in no order it says).
-            let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(super::NEURAL_ENGINE));
+            let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(NEURAL_ENGINE));
             let step = !neural_engine
                 && !matches!(
                     node.primitive,
@@ -693,7 +693,7 @@ impl Plan {
                 let value = &values[s][k];
                 let mut op = crate::profiler::record_op("to_host", || vec![value.ty()]);
                 op.outputs(|| vec![value.ty()]);
-                value.to(Device::Cpu)
+                value.to(Device::Cpu(0))
             }
             Source::ToDevice(s, k) => {
                 let value = &values[s][k];
@@ -707,8 +707,8 @@ impl Plan {
             ins.extend(stage.blocks.iter().map(|&b| inputs[n + b].clone()));
             let outputs = match (stage.host, workspace) {
                 (true, _) => {
-                    let ins: Vec<Tensor> = ins.iter().map(|t| t.to(Device::Cpu)).collect();
-                    stage.plan.run_on(&ins, Device::Cpu)?
+                    let ins: Vec<Tensor> = ins.iter().map(|t| t.to(Device::Cpu(0))).collect();
+                    stage.plan.run_on(&ins, Device::Cpu(0))?
                 }
                 (false, Some(ws)) => {
                     let bytes = stage.plan.workspace_bytes();
@@ -764,7 +764,10 @@ impl Plan {
     /// the steps are Metal kernels ([`crate::ops::mps`]); elsewhere they run on
     /// the host, with device inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
-        self.run_on(inputs, inputs.first().map_or(Device::Cpu, Tensor::device))
+        self.run_on(
+            inputs,
+            inputs.first().map_or(Device::Cpu(0), Tensor::device),
+        )
     }
 
     /// [`run`](Self::run) on `device`, where the inputs must be: for plans
@@ -779,11 +782,11 @@ impl Plan {
             ));
         }
         let executor = self.executor(device)?;
-        if device == Device::Meta {
+        if device == Device::Meta(0) {
             // Nothing to compute: outputs of the right types, without data
             // (shape inference).
             let meta = |ty: &TensorType| {
-                let options = TensorOptions::new().dtype(ty.dtype).device(Device::Meta);
+                let options = TensorOptions::new().dtype(ty.dtype).device(Device::Meta(0));
                 // SAFETY: meta tensors have no data to read.
                 unsafe { Tensor::empty(&ty.shape, options) }
             };
@@ -798,7 +801,7 @@ impl Plan {
             .map(|(t, at)| match at {
                 // Read on the host as its steps are encoded: its value, waited
                 // for (as `run_in` reads one).
-                Buffer::Scalar(_) => t.to(Device::Cpu),
+                Buffer::Scalar(_) => t.to(Device::Cpu(0)),
                 _ => dispatch_dtype!(t.dtype(), T => t.to(executor).contiguous::<T>()),
             })
             .collect();
@@ -884,7 +887,7 @@ impl Plan {
                 |j: &usize| self.aliases.contains(&Some(*j)) && inputs[*j].shares_storage_with(t);
             match *at {
                 // Read on the host as its steps are encoded.
-                Buffer::Scalar(_) => params.push(t.to(Device::Cpu)),
+                Buffer::Scalar(_) => params.push(t.to(Device::Cpu(0))),
                 _ if self.arguments[i]
                     && (t.device() != device || (0..inputs.len()).any(|j| donated(&j))) =>
                 {
@@ -945,15 +948,13 @@ impl Plan {
                         // A contraction with its epilogue reads its dot's
                         // operands as the dot does (a Core ML step, at
                         // any strides).
-                        Primitive::Fusion { name, .. }
-                            if name.starts_with(super::NEURAL_ENGINE) =>
-                        {
-                            true
-                        }
+                        Primitive::Fusion { name, .. } if name.starts_with(NEURAL_ENGINE) => true,
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
                                 && s.inputs[k].1.shape == self.inputs[i].shape
-                                && crate::compiler::mps::fusion_reads_strided(body, k, strides)
+                                && crate::graph_compiler::mps::fusion_reads_strided(
+                                    body, k, strides,
+                                )
                         }
                         _ => false,
                     })
@@ -989,12 +990,12 @@ impl Plan {
     /// Where the steps of a run on `device` run: MPS kernels on MPS, else
     /// the host.
     fn executor(&self, device: Device) -> Result<Device, String> {
-        let executor = if cfg!(lumen_mps_linked) && device == Device::Mps {
-            Device::Mps
+        let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
+            Device::Mps(0)
         } else {
-            Device::Cpu
+            Device::Cpu(0)
         };
-        if executor == Device::Mps {
+        if executor == Device::Mps(0) {
             let f64_step = self.steps.iter().find(|s| {
                 s.inputs
                     .iter()
@@ -1031,7 +1032,7 @@ impl Plan {
             Buffer::Workspace(offset) => workspace.data_ptr().wrapping_add(offset),
             _ => tensor(buffer).data_ptr(),
         };
-        if executor != Device::Mps
+        if executor != Device::Mps(0)
             && self
                 .steps
                 .iter()
@@ -1104,7 +1105,7 @@ impl Plan {
             });
             match executor {
                 #[cfg(lumen_mps_linked)]
-                Device::Mps => {
+                Device::Mps(_) => {
                     let mut keep: Vec<Tensor> = step
                         .inputs
                         .iter()
@@ -1179,7 +1180,7 @@ impl Plan {
                         out.copy_(src)?;
                     }
                     #[cfg(lumen_mps_linked)]
-                    Device::Mps => crate::ops::dynamic_slice::mps::copy(
+                    Device::Mps(_) => crate::ops::dynamic_slice::mps::copy(
                         src.data_ptr().cast_const(),
                         out.data_ptr(),
                         ty,
@@ -1201,7 +1202,7 @@ impl Plan {
         // in order with the plan's, counted so `synchronize` waits for it.
         let called = crate::graph::custom::call(kernel, &args);
         #[cfg(lumen_mps_linked)]
-        if executor == Device::Mps {
+        if executor == Device::Mps(0) {
             crate::stream::mps::mark();
         }
         let _ = executor;

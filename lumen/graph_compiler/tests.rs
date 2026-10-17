@@ -1,7 +1,7 @@
 use super::cse::cse;
 use crate::graph::Primitive::*;
-use crate::graph::tests::data;
 use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::graph_compiler::plan_tests::data;
 use crate::ops::reference;
 use crate::{DType, Scalar};
 
@@ -54,7 +54,6 @@ fn repeated_computations_run_once() {
     let z = zero(&mut g);
     let relu = apply(&mut g, Max, &[a, z]);
     let b = apply(&mut g, matmul(), &[x, w]);
-    // Operands swapped: the same product.
     let y = apply(&mut g, Mul, &[relu, b]);
     let y2 = apply(&mut g, Mul, &[b, relu]);
     let z2 = zero(&mut g);
@@ -90,7 +89,6 @@ fn different_parameters_or_order_are_kept() {
     let t = |p: Vec<usize>| Transpose { permutation: p };
     let a = apply(&mut g, t(vec![1, 0]), &[x]);
     let b = apply(&mut g, t(vec![0, 1]), &[x]);
-    // Not commutative: kept.
     let c = apply(&mut g, Sub, &[a, b]);
     let d = apply(&mut g, Sub, &[b, a]);
     g.set_outputs(&[c, d]).unwrap();
@@ -114,10 +112,6 @@ fn full(shape: &[usize], value: f64) -> Primitive {
     }
 }
 
-/// Algebraic simplification: `x * 1`, `1 * x`, `x / 1`, `x + 0`, `0 + x`,
-/// `x - 0`, `neg(neg(x))`, `select(p, x, x)` and a cast to `x`'s dtype are
-/// `x`; a reshape of a reshape, a transpose of a transpose, a broadcast of a
-/// broadcast one.
 #[test]
 fn algebraic_simplification() {
     let mut g = Graph::new();
@@ -183,10 +177,6 @@ fn algebraic_simplification() {
     same_values(&g, &simplified, &[data(&[2, 3], 1)]);
 }
 
-/// A transpose of a dot swapping its free dimensions (a weight's gradient
-/// from autodiff) is the dot of its operands swapped, no copy, with
-/// `matched` (the MPS compiler's, after matching attention); not without
-/// it, nor when the dot is read twice.
 #[test]
 fn transposes_of_dots_swap_their_operands() {
     let build = |read_twice: bool| {
@@ -218,9 +208,6 @@ fn transposes_of_dots_swap_their_operands() {
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
-/// With `matched`, a transpose moves past the elementwise primitives
-/// reading it (and a constant, made in the shape before it): one transpose,
-/// last (XLA's `ReshapeMover`); not without it.
 #[test]
 fn rearranges_move_past_elementwise_primitives() {
     let mut g = Graph::new();
@@ -249,10 +236,6 @@ fn rearranges_move_past_elementwise_primitives() {
     );
 }
 
-/// With `matched`, a widening cast moves after the layout primitives
-/// reading it (a concatenate's constant cast too, if exact), and a
-/// narrowing one before them (XLA's `ConvertMover`): they move the bfloat16
-/// values.
 #[test]
 fn casts_move_past_layout_primitives() {
     let cast = |dtype| Cast { new_dtype: dtype };
@@ -308,7 +291,6 @@ fn casts_move_past_layout_primitives() {
     }
 }
 
-/// `to_host(x * 3) * 2`: the product on the device, the rest on the host.
 fn to_host_graph() -> Graph {
     let mut g = Graph::new();
     let x = g.input(ty(&[2]));
@@ -323,9 +305,9 @@ fn to_host_graph() -> Graph {
 
 #[test]
 fn host_values_run_in_a_host_stage() {
-    let device = match crate::device::mps::is_available() {
-        true => crate::Device::Mps,
-        false => crate::Device::Meta,
+    let device = match crate::device::mps::MPS.is_available() {
+        true => crate::Device::Mps(0),
+        false => crate::Device::Meta(0),
     };
     let plan = super::compile(&to_host_graph(), device).unwrap();
     let staged = plan.staged.as_ref().expect("a staged plan");
@@ -333,22 +315,21 @@ fn host_values_run_in_a_host_stage() {
     assert_eq!(hosts, [false, true]);
     assert_eq!(
         staged.stages[1].inputs,
-        [crate::graph::Source::ToHost(0, 0)]
+        [crate::graph_compiler::Source::ToHost(0, 0)]
     );
-    if device == crate::Device::Mps {
+    if device == crate::Device::Mps(0) {
         let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
         let out = plan.run(&[x]).unwrap();
-        assert_eq!(out[0].device(), crate::Device::Cpu);
+        assert_eq!(out[0].device(), crate::Device::Cpu(0));
         assert_eq!(out[0].to_vec::<f32>(), [6.0, 12.0]);
     }
 }
 
 #[test]
 fn values_copied_back_at_once_pass_through_a_host_stage() {
-    // to_device(to_host(x * 3)) * 2: the host stage outputs its input.
-    let device = match crate::device::mps::is_available() {
-        true => crate::Device::Mps,
-        false => crate::Device::Meta,
+    let device = match crate::device::mps::MPS.is_available() {
+        true => crate::Device::Mps(0),
+        false => crate::Device::Meta(0),
     };
     let mut g = Graph::new();
     let x = g.input(ty(&[2]));
@@ -365,12 +346,12 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
     assert_eq!(hosts, [false, true, false]);
     assert_eq!(
         staged.stages[2].inputs,
-        [crate::graph::Source::ToDevice(1, 0)]
+        [crate::graph_compiler::Source::ToDevice(1, 0)]
     );
-    if device == crate::Device::Mps {
+    if device == crate::Device::Mps(0) {
         let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
         let out = plan.run(&[x]).unwrap();
-        assert_eq!(out[0].device(), crate::Device::Mps);
+        assert_eq!(out[0].device(), crate::Device::Mps(0));
         assert_eq!(out[0].to_vec::<f32>(), [6.0, 12.0]);
     }
 }
@@ -383,7 +364,7 @@ fn programs_without_host_values_are_one_plan() {
     let d = apply(&mut g, ToDevice, &[x]);
     let y = apply(&mut g, Mul, &[d, x]);
     g.set_outputs(&[y]).unwrap();
-    let plan = super::compile(&g, crate::Device::Meta).unwrap();
+    let plan = super::compile(&g, crate::Device::Meta(0)).unwrap();
     assert!(plan.staged.is_none());
     let steps: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(steps, ["mul"]);
@@ -396,7 +377,7 @@ fn ops_on_host_and_device_values_raise() {
     let h = apply(&mut g, ToHost, &[x]);
     let y = apply(&mut g, Add, &[h, x]);
     g.set_outputs(&[y]).unwrap();
-    let error = super::compile(&g, crate::Device::Meta).unwrap_err();
+    let error = super::compile(&g, crate::Device::Meta(0)).unwrap_err();
     assert!(
         error.contains("Expected all tensors to be on the same device"),
         "{error}"

@@ -282,7 +282,7 @@ def softmax(input, dim):
     """``exp(x - max) / sum(exp(x - max))`` along ``dim``, traced as those
     primitives: over the last dimension, the MPS compiler runs them as one
     row kernel (a chain of normalization diamonds,
-    ``compiler/mps/diamonds.rs``)."""
+    ``graph_compiler/mps/diamonds.rs``)."""
     x = _require_float(_lift(input), "softmax")
     e = exp(x - amax(x, dim, keepdim=True))
     return e / sum(e, dim, keepdim=True)

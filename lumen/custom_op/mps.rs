@@ -7,6 +7,7 @@ pub enum Grid {
 }
 
 pub struct MetalKernel {
+    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
     key: String,
     name: String,
 }

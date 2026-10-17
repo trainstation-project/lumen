@@ -1,11 +1,13 @@
 use super::codegen::metal_type;
 use super::merge_dots::merge_dots;
 use super::{codegen, fusion};
-use crate::compiler::CompilerConfig;
 use crate::graph::Primitive::*;
-use crate::graph::tests::mps::{available, check, check_within, exact_values, values};
-use crate::graph::tests::{data, mlp};
 use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::plan_tests::mps::{
+    available, check, check_within, exact_values, values,
+};
+use crate::graph_compiler::plan_tests::{data, mlp};
 use crate::ops::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
@@ -297,11 +299,11 @@ fn mps_plans_hold_kernel_scratch() {
         &[x],
     );
     g.set_outputs(&[s]).unwrap();
-    let plan = crate::compiler::compile(&g, crate::Device::Mps).unwrap();
+    let plan = crate::graph_compiler::compile(&g, crate::Device::Mps(0)).unwrap();
     let (_, bytes) = plan.steps()[0].scratch.expect("partials in the workspace");
     assert!(bytes > 0 && plan.workspace_bytes() >= bytes, "{plan}");
-    let input = values(DType::F16, &[4, 50_000], 1).to(crate::Device::Mps);
-    let generic = crate::graph::Plan::compile(&g).run(std::slice::from_ref(&input));
+    let input = values(DType::F16, &[4, 50_000], 1).to(crate::Device::Mps(0));
+    let generic = crate::graph_compiler::Plan::compile(&g).run(std::slice::from_ref(&input));
     assert!(generic.unwrap_err().contains("compile the graph for MPS"));
 }
 
@@ -870,30 +872,30 @@ fn owned_plans_read_packed_parameters() {
     let y = apply(&mut g, Mul, &[gate, up]);
     g.set_outputs(&[y]).unwrap();
     let params = vec![false, true, true];
-    let options = crate::compiler::Options {
+    let options = crate::graph_compiler::Options {
         parameters: Some(params.clone()),
         packable: params,
         ..Default::default()
     };
-    let plan = crate::compiler::compile_with(&g, Device::Mps, &options).unwrap();
+    let plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
     assert_eq!(plan.packed, [(vec![1, 2], 1)]);
-    let meta = || Tensor::zeros(&[32, 64], Device::Meta);
+    let meta = || Tensor::zeros(&[32, 64], Device::Meta(0));
     let (m1, m3) = (meta(), meta());
-    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps)
+    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps(0))
         .unwrap()
         .unwrap();
     // Placed again the same way: the same block; alone, not.
-    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps).unwrap();
+    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps(0)).unwrap();
     assert!(again.is_some_and(|b| b.shares_storage_with(&block)));
     assert!(
-        Tensor::pack(&[m3.clone(), m1.clone()], 1, Device::Mps)
+        Tensor::pack(&[m3.clone(), m1.clone()], 1, Device::Mps(0))
             .unwrap()
             .is_none()
     );
     let inputs = [data(&[16, 32], 1), data(&[32, 64], 2), data(&[32, 64], 3)];
     let (p1, p3) = (
-        m1.placed(Device::Mps).unwrap(),
-        m3.placed(Device::Mps).unwrap(),
+        m1.placed(Device::Mps(0)).unwrap(),
+        m3.placed(Device::Mps(0)).unwrap(),
     );
     assert!(p1.shares_storage_with(&block) && !p1.is_contiguous());
     p1.copy_(&inputs[1]).unwrap();
@@ -902,7 +904,7 @@ fn owned_plans_read_packed_parameters() {
         &[plan.workspace_bytes()],
         crate::TensorOptions::new()
             .dtype(DType::U8)
-            .device(Device::Mps),
+            .device(Device::Mps(0)),
     );
     let expected = reference::run(&g, &inputs).unwrap()[0].to_vec::<f32>();
     for _ in 0..2 {
@@ -913,7 +915,10 @@ fn owned_plans_read_packed_parameters() {
             )
             .unwrap();
         assert!(out[0].shares_storage_with(&workspace));
-        for (e, a) in expected.iter().zip(out[0].to(Device::Cpu).to_vec::<f32>()) {
+        for (e, a) in expected
+            .iter()
+            .zip(out[0].to(Device::Cpu(0)).to_vec::<f32>())
+        {
             assert!((e - a).abs() <= 1e-4 * (1.0 + e.abs()), "{e} vs {a}");
         }
     }
@@ -1026,7 +1031,7 @@ fn dots_read_slices_in_place() {
     if !available() {
         return;
     }
-    let plan = crate::compiler::compile(&g, crate::Device::Mps).unwrap();
+    let plan = crate::graph_compiler::compile(&g, crate::Device::Mps(0)).unwrap();
     let names: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(names.iter().filter(|&&n| n == "slice").count(), 1, "{plan}");
     let views: Vec<_> = plan
@@ -1051,12 +1056,12 @@ fn dots_read_slices_in_place() {
         .map(|(i, s)| values(DType::F32, s, i as u64 + 1))
         .collect();
     let expected = reference::run(&g, &inputs).unwrap();
-    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(crate::Device::Mps)).collect();
+    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(crate::Device::Mps(0))).collect();
     for (e, a) in expected.iter().zip(plan.run(&on_mps).unwrap()) {
         for (e, a) in e
             .to_vec::<f32>()
             .iter()
-            .zip(a.to(crate::Device::Cpu).to_vec::<f32>())
+            .zip(a.to(crate::Device::Cpu(0)).to_vec::<f32>())
         {
             assert!((e - a).abs() <= 1e-3 * (1.0 + e.abs()), "{e} vs {a}");
         }

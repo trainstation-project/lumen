@@ -32,8 +32,8 @@
 use std::collections::HashMap;
 
 use super::{codegen, fusion, split_k};
-use crate::compiler::attention;
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
+use crate::graph_compiler::attention;
 
 /// The most fusions in one kernel (XLA's `kMaxFusionBatchSize`).
 const MAX_MEMBERS: usize = 32;

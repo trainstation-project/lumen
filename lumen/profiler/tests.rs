@@ -500,7 +500,7 @@ fn host_kernels_are_apart_from_their_dispatch() {
     let x = g.input(TensorType::new(DType::F32, &[4]));
     let y = g.apply(crate::graph::Primitive::Exp, &[x]).unwrap();
     g.set_outputs(&[y]).unwrap();
-    let plan = crate::graph::Plan::compile(&g);
+    let plan = crate::graph_compiler::Plan::compile(&g);
     let x = Tensor::zeros(&[4], DType::F32);
     let p = profile(cpu(), || {
         plan.run(&[x]).unwrap();

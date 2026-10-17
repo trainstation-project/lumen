@@ -69,7 +69,7 @@ def test_mutated_argument_is_read_after_and_written_back(device):
 
 def _plan(f, *shapes):
     args = [lumen.empty(list(s), device="meta") for s in shapes]
-    return str(lumen.graph.Plan(lumen.make_graph(f)(*args), "cpu"))
+    return str(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "cpu"))
 
 
 def _call_line(plan):
@@ -154,7 +154,7 @@ def test_weight_mutated_in_place(device):
     for _ in range(2):
         f(m, _tensor([1, 2, 3], device))
     graph = lumen.make_graph(step)(m, lumen.empty([3], device="meta"))
-    plan = str(lumen.graph.Plan(graph, device, donate_into=[(1, 1)], parameters=[1]))
+    plan = str(lumen.graph_compiler.Plan(graph, device, donate_into=[(1, 1)], parameters=[1]))
     assert "in1:f32[3] = test::axpy" in plan, plan
     assert m.w._placed(device).storage_id == memory.storage_id
     assert _array(memory).tolist() == [2, 4, 6]
@@ -171,7 +171,8 @@ def test_opaque_to_the_compilers():
         return y * 2.0
 
     labels = [
-        s["label"] for s in lumen.graph.Plan(lumen.make_graph(twice)(lumen.empty([3], device="meta")), "cpu").steps()
+        s["label"]
+        for s in lumen.graph_compiler.Plan(lumen.make_graph(twice)(lumen.empty([3], device="meta")), "cpu").steps()
     ]
     assert labels.count("test::axpy") == 2, labels
     lumen.compile(twice, device="cpu")(lumen.from_numpy(np.zeros(3, np.float32)))
@@ -292,7 +293,8 @@ def test_overlappable_operand_memory_is_the_compilers_choice(device):
     # output's memory (out's, overlapped); undeclared, x needs its own too.
     meta = [lumen.empty([1024], device="meta")]
     workspace = [
-        lumen.graph.Plan(lumen.make_graph(using(op))(*meta), "cpu").workspace_bytes for op in (SQUARE, SQUARE_PLAIN)
+        lumen.graph_compiler.Plan(lumen.make_graph(using(op))(*meta), "cpu").workspace_bytes
+        for op in (SQUARE, SQUARE_PLAIN)
     ]
     assert workspace[1] - workspace[0] == 1024 * 4, workspace
     for op, shared in ((SQUARE, True), (SQUARE_PLAIN, False)):

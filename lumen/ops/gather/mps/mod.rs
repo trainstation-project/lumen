@@ -1,13 +1,5 @@
-//! gather and scatter_add on MPS (`kernels.metal`): a gather a thread an
-//! element of its result; a scatter_add a thread a column of its value,
-//! adding its updates in index order (deterministic), or, of few rows and
-//! updates, a thread an element, scanning the indices in order. A scatter_add whose
-//! value the plan put in its operand's buffer (`graph/plan.rs`: nothing
-//! reads the operand after it) adds the updates there, in place; otherwise
-//! it copies the operand first.
-
 use crate::graph::Primitive;
-use crate::graph::plan::Step;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, launch, u64_arg};
 use crate::{DType, Tensor};
 
@@ -37,8 +29,6 @@ pub(crate) fn encode(
     let (n, m) = (x.shape[axis], indices.numel());
     let inner: usize = x.shape[axis + 1..].iter().product();
     let scatter = matches!(step.primitive, Primitive::ScatterAdd { .. });
-    // A gather's result's elements; a scatter's columns (outer * inner),
-    // or its elements when each scans the indices.
     let scan = scatter && n * m <= SCAN;
     let total = match scatter && !scan {
         true => step.output.1.numel() / n.max(1),
@@ -56,7 +46,6 @@ pub(crate) fn encode(
                     step.label
                 ));
             }
-            // The operand's value, if not already in the output's buffer.
             if output.cast_const() != inputs[0] {
                 let name = step.label;
                 crate::ops::dynamic_slice::mps::copy(inputs[0], output, x, keep.clone(), name)?;
@@ -81,7 +70,6 @@ pub(crate) fn encode(
         u64_arg(inner.max(1)),
         u64_arg(total),
     ];
-    // A scan's threadgroups of 256 (`SCAN_BLOCK`), each element a thread.
     let grid = match scan {
         true => Grid::Groups([total.div_ceil(256), 1, 1]),
         false => Grid::Threads([total.min(ROW), total.div_ceil(ROW), 1]),

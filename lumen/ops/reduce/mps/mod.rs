@@ -1,15 +1,7 @@
-//! reduce_sum and reduce_max on MPS (`kernels.metal`), of the input
-//! normalized: size-1 dimensions dropped, adjacent ones both reduced or both
-//! kept merged ([`normalize`]). Consecutive axes are a
-//! view [a, count, b] reduced over the middle: rows when b = 1, columns
-//! otherwise, split into chunks when there are too few outputs to fill
-//! the GPU. Other axes take a generic kernel, with up to a threadgroup
-//! (fewer threads for outputs of fewer elements) reducing each output.
-
 use crate::graph::Primitive::{self, *};
 use crate::graph::TensorType;
-use crate::graph::plan::Step;
 use crate::graph::primitive::free_dims;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, dims_arg, dims32_arg, element_arg, launch, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
@@ -40,19 +32,9 @@ pub(crate) fn encode(
     )
 }
 
-/// How a reduction of `x` over `axes` runs: the kernel template its (first)
-/// launch instantiates, as [`encode_reduction`] launches it.
 pub(crate) enum Layout {
-    /// Any axes, a thread an output (`reduce`): inputs of 2^32 elements or
-    /// more.
     Generic,
-    /// Any axes, lanes of threads an output (`reduce_grouped`); rows too
-    /// short for a threadgroup each too.
     Grouped,
-    /// Consecutive axes, viewed as [a, count, b]: rows when b = 1
-    /// (`reduce_rows`), columns otherwise (`reduce_cols`); split into
-    /// partials, which a second launch reduces, when there are too few
-    /// outputs to fill the GPU.
     Rows,
     Cols,
 }
@@ -62,9 +44,6 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
     let grouped = x.numel() <= u32::MAX as usize;
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         let Split { count, b, .. } = split(&x, &reduced);
-        // Rows too short for a threadgroup each (fewer elements than its
-        // threads' lanes would take: an attention's head, of 16): several
-        // a threadgroup, as grouped lanes.
         let lanes = count.div_ceil((LANE_BYTES / x.dtype.size_of()).max(1));
         return match b {
             1 if grouped && lanes < REDUCE_THREADS => Layout::Grouped,
@@ -78,12 +57,6 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
     }
 }
 
-/// `x` and the `axes` it is reduced over, normalized as XLA's reduction
-/// passes do (`ReductionDegenerateDimRemover`,
-/// `ReductionDimensionGrouper`): size-1 dimensions dropped, and adjacent
-/// dimensions both reduced or both kept merged, a view of the same
-/// row-major memory. Reduced axes apart only across size-1 dimensions
-/// become one: a row or column reduction.
 fn normalize(x: &TensorType, axes: &[usize]) -> (TensorType, Vec<usize>) {
     let (mut shape, mut reduced) = (Vec::new(), Vec::new());
     let mut last = None;
@@ -103,11 +76,6 @@ fn normalize(x: &TensorType, axes: &[usize]) -> (TensorType, Vec<usize>) {
     (TensorType::new(x.dtype, &shape), reduced)
 }
 
-/// Reduce `x` with `op` (reduce_sum or reduce_max), its first launch the
-/// kernel `fused` if given (a reduction fusion's, computing its input from
-/// `inputs`, and writing its `extra` outputs after `output`), else the
-/// primitive's own (reading `inputs[0]`), recorded in the profiler as
-/// `name`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_reduction(
     step: &Step,
@@ -128,8 +96,6 @@ pub(crate) fn encode_reduction(
         unreachable!("a reduction")
     };
     let (op_name, accum) = (op.name(), accum_dtype(op, x.dtype));
-    // Kernels are named after the input's dtype, then the accumulation's
-    // if another (reduce_sum_rows_bf16_f32).
     let dtype = kernel_dtype(x.dtype, accum);
     let kernel = |own: String| fused.map_or(own, str::to_owned);
     let mut buffers = inputs.to_vec();
@@ -144,9 +110,6 @@ pub(crate) fn encode_reduction(
             scalars, scratch, keep,
         );
     }
-    // Other axes: a power-of-two number of lanes per output, indexing the
-    // reduced dimensions in 32 bits; inputs of 2^32 elements or more take a
-    // thread per output, which sums in the reference's (row-major) order.
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
     let init = match op {
@@ -165,8 +128,6 @@ pub(crate) fn encode_reduction(
         u32_arg(reduced.len() as u32),
     ];
     let (kernel, grid) = if let Layout::Grouped = layout {
-        // About 32 bytes a lane: enough lanes to read the elements
-        // coalesced, few enough that each lane's loads stay in flight.
         let per_lane = (LANE_BYTES / x.dtype.size_of()).max(1);
         let lanes = count
             .div_ceil(per_lane)
@@ -195,19 +156,13 @@ pub(crate) fn encode_reduction(
             Grid::Threads([outputs, 1, 1]),
         )
     };
-    // A fused kernel's by-value inputs come before its own arguments.
     let args: Vec<Vec<u8>> = scalars.iter().cloned().chain(args).collect();
     launch(&kernel, &buffers, &args, grid, keep, name)
 }
 
-/// The threads of a threadgroup that reduce together (`REDUCE_THREADS` in
-/// `kernels.metal`): a [`Grid::Groups`] threadgroup.
 pub(crate) const REDUCE_THREADS: usize = 256;
-
-/// The bytes of input each lane of a grouped reduction takes.
 const LANE_BYTES: usize = 32;
 
-/// The smallest value of `dtype`: the identity of `max`.
 fn lowest(dtype: DType) -> Scalar {
     match dtype {
         d if d.is_float() => Scalar::Float(f64::NEG_INFINITY),
@@ -218,10 +173,6 @@ fn lowest(dtype: DType) -> Scalar {
     }
 }
 
-/// How [`consecutive`] reduces `x` over the consecutive axes `reduced`,
-/// viewed as [a, count, b]: rows when b = 1, columns otherwise, in `chunks`
-/// chunks of `chunk` elements (one: a single launch; more: partials, then
-/// the partials).
 struct Split {
     a: usize,
     count: usize,
@@ -231,15 +182,11 @@ struct Split {
 }
 
 fn split(x: &TensorType, reduced: &[usize]) -> Split {
-    // Reducing nothing (size-1 dimensions alone, normalized away): a
-    // column of one element each, a thread an element, not a row each.
     let first = reduced.first().copied().unwrap_or(0);
     let end = reduced.last().map_or(first, |last| last + 1);
     let a: usize = x.shape[..first].iter().product();
     let count: usize = x.shape[first..end].iter().product();
     let b: usize = x.shape[end..].iter().product();
-    // Chunks per output, so enough run at once: rows take a threadgroup of
-    // 256 threads per chunk, columns a thread.
     let chunks = if b == 1 {
         if a >= 256 {
             1
@@ -262,14 +209,10 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     }
 }
 
-/// Whether a reduction of `x` over `axes` takes two launches: partials,
-/// then those (a split reduction).
 pub(crate) fn splits(x: &TensorType, axes: &[usize]) -> bool {
     scratch_bytes(x, axes, x.dtype) > 0
 }
 
-/// The dtype reduction `op` of elements of `dtype` accumulates in, its
-/// result's: reduce_sum's `accum_dtype`, else `dtype`.
 pub(crate) fn accum_dtype(op: &Primitive, dtype: DType) -> DType {
     match op {
         ReduceSum { accum_dtype, .. } => *accum_dtype,
@@ -277,8 +220,6 @@ pub(crate) fn accum_dtype(op: &Primitive, dtype: DType) -> DType {
     }
 }
 
-/// The dtype part of a reduction kernel's name: `x`'s, then the
-/// accumulation's if another (`bf16_f32`).
 pub(crate) fn kernel_dtype(x: DType, accum: DType) -> String {
     match x == accum {
         true => x.to_string(),
@@ -286,8 +227,6 @@ pub(crate) fn kernel_dtype(x: DType, accum: DType) -> String {
     }
 }
 
-/// The scratch a reduction of `x` over `axes`, accumulating in `accum`,
-/// needs: a split reduction's partials, of `accum` (none for the others).
 pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usize {
     let (x, reduced) = normalize(x, axes);
     if !reduced.windows(2).all(|w| w[1] == w[0] + 1) {
@@ -300,15 +239,6 @@ pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usi
     a * chunks * b * accum.size_of()
 }
 
-/// Reduce `x` over the consecutive axes `reduced`, viewed as [a, count, b]:
-/// rows when b = 1, columns otherwise. One launch, or, with too few outputs
-/// to fill the GPU, two: `count` split into chunks reduced in parallel into
-/// partials (in `scratch`, which the planner set aside), then the partials.
-/// The first launch is the kernel `fused` if given (reading `inputs`, and
-/// writing its `extra` outputs), else `op`'s own (reading `inputs[0]`); a
-/// split reduction's second, `last` if given, else `op`'s own. A split
-/// reduction's two launches are profiled as `launches`: the primitives
-/// each computes.
 #[allow(clippy::too_many_arguments)]
 fn consecutive(
     step: &Step,
@@ -352,7 +282,6 @@ fn consecutive(
         let mut buffers = srcs.to_vec();
         buffers.push(dst);
         buffers.extend(extra);
-        // A fused kernel's by-value inputs come before its own arguments.
         let args =
             |own: &[Vec<u8>]| -> Vec<Vec<u8>> { scalars.iter().chain(own).cloned().collect() };
         if rows {
@@ -388,10 +317,6 @@ fn consecutive(
             "{name}: a split reduction needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))"
         ));
     }
-    // The first launch writes every partial before the second reads them.
-    // Each is profiled as what it computes (`launches`), reading and
-    // writing its own types: the step's inputs to partials, then those to
-    // its output.
     let p = scratch.cast_const();
     let partials = TensorType::new(accum, &[a, chunks, b]);
     crate::profiler::next_launch(launches.0, || {
@@ -415,8 +340,6 @@ fn consecutive(
         keep.clone(),
         name,
     )?;
-    // The partials, of the accumulation dtype, reduced in it: by `last` if
-    // given (a fusion's, which applies its epilogue).
     let kernel = last.map_or_else(|| format!("{op}_{layout}_{accum}"), str::to_owned);
     crate::profiler::next_launch(launches.1, || {
         (vec![partials.clone()], vec![step.output.1.clone()])

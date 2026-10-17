@@ -6,7 +6,7 @@
 //!
 //! [`Plan`]: super::Plan
 
-use super::{Graph, Primitive, Var};
+use crate::graph::{Graph, Primitive, Var};
 
 /// Which node defines each value, and the nodes each value is read by
 /// (each once). A custom op is also read by the next one, so that they

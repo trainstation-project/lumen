@@ -1,21 +1,23 @@
+//! Metal kernels generated from fused graphs, and Core ML programs for
+//! the Neural Engine ([`ane`]).
+
+pub(crate) mod ane;
+
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::{formatdoc, writedoc};
 
-use super::fusion;
-use crate::compiler::CompilerConfig;
-use crate::compiler::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::attention::{Access, Attention, Backward, Dropout, Score};
+use crate::graph_compiler::mps::fusion;
 use crate::ops::mps::element_arg;
 use crate::ops::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
-/// The fusion kernel for `body`: its name and Metal source. The name is a
-/// hash of the source, so identical fusions share one kernel. The inputs
-/// `by_value` marks (runtime scalars; none if empty) it takes by value.
 pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -> (String, String) {
     if let Some(dot) = gemm_dot(body) {
         return gemm_kernel(body, by_value, dot);
@@ -34,7 +36,6 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
     // A multi-output fusion's other outputs, of the output's shape: each
-    // written at the same index.
     let extra: Vec<String> = body.outputs()[1..]
         .iter()
         .map(|&v| emitter.value(v, "j".into()))
@@ -1626,7 +1627,7 @@ fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
 }
 
 /// The Metal type of `dtype`'s elements.
-pub(super) fn metal_type(dtype: DType) -> &'static str {
+pub(crate) fn metal_type(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool => "bool",
         DType::U8 => "uchar",

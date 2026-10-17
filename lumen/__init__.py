@@ -1,4 +1,4 @@
-from lumen import autograd, custom_op, functional, graph, nn, ops, profiler, random, safetensors
+from lumen import autograd, custom_op, functional, graph, graph_compiler, nn, ops, profiler, random, safetensors
 from lumen._C import __version__, cpu, cuda, meta, mps
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
@@ -44,6 +44,7 @@ __all__ = [
     "device",
     "Stream",
     "graph",
+    "graph_compiler",
     "meta",
     "mps",
     "nn",

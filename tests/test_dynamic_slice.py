@@ -1,7 +1,7 @@
 """Dynamic slices (``lax.dynamic_slice``, ``lax.dynamic_update_slice``):
 blocks at start indices read when the program runs, clamped so the block is
 inside, their gradients, and a dynamic_update_slice written in place
-(``graph/plan.rs``): into its operand's memory where nothing reads the
+(``graph_compiler/plan.rs``): into its operand's memory where nothing reads the
 operand after it, a donated input's or a weight assigned with ``copy_``
 too (a KV cache), copying only where something does."""
 
@@ -106,7 +106,7 @@ def test_dynamic_slice_gradients(device):
 
 def _plan(f, *shapes, **options):
     args = [lumen.empty(s, dtype=d, device="meta") for s, d in shapes]
-    return str(lumen.graph.Plan(lumen.make_graph(f)(*args), "cpu", **options))
+    return str(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "cpu", **options))
 
 
 def _in_place(plan):
@@ -179,7 +179,7 @@ def test_kv_cache_is_written_in_place(device):
     meta = (lumen.empty([1, 1, 4], device="meta"), lumen.empty([1], dtype="int32", device="meta"))
     f(cache, *meta)
     graph = lumen.make_graph(step)(cache, *meta)
-    plan = str(lumen.graph.Plan(graph, device, donate=[2], parameters=[2]))
+    plan = str(lumen.graph_compiler.Plan(graph, device, donate=[2], parameters=[2]))
     assert "in2:f32[1,64,4] = dynamic_update_slice in2 " in plan, plan
     memory = cache.k._placed(device)
     for t in range(5):

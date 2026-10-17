@@ -12,10 +12,9 @@
 
 pub(crate) mod ane;
 mod bounds;
-mod codegen;
 mod diamonds;
 mod dot_strength;
-mod fusion;
+pub(crate) mod fusion;
 mod gated_backward;
 mod horizontal;
 mod linear_cross_entropy;
@@ -30,9 +29,11 @@ use std::sync::{Mutex, PoisonError};
 
 use self::merge_dots::merge_dots;
 use super::Options;
-use crate::compiler::attention;
-use crate::graph::plan::{Buffer, Step};
-use crate::graph::{Graph, Node, Plan, PlanOptions, Primitive, Var};
+use crate::codegen::mps as codegen;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::attention;
+use crate::graph_compiler::plan::{Buffer, Step};
+use crate::graph_compiler::{Plan, PlanOptions};
 use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,

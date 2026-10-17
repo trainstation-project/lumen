@@ -1,19 +1,17 @@
 //! `lumen._C.Graph`: bindings for [`crate::graph::Graph`], which the tracer
 //! in `lumen/graph/tracer.py` builds as the traced function runs.
 
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::graph::plan::Buffer;
-use crate::graph::{Graph, Plan, Primitive, TensorType, Var};
-use crate::python::resolve_device;
+use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 
 #[pyclass(name = "Graph", module = "lumen")]
 #[derive(Default)]
-struct PyGraph {
-    inner: Graph,
+pub(crate) struct PyGraph {
+    pub(crate) inner: Graph,
 }
 
 /// The primitive named `name` (its `lax` name) with parameters `params`.
@@ -221,7 +219,7 @@ impl PyGraph {
     /// None, and its `members`: the values it computes from the operands
     /// to the output.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        use crate::compiler::attention::{Score, traced};
+        use crate::graph_compiler::attention::{Score, traced};
         let nodes = self.inner.nodes();
         traced(&self.inner)
             .into_iter()
@@ -313,174 +311,11 @@ impl PyGraph {
     }
 }
 
-/// `lumen._C.Plan`: a graph compiled for execution ([`Plan`]), by the
-/// graph compiler of a device ([`crate::compiler`]).
-#[pyclass(name = "Plan", module = "lumen", frozen)]
-struct PyPlan {
-    inner: Plan,
-}
-
-#[pymethods]
-impl PyPlan {
-    /// `graph` compiled for `device` (default: generic, run on the inputs'
-    /// device): fused where the device fuses, unless `fuse` is false; with
-    /// outputs written into the inputs at positions `donate` where they fit.
-    /// With `parameters` (input positions), an executable that owns its
-    /// memory (`run_in`), those inputs its parameters, and those of them in
-    /// `packable` (not yet placed) packed into blocks where dots merge
-    /// (`packed`).
-    #[new]
-    #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new(), donate_into = Vec::new()))]
-    #[allow(clippy::too_many_arguments)] // Python's keyword arguments
-    fn new(
-        graph: PyRef<'_, PyGraph>,
-        device: Option<&Bound<'_, PyAny>>,
-        fuse: Option<bool>,
-        donate: Vec<usize>,
-        parameters: Option<Vec<usize>>,
-        packable: Vec<usize>,
-        scalars: Vec<usize>,
-        donate_into: Vec<(usize, usize)>,
-    ) -> PyResult<Self> {
-        let n = graph.inner.inputs().len();
-        let all = donate
-            .iter()
-            .chain(donate_into.iter().map(|(i, _)| i))
-            .chain(parameters.iter().flatten())
-            .chain(&packable)
-            .chain(&scalars);
-        if let Some(&i) = all.into_iter().find(|&&i| i >= n) {
-            return Err(PyValueError::new_err(format!(
-                "the graph has {n} inputs, got input {i}"
-            )));
-        }
-        let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
-        // The compiler's flags (`lumen.config.compiler`), `fuse` overriding
-        // its own.
-        let mut config = crate::compiler::config::config();
-        config.fuse = fuse.unwrap_or(config.fuse);
-        let options = crate::compiler::Options {
-            config,
-            donate,
-            donate_into,
-            parameters: parameters.as_deref().map(mask),
-            packable: mask(&packable),
-            scalars: mask(&scalars),
-        };
-        let inner = crate::compiler::compile_with(&graph.inner, resolve_device(device)?, &options)
-            .map_err(PyRuntimeError::new_err)?;
-        Ok(PyPlan { inner })
-    }
-
-    /// The inputs the compiler added after the graph's: each the block of
-    /// parameters (input positions) side by side along a dimension, as
-    /// `(positions, dimension)`.
-    #[getter]
-    fn packed(&self) -> Vec<(Vec<usize>, usize)> {
-        self.inner.packed().to_vec()
-    }
-
-    /// Run an executable that owns its memory in `workspace` (uint8, at
-    /// least `workspace_bytes`): the inputs that are not parameters copied
-    /// in, the parameters read in place; the outputs are views valid until
-    /// the next run in it.
-    fn run_in(
-        &self,
-        workspace: PyRef<'_, PyTensor>,
-        inputs: Vec<PyRef<'_, PyTensor>>,
-    ) -> PyResult<Vec<PyTensor>> {
-        let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
-        let outputs = self
-            .inner
-            .run_in(&workspace.inner, &inputs)
-            .map_err(PyValueError::new_err)?;
-        Ok(outputs.into_iter().map(PyTensor::wrap).collect())
-    }
-
-    /// Whether it runs steps on the Apple Neural Engine (Core ML programs,
-    /// `lumen.config.compiler.neural_engine`), their fixed weights baked in.
-    #[getter]
-    fn neural_engine(&self) -> bool {
-        self.inner.steps().iter().any(|s| {
-            matches!(&s.primitive, Primitive::Fusion { name, .. } if name.starts_with(crate::graph::NEURAL_ENGINE))
-        })
-    }
-
-    /// Compile its Neural Engine steps' programs again on their next run,
-    /// from their weights' values then: the weights were written.
-    fn _invalidate_neural_engine(&self) {
-        #[cfg(lumen_mps_linked)]
-        crate::compiler::mps::ane::invalidate(self.inner.steps());
-    }
-
-    #[getter]
-    fn workspace_bytes(&self) -> usize {
-        self.inner.workspace_bytes()
-    }
-
-    /// The steps in order, as dicts: as [`PyGraph::nodes`], with `inputs`
-    /// and `output` as `(buffer, dtype, shape)`, buffers named as the plan
-    /// prints them (`in0`, `out0`, `ws+1024`), and `sources`: the lines of
-    /// the traced program that computed what it does (a fusion's members'),
-    /// each a `(file, line)`.
-    fn steps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let typed = |(buffer, ty): &(Buffer, TensorType)| {
-            (buffer.to_string(), dtype_name(ty.dtype), ty.shape.clone())
-        };
-        self.inner
-            .steps()
-            .iter()
-            .map(|step| {
-                let d = primitive_dict(py, &step.primitive)?;
-                d.set_item("inputs", step.inputs.iter().map(typed).collect::<Vec<_>>())?;
-                d.set_item("output", typed(&step.output))?;
-                let extra: Vec<_> = step.extra_outputs.iter().map(typed).collect();
-                d.set_item("extra_outputs", extra)?;
-                d.set_item("label", step.label)?;
-                let views = step
-                    .views
-                    .iter()
-                    .map(|v| v.as_ref().map(|v| (v.offset, v.strides.clone())));
-                d.set_item("views", views.collect::<Vec<_>>())?;
-                d.set_item("scratch", step.scratch)?;
-                d.set_item("scope", scope_names(step.scope))?;
-                d.set_item("sources", step.sources.clone())?;
-                Ok(d)
-            })
-            .collect()
-    }
-
-    /// Run on `inputs`; on `device` (where the inputs must be), or else the
-    /// inputs' device (the CPU without inputs).
-    #[pyo3(signature = (inputs, device = None))]
-    fn run(
-        &self,
-        inputs: Vec<PyRef<'_, PyTensor>>,
-        device: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Vec<PyTensor>> {
-        let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
-        let outputs = match device {
-            Some(d) if !d.is_none() => self.inner.run_on(&inputs, resolve_device(Some(d))?),
-            _ => self.inner.run(&inputs),
-        }
-        .map_err(PyValueError::new_err)?;
-        Ok(outputs.into_iter().map(PyTensor::wrap).collect())
-    }
-
-    fn __str__(&self) -> String {
-        self.inner.to_string()
-    }
-
-    fn __repr__(&self) -> String {
-        self.inner.to_string()
-    }
-}
-
 /// `p` as a dict: `primitive`, its name; `text`, it with its parameters;
 /// and `fusion`, for a fusion, a dict of its `kernel` name, its `body`
 /// graph's text and the Metal `source` the kernel was compiled from (None
 /// off macOS), else None.
-fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
     match p {
@@ -490,7 +325,7 @@ fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, Py
             fusion.set_item("kernel", name)?;
             fusion.set_item("body", body.to_string())?;
             #[cfg(lumen_mps_linked)]
-            fusion.set_item("source", crate::compiler::mps::fusion_source(name))?;
+            fusion.set_item("source", crate::graph_compiler::mps::fusion_source(name))?;
             #[cfg(not(lumen_mps_linked))]
             fusion.set_item("source", py.None())?;
             d.set_item("fusion", fusion)?;
@@ -503,7 +338,7 @@ fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, Py
     Ok(d)
 }
 
-/// Custom op functions (`lumen.ops.custom_op`), by handle: never removed,
+/// Custom op functions (`lumen.custom_op`), by handle: never removed,
 /// so a handle a traced graph holds stays valid.
 static CUSTOM_OPS: std::sync::RwLock<Vec<Py<PyAny>>> = std::sync::RwLock::new(Vec::new());
 
@@ -539,11 +374,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::graph::custom::set_hook(call_custom_op);
     m.add_function(wrap_pyfunction!(_register_custom_op, m)?)?;
     m.add_class::<PyGraph>()?;
-    m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)?;
-    m.add_class::<PyPlan>()
+    m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)
 }
 
 /// A scope's range names, outermost first.
-fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
+pub(crate) fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
     scope.iter().map(|r| r.name).collect()
 }

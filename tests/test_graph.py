@@ -302,7 +302,7 @@ def test_mps_kernels_match_cpu(dtype):
 
 def test_plan():
     graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
-    plan = lumen.graph.Plan(graph)
+    plan = lumen.graph_compiler.Plan(graph)
     # exp writes the output's memory, add and tanh write over it in place
     # (each operand dies there); the workspace holds the broadcast 1 (1 KiB)
     # and the 0-d constant; the reshape costs nothing.
@@ -322,7 +322,7 @@ def test_graph_and_plan_describe_themselves():
     assert [n["primitive"] for n in nodes] == ["full", "broadcast_in_dim", "mul", "exp", "reduce_sum"]
     assert nodes[-1]["text"] == "reduce_sum[axes=(1,) accum_dtype=f32]" and nodes[-1]["fusion"] is None
     assert graph.inputs() == [0] and graph.outputs() == [nodes[-1]["output"]]
-    steps = lumen.graph.Plan(graph).steps()
+    steps = lumen.graph_compiler.Plan(graph).steps()
     assert steps[-1]["output"] == ("out0", "float32", [2])
     assert steps[2]["inputs"][0] == ("in0", "float32", [2, 3])
 
@@ -337,7 +337,7 @@ def test_mps_plan_steps_and_profiled_kernels():
 
     # Rows long enough for a threadgroup each.
     graph = lumen.make_graph(lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1))(x)
-    plan = lumen.graph.Plan(graph, "mps")
+    plan = lumen.graph_compiler.Plan(graph, "mps")
     # One step: the reduction fused with the ops computing its input.
     (step,) = plan.steps()
     fusion = step["fusion"]
@@ -365,7 +365,7 @@ def test_short_rows_reduce_several_a_threadgroup(n):
     except RuntimeError as e:
         pytest.skip(str(e))
     f = lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1)  # noqa: E731
-    (step,) = lumen.graph.Plan(lumen.make_graph(f)(X), "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X), "mps").steps()
     assert "reduce_grouped" in step["fusion"]["source"]
     got = [lumen.to_numpy(lumen.compile(f)(X)) for _ in range(2)]
     np.testing.assert_array_equal(got[0], got[1])
@@ -573,11 +573,11 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     # A contraction out of matmul form: a transpose step, then the matmul.
     dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype, a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
-    steps = [s["primitive"] for s in lumen.graph.Plan(graph, "mps", fuse=False).steps()]
+    steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
     # A split reduction's partials are scratch in the workspace.
     graph = lumen.make_graph(lambda x: F.sum(x, -1))(lumen.zeros([4, 50_000]))
-    plan = lumen.graph.Plan(graph, "mps")
+    plan = lumen.graph_compiler.Plan(graph, "mps")
     offset, size = plan.steps()[0]["scratch"]
     assert size > 0 and plan.workspace_bytes >= offset + size
     x = lumen.ones([4, 50_000], device="mps")
@@ -643,7 +643,7 @@ def test_packed_weights_are_one_matmul(device):
     h = x @ w13
     np.testing.assert_allclose(out, np.maximum(h[:, :64], 0) * h[:, 64:], rtol=1e-5, atol=1e-5)
     graph = lumen.make_graph(gated)(*args)
-    steps = [s["primitive"] for s in lumen.graph.Plan(graph, device).steps()]
+    steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, device).steps()]
     if device == "mps":
         assert steps == ["dot_general → max → mul"], steps
     else:
@@ -688,7 +688,7 @@ def test_dots_sharing_an_operand_merge(device):
     out = lumen.to_numpy(f(model, lumen.from_numpy(x)))
     np.testing.assert_allclose(out, np.maximum(x @ w1v, 0) * (x @ w3v), rtol=1e-5, atol=1e-5)
     graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
-    plan = lumen.graph.Plan(graph, device, parameters=[1, 2], packable=[1, 2])
+    plan = lumen.graph_compiler.Plan(graph, device, parameters=[1, 2], packable=[1, 2])
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
@@ -740,14 +740,14 @@ def test_attention_projections_merge_into_one_matmul():
     graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
     # The attention one kernel (flash attention) reading q, k and v where
     # the merged matmul writes them.
-    plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     merged, attention = plan.steps()
     assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
     assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
     # As traced: its matmuls read q, k and v as strided views.
     lumen.config.compiler.flash_attention = False
     try:
-        plan = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     finally:
         lumen.config.compiler.reset()
     steps = plan.steps()
@@ -790,7 +790,7 @@ def test_trained_attention_reads_merged_projections_in_place():
     model = Heads(meta(64, 64), meta(64, 64), meta(64, 64))
     grad = lumen.grad(lambda model, x: F.sum(model(x) * model(x)), (0, 1))
     graph = lumen.make_graph(grad)(model, meta(64, 64))
-    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3]).steps()
+    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3]).steps()
     labels = [s["label"] for s in steps]
     merged = steps[labels.index("3x dot_general")]["output"][0]
     attention = [s for s in steps if s["label"].startswith("flash_attention")]
@@ -904,7 +904,7 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
             out[device] = [lumen.to_numpy(v) for v in (result if gate else [result])]
             if device == "mps":
                 graph = lumen.make_graph(f)(model, meta(m, d))
-                steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
+                steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
                 dots = [s["label"] for s in steps if "dot_general" in s["label"]]
                 if gate:
                     assert len(dots) == 2, dots
@@ -985,7 +985,7 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step)(model, meta(m, d))
-    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     # The forward: the pair's epilogue (writing h [m, h], and the halves the
     # backward reads, no kernel of its own slicing them); the weights'
@@ -1074,7 +1074,7 @@ def test_hand_written_gated_backward_merges_as_autodiffs():
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step(_GatedMLPFunction.apply))(model, meta(m, d))
-    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
@@ -1149,7 +1149,7 @@ def test_values_saved_narrower_are_written_narrower():
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step)(model, meta(m, d))
-    steps = lumen.graph.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     (forward,) = [s for s in steps if s["label"].startswith("2x dot_general") and "logistic" in s["label"]]
     assert [o[1:] for o in forward["extra_outputs"]] == [("bfloat16", [m, h])] * 2, forward["label"]
 
@@ -1172,7 +1172,7 @@ def test_projections_of_several_inputs_each_read_one_block(module):
 
     model = module(meta(64, 64), meta(64, 64), meta(64, 64))
     graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
-    steps = lumen.graph.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     assert labels.count("3x dot_general") == 2, labels
     blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
@@ -1297,7 +1297,7 @@ def test_softmax_traces_to_its_primitives(device):
         lumen.to_numpy(lumen.compile(scaled)(t)), e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7
     )
     if device == "mps":
-        (step,) = lumen.graph.Plan(graph, "mps").steps()
+        (step,) = lumen.graph_compiler.Plan(graph, "mps").steps()
         assert step["fusion"] is not None and step["label"].startswith("mul")
     e0 = np.exp(x - x.max(0, keepdims=True))
     np.testing.assert_allclose(
@@ -1343,7 +1343,7 @@ def test_rms_norm(device):
     )
     if device == "mps":
         steps = lambda f: [
-            s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+            s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
         ]  # noqa: E731
         # One kernel each: a fusion with its reduction inside (a row kernel).
         for g in (f, by_hand):
@@ -1375,14 +1375,14 @@ def test_sqrt(device):
     ]:
         np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(t)), expected, rtol=1e-6)
     if device == "mps":
-        (step,) = lumen.graph.Plan(lumen.make_graph(lambda a: 1.0 / F.sqrt(a))(t), "mps").steps()
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(lambda a: 1.0 / F.sqrt(a))(t), "mps").steps()
         source = step["fusion"]["source"]
         assert step["label"].endswith("div") and "rsqrt(" not in source
         assert "Sqrt::apply" in source and "Div::apply" in source
         # A division by the sqrt of a row's sum (a diamond: one row kernel)
         # stays a sqrt, once a row, and a division.
         f = lambda a: a / F.sqrt(F.sum(a, -1, keepdim=True))  # noqa: E731
-        (step,) = lumen.graph.Plan(lumen.make_graph(f)(t), "mps").steps()
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(t), "mps").steps()
         source = step["fusion"]["source"]
         assert "Sqrt::apply" in source and "Div::apply" in source and "rsqrt(" not in source
 
@@ -1422,7 +1422,7 @@ def test_float_fields_are_runtime_scalars(device):
     # One plan, compiled once: each run reads eps from the host, a kernel
     # argument on MPS (no copy to the device, no new plan).
     graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
-    plan = lumen.graph.Plan(graph, device, parameters=[2], scalars=[1])
+    plan = lumen.graph_compiler.Plan(graph, device, parameters=[2], scalars=[1])
     workspace = lumen.Tensor.empty([plan.workspace_bytes], "uint8", device)
     inputs = [lumen.from_numpy(x).to(device), None, lumen.from_numpy(w).to(device)]
     for eps in (1e-6, 0.1, 1.0):
@@ -1516,7 +1516,7 @@ def test_upcast_rms_norm_is_one_kernel(n):
     graph = lumen.make_graph(lambda m, a: m(a))(
         UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
     )
-    (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
+    (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     source = step["fusion"]["source"]
     assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
     cached = n <= 8 * 256
@@ -1547,7 +1547,7 @@ def test_split_reduction_converts_its_input_once():
         pytest.skip(str(e))
     f = lumen.compile(lambda a: F.sum(a.float(), -1))
     graph = lumen.make_graph(lambda a: F.sum(a.float(), -1))(x)
-    (step,) = lumen.graph.Plan(graph, "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(graph, "mps").steps()
     assert step["label"] == "cast(bfloat16 -> float32) → reduce_sum" and step["scratch"] is not None
     source = step["fusion"]["source"]
     assert source.count("convert_value<float>") == 1, source
@@ -1592,7 +1592,7 @@ def test_normalizations_are_one_row_kernel(f):
         X, W = lumen.from_numpy(x).to("mps"), lumen.from_numpy(w).to("mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    (step,) = lumen.graph.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
     assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
     assert step["extra_outputs"] == [], step["extra_outputs"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
@@ -1623,7 +1623,7 @@ def test_normalizations_train_in_one_row_kernel(f):
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
-    labels = [s["label"] for s in lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
     if "sqrt" in str(labels):
         assert sum("sqrt" in label for label in labels) == 1, labels
     got = lumen.compile(grad)(X, W, C)
@@ -1657,11 +1657,11 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
         X, T, C = (lumen.from_numpy(a).to("mps") for a in (x, t, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    (forward,) = lumen.graph.Plan(lumen.make_graph(F.cross_entropy)(X, T), "mps").steps()
+    (forward,) = lumen.graph_compiler.Plan(lumen.make_graph(F.cross_entropy)(X, T), "mps").steps()
     assert forward["output"][2] == [n] and "reduce_max" in forward["label"], forward["label"]
     source = forward["fusion"]["source"]
     assert source.count("for (uint c") + source.count("for (uint e = 0") == 1, source
-    steps = lumen.graph.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
     assert [s["output"][2] for s in steps] == [[n, vocab]], [s["label"] for s in steps]
     assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]], steps[0]["label"]
     m = x.max(-1, keepdims=True).astype(np.float64)
@@ -1698,7 +1698,7 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
         X, T = (lumen.from_numpy(a).to("mps") for a in (x, t))
     except RuntimeError as e:
         pytest.skip(str(e))
-    steps = lumen.graph.Plan(lumen.make_graph(step)(X, T), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T), "mps").steps()
     labels = [s["label"] for s in steps]
     if rows_read == "its own":
         assert [s["output"][2] for s in steps] == [[n, vocab]], labels
@@ -1751,7 +1751,7 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype):
         pytest.skip(str(e))
     H, W = H.to(dtype=dtype), W.to(dtype=dtype)
     if device == "mps":
-        steps = lumen.graph.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
         assert steps[0]["label"] == "linear_cross_entropy" and steps[0]["output"][2] == [2, n], steps
     hr, wr = (lumen.to_numpy(v.to(dtype="float32")).astype(np.float64) for v in (H, W))
     x = hr @ wr.T
@@ -1791,10 +1791,10 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
     except RuntimeError as e:
         pytest.skip(str(e))
     H = H.to(dtype="bfloat16")
-    steps = lumen.graph.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
     assert "linear_cross_entropy" in [s["label"] for s in steps], [s["label"] for s in steps]
     assert all(s["output"][2] != [n, vocab] for s in steps), [s["label"] for s in steps]
-    steps = lumen.graph.Plan(lumen.make_graph(both)(H, W, T), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(both)(H, W, T), "mps").steps()
     assert "linear_cross_entropy" not in [s["label"] for s in steps], [s["label"] for s in steps]
     hr = lumen.to_numpy(H.to(dtype="float32")).astype(np.float64)
     wr = lumen.to_numpy(W.to(dtype="bfloat16").to(dtype="float32")).astype(np.float64)
@@ -1847,7 +1847,7 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     step = trained(unfused)
     lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
     try:
-        plan = lumen.graph.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
+        plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
         got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
     finally:
         lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
@@ -1855,7 +1855,7 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     labels = [s["label"] for s in plan.steps()]
     assert "linear_cross_entropy" in labels, labels
     assert sum("dot_general" in label for label in labels) == 3 * chunks, labels
-    baseline = lumen.graph.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
+    baseline = lumen.graph_compiler.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
     if vocab > d:
         assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)
     want = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(trained(unfused))(H, W, T, C)]
@@ -1882,7 +1882,7 @@ def test_rms_norm_backward_recomputes_its_normalized_input():
         X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    steps = lumen.graph.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
     (forward,) = [s for s in steps if "sqrt" in s["label"]]
     assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
     got = lumen.compile(step)(X, W, C)
@@ -1913,7 +1913,7 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
     if kernels is not None:
         assert len(steps) == kernels, [s["label"] for s in steps]
     got = lumen.compile(grad)(X, W, C)
@@ -1944,7 +1944,7 @@ def test_short_rows_are_a_simd_group_each(f, n):
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
     rows = [s for s in steps if s["fusion"] and "simd_sum" in s["fusion"]["source"]]
     assert rows, [s["label"] for s in steps]
     got = [[lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)] for _ in range(2)]
@@ -1975,7 +1975,7 @@ def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
     backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
     assert len(backward) == 1, [s["label"] for s in steps]
     assert len(backward[0]["extra_outputs"]) == sums
@@ -2049,12 +2049,12 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
         args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes]
     except RuntimeError as e:
         pytest.skip(str(e))
-    (step,) = lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
     lumen.config.compiler.contraction_epilogues = False
     try:
-        assert len(lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
+        assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
     finally:
         lumen.config.compiler.reset()
@@ -2112,7 +2112,9 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     an output, the cast is the epilogue's (no kernel of its own)."""
     m = lambda *s, d="bfloat16": lumen.empty(list(s), dtype=d, device="meta")  # noqa: E731
     args = (m(64, 96), m(96, 80), m(64, 80, d="float32"))
-    labels = lambda f: [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]  # noqa: E731
+    labels = lambda f: [
+        s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
+    ]  # noqa: E731
     # The rounding then widening is what the precision check warns of.
     with pytest.warns(UserWarning, match="casts it back"):
         assert labels(lambda x, w, r: (x @ w).float() + r) == [
@@ -2157,14 +2159,14 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     both = lambda x, w: (rounded(x, w), F.matmul(x, w, "float32", "float32"))  # noqa: E731
 
     def dots(f, *args):
-        return [s["text"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]
+        return [s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
     lumen.config.compiler.contraction_epilogues = False
     try:
         (dot,) = dots(rounded, x, w)
         assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
         # Its lines: the matmul's and the cast's.
-        (step,) = lumen.graph.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
         code = [open(f).read().splitlines()[line - 1].strip() for f, line in step["sources"]]
         assert sorted(code) == ["return y.bfloat16()", 'y = F.matmul(x, w, "float32", "float32")'], code
         assert [t.split("[")[0] for t in dots(both, x, w)] == ["dot_general", "cast"]
@@ -2224,7 +2226,7 @@ def test_matmul_epilogue_takes_runtime_scalars_by_value():
         out = lumen.to_numpy(f(_ScaledMatmul(weight, s), lumen.from_numpy(x)))
         np.testing.assert_allclose(out, (x @ w) * s, rtol=1e-5, atol=1e-5)
     graph = lumen.make_graph(lambda m, a: m(a))(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
-    (step,) = lumen.graph.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
+    (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     assert ("s1", "float32", []) in step["inputs"] and "constant float &in" in step["fusion"]["source"]
 
 
@@ -2427,7 +2429,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads():
             model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
             loss, grads = f(model, lumen.from_numpy(x).to("mps"))
             results.append([lumen.to_numpy(t) for t in (loss, *grads)])
-            plan = lumen.graph.Plan(lumen.make_graph(step)(model, lumen.from_numpy(x)), "mps")
+            plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(model, lumen.from_numpy(x)), "mps")
             labels = [s["label"] for s in plan.steps()]
             if epilogues:
                 assert "dot_general → max" in labels, labels
@@ -2445,7 +2447,7 @@ def test_concatenate_runs_unfused():
     except RuntimeError as e:
         pytest.skip(str(e))
     graph = lumen.make_graph(lambda a: prims.concatenate([a, a * 2.0], 1))(a)
-    plan = lumen.graph.Plan(graph, "mps", fuse=False)
+    plan = lumen.graph_compiler.Plan(graph, "mps", fuse=False)
     (out,) = plan.run([a])
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
 

@@ -1,4 +1,4 @@
-"""Horizontal loop fusion on MPS (``lumen/compiler/mps/horizontal.rs``):
+"""Horizontal loop fusion on MPS (``lumen/graph_compiler/mps/horizontal.rs``):
 independent small loop fusions of as many elements, one kernel."""
 
 import re
@@ -31,7 +31,7 @@ def _device(*arrays):
 
 
 def _steps(f, *args):
-    return lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()
+    return lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
 
 
 def _merged(label):

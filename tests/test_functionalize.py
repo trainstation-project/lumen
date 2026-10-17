@@ -253,7 +253,7 @@ def test_weight_assigned_in_place(device):
     memory = m.w._placed(device)
     step(m)
     graph = lumen.make_graph(lambda m: (m.w.copy_(m.w * 2.0), m.w * 1.0)[1])(m)
-    plan = str(lumen.graph.Plan(graph, device, donate_into=[(0, 1)], parameters=[0]))
+    plan = str(lumen.graph_compiler.Plan(graph, device, donate_into=[(0, 1)], parameters=[0]))
     assert "in0:f32[2,3] = " in plan, plan
     assert m.w._placed(device).storage_id == memory.storage_id
     assert lumen.to_numpy(memory).tolist() == [[2] * 3] * 2
@@ -449,7 +449,7 @@ def test_inplace_code_costs_no_memory():
     graphs = [lumen.make_graph(f)(*args) for f in (inplace, out_of_place)]
     assert str(graphs[0]) == str(graphs[1])
     for device in ("cpu", "meta"):
-        plans = [lumen.graph.Plan(g, device, parameters=[0, 1]) for g in graphs]
+        plans = [lumen.graph_compiler.Plan(g, device, parameters=[0, 1]) for g in graphs]
         assert plans[0].workspace_bytes == plans[1].workspace_bytes
 
 
@@ -464,7 +464,7 @@ def test_view_assignment_updates_its_base_in_place():
         return F.sum(y)
 
     graph = lumen.make_graph(f)(_meta(8, 16), _meta(16, 32))
-    plan = lumen.graph.Plan(graph, "cpu", parameters=[0, 1])
+    plan = lumen.graph_compiler.Plan(graph, "cpu", parameters=[0, 1])
     # One write (``y[k] += v``'s ``y[k] = t`` writes nothing more).
     (step,) = [line for line in str(plan).splitlines() if "dynamic_update_slice" in line]
     written, operand = step.split(":")[0].strip(), step.split("dynamic_update_slice ")[1].split()[0]

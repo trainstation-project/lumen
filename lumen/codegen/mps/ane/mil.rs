@@ -1,22 +1,15 @@
-//! A graph lowered to a Core ML ML Program (`coremltools`'
-//! `mlmodel/format/MIL.proto`, opset CoreML7), its specification
-//! (`Model.proto`) written as protobuf ([`super::proto`]): each value
-//! computed in its dtype (float16, float32, int32, bool).
-
 use super::proto::Message;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::{DType, Scalar};
 
-/// A shape as Core ML's arrays take it: a scalar as [1].
-pub(super) fn io_shape(shape: &[usize]) -> Vec<usize> {
+pub(crate) fn io_shape(shape: &[usize]) -> Vec<usize> {
     match shape.is_empty() {
         true => vec![1],
         false => shape.to_vec(),
     }
 }
 
-/// A dtype's MIL `DataType` and its name in a `cast`.
-pub(super) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
+pub(crate) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
     Ok(match dtype {
         DType::F16 => (10, "fp16"),
         DType::F32 => (11, "fp32"),
@@ -30,9 +23,7 @@ pub(super) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
     })
 }
 
-/// A dtype's Core ML array type (`ArrayFeatureType.ArrayDataType`): the
-/// program's inputs and outputs are float16, float32 or int32.
-pub(super) fn array_dtype(dtype: DType) -> Result<i64, String> {
+pub(crate) fn array_dtype(dtype: DType) -> Result<i64, String> {
     match dtype {
         DType::F16 => Ok(65552),
         DType::F32 => Ok(65568),
@@ -43,7 +34,6 @@ pub(super) fn array_dtype(dtype: DType) -> Result<i64, String> {
     }
 }
 
-/// A MIL `ValueType`: a tensor of `dtype` and `shape`.
 fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     let mut t = Message::new().int(1, dtype).int(2, shape.len() as i64);
     for &d in shape {
@@ -55,22 +45,17 @@ fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     Message::new().message(1, t)
 }
 
-/// A MIL `Value`: a tensor of `dtype` and `shape`, its elements `tensor`
-/// (a `TensorValue`).
 fn value(dtype: i64, shape: &[usize], tensor: Message) -> Message {
     Message::new()
         .message(2, tensor_type(dtype, shape))
         .message(3, Message::new().message(1, tensor))
 }
 
-/// A MIL string value.
 fn string_value(s: &str) -> Message {
     let strings = Message::new().string(1, s);
     value(2, &[], Message::new().message(4, strings))
 }
 
-/// The elements `data` (host bytes) of a tensor of `dtype`, as a MIL
-/// `TensorValue`.
 fn tensor_value(dtype: DType, data: &[u8]) -> Message {
     let words = |n: usize| data.chunks_exact(n);
     match dtype {
@@ -91,7 +76,6 @@ fn tensor_value(dtype: DType, data: &[u8]) -> Message {
     }
 }
 
-/// `value` of `dtype`, as its bytes.
 fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
     let f = match value {
         Scalar::Bool(b) => f64::from(u8::from(b)),
@@ -109,20 +93,13 @@ fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
     }
 }
 
-/// The graph being lowered: its MIL operations, and each value's MIL name
-/// and shape: its type's, or (a broadcast, a constant: compact) one of
-/// size-1 dimensions where it is the same along them, which elementwise
-/// operations broadcast (numpy's rule, as MIL's) and others tile first.
-/// Each operation's output, with the node it lowers (`None`: an input's or
-/// an output's).
-pub(super) type Owners = Vec<(String, Option<usize>)>;
+pub(crate) type Owners = Vec<(String, Option<usize>)>;
 
 struct Lower<'a> {
     graph: &'a Graph,
     ops: Vec<Message>,
     vals: Vec<Option<(String, Vec<usize>)>>,
     names: usize,
-    /// The node being lowered, and each operation's.
     node: Option<usize>,
     owners: Owners,
 }
@@ -133,9 +110,6 @@ impl Lower<'_> {
         format!("t{}", self.names)
     }
 
-    /// An operation `kind` of `inputs` (each a parameter and its
-    /// arguments' names), its output `dtype` and `shape`: its output's
-    /// name.
     fn op(
         &mut self,
         kind: &str,
@@ -147,7 +121,6 @@ impl Lower<'_> {
         self.named(name, kind, inputs, dtype, shape)
     }
 
-    /// [`op`](Self::op), its output named `name`.
     fn named(
         &mut self,
         name: String,
@@ -173,7 +146,6 @@ impl Lower<'_> {
         Ok(name)
     }
 
-    /// A constant of `dtype` and `shape`, its elements' bytes `data`.
     fn constant(&mut self, dtype: DType, shape: &[usize], data: &[u8]) -> Result<String, String> {
         let name = self.fresh();
         let code = mil_dtype(dtype)?.0;
@@ -191,7 +163,6 @@ impl Lower<'_> {
         Ok(name)
     }
 
-    /// An int32 vector constant (a parameter: axes, a shape).
     fn ints(&mut self, values: &[usize]) -> Result<String, String> {
         let data: Vec<u8> = values
             .iter()
@@ -208,7 +179,6 @@ impl Lower<'_> {
         self.constant(DType::Bool, &[], &[u8::from(value)])
     }
 
-    /// Value `v` at its type's shape: tiled along its compact dimensions.
     fn full(&mut self, v: Var) -> Result<String, String> {
         let ty = self.graph.type_of(v).clone();
         let (name, shape) = self.vals[v].clone().ok_or("a value before its producer")?;
@@ -227,7 +197,6 @@ impl Lower<'_> {
         Ok(tiled)
     }
 
-    /// Reshape `name` (`dtype`) to `shape`.
     fn reshape(&mut self, name: String, dtype: DType, shape: &[usize]) -> Result<String, String> {
         let s = self.ints(shape)?;
         self.op(
@@ -238,8 +207,6 @@ impl Lower<'_> {
         )
     }
 
-    /// Transpose `name` (`dtype`, of `shape`) by `perm`, if it moves any
-    /// dimension.
     fn transpose(
         &mut self,
         name: String,
@@ -298,7 +265,6 @@ impl Lower<'_> {
             Logistic => elementwise(self, "sigmoid", &["x"])?,
             Select => elementwise(self, "select", &["cond", "a", "b"])?,
             Neg => {
-                // x * -1: exact, -0 kept.
                 let (x, shape) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
@@ -354,7 +320,6 @@ impl Lower<'_> {
                 let x = input(0);
                 let (name, xs) = self.vals[x].clone().ok_or("a value before its producer")?;
                 let dtype = ty.dtype;
-                // The operand's dimensions in the result's order.
                 let mut perm: Vec<usize> = (0..broadcast_dimensions.len()).collect();
                 perm.sort_by_key(|&i| broadcast_dimensions[i]);
                 let (name, xs) = self.transpose(name, dtype, &xs, &perm)?;
@@ -378,7 +343,6 @@ impl Lower<'_> {
                 let (name, xs) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
-                // The same everywhere: still so.
                 if xs.iter().all(|&d| d == 1) {
                     let ones = vec![1; new_sizes.len()];
                     (self.reshape(name, ty.dtype, &ones)?, ones)
@@ -391,7 +355,6 @@ impl Lower<'_> {
                 let x = input(0);
                 let xt = graph.type_of(x).clone();
                 let mut name = self.full(x)?;
-                // Summed in its accumulation dtype: each element widened.
                 let kind = match &node.primitive {
                     ReduceSum { accum_dtype, .. } => {
                         if *accum_dtype != xt.dtype {
@@ -455,7 +418,6 @@ impl Lower<'_> {
                 let (n, it) = (graph.type_of(x).shape[*axis], graph.type_of(i).clone());
                 let x = self.full(x)?;
                 let i = self.full(i)?;
-                // Each index clamped into the axis, as the primitive does.
                 let lo = self.constant(it.dtype, &[], &scalar_bytes(it.dtype, Scalar::Int(0)))?;
                 let hi = self.constant(
                     it.dtype,
@@ -513,10 +475,6 @@ impl Lower<'_> {
         Ok(name)
     }
 
-    /// A dot_general as a (batched) matmul: each operand's dimensions
-    /// ordered batch, free, contracting (the left's) or batch, contracting,
-    /// free (the right's), folded into [B, M, K] and [B, K, N] (no B if
-    /// there is no batch), the product unfolded.
     fn dot(&mut self, node: &crate::graph::Node) -> Result<(String, Vec<usize>), String> {
         let Primitive::DotGeneral {
             lhs_contracting,
@@ -535,8 +493,6 @@ impl Lower<'_> {
             graph.type_of(node.inputs[0]).clone(),
             graph.type_of(node.inputs[1]).clone(),
         );
-        // float16 operands, a float16 result: Core ML's float16 matmul; a
-        // float32 result: of the operands widened (exactly), in float32.
         let dtype = match (l.dtype, *output_dtype) {
             (DType::F16, DType::F16) => DType::F16,
             (DType::F16 | DType::F32, DType::F32) => DType::F32,
@@ -610,11 +566,7 @@ impl Lower<'_> {
     }
 }
 
-/// `graph` as a Core ML model, its inputs with `constants` (their bytes,
-/// contiguous) constants of it, the others the model's (`in0`, ...): its
-/// specification (`Model.proto`), an ML Program, and each of its
-/// operations' outputs with the node of `graph` it lowers.
-pub(super) fn lower(
+pub(crate) fn lower(
     graph: &Graph,
     constants: &[Option<&[u8]>],
 ) -> Result<(Vec<u8>, Owners), String> {
@@ -672,7 +624,6 @@ pub(super) fn lower(
         let ty = graph.type_of(v).clone();
         description = description.message(10, feature(&format!("out{k}"), &ty)?);
         let x = lower.full(v)?;
-        // Named as the model's output (a scalar as [1]).
         let name = format!("out{k}");
         match ty.shape.is_empty() {
             true => {

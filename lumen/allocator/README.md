@@ -203,7 +203,7 @@ The shim (`mps/mps_shim.mm`) does the Objective-C work:
 affects only devices that have not allocated yet; an existing allocator keeps
 its size. `lumen.config.static_allocator_bytes` in Python reads and writes the
 same atomic, and `lumen.config` also exposes `compiler` (the graph
-compiler's flags, defined in `lumen/compiler`).
+compiler's flags, defined in `lumen/graph_compiler`).
 
 ## Usage across the crate
 

@@ -1,6 +1,6 @@
 """Attention: F.flash_attention ([B, S, N, H], grouped-query,
 causal), and the MPS compiler running attention, however written, as one
-flash-attention kernel (lumen/compiler/mps/attention.rs, attention.metal)."""
+flash-attention kernel (lumen/graph_compiler/mps/attention.rs, attention.metal)."""
 
 import warnings
 
@@ -42,7 +42,7 @@ def tensors(device, dtype, *shapes, seed=0):
 
 
 def steps(f, *args):
-    return [s["label"] for s in lumen.graph.Plan(lumen.make_graph(f)(*args), "mps").steps()]
+    return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
 
 TOL = {"float32": 2e-6, "float16": 2e-3, "bfloat16": 2e-2}
@@ -212,7 +212,7 @@ def test_attention_epilogues_fuse(f, sq):
 
 
 def _sources(f, *args):
-    plan = lumen.graph.Plan(lumen.make_graph(f)(*args), "mps")
+    plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps")
     return {s["label"]: (s.get("fusion") or {}).get("source", "") for s in plan.steps()}
 
 
@@ -459,7 +459,7 @@ def test_log_sum_exp_is_written_only_for_training():
         return F.flash_attention(q, k, v, is_causal=True)
 
     def source(f):
-        plan = lumen.graph.Plan(lumen.make_graph(f)(*m), "mps")
+        plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*m), "mps")
         (step,) = [s for s in plan.steps() if s["label"] == "flash_attention"]
         return step["fusion"]["source"]
 

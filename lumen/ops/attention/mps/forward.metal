@@ -1,53 +1,12 @@
-// Flash attention's forward: the kernels of attentions the MPS
-// compiler matches (lumen/compiler/mps/attention.rs): o = softmax(q k^T * scale
-// [causal]) v over each batch index, the scores and probabilities never
-// in memory. A generated kernel (lumen/compiler/mps/codegen.rs) instantiates one template
-// with the attention's sizes and an indexer `Ix`: q(b), k(b), v(b) and
-// o(b), the offset of batch index b's elements in each buffer (64-bit,
-// once a threadgroup), and the row and column strides of each (32-bit
-// within a batch index: query or key i, head dimension d at
-// i * ROW + d * COL).
-//
-// With RAW, the attention's own value is written to `raw` too (at the
-// output's index): with an epilogue, when it is read elsewhere (a training
-// forward's, which the backward reads).
-//
-// With LSE, each query row's log-sum-exp of its scores, m + log(l), is
-// written to `lse` too ([batch, Sq], float): what a training forward saves
-// for the backward (backward.metal).
-//
-// Scores, the softmax and the output accumulate in float; each score then
-// goes through `score` (its rounding, casts and scale as traced, codegen.rs)
-// and the probabilities are rounded to T for p v, as the traced program
-// rounds them. A causal mask lets query i see key j iff j <= i + offset. Each
-// output is written as epi(it, its flat index): Same, or a fusion's
-// epilogue (codegen.rs), writing Out.
-//
-// Each probability as P V reads it (rounded) is drop(it, b, i, j), batch
-// index b, query i, key j: NoDropout, or a generated dropout (codegen.rs)
-// drawing its random bits there; the softmax's sum reads them as they are.
-
-// No dropout: a probability as it is.
 struct NoDropout {
     template <typename U> inline U operator()(U x, uint, uint, uint) const { return x; }
 };
 
-// Query rows a SIMD group takes, SIMD groups a threadgroup has (256
-// threads), and so query rows a threadgroup takes.
 #define ATTN_ROWS 8
 #define ATTN_GROUPS 8
 #define ATTN_BQ (ATTN_ROWS * ATTN_GROUPS)
-// Loops over a tile's matrices, unrolled so the arrays of them stay in
-// registers (indexed by constants).
 #define ATTN_UNROLL _Pragma("clang loop unroll(full)")
 
-// Queries in tiles: threadgroup (qblock, b) takes ATTN_BQ query rows of
-// batch index b, its SIMD group sg 8 of them, its Q rows, scores S,
-// probabilities P and output O in simdgroup matrices (registers). Keys in
-// blocks of BK, K and V staged in threadgroup memory: S = Q K^T by 8x8
-// matrices into float; each row's running max m and sum l (online
-// softmax) over its 4 lanes; O rescaled, then O += P V. Blocks past the
-// last row's causal limit are skipped.
 template <typename T,
           typename O,
           uint D,
@@ -90,7 +49,6 @@ inline void flash_attention(device const T *q,
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = r0 + fr;
     const bool in_rows = row < sq;
-    // This lane's elements of the SIMD group's Q rows (zero past the queries).
     simdgroup_matrix<T, 8, 8> qm[D / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
         uint d = c * 8 + fc;
@@ -99,9 +57,7 @@ inline void flash_attention(device const T *q,
     }
     simdgroup_matrix<float, 8, 8> om[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { om[c] = simdgroup_matrix<float, 8, 8>(0); }
-    // Row `row`'s running max and sum, the same in each of its 4 lanes.
     float m = -INFINITY, l = 0;
-    // The keys any of this threadgroup's rows sees.
     uint last = sk;
     if (CAUSAL) {
         long hi = long(min(qblock * ATTN_BQ + ATTN_BQ, sq)) + long(offset);
@@ -118,7 +74,6 @@ inline void flash_attention(device const T *q,
             vs[e] = k0 + j < sk ? v[(k0 + j) * Ix::V_ROW + d * Ix::V_COL] : T(0);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        // S = Q K^T, [8 x BK], scaled and masked; its rows' max.
         simdgroup_matrix<float, 8, 8> s[BK / 8];
         float mx = -INFINITY;
         ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
@@ -139,9 +94,7 @@ inline void flash_attention(device const T *q,
         mx = max(mx, simd_shuffle_xor(mx, 1));
         mx = max(mx, simd_shuffle_xor(mx, 8));
         float m_new = max(m, mx);
-        // A row with no key seen yet has nothing to rescale.
         float factor = m_new == -INFINITY ? 1.0f : exp(m - m_new);
-        // P = exp(S - m), rounded to T for P V; its rows' sum in float.
         simdgroup_matrix<T, 8, 8> pm[BK / 8];
         float sum = 0;
         ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
@@ -156,7 +109,6 @@ inline void flash_attention(device const T *q,
         sum += simd_shuffle_xor(sum, 8);
         l = l * factor + sum;
         m = m_new;
-        // O rescaled, then O += P V.
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { frag(om[c]) *= factor; }
         ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
@@ -166,8 +118,6 @@ inline void flash_attention(device const T *q,
             }
         }
     }
-    // O / l, each lane its two elements of each row; the row's
-    // log-sum-exp, by its first lane.
     if (LSE && in_rows && fc == 0) {
         lse[ulong(b) * sq + row] = m + log(l);
     }
@@ -186,10 +136,6 @@ inline void flash_attention(device const T *q,
     }
 }
 
-// Few queries (decoding): threadgroup (i, b) takes query i of batch index
-// b, its SIMD groups every 8th key, each lane a 32nd of the head
-// dimension; each SIMD group's running max, sum and output, then theirs
-// combined.
 template <typename T,
           typename O,
           uint D,
@@ -253,7 +199,6 @@ inline void attention_decode(device const T *q,
         float factor = exp(m - m_new);
         float p = exp(s - m_new);
         l = l * factor + p;
-        // P rounded to T (and dropped), as p v reads it.
         float pt = float(drop(T(p), b, i, j));
         ATTN_UNROLL for (uint n = 0; n < VN; ++n) {
             uint d = lane + 32 * n;

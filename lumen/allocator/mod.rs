@@ -94,15 +94,14 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
 
 pub const ALIGNMENT: usize = 256;
 
-/// A range of a device's memory (MPS's, CUDA's), reserved on first use and
-/// handed out first fit, blocks merged when freed. Not an allocator: the
-/// device's allocator owns it, reserving and releasing the range.
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
 pub(crate) struct Region {
     device: Device,
     capacity: usize,
     state: Mutex<State>,
 }
 
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
 struct State {
     /// The range's start, reserved on the first allocation.
     base: Option<Base>,
@@ -115,12 +114,14 @@ struct State {
     live_bytes: usize,
 }
 
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
 struct Base(NonNull<u8>);
 
 // SAFETY: the range is device memory owned by the allocator; the pointer
 // is only offset and handed out, never dereferenced here.
 unsafe impl Send for Base {}
 
+#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
 impl Region {
     pub(crate) fn new(device: Device, capacity: usize) -> Self {
         Region {

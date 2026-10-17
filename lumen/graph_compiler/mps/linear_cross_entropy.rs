@@ -2,7 +2,7 @@
 //! of a dot's logits (`F.matmul(h, w.t(), "float32", "float32")`, an LM
 //! head's), however traced, run as [`Primitive::LinearCrossEntropy`] (two
 //! kernels, Cut Cross-Entropy's) when nothing else reads the logits: they
-//! never reach memory. As flash attention's ([`crate::compiler::attention`]),
+//! never reach memory. As flash attention's ([`crate::graph_compiler::attention`]),
 //! no call of its own needed (trained, `lumen/autograd/cross_entropy.py`
 //! makes the gradient not read the logits).
 //!

@@ -1,20 +1,7 @@
-//! Programs on a device and the host. A value is on the host if `to_host`
-//! made it (from the device) or a host op; on the device if an input, a
-//! device op or `to_device` (from the host) made it; free if it is a
-//! runtime scalar, or computed from those and constants alone (either side
-//! computes it where it reads it). An op runs where its operands are, as
-//! PyTorch runs ops on CPU tensors on the CPU; one reading values on both
-//! is an error, as in PyTorch.
-//!
-//! The program is cut into stages alternately on the device and the host,
-//! each op in the first stage of its side after its operands', each stage
-//! compiled by its device's compiler (the host's by [`super::cpu`]) and
-//! run in order ([`Plan`]'s staged run), the values crossing copied between
-//! them.
-
 use super::Options;
 use crate::Device;
-use crate::graph::{Graph, Plan, Primitive, Source, Stage, Staged, Var, plan::ALIGNMENT};
+use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::{Plan, Source, Stage, Staged, plan::ALIGNMENT};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Place {
@@ -23,8 +10,6 @@ enum Place {
     Device,
 }
 
-/// `graph` without its copies between the host and the device, each its
-/// operand: the program on one device.
 pub(crate) fn without_transfers(graph: &Graph) -> Graph {
     let transfer = |p: &Primitive| matches!(p, Primitive::ToHost | Primitive::ToDevice);
     if !graph.nodes().iter().any(|n| transfer(&n.primitive)) {
@@ -50,9 +35,6 @@ pub(crate) fn without_transfers(graph: &Graph) -> Graph {
     out
 }
 
-/// Where each of a program's values is: its side, the value it is (a copy
-/// within one side is its operand), its stage (none if free), the value a
-/// crossing copy copies, and the node computing it.
 struct Placement<'a> {
     graph: &'a Graph,
     place: Vec<Place>,
@@ -62,8 +44,6 @@ struct Placement<'a> {
     producer: Vec<Option<usize>>,
 }
 
-/// One stage being built: its graph, each program value's in it, where its
-/// inputs come from, and the program values it outputs.
 struct Builder {
     host: bool,
     graph: Graph,
@@ -72,9 +52,6 @@ struct Builder {
     outputs: Vec<Var>,
 }
 
-/// `graph` compiled in stages for `device` and the host, if anything is on
-/// the host (`options.scalars` its runtime scalars, free), `options` mapped
-/// onto each stage's inputs and outputs.
 pub(crate) fn compile(
     graph: &Graph,
     device: Device,
@@ -99,7 +76,6 @@ pub(crate) fn compile(
             value(&p, &mut builders, s, v);
         }
     }
-    // The program's outputs (a free one computed in the first stage).
     let outputs: Vec<Source> = graph
         .outputs()
         .iter()
@@ -233,8 +209,6 @@ pub(crate) fn compile(
     )))
 }
 
-/// Each value's place in `graph` (`scalars` its free inputs), or none if
-/// nothing is on the host.
 fn place<'a>(
     graph: &'a Graph,
     device: Device,
@@ -293,8 +267,6 @@ fn place<'a>(
     Ok(p.place.contains(&Place::Host).then_some(p))
 }
 
-/// Program value `v` in stage `s`'s graph: computed there (its own, or a
-/// free value recomputed in each stage reading it), or an input of it.
 fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
     let v = p.alias[v];
     if let Some(b) = builders[s].map[v] {
@@ -326,19 +298,13 @@ fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
     b
 }
 
-/// Where a stage reads program value `v` (not a free value computed) from:
-/// the program's inputs, a crossing copy of an earlier stage's value, or
-/// an earlier stage's output.
 fn source(p: &Placement, builders: &mut [Builder], v: Var) -> Source {
     if let Some(i) = p.graph.inputs().iter().position(|&u| u == v) {
         return Source::Input(i);
     }
     match p.crossing[v] {
-        // A program input's copy: the stage copies its inputs to its side.
         Some(u) if p.graph.inputs().contains(&u) => source(p, builders, u),
         Some(u) => {
-            // In its stage's graph: computed there, or (copied back as soon
-            // as copied there) an input of it.
             let t = p.stage[u].expect("a placed value");
             value(p, builders, t, u);
             let k = export(&mut builders[t], u);
@@ -354,7 +320,6 @@ fn source(p: &Placement, builders: &mut [Builder], v: Var) -> Source {
     }
 }
 
-/// The index of `v` among stage `b`'s outputs, added if it is not one.
 fn export(b: &mut Builder, v: Var) -> usize {
     b.outputs.iter().position(|&o| o == v).unwrap_or_else(|| {
         b.outputs.push(v);
