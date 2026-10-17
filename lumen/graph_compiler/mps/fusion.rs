@@ -13,9 +13,11 @@
 //! consumers read its output. Contractions are never fused.
 
 use super::diamonds::Row;
+use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::pass::Pass;
 pub(crate) use crate::graph_compiler::{constant, elementwise};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
@@ -843,4 +845,51 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
         }
     }
     false
+}
+
+/// Loop fusion ([`fuse`]), then horizontal fusion of the independent small
+/// loop fusions, one kernel each group ([`horizontal::fuse`]), again while
+/// a runtime scalar some step other than a fusion reads is dropped from
+/// those the kernels take by value (it is a buffer).
+pub(crate) struct LoopFusion;
+
+impl<'a> Pass<MpsModule<'a>> for LoopFusion {
+    fn name(&self) -> &'static str {
+        "loop_fusion"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let config = &m.options.config;
+        let requested = m.kernels.len();
+        let graph = loop {
+            m.kernels.truncate(requested);
+            let kernels = &mut m.kernels;
+            let mut kernel =
+                |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Loop(by_value.to_vec()));
+            let vars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
+            let fused = fuse(&m.graph, &m.rows, &vars, config, &mut kernel);
+            let fused = match config.horizontal_fusion {
+                true => {
+                    let vars: Vec<Var> = m.scalars.iter().map(|&i| fused.inputs()[i]).collect();
+                    horizontal::fuse(&fused, &vars, &mut kernel)
+                }
+                false => fused,
+            };
+            let unfused = |&i: &usize| {
+                let v = fused.inputs()[i];
+                let read = |n: &&Node| n.inputs.contains(&v);
+                let mut readers = fused.nodes().iter().filter(read);
+                readers.any(|n| !matches!(n.primitive, Primitive::Fusion { .. }))
+                    || fused.outputs().contains(&v)
+            };
+            let before = m.scalars.len();
+            m.scalars.retain(|i| !unfused(i));
+            if m.scalars.len() == before {
+                break fused;
+            }
+        };
+        m.graph = graph;
+        m.rows.clear();
+        Ok(())
+    }
 }

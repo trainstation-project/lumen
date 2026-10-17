@@ -35,9 +35,11 @@
 //! PyTorch's fused QKV weights, `[3D, D]` blocks of `nn.Linear`'s `[out,
 //! in]` weights, each a slice an optimizer updates in place.
 
+use super::MpsModule;
 use super::fusion::{elementwise, fusible};
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::pass::Pass;
 
 /// Dots that can merge: their nodes, in graph order.
 struct Group {
@@ -454,4 +456,27 @@ fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
 /// free one of the operand, if it has one.
 fn concat_dimension(p: &Primitive, side: usize, rank: usize) -> Option<usize> {
     free_dims(rank, &used_dims(p, 1 - side)).last()
+}
+
+/// The dots reading packable parameters merged into blocks of them
+/// ([`merge_dots`]). A donated parameter (a weight the program assigns)
+/// only as a contiguous part of its block, its new value written into it
+/// in place.
+pub(crate) struct MergeDots;
+
+impl<'a> Pass<MpsModule<'a>> for MergeDots {
+    fn name(&self) -> &'static str {
+        "merge_dots"
+    }
+
+    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+        let options = m.options;
+        let donated: Vec<bool> = (0..options.packable.len())
+            .map(|i| {
+                options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
+            })
+            .collect();
+        (m.graph, m.packed) = merge_dots(&m.graph, &options.packable, &donated);
+        Ok(())
+    }
 }

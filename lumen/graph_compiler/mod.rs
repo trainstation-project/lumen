@@ -3,8 +3,9 @@
 //! then plans its memory into a [`Plan`]. Devices without one run the
 //! graph's primitives as they are.
 //!
-//! Every device first runs the passes that hold for any: [`cse`] (common
-//! subexpression elimination).
+//! Each compiler is a [`pass`] pipeline (XLA's `HloPassPipeline`): every
+//! device first runs the passes that hold for any, [`cse`] (common
+//! subexpression elimination) and [`simplify`], then its own.
 //!
 //! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.
@@ -21,6 +22,7 @@ mod cpu;
 mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
+pub(crate) mod pass;
 pub mod plan;
 #[cfg(test)]
 pub(crate) mod plan_tests;
@@ -37,6 +39,7 @@ use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
 
 pub use config::CompilerConfig;
+use pass::{GraphModule, Pipeline, Rewrite};
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 
@@ -82,7 +85,15 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
 
 /// [`compile`] with `options`.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
-    let graph = &simplify::simplify(&cse::cse(graph));
+    let mut module = GraphModule {
+        graph: graph.clone(),
+        options,
+    };
+    Pipeline::new("frontend")
+        .add(Rewrite("cse", |g, _| cse::cse(g)))
+        .add(Rewrite("simplify", |g, _| simplify::simplify(g)))
+        .run(&mut module)?;
+    let graph = &module.graph;
     if device != Device::Cpu(0)
         && let Some(plan) = stages::compile(graph, device, options)?
     {
@@ -96,7 +107,7 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
     match device {
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
-        _ => Ok(cpu::compile(graph, options)),
+        _ => cpu::compile(graph, options),
     }
 }
 
