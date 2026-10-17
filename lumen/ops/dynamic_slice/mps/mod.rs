@@ -1,17 +1,8 @@
-//! dynamic_slice and dynamic_update_slice on MPS (`kernels.metal`): a thread
-//! an element of the block, its start indices read from their device
-//! buffers when the kernel runs. A dynamic_update_slice whose value the plan
-//! put in its operand's buffer (`graph/plan.rs`: nothing reads the operand
-//! after it) writes the update alone, in place; otherwise it copies the
-//! operand first.
-
 use crate::Tensor;
 use crate::graph::Primitive;
-use crate::graph::plan::Step;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg};
 
-/// Copy the `ty` value at `src` to `dst` (distinct buffers, perhaps of one
-/// storage), in the stream.
 pub(crate) fn copy(
     src: *const u8,
     dst: *mut u8,
@@ -32,7 +23,6 @@ pub(crate) fn copy(
     )
 }
 
-/// The most dimensions the kernels take (`DS_MAX_RANK`).
 const MAX_RANK: usize = 8;
 
 pub(crate) fn encode(
@@ -56,11 +46,9 @@ pub(crate) fn encode(
         _ => unreachable!("a dynamic slice"),
     };
     let update = matches!(step.primitive, Primitive::DynamicUpdateSlice);
-    // The operand's value, if not already in the output's buffer.
     if update && output.cast_const() != inputs[0] {
         copy(inputs[0], output, x, keep.clone(), step.label)?;
     }
-    // Each dimension's start index, the unused slots any buffer.
     let index_dtype = step
         .inputs
         .get(first)
