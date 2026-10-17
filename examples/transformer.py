@@ -38,7 +38,7 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 1
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
 BATCH, STEPS, DROPOUT = 32, 300, 0
 # Gradient accumulation: each step's microbatches, a backward pass each.
 ACCUM = 1
@@ -48,7 +48,7 @@ PROFILED_STEPS = 10
 lumen.config.compiler.deterministic = True
 lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
-lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 64
 lumen.config.compiler.fused_linear_cross_entropy = True
 
 
