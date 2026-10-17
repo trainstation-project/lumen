@@ -385,6 +385,7 @@ fn ops_on_host_and_device_values_raise() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::pass::{GraphModule, Pass, Pipeline, Rewrite};
     use super::{CompilerConfig, Options};
