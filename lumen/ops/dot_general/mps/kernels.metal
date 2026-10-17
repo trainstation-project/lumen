@@ -147,7 +147,7 @@ inline void matmul_wide_impl(device const T *lhs,
 // BMxBK and BKxBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
 // fixed column of them, and loads the next k step's while the current one is multiplied. Each output sums over k in
 // increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
-// kernels; a fusion's epilogue (lumen/codegen/mps.rs), writing Out. With ATOMIC (a split-K dot's: its batch
+// kernels; a fusion's epilogue (lumen/codegen/mps/mod.rs), writing Out. With ATOMIC (a split-K dot's: its batch
 // index a chunk of the contraction), each output is added to out[m, n] (float, zeroed before) atomically instead, the
 // chunks' in no fixed order. With PAIRED (a gated pair's: two dots of one operand merged, their rhs blocks [W1 | W2]
 // side by side, N = 2H, combined elementwise, as SwiGLU's silu(x W1) * (x W2)), the tile's columns are the two

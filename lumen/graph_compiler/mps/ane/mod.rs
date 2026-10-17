@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use crate::codegen::ane::mil;
+use crate::codegen::mps::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;

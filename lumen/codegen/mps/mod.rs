@@ -1,3 +1,8 @@
+//! Metal kernels generated from fused graphs, and Core ML programs for
+//! the Neural Engine ([`ane`]).
+
+pub(crate) mod ane;
+
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
