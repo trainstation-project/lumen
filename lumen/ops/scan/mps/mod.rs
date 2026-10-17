@@ -1,16 +1,5 @@
-//! cumsum on MPS (`kernels.metal`): the operand viewed as [a, n, b], each of
-//! its lines of n elements along the axis scanned. A row (b = 1) of more
-//! than [`ROW_THREADS`] elements takes threadgroups (`cumsum_rows`, blocks
-//! of 1024 elements scanned in parallel, each carried to the next); any
-//! other line (a column, a short row) threads (`cumsum_lines`). With too
-//! few lines to fill the GPU, each is split into chunks, scanned in three
-//! launches (reduce-then-scan): each chunk's sum into partials (in the
-//! scratch the planner set aside), the partials scanned in place, then each
-//! chunk from the sum of those before it. Every output is computed in a
-//! fixed order: deterministic.
-
-use crate::graph::plan::Step;
 use crate::graph::{Primitive, TensorType};
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, launch, u32_arg, u64_arg};
 use crate::ops::reduce::mps::kernel_dtype;
 use crate::{DType, Tensor};
@@ -26,8 +15,6 @@ const ROW_CHUNK: usize = 4096;
 const LINE_THREADS: usize = 16384;
 const LINE_CHUNK: usize = 64;
 
-/// How a cumsum of `x` along `axis` runs: [a, n, b], whether a row kernel
-/// scans it, and its chunks of `chunk` elements.
 struct Scan {
     a: usize,
     n: usize,
@@ -60,8 +47,6 @@ fn scan(x: &TensorType, axis: usize) -> Scan {
     }
 }
 
-/// The scratch a cumsum of `x` along `axis`, accumulating in `accum`,
-/// needs: a split scan's partials (none for the others).
 pub(crate) fn scratch_bytes(x: &TensorType, axis: usize, accum: DType) -> usize {
     let s = scan(x, axis);
     match s.chunks {
@@ -115,7 +100,6 @@ pub(crate) fn encode(
         true => Grid::Groups([chunks, a, 1]),
         false => Grid::Threads([a * b * chunks, 1, 1]),
     };
-    // Unsplit, the partials are never read: any buffer.
     let partials = match chunks {
         1 => output.cast_const(),
         _ => scratch.cast_const(),
@@ -135,7 +119,6 @@ pub(crate) fn encode(
         launch(&kernel, &buffers, &args, grid, keep, step.label)
     };
     if chunks > 1 {
-        // Each launch's writes are read by the next alone.
         pass(true, keep.clone())?;
         let lines = a * b;
         let args = [

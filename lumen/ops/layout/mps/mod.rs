@@ -1,11 +1,6 @@
-//! Layout primitives on MPS (`kernels.metal`): a plan's reshapes (copies; the
-//! others alias their operand), broadcast_in_dim, transpose and slice, as a
-//! dtype-agnostic gather: a tiled transpose where the output's innermost
-//! dimension would read the input at a stride.
-
 use crate::Tensor;
 use crate::graph::Primitive::*;
-use crate::graph::plan::Step;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{BYTES_PER_THREAD, Grid, dims32_arg, launch, u32_arg};
 use crate::tensor::contiguous_strides;
 
@@ -35,7 +30,6 @@ pub(crate) fn encode(
             strides
         }
         Transpose { permutation } => permutation.iter().map(|&d| xs[d]).collect(),
-        // The operand's strides, from its element at the start.
         Slice { start_indices, .. } => {
             let start: usize = start_indices.iter().zip(&xs).map(|(s, st)| s * st).sum();
             let src = inputs[0].wrapping_add(start * width);
@@ -46,15 +40,6 @@ pub(crate) fn encode(
     gather(width, &out.shape, &strides, inputs[0], output, keep, name)
 }
 
-/// Copy the elements of `src` at `strides` (in elements of `width` bytes)
-/// into `dst` as a contiguous tensor of `shape`, recorded in the profiler as
-/// `name`. Dimensions that are contiguous with each other in the input too
-/// are merged first. Where the innermost one reads the input at a stride
-/// while another reads it contiguously, a tiled transpose of the two (the
-/// others its batch); else a gather on a grid of (innermost dimension,
-/// rows): a few elements a thread where the innermost dimension reads
-/// contiguous elements or a broadcast one, else one (strided reads need
-/// the threads in flight).
 fn gather(
     width: usize,
     shape: &[usize],

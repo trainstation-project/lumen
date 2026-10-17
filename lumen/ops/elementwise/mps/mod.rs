@@ -1,9 +1,6 @@
-//! Elementwise primitives on MPS (`kernels.metal`): one kernel per op and
-//! dtype, named after the primitive, each thread taking a few elements.
-
 use crate::Tensor;
 use crate::graph::Primitive::*;
-use crate::graph::plan::Step;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{elementwise_grid, launch_step, u32_arg};
 
 pub(crate) fn encode(

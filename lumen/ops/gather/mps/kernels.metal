@@ -1,34 +1,4 @@
-// gather and scatter_add along an axis: the operand viewed as [outer, n,
-// inner] (n the axis's size), the indices (int32 or int64, I) as m of them,
-// the gathered values (a gather's result, a scatter's updates) as
-// [outer, m, inner].
-//
-// gather_<bytes>_<i32|i64>: a thread an element of the result: the
-// operand's element at its index, read as given (one out of range the
-// program's error; lumen.config.compiler.safe_kernels clamps them first,
-// lumen/compiler/mps/bounds.rs).
-// Elements are moved as their bytes (E: uchar to ulong), so one kernel
-// serves every dtype of a size.
-//
-// scatter_add_<dtype>_<i32|i64>: each update added to `out` (the operand's
-// value: its buffer, or a copy of it) at its index, as the gather's. A thread a column (o, r) of `out`: it adds that
-// column's updates in index order, so no two threads write one element and the sums' order is fixed (deterministic,
-// the reference's bit for bit), for any dtype. Its threads are outer * inner (an embedding's dimension), each adding m
-// updates.
-//
-// scatter_add_scan_<dtype>_<i32|i64>: the same sums, a thread an element
-// (o, k, r) of `out` instead: it scans the m indices in order, adding the
-// updates of those that are k to its element in a register (in the same
-// order: the same bits), then writes it once (its SIMD group's lanes
-// testing 32 indices at once when they share a row: rows of a multiple of
-// 32 elements). For few rows n (an
-// embedding's vocabulary) of few updates, which the column kernel leaves
-// to few threads, each a chain of m reads and writes of memory. A
-// threadgroup's threads read the indices (as rows) into its memory a block
-// at a time, which each then scans.
 #define SCAN_BLOCK 256
-//
-// Compiled after lumen/ops/mps/kernels.metal.
 
 #define GATHER(NAME, E, INAME, I)                                             \
     kernel void gather_##NAME##_##INAME(device const E *in [[buffer(0)]],     \
