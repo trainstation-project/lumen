@@ -640,6 +640,79 @@ pub(crate) fn fuse(
         }
     };
 
+    // A dot's value, or its epilogue's (a residual added), whose rows one
+    // row fusion normalizes, read elsewhere only after it (the residual
+    // stream, added to again): computed in that fusion, the rows in its
+    // kernel's epilogue (`codegen::row_dot`: rows inside one tile), the
+    // value another of its outputs if read elsewhere; where it can (else
+    // the dot's step stays, its value read).
+    let mut fusions = fusions;
+    for d in 0..nodes.len() {
+        let dot = matches!(nodes[d].primitive, Primitive::DotGeneral { .. });
+        if !config.contraction_epilogues || !dot || !live[d] {
+            continue;
+        }
+        // The step computing it: the dot's, or its epilogue's end's.
+        let p = dot_end[d].unwrap_or(d);
+        let v = nodes[p].output;
+        if !root[p] || host[p].is_some() {
+            continue;
+        }
+        // The first row fusion reading it.
+        let Some(f) = (0..nodes.len()).find(|&f| {
+            fusions[f]
+                .as_ref()
+                .is_some_and(|(_, reads)| reads.contains(&v))
+                && row_root(f)
+        }) else {
+            continue;
+        };
+        // The steps reading a value: fusions (their reads) and other nodes.
+        let read_by = |w: Var| -> Vec<usize> {
+            (0..nodes.len())
+                .filter(|&i| live[i] && root[i] && host[i].is_none())
+                .filter(|&i| match &fusions[i] {
+                    Some((_, reads)) => reads.contains(&w),
+                    None => nodes[i].inputs.contains(&w),
+                })
+                .collect()
+        };
+        // Its value, and those its epilogue writes, read elsewhere only
+        // after the row fusion (which then writes them).
+        let written: Vec<Var> = std::iter::once(v)
+            .chain(
+                (0..nodes.len())
+                    .filter(|&h| host[h] == Some(p))
+                    .map(|h| nodes[h].output),
+            )
+            .collect();
+        if !written.iter().all(|&w| read_by(w).iter().all(|&i| i >= f)) {
+            continue;
+        }
+        // Read elsewhere too (or an output): written by its kernel, as are
+        // the values its epilogue writes.
+        let elsewhere = is_output[v] || read_by(v).iter().any(|&i| i != f);
+        let before = host.clone();
+        root[p] = false;
+        for h in host.iter_mut().filter(|h| **h == Some(p)) {
+            *h = Some(f);
+        }
+        if elsewhere {
+            host[p] = Some(f);
+        }
+        let hosted = |q: usize| (root[q] || host[q].is_some()) && host[q] != Some(f);
+        let starts: Vec<usize> = std::iter::once(f)
+            .chain((0..nodes.len()).filter(|&h| host[h] == Some(f)))
+            .collect();
+        let (members, reads) = members(graph, &producer, hosted, &starts);
+        let others: Vec<Var> = starts[1..].iter().map(|&h| nodes[h].output).collect();
+        let body = body(graph, &members, &reads, nodes[f].output, &others);
+        match reads.len() <= MAX_INPUTS && super::codegen::row_dot(&body).is_some() {
+            true => fusions[f] = Some((members, reads)),
+            false => (root[p], host) = (true, before),
+        }
+    }
+
     let mut fused = Graph::new();
     let mut var: Vec<Var> = vec![usize::MAX; n];
     for &v in graph.inputs() {

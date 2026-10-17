@@ -893,11 +893,20 @@ pub(crate) fn encode(
             (_, true) => format!("{name}_mid"),
             _ => name.clone(),
         };
+        // Its rows computed in its epilogue: one kernel, a threadgroup the
+        // rows of a tile (all of each row's columns).
+        let (kernel, grid) = match codegen::row_dot(body) {
+            Some(_) => (
+                name.clone(),
+                Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
+            ),
+            None => (kernel, plan.grid),
+        };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
-        return launch(&kernel, &buffers, &args, plan.grid, keep, step.label);
+        return launch(&kernel, &buffers, &args, grid, keep, step.label);
     }
     // A row kernel: a threadgroup a row of the last dimension (a block of
     // rows, with partials).
