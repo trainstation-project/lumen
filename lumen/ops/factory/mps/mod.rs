@@ -1,11 +1,6 @@
-//! Factory primitives on MPS (`kernels.metal`): full, a dtype-agnostic fill a
-//! few elements a thread; iota, a thread per element on an inner x size
-//! x outer grid whose y coordinate is the value; and random_bits, a few
-//! elements a thread, each its own Philox block.
-
 use crate::Tensor;
 use crate::graph::Primitive::*;
-use crate::graph::plan::Step;
+use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg, u64_arg};
 
 pub(crate) fn encode(
