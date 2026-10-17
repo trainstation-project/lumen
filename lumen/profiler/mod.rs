@@ -109,6 +109,12 @@ pub struct Event {
     /// `record_shapes`.
     pub inputs: Vec<TensorType>,
     pub outputs: Vec<TensorType>,
+    /// Each input's and output's strides (in elements) as the kernel reads
+    /// and writes it, with `record_shapes`: a plan step's (a slice read in
+    /// place, an in-place concatenate's operand written in its result);
+    /// none for an op that does not say.
+    pub input_strides: Vec<Vec<usize>>,
+    pub output_strides: Vec<Vec<usize>>,
     /// The dtypes the op accumulates in, with `record_shapes`: a dot's or
     /// sum's `accum_dtype`, a max's dtype; a fusion's, each
     /// of its reductions' (none for elementwise ops).
@@ -163,8 +169,15 @@ thread_local! {
     static NEXT_LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
 }
 
-/// A launch's inputs' and outputs' types.
-type IoTypes = (Vec<TensorType>, Vec<TensorType>);
+/// A launch's inputs' and outputs' types, and their strides (in
+/// elements).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IoTypes {
+    pub inputs: Vec<TensorType>,
+    pub outputs: Vec<TensorType>,
+    pub input_strides: Vec<Vec<usize>>,
+    pub output_strides: Vec<Vec<usize>>,
+}
 
 /// What one device launch of an op computes, where it is not the whole op
 /// (an op that launches several kernels: a split reduction's partials,
@@ -278,20 +291,29 @@ pub fn stop() -> Result<Profile, String> {
     // Events are pushed as they end; order them by start for readers.
     events.sort_by_key(|e| (e.start_ns, e.id));
     // Device work has the types of the op that issued it, unless its own.
-    type Types = (Vec<TensorType>, Vec<TensorType>, Vec<DType>);
-    let types: std::collections::HashMap<u64, Types> = events
+    let types: std::collections::HashMap<u64, (IoTypes, Vec<DType>)> = events
         .iter()
         .filter(|e| e.kind == EventKind::Op)
-        .map(|e| (e.id, (e.inputs.clone(), e.outputs.clone(), e.accum.clone())))
+        .map(|e| {
+            let io = IoTypes {
+                inputs: e.inputs.clone(),
+                outputs: e.outputs.clone(),
+                input_strides: e.input_strides.clone(),
+                output_strides: e.output_strides.clone(),
+            };
+            (e.id, (io, e.accum.clone()))
+        })
         .collect();
     for e in events
         .iter_mut()
         .filter(|e| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel))
     {
-        if let Some((inputs, outputs, accum)) = e.parent.and_then(|p| types.get(&p)) {
+        if let Some((io, accum)) = e.parent.and_then(|p| types.get(&p)) {
             // A launch with types of its own ([`next_launch`]) keeps them.
             if e.inputs.is_empty() && e.outputs.is_empty() {
-                (e.inputs, e.outputs) = (inputs.clone(), outputs.clone());
+                (e.inputs, e.outputs) = (io.inputs.clone(), io.outputs.clone());
+                (e.input_strides, e.output_strides) =
+                    (io.input_strides.clone(), io.output_strides.clone());
             }
             e.accum = accum.clone();
         }
@@ -338,6 +360,8 @@ struct OpenRange {
     /// Inputs', outputs' and accumulation types; `None` without
     /// `record_shapes`.
     types: Option<(Vec<TensorType>, Vec<TensorType>, Vec<DType>)>,
+    /// Inputs' and outputs' strides, if the op says ([`RecordGuard::strides`]).
+    strides: (Vec<Vec<usize>>, Vec<Vec<usize>>),
 }
 
 fn open_range(
@@ -361,6 +385,7 @@ fn open_range(
             start_ns: now_ns(),
             parent,
             types: (bits & SHAPES != 0).then(|| (inputs(), Vec::new(), Vec::new())),
+            strides: (Vec::new(), Vec::new()),
         }),
     }
 }
@@ -371,6 +396,15 @@ impl RecordGuard {
     pub(crate) fn outputs(&mut self, outputs: impl FnOnce() -> Vec<TensorType>) {
         if let Some((_, out, _)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
             *out = outputs();
+        }
+    }
+
+    /// Record the strides (in elements) the op's kernel reads its inputs
+    /// and writes its outputs at (with `record_shapes`; `strides` is only
+    /// called then).
+    pub(crate) fn strides(&mut self, strides: impl FnOnce() -> (Vec<Vec<usize>>, Vec<Vec<usize>>)) {
+        if let Some(open) = self.open.as_mut().filter(|o| o.types.is_some()) {
+            open.strides = strides();
         }
     }
 
@@ -398,6 +432,7 @@ impl Drop for RecordGuard {
         });
         let thread = thread_id();
         let (inputs, outputs, accum) = open.types.unwrap_or_default();
+        let (input_strides, output_strides) = open.strides;
         push(
             open.session,
             Event {
@@ -411,6 +446,8 @@ impl Drop for RecordGuard {
                 device: Device::Cpu(0),
                 inputs,
                 outputs,
+                input_strides,
+                output_strides,
                 accum,
                 bytes: 0,
                 addr: 0,
@@ -477,6 +514,8 @@ pub(crate) fn report_memory(
             device,
             inputs: Vec::new(),
             outputs: Vec::new(),
+            input_strides: Vec::new(),
+            output_strides: Vec::new(),
             accum: Vec::new(),
             bytes,
             addr,
@@ -587,7 +626,7 @@ fn record_in(
         Some(Launch { name, types }) => (name, types),
         None => (name, None),
     };
-    let (inputs, outputs) = types.unwrap_or_default();
+    let io = types.unwrap_or_default();
     push(
         context.session,
         Event {
@@ -599,8 +638,10 @@ fn record_in(
             thread: context.thread,
             parent: context.parent,
             device,
-            inputs,
-            outputs,
+            inputs: io.inputs,
+            outputs: io.outputs,
+            input_strides: io.input_strides,
+            output_strides: io.output_strides,
             accum: Vec::new(),
             bytes: 0,
             addr: 0,

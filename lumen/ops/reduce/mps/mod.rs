@@ -320,12 +320,15 @@ fn consecutive(
     let p = scratch.cast_const();
     let partials = TensorType::new(accum, &[a, chunks, b]);
     crate::profiler::next_launch(launches.0, || {
-        let inputs = step.inputs.iter().map(|(_, ty)| ty.clone()).collect();
         let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
-        (
-            inputs,
-            std::iter::once(partials.clone()).chain(extra).collect(),
-        )
+        let mut output_strides = step.output_strides();
+        output_strides[0] = contiguous_strides(&partials.shape);
+        crate::profiler::IoTypes {
+            inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
+            outputs: std::iter::once(partials.clone()).chain(extra).collect(),
+            input_strides: step.input_strides(),
+            output_strides,
+        }
     });
     let kernel = first(format!("{op}_{layout}_{dtype}"));
     pass(
@@ -341,8 +344,11 @@ fn consecutive(
         name,
     )?;
     let kernel = last.map_or_else(|| format!("{op}_{layout}_{accum}"), str::to_owned);
-    crate::profiler::next_launch(launches.1, || {
-        (vec![partials.clone()], vec![step.output.1.clone()])
+    crate::profiler::next_launch(launches.1, || crate::profiler::IoTypes {
+        inputs: vec![partials.clone()],
+        outputs: vec![step.output.1.clone()],
+        input_strides: vec![contiguous_strides(&partials.shape)],
+        output_strides: step.output_strides()[..1].to_vec(),
     });
     pass(
         kernel,

@@ -241,10 +241,12 @@ pub(crate) fn encode_linear_cross_entropy(
     let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
     let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
     crate::profiler::next_launch("linear_cross_entropy (partials)", || {
-        (
-            step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
-            vec![partials.clone()],
-        )
+        crate::profiler::IoTypes {
+            inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
+            outputs: vec![partials.clone()],
+            input_strides: step.input_strides(),
+            output_strides: vec![contiguous_strides(&partials.shape)],
+        }
     });
     launch(
         &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
@@ -262,7 +264,12 @@ pub(crate) fn encode_linear_cross_entropy(
         step.label,
     )?;
     crate::profiler::next_launch("linear_cross_entropy (combine)", || {
-        (vec![partials.clone()], vec![step.output.1.clone()])
+        crate::profiler::IoTypes {
+            inputs: vec![partials.clone()],
+            outputs: vec![step.output.1.clone()],
+            input_strides: vec![contiguous_strides(&partials.shape)],
+            output_strides: step.output_strides(),
+        }
     });
     launch(
         "lce_combine",

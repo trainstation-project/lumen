@@ -1086,6 +1086,96 @@ def test_hand_written_gated_backward_merges_as_autodiffs():
     assert not any("transpose" in label for label in labels), labels
 
 
+class ProjectedAttention(lumen.nn.Module):
+    """A projection, then attention of its q, k and v (bfloat16 matmuls):
+    the projection so its input needs a gradient."""
+
+    w0: lumen.Tensor
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+    def __call__(self, inp, batch, heads):
+        x = F.matmul(inp, self.w0.t().bfloat16(), "float32", "bfloat16")
+        tokens, dim = x.shape
+        q, k, v = (
+            F.matmul(x, w.t().bfloat16(), "float32", "bfloat16")
+            .reshape(batch, tokens // batch, heads, dim // heads)
+            .transpose(-2, -3)
+            for w in (self.wq, self.wk, self.wv)
+        )
+        s = F.matmul(q, k.transpose(-1, -2), "float32", "float32")
+        return F.matmul(F.softmax(s, dim=-1).bfloat16(), v, "float32", "float32")
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "deterministic"])
+def test_qkv_backward_merges_its_gradients_dots(deterministic):
+    """Attention's q, k and v projections' backward (``gated_backward``, a
+    group of three): its input's gradient one dot of ``[dq | dk | dv]``
+    and the forward's weight block (K three times as long), its weights'
+    gradients one dot. Deterministic (dQ its own kernel), ``[dq | dk |
+    dv]`` written in place by the flash attention backward's kernels, each
+    gradient cast to bfloat16 and laid out as the dots read it as it is
+    stored: no concatenate, no kernel between them and the dots. Else
+    (dQ added atomically, in float32) written side by side by the kernel
+    casting them. The gradients the CPU's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    batch, seq, d, heads = 4, 32, 64, 4
+    m = batch * seq
+    values = {name: rand(d, d, seed=k) / 8 for k, name in enumerate(("w0", "wq", "wk", "wv"))}
+    x = rand(m, d, seed=4)
+
+    def step(model, x):
+        y = model(x.bfloat16(), batch, heads)
+        F.sum(y * y).backward()
+        return model.w0.grad, model.wq.grad, model.wk.grad, model.wv.grad
+
+    before = lumen.config.compiler.deterministic
+    lumen.config.compiler.deterministic = deterministic
+    try:
+        grads = {}
+        for device in ("cpu", "mps"):
+            model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
+            f = lumen.compile(step, device=device)
+            f(model, meta(m, d))
+            model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+            grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+        # Its kernels profiled (as compiled for these flags).
+        with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+            f(model, lumen.from_numpy(x))
+        model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
+        graph = lumen.make_graph(step)(model, meta(m, d))
+        steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    finally:
+        lumen.config.compiler.deterministic = before
+    for got, want in zip(grads["mps"], grads["cpu"]):
+        assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    labels = [s["label"] for s in steps]
+    merged = [s for s in steps if s["label"].startswith("3x dot_general")]
+    # The forward ([m, 3d]), the weights' gradients ([3d, d]) and the
+    # input's ([m, d], of [m, 3d] and the block).
+    assert sorted(s["output"][2] for s in merged) == sorted([[m, 3 * d], [3 * d, d], [m, d]]), labels
+    (dx,) = [s for s in merged if s["output"][2] == [m, d]]
+    assert [i[2] for i in dx["inputs"]] == [[m, 3 * d], [3 * d, d]], labels
+    assert "concatenate" not in labels, labels
+    if deterministic:
+        backward = [s for s in steps if s["label"].startswith("flash_attention_backward")]
+        assert len(backward) == 2 and all(s["output"][1:] == ("bfloat16", [m, d]) for s in backward), labels
+        # Both writing in one buffer, which the dots read: profiled at its
+        # strides, a row of it 3d elements.
+        assert backward[0]["output"][0] == backward[1]["output"][0] == dx["inputs"][0][0], steps
+        written = [e for e in prof.events() if e["name"].startswith("flash_attention_backward")]
+        assert [e["output_strides"] for e in written] == [[[3 * d, 1]] * 2, [[3 * d, 1]]], written
+        # The dots right after them: nothing copies, casts or lays out.
+        at = labels.index(backward[-1]["label"])
+        assert all(label.startswith("3x dot_general") for label in labels[at + 1 : at + 3]), labels
+        assert not any("concatenate" in label or "transpose" in label for label in labels), labels
+
+
 class _SavedNarrowMLP(lumen.autograd.Function):
     """A gated MLP saving its gate and up projections rounded to bfloat16
     (``examples/transformer.py``'s): its backward reads them so."""

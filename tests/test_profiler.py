@@ -249,6 +249,34 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
 
 
 @pytest.mark.mps
+def test_steps_record_their_strides(tmp_path):
+    """With record_shapes each plan step records the strides its kernel
+    reads its inputs and writes its outputs at: a slice a dot reads in
+    place at its operand's, the rest contiguous. Its kernels on the device
+    carry them too, and the trace has them (PyTorch's ``Input Strides``)."""
+    try:
+        a = lumen.ones([4, 8], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    b = lumen.ones([4, 16], device="mps")
+    f = lumen.compile(lambda a, b: (a[:, 2:6] @ b) * 2.0)
+    f(a, b)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(a, b)
+        lumen.mps.synchronize()
+    (dot,) = [e for e in prof.events() if e["kind"] == "op" and e["name"].startswith("dot_general")]
+    read = {shape[1]: strides for (_, shape), strides in zip(dot["inputs"], dot["input_strides"])}
+    assert read == {4: [8, 1], 16: [16, 1]} and dot["output_strides"] == [[16, 1]]
+    (kernel,) = [e for e in prof.events() if e["kind"] == "gpu" and e["parent"] == dot["id"]]
+    assert kernel["input_strides"] == dot["input_strides"]
+    path = tmp_path / "trace.json"
+    prof.export_chrome_trace(str(path))
+    trace = json.loads(path.read_text())
+    (traced,) = [e for e in trace["traceEvents"] if e.get("cat") == "cpu_op" and e["name"] == dot["name"]]
+    assert traced["args"]["Input Strides"] == dot["input_strides"]
+
+
+@pytest.mark.mps
 def test_split_reduction_launches_record_their_own_types():
     """A split reduction is two launches, each profiled with what it reads
     and writes: the step's input to partials (of the accumulation dtype),

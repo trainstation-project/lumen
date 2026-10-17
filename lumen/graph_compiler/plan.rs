@@ -62,6 +62,11 @@ pub struct Step {
     /// A multi-output fusion's other outputs, in order (its
     /// [`Primitive::FusionOutput`]s, which have no steps).
     pub extra_outputs: Vec<(Buffer, TensorType)>,
+    /// Each output's (the first, then the others) view of its buffer, if
+    /// it writes one (an in-place concatenate's operand, at its place in
+    /// the result: [`PlanOptions::concats`]), else the whole buffer,
+    /// contiguous.
+    pub output_views: Vec<Option<View>>,
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
@@ -72,6 +77,35 @@ pub struct Step {
     /// node's, or a fusion's members' (through fusions in it), each once,
     /// in order.
     pub sources: Vec<(&'static str, u32)>,
+}
+
+impl Step {
+    /// Each input's strides as its kernel reads it, in elements: its
+    /// view's, else contiguous.
+    pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
+        let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {
+            Some(view) => view.strides.clone(),
+            None => contiguous_strides(&ty.shape),
+        };
+        self.inputs
+            .iter()
+            .zip(&self.views)
+            .map(|(i, v)| strides(i, v))
+            .collect()
+    }
+
+    /// Each output's (the first, then the others) strides as its kernel
+    /// writes it, in elements: its view's, else contiguous.
+    pub(crate) fn output_strides(&self) -> Vec<Vec<usize>> {
+        std::iter::once(&self.output)
+            .chain(&self.extra_outputs)
+            .zip(&self.output_views)
+            .map(|((_, ty), view)| match view {
+                Some(view) => view.strides.clone(),
+                None => contiguous_strides(&ty.shape),
+            })
+            .collect()
+    }
 }
 
 /// The `record_function` ranges a plan's steps were traced in, open while
@@ -160,6 +194,29 @@ pub struct PlanOptions {
     /// a donated output only once no step reads its block either (an
     /// optimizer's update after the merged dots reading the old weights).
     pub blocks: Vec<(usize, Vec<usize>)>,
+    /// Concatenates the plan does not compute: each operand written in
+    /// its place in the result ([`slot`]) by the step computing it, whose
+    /// kernel writes it there. The device compiler picks them: those whose
+    /// operands' kernels write through such views, each read by the
+    /// concatenate alone.
+    pub concats: Vec<Var>,
+}
+
+/// Where operand `k` of concatenate `node` is in its result: the element
+/// offset of its first element and its strides (the result's).
+pub(crate) fn slot(graph: &Graph, node: &Node, k: usize) -> View {
+    let Primitive::Concatenate { dimension } = node.primitive else {
+        unreachable!("a concatenate")
+    };
+    let strides = contiguous_strides(&graph.type_of(node.output).shape);
+    let before: usize = node.inputs[..k]
+        .iter()
+        .map(|&v| graph.type_of(v).shape[dimension])
+        .sum();
+    View {
+        offset: before * strides[dimension],
+        strides,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,8 +356,20 @@ impl Plan {
         // or an index) and they are no output's, nor the caller's: an
         // input's (a donated input's: below).
         let callers = |r: Var| graph.inputs().contains(&r);
+        let in_place = |node: &Node| {
+            matches!(node.primitive, Primitive::Concatenate { .. })
+                && options.concats.contains(&node.output)
+        };
+        // An in-place concatenate's operands: written in its result, by
+        // their own steps.
+        let mut placed = vec![false; n];
+        for node in graph.nodes().iter().filter(|node| in_place(node)) {
+            node.inputs.iter().for_each(|&v| placed[v] = true);
+        }
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
+        // Where each in-place concatenate's operand is written in it.
+        let mut written_at: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
             // A wait's value is its operand's memory too (in place), but it
             // is a step: the host waits there.
@@ -376,6 +445,8 @@ impl Plan {
             // buffers in no order it says).
             let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(NEURAL_ENGINE));
             let step = !neural_engine
+                && !in_place(node)
+                && !placed[node.output]
                 && !matches!(
                     node.primitive,
                     Primitive::DynamicUpdateSlice
@@ -408,6 +479,16 @@ impl Plan {
                     }
                 }
             }
+            if in_place(node) {
+                for (k, &v) in node.inputs.iter().enumerate() {
+                    assert!(
+                        root[v] == v,
+                        "an in-place concatenate's operand in its own memory"
+                    );
+                    root[v] = root[node.output];
+                    written_at[v] = Some(slot(graph, node, k));
+                }
+            }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
                 && options.views.contains(&node.output)
             {
@@ -429,6 +510,7 @@ impl Plan {
                     && !is_reshape(&node.primitive)
                     && !is_view(node.output)
                     && !is_fusion_output(&node.primitive)
+                    && !in_place(node)
             })
             .collect();
 
@@ -474,8 +556,10 @@ impl Plan {
         for node in graph.nodes().iter().filter(|n| live[n.output]) {
             if let Primitive::FusionOutput { index, .. } = node.primitive {
                 let fusion = node.inputs[0];
-                first[node.output] = first[root[fusion]];
-                last[node.output] = last[node.output].max(first[node.output]);
+                // Its own value, or an in-place concatenate's.
+                let r = root[node.output];
+                first[r] = first[r].min(first[root[fusion]]);
+                last[r] = last[r].max(first[r]);
                 extra[fusion].push((index, node.output));
             }
         }
@@ -609,6 +693,14 @@ impl Plan {
                     outputs.sort_unstable();
                     outputs.into_iter().map(|(_, v)| slot(v)).collect()
                 },
+                output_views: {
+                    let mut outputs = extra[node.output].clone();
+                    outputs.sort_unstable();
+                    std::iter::once(node.output)
+                        .chain(outputs.into_iter().map(|(_, v)| v))
+                        .map(|v| written_at[v].clone())
+                        .collect()
+                },
                 scratch,
                 scope: node.scope,
                 sources: {
@@ -628,6 +720,7 @@ impl Plan {
                 views: vec![view[v].clone()],
                 output: (Buffer::Output(k), ty(v)),
                 extra_outputs: Vec::new(),
+                output_views: vec![None],
                 scratch: None,
                 scope: &[],
                 sources: Vec::new(),
@@ -1087,6 +1180,7 @@ impl Plan {
                     .collect()
             });
             record.accum(|| step.primitive.accum_dtypes(step.output.1.dtype));
+            record.strides(|| (step.input_strides(), step.output_strides()));
             // A view's first element is past its buffer's; a multi-output
             // fusion's other outputs follow its inputs.
             let args: Vec<*const u8> = step

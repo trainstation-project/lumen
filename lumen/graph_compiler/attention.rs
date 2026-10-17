@@ -154,8 +154,8 @@ pub(crate) enum Score {
 pub(crate) struct Backward {
     /// Where dV, dK and dQ (`[batch..., Sk, Hv]`, `[batch..., Sk, H]`,
     /// `[batch..., Sq, H]`, float32) are written, each if computed: the
-    /// node (its dot, or the dot's transpose, which the kernel writes in
-    /// that layout) and its strides.
+    /// node (its dot, or the transposes, reshapes and cast after it, which
+    /// the kernel writes in that layout and dtype) and its strides.
     pub dv_out: Option<(usize, Access)>,
     pub dk_out: Option<(usize, Access)>,
     pub dq_out: Option<(usize, Access)>,
@@ -191,7 +191,21 @@ pub(crate) const MAX_BACKWARD_HEAD: usize = 128;
 
 /// The attention backward a fusion's `body` computes, if it is one.
 pub(crate) fn backward_of_body(body: &Graph) -> Option<Backward> {
-    let m = Matcher::new(body);
+    backward_of_body_into(body, HashMap::new())
+}
+
+/// [`backward_of_body`], its outputs at `views` (by position: the offset
+/// and strides each is written at, in a larger buffer), if it can write
+/// them there.
+pub(crate) fn backward_of_body_into(
+    body: &Graph,
+    views: HashMap<usize, (usize, Vec<usize>)>,
+) -> Option<Backward> {
+    let mut m = Matcher::new(body);
+    m.views = views
+        .into_iter()
+        .map(|(k, view)| (body.outputs()[k], view))
+        .collect();
     (0..body.nodes().len()).find_map(|i| m.backward(i))
 }
 
@@ -247,12 +261,21 @@ pub(crate) fn fuse_backward(
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
+    // dQ added atomically: in float32, as its dot writes it (or its
+    // transpose).
+    let mut plain = Matcher::new(graph);
+    plain.chains = false;
     let nodes = graph.nodes();
     // Each fusion: where it goes, its outputs (the dots'), its inputs.
     let mut fusions: Vec<(usize, Vec<usize>, Vec<Var>)> = Vec::new();
     for i in 0..nodes.len() {
         let Some(b) = m.backward(i) else { continue };
-        // The nodes they write: the dots, or their transposes.
+        let together = together(&b);
+        let Some(b) = (if together { plain.backward(i) } else { Some(b) }) else {
+            continue;
+        };
+        // The nodes they write: the dots, or the transposes, reshapes and
+        // cast after them.
         let (Some((dv, _)), Some((dk, _)), Some((dq, _))) = (&b.dv_out, &b.dk_out, &b.dq_out)
         else {
             continue;
@@ -279,7 +302,7 @@ pub(crate) fn fuse_backward(
                 .then_some(at)
         };
         let all = vec![dv, dk, dq];
-        let groups = match (together(&b), read_after(&all)) {
+        let groups = match (together, read_after(&all)) {
             (true, Some(_)) => vec![all],
             _ => vec![vec![dv, dk], vec![dq]],
         };
@@ -522,6 +545,14 @@ struct Matcher<'a> {
     readers: Vec<Vec<usize>>,
     output: Vec<bool>,
     live: Vec<bool>,
+    /// Whether a backward's gradients are written through the transposes,
+    /// reshapes and cast after them ([`Self::written`]): not where its
+    /// kernel adds dQ atomically, in float32 (zeroed whole first).
+    chains: bool,
+    /// The values written into a larger buffer's part (an in-place
+    /// concatenate's operands): the offset and strides they are written
+    /// at, in elements.
+    views: HashMap<Var, (usize, Vec<usize>)>,
 }
 
 impl<'a> Matcher<'a> {
@@ -621,6 +652,8 @@ impl<'a> Matcher<'a> {
             }
         }
         Matcher {
+            chains: true,
+            views: HashMap::new(),
             graph,
             producer,
             readers,
@@ -965,11 +998,14 @@ impl<'a> Matcher<'a> {
         {
             return None;
         }
-        let out = |d: Option<usize>| d.map(|d| self.written(d, nb));
+        let out = |d: Option<usize>| match d {
+            Some(d) => self.written(d, nb, self.chains).map(Some),
+            None => Some(None),
+        };
         Some(Backward {
-            dv_out: out(dv),
-            dk_out: out(dk),
-            dq_out: out(dq),
+            dv_out: out(dv)?,
+            dk_out: out(dk)?,
+            dq_out: out(dq)?,
             q,
             k,
             v,
@@ -990,28 +1026,69 @@ impl<'a> Matcher<'a> {
     }
 
     /// Where a kernel writes dot `i`'s value (`[batch..., rows, cols]`):
-    /// as it is, or as its transpose if that is its only reader (the node
-    /// written, and its strides).
-    fn written(&self, i: usize, nb: usize) -> (usize, Access) {
+    /// as it is, or as its transpose if that is its only reader; with
+    /// `chain` (a backward's), through the transposes, reshapes and one
+    /// cast after it, each its value's only reader (as its readers take it:
+    /// `[dq | dk | dv]`'s parts, in the operands' dtype), the cast as it
+    /// stores each element. The node written, and its strides: its value's
+    /// [`Self::views`], if any, else contiguous.
+    fn written(&self, i: usize, nb: usize, chain: bool) -> Option<(usize, Access)> {
+        use Primitive::*;
         let nodes = self.graph.nodes();
-        let o = nodes[i].output;
-        let (root, perm) = match self.readers[o].as_slice() {
-            [r] if !self.output[o] => match &nodes[*r].primitive {
-                Primitive::Transpose { permutation } => (*r, permutation.clone()),
-                _ => (i, (0..nb + 2).collect()),
-            },
-            _ => (i, (0..nb + 2).collect()),
+        let mut path = vec![i];
+        let mut cast = false;
+        loop {
+            let o = nodes[*path.last().expect("the dot")].output;
+            let r = match self.readers[o][..] {
+                [r] if !self.output[o] && (chain || path.len() == 1) => r,
+                _ => break,
+            };
+            match &nodes[r].primitive {
+                Transpose { .. } => {}
+                Reshape { .. } if chain => {}
+                Cast { new_dtype } if chain && !cast && new_dtype.is_float() => cast = true,
+                _ => break,
+            }
+            path.push(r);
+        }
+        let root = *path.last().expect("the dot");
+        let value = nodes[root].output;
+        let (offset, strides) = match self.views.get(&value) {
+            Some(view) => view.clone(),
+            None => (0, contiguous_strides(&self.graph.type_of(value).shape)),
         };
-        let strides = contiguous_strides(&self.graph.type_of(nodes[root].output).shape);
-        let stride = |d: usize| strides[perm.iter().position(|&p| p == d).expect("a permutation")];
+        // Each dimension's stride, back from the value written to the dot's.
+        let mut dims: Vec<(usize, usize)> = strides.into_iter().map(|s| (s, 1)).collect();
+        for &k in path[1..].iter().rev() {
+            let node = &nodes[k];
+            dims = match &node.primitive {
+                Transpose { permutation } => {
+                    let mut operand = vec![(0, 1); dims.len()];
+                    for (d, &p) in permutation.iter().enumerate() {
+                        operand[p] = dims[d];
+                    }
+                    operand
+                }
+                Reshape { .. } => {
+                    let from = &self.graph.type_of(node.output).shape;
+                    let shape = &self.graph.type_of(node.inputs[0]).shape;
+                    let operand = reshaped(from, &dims, shape)?;
+                    operand
+                        .iter()
+                        .all(|&(_, div)| div == 1)
+                        .then_some(operand)?
+                }
+                _ => dims,
+            };
+        }
         let out = Access {
-            base: nodes[root].output,
-            offset: 0,
-            batch: (0..nb).map(|d| (stride(d), 1)).collect(),
-            row: stride(nb),
-            col: stride(nb + 1),
+            base: value,
+            offset,
+            batch: dims[..nb].to_vec(),
+            row: dims[nb].0,
+            col: dims[nb + 1].0,
         };
-        (root, out)
+        Some((root, out))
     }
 
     /// The scores `x` back to their dot (its node): the casts, the scale
@@ -1232,7 +1309,7 @@ impl<'a> Matcher<'a> {
             return None;
         }
         // The output, [batch..., Sq, Hv], or its transpose (the only reader).
-        let (root, out) = self.written(i, nb);
+        let (root, out) = self.written(i, nb, false)?;
         Some(Attention {
             root,
             q,

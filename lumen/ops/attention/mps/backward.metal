@@ -6,6 +6,8 @@ template <typename T,
           bool DQ,
           typename Ix,
           typename Score,
+          typename OK,
+          typename OV,
           typename Drop = NoDropout>
 inline void flash_attention_dkdv(device const T *q,
                                  device const T *k,
@@ -13,8 +15,8 @@ inline void flash_attention_dkdv(device const T *q,
                                  device const T *g,
                                  device const float *lse,
                                  device const float *delta,
-                                 device float *dk,
-                                 device float *dv,
+                                 device OK *dk,
+                                 device OV *dv,
                                  device atomic_float *dq,
                                  Ix ix,
                                  uint sq,
@@ -149,25 +151,33 @@ inline void flash_attention_dkdv(device const T *q,
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
             uint d = c * 8 + fc;
-            dk[row * Ix::DK_ROW + d * Ix::DK_COL] = frag(dkm[c]).x;
-            dk[row * Ix::DK_ROW + (d + 1) * Ix::DK_COL] = frag(dkm[c]).y;
+            dk[row * Ix::DK_ROW + d * Ix::DK_COL] = convert_value<OK>(frag(dkm[c]).x);
+            dk[row * Ix::DK_ROW + (d + 1) * Ix::DK_COL] = convert_value<OK>(frag(dkm[c]).y);
         }
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
             uint d = c * 8 + fc;
-            dv[row * Ix::DV_ROW + d * Ix::DV_COL] = frag(dvm[c]).x;
-            dv[row * Ix::DV_ROW + (d + 1) * Ix::DV_COL] = frag(dvm[c]).y;
+            dv[row * Ix::DV_ROW + d * Ix::DV_COL] = convert_value<OV>(frag(dvm[c]).x);
+            dv[row * Ix::DV_ROW + (d + 1) * Ix::DV_COL] = convert_value<OV>(frag(dvm[c]).y);
         }
     }
 }
 
-template <typename T, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Score, typename Drop = NoDropout>
+template <typename T,
+          uint D,
+          uint DV,
+          uint BK,
+          bool CAUSAL,
+          typename Ix,
+          typename Score,
+          typename OQ,
+          typename Drop = NoDropout>
 inline void flash_attention_dq(device const T *q,
                                device const T *k,
                                device const T *v,
                                device const T *g,
                                device const float *lse,
                                device const float *delta,
-                               device float *dq,
+                               device OQ *dq,
                                Ix ix,
                                uint sq,
                                uint sk,
@@ -257,8 +267,8 @@ inline void flash_attention_dq(device const T *q,
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
             uint d = c * 8 + fc;
-            dq[row * Ix::DQ_ROW + d * Ix::DQ_COL] = frag(dqm[c]).x;
-            dq[row * Ix::DQ_ROW + (d + 1) * Ix::DQ_COL] = frag(dqm[c]).y;
+            dq[row * Ix::DQ_ROW + d * Ix::DQ_COL] = convert_value<OQ>(frag(dqm[c]).x);
+            dq[row * Ix::DQ_ROW + (d + 1) * Ix::DQ_COL] = convert_value<OQ>(frag(dqm[c]).y);
         }
     }
 }

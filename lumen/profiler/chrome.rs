@@ -83,10 +83,25 @@ fn types_json(types: &[TensorType]) -> (String, String) {
 
 fn types_args(e: &Event) -> String {
     let mut args = String::new();
-    for (side, types) in [("Input", &e.inputs), ("Output", &e.outputs)] {
+    let sides = [
+        ("Input", &e.inputs, &e.input_strides),
+        ("Output", &e.outputs, &e.output_strides),
+    ];
+    for (side, types, strides) in sides {
         if !types.is_empty() {
             let (dims, dtypes) = types_json(types);
             let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
+        }
+        // PyTorch's key for them.
+        if !strides.is_empty() {
+            let strides: Vec<String> = strides
+                .iter()
+                .map(|s| {
+                    let s: Vec<String> = s.iter().map(|n| n.to_string()).collect();
+                    format!("[{}]", s.join(","))
+                })
+                .collect();
+            let _ = write!(args, ",\"{side} Strides\":[{}]", strides.join(","));
         }
     }
     if !e.accum.is_empty() {

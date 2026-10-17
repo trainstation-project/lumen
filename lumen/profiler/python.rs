@@ -109,7 +109,9 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
             .collect()
     };
     d.set_item("inputs", types(&e.inputs))?;
+    d.set_item("input_strides", &e.input_strides)?;
     d.set_item("outputs", types(&e.outputs))?;
+    d.set_item("output_strides", &e.output_strides)?;
     let accum: Vec<&'static str> = e.accum.iter().map(|&d| dtype_name(d)).collect();
     d.set_item("accum", accum)?;
     d.set_item("bytes", e.bytes)?;
