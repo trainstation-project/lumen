@@ -640,6 +640,66 @@ pub(crate) fn fuse(
         }
     };
 
+    // A dot's value, or its epilogue's (a residual added), whose rows one
+    // row fusion normalizes, read elsewhere only after it (the residual
+    // stream, added to again): computed in that fusion, the rows in its
+    // kernel's epilogue (`codegen::row_dot`: rows inside one tile), the
+    // value another of its outputs if read elsewhere; where it can (else
+    // the dot's step stays, its value read).
+    let mut fusions = fusions;
+    for d in 0..nodes.len() {
+        let dot = matches!(nodes[d].primitive, Primitive::DotGeneral { .. });
+        if !config.contraction_epilogues || !dot || !live[d] {
+            continue;
+        }
+        // The step computing it: the dot's, or its epilogue's end's.
+        let p = dot_end[d].unwrap_or(d);
+        let v = nodes[p].output;
+        if !root[p] || host[p].is_some() {
+            continue;
+        }
+        let reading: Vec<usize> = (0..nodes.len())
+            .filter(|&f| {
+                fusions[f]
+                    .as_ref()
+                    .is_some_and(|(_, reads)| reads.contains(&v))
+                    && row_root(f)
+            })
+            .collect();
+        let [f] = reading[..] else { continue };
+        let fits = fusions[f]
+            .as_ref()
+            .is_some_and(|(members, _)| users[v].iter().all(|&u| members.contains(&u) || u > f));
+        if !fits {
+            continue;
+        }
+        // Read elsewhere too (or an output): written by its kernel, as are
+        // the values its epilogue writes.
+        let elsewhere = is_output[v]
+            || fusions[f]
+                .as_ref()
+                .is_some_and(|(members, _)| users[v].iter().any(|u| !members.contains(u)));
+        let before = host.clone();
+        root[p] = false;
+        for h in host.iter_mut().filter(|h| **h == Some(p)) {
+            *h = Some(f);
+        }
+        if elsewhere {
+            host[p] = Some(f);
+        }
+        let hosted = |q: usize| (root[q] || host[q].is_some()) && host[q] != Some(f);
+        let starts: Vec<usize> = std::iter::once(f)
+            .chain((0..nodes.len()).filter(|&h| host[h] == Some(f)))
+            .collect();
+        let (members, reads) = members(graph, &producer, hosted, &starts);
+        let others: Vec<Var> = starts[1..].iter().map(|&h| nodes[h].output).collect();
+        let body = body(graph, &members, &reads, nodes[f].output, &others);
+        match reads.len() <= MAX_INPUTS && super::codegen::row_dot(&body).is_some() {
+            true => fusions[f] = Some((members, reads)),
+            false => (root[p], host) = (true, before),
+        }
+    }
+
     let mut fused = Graph::new();
     let mut var: Vec<Var> = vec![usize::MAX; n];
     for &v in graph.inputs() {

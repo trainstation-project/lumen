@@ -94,13 +94,10 @@ fn fuses_elementwise_and_layout_chains() {
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
     // The first matmul with relu (its max and zero) in its epilogue; the
-    // second (read by both of the softmax's reductions: no epilogue); then
-    // the softmax written out, a chain of two diamonds (its max, then its
-    // sum): one row kernel.
-    assert_eq!(
-        fused_primitives(&mlp(), &inputs),
-        ["fusion", "dot_general", "fusion"]
-    );
+    // second with the softmax written out, a chain of two diamonds (its
+    // max, then its sum) over rows of 3, inside one of its tiles: its
+    // kernel normalizes them (`codegen::row_dot`).
+    assert_eq!(fused_primitives(&mlp(), &inputs), ["fusion", "fusion"]);
 }
 
 #[test]

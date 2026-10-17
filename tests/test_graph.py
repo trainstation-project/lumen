@@ -752,12 +752,11 @@ def test_attention_projections_merge_into_one_matmul():
         lumen.config.compiler.reset()
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
-    assert [s["primitive"] for s in steps].count("dot_general") == 3
-    assert [s["label"] for s in steps if s["primitive"] == "dot_general"] == [
-        "3x dot_general",
-        "dot_general",
-        "dot_general",
-    ]
+    # The scores' softmax in their matmul's kernel (rows of 16 inside one
+    # tile).
+    dots = [s["label"] for s in steps if s["label"].startswith(("3x dot_general", "dot_general"))]
+    assert len(dots) == 3 and dots[0] == "3x dot_general" and dots[2] == "dot_general", dots
+    assert dots[1].startswith("dot_general → reduce_max") and dots[1].endswith("div"), dots
     assert "slice" not in [s["primitive"] for s in steps]
     views = [v for s in steps for v in s["views"] if v is not None]
     assert views == [(0, [96, 1]), (32, [96, 1]), (64, [96, 1])]
@@ -1990,14 +1989,19 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
         assert ("linear_cross_entropy" in labels) == (reduce == "squared"), labels
         if reduce == "squared":
             sizes = []
-        # Each chunk: its logits (a matmul), then its losses and gradient.
+        # Each chunk: its logits (a matmul), then its losses and gradient;
+        # one kernel where a row of logits fits a matmul tile (the logits
+        # never in memory).
         logits = [s["output"][2][0] for s in steps if s["label"] == "dot_general" and s["output"][2][1:] == [vocab]]
         rows = [
-            s["output"][2][0]
+            s
             for s in steps
             if s["output"][2][1:] == [vocab] and [o[2] for o in s.get("extra_outputs", [])] == [s["output"][2][:1]]
         ]
-        assert sorted(logits) == sorted(sizes) and sorted(rows) == sorted(sizes), labels
+        one = vocab <= 64
+        assert sorted(logits) == ([] if one else sorted(sizes)), labels
+        assert sorted(s["output"][2][0] for s in rows) == sorted(sizes), labels
+        assert all(("dot_general" in s["label"]) == one for s in rows), labels
         if vocab > d:
             assert plan.workspace_bytes < baseline.workspace_bytes / 2, (
                 plan.workspace_bytes,
@@ -2204,6 +2208,56 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
     finally:
         lumen.config.compiler.reset()
     np.testing.assert_array_equal(fused, unfused)
+
+
+def _rms_block(x, wo, r, norm, w1):
+    """A transformer block's residual, RMS norm and next projection: the
+    residual stream ``x`` returned too, as a block reads it again."""
+    x = r + F.matmul(x.bfloat16(), wo.t().bfloat16(), "float32", "float32")
+    h = F.rms_norm(x, x.shape[-1], norm).bfloat16()
+    return F.matmul(h, w1.t().bfloat16(), "float32", "float32"), x
+
+
+def _layer_norm_block(x, wo, r, norm, w1):
+    x = r + F.matmul(x.bfloat16(), wo.t().bfloat16(), "float32", "float32")
+    c = x - F.mean(x, -1, keepdim=True)
+    h = (c / F.sqrt(F.mean(c * c, -1, keepdim=True) + 1e-5) * norm).bfloat16()
+    return F.matmul(h, w1.t().bfloat16(), "float32", "float32")
+
+
+def _softmax_block(x, wo, r, norm, w1):
+    x = r + F.matmul(x.bfloat16(), wo.t().bfloat16(), "float32", "float32")
+    return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
+@pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128)])
+def test_matmul_epilogue_normalizes_its_rows(f, m, d):
+    """A normalization of a matmul's rows (a residual added first), rows no
+    wider than its 64x64 tiles: the matmul's kernel normalizes each tile's
+    rows from its accumulators (CODA's tile reductions), one kernel, the
+    product never in memory, its residual stream written too where it is
+    read again; exactly the unfused plan's result. Wider rows: a row
+    kernel of their own, as before."""
+    rng = np.random.default_rng(0)
+    shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
+    try:
+        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32) / 4).to("mps") for s in shapes]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
+    rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
+    assert len(rows) == (d <= 64), [s["label"] for s in steps]
+    flatten = lambda out: [lumen.to_numpy(t) for t in (out if isinstance(out, tuple) else [out])]
+    fused = flatten(lumen.compile(f)(*args))
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        unfused = flatten(lumen.compile(f)(*args))
+    finally:
+        lumen.config.compiler.reset()
+    for got, want in zip(fused, unfused):
+        np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.mps
