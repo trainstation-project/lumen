@@ -1982,11 +1982,18 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         (true, false) => &["dv", "dk"],
         _ => &["dq"],
     };
+    // Each output's dtype, as written (cast as it is stored).
+    let stored = |out: &Option<(usize, Access)>| {
+        let (node, _) = out.as_ref().expect("a computed gradient");
+        metal_type(body.type_of(body.nodes()[*node].output).dtype)
+    };
     for (k, out) in outs.iter().enumerate() {
         // dQ with dK and dV: added atomically.
-        let ty = match dkdv && *out == "dq" {
-            true => "atomic_float",
-            false => "float",
+        let ty = match *out {
+            "dq" if dkdv => "atomic_float",
+            "dq" => stored(&b.dq_out),
+            "dk" => stored(&b.dk_out),
+            _ => stored(&b.dv_out),
         };
         params.push(format!("device {ty} *{out} [[buffer({})]]", n + k));
     }
@@ -2014,23 +2021,27 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         true => backward_block_with_dq(b).expect("a fused backward fits"),
         false => backward_block(b),
     };
+    let (dk_t, dv_t, dq_t) = match (dkdv, dq) {
+        (true, _) => (stored(&b.dk_out), stored(&b.dv_out), ""),
+        (false, _) => ("", "", stored(&b.dq_out)),
+    };
     let call = match (dkdv, dq) {
         (true, true) => formatdoc!(
             "
             threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}], ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];
             threadgroup float lses[{rows}], deltas[{rows}];
-            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true, NAME_ix, NAME_score, {dk_t}, {dv_t}>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, ks, dss, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
         (true, false) => formatdoc!(
             "
             threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
             threadgroup float lses[{rows}], deltas[{rows}];
-            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false, NAME_ix, NAME_score, {dk_t}, {dv_t}>({q}, {k}, {v}, {g}, {lse}, {delta}, dk, dv, nullptr, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, qs, gs, lses, deltas, qs, qs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
         (false, _) => formatdoc!(
             "
             threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];
-            flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
+            flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal}, NAME_ix, NAME_score, {dq_t}>({q}, {k}, {v}, {g}, {lse}, {delta}, dq, NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale}, ks, vs, group.x, group.y, sg, lane, tid.y * 16 + tid.x, NAME_score(){drop_arg});"
         ),
     };
     let params = params.join(", ");

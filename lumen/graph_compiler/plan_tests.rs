@@ -425,6 +425,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
+        concats: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -494,6 +495,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
             scalars: Vec::new(),
             memory_limit: None,
             blocks: Vec::new(),
+            concats: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -642,6 +644,35 @@ fn custom_calls_mutate_in_place_where_they_can() {
     assert!(written.iter().zip(&operands).all(|(w, o)| w != o), "{plan}");
 }
 
+/// A concatenate computed in place (`concats`): no step of its own, each
+/// operand's step writing in its result's memory, alive from the first
+/// of them to the last step reading the result.
+#[test]
+fn in_place_concatenates_are_written_by_their_operands_steps() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[2, 3]));
+    let a = g.apply(Exp, &[x]).unwrap();
+    let b = g.apply(Neg, &[x]).unwrap();
+    let c = g.apply(Concatenate { dimension: 1 }, &[a, b]).unwrap();
+    let y = g.apply(Mul, &[c, c]).unwrap();
+    g.set_outputs(&[y]).unwrap();
+    let options = super::PlanOptions {
+        concats: vec![c],
+        ..Default::default()
+    };
+    let plan = Plan::compile_with(&g, &options);
+    let names: Vec<&str> = plan.steps().iter().map(|s| s.primitive.name()).collect();
+    assert_eq!(names, ["exp", "neg", "mul"], "{plan}");
+    let [exp, neg, mul] = plan.steps() else {
+        panic!("{plan}")
+    };
+    assert_eq!(exp.output.0, neg.output.0, "{plan}");
+    assert_eq!(mul.inputs[0].0, exp.output.0, "{plan}");
+    // Its place in the result: the second operand's 3 columns after the first's.
+    let view = super::plan::slot(&g, &g.nodes()[2], 1);
+    assert_eq!((view.offset, view.strides), (3, vec![6, 1]));
+}
+
 #[test]
 fn kernel_scratch_is_placed_in_the_workspace() {
     let mut g = Graph::new();
@@ -672,6 +703,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
+        concats: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];

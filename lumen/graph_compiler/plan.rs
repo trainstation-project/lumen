@@ -160,6 +160,29 @@ pub struct PlanOptions {
     /// a donated output only once no step reads its block either (an
     /// optimizer's update after the merged dots reading the old weights).
     pub blocks: Vec<(usize, Vec<usize>)>,
+    /// Concatenates the plan does not compute: each operand written in
+    /// its place in the result ([`slot`]) by the step computing it, whose
+    /// kernel writes it there. The device compiler picks them: those whose
+    /// operands' kernels write through such views, each read by the
+    /// concatenate alone.
+    pub concats: Vec<Var>,
+}
+
+/// Where operand `k` of concatenate `node` is in its result: the element
+/// offset of its first element and its strides (the result's).
+pub(crate) fn slot(graph: &Graph, node: &Node, k: usize) -> View {
+    let Primitive::Concatenate { dimension } = node.primitive else {
+        unreachable!("a concatenate")
+    };
+    let strides = contiguous_strides(&graph.type_of(node.output).shape);
+    let before: usize = node.inputs[..k]
+        .iter()
+        .map(|&v| graph.type_of(v).shape[dimension])
+        .sum();
+    View {
+        offset: before * strides[dimension],
+        strides,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +322,16 @@ impl Plan {
         // or an index) and they are no output's, nor the caller's: an
         // input's (a donated input's: below).
         let callers = |r: Var| graph.inputs().contains(&r);
+        let in_place = |node: &Node| {
+            matches!(node.primitive, Primitive::Concatenate { .. })
+                && options.concats.contains(&node.output)
+        };
+        // An in-place concatenate's operands: written in its result, by
+        // their own steps.
+        let mut placed = vec![false; n];
+        for node in graph.nodes().iter().filter(|node| in_place(node)) {
+            node.inputs.iter().for_each(|&v| placed[v] = true);
+        }
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
@@ -376,6 +409,8 @@ impl Plan {
             // buffers in no order it says).
             let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(NEURAL_ENGINE));
             let step = !neural_engine
+                && !in_place(node)
+                && !placed[node.output]
                 && !matches!(
                     node.primitive,
                     Primitive::DynamicUpdateSlice
@@ -408,6 +443,15 @@ impl Plan {
                     }
                 }
             }
+            if in_place(node) {
+                for &v in &node.inputs {
+                    assert!(
+                        root[v] == v,
+                        "an in-place concatenate's operand in its own memory"
+                    );
+                    root[v] = root[node.output];
+                }
+            }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
                 && options.views.contains(&node.output)
             {
@@ -429,6 +473,7 @@ impl Plan {
                     && !is_reshape(&node.primitive)
                     && !is_view(node.output)
                     && !is_fusion_output(&node.primitive)
+                    && !in_place(node)
             })
             .collect();
 
@@ -474,8 +519,10 @@ impl Plan {
         for node in graph.nodes().iter().filter(|n| live[n.output]) {
             if let Primitive::FusionOutput { index, .. } = node.primitive {
                 let fusion = node.inputs[0];
-                first[node.output] = first[root[fusion]];
-                last[node.output] = last[node.output].max(first[node.output]);
+                // Its own value, or an in-place concatenate's.
+                let r = root[node.output];
+                first[r] = first[r].min(first[root[fusion]]);
+                last[r] = last[r].max(first[r]);
                 extra[fusion].push((index, node.output));
             }
         }

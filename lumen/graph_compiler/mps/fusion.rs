@@ -100,12 +100,15 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// root's fusion has its reductions and inner nodes inside (a row kernel,
 /// `codegen.rs`), where any other reduction is a root.
 /// `scalars` are inputs a kernel takes by value (runtime scalars): `kernel`
-/// is told which of a body's inputs are. `config` says which of the
+/// is told which of a body's inputs are. `in_place` are concatenates (by
+/// node) computed in place (`super::in_place_concats`): left as they are,
+/// no kernel's. `config` says which of the
 /// fusions below to make (`reduction_epilogues`, `multi_output_fusion`).
 pub(crate) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
+    in_place: &[usize],
     config: &CompilerConfig,
     mut kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
@@ -138,7 +141,9 @@ pub(crate) fn fuse(
             }
         }
     }
-    let fusible: Vec<bool> = nodes.iter().map(|node| fusible(graph, node)).collect();
+    let fusible: Vec<bool> = (0..nodes.len())
+        .map(|i| fusible(graph, &nodes[i]) && !in_place.contains(&i))
+        .collect();
     // A row kernel's epilogue: its root extends to the elementwise
     // primitive reading it first (a norm computed in float32, then cast
     // back and scaled by its weight: one kernel). Read elsewhere too, after
@@ -863,11 +868,13 @@ impl<'a> Pass<MpsModule<'a>> for LoopFusion {
         let requested = m.kernels.len();
         let graph = loop {
             m.kernels.truncate(requested);
+            // Concatenates whose operands their kernels write in place.
+            let (in_place, _) = super::in_place_concats(&m.graph, &m.kernels);
             let kernels = &mut m.kernels;
             let mut kernel =
                 |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Loop(by_value.to_vec()));
             let vars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
-            let fused = fuse(&m.graph, &m.rows, &vars, config, &mut kernel);
+            let fused = fuse(&m.graph, &m.rows, &vars, &in_place, config, &mut kernel);
             let fused = match config.horizontal_fusion {
                 true => {
                     let vars: Vec<Var> = m.scalars.iter().map(|&i| fused.inputs()[i]).collect();

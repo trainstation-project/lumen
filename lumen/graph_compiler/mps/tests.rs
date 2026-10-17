@@ -23,6 +23,7 @@ fn fuse(g: &Graph) -> Graph {
         g,
         &super::diamonds::diamonds(g),
         &[],
+        &[],
         &config,
         |body, by_value| codegen::kernel(body, by_value, &config).0,
     )
@@ -985,6 +986,7 @@ fn dots_fuse_their_epilogue() {
     let unfused = fusion::fuse(
         &g,
         &super::diamonds::diamonds(&g),
+        &[],
         &[],
         &config,
         |body, by_value| codegen::kernel(body, by_value, &config).0,
