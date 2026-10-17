@@ -118,7 +118,7 @@ pub enum Primitive {
     /// start indices (the operands after it, as [`Primitive::DynamicSlice`]'s,
     /// clamped as its) (`lax.dynamic_update_slice`). Where nothing reads the
     /// operand after it, its value is the operand's buffer, the update written
-    /// there alone (in place: `graph/plan.rs`).
+    /// there alone (in place: `graph_compiler/plan.rs`).
     DynamicUpdateSlice,
     /// The operand's entries along `axis` that `indices` (its second
     /// operand: int32 or int64, any shape) pick: its shape with `axis`
@@ -175,7 +175,7 @@ pub enum Primitive {
     /// (its gradient's).
     LinearCrossEntropy,
     /// `body` run as one kernel, `name`: what a device's graph compiler
-    /// (`crate::compiler`) groups the primitives it fuses into. Its value is
+    /// (`crate::graph_compiler`) groups the primitives it fuses into. Its value is
     /// the body's first output; a body with more (a multi-output fusion)
     /// has each other one read by a [`Primitive::FusionOutput`].
     /// Profiled as `label`, its primitives' names joined by
@@ -192,7 +192,7 @@ pub enum Primitive {
         index: usize,
         ty: TensorType,
     },
-    /// A custom op (`lumen.ops.custom_op`), `label` its name: `kernel`, a
+    /// A custom op (`lumen.custom_op`), `label` its name: `kernel`, a
     /// function opaque to the compilers (by its handle, `graph/custom.rs`),
     /// reading its operands and writing those at `mutated` in place. Its
     /// value is `mutated[0]`'s new value; `mutated[k]`'s, a

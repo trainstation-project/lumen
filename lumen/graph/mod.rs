@@ -6,12 +6,9 @@
 //! each primitive computes.
 
 pub(crate) mod custom;
-pub mod plan;
 pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
-mod remat;
-mod schedule;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -19,8 +16,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
-pub use plan::{Plan, PlanOptions};
-pub(crate) use plan::{Source, Stage, Staged};
 pub use primitive::{FUSION_SEPARATOR, NEURAL_ENGINE, Primitive};
 
 use crate::DType;
@@ -103,13 +98,13 @@ pub struct Range {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub(crate) types: Vec<TensorType>,
-    inputs: Vec<Var>,
-    nodes: Vec<Node>,
-    outputs: Vec<Var>,
+    pub(crate) inputs: Vec<Var>,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) outputs: Vec<Var>,
     /// The scope [`apply`](Self::apply) gives the nodes it adds.
-    scope: Scope,
+    pub(crate) scope: Scope,
     /// The source lines it gives them.
-    sources: Lines,
+    pub(crate) sources: Lines,
 }
 
 impl Graph {

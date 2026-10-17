@@ -58,8 +58,8 @@ def bind(name, *operands, **params):
     tracer._record(name, inputs, params, var)
     out = tracer.TracedTensor(graph, var)
     # On the host if copied there, or computed from host values there.
-    if name == "to_host" or (name != "to_device" and any(x.device == "cpu" for x in operands)):
-        out.device = "cpu"
+    if name == "to_host" or (name != "to_device" and any(tracer._device_type(x.device) == "cpu" for x in operands)):
+        out.device = "cpu:0"
     return out
 
 
@@ -243,7 +243,7 @@ def scatter_add(x, indices, updates, axis):
 
 
 def _custom_call(operands, name, kernel, mutated, overlappable=()):
-    """Custom op ``name`` (``lumen.ops.custom_op``), function ``kernel`` (its
+    """Custom op ``name`` (``lumen.custom_op``), function ``kernel`` (its
     handle) on ``operands``, mutating those at ``mutated``, each ``(m, j)``
     of ``overlappable`` the mutated operand ``m`` perhaps in operand ``j``'s
     memory: their new values."""

@@ -95,7 +95,7 @@ def profile_steps(plan, run, runs, device):
     """For each step of ``plan``, its kernels in launch order as ``[name,
     median GPU us]`` over ``runs`` calls of ``run`` (running it) on
     ``device``."""
-    sync = lumen.mps.synchronize if device == "mps" else (lambda: None)
+    sync = lumen.Stream(device).synchronize
     run()
     sync()
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
@@ -291,8 +291,9 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
     device = device or (str(inputs[0].device) if inputs else "cpu")
     # The unfused plan for the same device: its steps are the graph's
     # primitives (after the device's rewrites), each its own kernel.
-    unfused = Plan(graph) if device in ("cpu", "meta") else Plan(graph, device, fuse=False, scalars=list(scalars))
-    timed = device not in ("cpu", "meta")
+    host = str(device).split(":")[0] in ("cpu", "meta")
+    unfused = Plan(graph) if host else Plan(graph, device, fuse=False, scalars=list(scalars))
+    timed = not host
     graph_inputs = inputs[: len(graph.inputs())]
     run = run or (lambda: plan.run(inputs, device))
     fused_kernels = profile_steps(plan, run, runs, device) if timed else []

@@ -97,9 +97,24 @@ def _record(name, inputs, params, var):
 def _is_device(x):
     """Whether ``x`` names a device (``"cpu"``, ``"mps"``, ``"cuda:0"``, a
     ``lumen.device``), not a dtype."""
-    from lumen._C import device
+    from lumen.device import device
 
-    return isinstance(x, device) or (isinstance(x, str) and x.split(":")[0] in ("cpu", "mps", "cuda", "meta"))
+    return isinstance(x, device) or (isinstance(x, str) and _device_type(x) in ("cpu", "mps", "cuda", "meta"))
+
+
+def _device_name(d):
+    """Device ``d`` (a string or a ``lumen.device``) as ``"type:index"``: an
+    unindexed one is device 0 of its type, as tensors' devices print."""
+    from lumen.device import device
+
+    d = device(d) if isinstance(d, str) else d
+    return f"{d.type}:{d.index or 0}"
+
+
+def _device_type(d):
+    """The type of device ``d`` (``"cpu"`` of ``"cpu:0"``, a string or a
+    ``lumen.device``), or None for none."""
+    return None if d is None else str(d).split(":")[0]
 
 
 def _tree_map(f, x):
@@ -349,10 +364,10 @@ def _device(args, device):
     argument with data's, or the meta device if all are meta (nothing
     runs), or the CPU."""
     if device is not None:
-        return str(device)
+        return _device_name(device)
     tensors = [a for a in args if isinstance(a, Tensor)]
-    data = [a for a in tensors if a.device != "meta"]
-    return str(data[0].device) if data else ("meta" if tensors else "cpu")
+    data = [a for a in tensors if _device_type(a.device) != "meta"]
+    return str(data[0].device) if data else ("meta:0" if tensors else "cpu:0")
 
 
 def compile(fn, device=None):
@@ -436,7 +451,7 @@ def compile(fn, device=None):
         rng = random._state() if drawn is not None else []
         weights = _weights(args)
         latest[:] = [key]
-        if target == "meta":
+        if _device_type(target) == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, tensors + weights + rng
@@ -488,7 +503,7 @@ def compile(fn, device=None):
     @functools.wraps(fn)
     def compiled(*args):
         graph, plan, workspace, out, inputs = prepare(args)
-        ran = not (workspace is None or any(isinstance(a, Tensor) and a.device == "meta" for a in args))
+        ran = not (workspace is None or any(isinstance(a, Tensor) and _device_type(a.device) == "meta" for a in args))
         if ran and plan.neural_engine:
             versions = [w._version for w in _weights(args)]
             if baked.get(id(plan)) != versions:
@@ -507,7 +522,8 @@ def compile(fn, device=None):
         # it is: no host op computed it), copied.
         def result_of(t):
             value = next(outputs)
-            return value.cpu() if ran and t.device == "cpu" and value.device != "cpu" else value
+            host = _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
+            return value.cpu() if ran and host else value
 
         result = _tree_map(result_of, out)
         if ran:
@@ -552,7 +568,7 @@ def compile(fn, device=None):
             raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = latest
         graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
-        target = str(device or compile_device or (target if target != "meta" else "cpu"))
+        target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
         # Kernels do not depend on the values: profile on ones, the weights
         # packed where the compiler merges dots.
         types = [graph.type_of(v) for v in graph.inputs()]
@@ -1156,10 +1172,10 @@ class TracedTensor:
             else:
                 dtype = a
         out = self if dtype in (None, self.dtype) else prims.cast(self, dtype)
-        kind = None if device is None else str(device).split(":")[0]
+        kind = _device_type(device)
         if kind == "cpu":
             out = out.cpu()
-        elif kind not in (None, "meta") and out.device == "cpu":
+        elif kind not in (None, "meta") and _device_type(out.device) == "cpu":
             out = prims.to_device(out)
         return out
 
@@ -1169,7 +1185,7 @@ class TracedTensor:
         ops reading it run on the host, as PyTorch runs ops on CPU tensors on
         the CPU (reading it and a device value in one op raises); returned,
         it is a CPU tensor."""
-        if self.device == "cpu":
+        if _device_type(self.device) == "cpu":
             return self
         out = prims.to_host(self)
         out.weak = self.weak
