@@ -658,27 +658,40 @@ pub(crate) fn fuse(
         if !root[p] || host[p].is_some() {
             continue;
         }
-        let reading: Vec<usize> = (0..nodes.len())
-            .filter(|&f| {
-                fusions[f]
-                    .as_ref()
-                    .is_some_and(|(_, reads)| reads.contains(&v))
-                    && row_root(f)
-            })
+        // The first row fusion reading it.
+        let Some(f) = (0..nodes.len()).find(|&f| {
+            fusions[f]
+                .as_ref()
+                .is_some_and(|(_, reads)| reads.contains(&v))
+                && row_root(f)
+        }) else {
+            continue;
+        };
+        // The steps reading a value: fusions (their reads) and other nodes.
+        let read_by = |w: Var| -> Vec<usize> {
+            (0..nodes.len())
+                .filter(|&i| live[i] && root[i] && host[i].is_none())
+                .filter(|&i| match &fusions[i] {
+                    Some((_, reads)) => reads.contains(&w),
+                    None => nodes[i].inputs.contains(&w),
+                })
+                .collect()
+        };
+        // Its value, and those its epilogue writes, read elsewhere only
+        // after the row fusion (which then writes them).
+        let written: Vec<Var> = std::iter::once(v)
+            .chain(
+                (0..nodes.len())
+                    .filter(|&h| host[h] == Some(p))
+                    .map(|h| nodes[h].output),
+            )
             .collect();
-        let [f] = reading[..] else { continue };
-        let fits = fusions[f]
-            .as_ref()
-            .is_some_and(|(members, _)| users[v].iter().all(|&u| members.contains(&u) || u > f));
-        if !fits {
+        if !written.iter().all(|&w| read_by(w).iter().all(|&i| i >= f)) {
             continue;
         }
         // Read elsewhere too (or an output): written by its kernel, as are
         // the values its epilogue writes.
-        let elsewhere = is_output[v]
-            || fusions[f]
-                .as_ref()
-                .is_some_and(|(members, _)| users[v].iter().any(|u| !members.contains(u)));
+        let elsewhere = is_output[v] || read_by(v).iter().any(|&i| i != f);
         let before = host.clone();
         root[p] = false;
         for h in host.iter_mut().filter(|h| **h == Some(p)) {

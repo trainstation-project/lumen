@@ -2260,6 +2260,66 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
         np.testing.assert_array_equal(got, want)
 
 
+class _NormedBlock(lumen.nn.Module):
+    """A projection, its residual (the stream ``x``, read again after the
+    norm: the next residual, the backward), an RMS norm of the stream as
+    bfloat16 rounds it, and the next projection
+    (``examples/transformer.py``'s)."""
+
+    wo: lumen.Tensor
+    norm: lumen.Tensor
+    w1: lumen.Tensor
+
+    def __call__(self, a, r):
+        x = r + F.matmul(a.bfloat16(), self.wo.t().bfloat16(), "float32", "float32")
+        h = F.rms_norm(x.bfloat16().float(), x.shape[-1], self.norm).bfloat16()
+        return x + F.matmul(h, self.w1.t().bfloat16(), "float32", "float32")
+
+
+@pytest.mark.mps
+def test_trained_matmul_epilogue_normalizes_its_rows():
+    """Trained, a projection's residual and RMS norm one kernel still: its
+    residual stream and the rounded copy the backward reads written by it
+    too, read after it. Its gradients exactly the unfused plan's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    m, d = 1000, 64
+    rng = np.random.default_rng(0)
+    values = {
+        "wo": rng.standard_normal((d, d)) / 8,
+        "norm": 1 + rng.standard_normal(d) / 4,
+        "w1": rng.standard_normal((d, d)) / 8,
+    }
+    a, r = (lumen.from_numpy(rng.standard_normal((m, d)).astype(np.float32)).to("mps") for _ in range(2))
+
+    def step(model, a, r):
+        y = model(a, r)
+        F.sum(y * y).backward()
+        return model.wo.grad, model.norm.grad, model.w1.grad
+
+    def run():
+        model = _NormedBlock(meta(d, d), meta(d), meta(d, d))
+        f = lumen.compile(step, device="mps")
+        f(model, meta(m, d), meta(m, d))
+        model.load_state_dict({k: lumen.from_numpy(v.astype(np.float32)) for k, v in values.items()})
+        return [lumen.to_numpy(g) for g in f(model, a, r)]
+
+    graph = lumen.make_graph(step)(_NormedBlock(meta(d, d), meta(d), meta(d, d)), meta(m, d), meta(m, d))
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(graph, "mps").steps()]
+    fused = [label for label in labels if label.startswith("dot_general → add") and "reduce_sum" in label]
+    assert len(fused) == 1, labels
+    got = run()
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        want = run()
+    finally:
+        lumen.config.compiler.reset()
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
+
+
 @pytest.mark.mps
 @pytest.mark.parametrize("m, tiles", [(64, "mid"), (192, "mid"), (16, "small"), (256, "large")])
 def test_matmul_tiles_fit_its_rows(m, tiles):
