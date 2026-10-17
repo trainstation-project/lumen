@@ -1,27 +1,3 @@
-// Flash attention's backward (FlashAttention-2's), the kernels of the
-// attention backwards the MPS compiler matches (lumen/compiler/mps/
-// attention.rs's `Backward`), instantiated by codegen.rs as the forward's
-// are. It uses forward.metal's helpers (frag, the ATTN_ constants) and is
-// included after it. On the transposed scores S^T = K Q^T:
-// P^T = exp(score(S^T) - lse) and
-// dS^T = P^T (V dO^T - D) * ds_scale, recomputed a block at a time from
-// each query's log-sum-exp `lse` and D = rowsum(dO * O), never stored. P
-// and dS are rounded to T for their products, which accumulate in float
-// and are written as float, at the strides of the layout their readers want
-// (the indexer's dk, dv, dq: [batch, rows, cols] or its transpose).
-//
-// With the forward's dropout, drop(x, b, i, j) (forward.metal's NoDropout,
-// or codegen.rs's, in float) is applied to dP and, for dV, to P, as the
-// forward applied it to query i's probability of key j.
-
-// dK = dS^T Q and dV = P^T dO: threadgroup (kblock, b) takes ATTN_BQ keys
-// of batch index b, its SIMD group sg 8 of them, their K, V, dK and dV rows
-// in simdgroup matrices (registers). Queries in blocks of BQ, Q, dO, lse
-// and D staged in threadgroup memory. Query blocks before the first that
-// sees the threadgroup's first key (causal) are skipped. With DQ, dQ = dS K
-// too: the keys' K rows staged in ks, each query block's dS^T in dss, and
-// dS K over the threadgroup's keys added to dq (zeroed before) atomically,
-// so in no fixed order (not deterministic).
 template <typename T,
           uint D,
           uint DV,
@@ -71,7 +47,6 @@ inline void flash_attention_dkdv(device const T *q,
     const bool in_rows = row < sk;
     if constexpr (DQ) {
         dq += ix.dq(b);
-        // The keys' K rows, zero past the last (their dS is not).
         for (uint e = t; e < ATTN_BQ * D; e += 256) {
             uint j = e / D, d = e % D, key = kblock * ATTN_BQ + j;
             ks[e] = key < sk ? k[key * Ix::K_ROW + d * Ix::K_COL] : T(0);
@@ -91,8 +66,6 @@ inline void flash_attention_dkdv(device const T *q,
     simdgroup_matrix<float, 8, 8> dkm[D / 8], dvm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) { dkm[c] = simdgroup_matrix<float, 8, 8>(0); }
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { dvm[c] = simdgroup_matrix<float, 8, 8>(0); }
-    // The first query seeing any of the threadgroup's keys: key j is seen
-    // by query i iff i >= j - offset.
     uint first = 0;
     if (CAUSAL) {
         long lo = long(kblock * ATTN_BQ) - long(offset);
@@ -134,13 +107,11 @@ inline void flash_attention_dkdv(device const T *q,
                 bool seen = q0 + i < sq && (!CAUSAL || int(row) <= int(q0 + i) + offset);
                 float pu = seen ? exp(score(s[u]) - lses[i]) : 0.0f;
                 ds[u] = pu * (drop(dp[u], b, q0 + i, row) - deltas[i]) * ds_scale;
-                // dV reads P dropped.
                 p[u] = drop(pu, b, q0 + i, row);
             }
             simdgroup_matrix<T, 8, 8> pm, dsm;
             frag(pm) = vec<T, 2>(p);
             frag(dsm) = vec<T, 2>(ds);
-            // dV += P^T dO, dK += dS^T Q over these 8 queries.
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> gm;
                 simdgroup_load(gm, gs + ic * 8 * DV + c * 8, DV);
@@ -156,8 +127,6 @@ inline void flash_attention_dkdv(device const T *q,
             }
         }
         if constexpr (DQ) {
-            // dQ += dS K over the threadgroup's keys, [BQ x D] in 8x8
-            // tiles, the SIMD groups' in turn.
             threadgroup_barrier(mem_flags::mem_threadgroup);
             for (uint tile = sg; tile < BQ / 8 * (D / 8); tile += ATTN_GROUPS) {
                 uint i = tile / (D / 8), c = tile % (D / 8);
@@ -191,10 +160,6 @@ inline void flash_attention_dkdv(device const T *q,
     }
 }
 
-// dQ = dS K: threadgroup (qblock, b) takes ATTN_BQ queries of batch index
-// b, its SIMD group sg 8 of them, their Q, dO and dQ rows in simdgroup
-// matrices; keys in blocks of BK, K and V staged in threadgroup memory.
-// Key blocks past the last row's causal limit are skipped.
 template <typename T, uint D, uint DV, uint BK, bool CAUSAL, typename Ix, typename Score, typename Drop = NoDropout>
 inline void flash_attention_dq(device const T *q,
                                device const T *k,
@@ -282,7 +247,6 @@ inline void flash_attention_dq(device const T *q,
             }
             simdgroup_matrix<T, 8, 8> dsm;
             frag(dsm) = vec<T, 2>(ds);
-            // dQ += dS K over these 8 keys.
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> km;
                 simdgroup_load(km, ks + jc * 8 * D + c * 8, D);
