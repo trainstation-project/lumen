@@ -187,7 +187,8 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
                     && per_row(v)
                     && finder.readers[v].iter().any(|&r| inside[r])
                     && finder.readers[v].iter().all(|&r| inside[r] || r > i);
-                if !finder.live[k] || inside[k] || !(read_inside || read_after) {
+                let shared = !read_inside && indices(graph, &finder.producer, v);
+                if !finder.live[k] || inside[k] || !(read_inside || read_after) || shared {
                     continue;
                 }
                 // An earlier row fusion's root (of these rows, writing
@@ -284,6 +285,22 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     }
 }
 
+/// Whether `v` is computed from iotas and constants alone (a one-hot's
+/// classes, a gather's row offsets): copied into each fusion reading it,
+/// so no row's own (read by other rows too: a chunk's, another chunk's).
+fn indices(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
+    let Some(p) = producer[v] else { return false };
+    let node = &graph.nodes()[p];
+    match node.primitive {
+        Primitive::Iota { .. } | Primitive::Full { .. } => true,
+        Primitive::Reshape { .. } | Primitive::BroadcastInDim { .. } => {
+            indices(graph, producer, node.inputs[0])
+        }
+        ref q if elementwise(q) => node.inputs.iter().all(|&u| indices(graph, producer, u)),
+        _ => false,
+    }
+}
+
 /// Each row fusion of `rows` extended to an elementwise consumer of its
 /// values of the rows' shape after it (read by none such), computed from
 /// them, from values of its rows (a cross entropy's logits), from values
@@ -364,6 +381,7 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                     Some(p) if cone.contains(&p) => {}
                     Some(p)
                         if !taken(p)
+                            && !indices(graph, &finder.producer, v)
                             && fusible(graph, &nodes[p])
                             && cheap(&nodes[p].primitive)
                             && fits(v) =>

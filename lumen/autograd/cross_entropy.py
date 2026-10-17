@@ -7,9 +7,11 @@ whose backward recomputes the logits a chunk of
 time from the forward's log-sum-exp (Liger's, XMA's chunked fused linear
 cross entropy): each chunk's ``(softmax - one_hot) · g``, then its rows of
 ``h``'s gradient and ``w'``'s, added to in float32. Nothing of the logits'
-shape is computed whole: the backward no longer reads them, so the MPS
-compiler runs the forward as one linear cross entropy (the logits never
-stored).
+shape is computed whole: the backward no longer reads them. The MPS
+compiler computes the forward's losses from the chunks' logits too, each
+chunk's logits once, its losses and gradient one kernel of them (XMA's);
+where ``g`` reads every row's loss (``mean(loss)²``), as one linear cross
+entropy, the logits never stored.
 
 With the chunk size None (the default), nothing is replaced: the gradient
 is the cross entropy's, of the logits.

@@ -737,7 +737,12 @@ fn row_kernel(
             Primitive::Gather { .. } => &node.inputs[1..],
             _ => &node.inputs[..],
         };
-        let of_rows = body.type_of(v).numel() == rows && reads.iter().all(|&u| e.invariant[u]);
+        // (An iota of `rows` elements is a row's by how it is read, as an
+        // input: a one-hot's classes, as many as the rows, spread along it.)
+        let iota = matches!(node.primitive, Primitive::Iota { .. });
+        let of_rows = body.type_of(v).numel() == rows
+            && reads.iter().all(|&u| e.invariant[u])
+            && (!iota || per_row(v));
         e.invariant[v] = reduced || constant[v] || of_rows;
     }
     // Values the same across the row, computed once a row before the loop
