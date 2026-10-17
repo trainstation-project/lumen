@@ -2,8 +2,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::tensor::python::dtype_name;
 use super::{Activity, Event, EventAvg, EventKind, Profile, ProfilerConfig, RecordGuard, SortBy};
+use crate::tensor::python::dtype_name;
 
 fn us(ns: u64) -> f64 {
     ns as f64 / 1000.0
