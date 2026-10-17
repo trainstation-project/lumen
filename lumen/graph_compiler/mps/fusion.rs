@@ -869,7 +869,7 @@ impl<'a> Pass<MpsModule<'a>> for LoopFusion {
         let graph = loop {
             m.kernels.truncate(requested);
             // Concatenates whose operands their kernels write in place.
-            let (in_place, _) = super::in_place_concats(&m.graph, &m.kernels);
+            let (in_place, _) = super::in_place_concats(&m.graph, &m.kernels, true);
             let kernels = &mut m.kernels;
             let mut kernel =
                 |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Loop(by_value.to_vec()));
