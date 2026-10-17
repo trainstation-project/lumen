@@ -12,7 +12,7 @@ fn a_custom_kernel_launches_into_the_mps_stream() {
     };
     assert_eq!(kernel.name(), "axpy");
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], Device::Cpu(0));
-    let err = kernel.launch(&[x.clone()], &[], Grid::Threads([3, 1, 1]));
+    let err = kernel.launch(std::slice::from_ref(&x), &[], Grid::Threads([3, 1, 1]));
     assert!(err.unwrap_err().contains("must be on mps"));
     let (x, y) = (
         x.to(Device::Mps(0)),
