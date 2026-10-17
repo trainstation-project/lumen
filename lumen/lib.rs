@@ -20,10 +20,10 @@ pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;
 pub(crate) mod codegen;
-pub mod graph_compiler;
 pub mod custom_op;
 pub mod device;
 pub mod graph;
+pub mod graph_compiler;
 pub mod ops;
 pub mod profiler;
 #[cfg(feature = "python")]
