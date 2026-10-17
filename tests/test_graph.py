@@ -1144,6 +1144,9 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
             f(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
             grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+        # Its kernels profiled (as compiled for these flags).
+        with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+            f(model, lumen.from_numpy(x))
         model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
         graph = lumen.make_graph(step)(model, meta(m, d))
         steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
@@ -1162,8 +1165,11 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
     if deterministic:
         backward = [s for s in steps if s["label"].startswith("flash_attention_backward")]
         assert len(backward) == 2 and all(s["output"][1:] == ("bfloat16", [m, d]) for s in backward), labels
-        # Both writing in one buffer, which the dots read.
+        # Both writing in one buffer, which the dots read: profiled at its
+        # strides, a row of it 3d elements.
         assert backward[0]["output"][0] == backward[1]["output"][0] == dx["inputs"][0][0], steps
+        written = [e for e in prof.events() if e["name"].startswith("flash_attention_backward")]
+        assert [e["output_strides"] for e in written] == [[[3 * d, 1]] * 2, [[3 * d, 1]]], written
         # The dots right after them: nothing copies, casts or lays out.
         at = labels.index(backward[-1]["label"])
         assert all(label.startswith("3x dot_general") for label in labels[at + 1 : at + 3]), labels

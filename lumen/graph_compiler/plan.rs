@@ -62,6 +62,11 @@ pub struct Step {
     /// A multi-output fusion's other outputs, in order (its
     /// [`Primitive::FusionOutput`]s, which have no steps).
     pub extra_outputs: Vec<(Buffer, TensorType)>,
+    /// Each output's (the first, then the others) view of its buffer, if
+    /// it writes one (an in-place concatenate's operand, at its place in
+    /// the result: [`PlanOptions::concats`]), else the whole buffer,
+    /// contiguous.
+    pub output_views: Vec<Option<View>>,
     /// Workspace bytes the kernel uses while it runs (its offset and
     /// length), if it asked for any ([`PlanOptions::scratch`]).
     pub scratch: Option<(usize, usize)>,
@@ -72,6 +77,35 @@ pub struct Step {
     /// node's, or a fusion's members' (through fusions in it), each once,
     /// in order.
     pub sources: Vec<(&'static str, u32)>,
+}
+
+impl Step {
+    /// Each input's strides as its kernel reads it, in elements: its
+    /// view's, else contiguous.
+    pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
+        let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {
+            Some(view) => view.strides.clone(),
+            None => contiguous_strides(&ty.shape),
+        };
+        self.inputs
+            .iter()
+            .zip(&self.views)
+            .map(|(i, v)| strides(i, v))
+            .collect()
+    }
+
+    /// Each output's (the first, then the others) strides as its kernel
+    /// writes it, in elements: its view's, else contiguous.
+    pub(crate) fn output_strides(&self) -> Vec<Vec<usize>> {
+        std::iter::once(&self.output)
+            .chain(&self.extra_outputs)
+            .zip(&self.output_views)
+            .map(|((_, ty), view)| match view {
+                Some(view) => view.strides.clone(),
+                None => contiguous_strides(&ty.shape),
+            })
+            .collect()
+    }
 }
 
 /// The `record_function` ranges a plan's steps were traced in, open while
@@ -334,6 +368,8 @@ impl Plan {
         }
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
+        // Where each in-place concatenate's operand is written in it.
+        let mut written_at: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
             // A wait's value is its operand's memory too (in place), but it
             // is a step: the host waits there.
@@ -444,12 +480,13 @@ impl Plan {
                 }
             }
             if in_place(node) {
-                for &v in &node.inputs {
+                for (k, &v) in node.inputs.iter().enumerate() {
                     assert!(
                         root[v] == v,
                         "an in-place concatenate's operand in its own memory"
                     );
                     root[v] = root[node.output];
+                    written_at[v] = Some(slot(graph, node, k));
                 }
             }
             if let Primitive::Slice { start_indices, .. } = &node.primitive
@@ -656,6 +693,14 @@ impl Plan {
                     outputs.sort_unstable();
                     outputs.into_iter().map(|(_, v)| slot(v)).collect()
                 },
+                output_views: {
+                    let mut outputs = extra[node.output].clone();
+                    outputs.sort_unstable();
+                    std::iter::once(node.output)
+                        .chain(outputs.into_iter().map(|(_, v)| v))
+                        .map(|v| written_at[v].clone())
+                        .collect()
+                },
                 scratch,
                 scope: node.scope,
                 sources: {
@@ -675,6 +720,7 @@ impl Plan {
                 views: vec![view[v].clone()],
                 output: (Buffer::Output(k), ty(v)),
                 extra_outputs: Vec::new(),
+                output_views: vec![None],
                 scratch: None,
                 scope: &[],
                 sources: Vec::new(),
@@ -1134,6 +1180,7 @@ impl Plan {
                     .collect()
             });
             record.accum(|| step.primitive.accum_dtypes(step.output.1.dtype));
+            record.strides(|| (step.input_strides(), step.output_strides()));
             // A view's first element is past its buffer's; a multi-output
             // fusion's other outputs follow its inputs.
             let args: Vec<*const u8> = step

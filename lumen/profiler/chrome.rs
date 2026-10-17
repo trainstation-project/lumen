@@ -89,6 +89,19 @@ fn types_args(e: &Event) -> String {
             let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
         }
     }
+    // PyTorch's key for them.
+    for (side, strides) in [("Input", &e.input_strides), ("Output", &e.output_strides)] {
+        if !strides.is_empty() {
+            let strides: Vec<String> = strides
+                .iter()
+                .map(|s| {
+                    let s: Vec<String> = s.iter().map(|n| n.to_string()).collect();
+                    format!("[{}]", s.join(","))
+                })
+                .collect();
+            let _ = write!(args, ",\"{side} Strides\":[{}]", strides.join(","));
+        }
+    }
     if !e.accum.is_empty() {
         let accum: Vec<String> = e.accum.iter().map(|d| json_str(d.name())).collect();
         let _ = write!(args, ",\"Accum type\":[{}]", accum.join(","));

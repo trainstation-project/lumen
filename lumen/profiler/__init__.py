@@ -91,7 +91,8 @@ class profile:
     """Profile the code in a ``with`` block (PyTorch:
     ``torch.profiler.profile``). ``activities`` defaults to CPU plus every
     usable device, as in PyTorch. ``record_shapes`` records the dtype and
-    shape of each op's inputs and outputs (PyTorch records the inputs')."""
+    shape of each op's inputs and outputs (PyTorch records the inputs'),
+    and each kernel's strides: as a plan step reads and writes them."""
 
     def __init__(self, activities=None, profile_memory=False, record_shapes=False):
         if activities is None:
@@ -129,7 +130,11 @@ class profile:
         user_range / memory / gpu / host_kernel (a plan step's run on the
         host, inside its op), ``start_us``, ``duration_us``, ``thread``,
         ``parent``, ``device``, ``inputs`` and ``outputs`` (with
-        ``record_shapes``: each a list of ``(dtype, shape)``), ``accum``
+        ``record_shapes``: each a list of ``(dtype, shape)``),
+        ``input_strides`` and ``output_strides`` (with ``record_shapes``,
+        a plan step's: each a list of strides in elements, as its kernel
+        reads its inputs and writes its outputs: a slice read in place, an
+        in-place concatenate's operand written in its result), ``accum``
         (with ``record_shapes``: the dtypes the op accumulates in, a dot's
         or sum's ``accum_dtype``, a max's or softmax's dtype, each of a
         fusion's reductions'), ``bytes``, ...), by start time. A gpu event
