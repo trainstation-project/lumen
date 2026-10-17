@@ -1807,13 +1807,25 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
 
 
 @pytest.mark.parametrize("reduce", ["mean", "weighted", "squared"])
-@pytest.mark.parametrize("n, d, vocab, chunk", [(64, 32, 16, 16), (1000, 256, 5000, 128)])
-def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
+@pytest.mark.parametrize(
+    "n, d, vocab, chunk, head",
+    [
+        (64, 32, 16, 16, "bfloat16"),
+        (1000, 256, 5000, 128, "bfloat16"),
+        (1024, 64, 1984, 32, "float32"),
+        (64, 32, 16, 64, "bfloat16"),
+    ],
+)
+def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
     """A cross entropy of a matmul's logits trained with
     ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``
     (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
-    a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the last one
-    short). On MPS each chunk's logits computed once (XMA's fused linear
+    a time (4 of 16 rows of 64; 8 of 128 rows of 1000, the last one
+    short; 32 of 32 rows of 1024, more than a kernel binds, its losses
+    joined a few chunks' at a time; or one chunk, all 64 rows: its logits
+    the forward's, the program unchunked). Its weight bfloat16, or float32
+    cast to bfloat16 in the step (an LM head's master weight, its gradient
+    float32). On MPS each chunk's logits computed once (XMA's fused linear
     cross entropy): a matmul writing them, then one row kernel writing
     the chunk's losses and ``(softmax - one_hot) · g`` (any ``g``: a
     mean's, a weighted sum's) from them, then its rows' gradients; the
@@ -1844,13 +1856,14 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
         return step
 
     def unfused(h, w, t):
+        w = w.bfloat16() if head == "float32" else w
         return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
 
     try:
         H, W, T, C = (lumen.from_numpy(a).to("mps") for a in (h, w, t, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    H, W = H.to(dtype="bfloat16"), W.to(dtype="bfloat16")
+    H, W = H.to(dtype="bfloat16"), W.to(dtype=head)
     step = trained(unfused)
     lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
     try:
@@ -1861,21 +1874,30 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     sizes = [min(chunk, n - start) for start in range(0, n, chunk)]
     steps = plan.steps()
     labels = [s["label"] for s in steps]
-    assert all(s["output"][2] != [n, vocab] for s in steps), labels
-    assert ("linear_cross_entropy" in labels) == (reduce == "squared"), labels
-    if reduce == "squared":
-        sizes = []
-    # Each chunk: its logits (a matmul), then its losses and gradient.
-    logits = [s["output"][2][0] for s in steps if s["label"] == "dot_general" and s["output"][2][1:] == [vocab]]
-    rows = [
-        s["output"][2][0]
-        for s in steps
-        if s["output"][2][1:] == [vocab] and [o[2] for o in s.get("extra_outputs", [])] == [s["output"][2][:1]]
-    ]
-    assert sorted(logits) == sorted(sizes) and sorted(rows) == sorted(sizes), labels
     baseline = lumen.graph_compiler.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
-    if vocab > d:
-        assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)
+    if len(sizes) == 1:
+        # The unfused program's steps, and the chunks' `h` gradient's
+        # (zeros, a chunk's rows written in).
+        chunked = [label for label in labels if label not in ("full", "dynamic_update_slice")]
+        assert sorted(chunked) == sorted(s["label"] for s in baseline.steps()), labels
+    else:
+        assert all(s["output"][2] != [n, vocab] for s in steps), labels
+        assert ("linear_cross_entropy" in labels) == (reduce == "squared"), labels
+        if reduce == "squared":
+            sizes = []
+        # Each chunk: its logits (a matmul), then its losses and gradient.
+        logits = [s["output"][2][0] for s in steps if s["label"] == "dot_general" and s["output"][2][1:] == [vocab]]
+        rows = [
+            s["output"][2][0]
+            for s in steps
+            if s["output"][2][1:] == [vocab] and [o[2] for o in s.get("extra_outputs", [])] == [s["output"][2][:1]]
+        ]
+        assert sorted(logits) == sorted(sizes) and sorted(rows) == sorted(sizes), labels
+        if vocab > d:
+            assert plan.workspace_bytes < baseline.workspace_bytes / 2, (
+                plan.workspace_bytes,
+                baseline.workspace_bytes,
+            )
     want = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(trained(unfused))(H, W, T, C)]
     np.testing.assert_allclose(got[0], want[0], rtol=1e-6)
     for g, e in zip(got[1:], want[1:]):

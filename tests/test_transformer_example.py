@@ -17,10 +17,6 @@ VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
 BATCH, PASSES, LR = 8, 3, 3e-3
 
 
-def one_hot(ids, n):
-    return F.eq(ids.reshape(*ids.shape, 1), lumen.arange(n, dtype="int64")).to(dtype="float32")
-
-
 class Embedding(lumen.nn.Module):
     tokens: lumen.Tensor
     positions: lumen.Tensor
@@ -87,8 +83,7 @@ class Transformer(lumen.nn.Module):
 
 
 def cross_entropy(logits, targets):
-    log_p = F.log_softmax(logits, -1)
-    return -F.mean(F.sum(one_hot(targets.reshape(-1), log_p.shape[-1]) * log_p, -1))
+    return F.mean(F.cross_entropy(logits, targets.reshape(-1)))
 
 
 class AdamW(lumen.nn.Module):
@@ -274,9 +269,14 @@ def test_transformer_forward_matches_numpy(device):
 
 
 @pytest.mark.mps
-def test_transformer_train_step_matches_cpu():
+@pytest.mark.parametrize("chunk", [None, 64, 8])
+def test_transformer_train_step_matches_cpu(chunk):
     """One training step (``PASSES`` accumulated backward passes, then
-    AdamW) on MPS and on lumen's CPU backend: the same loss; the same
+    AdamW) on MPS and on lumen's CPU backend, its cross entropy's gradient
+    whole or a chunk of rows at a time
+    (``fused_linear_cross_entropy_chunk_size``: 4 chunks of 64 of the 256
+    rows, or 32 of 8, each chunk's logits computed once on MPS, recomputed
+    on the CPU, as traced): the same loss; the same
     gradients (AdamW's first moments, ``(1 - beta1) * g`` after one step)
     and second moments, to bfloat16's precision; the same new weights where
     a gradient is clearly not zero, and within twice the update's size
@@ -288,17 +288,21 @@ def test_transformer_train_step_matches_cpu():
     two 2% (at most 3.4%) from each other: rounded at different places (a
     fused kernel's, flash attention's), not wrongly."""
     results = {}
-    for device in ("cpu", "mps"):
-        model = _model()
-        opt = AdamW(model.parameters(), lr=LR, weight_decay=0.0)
-        ids_meta = meta(BATCH, SEQ, dtype="int64")
-        f = _compiled(train_step, device, model, opt, ids_meta, ids_meta)
-        model.load_state_dict({name: lumen.from_numpy(v) for name, v in _weights(model).items()})
-        ids = _ids()
-        targets = (ids + 1) % VOCAB
-        loss = float(lumen.to_numpy(f(model, opt, lumen.from_numpy(ids), lumen.from_numpy(targets))))
-        state = {name: lumen.to_numpy(t._placed(device)) for name, t in opt.named_parameters()}
-        results[device] = loss, state
+    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
+    try:
+        for device in ("cpu", "mps"):
+            model = _model()
+            opt = AdamW(model.parameters(), lr=LR, weight_decay=0.0)
+            ids_meta = meta(BATCH, SEQ, dtype="int64")
+            f = _compiled(train_step, device, model, opt, ids_meta, ids_meta)
+            model.load_state_dict({name: lumen.from_numpy(v) for name, v in _weights(model).items()})
+            ids = _ids()
+            targets = (ids + 1) % VOCAB
+            loss = float(lumen.to_numpy(f(model, opt, lumen.from_numpy(ids), lumen.from_numpy(targets))))
+            state = {name: lumen.to_numpy(t._placed(device)) for name, t in opt.named_parameters()}
+            results[device] = loss, state
+    finally:
+        lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
     (cpu_loss, cpu), (mps_loss, mps) = results["cpu"], results["mps"]
     assert mps_loss == pytest.approx(cpu_loss, rel=1e-2), (mps_loss, cpu_loss)
     assert cpu.keys() == mps.keys()

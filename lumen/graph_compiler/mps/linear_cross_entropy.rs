@@ -259,13 +259,10 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             // Every chunk's: the losses and log-sum-exp (what reads them
             // after every chunk's gradient, read after its rows' kernel).
             rows.sort_by_key(|r| r.0);
-            let concat = Primitive::Concatenate { dimension: 0 };
             out.set_origin(&nodes[f.lse]);
-            let all: Vec<Var> = rows.iter().map(|r| r.2).collect();
-            map[lse] = out.apply(concat.clone(), &all).ok()?;
+            map[lse] = joined(&mut out, rows.iter().map(|r| r.2).collect())?;
             out.set_origin(&nodes[f.loss]);
-            let all: Vec<Var> = rows.iter().map(|r| r.3).collect();
-            map[loss] = out.apply(concat, &all).ok()?;
+            map[loss] = joined(&mut out, rows.iter().map(|r| r.3).collect())?;
             continue;
         }
         // A chunk's rows of the log-sum-exp or losses: its own.
@@ -314,6 +311,23 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).ok()?;
     Some(out.prune().0)
+}
+
+/// `values` (chunks' rows, in order) concatenated: at most 16 a
+/// concatenate (a kernel binds few buffers), those concatenated in turn.
+fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
+    while values.len() > 1 {
+        values = values
+            .chunks(16)
+            .map(|part| match part {
+                [v] => Some(*v),
+                _ => out
+                    .apply(Primitive::Concatenate { dimension: 0 }, part)
+                    .ok(),
+            })
+            .collect::<Option<_>>()?;
+    }
+    values.pop()
 }
 
 /// `p` of a chunk of `c` of the `b` rows (each value's first dimension
