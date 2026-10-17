@@ -223,10 +223,14 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             continue;
         }
         if let Some(&(_, start, end)) = chunks.iter().find(|c| c.0 == k) {
-            emit(&mut out, &mut map, node);
+            // The chunk's logits, the forward's too (its dot's lines).
+            out.set_origins(&[node, &nodes[dot]]);
+            let ins: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+            map[node.output] = out.apply(node.primitive.clone(), &ins).ok()?;
+            out.set_label(map[node.output], node.label);
             logits[node.output] = true;
             // The chunk's rows of the forward, of its logits.
-            out.set_origin(&nodes[dot]);
+            out.set_origin(&nodes[f.pick]);
             let target = Primitive::Slice {
                 start_indices: vec![start],
                 limit_indices: vec![end],
