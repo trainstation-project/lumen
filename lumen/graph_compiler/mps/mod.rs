@@ -119,6 +119,14 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
 /// The MPS passes `config` turns on, in order.
 fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
+    // A cross entropy of a dot's logits whose gradient recomputes them a
+    // chunk at a time: its rows computed from those chunks' logits (before
+    // any dot is merged, or its forward matched as a linear cross entropy).
+    if config.fuse && config.fused_linear_cross_entropy {
+        p.add(Rewrite("chunked_cross_entropy", |g, _| {
+            linear_cross_entropy::chunked_cross_entropy(g)
+        }));
+    }
     // A gated pair's backward's dots merged (before `merge_dots`, which
     // reads its weights' concatenate as the forward's block).
     if config.fuse && config.merge_dots && config.contraction_epilogues {

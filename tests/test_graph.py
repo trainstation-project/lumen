@@ -1632,7 +1632,7 @@ def test_normalizations_train_in_one_row_kernel(f):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("n, vocab", [(64, 16), (300, 1000), (128, 32000)])
+@pytest.mark.parametrize("n, vocab", [(64, 16), (16, 16), (300, 1000), (128, 32000)])
 def test_cross_entropy_is_one_row_kernel(n, vocab):
     """``F.cross_entropy`` (``reduction="none"``): each row's ``logsumexp -
     logit[label]``. On MPS one row kernel reads the logits once (an online
@@ -1641,7 +1641,8 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
     Trained (``g`` not read from the losses), its gradient ``(exp(x - lse)
     - one_hot) · g`` is the same kernel's second pass over the row (XMA's
     forward-backward kernel), the losses its other output: one kernel,
-    nothing of the logits' shape but the gradient written. Losses and
+    nothing of the logits' shape but the gradient written (its one-hot's
+    classes along the row, as many as the rows or not). Losses and
     gradients NumPy's."""
     rng = np.random.default_rng(0)
     x = (rng.standard_normal((n, vocab)) * 3).astype(np.float32)
@@ -1805,22 +1806,23 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(both)(H, W, T)[0]), want, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("reduce", ["mean", "weighted"])
+@pytest.mark.parametrize("reduce", ["mean", "weighted", "squared"])
 @pytest.mark.parametrize("n, d, vocab, chunk", [(64, 32, 16, 16), (1000, 256, 5000, 128)])
 def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     """A cross entropy of a matmul's logits trained with
     ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``
     (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
     a time (4 of 16 rows of 64, or 8 of 128 rows of 1000, the last one
-    short), the chunk's logits recomputed, ``(softmax - one_hot) · g``
-    (any ``g``: a mean's, a weighted sum's), then its rows' gradients:
-    three matmuls a chunk; its forward, nothing else reading the logits,
-    one linear cross entropy. Each chunk's weight gradient added by its own
-    matmul's epilogue, as it is computed (none kept for a later one), so
-    the logits of a chunk at a time in memory: of a large vocabulary, less
-    than the unfused program's. Its losses and gradients the unfused
-    program's but where a bfloat16 rounds apart (the log-sum-exp's
-    order)."""
+    short). On MPS each chunk's logits computed once (XMA's fused linear
+    cross entropy): a matmul writing them, then one row kernel writing
+    the chunk's losses and ``(softmax - one_hot) · g`` (any ``g``: a
+    mean's, a weighted sum's) from them, then its rows' gradients; the
+    forward's losses those chunks', the whole logits never computed. Not
+    where ``g`` reads every row's loss (``mean(loss)²``): the chunk's
+    logits recomputed after a linear cross entropy, its forward. The
+    logits of a chunk at a time in memory: of a large vocabulary, less
+    than the unfused program's. Its losses the unfused program's, its
+    gradients too but where a bfloat16 rounds apart."""
     rng = np.random.default_rng(0)
     h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
     w = rng.standard_normal((vocab, d)).astype(np.float32)
@@ -1830,7 +1832,12 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
     def trained(f):
         def step(h, w, t, c):
             losses = f(h, w, t)
-            loss = F.mean(losses) if reduce == "mean" else F.sum(losses * c)
+            of = {
+                "mean": lambda: F.mean(losses),
+                "weighted": lambda: F.sum(losses * c),
+                "squared": lambda: F.mean(losses) * F.mean(losses),
+            }
+            loss = of[reduce]()
             loss.backward()
             return loss, h.grad, w.grad
 
@@ -1851,10 +1858,21 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce):
         got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
     finally:
         lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
-    chunks = -(-n // chunk)
-    labels = [s["label"] for s in plan.steps()]
-    assert "linear_cross_entropy" in labels, labels
-    assert sum("dot_general" in label for label in labels) == 3 * chunks, labels
+    sizes = [min(chunk, n - start) for start in range(0, n, chunk)]
+    steps = plan.steps()
+    labels = [s["label"] for s in steps]
+    assert all(s["output"][2] != [n, vocab] for s in steps), labels
+    assert ("linear_cross_entropy" in labels) == (reduce == "squared"), labels
+    if reduce == "squared":
+        sizes = []
+    # Each chunk: its logits (a matmul), then its losses and gradient.
+    logits = [s["output"][2][0] for s in steps if s["label"] == "dot_general" and s["output"][2][1:] == [vocab]]
+    rows = [
+        s["output"][2][0]
+        for s in steps
+        if s["output"][2][1:] == [vocab] and [o[2] for o in s.get("extra_outputs", [])] == [s["output"][2][:1]]
+    ]
+    assert sorted(logits) == sorted(sizes) and sorted(rows) == sorted(sizes), labels
     baseline = lumen.graph_compiler.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
     if vocab > d:
         assert plan.workspace_bytes < baseline.workspace_bytes / 2, (plan.workspace_bytes, baseline.workspace_bytes)

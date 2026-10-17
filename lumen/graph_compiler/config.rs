@@ -87,9 +87,11 @@ pub struct CompilerConfig {
     pub memory_limit: usize,
     /// The rows a cross entropy of a matmul's logits is differentiated a
     /// chunk at a time (read as its gradient is traced,
-    /// `lumen/autograd/cross_entropy.py`): its logits recomputed a chunk at
-    /// a time, never whole, so its forward runs as a linear cross entropy
-    /// trained too (Liger's, XMA's chunked fused linear cross entropy).
+    /// `lumen/autograd/cross_entropy.py`): its logits a chunk at a time,
+    /// never whole. On MPS each chunk's logits are computed once, its
+    /// losses and gradient from them (XMA's chunked fused linear cross
+    /// entropy); where the gradient reads every row's loss, recomputed
+    /// after a linear cross entropy, its forward (Liger's).
     /// None, the default: its gradient the cross entropy's, of the logits.
     pub fused_linear_cross_entropy_chunk_size: Option<usize>,
     /// Clamp the indices a program reads at (a gather's, a scatter-add's, a
