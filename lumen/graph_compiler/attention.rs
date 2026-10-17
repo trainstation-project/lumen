@@ -264,7 +264,7 @@ pub(crate) fn fuse_backward(
     // dQ added atomically: in float32, as its dot writes it (or its
     // transpose).
     let mut plain = Matcher::new(graph);
-    plain.chains = false;
+    plain.plain_dq = true;
     let nodes = graph.nodes();
     // Each fusion: where it goes, its outputs (the dots'), its inputs.
     let mut fusions: Vec<(usize, Vec<usize>, Vec<Var>)> = Vec::new();
@@ -545,10 +545,11 @@ struct Matcher<'a> {
     readers: Vec<Vec<usize>>,
     output: Vec<bool>,
     live: Vec<bool>,
-    /// Whether a backward's gradients are written through the transposes,
-    /// reshapes and cast after them ([`Self::written`]): not where its
-    /// kernel adds dQ atomically, in float32 (zeroed whole first).
-    chains: bool,
+    /// Whether a backward's dQ is written as its dot computes it (or its
+    /// transpose), not through the transposes, reshapes and cast after it
+    /// ([`Self::written`]): where its kernel adds it atomically, in
+    /// float32 (zeroed whole first).
+    plain_dq: bool,
     /// The values written into a larger buffer's part (an in-place
     /// concatenate's operands): the offset and strides they are written
     /// at, in elements.
@@ -652,7 +653,7 @@ impl<'a> Matcher<'a> {
             }
         }
         Matcher {
-            chains: true,
+            plain_dq: false,
             views: HashMap::new(),
             graph,
             producer,
@@ -998,14 +999,14 @@ impl<'a> Matcher<'a> {
         {
             return None;
         }
-        let out = |d: Option<usize>| match d {
-            Some(d) => self.written(d, nb, self.chains).map(Some),
+        let out = |d: Option<usize>, chain: bool| match d {
+            Some(d) => self.written(d, nb, chain).map(Some),
             None => Some(None),
         };
         Some(Backward {
-            dv_out: out(dv)?,
-            dk_out: out(dk)?,
-            dq_out: out(dq)?,
+            dv_out: out(dv, true)?,
+            dk_out: out(dk, true)?,
+            dq_out: out(dq, !self.plain_dq)?,
             q,
             k,
             v,

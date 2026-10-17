@@ -25,7 +25,7 @@ fn fuse(g: &Graph) -> Graph {
         &[],
         &[],
         &config,
-        |body, by_value| codegen::kernel(body, by_value, &config).0,
+        |body, by_value| codegen::kernel(body, by_value, &config, &Default::default()).0,
     )
 }
 
@@ -391,7 +391,8 @@ fn transposes_in_fusions_are_tiled() {
                 panic!("{fused}")
             };
             assert_eq!(fused.nodes().len(), 1, "{fused}");
-            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+            let source =
+                codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
             assert_eq!(
                 codegen::transpose_tiling(body).is_some(),
                 tiled,
@@ -443,7 +444,7 @@ fn reductions_are_normalized() {
         let Fusion { body, .. } = &fused.nodes()[0].primitive else {
             panic!("{fused}")
         };
-        let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+        let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
         assert!(
             source.contains(&format!("{kernel}<")),
             "{shape:?} {axes:?}: {source}"
@@ -500,7 +501,8 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let Fusion { body, .. } = &fused.nodes()[0].primitive else {
                     panic!("{fused}")
                 };
-                let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+                let source =
+                    codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
                 match accum_dtype {
                     // Widened as read: the reduction is float throughout.
                     DType::F32 => {
@@ -553,7 +555,8 @@ fn hierarchical_reductions_keep_their_dtype() {
     let fused = fuse(&g);
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+            let source =
+                codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
             assert!(!mentions(&source, "float"), "{source}");
         }
     }
@@ -970,7 +973,7 @@ fn dots_fuse_their_epilogue() {
         panic!("{fused}")
     };
     assert!(label.starts_with("dot_general"), "{label}");
-    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+    let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
     assert!(
         source.contains("matmul_sg_impl") && source.contains("_small("),
         "{source}"
@@ -989,7 +992,7 @@ fn dots_fuse_their_epilogue() {
         &[],
         &[],
         &config,
-        |body, by_value| codegen::kernel(body, by_value, &config).0,
+        |body, by_value| codegen::kernel(body, by_value, &config, &Default::default()).0,
     );
     assert_eq!(names(&unfused), ["dot_general", "fusion"]);
     if available() {
@@ -1179,7 +1182,8 @@ fn reductions_apply_their_epilogue() {
                 panic!("{fused}")
             };
             assert!(super::codegen::has_epilogue(body));
-            let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+            let source =
+                codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
             assert!(source.contains("operator()(float r)"), "{source}");
             assert_eq!(source.contains("_final("), split, "{source}");
             if available() {
@@ -1211,7 +1215,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
             panic!("{fused}")
         };
         assert!(super::codegen::has_epilogue(body));
-        let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+        let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
         assert_eq!(source.contains("_final("), split, "{source}");
         if available() {
             // The sum's float accumulation error: of `shape[1]` values of
@@ -1521,7 +1525,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+    let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
@@ -1549,7 +1553,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(body, &[], &CompilerConfig::default()).1;
+    let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"

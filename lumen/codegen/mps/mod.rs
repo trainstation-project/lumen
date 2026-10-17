@@ -18,7 +18,16 @@ use crate::ops::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
-pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -> (String, String) {
+/// A loop fusion's kernel: its name and Metal source. `views` (by output
+/// position) are the offset and strides each output is written at in a
+/// larger buffer (an in-place concatenate's operand), where
+/// [`writes_views`] says it can be.
+pub(crate) fn kernel(
+    body: &Graph,
+    by_value: &[bool],
+    config: &CompilerConfig,
+    views: &HashMap<usize, (usize, Vec<usize>)>,
+) -> (String, String) {
     if let Some(dot) = gemm_dot(body) {
         return gemm_kernel(body, by_value, dot);
     }
@@ -30,7 +39,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -
         return reduction(body, by_value, root);
     }
     if let Some(tiling) = transpose_tiling(body) {
-        return transpose_kernel(body, by_value, &tiling);
+        return transpose_kernel(body, by_value, &tiling, views);
     }
     let mut emitter = Emitter::new(body, by_value);
     let out = body.outputs()[0];
@@ -42,11 +51,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool], config: &CompilerConfig) -
         .collect();
     let out_type = metal_type(body.type_of(out).dtype);
     let (params, args) = io_params(body, by_value, out_type);
-    let mut writes = String::new();
-    writeln!(writes, "out[j] = {result};").unwrap();
-    for (e, value) in extra.iter().enumerate() {
-        writeln!(writes, "out{}[j] = {value};", e + 1).unwrap();
-    }
+    let writes = written(body, views, &result, &extra);
     let lines = &emitter.lines;
     named(formatdoc!(
         "
@@ -445,7 +450,12 @@ pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
 /// operand is laid out (computing what the operand is computed from, at
 /// those indices), into threadgroup memory; then computes the output along
 /// `b`, as it is laid out, each hero's value read from its tile.
-fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -> (String, String) {
+fn transpose_kernel(
+    body: &Graph,
+    by_value: &[bool],
+    tiling: &TransposeTiling,
+    views: &HashMap<usize, (usize, Vec<usize>)>,
+) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = metal_type(body.type_of(out).dtype);
     let (params, _) = io_params(body, by_value, out_type);
@@ -502,11 +512,7 @@ fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -
         .iter()
         .map(|&v| emitter.value(v, "j".into()))
         .collect();
-    let mut writes = String::new();
-    writeln!(writes, "out[j] = {result};").unwrap();
-    for (e, value) in extra.iter().enumerate() {
-        writeln!(writes, "out{}[j] = {value};", e + 1).unwrap();
-    }
+    let writes = written(body, views, &result, &extra);
     source.push_str(&each(&format!("{}{writes}", emitter.lines), "b", "a"));
     named(formatdoc!(
         "
@@ -515,6 +521,61 @@ fn transpose_kernel(body: &Graph, by_value: &[bool], tiling: &TransposeTiling) -
         }}
         "
     ))
+}
+
+/// Whether a loop fusion's kernel ([`kernel`]) can write its outputs
+/// into a larger buffer's part, at any offset and strides: one computing
+/// each element at its flat index `j` (elementwise, or a tiled
+/// transpose), not a contraction's, a row's or a reduction's.
+pub(crate) fn writes_views(body: &Graph) -> bool {
+    gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
+}
+
+/// A loop fusion's writes at flat index `j`: its output's `result` and its
+/// other outputs' `extra` (`out`, `out1`, ...), each where `views` (by
+/// position) places it, or at `j`.
+fn written(
+    body: &Graph,
+    views: &HashMap<usize, (usize, Vec<usize>)>,
+    result: &str,
+    extra: &[String],
+) -> String {
+    let mut writes = String::new();
+    for (k, value) in std::iter::once(result)
+        .chain(extra.iter().map(String::as_str))
+        .enumerate()
+    {
+        let out = match k {
+            0 => "out".to_string(),
+            _ => format!("out{k}"),
+        };
+        let at = match views.get(&k) {
+            Some((offset, strides)) => {
+                // `j`'s index along each dimension, the last fastest.
+                let shape = &body.type_of(body.outputs()[k]).shape;
+                let mut at = format!("{offset}ul");
+                let mut inner = 1;
+                for (d, (&n, &stride)) in shape.iter().zip(strides).enumerate().rev() {
+                    if n == 1 {
+                        continue;
+                    }
+                    let mut idx = match inner {
+                        1 => "j".to_string(),
+                        _ => format!("(j / {inner}u)"),
+                    };
+                    if d > 0 && shape[..d].iter().any(|&m| m != 1) {
+                        idx = format!("({idx} % {n}u)");
+                    }
+                    at.push_str(&format!(" + ulong({idx}) * {stride}ul"));
+                    inner *= n;
+                }
+                at
+            }
+            None => "j".to_string(),
+        };
+        writeln!(writes, "{out}[{at}] = {value};").unwrap();
+    }
+    writes
 }
 
 /// `source` (Metal) indented by its braces: each line's own indentation

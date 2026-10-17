@@ -1114,12 +1114,12 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
     """Attention's q, k and v projections' backward (``gated_backward``, a
     group of three): its input's gradient one dot of ``[dq | dk | dv]``
     and the forward's weight block (K three times as long), its weights'
-    gradients one dot. Deterministic (dQ its own kernel), ``[dq | dk |
-    dv]`` written in place by the flash attention backward's kernels, each
-    gradient cast to bfloat16 and laid out as the dots read it as it is
-    stored: no concatenate, no kernel between them and the dots. Else
-    (dQ added atomically, in float32) written side by side by the kernel
-    casting them. The gradients the CPU's."""
+    gradients one dot. ``[dq | dk | dv]`` written in place by the flash
+    attention backward's kernels, each gradient cast to bfloat16 and laid
+    out as the dots read it as it is stored: no concatenate. Deterministic
+    (dQ its own kernel), no kernel between them and the dots. Else (one
+    kernel, adding dQ atomically in float32) dQ cast and laid out by a
+    kernel of its own, into its place. The gradients the CPU's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1162,18 +1162,33 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
     (dx,) = [s for s in merged if s["output"][2] == [m, d]]
     assert [i[2] for i in dx["inputs"]] == [[m, 3 * d], [3 * d, d]], labels
     assert "concatenate" not in labels, labels
+    backward = [s for s in steps if s["label"].startswith("flash_attention_backward")]
+    assert all(s["output"][1:] == ("bfloat16", [m, d]) for s in backward), labels
+    # Each writing in one buffer, which the dots read: profiled at its
+    # strides, a row of it 3d elements.
+    written = [e for e in prof.events() if e["name"].startswith("flash_attention_backward")]
     if deterministic:
-        backward = [s for s in steps if s["label"].startswith("flash_attention_backward")]
-        assert len(backward) == 2 and all(s["output"][1:] == ("bfloat16", [m, d]) for s in backward), labels
-        # Both writing in one buffer, which the dots read: profiled at its
-        # strides, a row of it 3d elements.
+        assert len(backward) == 2, labels
         assert backward[0]["output"][0] == backward[1]["output"][0] == dx["inputs"][0][0], steps
-        written = [e for e in prof.events() if e["name"].startswith("flash_attention_backward")]
         assert [e["output_strides"] for e in written] == [[[3 * d, 1]] * 2, [[3 * d, 1]]], written
         # The dots right after them: nothing copies, casts or lays out.
         at = labels.index(backward[-1]["label"])
         assert all(label.startswith("3x dot_general") for label in labels[at + 1 : at + 3]), labels
         assert not any("concatenate" in label or "transpose" in label for label in labels), labels
+    else:
+        # dK and dV in place, dQ in float32 ([batch, heads, seq, d / heads]).
+        (step,) = backward
+        assert step["output"][0] == dx["inputs"][0][0], steps
+        (event,) = written
+        assert event["output_strides"][:2] == [[3 * d, 1]] * 2, event
+        assert event["outputs"][2][0] == "float32", event
+        # Then dQ cast and laid out into its place.
+        at = labels.index(step["label"])
+        cast = steps[at + 1]
+        assert "cast" in cast["label"] and cast["output"] == (dx["inputs"][0][0], "bfloat16", [m, d]), steps
+        assert labels[at + 2].startswith("3x dot_general"), labels
+        (event,) = [e for e in prof.events() if e["name"] == cast["label"] and e["inputs"][0][0] == "float32"]
+        assert event["output_strides"] == [[3 * d, 1]], event
 
 
 class _SavedNarrowMLP(lumen.autograd.Function):
