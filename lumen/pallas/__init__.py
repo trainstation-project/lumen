@@ -37,6 +37,7 @@ __all__ = [
     "ANY",
     "BlockSpec",
     "Ref",
+    "SMEM",
     "SemaphoreType",
     "ShapeDtypeStruct",
     "VMEM",
@@ -91,7 +92,17 @@ class ds:
 
 
 class VMEM:
-    """A VMEM scratch buffer of ``shape`` and ``dtype`` (``pltpu.VMEM``)."""
+    """A VMEM scratch buffer of ``shape`` and ``dtype`` (``pltpu.VMEM``);
+    as a ``BlockSpec``'s ``memory_space``, an operand staged in VMEM."""
+
+    def __init__(self, shape, dtype):
+        self.shape, self.dtype = tuple(shape), dtype
+
+
+class SMEM:
+    """An SMEM (scalar memory) scratch buffer of ``shape`` and ``dtype``
+    (``pltpu.SMEM``); as a ``BlockSpec``'s ``memory_space``, an operand
+    staged in SMEM, its elements read and written one at a time."""
 
     def __init__(self, shape, dtype):
         self.shape, self.dtype = tuple(shape), dtype
@@ -175,12 +186,25 @@ class Ref:
             return self
         return Ref(self.kernel, self.kernel.slice(self.var, starts, dynamic, sizes, squeezed))
 
+    def _element(self, index):
+        """An SMEM ref's element ``index`` (an index a dimension): its
+        indices' values."""
+        index = index if isinstance(index, tuple) else (index,)
+        if len(index) != self.ndim or any(isinstance(i, (slice, ds)) or i is Ellipsis for i in index):
+            raise IndexError(f"an SMEM ref's element takes {self.ndim} indices, got {index!r}")
+        return [_i32(i).var for i in index]
+
     def __getitem__(self, index):
         if self.space == "smem":
-            return TracedTensor(self.kernel, self.kernel.load(self.var, _i32(index).var))
+            return TracedTensor(self.kernel, self.kernel.load(self.var, self._element(index)))
         return TracedTensor(self.kernel, self.kernel.load(self._window(index).var))
 
     def __setitem__(self, index, value):
+        if self.space == "smem":
+            indices = self._element(index)
+            value = prims.full((), value, self.dtype) if not isinstance(value, TracedTensor) else value
+            self.kernel.store(self.var, value.var, indices)
+            return
         window = self._window(index)
         value = prims.full(window.shape, value, window.dtype) if not isinstance(value, TracedTensor) else value
         self.kernel.store(window.var, value.var)
@@ -206,19 +230,26 @@ def kernel(body, *, scalars, rows, host_rows=None, scratch=(), name="kernel"):
     k = Kernel(scalars, rows, host_rows)
     with tracer.tracing(k):
         refs = [Ref(k, v) for v in k.params()]
-        for s in scratch:
-            var = k.vmem(s.dtype, list(s.shape)) if isinstance(s, VMEM) else k.semaphores(list(s.shape))
-            refs.append(Ref(k, var))
+        refs += [_alloc(k, s) for s in scratch]
         body(*refs)
     return k.lower(name)
 
 
+def _alloc(k, s):
+    """A ref of scratch ``s`` (``VMEM``, ``SMEM``, ``SemaphoreType``) of kernel
+    ``k``."""
+    if isinstance(s, VMEM):
+        return Ref(k, k.vmem(s.dtype, list(s.shape)))
+    if isinstance(s, SMEM):
+        return Ref(k, k.smem(s.dtype, list(s.shape)))
+    return Ref(k, k.semaphores(list(s.shape)))
+
+
 def scratch(s):
-    """A ref of scratch ``s`` (``VMEM``, ``SemaphoreType``) of the kernel
-    being traced, made as it is traced (``emit_pipeline``'s buffers)."""
-    k = _kernel()
-    var = k.vmem(s.dtype, list(s.shape)) if isinstance(s, VMEM) else k.semaphores(list(s.shape))
-    return Ref(k, var)
+    """A ref of scratch ``s`` (``VMEM``, ``SMEM``, ``SemaphoreType``) of the
+    kernel being traced, made as it is traced (``emit_pipeline``'s
+    buffers)."""
+    return _alloc(_kernel(), s)
 
 
 def when(cond):

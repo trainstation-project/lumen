@@ -191,8 +191,8 @@ impl Kernel {
     /// A new scratch buffer or semaphore array.
     pub fn alloc(&mut self, ty: Type) -> Result<Var, String> {
         match ty {
-            Type::Ref(_, Space::Vmem) | Type::Semaphore(_) => {}
-            _ => return Err("scratch is VMEM or DMA semaphores".into()),
+            Type::Ref(_, Space::Vmem | Space::Smem) | Type::Semaphore(_) => {}
+            _ => return Err("scratch is VMEM, SMEM or DMA semaphores".into()),
         }
         let v = self.var(ty);
         self.scratch.push(v);
@@ -428,32 +428,51 @@ impl Kernel {
     }
 
     /// A VMEM ref's value, or an SMEM ref's element at i32 `index`.
-    pub fn load(&mut self, src: Var, index: Option<Var>) -> Result<Var, String> {
+    /// A VMEM ref's whole value (no `indices`), or an SMEM ref's element at
+    /// i32 `indices` (one a dimension).
+    pub fn load(&mut self, src: Var, indices: &[Var]) -> Result<Var, String> {
         self.check(&[src])?;
+        self.check(indices)?;
         let (t, space) = self.reference(src)?;
         let t = t.clone();
-        let (inputs, ty) = match (space, index) {
-            (Space::Vmem, None) => (vec![src], t),
-            (Space::Smem, Some(i)) if t.shape.len() == 1 => {
-                self.check(&[i])?;
-                (vec![src, i], TensorType::new(t.dtype, &[]))
+        let ty = match (space, indices.len()) {
+            (Space::Vmem, 0) => t,
+            (Space::Smem, n) if n == t.shape.len() => TensorType::new(t.dtype, &[]),
+            _ => {
+                return Err(
+                    "loads read a VMEM ref whole, or an SMEM ref's element (an index a dimension)"
+                        .into(),
+                );
             }
-            _ => return Err("loads read a VMEM ref whole, or an SMEM vector's element".into()),
         };
+        let inputs: Vec<Var> = std::iter::once(src)
+            .chain(indices.iter().copied())
+            .collect();
         Ok(self.push(Op::Load, &inputs, vec![Type::Value(ty)])[0])
     }
 
-    /// Stores `value` in VMEM ref `dst`.
-    pub fn store(&mut self, dst: Var, value: Var) -> Result<(), String> {
+    /// Stores `value` in VMEM ref `dst` whole (no `indices`), or as an SMEM
+    /// ref's element at i32 `indices`.
+    pub fn store(&mut self, dst: Var, value: Var, indices: &[Var]) -> Result<(), String> {
         self.check(&[dst, value])?;
+        self.check(indices)?;
         let (t, space) = self.reference(dst)?;
         let v = self.value(value)?;
-        if space != Space::Vmem || t != v {
+        let fits = match (space, indices.len()) {
+            (Space::Vmem, 0) => t == v,
+            (Space::Smem, n) => n == t.shape.len() && *v == TensorType::new(t.dtype, &[]),
+            _ => false,
+        };
+        if !fits {
             return Err(format!(
-                "stores write a VMEM ref of the value's type, got {t} and {v}"
+                "stores write a VMEM ref whole, or an SMEM ref's element, of its dtype: got {t} and {v}"
             ));
         }
-        self.push(Op::Store, &[dst, value], vec![]);
+        let inputs: Vec<Var> = [dst, value]
+            .into_iter()
+            .chain(indices.iter().copied())
+            .collect();
+        self.push(Op::Store, &inputs, vec![]);
         Ok(())
     }
 

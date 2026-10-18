@@ -405,10 +405,43 @@ impl Emitter<'_> {
                     }
                 }
                 _ => {
-                    let i = self.op("arith.index_cast", &[(&ins[1].0, "i32".into())], "", &["index".into()]);
-                    self.op("memref.load", &[(&ins[0].0, ins[0].1.clone()), (&i[0], "index".into())], "", &out_types)
+                    // An SMEM element, at its indices.
+                    let dtype = self.value(node.outputs[0]).dtype;
+                    let mut operands = vec![(ins[0].0.clone(), ins[0].1.clone())];
+                    for (i, _) in &ins[1..] {
+                        let i = self.op("arith.index_cast", &[(i, "i32".into())], "", &["index".into()]);
+                        operands.push((i[0].clone(), "index".into()));
+                    }
+                    match dtype {
+                        // Stored as int32: nonzero.
+                        DType::Bool => {
+                            let word = TensorType::new(DType::I32, &[]);
+                            let w = self.op("memref.load", &refs(&operands), "", &["i32".into()]).remove(0);
+                            let zero = (self.constant(&Scalar::Int(0), &word), word.clone());
+                            let out = self.value(node.outputs[0]).clone();
+                            vec![self.unary("arith.cmpi", &[&(w, word), &zero], "predicate = 1 : i64", &out)]
+                        }
+                        _ => self.op("memref.load", &refs(&operands), "", &out_types),
+                    }
                 }
             },
+            Op::Store if node.inputs.len() > 2 => {
+                // An SMEM element, at its indices (a bool as int32).
+                let value = match self.value(node.inputs[1]).dtype {
+                    DType::Bool => {
+                        let b = (ins[1].0.clone(), TensorType::new(DType::Bool, &[]));
+                        let word = TensorType::new(DType::I32, &[]);
+                        (self.unary("arith.extui", &[&b], "", &word), "i32".to_string())
+                    }
+                    _ => ins[1].clone(),
+                };
+                let mut operands = vec![value, ins[0].clone()];
+                for (i, _) in &ins[2..] {
+                    let i = self.op("arith.index_cast", &[(i, "i32".into())], "", &["index".into()]);
+                    operands.push((i[0].clone(), "index".into()));
+                }
+                self.op("memref.store", &refs(&operands), "nontemporal = false", &[])
+            }
             Op::Store => {
                 let Type::Ref(t, _) = self.ty(node.inputs[0]) else {
                     unreachable!("checked when built")
@@ -520,7 +553,27 @@ impl Emitter<'_> {
         if let Full { fill_value, .. } = p {
             return Ok(self.constant(fill_value, out));
         }
-        let a = &args[0];
+        if let Iota { dimension, .. } = p {
+            // `tpu.iota`, of two dimensions at least: a vector's as `[1, n]`.
+            let (shape, dimension) = match out.shape.len() {
+                1 => (vec![1, out.shape[0]], 1),
+                _ => (out.shape.clone(), *dimension),
+            };
+            let ty = TensorType::new(out.dtype, &shape);
+            let attrs = format!("dimensions = array<i32: {dimension}>");
+            let iota = (
+                self.op("tpu.iota", &[], &attrs, &[value_type(&ty)])
+                    .remove(0),
+                ty,
+            );
+            return Ok(match out.shape.len() {
+                1 => self.unary("vector.shape_cast", &[&iota], "", out),
+                _ => iota.0,
+            });
+        }
+        let Some(a) = args.first() else {
+            return Err(format!("{} does not run in TPU kernels yet", p.name()));
+        };
         let float = a.1.dtype.is_float();
         let uns = unsigned(a.1.dtype);
         Ok(match p {
@@ -649,19 +702,41 @@ impl Emitter<'_> {
                 output_dtype,
             } => {
                 let b = &args[1];
-                if !lhs_batch.is_empty()
-                    || !rhs_batch.is_empty()
-                    || a.1.shape.len() != 2
-                    || b.1.shape.len() != 2
-                    || lhs_contracting.len() != 1
-                {
-                    return Err(
-                        "TPU kernels multiply matrices: two dimensions, one contracting, no batch"
-                            .into(),
-                    );
-                }
-                let (lc, rc) = (lhs_contracting[0], rhs_contracting[0]);
-                let (lf, rf) = (1 - lc, 1 - rc);
+                // Mosaic's dimension numbers: the operands' contracting and
+                // free dimensions, the result's dimensions as (operand,
+                // dimension) pairs (the batch, the lhs's free, the rhs's
+                // free), and the batch dimensions.
+                let free = |rank: usize, contracting: &[usize], batch: &[usize]| -> Vec<usize> {
+                    (0..rank)
+                        .filter(|d| !contracting.contains(d) && !batch.contains(d))
+                        .collect()
+                };
+                let (lf, rf) = (
+                    free(a.1.shape.len(), lhs_contracting, lhs_batch),
+                    free(b.1.shape.len(), rhs_contracting, rhs_batch),
+                );
+                let list = |v: &[usize]| {
+                    v.iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let order: Vec<String> = lhs_batch
+                    .iter()
+                    .map(|d| format!("0, {d}"))
+                    .chain(lf.iter().map(|d| format!("0, {d}")))
+                    .chain(rf.iter().map(|d| format!("1, {d}")))
+                    .collect();
+                let numbers = format!(
+                    "#tpu.dot_dimension_numbers<[{}], [{}], [{}], [{}], [{}], [{}], [{}]>",
+                    list(lhs_contracting),
+                    list(rhs_contracting),
+                    list(&lf),
+                    list(&rf),
+                    order.join(", "),
+                    list(lhs_batch),
+                    list(rhs_batch)
+                );
                 let acc_type = TensorType::new(*accum_dtype, &out.shape);
                 let zero = match accum_dtype.is_float() {
                     true => Scalar::Float(0.0),
@@ -673,8 +748,7 @@ impl Emitter<'_> {
                     _ => "",
                 };
                 let attrs = format!(
-                    "dimension_numbers = #tpu.dot_dimension_numbers<[{lc}], [{rc}], [{lf}], [{rf}], \
-                     [0, {lf}, 1, {rf}], [], []>, {precision}transpose_lhs = false, \
+                    "dimension_numbers = {numbers}, {precision}transpose_lhs = false, \
                      transpose_lhs_hint = false, transpose_rhs = false"
                 );
                 let product = (
@@ -709,6 +783,17 @@ impl Emitter<'_> {
                     list(&vec![1; sizes.len()])
                 );
                 self.unary("vector.extract_strided_slice", &[a], &attrs, out)
+            }
+            Transpose { permutation } => {
+                let attrs = format!(
+                    "permutation = array<i64: {}>",
+                    permutation
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                self.unary("tpu.transpose", &[a], &attrs, out)
             }
             other => return Err(format!("{} does not run in TPU kernels yet", other.name())),
         })

@@ -146,13 +146,20 @@ impl PyKernel {
             .map_err(err)
     }
 
-    #[pyo3(signature = (src, index = None))]
-    fn load(&mut self, src: Var, index: Option<Var>) -> PyResult<Var> {
-        self.inner.load(src, index).map_err(err)
+    #[pyo3(signature = (src, indices = Vec::new()))]
+    fn load(&mut self, src: Var, indices: Vec<Var>) -> PyResult<Var> {
+        self.inner.load(src, &indices).map_err(err)
     }
 
-    fn store(&mut self, dst: Var, value: Var) -> PyResult<()> {
-        self.inner.store(dst, value).map_err(err)
+    #[pyo3(signature = (dst, value, indices = Vec::new()))]
+    fn store(&mut self, dst: Var, value: Var, indices: Vec<Var>) -> PyResult<()> {
+        self.inner.store(dst, value, &indices).map_err(err)
+    }
+
+    /// An SMEM scratch buffer of `dtype` and `shape`.
+    fn smem(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
+        let ty = Type::Ref(TensorType::new(parse_dtype(dtype)?, &shape), Space::Smem);
+        self.inner.alloc(ty).map_err(err)
     }
 
     fn dma(&mut self, src: Var, dst: Var, sem: Var, wait: bool) -> PyResult<()> {

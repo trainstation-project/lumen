@@ -25,7 +25,7 @@ fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
     };
     let sem = k.alloc(Type::Semaphore(vec![])).unwrap();
     let zero = constant(&mut k, 0);
-    let row = k.load(scalars, Some(zero)).unwrap();
+    let row = k.load(scalars, &[zero]).unwrap();
     let to = k
         .slice(
             result,
@@ -73,12 +73,12 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
         dtype: DType::F32,
     };
     let zeros = k.apply(zeros, &[]).unwrap();
-    k.store(acc, zeros).unwrap();
+    k.store(acc, zeros, &[]).unwrap();
     k.end_if().unwrap();
     let (xv, yv, av) = (
-        k.load(x, None).unwrap(),
-        k.load(y, None).unwrap(),
-        k.load(acc, None).unwrap(),
+        k.load(x, &[]).unwrap(),
+        k.load(y, &[]).unwrap(),
+        k.load(acc, &[]).unwrap(),
     );
     // x @ y.T: y is [n, k].
     let dot = Primitive::DotGeneral {
@@ -91,7 +91,7 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
     };
     let product = k.apply(dot, &[xv, yv]).unwrap();
     let sum = k.apply(Primitive::Add, &[av, product]).unwrap();
-    k.store(acc, sum).unwrap();
+    k.store(acc, sum, &[]).unwrap();
     let out = k.end_for(&carried).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(*k.type_of(out[0]), Type::Value(i32_scalar()));
@@ -121,7 +121,7 @@ fn bit_ops_unpack_a_bfloat16_word() {
             Space::Vmem,
         ))
         .unwrap();
-    let w = k.load(words, None).unwrap();
+    let w = k.load(words, &[]).unwrap();
     let sixteen = Primitive::Full {
         shape: vec![8, 128],
         fill_value: Scalar::Int(16),
@@ -182,8 +182,8 @@ fn kernels_refuse_what_tpus_cannot_do() {
         unreachable!()
     };
     // Loads read VMEM whole, or an SMEM element.
-    assert!(k.load(memory, None).is_err());
-    assert!(k.load(scalars, None).is_err());
+    assert!(k.load(memory, &[]).is_err());
+    assert!(k.load(scalars, &[]).is_err());
     // Scratch is VMEM or semaphores.
     let hbm = Type::Ref(TensorType::new(DType::F32, &[8, 128]), Space::Any);
     assert!(k.alloc(hbm).is_err());

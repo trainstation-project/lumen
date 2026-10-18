@@ -91,41 +91,55 @@ def _specs(specs, count):
 
 
 def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
-    """``kernel`` on HBM refs ``ins`` and ``outs``, as ``pallas_call`` runs it."""
-    from . import VMEM, SemaphoreType, emit_pipeline, make_async_copy, scratch
+    """``kernel`` on HBM refs ``ins`` and ``outs``, as ``pallas_call`` runs it:
+    each operand staged whole in VMEM (no specs and no grid; a spec of
+    ``memory_space=VMEM`` and no block shape) or SMEM (``memory_space=SMEM``),
+    its HBM ref as it is (``memory_space=ANY``), or its blocks pipelined over
+    the grid (a spec with a block shape)."""
+    from . import SMEM, VMEM, SemaphoreType, emit_pipeline, make_async_copy, scratch
     from .pipeline import BlockSpec
 
-    if not grid and in_specs is None and out_specs is None:
-        # Each whole, in VMEM.
-        sem = scratch(SemaphoreType.DMA)
-        vins = [scratch(VMEM(r.shape, r.dtype)) for r in ins]
-        vouts = [scratch(VMEM(r.shape, r.dtype)) for r in outs]
-        for r, v in zip(ins, vins):
-            copy = make_async_copy(r, v, sem)
-            copy.start()
-            copy.wait()
-        kernel(*vins, *vouts, *[scratch(s) for s in scratch_shapes])
-        for r, v in zip(outs, vouts):
-            copy = make_async_copy(v, r, sem)
-            copy.start()
-            copy.wait()
-        return
-    specs = _specs(in_specs, len(ins)) + _specs(out_specs, len(outs))
     refs = ins + outs
-    specs = [s if s is not None else BlockSpec() for s in specs]
-    piped = [i for i, s in enumerate(specs) if s.memory_space != ANY]
+    whole = not grid and in_specs is None and out_specs is None
+    specs = _specs(in_specs, len(ins)) + _specs(out_specs, len(outs))
+    args, piped, staged = list(refs), [], []
+    for i, spec in enumerate(specs):
+        space = None if spec is None else spec.memory_space
+        if space == ANY:
+            continue
+        if space is SMEM or (space is VMEM or whole or spec is None) and (spec is None or spec.block_shape is None):
+            staged.append((i, SMEM if space is SMEM else VMEM))
+        else:
+            piped.append(i)
+    sem = scratch(SemaphoreType.DMA) if staged else None
+
+    def copy(src, dst):
+        c = make_async_copy(src, dst, sem)
+        c.start()
+        c.wait()
+
+    for i, space in staged:
+        args[i] = scratch(space(refs[i].shape, refs[i].dtype))
+        if i < len(ins):
+            copy(refs[i], args[i])
     extra = [scratch(s) for s in scratch_shapes]
+    if piped or grid:
+        specs = [s if s is not None else BlockSpec() for s in specs]
 
-    def body(*blocks):
-        args = list(refs)
-        for i, b in zip(piped, blocks):
-            args[i] = b
+        def body(*blocks):
+            for i, b in zip(piped, blocks):
+                args[i] = b
+            kernel(*args, *extra)
+
+        n_in = sum(1 for i in piped if i < len(ins))
+        emit_pipeline(
+            body,
+            grid=grid,
+            in_specs=[specs[i] for i in piped[:n_in]],
+            out_specs=[specs[i] for i in piped[n_in:]],
+        )(*[refs[i] for i in piped])
+    else:
         kernel(*args, *extra)
-
-    n_in = sum(1 for i in piped if i < len(ins))
-    emit_pipeline(
-        body,
-        grid=grid,
-        in_specs=[specs[i] for i in piped[:n_in]],
-        out_specs=[specs[i] for i in piped[n_in:]],
-    )(*[refs[i] for i in piped])
+    for i, _ in staged:
+        if i >= len(ins):
+            copy(args[i], refs[i])
