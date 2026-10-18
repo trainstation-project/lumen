@@ -157,9 +157,9 @@ pub(crate) fn encode(
         ));
     };
     let spec = format!(
-        "\"batch\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"operands\": \
-         \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}]",
-        f.batch, f.m, f.n, f.k, f.transposed, lhs.dtype, out.dtype
+        "\"batch\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"packing\": \
+         [{pin}, {pout}], \"blocks\": [{bm}, {bn}, {bk}]",
+        f.batch, f.m, f.n, f.k, f.transposed
     );
     let rows = [inputs[0], inputs[1], output.cast_const()];
     let launched = Launch {

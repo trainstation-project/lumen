@@ -26,8 +26,9 @@ from lumen.ops.tpu import pallas
 
 def program(spec, epilogue=None):
     """The dot of ``spec``: ``batch``, ``m``, ``n``, ``k``, ``transposed`` (a
-    ``[N, K]`` rhs), ``operands`` and ``output`` dtypes, ``blocks`` (bm, bn,
-    bk) and the memory's ``rows``. Its scalars are the rows of the lhs, the
+    ``[N, K]`` rhs), ``packing`` (the operands' and the output's elements a
+    word: 1 for float32, 2 for bfloat16), ``blocks`` (bm, bn, bk), and the
+    TPU's ``kind`` and memory ``rows``. Its scalars are the rows of the lhs, the
     rhs and the output. ``epilogue`` (float32 block to float32 block,
     elementwise: a bfloat16 output's columns are in the accumulator's order)
     is applied to each output block before it is rounded."""
@@ -39,8 +40,7 @@ def program(spec, epilogue=None):
     b_, m, n, k = spec["batch"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
     t = spec["transposed"]
-    pin = 2 if spec["operands"] == "bfloat16" else 1
-    pout = 2 if spec["output"] == "bfloat16" else 1
+    pin, pout = spec["packing"]
     mb, nb, kb = m // bm, n // bn, k // bk
     precision = jax.lax.Precision.HIGHEST if pin == 1 else None
     numbers = (((1,), (1,)), ((), ())) if t else (((1,), (0,)), ((), ()))
