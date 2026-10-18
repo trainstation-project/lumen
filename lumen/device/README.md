@@ -130,7 +130,7 @@ compiles on machines with no CUDA headers or libraries.
   matching on it. The CUDA allocator calls `CUDA.set_device(..)` before
   touching memory, which is why `set_device` exists.
 * Ops and streams: `lumen/ops/mod.rs`, `lumen/ops/device_transfer/mod.rs`,
-  `lumen/ops/wait/mod.rs`, `lumen/stream/cuda/mod.rs`, `lumen/stream/mps/mod.rs`.
+  `lumen/ops/wait/mod.rs`, `lumen/stream/cuda.rs`, `lumen/stream/mps/mod.rs`.
 * Profiling: `lumen/profiler/mod.rs`, `profiler/chrome.rs`, `profiler/summary.rs`,
   and `profiler/cupti.rs` (iterates `CUDA.device_count()`).
 * Guarding GPU-only tests: `CUDA.is_available()` / `MPS.is_available()` are

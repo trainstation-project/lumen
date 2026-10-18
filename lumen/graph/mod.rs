@@ -19,6 +19,7 @@ use std::sync::{Mutex, PoisonError};
 pub use primitive::{FUSION_SEPARATOR, NEURAL_ENGINE, Primitive};
 
 use crate::DType;
+use crate::tensor::contiguous_strides;
 
 /// The static type of a graph value: a dtype and a shape (JAX:
 /// `ShapedArray`). Graph values have no strides or device.
@@ -105,6 +106,15 @@ pub struct Graph {
     pub(crate) scope: Scope,
     /// The source lines it gives them.
     pub(crate) sources: Lines,
+}
+
+/// Where a value lives in another value's memory ([`Graph::placements`]):
+/// the element offset of its first element there and its strides, in
+/// elements (XLA's layout and buffer aliasing, as one annotation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct View {
+    pub offset: usize,
+    pub strides: Vec<usize>,
 }
 
 impl Graph {
@@ -239,6 +249,55 @@ impl Graph {
 
     pub fn type_of(&self, var: Var) -> &TensorType {
         &self.types[var]
+    }
+
+    /// Where operand `k` of concatenate `node` is in its result: its view
+    /// of the result's memory (the result's strides).
+    pub fn slot(&self, node: &Node, k: usize) -> View {
+        let Primitive::Concatenate { dimension, .. } = node.primitive else {
+            panic!("{}: not a concatenate", node.primitive)
+        };
+        let strides = contiguous_strides(&self.types[node.output].shape);
+        let before: usize = node.inputs[..k]
+            .iter()
+            .map(|&v| self.types[v].shape[dimension])
+            .sum();
+        View {
+            offset: before * strides[dimension],
+            strides,
+        }
+    }
+
+    /// Where each value lives in another's memory, if it does (by value),
+    /// as the graph's primitives place it: a slice read in place
+    /// ([`Primitive::Slice`]'s `view`) in its operand's; an operand of a
+    /// concatenate computed in place ([`Primitive::Concatenate`]'s
+    /// `in_place`) in the result's, at its place there. That value, and the
+    /// value's view of it: what the passes, the kernels writing and reading
+    /// it and the plan all take, from this alone.
+    pub fn placements(&self) -> Vec<Option<(Var, View)>> {
+        let mut placed = vec![None; self.types.len()];
+        for node in &self.nodes {
+            match &node.primitive {
+                Primitive::Slice {
+                    start_indices,
+                    view: true,
+                    ..
+                } => {
+                    let x = node.inputs[0];
+                    let strides = contiguous_strides(&self.types[x].shape);
+                    let offset = start_indices.iter().zip(&strides).map(|(s, t)| s * t).sum();
+                    placed[node.output] = Some((x, View { offset, strides }));
+                }
+                Primitive::Concatenate { in_place: true, .. } => {
+                    for (k, &v) in node.inputs.iter().enumerate() {
+                        placed[v] = Some((node.output, self.slot(node, k)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        placed
     }
 
     pub fn inputs(&self) -> &[Var] {

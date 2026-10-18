@@ -601,7 +601,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ravel(idx.iter().zip(start_indices).map(|(i, s)| i + s), &x.shape)
             })
         }
-        Concatenate { dimension } => {
+        Concatenate { dimension, .. } => {
             let d = *dimension;
             let all = match args[0] {
                 Int(_) => Int(args

@@ -317,6 +317,7 @@ pub(crate) fn merge_dots(
                         others.iter().map(|&v| graph.type_of(v)).collect();
                     let block = Primitive::Concatenate {
                         dimension: g.dimension,
+                        in_place: false,
                     }
                     .infer(&types)
                     .expect("operands equal but in the dimension");
@@ -373,6 +374,7 @@ pub(crate) fn merge_dots(
                     let part = Primitive::Slice {
                         start_indices: starts,
                         limit_indices: limits,
+                        view: false,
                     };
                     map[v] = out.apply(part, &[value]).expect("within the block");
                     parted[v] = true;
@@ -402,6 +404,7 @@ pub(crate) fn merge_dots(
                 let slice = Primitive::Slice {
                     start_indices: starts,
                     limit_indices: limits,
+                    view: false,
                 };
                 out.set_origin(&nodes[m]);
                 map[nodes[m].output] = out.apply(slice, &[result]).expect("within the result");
@@ -414,7 +417,7 @@ pub(crate) fn merge_dots(
         }
         // A concatenate of a merged group's operands, as they are side by
         // side: their block (or its chain).
-        if let Primitive::Concatenate { dimension } = node.primitive
+        if let Primitive::Concatenate { dimension, .. } = node.primitive
             && let Some(&(_, _, block)) = blocks
                 .iter()
                 .chain(&parts)

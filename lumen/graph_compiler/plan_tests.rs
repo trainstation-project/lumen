@@ -421,11 +421,9 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         donate: vec![0],
         donate_into: Vec::new(),
         parameters: None,
-        views: Vec::new(),
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
-        concats: Vec::new(),
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -491,11 +489,9 @@ fn donated_inputs_hold_outputs_written_in_place() {
             donate: vec![0],
             donate_into: Vec::new(),
             parameters: None,
-            views: Vec::new(),
             scalars: Vec::new(),
             memory_limit: None,
             blocks: Vec::new(),
-            concats: Vec::new(),
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -644,7 +640,7 @@ fn custom_calls_mutate_in_place_where_they_can() {
     assert!(written.iter().zip(&operands).all(|(w, o)| w != o), "{plan}");
 }
 
-/// A concatenate computed in place (`concats`): no step of its own, each
+/// A concatenate computed in place (its `in_place`): no step of its own, each
 /// operand's step writing in its result's memory, alive from the first
 /// of them to the last step reading the result.
 #[test]
@@ -653,14 +649,18 @@ fn in_place_concatenates_are_written_by_their_operands_steps() {
     let x = g.input(ty(DType::F32, &[2, 3]));
     let a = g.apply(Exp, &[x]).unwrap();
     let b = g.apply(Neg, &[x]).unwrap();
-    let c = g.apply(Concatenate { dimension: 1 }, &[a, b]).unwrap();
+    let c = g
+        .apply(
+            Concatenate {
+                dimension: 1,
+                in_place: true,
+            },
+            &[a, b],
+        )
+        .unwrap();
     let y = g.apply(Mul, &[c, c]).unwrap();
     g.set_outputs(&[y]).unwrap();
-    let options = super::PlanOptions {
-        concats: vec![c],
-        ..Default::default()
-    };
-    let plan = Plan::compile_with(&g, &options);
+    let plan = Plan::compile(&g);
     let names: Vec<&str> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(names, ["exp", "neg", "mul"], "{plan}");
     let [exp, neg, mul] = plan.steps() else {
@@ -668,9 +668,26 @@ fn in_place_concatenates_are_written_by_their_operands_steps() {
     };
     assert_eq!(exp.output.0, neg.output.0, "{plan}");
     assert_eq!(mul.inputs[0].0, exp.output.0, "{plan}");
-    // Its place in the result: the second operand's 3 columns after the first's.
-    let view = super::plan::slot(&g, &g.nodes()[2], 1);
-    assert_eq!((view.offset, view.strides), (3, vec![6, 1]));
+    // Each operand's place in the result (the graph's, which the steps
+    // write at): the second's 3 columns after the first's.
+    let placements = g.placements();
+    let at = |v: usize| {
+        placements[v]
+            .clone()
+            .map(|(base, at)| (base, at.offset, at.strides))
+    };
+    assert_eq!(at(a), Some((c, 0, vec![6, 1])));
+    assert_eq!(at(b), Some((c, 3, vec![6, 1])));
+    assert_eq!(
+        exp.output_views[0].as_ref().map(|at| at.offset),
+        Some(0),
+        "{plan}"
+    );
+    assert_eq!(
+        neg.output_views[0].as_ref().map(|at| at.offset),
+        Some(3),
+        "{plan}"
+    );
 }
 
 #[test]
@@ -699,11 +716,9 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         donate: Vec::new(),
         donate_into: Vec::new(),
         parameters: None,
-        views: Vec::new(),
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
-        concats: Vec::new(),
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];
@@ -1176,6 +1191,7 @@ pub(crate) mod mps {
                 let slice = Slice {
                     start_indices: start.to_vec(),
                     limit_indices: limit.to_vec(),
+                    view: false,
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
             }
@@ -1196,7 +1212,10 @@ pub(crate) mod mps {
                     ty(dtype, &shape)
                 };
                 check_node(
-                    Concatenate { dimension },
+                    Concatenate {
+                        dimension,
+                        in_place: false,
+                    },
                     &[shape(2), shape(0), shape(3), shape(1)],
                 );
             }

@@ -55,6 +55,7 @@ fn slice_rules() {
     let slice = |s: &[usize], l: &[usize]| Slice {
         start_indices: s.to_vec(),
         limit_indices: l.to_vec(),
+        view: false,
     };
     let y = infer(slice(&[1, 2], &[3, 6]), std::slice::from_ref(&x)).unwrap();
     assert_eq!((y.dtype, y.shape), (DType::F32, vec![2, 4]));
@@ -72,7 +73,10 @@ fn slice_rules() {
 #[test]
 fn concatenate_rules() {
     let (a, b) = (ty(DType::F32, &[2, 3, 4]), ty(DType::F32, &[2, 5, 4]));
-    let cat = |dimension| Concatenate { dimension };
+    let cat = |dimension| Concatenate {
+        dimension,
+        in_place: false,
+    };
     let y = infer(cat(1), &[a.clone(), b.clone(), a.clone()]).unwrap();
     assert_eq!((y.dtype, y.shape), (DType::F32, vec![2, 11, 4]));
     assert_eq!(

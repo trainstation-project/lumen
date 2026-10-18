@@ -12,34 +12,50 @@
 
 pub(crate) mod ane;
 mod bounds;
+mod canonicalize_dots;
+mod chunked_cross_entropy;
+mod concatenates_alone;
 mod diamonds;
 mod dot_strength;
+mod flash_attention;
+mod flash_attention_backward;
 pub(crate) mod fusion;
 mod gated_backward;
 mod horizontal;
+mod kernel_codegen;
 mod linear_cross_entropy;
 mod merge_dots;
+mod place_concats;
+mod place_views;
 mod split_k;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ffi::{CString, c_char};
 use std::sync::{Mutex, PoisonError};
 
-use super::pass::{Module, Pass, Pipeline, Rewrite};
+use super::pass::{Module, Pipeline, Rewrite};
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::attention;
-use crate::graph_compiler::plan::{Buffer, Step, slot};
+use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
-use crate::ops::dot_general::mps::{collapsed, matmul_order, reads_strided};
 use crate::ops::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
+#[cfg(test)]
+use canonicalize_dots::canonicalize_dots;
+use concatenates_alone::ConcatenatesAlone;
+use flash_attention::FlashAttention;
+use flash_attention_backward::FlashAttentionBackward;
+use kernel_codegen::Codegen;
+use place_concats::PlaceConcats;
+use place_views::PlaceViews;
+pub(crate) use place_views::fusion_reads_strided;
 
 unsafe extern "C" {
     // In lumen/ops/mps/shim.mm.
@@ -83,9 +99,6 @@ pub(crate) struct MpsModule<'a> {
     /// kernel name.
     kernels: Vec<Kernel>,
     sources: BTreeMap<String, String>,
-    /// The concatenates computed in place ([`in_place_concats`]), once
-    /// [`Codegen`] has written their operands' kernels.
-    concats: Vec<Var>,
 }
 
 impl Module for MpsModule<'_> {
@@ -127,7 +140,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     // any dot is merged, or its forward matched as a linear cross entropy).
     if config.fuse && config.fused_linear_cross_entropy {
         p.add(Rewrite("chunked_cross_entropy", |g, _| {
-            linear_cross_entropy::chunked_cross_entropy(g)
+            chunked_cross_entropy::chunked_cross_entropy(g)
         }));
     }
     // A gated pair's backward's dots merged (before `merge_dots`, which
@@ -174,16 +187,23 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
             split_k::split_k(g, !c.deterministic)
         }));
     }
-    p.add(Rewrite("canonicalize_dots", |g, _| canonicalize_dots(g)));
+    p.add(Rewrite("canonicalize_dots", |g, _| {
+        canonicalize_dots::canonicalize_dots(g)
+    }));
     if config.fuse {
         if config.normalization_diamonds {
             p.add(diamonds::Diamonds);
         }
+        // The concatenates whose operands their kernels will write in
+        // place: so marked, which loop fusion leaves be.
+        p.add(PlaceConcats);
         p.add(fusion::LoopFusion);
     } else {
         p.add(ConcatenatesAlone);
     }
     p.add(Codegen);
+    // The slices its dots read in place: views of their operands.
+    p.add(PlaceViews);
     p
 }
 
@@ -199,7 +219,6 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         scalars: super::positions(&options.scalars),
         kernels: Vec::new(),
         sources: BTreeMap::new(),
-        concats: Vec::new(),
     };
     pipeline(config).run(&mut module)?;
     compile_kernels(std::mem::take(&mut module.sources))?;
@@ -207,7 +226,6 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         graph: fused,
         packed,
         scalars,
-        concats,
         ..
     } = module;
     // The blocks it added are parameters too.
@@ -220,7 +238,6 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         donate: options.donate.clone(),
         donate_into: options.donate_into.clone(),
         parameters,
-        views: dot_views(&fused),
         scalars,
         memory_limit: config.memory_limit(),
         // The blocks it added, after the graph's inputs, each holding its
@@ -230,7 +247,6 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             .enumerate()
             .map(|(k, (members, _))| (fused.inputs().len() - packed.len() + k, members.clone()))
             .collect(),
-        concats,
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named
@@ -295,378 +311,6 @@ fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Each attention one fusion ([`attention::fuse`]): a flash-attention
-/// kernel.
-struct FlashAttention;
-
-impl<'a> Pass<MpsModule<'a>> for FlashAttention {
-    fn name(&self) -> &'static str {
-        "flash_attention"
-    }
-
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let scalars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
-        let epilogues = m.options.config.contraction_epilogues;
-        let kernels = &mut m.kernels;
-        m.graph = attention::fuse(&m.graph, epilogues, &scalars, |_| {
-            request(kernels, Kernel::Attention)
-        });
-        Ok(())
-    }
-}
-
-/// Each attention's backward one kernel adding dQ atomically (unless
-/// `deterministic`, or its blocks do not fit), or two (dV and dK, dQ), the
-/// probabilities recomputed from the forward's log-sum-exp.
-struct FlashAttentionBackward;
-
-impl<'a> Pass<MpsModule<'a>> for FlashAttentionBackward {
-    fn name(&self) -> &'static str {
-        "flash_attention_backward"
-    }
-
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let deterministic = m.options.config.deterministic;
-        let kernels = &mut m.kernels;
-        m.graph = attention::fuse_backward(
-            &m.graph,
-            |b| !deterministic && codegen::backward_block_with_dq(b).is_some(),
-            |_| request(kernels, Kernel::AttentionBackward),
-        );
-        Ok(())
-    }
-}
-
-/// Unfused, each concatenate a fusion of its own: it has no kernel but a
-/// fusion's. No kernel takes a runtime scalar by value.
-struct ConcatenatesAlone;
-
-impl<'a> Pass<MpsModule<'a>> for ConcatenatesAlone {
-    fn name(&self) -> &'static str {
-        "concatenates_alone"
-    }
-
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        m.scalars.clear();
-        let kernels = &mut m.kernels;
-        m.graph = concatenates_alone(&m.graph, &[], |_| {
-            request(kernels, Kernel::Loop(Vec::new()))
-        });
-        Ok(())
-    }
-}
-
-/// Each fusion's kernel generated as Metal source ([`codegen`]), the
-/// fusion named by it (the name its step launches); a kernel generated
-/// once for all the fusions sharing it.
-struct Codegen;
-
-impl<'a> Pass<MpsModule<'a>> for Codegen {
-    fn name(&self) -> &'static str {
-        "codegen"
-    }
-
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config;
-        // A concatenate [`fusion`] left be whose operands' kernels cannot
-        // write them in place: a kernel of its own.
-        let (concats, _) = in_place_concats(&m.graph, &m.kernels, false);
-        let kernels = &mut m.kernels;
-        let held = |i: usize| {
-            matches!(m.graph.nodes[i].primitive, Primitive::Concatenate { .. })
-                && !concats.contains(&i)
-        };
-        if (0..m.graph.nodes.len()).any(held) {
-            m.graph = concatenates_alone(&m.graph, &concats, |_| {
-                request(kernels, Kernel::Loop(Vec::new()))
-            });
-        }
-        let (concats, mut views) = in_place_concats(&m.graph, &m.kernels, false);
-        m.concats = concats.iter().map(|&c| m.graph.nodes[c].output).collect();
-        for (i, node) in m.graph.nodes.iter_mut().enumerate() {
-            let Primitive::Fusion { name, body, .. } = &mut node.primitive else {
-                continue;
-            };
-            let Some(k) = name.strip_prefix(PENDING) else {
-                continue;
-            };
-            let k: usize = k.parse().expect("a requested kernel's index");
-            let (kernel, source) = match &m.kernels[k] {
-                Kernel::Loop(by_value) => {
-                    let views = views.remove(&i).unwrap_or_default();
-                    codegen::kernel(body, by_value, config, &views)
-                }
-                Kernel::Attention => {
-                    let a = attention::of_body(body).expect("an attention");
-                    codegen::attention_kernel(body, &a)
-                }
-                Kernel::AttentionBackward => {
-                    // Its outputs an in-place concatenate's operands
-                    // written in their places in its result.
-                    let views = views.remove(&i).unwrap_or_default();
-                    let b = attention::backward_of_body_into(body, views)
-                        .expect("an attention backward");
-                    codegen::attention_backward_kernel(body, &b)
-                }
-            };
-            m.sources.insert(kernel.clone(), source);
-            *name = kernel;
-        }
-        Ok(())
-    }
-}
-
-/// Each kernel's (by its node) outputs' views (by position): the offset
-/// and strides each is written at.
-type Placed = HashMap<usize, HashMap<usize, (usize, Vec<usize>)>>;
-
-/// The concatenates of `graph` computed in place
-/// ([`PlanOptions::concats`], by node), and the views their operands are
-/// written at (by the node of the kernel writing each, by its output's
-/// position): concatenates of an attention backward's gradients
-/// (`[dq | dk | dv]`, which `gated_backward` merges attention's
-/// projections' gradients' dots on), each operand read by the concatenate
-/// alone and written at its place in the result ([`slot`]) by its kernel:
-/// an attention backward's, through its layout chain
-/// ([`attention::fuse_backward`]; not a dQ it adds atomically, into memory
-/// zeroed whole first), or a loop fusion's that writes views
-/// ([`codegen::writes_views`]: that dQ cast and laid out). No kernel
-/// copies them side by side.
-///
-/// `before_fusion`: those [`fusion`] leaves be, its loop fusions not made
-/// yet: an operand it would compute in one (an elementwise or layout
-/// primitive's value) counts as one. One whose fusion then cannot write
-/// it there is concatenated by a kernel of its own ([`Codegen`]).
-fn in_place_concats(
-    graph: &Graph,
-    kernels: &[Kernel],
-    before_fusion: bool,
-) -> (Vec<usize>, Placed) {
-    let nodes = graph.nodes();
-    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-    // The live nodes reading each value.
-    let mut live = vec![false; graph.types.len()];
-    graph.outputs().iter().for_each(|&v| live[v] = true);
-    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
-    for (i, node) in nodes.iter().enumerate().rev() {
-        if live[node.output] {
-            for &v in &node.inputs {
-                live[v] = true;
-                readers[v].push(i);
-            }
-        }
-    }
-    let kernel = |node: &Node| match &node.primitive {
-        Primitive::Fusion { name, .. } => name
-            .strip_prefix(PENDING)
-            .and_then(|k| k.parse::<usize>().ok())
-            .map(|k| &kernels[k]),
-        _ => None,
-    };
-    let (mut concats, mut placed): (Vec<usize>, Placed) = (Vec::new(), HashMap::new());
-    for (c, node) in nodes.iter().enumerate() {
-        if !live[node.output] || !matches!(node.primitive, Primitive::Concatenate { .. }) {
-            continue;
-        }
-        // Each operand's kernel (by node, none for one fusion will make),
-        // its output's position and view, and whether it is an attention
-        // backward's.
-        let writes = node
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(k, &v)| {
-                // (A fusion's other outputs read its value: not a reader.)
-                let other =
-                    |r: &&usize| !matches!(nodes[**r].primitive, Primitive::FusionOutput { .. });
-                let alone =
-                    readers[v].iter().filter(other).eq([&c]) && !graph.outputs().contains(&v);
-                let once = node.inputs.iter().filter(|&&u| u == v).count() == 1;
-                let p = producer[v].filter(|_| alone && once)?;
-                let (f, index) = match nodes[p].primitive {
-                    Primitive::FusionOutput { index, .. } => (producer[nodes[p].inputs[0]]?, index),
-                    _ => (p, 0),
-                };
-                let view = slot(graph, node, k);
-                let view = (view.offset, view.strides);
-                let fused = &nodes[f];
-                match (kernel(fused), &fused.primitive) {
-                    (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
-                        let atomic = body.outputs().len() == 3 && index == 2;
-                        let views = HashMap::from([(index, view.clone())]);
-                        let writes =
-                            !atomic && attention::backward_of_body_into(body, views).is_some();
-                        writes.then_some((Some((f, index, view)), true))
-                    }
-                    (Some(Kernel::Loop(_)), Primitive::Fusion { body, .. }) => {
-                        codegen::writes_views(body).then_some((Some((f, index, view)), false))
-                    }
-                    (None, p) if before_fusion => {
-                        let layout = matches!(
-                            p,
-                            Primitive::Reshape { .. }
-                                | Primitive::Transpose { .. }
-                                | Primitive::BroadcastInDim { .. }
-                                | Primitive::Slice { .. }
-                        );
-                        let fuses =
-                            fusion::fusible(graph, fused) && (layout || fusion::elementwise(p));
-                        fuses.then_some((None, false))
-                    }
-                    _ => None,
-                }
-            })
-            .collect::<Option<Vec<_>>>();
-        if let Some(writes) = writes.filter(|w| w.iter().any(|&(_, attention)| attention)) {
-            concats.push(c);
-            for (f, index, view) in writes.into_iter().filter_map(|(w, _)| w) {
-                placed.entry(f).or_default().insert(index, view);
-            }
-        }
-    }
-    (concats, placed)
-}
-
-/// `graph` with each dot_general whose operands' dimensions do not collapse
-/// into matmul form ([`crate::ops::dot_general::mps`]) given them in that
-/// order by a transpose first (XLA: GPU dot canonicalization): the copy is a
-/// step of the plan, in its workspace, rather than inside the kernel.
-fn canonicalize_dots(graph: &Graph) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![0; graph.types.len()];
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-    for node in graph.nodes() {
-        out.set_origin(node);
-        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let primitive = match &node.primitive {
-            p @ Primitive::DotGeneral {
-                lhs_contracting,
-                rhs_contracting,
-                lhs_batch,
-                rhs_batch,
-                accum_dtype,
-                output_dtype,
-            } => {
-                let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
-                let order = matmul_order(p, lhs.shape.len(), rhs.shape.len());
-                let (mut lc, mut rc) = (lhs_contracting.clone(), rhs_contracting.clone());
-                let (mut lb, mut rb) = (lhs_batch.clone(), rhs_batch.clone());
-                let mut transposed = |input: &mut Var, permutation: &[usize]| {
-                    let t = Primitive::Transpose {
-                        permutation: permutation.to_vec(),
-                    };
-                    *input = out
-                        .apply(t, &[*input])
-                        .expect("a permutation of its dimensions");
-                };
-                if collapsed(
-                    lhs,
-                    &contiguous_strides(&lhs.shape),
-                    &order.lhs,
-                    order.lhs_split,
-                )
-                .is_none()
-                {
-                    transposed(&mut inputs[0], &order.lhs);
-                    let (i, j) = order.lhs_split;
-                    (lb, lc) = ((0..i).collect(), (j..order.lhs.len()).collect());
-                }
-                if collapsed(
-                    rhs,
-                    &contiguous_strides(&rhs.shape),
-                    &order.rhs,
-                    order.rhs_split,
-                )
-                .is_none()
-                {
-                    transposed(&mut inputs[1], &order.rhs);
-                    let (i, j) = order.rhs_split;
-                    (rb, rc) = ((0..i).collect(), (i..j).collect());
-                }
-                Primitive::DotGeneral {
-                    lhs_contracting: lc,
-                    rhs_contracting: rc,
-                    lhs_batch: lb,
-                    rhs_batch: rb,
-                    accum_dtype: *accum_dtype,
-                    output_dtype: *output_dtype,
-                }
-            }
-            p => p.clone(),
-        };
-        map[node.output] = out
-            .apply(primitive, &inputs)
-            .expect("a rewrite keeps the node's type");
-        out.set_label(map[node.output], node.label);
-    }
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
-/// The slices of `graph` its dots read in place, as strided views of the
-/// sliced value ([`PlanOptions::views`]; the matmul kernels take any
-/// operand strides): those read by dots alone (or contractions with their
-/// epilogues, [`fusion_reads_strided`]), each of which reads it in matmul
-/// form at those strides, that are not outputs or of a value that is such
-/// a view itself.
-fn dot_views(graph: &Graph) -> Vec<Var> {
-    let nodes = graph.nodes();
-    let mut views = Vec::new();
-    for node in nodes {
-        let (Primitive::Slice { .. }, &[x]) = (&node.primitive, node.inputs.as_slice()) else {
-            continue;
-        };
-        let v = node.output;
-        if graph.outputs().contains(&v) || views.contains(&x) {
-            continue;
-        }
-        let strides = contiguous_strides(&graph.type_of(x).shape);
-        let mut readers = nodes.iter().filter(|n| n.inputs.contains(&v)).peekable();
-        let read = readers.peek().is_some();
-        let in_place = readers.all(|n| match &n.primitive {
-            Primitive::DotGeneral { .. } => {
-                let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
-                (0..2)
-                    .all(|k| n.inputs[k] != v || reads_strided(&n.primitive, operands, k, &strides))
-            }
-            Primitive::Fusion { body, .. } => (0..n.inputs.len())
-                .all(|k| n.inputs[k] != v || fusion_reads_strided(body, k, &strides)),
-            _ => false,
-        });
-        if read && in_place {
-            views.push(v);
-        }
-    }
-    views
-}
-
-/// Whether a fusion with `body` reads its input `k` in place at `strides`
-/// (in elements): a contraction with its epilogue, whose dot alone reads it,
-/// in matmul form at them.
-pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
-    let (Some(dot), Some(&v)) = (codegen::gemm_dot(body), body.inputs().get(k)) else {
-        return false;
-    };
-    let side = dot.inputs.iter().position(|&u| u == v);
-    let only = body
-        .nodes()
-        .iter()
-        .all(|n| std::ptr::eq(n, dot) || !n.inputs.contains(&v));
-    let operands = [body.type_of(dot.inputs[0]), body.type_of(dot.inputs[1])];
-    match side {
-        Some(side) if only && dot.inputs[0] != dot.inputs[1] => {
-            crate::ops::dot_general::mps::reads_strided(&dot.primitive, operands, side, strides)
-        }
-        _ => false,
-    }
-}
-
 /// Each generated kernel's Metal source (without the shared prelude), by
 /// name, as compiled.
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
@@ -677,66 +321,6 @@ static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 pub(crate) fn fusion_source(name: &str) -> Option<String> {
     let sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
     sources.get(name).cloned()
-}
-
-/// `graph` with each concatenate a fusion of it alone (its kernel named by
-/// `kernel`): unfused, as it runs on MPS.
-fn concatenates_alone(
-    graph: &Graph,
-    in_place: &[usize],
-    mut kernel: impl FnMut(&Graph) -> String,
-) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-    for (i, node) in graph.nodes().iter().enumerate() {
-        out.set_origin(node);
-        let primitive = match node.primitive {
-            Primitive::Concatenate { .. } if !in_place.contains(&i) => {
-                let mut reads: Vec<Var> = Vec::new();
-                for &v in &node.inputs {
-                    if !reads.contains(&v) {
-                        reads.push(v);
-                    }
-                }
-                let mut body = Graph::new();
-                let ins: Vec<Var> = reads
-                    .iter()
-                    .map(|&v| body.input(graph.type_of(v).clone()))
-                    .collect();
-                let operands: Vec<Var> = node
-                    .inputs
-                    .iter()
-                    .map(|v| ins[reads.iter().position(|r| r == v).expect("read")])
-                    .collect();
-                let value = body
-                    .apply(node.primitive.clone(), &operands)
-                    .expect("the concatenate");
-                body.set_outputs(&[value]).expect("its value");
-                let name = kernel(&body);
-                let reads: Vec<Var> = reads.iter().map(|&v| map[v]).collect();
-                map[node.output] = out
-                    .apply(
-                        Primitive::Fusion {
-                            name,
-                            label: "concatenate",
-                            body,
-                        },
-                        &reads,
-                    )
-                    .expect("a fusion typed as the concatenate");
-                continue;
-            }
-            ref p => p.clone(),
-        };
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
-    }
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
 }
 
 /// Encode fusion `step`: its kernel, compiled with its graph, over the

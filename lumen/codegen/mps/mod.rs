@@ -1761,7 +1761,7 @@ impl<'a> Emitter<'a> {
                     // The operand holding the coordinate along `dimension`,
                     // each read only in its own branch (another's index
                     // would be out of its bounds).
-                    Concatenate { dimension } => {
+                    Concatenate { dimension, .. } => {
                         let d = *dimension;
                         let span = contiguous_strides(&ty.shape)[d];
                         let mut c = idx.clone();
@@ -2390,6 +2390,7 @@ pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'
         Primitive::Slice {
             start_indices,
             limit_indices,
+            ..
         } => (0..rank).all(|d| match d == rank - 1 {
             true => start_indices[d] == start && limit_indices[d] == start + n / 2,
             false => start_indices[d] == 0 && limit_indices[d] == shape[d],
@@ -2414,7 +2415,7 @@ pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
     let node = body.nodes().iter().find(|n| n.output == out)?;
     let shape = &body.type_of(dot.output).shape;
     match (&node.primitive, node.inputs.as_slice()) {
-        (Primitive::Concatenate { dimension }, &[a, b])
+        (Primitive::Concatenate { dimension, .. }, &[a, b])
             if *dimension + 1 == shape.len()
                 && body.type_of(a).shape == *shape
                 && body.type_of(b).shape == *shape
