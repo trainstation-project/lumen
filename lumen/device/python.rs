@@ -200,7 +200,7 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
-    for kind in ["cpu", "cuda", "meta", "mps"] {
+    for kind in ["cpu", "cuda", "meta", "mps", "tpu"] {
         let sub = device_module(m.py(), kind)?;
         modules.set_item(sub.name()?, &sub)?;
         m.add(kind, sub)?;

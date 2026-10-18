@@ -42,6 +42,7 @@ pub enum DispatchKey {
     Cpu,
     Cuda,
     Mps,
+    Tpu,
     /// Meta tensors (no data): kernels only check and set metadata.
     Meta,
 }
@@ -53,6 +54,7 @@ impl DispatchKey {
             Device::Cpu(_) => DispatchKey::Cpu,
             Device::Cuda(_) => DispatchKey::Cuda,
             Device::Mps(_) => DispatchKey::Mps,
+            Device::Tpu(_) => DispatchKey::Tpu,
             Device::Meta(_) => DispatchKey::Meta,
         }
     }

@@ -8,6 +8,8 @@ pub mod mps;
 pub(crate) mod python;
 #[cfg(test)]
 mod tests;
+#[cfg(lumen_tpu_linked)]
+mod tpu;
 
 pub use cpu::CpuStream;
 #[cfg(lumen_cuda_linked)]
@@ -15,6 +17,8 @@ pub use cuda::CudaStream;
 pub use meta::MetaStream;
 #[cfg(lumen_mps_linked)]
 pub use mps::MpsStream;
+#[cfg(lumen_tpu_linked)]
+pub use tpu::TpuStream;
 
 use std::sync::Arc;
 
@@ -33,6 +37,8 @@ pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
         Device::Mps(_) => Arc::new(MpsStream),
         #[cfg(lumen_cuda_linked)]
         Device::Cuda(index) => Arc::new(CudaStream { index }),
+        #[cfg(lumen_tpu_linked)]
+        Device::Tpu(_) => Arc::new(TpuStream),
         #[allow(unreachable_patterns)]
         _ => unreachable!("{device} is never available without its backend"),
     })

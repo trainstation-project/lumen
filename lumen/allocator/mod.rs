@@ -7,6 +7,8 @@ mod mps;
 pub(crate) mod python;
 #[cfg(test)]
 mod tests;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
 
 pub use cpu::CpuAllocator;
 #[cfg(lumen_cuda_linked)]
@@ -14,6 +16,8 @@ pub use cuda::CudaAllocator;
 pub use meta::MetaAllocator;
 #[cfg(lumen_mps_linked)]
 pub use mps::MpsAllocator;
+#[cfg(lumen_tpu_linked)]
+pub use tpu::TpuAllocator;
 
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
@@ -95,6 +99,8 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
         Device::Mps(_) => mps::allocator(),
         #[cfg(lumen_cuda_linked)]
         Device::Cuda(index) => cuda::allocator(index),
+        #[cfg(lumen_tpu_linked)]
+        Device::Tpu(index) => tpu::allocator(index),
         #[allow(unreachable_patterns)]
         _ => unreachable!("{device} is never available without its backend"),
     })
@@ -102,14 +108,20 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
 
 pub const ALIGNMENT: usize = 256;
 
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 pub(crate) struct Region {
     device: Device,
     capacity: usize,
     state: Mutex<State>,
 }
 
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 struct State {
     /// The range's start, reserved on the first allocation.
     base: Option<Base>,
@@ -122,14 +134,20 @@ struct State {
     live_bytes: usize,
 }
 
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 struct Base(NonNull<u8>);
 
 // SAFETY: the range is device memory owned by the allocator; the pointer
 // is only offset and handed out, never dereferenced here.
 unsafe impl Send for Base {}
 
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 impl Region {
     pub(crate) fn new(device: Device, capacity: usize) -> Self {
         Region {
@@ -255,6 +273,8 @@ impl Region {
         );
     }
 
+    // (The TPU's allocator keeps its region's buffer itself.)
+    #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
     pub(crate) fn base(&mut self) -> Option<NonNull<u8>> {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         state.base.take().map(|base| base.0)

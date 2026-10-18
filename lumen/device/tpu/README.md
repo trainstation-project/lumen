@@ -1,0 +1,70 @@
+# `lumen/device/tpu`
+
+Google TPUs, through **libtpu's PJRT C API**: the only way into a TPU from
+outside JAX. This folder owns the process's one PJRT client, its devices
+(`tpu:0`, `tpu:1`, ...), and the device-memory calls the TPU allocator
+([`../../allocator/tpu.rs`](../../allocator/README.md)) is built on.
+
+libtpu is **loaded at run time** (`dlopen`), never linked: the crate builds
+anywhere, and a machine without libtpu or TPUs simply reports no TPU devices.
+It is found at `TPU_LIBRARY_PATH` (the variable JAX and torch_xla read),
+else by the loader's search for `libtpu.so`. A pip-installed libtpu lives at
+`<venv>/lib/python3.*/site-packages/libtpu/libtpu.so`.
+
+Built with the **`tpu` Cargo feature, on Linux**: `build.rs`
+(`build_tpu_shim`) compiles `pjrt.c` and sets `cfg(lumen_tpu_linked)`.
+Without it, the `Tpu` backend still exists and reports no devices.
+
+## Files
+
+| File | Contents |
+| --- | --- |
+| `mod.rs` | `Tpu` / `TPU`, the `DeviceBackend` (name `"tpu"`, device count, `check` with the shim's reason when none are found); the shim's FFI (`ffi`), `error()`, and `memory(index)` (tests). |
+| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`), freeing it, reading it back at an offset (`lumen_tpu_read`), and memory statistics. |
+| `pjrt_c_api.h` | XLA's PJRT C API header (`xla/pjrt/c/pjrt_c_api.h`, Apache 2.0), vendored. |
+
+## How TPU memory works (and why the allocator is shaped this way)
+
+What libtpu 0.0.17 (PJRT API 0.69) does, as probed on a v6e:
+
+* **A 1-D `u32` buffer is byte-linear.** Its raw bytes on the device are the
+  host's, byte for byte, so it can be addressed by byte offset: the region a
+  `Region` allocator needs. (A `u8` buffer is not: TPUs pack sub-32-bit
+  elements in tiles, `(1024)(128)(4,1)`, even when a linear layout is
+  requested.) `lumen_tpu_alloc` reserves one with
+  `PJRT_Client_CreateUninitializedBuffer`.
+* **Memory is not host-addressable**, and there is no view of a sub-range:
+  `PJRT_Client_CreateViewOfDeviceBuffer` is not implemented on TPU. A
+  pointer the allocator hands out is the runtime's address of the region's
+  buffer (`PJRT_Buffer_UnsafePointer`) plus the allocation's offset: a key,
+  never dereferenced.
+* **Reads at an offset work:** `PJRT_Buffer_CopyRawToHost`, which wants host
+  memory and offsets aligned to 32 bytes for the TPU's DMA;
+  `lumen_tpu_read` stages through an aligned buffer and widens the copy to
+  aligned bounds, so any offset and length work.
+* **Writes at an offset do not, yet:** PJRT has no "copy host bytes into an
+  existing buffer". (Its async transfer manager writes at offsets, but its
+  buffer cannot be read until its last transfer.) Writing the region will
+  take a TPU program: a compiled copy, or lumen's own kernels.
+
+## Invariants & gotchas
+
+* **One client per process**, created on first use (`pthread_once`):
+  `device_count()`, the first `check()` or allocation. Creating it claims the
+  machine's TPUs; another process (a JAX program) cannot use them meanwhile.
+* **The plugin's API may be older than the header.** Each argument struct
+  carries this header's `struct_size` (a plugin accepts sizes at least its
+  own); every function is checked present in the plugin's table (`HAS`)
+  before it is used, and a missing one means no TPU devices, with the reason.
+* **Errors are strings, not panics, until the allocator:** the shim records
+  the last PJRT error (`lumen_tpu_error`); `check()` quotes it when no device
+  is found, and the allocator's out-of-memory panic includes it.
+* **Everything here is synchronous:** each read awaits its PJRT event, so a
+  TPU's stream (`lumen/stream/tpu.rs`) has nothing in flight to wait for.
+
+## Related
+
+- [`../`](../README.md) — the `DeviceBackend` trait and the `Device` enum (`Device::Tpu`).
+- [`../../allocator/`](../../allocator/README.md) — `TpuAllocator`, a `Region` over the buffer this folder reserves.
+- [`../../ops/device_transfer/`](../../ops/device_transfer/README.md) — TPU-to-host copies (`tpu.rs`).
+- [`../../stream/`](../../stream/README.md) — `TpuStream`.

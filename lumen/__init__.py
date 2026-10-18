@@ -1,5 +1,5 @@
 from lumen import autograd, custom_op, functional, graph, graph_compiler, nn, ops, profiler, random, safetensors
-from lumen._C import __version__, cpu, cuda, meta, mps
+from lumen._C import __version__, cpu, cuda, meta, mps, tpu
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.device import device

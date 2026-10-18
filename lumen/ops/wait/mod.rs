@@ -7,7 +7,9 @@ pub static WAIT: Op<WaitKernel> = Op::new(op_name!("wait"), kernels);
 
 fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     match key {
-        DispatchKey::Cpu | DispatchKey::Meta => Some(|_| {}),
+        // (A TPU's work so far, its memory's reads, is waited for as it
+        // runs.)
+        DispatchKey::Cpu | DispatchKey::Meta | DispatchKey::Tpu => Some(|_| {}),
         DispatchKey::Mps | DispatchKey::Cuda => Some(|t| {
             let stream = crate::stream::stream_for(t.device());
             stream.expect("a tensor's device is present").synchronize()

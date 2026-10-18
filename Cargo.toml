@@ -14,6 +14,10 @@ cuda = []
 # Apple Silicon (Metal) backend. On by default; build.rs compiles the shim
 # only on macOS, so this is a no-op elsewhere.
 mps = []
+# Google TPU backend: libtpu's PJRT C API, loaded at run time
+# (lumen/device/tpu). Off by default; build.rs compiles its shim only on
+# Linux, so this is a no-op elsewhere.
+tpu = []
 # Python bindings (`lumen._C`, lumen/python.rs). Built by maturin (see
 # pyproject.toml); plain `cargo test` leaves it off, since pyo3 would then
 # link test binaries against libpython.

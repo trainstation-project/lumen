@@ -16,10 +16,16 @@ fn neural_engine_pid() -> u64 {
     (2 << 32) + u64::from(std::process::id())
 }
 
+/// TPU `i`'s timeline, apart from the CPU's and CUDA devices'.
+fn tpu_pid(i: usize) -> u64 {
+    (3 << 32) + i as u64
+}
+
 fn pid(device: Device) -> u64 {
     match device {
         Device::Cpu(_) => std::process::id().into(),
         Device::Cuda(i) => i as u64,
+        Device::Tpu(i) => tpu_pid(i),
         Device::Mps(_) | Device::Meta(_) => 0,
     }
 }
@@ -29,6 +35,8 @@ fn device_type(device: Device) -> (i32, i64) {
         Device::Cpu(_) => (0, -1),
         Device::Cuda(i) => (1, i as i64),
         Device::Mps(_) => (13, 0),
+        // PyTorch's XLA, as its traces of TPUs say.
+        Device::Tpu(i) => (9, i as i64),
         Device::Meta(_) => (9, 0),
     }
 }
@@ -38,6 +46,7 @@ fn process_name(device: Device) -> String {
         Device::Cpu(_) => "CPU".to_owned(),
         Device::Cuda(i) => format!("CUDA {i}"),
         Device::Mps(_) => "MPS".to_owned(),
+        Device::Tpu(i) => format!("TPU {i}"),
         Device::Meta(_) => "Meta".to_owned(),
     }
 }

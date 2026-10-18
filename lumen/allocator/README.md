@@ -21,9 +21,10 @@ result).
 | `cuda.rs` | `CudaAllocator`: a `Region` over one `cudaMalloc` per device (FFI), and the per-device registry. |
 | `mps/mod.rs` | `MpsAllocator`: a `Region` over one Metal buffer (the shim's FFI), and its shared instance. |
 | `mps/mps_shim.mm` | Objective-C++: `MTLBuffer` creation, the pointer→buffer map, and device limits. |
+| `tpu.rs` | `TpuAllocator`: a `Region` over one byte-linear PJRT buffer per TPU (`lumen/device/tpu`), its per-device registry, and `copy_to_host` (reads at an offset). Only with `cfg(lumen_tpu_linked)`. |
 | `python.rs` | `lumen.config` (`Config` pyclass), plus the `compiler` sub-config. |
 | `__init__.py`, `_C.pyi` | Python-side re-export and type stubs. |
-| `tests.rs` | CPU, static-allocator, device-crossing, CUDA and MPS test modules. |
+| `tests.rs` | CPU, static-allocator, device-crossing, CUDA, MPS and TPU test modules. |
 
 ## The `Allocator` trait
 
@@ -195,6 +196,18 @@ The shim (`mps/mps_shim.mm`) does the Objective-C work:
 * `lumen_mps_limits` reports alignment, `vm_page_size`, `maxBufferLength` and
   `recommendedMaxWorkingSetSize` for size math on the Rust side.
 
+### TPU
+`tpu.rs`, over `lumen/device/tpu`'s PJRT shim. Each TPU's `TpuAllocator` is a
+`Region` like CUDA's and MPS's, sized by `static_allocator_bytes`, its range
+one **1-D `u32` PJRT buffer** (the only kind a TPU stores byte for byte as
+the host does; see [`../device/tpu/README.md`](../device/tpu/README.md)).
+TPU memory is not host-addressable: the pointers handed out are the
+runtime's address of that buffer plus the allocation's offset, never
+dereferenced. `copy_to_host(index, ptr, dst)` reads an allocation back at its
+offset (the TPU-to-host copy kernel's). Writing the region needs a TPU
+program: not yet. The allocator keeps its buffer handle itself
+(`Region::base` is the CUDA and MPS allocators').
+
 ## Configuration
 
 `config.rs` holds `static_allocator_bytes`, an `AtomicUsize` defaulting to
@@ -222,7 +235,7 @@ compiler's flags, defined in `lumen/graph_compiler`).
 
 ## Tests
 
-`tests.rs` is split into four modules:
+`tests.rs` is split into these modules:
 
 * `cpu` — singleton identity, 64-byte alignment, write/read round-trip,
   zero-byte safety, repeated alloc/free cycles.
@@ -238,5 +251,10 @@ compiler's flags, defined in `lumen/graph_compiler`).
   every available device has one shared allocator, `Storage` is `Send +
   Sync`, and unavailable devices are reported rather than panicking
   unexpectedly.
-* `cuda` / `mps` — hardware-gated, with `require_cuda!` / `require_mps!`
-  macros that print "unavailable, skipping" and return early.
+* `cuda` / `mps` / `tpu` — hardware-gated, with `require_cuda!` /
+  `require_mps!` / `require_tpu!` macros that print "unavailable,
+  skipping" and return early. The TPU tests run one at a time (they measure
+  the device's memory, which the others would change): the region is in the
+  device's memory once reserved and gone when dropped, offsets are aligned
+  and reused, reads at any offset agree, reads past the region fail, and a
+  TPU tensor copies to the host.
