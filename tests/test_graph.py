@@ -2232,13 +2232,18 @@ def _softmax_block(x, wo, r, norm, w1):
 
 @pytest.mark.mps
 @pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
-@pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128)])
+@pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128), (300, 200), (1000, 1000), (256, 4096)])
 def test_matmul_epilogue_normalizes_its_rows(f, m, d):
-    """A normalization of a matmul's rows (a residual added first), rows no
-    wider than its 64x64 tiles: the matmul's kernel normalizes each tile's
+    """A normalization of a matmul's rows (a residual added first): rows no
+    wider than its 64x64 tiles, the matmul's kernel normalizes each tile's
     rows from its accumulators (CODA's tile reductions), one kernel, the
     product never in memory, its residual stream written too where it is
-    read again; exactly the unfused plan's result. Wider rows: a row
+    read again; exactly the unfused plan's result. Wider rows: the matmul's
+    kernel writes its product and each tile's partials of the rows' first
+    reductions (an RMS norm's sum of squares, a layer norm's mean), then a
+    row kernel takes them from those partials (CODA's following
+    reduction), one step: the unfused result but where a row's sums add in
+    another order. A softmax's max and sum (combined online) not so: a row
     kernel of their own, as before."""
     rng = np.random.default_rng(0)
     shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
@@ -2248,7 +2253,8 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
         pytest.skip(str(e))
     steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
-    assert len(rows) == (d <= 64), [s["label"] for s in steps]
+    wide = d > 64
+    assert len(rows) == (not wide or f is not _softmax_block), [s["label"] for s in steps]
     flatten = lambda out: [lumen.to_numpy(t) for t in (out if isinstance(out, tuple) else [out])]
     fused = flatten(lumen.compile(f)(*args))
     lumen.config.compiler.contraction_epilogues = False
@@ -2256,8 +2262,13 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
         unfused = flatten(lumen.compile(f)(*args))
     finally:
         lumen.config.compiler.reset()
-    for got, want in zip(fused, unfused):
-        np.testing.assert_array_equal(got, want)
+    # The residual stream (no reduction) exactly; the normalized rows' next
+    # matmul, of wide rows, within their bfloat16 rounding.
+    for k, (got, want) in enumerate(zip(fused, unfused)):
+        if wide and k == 0:
+            np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * np.abs(want).max())
+        else:
+            np.testing.assert_array_equal(got, want)
 
 
 class _NormedBlock(lumen.nn.Module):
