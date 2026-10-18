@@ -56,10 +56,14 @@ def program(spec, epilogue=None):
             ob[...] = v.to(out_dtype)
 
         def body(xb, yb, ob):
-            product = pl.dot(xb[...], yb[...], trans_b=t)
+            # Each step's product where it is added, so the matrix unit
+            # accumulates it (a product of its own would be a block of VMEM).
+            def product():
+                return pl.dot(xb[...], yb[...], trans_b=t)
+
             if kb == 1:
                 # One block of k: no accumulator.
-                finish(product, ob)
+                finish(product(), ob)
                 return
             step = pl.program_id(3)
 
@@ -67,15 +71,15 @@ def program(spec, epilogue=None):
             # the output is written (neither zeroed nor stored first).
             @pl.when(step == 0)
             def _():
-                acc[...] = product
+                acc[...] = product()
 
             @pl.when((step > 0) & (step < kb - 1))
             def _():
-                acc[...] += product
+                acc[...] += product()
 
             @pl.when(step == kb - 1)
             def _():
-                finish(acc[...] + product, ob)
+                finish(acc[...] + product(), ob)
 
         grid = (batch * lead, mb, nb, kb)
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec], out_specs=[o_spec])(x, y, out)
