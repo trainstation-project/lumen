@@ -23,9 +23,6 @@ accumulator holds the even columns, then the odd.
 
 from lumen.ops.tpu import pallas
 
-# A bfloat16 word's high half.
-HIGH = 0xFFFF0000
-
 
 def program(spec, epilogue=None):
     """The dot of ``spec``: ``batch``, ``m``, ``n``, ``k``, ``transposed`` (a
@@ -55,7 +52,8 @@ def program(spec, epilogue=None):
         return pltpu.bitcast(w << 16, jnp.float32).astype(jnp.bfloat16)
 
     def high(w):
-        return pltpu.bitcast(w & HIGH, jnp.float32).astype(jnp.bfloat16)
+        # Its high half, by shifts: a mask constant would be an int32's.
+        return pltpu.bitcast((w >> 16) << 16, jnp.float32).astype(jnp.bfloat16)
 
     def rounded(v):
         return pltpu.bitcast(v.astype(jnp.bfloat16).astype(jnp.float32), jnp.uint32)
@@ -118,7 +116,7 @@ def program(spec, epilogue=None):
                     ow[...] = pltpu.bitcast(v, jnp.uint32)
                 else:
                     h = bn // 2
-                    ow[...] = (rounded(v[:, :h]) >> 16) | (rounded(v[:, h:]) & HIGH)
+                    ow[...] = (rounded(v[:, :h]) >> 16) | (rounded(v[:, h:]) >> 16 << 16)
 
         out_spec = pl.BlockSpec((bm, bn // pout), lambda b, i, j, s: (b * mb + i, j))
         pltpu.emit_pipeline(body, grid=(b_, mb, nb, kb), in_specs=specs, out_specs=[out_spec])(x, *ys, out)
