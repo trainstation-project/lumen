@@ -7,6 +7,7 @@
 
 use super::linear_cross_entropy::{Found, matched, uses};
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// `graph` with each linear cross entropy whose gradient a chunk of rows
 /// at a time recomputes their logits (`lumen/autograd/cross_entropy.py`:
@@ -269,4 +270,18 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
         }
         _ => return None,
     })
+}
+
+/// [`chunked_cross_entropy`] as a pass.
+pub(crate) struct ChunkedCrossEntropy;
+
+impl<M: Module> CompilerPass<M> for ChunkedCrossEntropy {
+    fn name(&self) -> &'static str {
+        "chunked_cross_entropy"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = chunked_cross_entropy(m.graph());
+        Ok(())
+    }
 }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use super::{Kernel, MpsModule, PENDING, codegen, fusion};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::attention;
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// The concatenates whose operands' kernels will write them in place
 /// ([`in_place_concats`], before loop fusion makes them): marked so
@@ -15,12 +15,12 @@ use crate::graph_compiler::pass::Pass;
 /// respects and the plan reads ([`Graph::placements`]).
 pub(super) struct PlaceConcats;
 
-impl<'a> Pass<MpsModule<'a>> for PlaceConcats {
+impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
     fn name(&self) -> &'static str {
         "place_concats"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         for c in in_place_concats(&m.graph, &m.kernels, true) {
             if let Primitive::Concatenate { in_place, .. } = &mut m.graph.nodes[c].primitive {
                 *in_place = true;

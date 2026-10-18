@@ -17,7 +17,7 @@ use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{constant, elementwise};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
@@ -937,12 +937,12 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
 /// those the kernels take by value (it is a buffer).
 pub(crate) struct LoopFusion;
 
-impl<'a> Pass<MpsModule<'a>> for LoopFusion {
+impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
     fn name(&self) -> &'static str {
         "loop_fusion"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
         let requested = m.kernels.len();
         let graph = loop {

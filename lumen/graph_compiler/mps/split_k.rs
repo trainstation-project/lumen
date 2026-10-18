@@ -17,6 +17,7 @@
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::ops::dot_general::mps::float_groups;
 
 /// The threadgroups that fill the GPU (on an M4 Pro: about 13 per GPU
@@ -181,4 +182,19 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
         s /= 2;
     }
     (s >= 2).then_some(s)
+}
+
+/// [`split_k`] as a pass: its chunks added atomically unless
+/// `deterministic`.
+pub(crate) struct SplitK;
+
+impl<M: Module> CompilerPass<M> for SplitK {
+    fn name(&self) -> &'static str {
+        "split_k"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = split_k(m.graph(), !m.config().deterministic);
+        Ok(())
+    }
 }

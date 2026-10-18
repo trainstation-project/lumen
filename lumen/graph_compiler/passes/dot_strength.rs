@@ -10,6 +10,7 @@
 
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// `graph` with each dot of a vector a product and a sum.
 pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
@@ -177,5 +178,19 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
                 &[v],
             )
             .expect("the same elements"),
+    }
+}
+
+/// [`reduce_vector_dots`] as a pass.
+pub(crate) struct DotStrength;
+
+impl<M: Module> CompilerPass<M> for DotStrength {
+    fn name(&self) -> &'static str {
+        "dot_strength"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = reduce_vector_dots(m.graph());
+        Ok(())
     }
 }

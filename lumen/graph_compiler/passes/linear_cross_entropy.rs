@@ -29,6 +29,7 @@
 //! and gradient one row kernel of them (XMA's fused linear cross entropy).
 
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
 /// A match: the dot's operands and the pattern's nodes (by index), `loss`
@@ -292,4 +293,18 @@ fn row_offsets_plus(
     };
     let t = graph.type_of(target);
     (t.shape == [b] && matches!(t.dtype, DType::I32 | DType::I64)).then_some(target)
+}
+
+/// [`linear_cross_entropy`] as a pass.
+pub(crate) struct LinearCrossEntropy;
+
+impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
+    fn name(&self) -> &'static str {
+        "linear_cross_entropy"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = linear_cross_entropy(m.graph());
+        Ok(())
+    }
 }

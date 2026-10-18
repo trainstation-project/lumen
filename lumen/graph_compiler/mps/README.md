@@ -18,14 +18,9 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode`, `fusion_scratch_bytes`. |
-| `chunked_cross_entropy.rs` | Pass `chunked_cross_entropy`: a cross entropy trained a chunk of rows at a time computes each chunk's logits once (XMA's fused linear CE). |
-| `gated_backward.rs` | Pass `gated_backward`: merges the dots of a gated pair's / QKV group's backward into one dot of concatenated operands. |
 | `merge_dots.rs` | Pass `merge_dots` (`MergeDots`): dots sharing an operand become one dot over a packed block of parameters (XLA `DotMerger`). |
 | `flash_attention.rs` | Pass `flash_attention`: each matched attention one fusion (`attention::fuse`), `Kernel::Attention`. |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
-| `linear_cross_entropy.rs` | Pass `linear_cross_entropy`: CE of a dot's logits nothing else reads becomes `Primitive::LinearCrossEntropy` (Cut Cross-Entropy). |
-| `bounds.rs` | Pass `clamp_indices`: clamps gather / scatter-add / linear-CE indices into range (only with `safe_kernels`). |
-| `dot_strength.rs` | Pass `dot_strength`: a dot with a vector operand becomes multiply + `reduce_sum` (XLA `DotStrengthReduction`). |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
 | `canonicalize_dots.rs` | Pass `canonicalize_dots`: transposes dot operands into matmul form as a separate step. |
 | `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): finds softmax/RMS/layer-norm style row diamonds and their `partials` (XLA `SoftmaxRewriterTriton`); stores `Row`s in `MpsModule::rows`. |
@@ -43,22 +38,23 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 
 ## The pipeline, in order
 
-`pipeline(config)` builds these passes (each a `Pass<MpsModule>`; `Rewrite`
-ones replace only the graph). The order is load-bearing; the comments in
+`pipeline(config)` builds these passes, each a `CompilerPass` (MPS ones of
+`MpsModule`; the device-independent ones from [`../passes/`](../passes/README.md),
+of any module). The order is load-bearing; the comments in
 `pipeline()` say why each sits where it does.
 
 | # | Pass name | Runs when | File | What it does |
 | --- | --- | --- | --- | --- |
-| 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
-| 2 | `gated_backward` | `fuse && merge_dots && contraction_epilogues` | `gated_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
+| 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
+| 2 | `gated_backward` | `fuse && merge_dots && contraction_epilogues` | `../passes/gated_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
 | 3 | `merge_dots` | `fuse && merge_dots` | `merge_dots.rs` | Merge dots over packable parameters into blocks; fills `MpsModule::packed`. |
 | 4 | `flash_attention` | `fuse && flash_attention` | `flash_attention.rs` | Attention → one flash-attention fusion (before dots are put in matmul form). |
 | 5 | `flash_attention_backward` | `fuse && flash_attention` | `flash_attention_backward.rs` | Attention backward → flash-attention backward fusion(s). |
-| 6 | `linear_cross_entropy` | `fuse && fused_linear_cross_entropy` | `linear_cross_entropy.rs` | CE of unshared logits → `LinearCrossEntropy`. |
-| 7 | `clamp_indices` | `safe_kernels` | `bounds.rs` | Clamp indices (after linear CE matching, which reads the gather's index). |
-| 8 | `simplify` | always | `../simplify.rs` | `simplify_with(g, true)`: now that patterns are matched, swap transposes of dots, move reshapes/transposes/casts. |
+| 6 | `linear_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/linear_cross_entropy.rs` | CE of unshared logits → `LinearCrossEntropy`. |
+| 7 | `clamp_indices` | `safe_kernels` | `../passes/clamp_indices.rs` | Clamp indices (after linear CE matching, which reads the gather's index). |
+| 8 | `simplify` | always | `../passes/simplify.rs` | `Simplify { matched: true }`: now that patterns are matched, swap transposes of dots, move reshapes/transposes/casts. |
 | 9 | `neural_engine` | `neural_engine` | `ane/mod.rs` | Offload float16 regions on fixed weights to Core ML (whole dots, before split-K). |
-| 10 | `dot_strength` | always | `dot_strength.rs` | Vector dots → product + sum. |
+| 10 | `dot_strength` | always | `../passes/dot_strength.rs` | Vector dots → product + sum. |
 | 11 | `split_k` | `split_k` | `split_k.rs` | Split long-K dots; atomic unless `deterministic`. |
 | 12 | `canonicalize_dots` | always | `canonicalize_dots.rs` | Dot operands into matmul form. |
 | 13 | `normalization_diamonds` | `fuse && normalization_diamonds` | `diamonds.rs` | Row kernels' `Row`s for loop fusion. |

@@ -19,10 +19,10 @@
 pub(crate) mod attention;
 pub mod config;
 mod cpu;
-mod cse;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;
+mod passes;
 pub mod plan;
 #[cfg(test)]
 pub(crate) mod plan_tests;
@@ -30,7 +30,6 @@ pub(crate) mod plan_tests;
 pub(crate) mod python;
 mod remat;
 mod schedule;
-mod simplify;
 mod stages;
 #[cfg(test)]
 mod tests;
@@ -39,7 +38,9 @@ use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
 
 pub use config::CompilerConfig;
-use pass::{GraphModule, Pipeline, Rewrite};
+use pass::{GraphModule, Pipeline};
+use passes::cse::Cse;
+use passes::simplify::Simplify;
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 
@@ -90,8 +91,8 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         options,
     };
     Pipeline::new("frontend")
-        .add(Rewrite("cse", |g, _| cse::cse(g)))
-        .add(Rewrite("simplify", |g, _| simplify::simplify(g)))
+        .add(Cse)
+        .add(Simplify { matched: false })
         .run(&mut module)?;
     let graph = &module.graph;
     if device != Device::Cpu(0)

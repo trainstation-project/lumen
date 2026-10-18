@@ -1,5 +1,6 @@
-use super::pass::{GraphModule, Pipeline, Rewrite};
-use super::{Options, positions, simplify};
+use super::pass::{GraphModule, Pipeline};
+use super::passes::simplify::Simplify;
+use super::{Options, positions};
 use crate::graph::Graph;
 use crate::graph_compiler::{Plan, PlanOptions};
 
@@ -9,7 +10,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         options,
     };
     Pipeline::new("cpu")
-        .add(Rewrite("simplify", |g, _| simplify::simplify_with(g, true)))
+        .add(Simplify { matched: true })
         .run(&mut module)?;
     let plan = PlanOptions {
         scratch: None,

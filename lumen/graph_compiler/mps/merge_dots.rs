@@ -39,7 +39,7 @@ use super::MpsModule;
 use super::fusion::{elementwise, fusible};
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// Dots that can merge: their nodes, in graph order.
 struct Group {
@@ -467,12 +467,12 @@ fn concat_dimension(p: &Primitive, side: usize, rank: usize) -> Option<usize> {
 /// in place.
 pub(crate) struct MergeDots;
 
-impl<'a> Pass<MpsModule<'a>> for MergeDots {
+impl<'a> CompilerPass<MpsModule<'a>> for MergeDots {
     fn name(&self) -> &'static str {
         "merge_dots"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let options = m.options;
         let donated: Vec<bool> = (0..options.packable.len())
             .map(|i| {

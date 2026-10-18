@@ -13,8 +13,8 @@ plan — so this folder is only the glue from `Options` to `PlanOptions`.
 
 ## What `compile` does
 
-1. Runs `Pipeline::new("cpu")` with a single `Rewrite("simplify", ..)`
-   calling `simplify::simplify_with(g, true)`: the `matched` rewrites
+1. Runs `Pipeline::new("cpu")` with a single pass, `Simplify { matched: true }`
+   ([`../passes/simplify.rs`](../passes/README.md)): the `matched` rewrites
    (moving reshapes/transposes/casts, folding any transpose into dots) that
    the frontend held back so device compilers could match patterns first.
    As a `Pipeline`, it is profiled and honors `dump_to` like the others.

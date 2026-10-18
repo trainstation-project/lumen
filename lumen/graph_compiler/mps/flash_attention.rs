@@ -4,18 +4,18 @@
 use super::{Kernel, MpsModule, request};
 use crate::graph::Var;
 use crate::graph_compiler::attention;
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// Each attention one fusion ([`attention::fuse`]): a flash-attention
 /// kernel.
 pub(super) struct FlashAttention;
 
-impl<'a> Pass<MpsModule<'a>> for FlashAttention {
+impl<'a> CompilerPass<MpsModule<'a>> for FlashAttention {
     fn name(&self) -> &'static str {
         "flash_attention"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let scalars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
         let epilogues = m.options.config.contraction_epilogues;
         let kernels = &mut m.kernels;

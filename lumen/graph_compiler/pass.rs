@@ -1,7 +1,9 @@
 //! Compiler passes, as XLA's (`HloPassInterface`, `HloPassPipeline`): each
-//! a named rewrite of a module (its graph, and what the passes before it
-//! found), run in order by a [`Pipeline`], which a device's compiler builds
-//! from the passes its flags turn on. Each pass is timed in the profiler
+//! a [`CompilerPass`], a named rewrite of a module (its graph, and what the
+//! passes before it found) by its `apply`, run in order by a [`Pipeline`],
+//! which a device's compiler builds from the passes its flags turn on. A
+//! pass of the graph alone (`graph_compiler/passes`) applies to any
+//! [`Module`]; a device's (`graph_compiler/mps`) to its own. Each pass is timed in the profiler
 //! (`pipeline::pass`); with `lumen.config.compiler.dump_to` (XLA's
 //! `--xla_dump_to`), the graph before the first pass and after each is
 //! written there, a file each: `<module>.<pipeline>.<step>.<pass>.txt`.
@@ -43,31 +45,18 @@ impl Module for GraphModule<'_> {
     }
 }
 
-/// A named rewrite of a module `M`.
-pub(crate) trait Pass<M> {
+/// A compiler pass (XLA's `HloPassInterface`): a named rewrite of a
+/// module `M`, which [`apply`](Self::apply) makes in place. Every pass is
+/// one, its name what the profiler and `dump_to` call it.
+pub(crate) trait CompilerPass<M> {
     fn name(&self) -> &'static str;
-    fn run(&mut self, module: &mut M) -> Result<(), String>;
-}
-
-/// A pass rewriting the graph alone: `.1`, named `.0`.
-pub(crate) struct Rewrite(pub &'static str, pub fn(&Graph, &CompilerConfig) -> Graph);
-
-impl<M: Module> Pass<M> for Rewrite {
-    fn name(&self) -> &'static str {
-        self.0
-    }
-
-    fn run(&mut self, module: &mut M) -> Result<(), String> {
-        let graph = (self.1)(module.graph(), module.config());
-        *module.graph_mut() = graph;
-        Ok(())
-    }
+    fn apply(&mut self, module: &mut M) -> Result<(), String>;
 }
 
 /// Passes run in order on a module.
 pub(crate) struct Pipeline<M> {
     name: &'static str,
-    passes: Vec<Box<dyn Pass<M>>>,
+    passes: Vec<Box<dyn CompilerPass<M>>>,
 }
 
 /// Modules dumped so far: each dump's files numbered by its module.
@@ -81,7 +70,7 @@ impl<M: Module> Pipeline<M> {
         }
     }
 
-    pub(crate) fn add(&mut self, pass: impl Pass<M> + 'static) -> &mut Self {
+    pub(crate) fn add(&mut self, pass: impl CompilerPass<M> + 'static) -> &mut Self {
         self.passes.push(Box::new(pass));
         self
     }
@@ -104,7 +93,7 @@ impl<M: Module> Pipeline<M> {
         for (step, pass) in self.passes.iter_mut().enumerate() {
             let range = format!("{name}::{}", pass.name());
             let _range = crate::profiler::record_function(range);
-            pass.run(module)?;
+            pass.apply(module)?;
             if let Some(dump) = &dump {
                 dump(step + 1, pass.name(), module.graph())?;
             }

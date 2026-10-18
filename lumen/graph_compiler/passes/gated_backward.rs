@@ -21,6 +21,7 @@
 
 use crate::graph::{Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// A matched group's backward: the sum's node and the adds it is of, its
 /// dots' operands (each dot `dot(g, a)` or `dot(a, g)`, `g_first` which),
@@ -415,4 +416,18 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
         accum_dtype,
         output_dtype,
     })
+}
+
+/// [`gated_backward`] as a pass.
+pub(crate) struct GatedBackward;
+
+impl<M: Module> CompilerPass<M> for GatedBackward {
+    fn name(&self) -> &'static str {
+        "gated_backward"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = gated_backward(m.graph());
+        Ok(())
+    }
 }

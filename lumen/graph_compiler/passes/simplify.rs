@@ -2,12 +2,9 @@ use std::collections::HashMap;
 
 use super::cse::cse;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Element, Scalar};
-
-pub(crate) fn simplify(graph: &Graph) -> Graph {
-    simplify_with(graph, false)
-}
 
 pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
@@ -257,7 +254,7 @@ fn moved(
     let then: Primitive = match primitive {
         // ReshapeMover: op(r(x), r(y), c) = r(op(x, y, c')), a reshape or
         // transpose `r` read by `op` alone, not of a constant.
-        p if super::elementwise(p) && !matches!(p, Cast { .. }) => {
+        p if crate::graph_compiler::elementwise(p) && !matches!(p, Cast { .. }) => {
             let rearranged = |v: Var| {
                 node_of(out, producer, v).filter(|n| {
                     matches!(n.primitive, Reshape { .. } | Transpose { .. })
@@ -576,5 +573,22 @@ fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> 
             | Primitive::Cast { .. } => v = node.inputs[0],
             _ => return None,
         }
+    }
+}
+
+/// [`simplify_with`] as a pass: `matched`, after the device's patterns
+/// are matched (transposes of dots swapped, layouts moved).
+pub(crate) struct Simplify {
+    pub(crate) matched: bool,
+}
+
+impl<M: Module> CompilerPass<M> for Simplify {
+    fn name(&self) -> &'static str {
+        "simplify"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = simplify_with(m.graph(), self.matched);
+        Ok(())
     }
 }

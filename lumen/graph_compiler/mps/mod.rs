@@ -11,19 +11,14 @@
 //! instead, as Core ML steps ([`ane`]).
 
 pub(crate) mod ane;
-mod bounds;
 mod canonicalize_dots;
-mod chunked_cross_entropy;
 mod concatenates_alone;
 mod diamonds;
-mod dot_strength;
 mod flash_attention;
 mod flash_attention_backward;
 pub(crate) mod fusion;
-mod gated_backward;
 mod horizontal;
 mod kernel_codegen;
-mod linear_cross_entropy;
 mod merge_dots;
 mod place_concats;
 mod place_views;
@@ -35,7 +30,13 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, c_char};
 use std::sync::{Mutex, PoisonError};
 
-use super::pass::{Module, Pipeline, Rewrite};
+use super::pass::{Module, Pipeline};
+use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
+use super::passes::clamp_indices::ClampIndices;
+use super::passes::dot_strength::DotStrength;
+use super::passes::gated_backward::GatedBackward;
+use super::passes::linear_cross_entropy::LinearCrossEntropy;
+use super::passes::simplify::Simplify;
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::graph::{Graph, Primitive, Var};
@@ -47,6 +48,7 @@ use crate::ops::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
+use canonicalize_dots::CanonicalizeDots;
 #[cfg(test)]
 use canonicalize_dots::canonicalize_dots;
 use concatenates_alone::ConcatenatesAlone;
@@ -139,16 +141,12 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     // chunk at a time: its rows computed from those chunks' logits (before
     // any dot is merged, or its forward matched as a linear cross entropy).
     if config.fuse && config.fused_linear_cross_entropy {
-        p.add(Rewrite("chunked_cross_entropy", |g, _| {
-            chunked_cross_entropy::chunked_cross_entropy(g)
-        }));
+        p.add(ChunkedCrossEntropy);
     }
     // A gated pair's backward's dots merged (before `merge_dots`, which
     // reads its weights' concatenate as the forward's block).
     if config.fuse && config.merge_dots && config.contraction_epilogues {
-        p.add(Rewrite("gated_backward", |g, _| {
-            gated_backward::gated_backward(g)
-        }));
+        p.add(GatedBackward);
     }
     // Merging needs fusion: the merged dot's readers read its slices.
     if config.fuse && config.merge_dots {
@@ -162,34 +160,24 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     // A cross entropy of a dot's logits nothing else reads, its logits
     // never stored (matched, as attention, before the dots are moved).
     if config.fuse && config.fused_linear_cross_entropy {
-        p.add(Rewrite("linear_cross_entropy", |g, _| {
-            linear_cross_entropy::linear_cross_entropy(g)
-        }));
+        p.add(LinearCrossEntropy);
     }
     // After the linear cross entropy's match, which reads its gather's index.
     if config.safe_kernels {
-        p.add(Rewrite("clamp_indices", |g, _| bounds::clamp_indices(g)));
+        p.add(ClampIndices);
     }
     // Now the attention's are matched (its kernels' layouts): transposes of
     // dots swapped, reshapes, transposes and casts moved.
-    p.add(Rewrite("simplify", |g, _| {
-        super::simplify::simplify_with(g, true)
-    }));
+    p.add(Simplify { matched: true });
     // Whole dots on the Neural Engine, before split-K splits them.
     if config.neural_engine {
         p.add(ane::NeuralEngine);
     }
-    p.add(Rewrite("dot_strength", |g, _| {
-        dot_strength::reduce_vector_dots(g)
-    }));
+    p.add(DotStrength);
     if config.split_k {
-        p.add(Rewrite("split_k", |g, c| {
-            split_k::split_k(g, !c.deterministic)
-        }));
+        p.add(split_k::SplitK);
     }
-    p.add(Rewrite("canonicalize_dots", |g, _| {
-        canonicalize_dots::canonicalize_dots(g)
-    }));
+    p.add(CanonicalizeDots);
     if config.fuse {
         if config.normalization_diamonds {
             p.add(diamonds::Diamonds);

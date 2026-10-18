@@ -3,18 +3,18 @@
 
 use super::{Kernel, MpsModule, request};
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// Unfused, each concatenate a fusion of its own: it has no kernel but a
 /// fusion's. No kernel takes a runtime scalar by value.
 pub(super) struct ConcatenatesAlone;
 
-impl<'a> Pass<MpsModule<'a>> for ConcatenatesAlone {
+impl<'a> CompilerPass<MpsModule<'a>> for ConcatenatesAlone {
     fn name(&self) -> &'static str {
         "concatenates_alone"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         m.scalars.clear();
         let kernels = &mut m.kernels;
         m.graph = concatenates_alone(&m.graph, |_| request(kernels, Kernel::Loop(Vec::new())));

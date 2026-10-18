@@ -4,19 +4,19 @@
 
 use super::{MpsModule, codegen};
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 use crate::ops::dot_general::mps::reads_strided;
 use crate::tensor::contiguous_strides;
 
 /// The slices its dots read in place ([`dot_views`]): marked so.
 pub(super) struct PlaceViews;
 
-impl<'a> Pass<MpsModule<'a>> for PlaceViews {
+impl<'a> CompilerPass<MpsModule<'a>> for PlaceViews {
     fn name(&self) -> &'static str {
         "place_views"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         for v in dot_views(&m.graph) {
             let node = m.graph.nodes.iter_mut().find(|n| n.output == v);
             if let Some(Primitive::Slice { view, .. }) = node.map(|n| &mut n.primitive) {

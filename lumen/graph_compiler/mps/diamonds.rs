@@ -47,7 +47,7 @@
 use super::MpsModule;
 use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 use crate::ops::reduce::mps::REDUCE_THREADS;
 
 /// The most threadgroups a row kernel with partials runs (each a block of
@@ -955,12 +955,12 @@ impl<'a> Finder<'a> {
 /// fusion after it.
 pub(crate) struct Diamonds;
 
-impl<'a> Pass<MpsModule<'a>> for Diamonds {
+impl<'a> CompilerPass<MpsModule<'a>> for Diamonds {
     fn name(&self) -> &'static str {
         "normalization_diamonds"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         (m.graph, m.rows) = partials(&m.graph, diamonds(&m.graph));
         Ok(())
     }

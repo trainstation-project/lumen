@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use super::MpsModule;
 use crate::codegen::mps::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
@@ -767,12 +767,12 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
 
 pub(crate) struct NeuralEngine;
 
-impl<'a> Pass<MpsModule<'a>> for NeuralEngine {
+impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
     fn name(&self) -> &'static str {
         "neural_engine"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let options = m.options;
         let written = |i: usize| {
             options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)
