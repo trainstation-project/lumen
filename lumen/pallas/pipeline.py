@@ -27,6 +27,7 @@ import math
 
 from lumen.graph import prims
 from lumen.graph.tracer import TracedTensor
+from lumen.tensor import Tensor
 
 # The pipelines being traced, innermost last: each step's index and the
 # grid.
@@ -216,11 +217,14 @@ def _padded(ref, shape):
 class _Buffered:
     """An operand's HBM ref, its blocks, and its VMEM slots and semaphores."""
 
-    def __init__(self, ref, spec, label):
+    def __init__(self, ref, spec, label, grid):
         from lumen import pallas as pl
 
         self.ref, self.spec, self.label = ref, spec, label
         block = ref.shape if spec.block_shape is None else spec.block_shape
+        self.sizes = [1 if d is None else getattr(d, "block_size", d) for d in block]
+        # Its index map's errors first (JAX's order): traced at the first step.
+        self.block((0,) * len(grid))
         if len(block) != len(ref.shape):
             raise ValueError(
                 f"Block shape for {label} (= {tuple(block)}) must have the same number of dimensions as the "
@@ -231,7 +235,6 @@ class _Buffered:
                 raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
         self.squeezed = [d is None for d in block]
         self.elements = [d if isinstance(d, Element) else None for d in block]
-        self.sizes = [1 if d is None else getattr(d, "block_size", d) for d in block]
         if any(e is not None and e.padding[0] for e in self.elements):
             raise NotImplementedError("Element blocks padded below their operand are not supported yet")
         _check_block(label, self.sizes, ref.shape, ref.dtype)
@@ -265,6 +268,8 @@ class _Buffered:
                 f"Currently returning {len(block)} values."
             )
         for k, b in enumerate(block):
+            if isinstance(b, Tensor):
+                raise ValueError(f"{mapped} must not capture constants: {b}")
             scalar = isinstance(b, TracedTensor) and b.shape == () and not b.dtype.startswith(("float", "bf"))
             if not (scalar or (isinstance(b, int) and not isinstance(b, bool))):
                 kind = f"{b.dtype}[{','.join(map(str, b.shape))}]" if isinstance(b, TracedTensor) else type(b).__name__
@@ -318,8 +323,8 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
         if steps == 0:
             return
         names = labels or [f"refs[{i}]" for i in range(len(refs))]
-        ins = [_Buffered(r, s, n) for r, s, n in zip(refs, in_specs, names)]
-        outs = [_Buffered(r, s, n) for r, s, n in zip(refs[len(in_specs) :], out_specs, names[len(in_specs) :])]
+        ins = [_Buffered(r, s, n, grid) for r, s, n in zip(refs, in_specs, names)]
+        outs = [_Buffered(r, s, n, grid) for r, s, n in zip(refs[len(in_specs) :], out_specs, names[len(in_specs) :])]
         start = [0] * len(grid)
 
         # Each input's first block, into slot 0.

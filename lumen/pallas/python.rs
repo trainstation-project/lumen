@@ -189,6 +189,10 @@ impl PyKernel {
         self.inner.end_if(&results).map_err(err)
     }
 
+    fn delay(&mut self, nanos: Var) -> PyResult<()> {
+        self.inner.delay(nanos).map_err(err)
+    }
+
     fn begin_else(&mut self, results: Vec<Var>) -> PyResult<()> {
         self.inner.begin_else(&results).map_err(err)
     }

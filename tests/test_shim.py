@@ -58,6 +58,9 @@ def test_numpy_roundtrip():
     assert b.shape == [2, 3]
     assert b.dtype == "float32"
     assert b.tolist() == t.tolist()
+    # A 0-d array stays a scalar.
+    s = lumen.from_numpy(np.array(7, dtype=np.int32))
+    assert s.shape == [] and s.item() == 7
 
 
 def test_np_array_protocol():

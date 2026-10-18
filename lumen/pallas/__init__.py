@@ -65,6 +65,7 @@ __all__ = [
     "cdiv",
     "clz",
     "cond",
+    "delay",
     "dot_general",
     "dslice",
     "erf_inv",
@@ -618,6 +619,12 @@ def erf_inv(x, accurate=True):
     """``lax.erf_inv``: XLA's polynomial (accurate either way)."""
     del accurate
     return prims.erf_inv(x)
+
+
+def delay(nanos):
+    """Waits ``nanos`` (an int, or a traced int32 scalar) nanoseconds
+    (``pltpu.delay``)."""
+    _kernel().delay(_i32(nanos).var)
 
 
 def population_count(x):

@@ -654,6 +654,10 @@ def _common_dtype(op, operands):
     tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
     dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
+        # An operand that says why it is not one (a kernel's ref).
+        for x in operands:
+            if hasattr(x, "_not_an_operand"):
+                raise TypeError(x._not_an_operand(op))
         raise TypeError(f"{op} needs a tensor operand")
     if len(dtypes) > 1:
         raise TypeError(f"{op} got tensors of dtypes {' and '.join(dtypes)}: convert them to one with .to(dtype)")

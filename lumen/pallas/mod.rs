@@ -104,6 +104,8 @@ pub enum Op {
     DmaStart,
     /// Waits for the copy of `(src, dst, sem)`.
     DmaWait,
+    /// Waits an i32 scalar's nanoseconds (`tpu.delay`).
+    Delay,
     /// Runs its block if its i1 operand, else `otherwise` (none: nothing):
     /// its values the results of the block that ran (of one type).
     If {
@@ -583,6 +585,16 @@ impl Kernel {
         }
         let op = if wait { Op::DmaWait } else { Op::DmaStart };
         self.push(op, &[src, dst, sem], vec![]);
+        Ok(())
+    }
+
+    /// Waits i32 scalar `nanos` nanoseconds.
+    pub fn delay(&mut self, nanos: Var) -> Result<(), String> {
+        self.check(&[nanos])?;
+        if *self.value(nanos)? != TensorType::new(DType::I32, &[]) {
+            return Err("a delay is an int32 scalar of nanoseconds".into());
+        }
+        self.push(Op::Delay, &[nanos], vec![]);
         Ok(())
     }
 

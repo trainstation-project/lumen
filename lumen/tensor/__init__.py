@@ -176,11 +176,13 @@ def from_numpy(a):
     """Copy a numpy array into a lumen.Tensor."""
     import numpy as np
 
+    # (ascontiguousarray makes a 0-d array 1-d: its own shape kept.)
+    shape = np.shape(a)
     a = np.ascontiguousarray(a)
     values = a.ravel()
     if str(a.dtype) in _ML_DTYPES:
         values = values.astype(np.float64 if "float" in str(a.dtype) else np.int64)
-    return Tensor(values.tolist(), shape=list(a.shape), dtype=str(a.dtype))
+    return Tensor(values.tolist(), shape=list(shape), dtype=str(a.dtype))
 
 
 def _tensor__array__(self, dtype=None, copy=None):

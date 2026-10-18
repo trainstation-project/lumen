@@ -507,6 +507,7 @@ impl Emitter<'_> {
                 };
                 self.op(name, &refs(&operands), &attrs, &out_types)
             }
+            Op::Delay => self.op("tpu.delay", &refs(&ins), "", &[]),
             Op::DmaStart => self.op(
                 "tpu.enqueue_dma",
                 &refs(&ins),

@@ -67,15 +67,6 @@ def pallas_call(
         for d in getattr(spec, "block_shape", None) or ():
             if isinstance(d, BoundedSlice):
                 raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
-    if (
-        isinstance(out_specs, (list, tuple))
-        and isinstance(out_shape, (list, tuple))
-        and len(out_specs) != len(out_shape)
-    ):
-        raise ValueError(
-            "Pytree for `out_specs` and `out_shape` do not match. There are 1 mismatches, including:\n"
-            f"    * `out_specs` is a tuple of length {len(out_specs)} but `out_shape` is a tuple of length {len(out_shape)}"
-        )
     single = not isinstance(out_shape, (list, tuple))
     outs = [out_shape] if single else list(out_shape)
     grid = (grid,) if isinstance(grid, int) else tuple(grid)
@@ -85,6 +76,11 @@ def pallas_call(
     label = f"pallas_call[{name or getattr(kernel, '__name__', 'kernel')}]"
 
     def call(*args):
+        if isinstance(out_specs, (list, tuple)) and not single and len(out_specs) != len(outs):
+            raise ValueError(
+                "Pytree for `out_specs` and `out_shape` do not match. There are 1 mismatches, including:\n"
+                f"    * `out_specs` is a tuple of length {len(out_specs)} but `out_shape` is a tuple of length {len(outs)}"
+            )
         if not outs:
             # Nothing it writes is read: no op (JAX's returns no outputs).
             return ()
