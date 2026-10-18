@@ -22,8 +22,8 @@ ci: fmt-check clang-format-check clippy test miri
 # are: a PCI device of Google's (vendor 0x1ae0) of the processing
 # accelerator class (0x12; Google's virtual NIC and disk share the vendor).
 # The crate and wheel get the `tpu` feature and the wheel the `tpu` extra
-# (JAX, which lowers lumen's Pallas kernels, and its libtpu, which the TPU
-# tests load: TPU_ENV; a TPU_LIBRARY_PATH already set wins).
+# (libtpu), which the TPU tests load (TPU_ENV; a TPU_LIBRARY_PATH already
+# set wins).
 HAS_CUDA := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo yes)
 HAS_TPU := $(shell for d in /sys/bus/pci/devices/*; do [ "$$(cat $$d/vendor 2>/dev/null)" = 0x1ae0 ] && case "$$(cat $$d/class)" in (0x12*) echo yes; break;; esac; done)
 comma := ,
@@ -40,11 +40,11 @@ NO_METAL_FEATURES := --no-default-features --features cuda
 ## test: every test: the unit and doc tests, then the Python tests. CPU
 ## tests always run; MPS, CUDA and TPU ones run where the device is
 ## available. The wheel is built first: it installs the device extras the
-## tests load (JAX and libtpu). On a TPU machine where lumen sees no TPU, it fails
+## tests load (libtpu). On a TPU machine where lumen sees no TPU, it fails
 ## rather than skip the TPU tests.
 test:
 	maturin develop $(MATURIN_FEATURES)
-	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is the tpu extra installed (pip install jax[tpu]) or TPU_LIBRARY_PATH set?')")
+	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
 	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
 	cargo test --doc
 	$(TPU_ENV) python -m pytest tests -q -rs

@@ -197,28 +197,6 @@ int lumen_tpu_read(void *buffer, size_t size, size_t offset, void *dst, size_t n
     return bad;
 }
 
-// Device `index`'s kind ("TPU v6 lite"), what a kernel is lowered for, into
-// `kind` (`size` bytes, NUL-terminated): whether it failed (`error` says why).
-int lumen_tpu_device_kind(int index, char *kind, size_t size) {
-    if (lumen_tpu_device_count() <= index || index < 0 || !HAS(PJRT_Device_GetDescription) ||
-        !HAS(PJRT_DeviceDescription_Kind)) {
-        snprintf(error, sizeof error, "no kind for TPU device %d", index);
-        return 1;
-    }
-    PJRT_Device_GetDescription_Args description = {.struct_size = PJRT_Device_GetDescription_Args_STRUCT_SIZE,
-                                                   .device = devices[index]};
-    if (failed(api->PJRT_Device_GetDescription(&description), "describing a TPU device")) {
-        return 1;
-    }
-    PJRT_DeviceDescription_Kind_Args args = {.struct_size = PJRT_DeviceDescription_Kind_Args_STRUCT_SIZE,
-                                             .device_description = description.device_description};
-    if (failed(api->PJRT_DeviceDescription_Kind(&args), "describing a TPU device")) {
-        return 1;
-    }
-    snprintf(kind, size, "%.*s", (int)args.device_kind_size, args.device_kind);
-    return 0;
-}
-
 // `code` (`size` bytes of StableHLO) compiled as a portable executable, one
 // that runs on any device; none (and `error`) if it does not compile.
 void *lumen_tpu_compile(const char *code, size_t size) {

@@ -194,6 +194,37 @@ def producer(var):
     return _PRODUCERS[-1].get(var)
 
 
+@contextlib.contextmanager
+def tracing(graph, device=None, sources=None, tape=None, leaves=None):
+    """Ops record into ``graph`` (a ``Graph``, or anything answering as one:
+    a ``lumen.pallas`` kernel) inside: a trace of its own, on ``device``,
+    its values' source lines in ``sources``, its nodes on ``tape`` (for
+    ``.backward()`` of ``leaves``). Yields its random state."""
+    tape = [] if tape is None else tape
+    rng = {"state": None, "drawn": 0}
+    _TRACES.append(graph)
+    _SCOPES.append([])
+    _SCOPE_OF.append({})
+    _DEVICES.append(device)
+    _RNG.append(rng)
+    _SOURCES.append({} if sources is None else sources)
+    _PRODUCERS.append({})
+    _TAPES.append(tape)
+    _BACKWARD.append((tape, [] if leaves is None else leaves))
+    try:
+        yield rng
+    finally:
+        _TRACES.pop()
+        _SCOPES.pop()
+        _SCOPE_OF.pop()
+        _DEVICES.pop()
+        _RNG.pop()
+        _SOURCES.pop()
+        _PRODUCERS.pop()
+        _TAPES.pop()
+        _BACKWARD.pop()
+
+
 def current_graph():
     if not _TRACES:
         raise RuntimeError("lumen ops run only while tracing, inside a function passed to lumen.compile")
@@ -271,28 +302,8 @@ def _trace(fn, args, device):
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
-    _TRACES.append(graph)
-    _SCOPES.append([])
-    _SCOPE_OF.append({})
-    _DEVICES.append(device)
-    _RNG.append({"state": None, "drawn": 0})
-    _SOURCES.append(sources)
-    _PRODUCERS.append({})
-    _TAPES.append(tape)
-    _BACKWARD.append((tape, leaves))
-
-    try:
+    with tracing(graph, device, sources, tape, leaves) as rng:
         out = fn(*traced)
-    finally:
-        _TRACES.pop()
-        _SCOPES.pop()
-        _SCOPE_OF.pop()
-        _DEVICES.pop()
-        rng = _RNG.pop()
-        _SOURCES.pop()
-        _PRODUCERS.pop()
-        _TAPES.pop()
-        _BACKWARD.pop()
 
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):

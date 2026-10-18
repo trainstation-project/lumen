@@ -19,11 +19,10 @@ cuda = [
     # Its compiled kernels are called from Rust through TVM-FFI's C ABI.
     "apache-tvm-ffi; sys_platform == 'linux'",
 ]
-# A TPU's runtime and kernels: JAX, which lowers lumen's Pallas kernels
-# (lumen/ops/*/tpu.py), with the libtpu its kernels are for: libtpu.so, which
-# lumen/device/tpu loads at run time (`make test` points TPU_LIBRARY_PATH at
-# it). Linux only.
-tpu = ["jax[tpu]; sys_platform == 'linux'"]
+# A TPU's runtime: libtpu.so, which lumen/device/tpu loads at run time and
+# which compiles lumen's kernels (`make test` points TPU_LIBRARY_PATH at
+# this package's). Linux only.
+tpu = ["libtpu; sys_platform == 'linux'"]
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
 

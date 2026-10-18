@@ -1,4 +1,5 @@
-"""``dot_general`` on TPU, in Pallas: a matmul over the device's memory.
+"""``dot_general`` on TPU, in lumen's Pallas: a matmul over the device's
+memory.
 
 ``lumen/ops/dot_general/tpu.rs`` chooses the spec (the dot's form and blocks)
 and runs the program; this is the kernel. One pipeline (``emit_pipeline``,
@@ -21,43 +22,38 @@ columns' bits in the low halves, its odd columns' in the high, so its
 accumulator holds the even columns, then the odd.
 """
 
+from lumen import pallas as pl
 from lumen.ops.tpu import pallas
+
+# A bfloat16 word's high half.
+HIGH = 0xFFFF0000
 
 
 def program(spec, epilogue=None):
     """The dot of ``spec``: ``batch``, ``m``, ``n``, ``k``, ``transposed`` (a
     ``[N, K]`` rhs), ``packing`` (the operands' and the output's elements a
-    word: 1 for float32, 2 for bfloat16), ``blocks`` (bm, bn, bk), and the
-    TPU's ``kind`` and memory ``rows``. Its scalars are the rows of the lhs, the
-    rhs and the output. ``epilogue`` (float32 block to float32 block,
-    elementwise: a bfloat16 output's columns are in the accumulator's order)
-    is applied to each output block before it is rounded."""
-    jax = pallas.jax()
-    import jax.numpy as jnp
-    from jax.experimental import pallas as pl
-    from jax.experimental.pallas import tpu as pltpu
-
+    word: 1 for float32, 2 for bfloat16) and ``blocks`` (bm, bn, bk). Its
+    scalars are the rows of the lhs, the rhs and the output. ``epilogue``
+    (float32 block to float32 block, elementwise: a bfloat16 output's
+    columns are in the accumulator's order) is applied to each output block
+    before it is rounded."""
     b_, m, n, k = spec["batch"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
     t = spec["transposed"]
     pin, pout = spec["packing"]
     mb, nb, kb = m // bm, n // bn, k // bk
-    precision = jax.lax.Precision.HIGHEST if pin == 1 else None
-    numbers = (((1,), (1,)), ((), ())) if t else (((1,), (0,)), ((), ()))
 
     def mm(a, b):
-        return jax.lax.dot_general(a, b, numbers, precision=precision, preferred_element_type=jnp.float32)
+        return pl.dot(a, b, trans_b=t)
 
     def low(w):
-        return pltpu.bitcast(w << 16, jnp.float32).astype(jnp.bfloat16)
+        return pl.bitcast(pl.shift_left(w, 16), "float32").to("bfloat16")
 
     def high(w):
-        # Its high half, by shifts: a mask (0xFFFF0000) would overflow the
-        # int32 JAX takes a Python int for.
-        return pltpu.bitcast((w >> 16) << 16, jnp.float32).astype(jnp.bfloat16)
+        return pl.bitcast(pl.bitwise_and(w, HIGH), "float32").to("bfloat16")
 
     def rounded(v):
-        return pltpu.bitcast(v.astype(jnp.bfloat16).astype(jnp.float32), jnp.uint32)
+        return pl.bitcast(v.to("bfloat16").to("float32"), "uint32")
 
     def kernel(rows, memory, result, acc):
         x = pallas.matrix(memory, rows[0], (b_ * m, k // pin))
@@ -88,10 +84,10 @@ def program(spec, epilogue=None):
 
             @pl.when(step == 0)
             def _():
-                acc[...] = jnp.zeros_like(acc)
+                acc[...] = 0.0
 
             if pin == 1:
-                acc[...] += mm(pltpu.bitcast(xw[...], jnp.float32), pltpu.bitcast(yw[0][...], jnp.float32))
+                acc[...] += mm(pl.bitcast(xw[...], "float32"), pl.bitcast(yw[0][...], "float32"))
             else:
                 w = xw[...]
                 x0, x1 = low(w), high(w)
@@ -114,14 +110,13 @@ def program(spec, epilogue=None):
                 if epilogue is not None:
                     v = epilogue(v)
                 if pout == 1:
-                    ow[...] = pltpu.bitcast(v, jnp.uint32)
+                    ow[...] = pl.bitcast(v, "uint32")
                 else:
                     h = bn // 2
-                    ow[...] = (rounded(v[:, :h]) >> 16) | (rounded(v[:, h:]) >> 16 << 16)
+                    even = pl.shift_right_logical(rounded(v[:, :h]), 16)
+                    ow[...] = pl.bitwise_or(even, pl.bitwise_and(rounded(v[:, h:]), HIGH))
 
         out_spec = pl.BlockSpec((bm, bn // pout), lambda b, i, j, s: (b * mb + i, j))
-        pltpu.emit_pipeline(body, grid=(b_, mb, nb, kb), in_specs=specs, out_specs=[out_spec])(x, *ys, out)
+        pl.emit_pipeline(body, grid=(b_, mb, nb, kb), in_specs=specs, out_specs=[out_spec])(x, *ys, out)
 
-    return pallas.program(
-        kernel, kind=spec["kind"], rows=spec["rows"], scalars=3, scratch=[pltpu.VMEM((bm, bn), jnp.float32)]
-    )
+    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")])

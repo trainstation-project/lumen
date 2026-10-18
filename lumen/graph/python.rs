@@ -15,7 +15,7 @@ pub(crate) struct PyGraph {
 }
 
 /// The primitive named `name` (its `lax` name) with parameters `params`.
-fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
+pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
     use Primitive::*;
     let get = |key: &str| {
         params
