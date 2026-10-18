@@ -38,6 +38,12 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 
 ## The pipeline, in order
 
+Before them, `compile` refuses exp, log, sqrt, tanh and logistic of
+bfloat16 (`no_bf16_math`): Metal's take and return float, and a program runs
+as traced, so it converts to float32 itself. The rule is the MPS's alone:
+the CPU's reference and a TPU (whose v6e computes them in bfloat16) run
+them.
+
 `pipeline(config)` builds these passes, each a `CompilerPass` (MPS ones of
 `MpsModule`; the device-independent ones from [`../passes/`](../passes/README.md),
 of any module). The order is load-bearing; the comments in

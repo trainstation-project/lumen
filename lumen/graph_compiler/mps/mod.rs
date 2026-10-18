@@ -199,9 +199,27 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     p
 }
 
+/// An error for a node of `graph` computing exp, log, sqrt, tanh or
+/// logistic of bfloat16: Metal's take and return float, and a program runs
+/// as traced, never in another dtype (it computes them in float32 itself).
+fn no_bf16_math(graph: &Graph) -> Result<(), String> {
+    use Primitive::*;
+    for node in graph.nodes() {
+        let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
+        if matches!(node.primitive, Exp | Log | Sqrt | Tanh | Logistic) && x.dtype == DType::BF16 {
+            return Err(format!(
+                "{}: has no bfloat16 kernel on MPS, got {x}: convert to float32 first (x.to(dtype=float32))",
+                node.primitive.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `graph` rewritten by the MPS passes (as `options.config` says) and
 /// planned, its fusion kernels compiled.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+    no_bf16_math(graph)?;
     let config = &options.config;
     let mut module = MpsModule {
         graph: graph.clone(),

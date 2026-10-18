@@ -28,10 +28,9 @@ fn elementwise_is_strict() {
     assert!(infer(Add, &[x.clone(), ty(DType::F32, &[3])]).is_err());
     assert!(infer(Add, &[x.clone(), ty(DType::F16, &[2, 3])]).is_err());
     assert!(infer(Exp, &[ty(DType::I32, &[2])]).is_err());
-    // Nothing computes bfloat16 math as traced: convert it first.
+    // bfloat16 math is a graph's (a device without it refuses it: MPS).
     for p in [Exp, Log, Sqrt, Tanh, Logistic] {
-        let e = infer(p, &[ty(DType::BF16, &[2])]).unwrap_err();
-        assert!(e.contains("convert to float32"), "{e}");
+        assert!(infer(p, &[ty(DType::BF16, &[2])]).is_ok());
     }
     assert!(infer(Neg, &[ty(DType::BF16, &[2])]).is_ok());
     assert!(infer(Add, &[ty(DType::Bool, &[2]), ty(DType::Bool, &[2])]).is_err());

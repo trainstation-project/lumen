@@ -537,9 +537,6 @@ impl Primitive {
                 if !matches!(self, Neg) && !x.dtype.is_float() {
                     return err(format!("takes a floating-point operand, got {x}"));
                 }
-                if !matches!(self, Neg) {
-                    no_bf16_math(x).map_err(prefix)?;
-                }
                 Ok(x.clone())
             }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
@@ -555,14 +552,6 @@ impl Primitive {
                 };
                 if !fits {
                     return err(format!("does not take {x}"));
-                }
-                if floats
-                    && !matches!(
-                        op,
-                        Abs | Sign | Floor | Ceil | RoundEven | IsFinite | ReducePrecision { .. }
-                    )
-                {
-                    no_bf16_math(x).map_err(prefix)?;
                 }
                 match op {
                     IsFinite => Ok(TensorType::new(DType::Bool, &x.shape)),
@@ -586,9 +575,6 @@ impl Primitive {
                 };
                 if !fits {
                     return err(format!("does not take {x}"));
-                }
-                if matches!(op, Pow) {
-                    no_bf16_math(x).map_err(prefix)?;
                 }
                 Ok(x.clone())
             }
@@ -966,18 +952,6 @@ fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
         false => Err(format!(
             "accumulates in the operand's dtype, or float32 (int32) for narrower floats (integers): got accum_dtype {accum} for {x}"
         )),
-    }
-}
-
-/// Ok, unless `x` is bfloat16: no device computes exp, log, sqrt, tanh or
-/// logistic in it (Metal's take and return float), and a program is run as
-/// traced, never in another dtype; it computes them in float32 itself.
-fn no_bf16_math(x: &TensorType) -> Result<(), String> {
-    match x.dtype {
-        DType::BF16 => Err(format!(
-            "has no bfloat16 kernel, got {x}: convert to float32 first (x.to(dtype=float32))"
-        )),
-        _ => Ok(()),
     }
 }
 

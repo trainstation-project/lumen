@@ -966,10 +966,20 @@ pub(crate) mod mps {
                 check_node(p, &two);
             }
             check_node(Neg, std::slice::from_ref(&x));
-            // No bfloat16 kernels for these (graph rejects them).
+            // No bfloat16 kernels for these (the MPS compiler refuses them).
             if dtype.is_float() && dtype != DType::BF16 {
                 for p in [Exp, Log, Sqrt, Tanh, Logistic] {
                     check_node(p, std::slice::from_ref(&x));
+                }
+            }
+            if dtype == DType::BF16 {
+                for p in [Exp, Log, Sqrt, Tanh, Logistic] {
+                    let mut g = Graph::new();
+                    let v = g.input(x.clone());
+                    let out = g.apply(p, &[v]).unwrap();
+                    g.set_outputs(&[out]).unwrap();
+                    let e = crate::graph_compiler::compile(&g, Device::Mps(0)).unwrap_err();
+                    assert!(e.contains("no bfloat16 kernel on MPS"), "{e}");
                 }
             }
         }
