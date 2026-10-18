@@ -394,6 +394,23 @@ impl Tensor {
         if device != Device::Cpu(0) && self.device() != Device::Cpu(0) {
             return self.copy_to(Device::Cpu(0)).copy_to(device);
         }
+        // A TPU keeps a tensor in its shape's tiles (`device::tpu::layout`):
+        // copied in its own shape, contiguous, not as the span it covers.
+        if let (Device::Tpu(_), _) | (_, Device::Tpu(_)) = (device, self.device()) {
+            assert!(
+                self.device() == Device::Cpu(0) || self.is_contiguous(),
+                "a TPU tensor is copied whole: contiguous"
+            );
+            let src = dispatch_dtype!(self.dtype, T => self.contiguous::<T>());
+            let options = TensorOptions::new().dtype(self.dtype).device(device);
+            // SAFETY: the copy below writes every element.
+            let out = unsafe { Self::empty(&self.shape, options) };
+            match device {
+                Device::Cpu(_) => copy_d2h(&out, &src),
+                _ => copy_h2d(&out, &src),
+            }
+            return out;
+        }
         let span = self.span();
         // SAFETY: the copy below covers every element of the span (none, on
         // the meta device).
