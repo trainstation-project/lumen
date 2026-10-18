@@ -1045,11 +1045,13 @@ impl Plan {
         Ok(())
     }
 
-    /// Where the steps of a run on `device` run: MPS kernels on MPS, else
-    /// the host.
+    /// Where the steps of a run on `device` run: MPS kernels on MPS, TPU
+    /// kernels on a TPU, else the host.
     fn executor(&self, device: Device) -> Result<Device, String> {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
+        } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_)) {
+            device
         } else {
             Device::Cpu(0)
         };
@@ -1178,6 +1180,11 @@ impl Plan {
                     }
                     crate::ops::mps::encode(step, &args, out, scratch, keep)?;
                 }
+                #[cfg(lumen_tpu_linked)]
+                Device::Tpu(index) => {
+                    let _ = scratch;
+                    crate::ops::tpu::encode(index, step, &args, out)?;
+                }
                 _ => {
                     // The reference evaluates each step whole: no scratch.
                     let _ = scratch;
@@ -1237,6 +1244,10 @@ impl Plan {
                 match executor {
                     _ if !src.is_contiguous() => {
                         out.copy_(src)?;
+                    }
+                    #[cfg(lumen_tpu_linked)]
+                    Device::Tpu(_) => {
+                        return Err(format!("{}: custom ops do not run on TPU yet", step.label));
                     }
                     #[cfg(lumen_mps_linked)]
                     Device::Mps(_) => crate::ops::dynamic_slice::mps::copy(

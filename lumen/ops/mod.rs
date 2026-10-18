@@ -26,6 +26,8 @@ pub mod reference;
 pub mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
 #[cfg(feature = "python")]
 pub(crate) mod tvm_ffi;
 pub mod wait;

@@ -1,7 +1,8 @@
 //! Google TPUs, through libtpu's PJRT C API (`pjrt.c`, which loads libtpu at
 //! run time: `TPU_LIBRARY_PATH`, else the loader's search). One PJRT client
 //! for the process, created on first use; its addressable devices are
-//! `tpu:0`, `tpu:1`, ... Built with the `tpu` feature on Linux
+//! `tpu:0`, `tpu:1`, ... It compiles and runs the programs of
+//! `lumen/ops/tpu`. Built with the `tpu` feature on Linux
 //! (`cfg(lumen_tpu_linked)`); without it, or without libtpu or TPUs, there
 //! are none.
 
@@ -22,6 +23,16 @@ pub(crate) mod ffi {
             offset: usize,
             dst: *mut c_void,
             nbytes: usize,
+        ) -> i32;
+        pub fn lumen_tpu_compile(code: *const c_char, size: usize) -> *mut c_void;
+        pub fn lumen_tpu_run(
+            executable: *mut c_void,
+            index: i32,
+            scalars: *const i32,
+            count: usize,
+            host: *const c_void,
+            nbytes: usize,
+            region: *mut *mut c_void,
         ) -> i32;
         #[cfg(test)]
         pub fn lumen_tpu_memory(index: i32, in_use: *mut i64, limit: *mut i64) -> i32;
@@ -47,6 +58,11 @@ pub(crate) fn memory(index: usize) -> Result<(usize, usize), String> {
         _ => Err(error()),
     }
 }
+
+/// Held by each test of a TPU: some measure its memory, which the others
+/// would change.
+#[cfg(test)]
+pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct Tpu;
 pub static TPU: &dyn DeviceBackend = &Tpu;

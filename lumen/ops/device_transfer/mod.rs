@@ -30,7 +30,9 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Cuda => Some(cuda::copy_h2d),
         #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
-        // Not yet: a TPU's memory is written only by its programs.
+        #[cfg(lumen_tpu_linked)]
+        DispatchKey::Tpu => Some(tpu::copy_h2d),
+        #[cfg(not(lumen_tpu_linked))]
         DispatchKey::Tpu => None,
         // Meta tensors have no data to copy (`Tensor::copy_to`).
         DispatchKey::Meta => None,

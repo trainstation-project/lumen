@@ -444,12 +444,8 @@ mod tpu {
 
         use crate::allocator::tpu::copy_to_host;
         use crate::allocator::{ALIGNMENT, TpuAllocator, allocator_for};
-        use crate::device::tpu::{TPU, memory};
+        use crate::device::tpu::{ONE_AT_A_TIME, TPU, memory};
         use crate::{Allocator, DType, Device, Storage, Tensor, TensorOptions};
-
-        /// Held by each test: they measure the devices' memory, which the
-        /// others would change.
-        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
         macro_rules! require_tpu {
             () => {
