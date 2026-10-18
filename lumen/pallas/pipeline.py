@@ -239,14 +239,19 @@ class _Buffered:
             raise NotImplementedError("Element blocks padded below their operand are not supported yet")
         _check_block(label, self.sizes, ref.shape, ref.dtype)
         # Its blocks past its end (an Element's padding, a last block
-        # partly out): the operand viewed that much larger, its tiles' padding.
+        # partly out): the operand viewed that much larger, its tiles'
+        # padding; past its tiles, each copy clipped to it (``clip``).
         high = [e.padding[1] if e is not None else 0 for e in self.elements]
         whole = [
             n + h if e is not None else max(n, -(-n // size) * size)
             for n, h, e, size in zip(ref.shape, high, self.elements, self.sizes)
         ]
+        self.clip = None
         if whole != list(ref.shape):
-            self.ref = _padded(ref, whole)
+            try:
+                self.ref = _padded(ref, whole)
+            except NotImplementedError:
+                self.clip = [n != w for n, w in zip(ref.shape, whole)]
         # One dimension of whole 1-D tiles: its two slots one after another
         # (Mosaic slices packed tiles whole).
         self.flat = len(self.sizes) == 1 and self.sizes[0] % (128 * (32 // _bits(ref.dtype))) == 0
@@ -289,19 +294,32 @@ class _Buffered:
                 raise ValueError(f"{mapped} must return integer scalars. Output[{k}] has type {kind}")
         return block
 
-    def hbm(self, block):
-        """The HBM window of ``block``."""
+    def copy(self, block, window, sem, to_hbm=False):
+        """The copy of ``block`` from its HBM window to VMEM slot ``window``
+        (``to_hbm``: back): of the rows within the operand alone where it
+        reaches past the operand's tiles (the rest of the slot undefined,
+        as Pallas leaves it), which takes the block where it is traced."""
         from lumen import pallas as pl
 
-        at = []
-        for b, size, element in zip(block, self.sizes, self.elements):
-            if element is not None:
-                # An element offset.
-                at.append(pl.ds(b, size))
+        hbm, part = [], []
+        for d, (b, size, element) in enumerate(zip(block, self.sizes, self.elements)):
+            start = b if element is not None else b * size
+            if self.clip is not None and self.clip[d]:
+                if not isinstance(start, int):
+                    raise NotImplementedError(
+                        f"a block of {self.label} past the tiles of its operand, at a traced position, is not supported yet"
+                    )
+                inside = min(size, self.ref.shape[d] - start)
+                hbm.append(pl.ds(start, inside))
+                part.append(pl.ds(0, inside))
                 continue
-            start = b * size
-            at.append(pl.ds(pl.multiple_of(start, size), size))
-        return self.ref.at[tuple(at)]
+            # An element offset, or a multiple of the block.
+            hbm.append(pl.ds(start if element is not None else pl.multiple_of(start, size), size))
+            part.append(slice(None))
+        src, dst = self.ref.at[tuple(hbm)], window
+        if any(isinstance(p, pl.ds) for p in part):
+            dst = window.at[tuple(part)]
+        return pl.make_async_copy(dst, src, sem) if to_hbm else pl.make_async_copy(src, dst, sem)
 
     def slot(self, counter):
         from lumen import pallas as pl
@@ -343,7 +361,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
         # Each input's first block, into slot 0.
         for b in ins:
             window, sem = b.slot(_scalar(0, "int32"))
-            pl.make_async_copy(b.hbm(b.block(start)), window, sem).start()
+            b.copy(b.block(start), window, sem).start()
 
         def step(s, carry):
             index, previous, in_counters, out_counters = carry
@@ -358,7 +376,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(fetch)
                 def _():
-                    pl.make_async_copy(b.hbm(b.block(following)), window, sem).start()
+                    b.copy(b.block(following), window, sem).start()
 
                 c[0] = _bump(c[0], fetch)
             # Wait for each input's current block, if it changed.
@@ -368,7 +386,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(changed)
                 def _():
-                    pl.make_async_copy(b.hbm(b.block(index)), window, sem).wait()
+                    b.copy(b.block(index), window, sem).wait()
 
             blocks = [b.view(b.slot(c[1])[0]) for b, c in zip(ins, in_counters)]
             blocks += [b.view(b.slot(c[0])[0]) for b, c in zip(outs, out_counters)]
@@ -386,7 +404,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(done)
                 def _():
-                    pl.make_async_copy(window, b.hbm(b.block(index)), sem).start()
+                    b.copy(b.block(index), window, sem, to_hbm=True).start()
 
                 c[0] = _bump(c[0], done)
                 # Wait for the write-back before this one.
@@ -395,7 +413,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(written)
                 def _():
-                    pl.make_async_copy(window, b.hbm(b.block(previous)), sem).wait()
+                    b.copy(b.block(previous), window, sem, to_hbm=True).wait()
 
                 c[1] = _bump(c[1], written)
             for b, c in zip(ins, in_counters):
@@ -413,7 +431,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
         # Wait for each output's last write-back.
         for b, c in zip(outs, out_counters):
             window, sem = b.slot(c[1])
-            pl.make_async_copy(window, b.hbm(b.block(final)), sem).wait()
+            b.copy(b.block(final), window, sem, to_hbm=True).wait()
 
     return pipeline
 
