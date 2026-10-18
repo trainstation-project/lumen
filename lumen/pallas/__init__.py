@@ -193,10 +193,11 @@ class Ref:
             raise IndexError("a ref's window is contiguous: read strided elements with ref[index]")
         return window
 
-    def _strided(self, index):
+    def _strided(self, index, squeezing=True):
         """``index``'s window (whole in its strided dimensions) and, if any
         dimension is strided, each of the window's dimensions' start, count
-        and stride."""
+        and stride. Without ``squeezing``, an element index keeps its
+        dimension (of one)."""
         index = index if isinstance(index, tuple) else (index,)
         if any(i is Ellipsis for i in index):
             at = index.index(Ellipsis)
@@ -227,7 +228,7 @@ class Ref:
             else:
                 starts.append(int(start))
             sizes.append(size)
-            squeezed.append(squeeze)
+            squeezed.append(squeeze and squeezing)
         strided = strides if any(s != 1 for _, _, s in strides) else None
         if starts == [0] * self.ndim and sizes == list(self.shape) and not any(squeezed):
             return self, strided
@@ -247,7 +248,40 @@ class Ref:
         indices = [_i32(0 if w else i).var for i, w in zip(index, whole)]
         return indices, (1,) * sum(whole)
 
+    def _access(self, index):
+        """``index`` as each dimension's start (an int or a traced int32
+        scalar), size, stride, and whether it is squeezed (an element)."""
+        index = index if isinstance(index, tuple) else (index,)
+        if any(i is Ellipsis for i in index):
+            at = index.index(Ellipsis)
+            index = index[:at] + (slice(None),) * (self.ndim - len(index) + 1) + index[at + 1 :]
+        index = index + (slice(None),) * (self.ndim - len(index))
+        if len(index) != self.ndim:
+            raise IndexError(f"{len(index)} indices for a ref of {self.ndim} dimensions")
+        access = []
+        for i, n in zip(index, self.shape):
+            if isinstance(i, slice):
+                start, stop, step = i.indices(n)
+                if step < 1:
+                    raise IndexError("ref windows go forwards")
+                access.append((start, len(range(start, stop, step)), step, False))
+            elif isinstance(i, ds):
+                access.append((i.start, i.size, i.stride, False))
+            else:
+                access.append((i, 1, 1, True))
+        return access
+
     def __getitem__(self, index):
+        if self.space == "vmem" and self.dtype != "bool":
+            # As Pallas: a load at the window's starts, its elements
+            # squeezed after.
+            access = self._access(index)
+            starts = [_i32(a).var for a, _, _, _ in access]
+            sizes = [k for _, k, _, _ in access]
+            strides = [s for _, _, s, _ in access]
+            value = TracedTensor(self.kernel, self.kernel.load_strided(self.var, starts, sizes, strides))
+            shape = [k for _, k, _, squeezed in access if not squeezed]
+            return value.reshape(shape) if len(shape) != len(sizes) else value
         if self.space == "smem":
             indices, shape = self._element(index)
             value = TracedTensor(self.kernel, self.kernel.load(self.var, indices))
@@ -257,6 +291,11 @@ class Ref:
             starts = [_i32(a).var for a, _, _ in strided]
             sizes, strides = [k for _, k, _ in strided], [s for _, _, s in strided]
             return TracedTensor(self.kernel, self.kernel.load_strided(window.var, starts, sizes, strides))
+        if self.ndim and not window.ndim:
+            # An element: its window of ones loaded, then its value (as
+            # Pallas: Mosaic loads vectors).
+            window, _ = self._strided(index, squeezing=False)
+            return TracedTensor(self.kernel, self.kernel.load(window.var)).reshape(())
         return TracedTensor(self.kernel, self.kernel.load(window.var))
 
     def __setitem__(self, index, value):
@@ -264,6 +303,17 @@ class Ref:
             indices, _ = self._element(index)
             value = prims.full((), value, self.dtype) if not isinstance(value, TracedTensor) else value
             self.kernel.store(self.var, value.reshape(()).var, indices)
+            return
+        if self.space == "vmem" and self.dtype != "bool":
+            access = self._access(index)
+            sizes = [k for _, k, _, _ in access]
+            shape = [k for _, k, _, squeezed in access if not squeezed]
+            value = prims.full(shape, value, self.dtype) if not isinstance(value, TracedTensor) else value
+            if tuple(value.shape) != tuple(shape):
+                raise ValueError(f"a store of {list(shape)} elements got a value of {list(value.shape)}")
+            value = value.reshape(sizes) if len(shape) != len(sizes) else value
+            starts = [_i32(a).var for a, _, _, _ in access]
+            self.kernel.store_strided(self.var, value.var, starts, [s for _, _, s, _ in access])
             return
         window, strided = self._strided(index)
         if strided is not None:

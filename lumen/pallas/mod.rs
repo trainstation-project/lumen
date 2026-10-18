@@ -94,7 +94,8 @@ pub enum Op {
     /// Stores a value in a VMEM ref (of its shape): `(ref, value)`.
     Store,
     /// A VMEM ref's every `strides`-th element of each dimension, from i32
-    /// starts (`tpu.strided_load`): `(ref, starts...)`.
+    /// starts (`tpu.strided_load`; `vector.load` of unit strides): `(ref,
+    /// starts...)`.
     StridedLoad(Vec<usize>),
     /// Stores a value in those elements: `(ref, value, starts...)`.
     StridedStore(Vec<usize>),

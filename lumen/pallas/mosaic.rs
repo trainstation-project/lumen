@@ -398,8 +398,8 @@ impl Emitter<'_> {
             }
             Op::Reshape(_) => self.op("tpu.memref_reshape", &refs(&ins), "", &out_types),
             Op::RefBitcast(_) => self.op("tpu.memref_bitcast", &refs(&ins), "", &out_types),
-            Op::Load => match node.inputs.len() {
-                1 => {
+            Op::Load => match self.ty(node.inputs[0]) {
+                Type::Ref(_, Space::Vmem) => {
                     let t = match self.ty(node.inputs[0]) {
                         Type::Ref(t, _) => t.clone(),
                         _ => unreachable!("checked when built"),
@@ -442,7 +442,7 @@ impl Emitter<'_> {
                     }
                 }
             },
-            Op::Store if node.inputs.len() > 2 => {
+            Op::Store if matches!(self.ty(node.inputs[0]), Type::Ref(_, Space::Smem)) => {
                 // An SMEM element, at its indices (a bool as int32).
                 let value = match self.value(node.inputs[1]).dtype {
                     DType::Bool => {
@@ -492,9 +492,18 @@ impl Emitter<'_> {
                     let i = self.op("arith.index_cast", &[(i, "i32".into())], "", &["index".into()]);
                     operands.push((i[0].clone(), "index".into()));
                 }
-                let name = match node.outputs.is_empty() {
-                    true => "tpu.strided_store",
-                    false => "tpu.strided_load",
+                // Of unit strides: a vector load or store at the starts, as
+                // Pallas (no slice of the ref, which Mosaic wants whole tiles of).
+                let unit = strides.iter().all(|&s| s == 1);
+                let rank = strides.len();
+                let (name, attrs) = match (node.outputs.is_empty(), unit) {
+                    (true, true) => (
+                        "tpu.vector_store",
+                        format!("add = false, operandSegmentSizes = array<i32: 1, 1, {rank}, 0>, strides = array<i32>"),
+                    ),
+                    (true, false) => ("tpu.strided_store", attrs),
+                    (false, true) => ("vector.load", String::new()),
+                    (false, false) => ("tpu.strided_load", attrs),
                 };
                 self.op(name, &refs(&operands), &attrs, &out_types)
             }
