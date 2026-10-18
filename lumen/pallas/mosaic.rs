@@ -528,7 +528,7 @@ impl Emitter<'_> {
                 let pad = "  ".repeat(self.depth);
                 let _ = writeln!(self.out, "{pad}{assign}\"stable_mosaic.scf.if\"({}) ({{", ins[0].0);
                 self.region(then, "scf.yield", None)?;
-                let _ = write!(self.out, "{pad}}}, {{\n");
+                let _ = writeln!(self.out, "{pad}}}, {{");
                 // No else: its region empty.
                 if let Some(otherwise) = otherwise {
                     self.region(otherwise, "scf.yield", None)?;
@@ -542,7 +542,7 @@ impl Emitter<'_> {
                 let operands: Vec<&str> = ins.iter().map(|(n, _)| n.as_str()).collect();
                 let _ = writeln!(self.out, "{pad}{assign}\"stable_mosaic.scf.while\"({}) ({{", operands.join(", "));
                 self.region(before, "scf.condition", Some(&before.args))?;
-                let _ = write!(self.out, "{pad}}}, {{\n");
+                let _ = writeln!(self.out, "{pad}}}, {{");
                 self.region(after, "scf.yield", Some(&after.args))?;
                 let types: Vec<String> = ins.iter().map(|(_, t)| t.clone()).collect();
                 let _ = writeln!(self.out, "{pad}}}) : ({}) -> {}", types.join(", "), self.signature(&out_types));
@@ -739,7 +739,11 @@ impl Emitter<'_> {
                 let indices = match args[1].1.dtype.bits() {
                     b if b == bits => args[1].clone(),
                     b if b < bits => {
-                        let ext = if unsigned(args[1].1.dtype) { "arith.extui" } else { "arith.extsi" };
+                        let ext = if unsigned(args[1].1.dtype) {
+                            "arith.extui"
+                        } else {
+                            "arith.extsi"
+                        };
                         (self.unary(ext, &[&args[1]], "", &wide), wide)
                     }
                     _ => {
@@ -853,7 +857,9 @@ impl Emitter<'_> {
                 // libtpu 0.0.48's Mosaic aborts the process on these (as
                 // under JAX): an error, then.
                 if lhs_contracting.len() > 1 {
-                    return Err("a dot of more than one contracting dimension is not lowered".into());
+                    return Err(
+                        "a dot of more than one contracting dimension is not lowered".into(),
+                    );
                 }
                 // Mosaic's dimension numbers: the operands' contracting and
                 // free dimensions, the result's dimensions as (operand,
@@ -1174,7 +1180,11 @@ impl Emitter<'_> {
         let (float, uns) = (a.1.dtype.is_float(), unsigned(a.1.dtype));
         // A float's power of integers: of them as floats, as Pallas.
         if matches!(op, B::Pow) && b.1.dtype.is_int() {
-            let to = if unsigned(b.1.dtype) { "arith.uitofp" } else { "arith.sitofp" };
+            let to = if unsigned(b.1.dtype) {
+                "arith.uitofp"
+            } else {
+                "arith.sitofp"
+            };
             let y = (self.unary(to, &[b], "", &a.1), a.1.clone());
             return Ok(self.unary("math.powf", &[a, &y], FAST, out));
         }
@@ -1341,7 +1351,12 @@ impl Emitter<'_> {
         // Away from zero (one bit more) if `y` is further out than `x`.
         let towards_up = self.compare(x, y, 4);
         let positive = self.compare(x, &zero, 2);
-        let away = self.apply("arith.xori", &[&towards_up, &positive], "", &positive.1.clone());
+        let away = self.apply(
+            "arith.xori",
+            &[&towards_up, &positive],
+            "",
+            &positive.1.clone(),
+        );
         let next = self.select(&away, &down, &up);
         // From zero: the smallest of `y`'s sign.
         let sign_bit = int(self, -(1i64 << (width - 1)) | 1);

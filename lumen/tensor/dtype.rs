@@ -331,7 +331,11 @@ impl Float8 {
         let a = x.abs();
         let inf = (((1u32 << self.exponent) - 1) << self.mantissa) as u8;
         if a.is_infinite() {
-            return if self.kind == Kind::Ieee { sign | inf } else { nan };
+            return if self.kind == Kind::Ieee {
+                sign | inf
+            } else {
+                nan
+            };
         }
         // Its bits as an integer: subnormals in units of the smallest one,
         // normals' exponent and mantissa continuing them.
@@ -342,7 +346,13 @@ impl Float8 {
         } else {
             let e = a.log2().floor() as i32;
             // `log2` can be one off at the edges: a mantissa in [1, 2).
-            let e = if a < 2f64.powi(e) { e - 1 } else if a >= 2f64.powi(e + 1) { e + 1 } else { e };
+            let e = if a < 2f64.powi(e) {
+                e - 1
+            } else if a >= 2f64.powi(e + 1) {
+                e + 1
+            } else {
+                e
+            };
             let q = (a / 2f64.powi(e - m)).round_ties_even() as u32;
             (((e - min_exp + 1) as u32) << self.mantissa) + q - (1 << self.mantissa)
         };

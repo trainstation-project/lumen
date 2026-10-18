@@ -163,11 +163,21 @@ impl PyKernel {
         sizes: Vec<usize>,
         strides: Vec<usize>,
     ) -> PyResult<Var> {
-        self.inner.load_strided(src, &starts, &sizes, &strides).map_err(err)
+        self.inner
+            .load_strided(src, &starts, &sizes, &strides)
+            .map_err(err)
     }
 
-    fn store_strided(&mut self, dst: Var, value: Var, starts: Vec<Var>, strides: Vec<usize>) -> PyResult<()> {
-        self.inner.store_strided(dst, value, &starts, &strides).map_err(err)
+    fn store_strided(
+        &mut self,
+        dst: Var,
+        value: Var,
+        starts: Vec<Var>,
+        strides: Vec<usize>,
+    ) -> PyResult<()> {
+        self.inner
+            .store_strided(dst, value, &starts, &strides)
+            .map_err(err)
     }
 
     /// An SMEM scratch buffer of `dtype` and `shape`.

@@ -541,14 +541,23 @@ impl Kernel {
         if v.dtype != dtype {
             return Err(format!("a strided store of {dtype} got {v}"));
         }
-        let inputs: Vec<Var> = [dst, value].into_iter().chain(starts.iter().copied()).collect();
+        let inputs: Vec<Var> = [dst, value]
+            .into_iter()
+            .chain(starts.iter().copied())
+            .collect();
         self.push(Op::StridedStore(strides.to_vec()), &inputs, vec![]);
         Ok(())
     }
 
     /// The dtype of VMEM ref `r`, whose `sizes` elements from `starts`
     /// every `strides`-th are read or written.
-    fn strided(&self, r: Var, starts: &[Var], sizes: &[usize], strides: &[usize]) -> Result<DType, String> {
+    fn strided(
+        &self,
+        r: Var,
+        starts: &[Var],
+        sizes: &[usize],
+        strides: &[usize],
+    ) -> Result<DType, String> {
         self.check(&[r])?;
         self.check(starts)?;
         let (t, space) = self.reference(r)?;
@@ -556,7 +565,11 @@ impl Kernel {
         let fits = space == Space::Vmem
             && t.dtype != DType::Bool
             && [starts.len(), sizes.len(), strides.len()] == [rank; 3]
-            && t.shape.iter().zip(sizes).zip(strides).all(|((n, k), s)| *k == 0 || (k - 1) * s < *n);
+            && t.shape
+                .iter()
+                .zip(sizes)
+                .zip(strides)
+                .all(|((n, k), s)| *k == 0 || (k - 1) * s < *n);
         if !fits {
             return Err(
                 "strided loads and stores are of a VMEM ref (not bool): a start, size and stride (0: broadcast) a dimension, within it"

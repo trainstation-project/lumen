@@ -147,7 +147,9 @@ impl Layout {
         for (k, p) in self.positions().into_iter().enumerate() {
             let dst = &mut host[k * to..(k + 1) * to];
             match self.dtype {
-                DType::Bool => dst[0] = u8::from(memory[p * 4..(p + 1) * 4].iter().any(|&b| b != 0)),
+                DType::Bool => {
+                    dst[0] = u8::from(memory[p * 4..(p + 1) * 4].iter().any(|&b| b != 0))
+                }
                 _ if bits < 8 => {
                     let mask = (1u8 << bits) - 1;
                     dst[0] = (memory[p * bits / 8] >> (p * bits % 8)) & mask;

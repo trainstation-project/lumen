@@ -6,8 +6,8 @@
 //! (`tpu.dynamic_gather`).
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::{DType, Scalar};
 use crate::graph_compiler::pass::{CompilerPass, Module};
+use crate::{DType, Scalar};
 
 /// `graph` with each `take_along_axis` a [`Primitive::Gather`] of its
 /// operand flattened: its positions int64 if the indices are, else int32.
@@ -71,7 +71,10 @@ pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
             },
             &[inputs[0]],
         );
-        let v = apply(Primitive::Gather { axis: 0 }, &[whole, flat.expect("a dimension")]);
+        let v = apply(
+            Primitive::Gather { axis: 0 },
+            &[whole, flat.expect("a dimension")],
+        );
         out.set_label(v, node.label);
         map[node.output] = v;
     }

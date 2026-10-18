@@ -181,7 +181,9 @@ fn dot_general_accumulates_in_accum_dtype() {
     let mixed = |l, r| [ty(l, &[2, 3]), ty(r, &[3, 4])];
     let f8 = DType::F8E4M3B11FNUZ;
     assert_eq!(
-        infer(dot(DType::F32, DType::F32), &mixed(DType::BF16, f8)).unwrap().dtype,
+        infer(dot(DType::F32, DType::F32), &mixed(DType::BF16, f8))
+            .unwrap()
+            .dtype,
         DType::F32
     );
     assert!(infer(dot(DType::F32, f8), &mixed(DType::BF16, f8)).is_ok());
@@ -415,11 +417,11 @@ fn bit_ops_follow_xla() {
         [-8, -3, 1, -1]
     );
     assert_eq!(
-        run(Unary(Not), &[x.clone()]).to_vec::<i32>(),
+        run(Unary(Not), std::slice::from_ref(&x)).to_vec::<i32>(),
         [7, -6, -2, 0]
     );
     assert_eq!(
-        run(Unary(PopulationCount), &[x.clone()]).to_vec::<i32>(),
+        run(Unary(PopulationCount), std::slice::from_ref(&x)).to_vec::<i32>(),
         [29, 2, 1, 32]
     );
     assert_eq!(run(Unary(Clz), &[x]).to_vec::<i32>(), [0, 29, 31, 0]);

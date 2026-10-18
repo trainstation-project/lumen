@@ -562,7 +562,8 @@ impl Primitive {
                 use BinaryOp::*;
                 let (x, y) = (args[0], args[1]);
                 // A float's power of integers (`lax.pow`'s): of its shape.
-                if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape {
+                if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape
+                {
                     return Ok(x.clone());
                 }
                 if x != y {
@@ -642,7 +643,10 @@ impl Primitive {
                 }
                 check_accum(lhs, *accum_dtype).map_err(prefix)?;
                 check_accum(rhs, *accum_dtype).map_err(prefix)?;
-                if *output_dtype != lhs.dtype && *output_dtype != rhs.dtype && output_dtype != accum_dtype {
+                if *output_dtype != lhs.dtype
+                    && *output_dtype != rhs.dtype
+                    && output_dtype != accum_dtype
+                {
                     return err(format!(
                         "outputs the operands' dtype or accum_dtype ({accum_dtype}): got output_dtype {output_dtype} for {lhs}"
                     ));
