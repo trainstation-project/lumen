@@ -632,13 +632,17 @@ impl Primitive {
                 output_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
-                if lhs.dtype != rhs.dtype || lhs.dtype == DType::Bool {
+                // Of one dtype, or two floats (a TPU multiplies bfloat16 by
+                // float8: a device that cannot refuses them).
+                let floats = lhs.dtype.is_float() && rhs.dtype.is_float();
+                if (lhs.dtype != rhs.dtype && !floats) || lhs.dtype == DType::Bool {
                     return err(format!(
-                        "operands must share a non-bool dtype, got {lhs} and {rhs}"
+                        "operands must share a non-bool dtype (or be floats), got {lhs} and {rhs}"
                     ));
                 }
                 check_accum(lhs, *accum_dtype).map_err(prefix)?;
-                if *output_dtype != lhs.dtype && output_dtype != accum_dtype {
+                check_accum(rhs, *accum_dtype).map_err(prefix)?;
+                if *output_dtype != lhs.dtype && *output_dtype != rhs.dtype && output_dtype != accum_dtype {
                     return err(format!(
                         "outputs the operands' dtype or accum_dtype ({accum_dtype}): got output_dtype {output_dtype} for {lhs}"
                     ));

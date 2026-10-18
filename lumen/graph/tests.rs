@@ -177,6 +177,16 @@ fn dot_general_accumulates_in_accum_dtype() {
         let e = infer(dot(accum, output), &operands(d)).unwrap_err();
         assert!(e.contains(word), "{e}");
     }
+    // Two float dtypes (a TPU's bfloat16 by float8); not an integer's.
+    let mixed = |l, r| [ty(l, &[2, 3]), ty(r, &[3, 4])];
+    let f8 = DType::F8E4M3B11FNUZ;
+    assert_eq!(
+        infer(dot(DType::F32, DType::F32), &mixed(DType::BF16, f8)).unwrap().dtype,
+        DType::F32
+    );
+    assert!(infer(dot(DType::F32, f8), &mixed(DType::BF16, f8)).is_ok());
+    let e = infer(dot(DType::I32, DType::I32), &mixed(DType::I8, DType::BF16)).unwrap_err();
+    assert!(e.contains("non-bool dtype"), "{e}");
     assert_eq!(
         dot(DType::F32, DType::BF16).to_string(),
         "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=bf16]"

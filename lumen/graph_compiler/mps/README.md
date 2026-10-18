@@ -38,11 +38,12 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 
 ## The pipeline, in order
 
-Before them, `compile` refuses exp, log, sqrt, tanh and logistic of
-bfloat16 (`no_bf16_math`): Metal's take and return float, and a program runs
-as traced, so it converts to float32 itself. The rule is the MPS's alone:
-the CPU's reference and a TPU (whose v6e computes them in bfloat16) run
-them.
+Before them, `compile` refuses what a graph may have but the MPS has no
+kernel for (`unsupported`): exp, log, sqrt, tanh and logistic of bfloat16
+(Metal's take and return float, and a program runs as traced, so it
+converts to float32 itself), and dots of two dtypes. The rules are the
+MPS's alone: the CPU's reference and a TPU (whose v6e computes those in
+bfloat16, and multiplies bfloat16 by float8) run them.
 
 `pipeline(config)` builds these passes, each a `CompilerPass` (MPS ones of
 `MpsModule`; the device-independent ones from [`../passes/`](../passes/README.md),
