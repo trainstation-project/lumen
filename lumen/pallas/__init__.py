@@ -31,11 +31,24 @@ from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
 from .call import ANY, ShapeDtypeStruct, pallas_call, program
-from .pipeline import BlockSpec, axis_index, axis_size, emit_pipeline, num_programs, program_id
+from .pipeline import (
+    Blocked,
+    BlockSpec,
+    BoundedSlice,
+    Element,
+    axis_index,
+    axis_size,
+    emit_pipeline,
+    num_programs,
+    program_id,
+)
 
 __all__ = [
     "ANY",
     "BlockSpec",
+    "Blocked",
+    "BoundedSlice",
+    "Element",
     "Ref",
     "SMEM",
     "SemaphoreType",
@@ -110,7 +123,8 @@ class ds:
     def __init__(self, start, size=None, stride=None):
         if size is None:
             start, size = 0, start
-        self.start, self.size, self.stride = start, size, stride or 1
+        # A stride of 0: one element, broadcast.
+        self.start, self.size, self.stride = start, size, 1 if stride is None else stride
 
 
 dslice = ds
@@ -165,12 +179,15 @@ class Ref:
     """A buffer of a kernel: its ``dtype``, ``shape`` and ``space`` (``"any"``
     for HBM, ``"vmem"``, ``"smem"``, ``"semaphore"``). ``ref[index]`` loads
     (a VMEM window whole, an SMEM element), ``ref[index] = value`` stores,
-    ``ref.at[index]`` is a window of it (a ref), as in Pallas."""
+    ``ref.at[index]`` is a window of it (a ref), as in Pallas. A ``shape`` of
+    ``()`` reads a ref of one element as a scalar (a TPU copies whole rows:
+    a scalar's are a ``(1,)``'s)."""
 
-    def __init__(self, kernel, var):
+    def __init__(self, kernel, var, shape=None):
         self.kernel, self.var = kernel, var
-        self.dtype, shape, self.space = kernel.ref_type(var)
-        self.shape = tuple(shape)
+        self.dtype, physical, self.space = kernel.ref_type(var)
+        self.shape = tuple(physical) if shape is None else tuple(shape)
+        self._scalar = self.shape == () and tuple(physical) == (1,)
 
     def __repr__(self):
         return f"Ref(%{self.var}, {self.dtype}{list(self.shape)}, {self.space})"
@@ -246,7 +263,7 @@ class Ref:
         if len(index) != self.ndim or any(isinstance(i, (slice, ds)) and not w for i, w in zip(index, whole)):
             raise IndexError(f"an SMEM ref's element takes {self.ndim} indices, got {index!r}")
         indices = [_i32(0 if w else i).var for i, w in zip(index, whole)]
-        return indices, (1,) * sum(whole)
+        return (indices or [_i32(0).var]) if self._scalar else indices, (1,) * sum(whole)
 
     def _access(self, index):
         """``index`` as each dimension's start (an int or a traced int32
@@ -299,6 +316,11 @@ class Ref:
         return TracedTensor(self.kernel, self.kernel.load(window.var))
 
     def __setitem__(self, index, value):
+        if hasattr(value, "shape") and not isinstance(value, TracedTensor):
+            raise ValueError(
+                f"The kernel function of a pallas_call captures constants ({value.dtype}{list(value.shape)}): "
+                "pass them to it as operands"
+            )
         if self.space == "smem":
             indices, _ = self._element(index)
             value = prims.full((), value, self.dtype) if not isinstance(value, TracedTensor) else value
@@ -462,6 +484,10 @@ def scan(f, init, xs=None, length=None):
     (``carry, None -> carry, ()``) run ``length`` times; the last carry and
     ``()``."""
     xs_leaves, rebuild = _flatten(xs)
+    if length is None:
+        if not xs_leaves:
+            raise ValueError("scan needs a length, or xs to take it from")
+        length = xs_leaves[0].shape[0]
 
     def body(_, carry):
         # Pallas checks the outputs first: an element of each of `xs`, then.

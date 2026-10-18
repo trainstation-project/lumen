@@ -69,10 +69,36 @@ def axis_size(name):
     return num_programs(_axis(name))
 
 
+class Blocked:
+    """A block dimension of ``block_size`` whose index map gives block
+    indices (an int's meaning)."""
+
+    def __init__(self, block_size):
+        self.block_size = block_size
+
+
+class Element:
+    """A block dimension of ``block_size`` whose index map gives element
+    offsets, the block ``padding`` (low, high) elements wider than the
+    operand where it reaches past it (``pl.Element``)."""
+
+    def __init__(self, block_size, padding=(0, 0)):
+        self.block_size, self.padding = block_size, tuple(padding)
+
+
+class BoundedSlice:
+    """A block dimension its index map gives a ``pl.ds`` of, at most
+    ``block_size`` (``pl.BoundedSlice``): not on a TPU."""
+
+    def __init__(self, block_size):
+        self.block_size = block_size
+
+
 class BlockSpec:
     """An operand's blocks: ``block_shape`` (its whole shape if None; a
-    ``None`` dimension of size 1, squeezed from the block the body sees),
-    and ``index_map(*indices)``, the block (in blocks, not elements) a grid
+    ``None`` dimension of size 1, squeezed from the block the body sees;
+    ``Element`` and ``Blocked`` ones), and ``index_map(*indices)``, the
+    block (in blocks, not elements, but for ``Element`` dimensions) a grid
     step works on (the first if None). ``memory_space=ANY``: no blocks, the
     operand's HBM ref as it is (``pallas_call``)."""
 
@@ -131,6 +157,34 @@ def _bump(counter, pred):
     return prims.select(pred, counter + 1, counter)
 
 
+def _bits(dtype):
+    """Bits of ``dtype``'s elements in a TPU's memory (bool's an int32's)."""
+    if dtype == "bool":
+        return 32
+    if dtype.startswith("float8"):
+        return 8
+    return int("".join(c for c in dtype if c.isdigit()))
+
+
+def _padded(ref, shape):
+    """HBM view ``ref`` (a pallas_call operand's) as ``shape``, no smaller:
+    its bytes the same (padded to whole tiles as they are), or an error."""
+    from lumen.ops.tpu.pallas import view
+
+    def tiles(s):
+        if len(s) < 2:
+            return list(s[:-1]) + [-(-n // 128) for n in s[-1:]]
+        rows = 8 * (32 // _bits(ref.dtype))
+        return [*s[:-2], -(-s[-2] // rows), -(-s[-1] // 128)]
+
+    if getattr(ref, "_view", None) is None or tiles(shape) != tiles(ref.shape):
+        raise NotImplementedError(
+            f"an Element block padded past the tiles of its operand {ref.dtype}{list(ref.shape)} is not supported yet"
+        )
+    memory, row = ref._view
+    return view(memory, row, shape, ref.dtype)
+
+
 class _Buffered:
     """An operand's HBM ref, its blocks, and its VMEM slots and semaphores."""
 
@@ -139,8 +193,17 @@ class _Buffered:
 
         self.ref, self.spec = ref, spec
         block = ref.shape if spec.block_shape is None else spec.block_shape
+        for d in block:
+            if isinstance(d, BoundedSlice):
+                raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
         self.squeezed = [d is None for d in block]
-        self.sizes = [1 if d is None else d for d in block]
+        self.elements = [d if isinstance(d, Element) else None for d in block]
+        self.sizes = [1 if d is None else getattr(d, "block_size", d) for d in block]
+        if any(e is not None and e.padding[0] for e in self.elements):
+            raise NotImplementedError("Element blocks padded below their operand are not supported yet")
+        high = [e.padding[1] if e is not None else 0 for e in self.elements]
+        if any(high):
+            self.ref = _padded(ref, [n + h for n, h in zip(ref.shape, high)])
         self.window = pl.scratch(pl.VMEM((2, *self.sizes), ref.dtype))
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
@@ -154,7 +217,11 @@ class _Buffered:
         from lumen import pallas as pl
 
         at = []
-        for b, size in zip(block, self.sizes):
+        for b, size, element in zip(block, self.sizes, self.elements):
+            if element is not None:
+                # An element offset.
+                at.append(pl.ds(b, size))
+                continue
             start = b * size
             at.append(pl.ds(pl.multiple_of(start, size), size))
         return self.ref.at[tuple(at)]

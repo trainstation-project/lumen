@@ -41,5 +41,13 @@ def program(kernel, spec, scratch=()) -> str:
 
 def view(memory, row, shape, dtype):
     """The ``shape`` of ``dtype`` at ``row`` of ``memory``: a ref of it in
-    place, in its TPU layout (``device::tpu::layout``)."""
-    return pl.Ref(memory.kernel, memory.kernel.view(memory.var, row.var, dtype, list(shape)))
+    place, in its TPU layout (``device::tpu::layout``); a scalar's as a
+    ``(1,)``'s (the same bytes), which a TPU copies (whole rows), read as
+    a scalar."""
+    k = memory.kernel
+    if tuple(shape) == ():
+        return pl.Ref(k, k.view(memory.var, row.var, dtype, [1]), shape=())
+    ref = pl.Ref(k, k.view(memory.var, row.var, dtype, list(shape)))
+    # Where it is, to view it as another shape of the same bytes.
+    ref._view = (memory, row)
+    return ref

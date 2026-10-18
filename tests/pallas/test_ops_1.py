@@ -1184,7 +1184,9 @@ def test_jnp_einsum_grad_y_pallas():
         out_ref[...] = F.einsum("mk,mn->kn", x_ref[...], y_ref[...])
 
     out = _run(kernel, pl.ShapeDtypeStruct((256, 256), "float32"), _tensor(x), _tensor(y))
-    np.testing.assert_array_equal(out, np.einsum("mk,mn->kn", x, y))
+    # JAX compares with jnp.einsum on the TPU (summing in the same order);
+    # numpy's sums in another, to float32's rounding.
+    np.testing.assert_allclose(out, np.einsum("mk,mn->kn", x, y), rtol=1e-6)
 
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
@@ -1203,7 +1205,8 @@ def test_dot_dims_batched_simple_dot_general(dtype):
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((11, 16, 128), "float32"), _tensor(x, dtype), _tensor(y, dtype))
-    np.testing.assert_allclose(out, _dot_general(x, y, numbers), rtol=5e-3 if dtype == "bfloat16" else 1e-7)
+    # float32: numpy sums in another order than the TPU (JAX's reference).
+    np.testing.assert_allclose(out, _dot_general(x, y, numbers), rtol=5e-3 if dtype == "bfloat16" else 1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize(

@@ -729,7 +729,9 @@ def test_reduce_only_dim():
 
 # (name, lumen op, numpy op).
 _REDUCE_OPS = [
-    ("add", F.sum, np.sum),
+    # jnp.sum: narrower floats summed in float32 (lumen's F.sum, in the
+    # tensor's dtype, asks for that).
+    ("add", lambda x, axis: F.sum(x.float() if x.dtype == "bfloat16" else x, axis).to(x.dtype), np.sum),
     ("max", lambda x, axis: F.amax(x, axis), np.max),
     ("min", lambda x, axis: F.amin(x, axis), np.min),
     ("argmax", lambda x, axis: F.argmax(x, axis), np.argmax),

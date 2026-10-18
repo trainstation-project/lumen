@@ -70,6 +70,9 @@ def pallas_call(
     label = f"pallas_call[{name or getattr(kernel, '__name__', 'kernel')}]"
 
     def call(*args):
+        if not outs:
+            # Nothing it writes is read: no op (JAX's returns no outputs).
+            return ()
         args = [tracer._lift(a) for a in args]
         types = [(a.dtype, tuple(a.shape)) for a in args] + [(o.dtype, o.shape) for o in outs]
         _check_aliases(aliases, types[: len(args)], types[len(args) :])
@@ -158,7 +161,13 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         space = None if spec is None else spec.memory_space
         if space == ANY:
             continue
-        if space is SMEM or (space is VMEM or whole or spec is None) and (spec is None or spec.block_shape is None):
+        # Without a grid, a block of no shape is the operand whole: staged
+        # as it is (one step).
+        if (
+            space is SMEM
+            or (space is VMEM or whole or spec is None or not grid)
+            and (spec is None or spec.block_shape is None)
+        ):
             staged.append((i, SMEM if space is SMEM else VMEM))
         else:
             piped.append(i)
@@ -170,7 +179,9 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         c.wait()
 
     for i, space in staged:
-        args[i] = scratch(space(refs[i].shape, refs[i].dtype))
+        args[i] = scratch(space(refs[i].kernel.ref_type(refs[i].var)[1], refs[i].dtype))
+        if refs[i]._scalar:
+            args[i] = type(args[i])(args[i].kernel, args[i].var, shape=())
         if i < len(ins):
             copy(refs[i], args[i])
     extra = [scratch(s) for s in scratch_shapes]

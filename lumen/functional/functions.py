@@ -659,7 +659,8 @@ def diagonal(input, offset=0, dim1=0, dim2=1):
 def pad(input, pad, mode="constant", value=0):
     """``input`` padded (``torch.nn.functional.pad``): ``pad`` pairs of
     before and after sizes, the last dimension's first; ``"constant"``
-    with ``value``, or ``"circular"`` (wrapping around)."""
+    with ``value``, or ``"circular"`` (wrapping around, as many times as
+    it takes)."""
     out = _lift(input)
     for i in range(len(pad) // 2):
         d = out.ndim - 1 - i
@@ -668,6 +669,13 @@ def pad(input, pad, mode="constant", value=0):
         if mode == "constant":
             side = lambda k: prims.full(tuple(k if j == d else s for j, s in enumerate(out.shape)), value, out.dtype)
             parts = ([side(before)] if before > 0 else []) + [out] + ([side(after)] if after > 0 else [])
+        elif mode == "circular" and (before > n or after > n):
+            # Wider than the dimension (numpy's "wrap"): it repeated, then
+            # the window.
+            k = -(-before // n)
+            repeated = prims.concatenate([out] * (k + 1 + -(-after // n)), d)
+            out = repeated.narrow(d, k * n - before, n + before + after)
+            continue
         elif mode == "circular":
             part = lambda a, b: out.narrow(d, a, b - a)
             parts = ([part(n - before, n)] if before > 0 else []) + [out] + ([part(0, after)] if after > 0 else [])

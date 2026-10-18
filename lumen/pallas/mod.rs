@@ -554,11 +554,10 @@ impl Kernel {
         let fits = space == Space::Vmem
             && t.dtype != DType::Bool
             && [starts.len(), sizes.len(), strides.len()] == [rank; 3]
-            && !strides.contains(&0)
             && t.shape.iter().zip(sizes).zip(strides).all(|((n, k), s)| *k == 0 || (k - 1) * s < *n);
         if !fits {
             return Err(
-                "strided loads and stores are of a VMEM ref (not bool): a start, size and positive stride a dimension, within it"
+                "strided loads and stores are of a VMEM ref (not bool): a start, size and stride (0: broadcast) a dimension, within it"
                     .into(),
             );
         }
