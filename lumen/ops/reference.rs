@@ -1,6 +1,8 @@
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::tensor::dtype::{dispatch_dtype, to_bf16, to_f16};
+use crate::tensor::dtype::{
+    dispatch_dtype, f8e4m3b11fnuz, f8e4m3fn, f8e5m2, to_bf16, to_f16,
+};
 use crate::tensor::for_each_index;
 use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
@@ -149,6 +151,12 @@ fn wrap(x: i128, dtype: DType) -> i128 {
         I16 => x as i16 as i128,
         I32 => x as i32 as i128,
         I64 => x as i64 as i128,
+        // The low bits, as `ml_dtypes` and XLA wrap.
+        I2 | I4 => {
+            let shift = 128 - dtype.bits();
+            (x << shift) >> shift
+        }
+        U2 | U4 => x & ((1 << dtype.bits()) - 1),
         _ => unreachable!("{dtype} is not an integer dtype"),
     }
 }
@@ -159,6 +167,9 @@ fn round(x: f64, dtype: DType) -> f64 {
         DType::BF16 => to_bf16(x).to_f64(),
         DType::F32 => x as f32 as f64,
         DType::F64 => x,
+        DType::F8E4M3FN => f8e4m3fn::from_f64(x).to_f64(),
+        DType::F8E5M2 => f8e5m2::from_f64(x).to_f64(),
+        DType::F8E4M3B11FNUZ => f8e4m3b11fnuz::from_f64(x).to_f64(),
         _ => unreachable!("{dtype} is not a float dtype"),
     }
 }
@@ -175,6 +186,9 @@ fn saturate(x: f64, dtype: DType) -> i128 {
         I16 => x as i16 as i128,
         I32 => x as i32 as i128,
         I64 => x as i64 as i128,
+        // Clamped to its range (NaN to 0), as XLA converts.
+        I2 | I4 => (x as i128).clamp(-(1 << (dtype.bits() - 1)), (1 << (dtype.bits() - 1)) - 1),
+        U2 | U4 => (x as i128).clamp(0, (1 << dtype.bits()) - 1),
         _ => unreachable!("{dtype} is not an integer dtype"),
     }
 }
@@ -182,8 +196,8 @@ fn saturate(x: f64, dtype: DType) -> i128 {
 fn lowest(dtype: DType) -> Values {
     match dtype {
         d if d.is_float() => Values::Float(vec![f64::NEG_INFINITY]),
-        DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
-            Values::Int(vec![-(1 << (8 * dtype.size_of() - 1))])
+        DType::I2 | DType::I4 | DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
+            Values::Int(vec![-(1 << (dtype.bits() - 1))])
         }
         _ => Values::Int(vec![0]),
     }
@@ -201,7 +215,7 @@ fn fmin(x: f64, y: f64) -> f64 {
 fn bits(dtype: DType) -> u32 {
     match dtype {
         DType::Bool => 1,
-        d => 8 * d.size_of() as u32,
+        d => d.bits() as u32,
     }
 }
 

@@ -638,6 +638,7 @@ impl std::fmt::Display for Tensor {
             DType::U32 => self.fmt_typed::<u32>(f),
             DType::U64 => self.fmt_typed::<u64>(f),
             DType::Bool => self.fmt_typed::<bool>(f),
+            narrow => dispatch_dtype!(narrow, T => self.fmt_typed::<T>(f)),
         }
     }
 }

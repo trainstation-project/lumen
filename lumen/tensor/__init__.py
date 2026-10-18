@@ -145,6 +145,11 @@ def arange(n, dtype=None, device=None):
 # ---------------------------------------------------------------------
 
 
+# Dtypes numpy has through ml_dtypes alone (each element a byte), copied
+# through Python numbers.
+_ML_DTYPES = ("int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2", "float8_e4m3b11fnuz")
+
+
 def to_numpy(t):
     """Copy a lumen.Tensor into a numpy array: one copy of its memory to the
     host (``Tensor.cpu``), read by numpy through DLPack, no Python number
@@ -153,6 +158,10 @@ def to_numpy(t):
 
     if t.dtype == "bfloat16":
         raise TypeError("numpy has no bfloat16: convert the tensor first (t.to(dtype=lumen.float32))")
+    if t.dtype in _ML_DTYPES:
+        import ml_dtypes
+
+        return np.asarray(t.tolist(), dtype=getattr(ml_dtypes, t.dtype))
     host = t.cpu()
     array = np.from_dlpack(host)
     # A host tensor is its own memory: copy it, so the array is the caller's.
@@ -164,7 +173,10 @@ def from_numpy(a):
     import numpy as np
 
     a = np.ascontiguousarray(a)
-    return Tensor(a.ravel().tolist(), shape=list(a.shape), dtype=str(a.dtype))
+    values = a.ravel()
+    if str(a.dtype) in _ML_DTYPES:
+        values = values.astype(np.float64 if "float" in str(a.dtype) else np.int64)
+    return Tensor(values.tolist(), shape=list(a.shape), dtype=str(a.dtype))
 
 
 def _tensor__array__(self, dtype=None, copy=None):

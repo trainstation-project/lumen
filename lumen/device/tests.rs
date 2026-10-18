@@ -54,6 +54,10 @@ mod tpu_layout {
             "#tpu.tiled<(8,128),[4,2,1]>"
         );
         assert_eq!(attr(DType::F32, &[8]), "#tpu.tiled<(128),[1]>");
+        assert_eq!(
+            attr(DType::I4, &[64, 128]),
+            "#tpu.tiled<(64,128)(8,1),[1,1]>"
+        );
     }
 
     #[test]
@@ -65,6 +69,8 @@ mod tpu_layout {
         assert_eq!(bytes(DType::Bool, &[2, 3]), 8 * 128 * 4);
         assert_eq!(bytes(DType::F32, &[8]), 512);
         assert_eq!(bytes(DType::F32, &[]), 512);
+        assert_eq!(bytes(DType::I4, &[2, 3]), 64 * 128 / 2);
+        assert_eq!(bytes(DType::U2, &[3000]), 1024);
         assert!(Layout::new(DType::F64, &[2, 2]).is_err());
     }
 
@@ -76,12 +82,17 @@ mod tpu_layout {
             (DType::I8, vec![5, 7]),
             (DType::Bool, vec![2, 9]),
             (DType::F32, vec![1000]),
+            (DType::I4, vec![70, 129]),
+            (DType::U2, vec![3, 5]),
+            (DType::F8E5M2, vec![33, 2]),
         ] {
             let layout = Layout::new(dtype, &shape).unwrap();
             let numel: usize = shape.iter().product();
             let host: Vec<u8> = (0..numel * dtype.size_of())
                 .map(|i| match dtype {
                     DType::Bool => (i % 3 == 0) as u8,
+                    // A sub-byte element's value is its byte's low bits.
+                    d if d.bits() < 8 => (i * 7 + 1) as u8 & ((1 << d.bits()) - 1),
                     _ => (i * 7 + 1) as u8,
                 })
                 .collect();

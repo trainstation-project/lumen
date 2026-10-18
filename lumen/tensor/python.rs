@@ -5,8 +5,8 @@ use pyo3::types::{PyBool, PyCapsule, PyFloat, PyInt, PyList, PyTuple};
 
 use crate as core;
 use crate::device::python::resolve_device;
-use crate::tensor::dtype::{bf16, f16};
-use crate::{DType, Scalar, Tensor, TensorOptions};
+use crate::tensor::dtype::{bf16, dispatch_dtype, f16};
+use crate::{DType, Element, Scalar, Tensor, TensorOptions};
 
 pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
     match s {
@@ -23,9 +23,17 @@ pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
         "uint32" | "u32" => Ok(DType::U32),
         "uint64" | "u64" => Ok(DType::U64),
         "bool" => Ok(DType::Bool),
+        "int2" | "i2" => Ok(DType::I2),
+        "int4" | "i4" => Ok(DType::I4),
+        "uint2" | "u2" => Ok(DType::U2),
+        "uint4" | "u4" => Ok(DType::U4),
+        "float8_e4m3fn" | "f8e4m3fn" => Ok(DType::F8E4M3FN),
+        "float8_e5m2" | "f8e5m2" => Ok(DType::F8E5M2),
+        "float8_e4m3b11fnuz" | "f8e4m3b11fnuz" => Ok(DType::F8E4M3B11FNUZ),
         other => Err(PyValueError::new_err(format!(
             "unknown dtype {other:?}; expected float16|bfloat16|float32|float64|\
-             int8|int16|int32|int64|uint8|uint16|uint32|uint64|bool"
+             int8|int16|int32|int64|uint8|uint16|uint32|uint64|bool|\
+             int2|int4|uint2|uint4|float8_e4m3fn|float8_e5m2|float8_e4m3b11fnuz"
         ))),
     }
 }
@@ -131,6 +139,7 @@ fn tensor_from_flat(
         DType::U32 => build!(u32),
         DType::U64 => build!(u64),
         DType::Bool => build!(bool),
+        narrow => dispatch_dtype!(narrow, T => build_half!(T)),
     })
 }
 
@@ -159,6 +168,10 @@ fn scalar_to_py(py: Python<'_>, t: &Tensor, index: &[usize]) -> PyResult<Py<PyAn
         DType::U32 => t.get::<u32>(index).into_py_any(py)?,
         DType::U64 => t.get::<u64>(index).into_py_any(py)?,
         DType::Bool => t.get::<bool>(index).into_py_any(py)?,
+        narrow => match dispatch_dtype!(narrow, T => t.get::<T>(index).to_scalar()) {
+            Scalar::Int(v) => v.into_py_any(py)?,
+            v => v.to_f64().into_py_any(py)?,
+        },
     })
 }
 
@@ -190,6 +203,7 @@ fn set_value(t: &Tensor, index: &[usize], value: &Bound<'_, PyAny>) -> PyResult<
         DType::U32 => set!(u32),
         DType::U64 => set!(u64),
         DType::Bool => set!(bool),
+        narrow => dispatch_dtype!(narrow, T => set_half!(T)),
     }
     Ok(())
 }
@@ -454,7 +468,7 @@ impl PyTensor {
             DType::U16 => self.inner.contiguous::<u16>(),
             DType::U32 => self.inner.contiguous::<u32>(),
             DType::U64 => self.inner.contiguous::<u64>(),
-            DType::Bool => self.inner.contiguous::<bool>(),
+            narrow => dispatch_dtype!(narrow, T => self.inner.contiguous::<T>()),
         }))
     }
 
@@ -585,6 +599,13 @@ impl PyTensor {
             DType::U32 => nested_list(py, ptr.cast::<u32>(), shape, strides, &same),
             DType::U64 => nested_list(py, ptr.cast::<u64>(), shape, strides, &same),
             DType::Bool => nested_list(py, ptr.cast::<bool>(), shape, strides, &same),
+            narrow => dispatch_dtype!(narrow, T => {
+                nested_list(py, ptr.cast::<T>(), shape, strides, &|v: T| match v.to_scalar() {
+                    Scalar::Int(i) => i.into_py_any(py),
+                    v => v.to_f64().into_py_any(py),
+                }
+                .expect("a number"))
+            }),
         }
     }
 

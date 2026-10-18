@@ -9,6 +9,7 @@ use std::fmt::Write;
 
 use super::{Block, Kernel, Node, Op, Space, Type, Var};
 use crate::graph::{Primitive, TensorType};
+use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2};
 use crate::{DType, Scalar};
 
 /// The Mosaic serialization version written: libtpu reads it and older ones.
@@ -29,13 +30,26 @@ fn element(dtype: DType) -> &'static str {
         BF16 => "bf16",
         F32 => "f32",
         F64 => "f64",
+        I2 | U2 => "i2",
+        I4 | U4 => "i4",
+        F8E4M3FN => "f8E4M3FN",
+        F8E5M2 => "f8E5M2",
+        F8E4M3B11FNUZ => "f8E4M3B11FNUZ",
+    }
+}
+
+/// The bits of `dtype`'s elements in memory (bool's an int32's).
+fn stored_bits(dtype: DType) -> usize {
+    match dtype {
+        DType::Bool => 32,
+        d => d.bits(),
     }
 }
 
 fn unsigned(dtype: DType) -> bool {
     matches!(
         dtype,
-        DType::U8 | DType::U16 | DType::U32 | DType::U64 | DType::Bool
+        DType::U2 | DType::U4 | DType::U8 | DType::U16 | DType::U32 | DType::U64 | DType::Bool
     )
 }
 
@@ -94,7 +108,7 @@ fn type_name(ty: &Type) -> String {
 /// `v` as an attribute of `dtype`'s element: an integer wrapped to its
 /// width, a float exact (decimal to 17 digits, hex bits if not finite).
 fn literal(v: &Scalar, dtype: DType) -> String {
-    let bits = dtype.size_of() * 8;
+    let bits = dtype.bits();
     match (dtype.is_float(), v) {
         (_, Scalar::Bool(b)) if dtype == DType::Bool => b.to_string(),
         (true, _) => {
@@ -106,6 +120,9 @@ fn literal(v: &Scalar, dtype: DType) -> String {
                 (false, DType::BF16) => {
                     format!("0x{:04X}", crate::tensor::dtype::to_bf16(x).to_bits())
                 }
+                (false, DType::F8E4M3FN) => format!("0x{:02X}", f8e4m3fn::from_f64(x).0),
+                (false, DType::F8E5M2) => format!("0x{:02X}", f8e5m2::from_f64(x).0),
+                (false, DType::F8E4M3B11FNUZ) => format!("0x{:02X}", f8e4m3b11fnuz::from_f64(x).0),
                 (false, _) => format!("0x{:04X}", crate::tensor::dtype::to_f16(x).to_bits()),
             }
         }
@@ -324,7 +341,7 @@ impl Emitter<'_> {
                 let Type::View(t, _) = self.ty(node.outputs[0]) else {
                     unreachable!("a view's window")
                 };
-                let words = 32 / t.dtype.size_of().max(if t.dtype == DType::Bool { 4 } else { 1 });
+                let words = 256 / stored_bits(t.dtype);
                 let attrs = format!("multiple = {words} : i32");
                 let at = self.op("tpu.assume_multiple", &[(&offset, "i32".into())], &attrs, &["i32".into()]);
                 let memory_type = type_name(self.ty(*self.kernel.params().last().expect("the memory")));
@@ -365,7 +382,7 @@ impl Emitter<'_> {
                 let Type::View(t, _) = self.ty(node.outputs[0]) else {
                     unreachable!("a view's type")
                 };
-                let per_row = 512 / t.dtype.size_of().max(if t.dtype == DType::Bool { 4 } else { 1 });
+                let per_row = 4096 / stored_bits(t.dtype);
                 let k = self.i32(per_row);
                 let at = self.op("arith.muli", &[(&ins[1].0, "i32".into()), (&k, "i32".into())], OVERFLOW, &["i32".into()]);
                 let attrs = format!("multiple = {per_row} : i32");
@@ -1271,7 +1288,7 @@ impl Emitter<'_> {
     fn cast(&mut self, a: &(String, TensorType), dtype: DType) -> Result<String, String> {
         let from = a.1.dtype;
         let out = TensorType::new(dtype, &a.1.shape);
-        let (bits_in, bits_out) = (from.size_of(), dtype.size_of());
+        let (bits_in, bits_out) = (from.bits(), dtype.bits());
         // As Pallas: a bool to a float through int32; to a bool from 32
         // bits (narrower operands widened first).
         if from == DType::Bool && dtype.is_float() {
@@ -1279,7 +1296,7 @@ impl Emitter<'_> {
             let w = (self.unary("arith.extui", &[a], "", &wide), wide);
             return self.cast(&w, dtype);
         }
-        if dtype == DType::Bool && from != DType::Bool && bits_in < 4 {
+        if dtype == DType::Bool && from != DType::Bool && bits_in < 32 {
             let wide = match from.is_float() {
                 true => DType::F32,
                 false if unsigned(from) => DType::U32,

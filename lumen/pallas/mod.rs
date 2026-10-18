@@ -283,7 +283,7 @@ impl Kernel {
         self.check(inputs)?;
         let a = self.value(inputs[0])?.clone();
         let ty = match &op {
-            Op::Bitcast(dtype) if dtype.size_of() == a.dtype.size_of() => {
+            Op::Bitcast(dtype) if dtype.bits() == a.dtype.bits() => {
                 TensorType::new(*dtype, &a.shape)
             }
             Op::Bitcast(dtype) => {
@@ -448,7 +448,7 @@ impl Kernel {
             return Err("a tiled view is not bitcast: view the tensor as its dtype".into());
         }
         let (t, space) = self.reference(src)?;
-        if dtype.size_of() != t.dtype.size_of() {
+        if dtype.bits() != t.dtype.bits() {
             return Err(format!("a ref of {} cannot be read as {dtype}", t.dtype));
         }
         let ty = Type::Ref(TensorType::new(dtype, &t.shape), space);

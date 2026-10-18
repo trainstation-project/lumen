@@ -829,3 +829,33 @@ fn half_floats_round_to_nearest_once() {
     assert!(to_bf16(f64::INFINITY).is_infinite());
     assert!(to_f16(f64::NAN).is_nan());
 }
+
+#[test]
+fn narrow_dtypes_are_ml_dtypes_bytes() {
+    use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2, i2, i4, u4};
+    // As ml_dtypes 0.6 stores them.
+    let values = [-1.5, 448.0, 1000.0, f64::NAN, f64::INFINITY, -0.0];
+    let bytes = |f: fn(f64) -> u8| values.map(f);
+    assert_eq!(bytes(|x| f8e4m3fn::from_f64(x).0), [188, 126, 127, 127, 127, 128]);
+    assert_eq!(bytes(|x| f8e5m2::from_f64(x).0), [190, 95, 100, 126, 124, 128]);
+    assert_eq!(bytes(|x| f8e4m3b11fnuz::from_f64(x).0), [220, 128, 128, 128, 128, 0]);
+    assert_eq!([-1.0, -8.0, 7.0].map(|x| i4::from_f64(x).0), [15, 8, 7]);
+    assert_eq!([-1.0, -2.0, 1.0].map(|x| i2::from_f64(x).0), [3, 2, 1]);
+    assert_eq!(i4(8).to_f64(), -8.0);
+    assert_eq!(u4(15).to_f64(), 15.0);
+    // Every float8 is its byte again (but NaNs, of one byte each).
+    for b in 0..=255u8 {
+        for (to, from) in [
+            (f8e4m3fn(b).to_f64(), f8e4m3fn::from_f64 as fn(f64) -> f8e4m3fn),
+            (f8e5m2(b).to_f64(), |x| f8e4m3fn(f8e5m2::from_f64(x).0)),
+            (f8e4m3b11fnuz(b).to_f64(), |x| f8e4m3fn(f8e4m3b11fnuz::from_f64(x).0)),
+        ] {
+            if !to.is_nan() {
+                assert_eq!(from(to).0, b, "{b:#04x} ({to})");
+            }
+        }
+    }
+    // Halfway between 1 and 1.125 (e4m3): to even.
+    assert_eq!(f8e4m3fn::from_f64(1.0625).to_f64(), 1.0);
+    assert_eq!(f8e4m3fn::from_f64(1.1875).to_f64(), 1.25);
+}

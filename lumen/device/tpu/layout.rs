@@ -6,7 +6,8 @@
 //!
 //! * A tensor of two or more dimensions `[..., M, N]` is tiled on its last
 //!   two: tiles of `tm × 128` elements (`tm` 8 for 32-bit dtypes, 16 for
-//!   16-bit, 32 for 8-bit), `M` and `N` padded to whole tiles. The tiles
+//!   16-bit, 32 for 8-bit, 64 for 4-bit, 128 for 2-bit), `M` and `N`
+//!   padded to whole tiles. The tiles
 //!   follow each other row-major (each of the leading dimensions' indices a
 //!   matrix of tiles), each tile its 128-wide rows in order; a 32-bit word
 //!   of a tile holds `pack` (`32 / bits`) elements of one column, of rows
@@ -33,6 +34,7 @@ pub struct Layout {
     /// A tile's rows (`tm`), for two dimensions or more.
     pub rows: usize,
     /// Elements of a 32-bit word (`32 / bits`), down a tile's column.
+    /// (A sub-byte element on the host is a byte, its value its low bits.)
     pub pack: usize,
 }
 
@@ -48,7 +50,7 @@ impl Layout {
             }
             other => other,
         };
-        let pack = 4 / stored.size_of();
+        let pack = 32 / stored.bits();
         Ok(Layout {
             shape: shape.to_vec(),
             dtype,
@@ -74,13 +76,13 @@ impl Layout {
 
     /// Its bytes in memory: whole tiles, or whole rows.
     pub fn bytes(&self) -> usize {
-        let size = self.stored.size_of();
+        let bits = self.stored.bits();
         if self.tiled() {
             let (lead, m, n) = self.padded();
-            return lead * m * n * size;
+            return lead * m * n * bits / 8;
         }
         let numel: usize = self.shape.iter().product();
-        (numel * size).div_ceil(ROW) * ROW
+        (numel * bits).div_ceil(8 * ROW) * ROW
     }
 
     /// Its elements' positions in memory, in elements of `stored`, in
@@ -114,15 +116,18 @@ impl Layout {
     /// `host`'s bytes (the tensor row-major, as the host keeps it) as they
     /// are in memory, [`bytes`](Self::bytes) of them, the padding zero.
     pub fn tile(&self, host: &[u8]) -> Vec<u8> {
-        let (from, to) = (self.dtype.size_of(), self.stored.size_of());
+        let (from, bits) = (self.dtype.size_of(), self.stored.bits());
         let mut out = vec![0u8; self.bytes()];
         for (k, p) in self.positions().into_iter().enumerate() {
             let src = &host[k * from..(k + 1) * from];
-            let dst = &mut out[p * to..(p + 1) * to];
-            match from == to {
-                true => dst.copy_from_slice(src),
+            match self.dtype {
                 // bool to int32: 0 or 1.
-                false => dst[0] = u8::from(src[0] != 0),
+                DType::Bool => out[p * 4] = u8::from(src[0] != 0),
+                _ if bits < 8 => {
+                    let mask = (1u8 << bits) - 1;
+                    out[p * bits / 8] |= (src[0] & mask) << (p * bits % 8);
+                }
+                _ => out[p * from..(p + 1) * from].copy_from_slice(src),
             }
         }
         out
@@ -130,13 +135,16 @@ impl Layout {
 
     /// The tensor row-major, from its bytes in memory: into `host`.
     pub fn untile(&self, memory: &[u8], host: &mut [u8]) {
-        let (to, from) = (self.dtype.size_of(), self.stored.size_of());
+        let (to, bits) = (self.dtype.size_of(), self.stored.bits());
         for (k, p) in self.positions().into_iter().enumerate() {
-            let src = &memory[p * from..(p + 1) * from];
             let dst = &mut host[k * to..(k + 1) * to];
-            match from == to {
-                true => dst.copy_from_slice(src),
-                false => dst[0] = u8::from(src.iter().any(|&b| b != 0)),
+            match self.dtype {
+                DType::Bool => dst[0] = u8::from(memory[p * 4..(p + 1) * 4].iter().any(|&b| b != 0)),
+                _ if bits < 8 => {
+                    let mask = (1u8 << bits) - 1;
+                    dst[0] = (memory[p * bits / 8] >> (p * bits % 8)) & mask;
+                }
+                _ => dst.copy_from_slice(&memory[p * to..(p + 1) * to]),
             }
         }
     }
