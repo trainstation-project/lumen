@@ -80,7 +80,8 @@ static void initialize(void) {
           HAS(PJRT_Client_Create) && HAS(PJRT_Client_AddressableDevices) &&
           HAS(PJRT_Client_CreateUninitializedBuffer) && HAS(PJRT_Buffer_UnsafePointer) &&
           HAS(PJRT_Buffer_CopyRawToHost) && HAS(PJRT_Buffer_Destroy) && HAS(PJRT_Client_Compile) &&
-          HAS(PJRT_Client_BufferFromHostBuffer) && HAS(PJRT_LoadedExecutable_Execute))) {
+          HAS(PJRT_Client_BufferFromHostBuffer) && HAS(PJRT_LoadedExecutable_Execute) &&
+          HAS(PJRT_Buffer_ReadyEvent))) {
         snprintf(error,
                  sizeof error,
                  "%s's PJRT API (%d.%d) lacks a function lumen needs",
@@ -295,6 +296,15 @@ int lumen_tpu_run(void *executable,
     lumen_tpu_free(*region);
     *region = result;
     return 0;
+}
+
+// Waits for `buffer` (a region: what the programs run so far on it write).
+// Whether it failed (`error` says why).
+int lumen_tpu_wait(void *buffer) {
+    PJRT_Buffer_ReadyEvent_Args ready = {.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE,
+                                         .buffer = (PJRT_Buffer *)buffer};
+    return failed(api->PJRT_Buffer_ReadyEvent(&ready), "waiting for a TPU program") ||
+           awaited(ready.event, "waiting for a TPU program");
 }
 
 // Device `index`'s memory in use and its limit, in bytes: whether it failed.

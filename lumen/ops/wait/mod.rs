@@ -7,9 +7,18 @@ pub static WAIT: Op<WaitKernel> = Op::new(op_name!("wait"), kernels);
 
 fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     match key {
-        // (A TPU's work so far, its memory's reads, is waited for as it
-        // runs.)
-        DispatchKey::Cpu | DispatchKey::Meta | DispatchKey::Tpu => Some(|_| {}),
+        DispatchKey::Cpu | DispatchKey::Meta => Some(|_| {}),
+        // The programs run on its device's memory so far (they run
+        // asynchronously; reads of it wait for them themselves).
+        #[cfg(lumen_tpu_linked)]
+        DispatchKey::Tpu => Some(|t| {
+            let crate::Device::Tpu(index) = t.device() else {
+                unreachable!("a TPU tensor")
+            };
+            crate::allocator::tpu::wait(index).unwrap_or_else(|e| panic!("{e}"))
+        }),
+        #[cfg(not(lumen_tpu_linked))]
+        DispatchKey::Tpu => Some(|_| {}),
         DispatchKey::Mps | DispatchKey::Cuda => Some(|t| {
             let stream = crate::stream::stream_for(t.device());
             stream.expect("a tensor's device is present").synchronize()
