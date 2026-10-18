@@ -61,7 +61,7 @@ pub(crate) fn memory(index: usize) -> Result<(usize, usize), String> {
 
 /// Held by each test of a TPU: some measure its memory, which the others
 /// would change.
-#[cfg(test)]
+#[cfg(all(test, lumen_tpu_linked))]
 pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct Tpu;
