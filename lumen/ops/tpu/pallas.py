@@ -73,12 +73,12 @@ def program(kernel, *, kind: str, rows: int, scalars: int, host_rows: int = 0, s
 
     jitted = jax_.jit(call, donate_argnums=memory)
     device = jax_.sharding.AbstractDevice(device_kind=kind, num_cores=1, platform="tpu")
-    mesh = jax_.sharding.AbstractMesh((1,), ("device",), abstract_device=device)
-    # The TPU's kind is for lowering (Pallas asks it of the mesh); traced
-    # under the mesh, the refs would carry its shardings.
-    traced = jitted.trace(*args)
+    # Pallas asks the mesh for the TPU it targets; an automatic axis, so the
+    # types carry no shardings (a ref's reshape would not keep them).
+    auto = (jax_.sharding.AxisType.Auto,)
+    mesh = jax_.sharding.AbstractMesh((1,), ("device",), auto, abstract_device=device)
     with jax_.sharding.use_abstract_mesh(mesh):
-        return traced.lower(lowering_platforms=("tpu",)).as_text()
+        return jitted.trace(*args).lower(lowering_platforms=("tpu",)).as_text()
 
 
 def matrix(ref, row, shape):
