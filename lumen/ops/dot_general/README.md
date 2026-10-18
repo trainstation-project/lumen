@@ -5,7 +5,7 @@ matmul) and for `linear_cross_entropy` (the logits `h · wᵀ` fused with a
 cross-entropy, never materialized). There is no `Op` here: `dot_general` is
 a graph primitive, run by a compiled plan. On MPS, `ops::mps::encode` sends
 its steps to `mps::encode` / `mps::encode_linear_cross_entropy`; on a TPU,
-`ops::tpu::encode` sends `dot_general` to `tpu::encode` (its Pallas kernel,
+`ops::tpu::encode` sends `dot_general` to `tpu::encode` (its kernel, in lumen's Pallas:
 `tpu.py`); elsewhere the plan
 evaluates it with `ops/reference.rs`.
 
@@ -15,18 +15,18 @@ evaluates it with `ops/reference.rs`.
 | --- | --- |
 | `mod.rs` | Module doc and the `#[cfg(lumen_mps_linked)] mod mps;` and `#[cfg(lumen_tpu_linked)] mod tpu;` hooks. |
 | `tpu.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec; see *TPU* below. |
-| `tpu.py` | The Pallas kernel of a dot on TPU (`program(spec, epilogue)`). |
+| `tpu.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
 
 ## TPU
 
-`tpu.py` is the kernel, in Pallas; `tpu.rs` its spec
+`tpu.py` is the kernel, in lumen's Pallas ([`../../pallas/`](../../pallas/README.md)); `tpu.rs` its spec
 ([`../tpu/`](../tpu/README.md) lowers and runs it). The lhs must be batch,
 free then contracting dimensions; the rhs batch, then contracting and free
 dimensions (`[K, N]`) or free and contracting (`[N, K]`, `transposed`);
 anything else errors. Operands are float32 or bfloat16 (one dtype),
 accumulating in float32; the output float32 or bfloat16.
 
-* **Pipeline** over `(batch, M/bm, N/bn, K/bk)` (`pltpu.emit_pipeline`, the
+* **Pipeline** over `(batch, M/bm, N/bn, K/bk)` (`pl.emit_pipeline`, the
   blocks' copies double-buffered against compute): each step multiplies an
   lhs and rhs block on the matrix unit into a float32 accumulator (VMEM,
   zeroed at the first K step), and the last K step writes the output
@@ -49,10 +49,10 @@ accumulating in float32; the output float32 or bfloat16.
 * **Supported**: float32 → float32; bfloat16 → bfloat16; bfloat16 → float32
   with a `[N, K]` rhs. The others (float32 → bfloat16, bfloat16 → float32
   with a `[K, N]` rhs) would interleave columns across lanes: not yet.
-* float32 operands multiply in full float32 (`Precision.HIGHEST`), not the
-  matrix unit's bfloat16 passes.
-* On a v6e at 4096³: about 475 TFLOP/s in bfloat16 (XLA's: 770) and 110 in
-  float32 (125).
+* float32 operands multiply in full float32 (`contract_precision<fp32>`),
+  not the matrix unit's bfloat16 passes.
+* On a v6e at 4096³, through `lumen.compile`: about 465 TFLOP/s in bfloat16
+  (XLA's: 770) and 110 in float32 (125): JAX's Pallas kernel's speed.
 
 ## Subfolders
 

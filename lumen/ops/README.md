@@ -11,7 +11,7 @@ reference interpreter. Two kinds of code live here:
   side (`mod.rs`, an `encode` function). These are not `Op`s: a compiled
   `Plan` (`graph_compiler/plan.rs`) runs each step on MPS through
   [`mps::encode`](mps/mod.rs), which routes on the step's `Primitive`, and
-  on a TPU through [`tpu::encode`](tpu/mod.rs) (Pallas kernels); on any
+  on a TPU through [`tpu::encode`](tpu/mod.rs) (kernels in lumen's Pallas); on any
   other executor the plan evaluates the step with
   [`reference::eval_raw`](reference.rs).
 
@@ -37,7 +37,7 @@ templates in these `.metal` files (compiled with `TEMPLATES_ONLY`, see
 | Folder | What it holds |
 | --- | --- |
 | [`mps/`](mps/README.md) | Shared MPS plumbing: `encode` (per-primitive routing), `launch`, argument packing, the shared Metal prelude and the Objective-C++ launch shim. |
-| [`tpu/`](tpu/README.md) | TPU plumbing: `encode` (per-primitive routing), lowering Pallas kernels (`pallas.py`) for their specs, compiling and launching. |
+| [`tpu/`](tpu/README.md) | TPU plumbing: `encode` (per-primitive routing), tracing kernels (`pallas.py`) for their specs, the StableHLO wrapper, compiling and launching. |
 | [`attention/`](attention/README.md) | Flash-attention forward/backward Metal templates, used only by generated fusion kernels. |
 | [`dot_general/`](dot_general/README.md) | `dot_general` (matmul) and `linear_cross_entropy` kernels (MPS; `dot_general` on TPU too). |
 | [`reduce/`](reduce/README.md) | `reduce_sum` / `reduce_max`. |
