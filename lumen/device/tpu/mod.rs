@@ -8,6 +8,8 @@
 
 use super::DeviceBackend;
 
+pub mod layout;
+
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod ffi {
     use std::ffi::{c_char, c_void};

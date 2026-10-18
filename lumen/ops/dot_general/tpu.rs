@@ -1,18 +1,21 @@
-//! `dot_general` on TPU: the spec of its Pallas kernel (`tpu.py` beside
-//! this file, which says how it works): the dot's form, its blocks and
-//! dtypes. A dot the kernel cannot run errors here, saying why.
+//! `dot_general` on TPU: the spec of its kernel (`tpu.py` beside this file,
+//! in lumen's Pallas, which says how it works): the dot's form, its blocks
+//! and dtypes. A dot the kernel cannot run errors here, saying why.
 
 use crate::DType;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::ops::tpu::{Launch, launch};
 
-/// A `dot_general` as `out[b] = lhs[b] · rhs[b]`: `batch` of `[m, k]` times
-/// `[k, n]` (`[n, k]` if `transposed`), each operand's batch, free and
-/// contracting dimensions collapsed.
+/// A `dot_general` as `out[b, l] = lhs[b, l] · rhs[b]`: `batch` times
+/// `lead` (the lhs's free dimensions before its last) of `[m, k]` times
+/// `[k, n]` (`[n, k]` if `transposed`). A TPU's tensors are tiled on their
+/// last two dimensions, the others merging freely: the lhs is viewed as
+/// `[batch · lead, m, k]`, the output as `[batch · lead, m, n]`.
 #[derive(Debug, PartialEq)]
 struct Form {
     batch: usize,
+    lead: usize,
     m: usize,
     n: usize,
     k: usize,
@@ -20,8 +23,9 @@ struct Form {
 }
 
 /// `p`'s form on operands of shapes `lhs` and `rhs`: an error unless the
-/// lhs is batch, free then contracting dimensions and the rhs batch then
-/// contracting and free dimensions (either order), each group in order.
+/// lhs is batch, free then one contracting dimension (a free one at
+/// least), and the rhs batch then its contracting and one free dimension
+/// (either order).
 fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -34,51 +38,50 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
         unreachable!("a dot_general's form")
     };
     let run = |dims: &[usize], start: usize| dims.iter().enumerate().all(|(i, &d)| d == start + i);
-    let (nb, nc) = (lhs_batch.len(), lhs_contracting.len());
+    let nb = lhs_batch.len();
     let product = |dims: &[usize]| dims.iter().product::<usize>();
-    let in_order = run(lhs_batch, 0) && run(rhs_batch, 0) && run(lhs_contracting, lhs.len() - nc);
-    let transposed = if run(rhs_contracting, nb) {
-        false
-    } else if run(rhs_contracting, rhs.len() - nc) {
-        true
-    } else {
+    if !(run(lhs_batch, 0) && run(rhs_batch, 0)) {
+        return Err("dot_general on TPU: the operands' batch dimensions must lead them".into());
+    }
+    if *lhs_contracting != [lhs.len() - 1] || lhs.len() < nb + 2 {
         return Err(
-            "dot_general on TPU: the rhs's contracting dimensions must follow its batch \
-                    dimensions or end it"
-                .into(),
-        );
-    };
-    if !in_order {
-        return Err(
-            "dot_general on TPU: the lhs must be batch, free then contracting dimensions".into(),
+            "dot_general on TPU: the lhs must be batch, free then one contracting dimension".into(),
         );
     }
-    let free = match transposed {
-        false => &rhs[nb + nc..],
-        true => &rhs[nb..rhs.len() - nc],
-    };
+    if rhs.len() != nb + 2 || rhs_contracting.len() != 1 {
+        return Err(
+            "dot_general on TPU: the rhs must be batch, then one contracting and one free dimension"
+                .into(),
+        );
+    }
+    let transposed = rhs_contracting[0] == nb + 1;
     Ok(Form {
         batch: product(&lhs[..nb]),
-        m: product(&lhs[nb..lhs.len() - nc]),
-        n: product(free),
-        k: product(&lhs[lhs.len() - nc..]),
+        lead: product(&lhs[nb..lhs.len() - 2]),
+        m: lhs[lhs.len() - 2],
+        n: rhs[if transposed { nb } else { nb + 1 }],
+        k: lhs[lhs.len() - 1],
         transposed,
     })
 }
 
-/// The largest multiple of `unit` at most `cap` that divides `n`.
+/// A block of a dimension of `n`: the whole if at most `cap`, else the
+/// largest multiple of `unit` at most `cap` that divides it.
 fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
+    if n <= cap {
+        return Some(n);
+    }
     (1..=cap / unit)
         .rev()
         .map(|i| i * unit)
         .find(|&b| n.is_multiple_of(b))
 }
 
-/// Elements of `dtype` in a 32-bit word: 1 for float32, 2 for bfloat16.
-fn packing(dtype: DType, what: &str) -> Result<usize, String> {
+/// The rows of a tile of `dtype`: 8 for float32, 16 for bfloat16.
+fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     match dtype {
-        DType::F32 => Ok(1),
-        DType::BF16 => Ok(2),
+        DType::F32 => Ok(8),
+        DType::BF16 => Ok(16),
         _ => Err(format!(
             "dot_general on TPU: {what} must be float32 or bfloat16, got {dtype}"
         )),
@@ -106,45 +109,32 @@ pub(crate) fn encode(
             lhs.dtype, rhs.dtype, accum_dtype
         ));
     }
-    let pin = packing(lhs.dtype, "the operands")?;
-    let pout = packing(out.dtype, "the output")?;
-    // The output's columns split by parity only where a word holds two:
-    // a rhs whose rows hold N pairs them, so its output must too.
-    if (pin == 1 && pout == 2) || (pin == 2 && !f.transposed && pout == 1) {
-        return Err(format!(
-            "dot_general on TPU: {} operands with a {} output are not supported yet",
-            lhs.dtype, out.dtype
-        ));
-    }
-    // Blocks of whole rows of 128 words (a pair of rows, a word two
-    // elements), as large as fit VMEM: tuned on a v6e.
-    let unit_n = 128 * pout.max(if f.transposed { 1 } else { pin });
-    let unit_k = 128 * pin;
-    let (cap_m, cap_n, cap_k) = match pin {
-        1 => (512, 512, 512),
+    // Blocks of whole tiles (or whole dimensions), as large as fit VMEM:
+    // tuned on a v6e.
+    let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
+    let (cap_m, cap_n, cap_k) = match lhs.dtype {
+        DType::F32 => (512, 512, 512),
         _ => (1024, 1024, 512),
     };
-    // An lhs block's rows are M's whole, or a multiple of 8 (the batch's
-    // matrices are one).
     let blocks = (
-        match f.batch == 1 && f.m <= cap_m {
-            true => Some(f.m),
-            false => block(f.m, 8, cap_m),
-        },
-        block(f.n, unit_n, cap_n),
-        block(f.k, unit_k, cap_k),
+        block(f.m, unit_m, cap_m),
+        block(f.n, 128, cap_n),
+        block(f.k, 128, cap_k),
     );
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [
             (
                 blocks.0,
-                format!(
-                    "M ({}) a multiple of 8 (or at most {cap_m}, unbatched)",
-                    f.m
-                ),
+                format!("M ({}) at most {cap_m} or a multiple of {unit_m}", f.m),
             ),
-            (blocks.1, format!("N ({}) a multiple of {unit_n}", f.n)),
-            (blocks.2, format!("K ({}) a multiple of {unit_k}", f.k)),
+            (
+                blocks.1,
+                format!("N ({}) at most {cap_n} or a multiple of 128", f.n),
+            ),
+            (
+                blocks.2,
+                format!("K ({}) at most {cap_k} or a multiple of 128", f.k),
+            ),
         ];
         let failed: Vec<String> = failed
             .into_iter()
@@ -157,9 +147,16 @@ pub(crate) fn encode(
         ));
     };
     let spec = format!(
-        "\"batch\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"packing\": \
-         [{pin}, {pout}], \"blocks\": [{bm}, {bn}, {bk}]",
-        f.batch, f.m, f.n, f.k, f.transposed
+        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \
+         \"operands\": \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}]",
+        f.batch,
+        f.lead,
+        f.m,
+        f.n,
+        f.k,
+        f.transposed,
+        lhs.dtype.full_name(),
+        out.dtype.full_name()
     );
     let rows = [inputs[0], inputs[1], output.cast_const()];
     let launched = Launch {

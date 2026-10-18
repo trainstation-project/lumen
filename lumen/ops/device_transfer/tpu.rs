@@ -1,27 +1,36 @@
 //! TPU-to-host copies, through the TPU allocator's reads of its region
-//! (`allocator::tpu::copy_to_host`); host-to-TPU copies, through a Pallas
-//! kernel (`tpu.py`) that copies the host's bytes (passed to it, whole
-//! rows) to the destination's rows.
+//! (`allocator::tpu::copy_to_host`); host-to-TPU copies, through a kernel in
+//! lumen's Pallas (`tpu.py`) that copies the host's bytes (passed to it,
+//! whole rows) to the destination's rows. A TPU keeps a tensor in its tiles
+//! (`device::tpu::layout`): the copies tile and untile on the host.
 
 use std::ptr::NonNull;
 
 use crate::Tensor;
 use crate::allocator::tpu::ROW;
 use crate::device::Device;
+use crate::device::tpu::layout::Layout;
 use crate::ops::tpu::{Launch, launch};
+
+/// `t`'s layout on its TPU.
+fn layout(t: &Tensor) -> Layout {
+    Layout::new(t.dtype(), t.shape()).unwrap_or_else(|e| panic!("{e}"))
+}
 
 pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let Device::Tpu(index) = dst.device() else {
         unreachable!("the TPU copy kernel runs on TPU tensors")
     };
     let nbytes = dst.nbytes();
-    // Whole rows: a TPU allocation's, its padding the destination's own.
-    let mut host = vec![0u8; nbytes.next_multiple_of(ROW)];
     // SAFETY: `src` is a host tensor of `nbytes` contiguous bytes.
-    host[..nbytes].copy_from_slice(unsafe { std::slice::from_raw_parts(src.data_ptr(), nbytes) });
+    let bytes = unsafe { std::slice::from_raw_parts(src.data_ptr(), nbytes) };
+    // In tiles: whole rows, a TPU allocation's, its padding the
+    // destination's own.
+    let host = layout(dst).tile(bytes);
+    debug_assert!(host.len().is_multiple_of(ROW));
     let launched = Launch {
         module: "lumen.ops.device_transfer.tpu",
-        spec: format!("\"host_rows\": {}", host.len() / ROW),
+        spec: String::new(),
         rows: &[dst.data_ptr().cast_const()],
         scalars: &[],
         host: &host,
@@ -38,9 +47,12 @@ pub(super) fn copy_d2h(dst: &Tensor, src: &Tensor) {
     let Some(ptr) = NonNull::new(src.data_ptr()) else {
         return;
     };
+    let layout = layout(src);
+    let mut memory = vec![0u8; layout.bytes()];
+    crate::allocator::tpu::copy_to_host(index, ptr, &mut memory)
+        .unwrap_or_else(|e| panic!("copying {nbytes} bytes from tpu:{index} failed: {e}"));
     // SAFETY: `dst` is a host tensor of `nbytes` contiguous bytes, which
     // this copy alone writes (`copy_to`'s caller ensures it).
     let dst = unsafe { std::slice::from_raw_parts_mut(dst.data_ptr(), nbytes) };
-    crate::allocator::tpu::copy_to_host(index, ptr, dst)
-        .unwrap_or_else(|e| panic!("copying {nbytes} bytes from tpu:{index} failed: {e}"));
+    layout.untile(&memory, dst);
 }

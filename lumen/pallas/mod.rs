@@ -43,6 +43,17 @@ pub enum Type {
     Ref(TensorType, Space),
     /// DMA semaphores, an array of `shape` (`[]`: one).
     Semaphore(Vec<usize>),
+    /// A tensor in the device's memory, in a TPU's tiles
+    /// (`device::tpu::layout`): an HBM ref of that layout.
+    View(TensorType, Tiled),
+}
+
+/// A view's tiled layout: its tiles (Mosaic's, `(8,128)(2,1)`) and each
+/// dimension's stride in tiles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tiled {
+    pub tiles: String,
+    pub strides: Vec<usize>,
 }
 
 /// What a node does.
@@ -52,6 +63,10 @@ pub enum Op {
     Prim(Primitive),
     /// A value's bits as another dtype of its width (`pltpu.bitcast`).
     Bitcast(DType),
+    /// A tensor of a type in the device's memory at an i32 row of it (its
+    /// operands the memory and the row), in its TPU layout
+    /// (`tpu.reinterpret_cast`).
+    View,
     /// Integer bit ops, of two values of one type (`lax.shift_left`,
     /// `shift_right_logical`, `bitwise_and`, `bitwise_or`).
     ShiftLeft,
@@ -218,6 +233,7 @@ impl Kernel {
     fn reference(&self, v: Var) -> Result<(&TensorType, Space), String> {
         match &self.types[v] {
             Type::Ref(t, space) => Ok((t, *space)),
+            Type::View(t, _) => Ok((t, Space::Any)),
             other => Err(format!("%{v} is not a ref but a {other:?}")),
         }
     }
@@ -273,7 +289,7 @@ impl Kernel {
         self.check(&[src])?;
         self.check(dynamic)?;
         let shape = match &self.types[src] {
-            Type::Ref(t, _) => t.shape.clone(),
+            Type::Ref(t, _) | Type::View(t, _) => t.shape.clone(),
             Type::Semaphore(shape) => shape.clone(),
             other => return Err(format!("only refs are sliced, not a {other:?}")),
         };
@@ -308,6 +324,21 @@ impl Kernel {
             .collect();
         let ty = match &self.types[src] {
             Type::Ref(t, space) => Type::Ref(TensorType::new(t.dtype, &kept), *space),
+            // A window of a view: its tiles, the strides of its dimensions
+            // kept.
+            Type::View(t, tiled) => {
+                let strides = tiled
+                    .strides
+                    .iter()
+                    .zip(&squeezed)
+                    .filter_map(|(&s, &q)| (!q).then_some(s))
+                    .collect();
+                let tiled = Tiled {
+                    tiles: tiled.tiles.clone(),
+                    strides,
+                };
+                Type::View(TensorType::new(t.dtype, &kept), tiled)
+            }
             _ => Type::Semaphore(kept),
         };
         let inputs: Vec<Var> = std::iter::once(src)
@@ -321,9 +352,36 @@ impl Kernel {
         Ok(self.push(op, &inputs, vec![ty])[0])
     }
 
+    /// A `ty` tensor in `memory` (the kernel's, as read or written) at i32
+    /// row `row`, in its TPU layout.
+    pub fn view(&mut self, memory: Var, row: Var, ty: TensorType) -> Result<Var, String> {
+        self.check(&[memory, row])?;
+        if !self.params.contains(&memory) || self.types[memory] != words(self.rows()) {
+            return Err("a view is of the kernel's memory".into());
+        }
+        if *self.value(row)? != TensorType::new(DType::I32, &[]) {
+            return Err("a view's row is an int32 scalar".into());
+        }
+        let layout = crate::device::tpu::layout::Layout::new(ty.dtype, &ty.shape)?;
+        let (tiles, strides) = layout.tiles();
+        let ty = Type::View(ty, Tiled { tiles, strides });
+        Ok(self.push(Op::View, &[memory, row], vec![ty])[0])
+    }
+
+    /// The memory's rows.
+    fn rows(&self) -> usize {
+        match &self.types[*self.params.last().expect("the memory")] {
+            Type::Ref(t, _) => t.shape[0],
+            _ => unreachable!("the memory is a ref"),
+        }
+    }
+
     /// `src`'s elements as `shape`.
     pub fn reshape(&mut self, src: Var, shape: Vec<usize>) -> Result<Var, String> {
         self.check(&[src])?;
+        if let Type::View(..) = self.types[src] {
+            return Err("a tiled view is not reshaped: its tiles are its shape's".into());
+        }
         let (t, space) = self.reference(src)?;
         if t.shape.iter().product::<usize>() != shape.iter().product::<usize>() {
             return Err(format!("a ref of {t} cannot be reshaped to {shape:?}"));
@@ -335,6 +393,9 @@ impl Kernel {
     /// `src`'s bits as `dtype` (of its width).
     pub fn ref_bitcast(&mut self, src: Var, dtype: DType) -> Result<Var, String> {
         self.check(&[src])?;
+        if let Type::View(..) = self.types[src] {
+            return Err("a tiled view is not bitcast: view the tensor as its dtype".into());
+        }
         let (t, space) = self.reference(src)?;
         if dtype.size_of() != t.dtype.size_of() {
             return Err(format!("a ref of {} cannot be read as {dtype}", t.dtype));

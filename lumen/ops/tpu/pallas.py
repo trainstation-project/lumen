@@ -10,8 +10,9 @@ wraps the Mosaic in a program, compiles it with libtpu and runs it.
 
 Every kernel works on a device's whole memory: the TPU allocator's one
 buffer, ``uint32[rows, 1, 128]`` (rows of 512 bytes, laid out as the host
-lays out bytes). Its arguments are int32 scalars (the rows of the buffers
-it reads and writes, first), optionally host bytes copied to the TPU
+lays out bytes), each tensor in it in the TPU's tiles (:func:`view`). Its
+arguments are int32 scalars (the rows of the tensors it reads and writes,
+first), optionally host bytes copied to the TPU
 (``uint32[host_rows, 1, 128]``), and the memory, as read and as written.
 """
 
@@ -38,7 +39,7 @@ def program(kernel, spec, scratch=()) -> str:
     )
 
 
-def matrix(ref, row, shape):
-    """The ``shape`` (rows, words; words a multiple of 128) of 32-bit words
-    in memory ``ref`` from row ``row``."""
-    return ref.at[pl.ds(row, shape[0] * shape[1] // 128)].reshape(*shape)
+def view(memory, row, shape, dtype):
+    """The ``shape`` of ``dtype`` at ``row`` of ``memory``: a ref of it in
+    place, in its TPU layout (``device::tpu::layout``)."""
+    return pl.Ref(memory.kernel, memory.kernel.view(memory.var, row.var, dtype, list(shape)))

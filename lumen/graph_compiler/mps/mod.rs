@@ -235,6 +235,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             .enumerate()
             .map(|(k, (members, _))| (fused.inputs().len() - packed.len() + k, members.clone()))
             .collect(),
+        layout: None,
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named

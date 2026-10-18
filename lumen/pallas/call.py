@@ -16,12 +16,10 @@ sees, as in JAX:
 
 then a ref of each of ``scratch_shapes``.
 
-Operands and outputs are viewed in place: 32-bit dtypes, of two dimensions
-or more, the last a multiple of 128 (a TPU lays out narrower dtypes and
-shorter rows otherwise than the host's bytes).
+Operands and outputs are viewed in place, in a TPU's tiles
+(``device::tpu::layout``, as lumen keeps a TPU's tensors): any shape, any
+dtype a TPU stores.
 """
-
-import math
 
 from lumen.graph import prims, tracer
 
@@ -45,19 +43,6 @@ def program(spec):
     return _CALLS[spec["kernel"]](spec)
 
 
-def _view(memory, row, shape, dtype):
-    """The ``shape`` of ``dtype`` at ``row`` of ``memory``: a ref in place."""
-    from . import ds
-
-    words = math.prod(shape)
-    if dtype not in ("float32", "int32", "uint32") or len(shape) < 2 or shape[-1] % 128:
-        raise NotImplementedError(
-            f"pallas_call reads and writes 32-bit arrays of two dimensions or more, the last a "
-            f"multiple of 128, in place: got {dtype}{list(shape)}"
-        )
-    return memory.at[ds(row, words // 128)].reshape(*shape).bitcast(dtype)
-
-
 def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, scratch_shapes=(), name=None):
     """``kernel`` as an op: a function of the operands, returning outputs of
     ``out_shape`` (a ``ShapeDtypeStruct``, or a list or tuple of them)
@@ -75,8 +60,10 @@ def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, sc
             from . import kernel as trace
 
             def body(scalars, memory, result):
+                from lumen.ops.tpu.pallas import view
+
                 refs = [
-                    _view(memory if i < len(args) else result, scalars[i], shape, dtype)
+                    view(memory if i < len(args) else result, scalars[i], shape, dtype)
                     for i, (dtype, shape) in enumerate(types)
                 ]
                 _run(kernel, refs[: len(args)], refs[len(args) :], grid, in_specs, out_specs, scratch_shapes)

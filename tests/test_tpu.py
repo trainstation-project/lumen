@@ -81,7 +81,12 @@ def test_a_bfloat16_dot_with_a_float32_output():
     assert y.dtype == "float32"
 
 
-def test_a_dot_the_kernel_cannot_block_says_why():
-    x, w = lumen.zeros([4, 8]).to("tpu"), lumen.zeros([8, 16]).to("tpu")
-    with pytest.raises(ValueError, match="needs N \\(16\\) a multiple of 128 and K \\(8\\) a multiple of 128"):
+def test_small_dots_take_their_dimensions_whole():
+    check(lambda x, w: x @ w, [4, 8], [8, 16], "float32", 1e-5)
+    check(lambda x, w: x @ w, [3, 100], [100, 30], "bfloat16", 1e-2)
+
+
+def test_a_dot_the_kernel_cannot_run_says_why():
+    x, w = (lumen.zeros([8, 128], "int32").to("tpu") for _ in range(2))
+    with pytest.raises(ValueError, match="accumulating in float32"):
         lumen.compile(lambda x, w: x @ w)(x, w)

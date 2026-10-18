@@ -109,9 +109,21 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
     match device {
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
-        _ => cpu::compile(graph, options),
+        // A TPU's tiles (`device::tpu::layout`).
+        Device::Tpu(_) => cpu::compile(graph, options, Some(TPU_LAYOUT)),
+        _ => cpu::compile(graph, options, None),
     }
 }
+
+/// How a TPU lays values out: its tiles. A type a TPU does not store (64-bit)
+/// counts as its elements: its plan errors when it runs.
+const TPU_LAYOUT: plan::DeviceLayout = plan::DeviceLayout {
+    bytes: |t| {
+        crate::device::tpu::layout::bytes(t.dtype, &t.shape)
+            .unwrap_or(t.numel() * t.dtype.size_of())
+    },
+    same: crate::device::tpu::layout::same,
+};
 
 /// The positions `mask` holds.
 fn positions(mask: &[bool]) -> Vec<usize> {

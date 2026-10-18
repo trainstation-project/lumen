@@ -13,6 +13,17 @@ fn device_of(options: &TensorOptions) -> Device {
     options.device_opt().unwrap_or(Device::Cpu(0))
 }
 
+/// The bytes a `dtype` tensor of `shape` takes on `device`: its elements',
+/// or on a TPU its tiles' (`device::tpu::layout`).
+fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
+    match device {
+        Device::Tpu(_) => {
+            crate::device::tpu::layout::bytes(dtype, shape).unwrap_or_else(|e| panic!("{e}"))
+        }
+        _ => shape.iter().product::<usize>() * dtype.size_of(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Arc<Storage>,
@@ -42,14 +53,15 @@ impl Tensor {
         let op = crate::profiler::record_op(op_name!("empty"), Vec::new);
         let options = options.into();
         let dtype = options.dtype_opt().unwrap_or(DEFAULT_DTYPE);
-        let numel: usize = size.iter().product();
-        let storage = Storage::new(numel * dtype.size_of(), device_of(&options));
+        let device = device_of(&options);
+        let storage = Storage::new(device_bytes(device, dtype, size), device);
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
-        let storage = Storage::with_allocator(self.nbytes(), allocator, self.device());
+        let nbytes = device_bytes(self.device(), self.dtype, &self.shape);
+        let storage = Storage::with_allocator(nbytes, allocator, self.device());
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 
@@ -210,13 +222,12 @@ impl Tensor {
     pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
         let start = self.offset * self.dtype.size_of() + byte_offset;
         let size = dtype.size_of();
-        let numel: usize = shape.iter().product();
         assert!(
             self.is_contiguous() && start.is_multiple_of(size),
             "an aligned view"
         );
         assert!(
-            byte_offset + numel * size <= self.nbytes(),
+            byte_offset + device_bytes(self.device(), dtype, shape) <= self.nbytes(),
             "a view within the tensor"
         );
         Tensor {
@@ -250,6 +261,15 @@ impl Tensor {
             self.shape,
             self.numel()
         );
+        // A TPU's tensor is in tiles of its shape's: another shape whose
+        // tiles differ is a copy (through the host: there is no TPU kernel
+        // for it outside a compiled program).
+        if let Device::Tpu(_) = self.device()
+            && !crate::device::tpu::layout::same(&self.ty(), &TensorType::new(self.dtype, shape))
+        {
+            let host = self.to(Device::Cpu(0)).reshape(shape);
+            return recorded(op, host.to(self.device()));
+        }
         let t = Tensor {
             storage: Arc::clone(&self.storage),
             dtype: self.dtype,

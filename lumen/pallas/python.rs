@@ -110,6 +110,7 @@ impl PyKernel {
                 };
                 Ok((dtype_name(t.dtype), t.shape.clone(), space))
             }
+            Type::View(t, _) => Ok((dtype_name(t.dtype), t.shape.clone(), "any")),
             Type::Semaphore(shape) => Ok(("semaphore", shape.clone(), "semaphore")),
             Type::Value(_) => Err(err(format!("%{var} is not a ref but a value"))),
         }
@@ -126,6 +127,13 @@ impl PyKernel {
         self.inner
             .slice(src, starts, &dynamic, sizes, squeezed)
             .map_err(err)
+    }
+
+    /// A `dtype` tensor of `shape` in `memory` at int32 row `row`, in its
+    /// TPU layout (a ref of HBM).
+    fn view(&mut self, memory: Var, row: Var, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
+        let ty = TensorType::new(parse_dtype(dtype)?, &shape);
+        self.inner.view(memory, row, ty).map_err(err)
     }
 
     fn reshape(&mut self, src: Var, shape: Vec<usize>) -> PyResult<Var> {

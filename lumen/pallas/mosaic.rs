@@ -51,6 +51,14 @@ fn value_type(t: &TensorType) -> String {
     }
 }
 
+/// A buffer's element: its dtype's, but bool's int32 (as Mosaic stores it).
+fn stored(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Bool => "i32",
+        other => element(other),
+    }
+}
+
 fn type_name(ty: &Type) -> String {
     match ty {
         Type::Value(t) => value_type(t),
@@ -63,7 +71,17 @@ fn type_name(ty: &Type) -> String {
             format!(
                 "memref<{}{}, #tpu.memory_space<{space}>>",
                 dims(&t.shape),
-                element(t.dtype)
+                stored(t.dtype)
+            )
+        }
+        Type::View(t, tiled) => {
+            let strides: Vec<String> = tiled.strides.iter().map(usize::to_string).collect();
+            format!(
+                "memref<{}{}, #tpu.tiled<{},[{}]>, #tpu.memory_space<any>>",
+                dims(&t.shape),
+                stored(t.dtype),
+                tiled.tiles,
+                strides.join(",")
             )
         }
         Type::Semaphore(shape) => format!(
@@ -276,6 +294,7 @@ impl Emitter<'_> {
                 }
                 let whole = match self.ty(src) {
                     Type::Ref(t, space) => Type::Ref(TensorType::new(t.dtype, sizes), *space),
+                    Type::View(t, tiled) => Type::View(TensorType::new(t.dtype, sizes), tiled.clone()),
                     _ => Type::Semaphore(sizes.clone()),
                 };
                 let attrs = format!("operandSegmentSizes = array<i32: 1, {}, 0>", starts.len());
@@ -285,18 +304,49 @@ impl Emitter<'_> {
                     false => sliced,
                 }
             }
+            Op::View => {
+                // At its row's first element, in elements of its dtype as
+                // stored (a word multiple: a row is 512 bytes).
+                let Type::View(t, _) = self.ty(node.outputs[0]) else {
+                    unreachable!("a view's type")
+                };
+                let per_row = 512 / t.dtype.size_of().max(if t.dtype == DType::Bool { 4 } else { 1 });
+                let k = self.i32(per_row);
+                let at = self.op("arith.muli", &[(&ins[1].0, "i32".into()), (&k, "i32".into())], OVERFLOW, &["i32".into()]);
+                let attrs = format!("multiple = {per_row} : i32");
+                let at = self.op("tpu.assume_multiple", &[(&at[0], "i32".into())], &attrs, &["i32".into()]);
+                let operands = [(ins[0].0.as_str(), ins[0].1.clone()), (at[0].as_str(), "i32".to_string())];
+                self.op(
+                    "tpu.reinterpret_cast",
+                    &operands,
+                    "operandSegmentSizes = array<i32: 1, 1, 0, 0>",
+                    &out_types,
+                )
+            }
             Op::Reshape(_) => self.op("tpu.memref_reshape", &refs(&ins), "", &out_types),
             Op::RefBitcast(_) => self.op("tpu.memref_bitcast", &refs(&ins), "", &out_types),
             Op::Load => match node.inputs.len() {
                 1 => {
-                    let Type::Ref(t, _) = self.ty(node.inputs[0]) else {
-                        unreachable!("checked when built")
+                    let t = match self.ty(node.inputs[0]) {
+                        Type::Ref(t, _) => t.clone(),
+                        _ => unreachable!("checked when built"),
                     };
-                    let rank = t.shape.len();
+                    let (rank, dtype) = (t.shape.len(), t.dtype);
                     let zero = self.index(0);
                     let mut operands = refs(&ins);
                     operands.extend((0..rank).map(|_| (zero.as_str(), "index".to_string())));
-                    self.op("vector.load", &operands, "", &out_types)
+                    match dtype {
+                        // Stored as int32: nonzero.
+                        DType::Bool => {
+                            let words = TensorType::new(DType::I32, &t.shape);
+                            let w = self.op("vector.load", &operands, "", &[value_type(&words)]).remove(0);
+                            let zero = (self.constant(&Scalar::Int(0), &words), words.clone());
+                            let w = (w, words);
+                            let out = self.value(node.outputs[0]).clone();
+                            vec![self.unary("arith.cmpi", &[&w, &zero], "predicate = 1 : i64", &out)]
+                        }
+                        _ => self.op("vector.load", &operands, "", &out_types),
+                    }
                 }
                 _ => {
                     let i = self.op("arith.index_cast", &[(&ins[1].0, "i32".into())], "", &["index".into()]);
@@ -307,9 +357,18 @@ impl Emitter<'_> {
                 let Type::Ref(t, _) = self.ty(node.inputs[0]) else {
                     unreachable!("checked when built")
                 };
-                let rank = t.shape.len();
+                let (rank, shape, dtype) = (t.shape.len(), t.shape.clone(), t.dtype);
+                // A bool, stored as int32.
+                let value = match dtype {
+                    DType::Bool => {
+                        let words = TensorType::new(DType::I32, &shape);
+                        let b = (ins[1].0.clone(), TensorType::new(DType::Bool, &shape));
+                        (self.unary("arith.extui", &[&b], "", &words), value_type(&words))
+                    }
+                    _ => ins[1].clone(),
+                };
                 let zero = self.index(0);
-                let mut operands = vec![(ins[1].0.as_str(), ins[1].1.clone()), (ins[0].0.as_str(), ins[0].1.clone())];
+                let mut operands = vec![(value.0.as_str(), value.1.clone()), (ins[0].0.as_str(), ins[0].1.clone())];
                 operands.extend((0..rank).map(|_| (zero.as_str(), "index".to_string())));
                 let attrs = format!(
                     "add = false, operandSegmentSizes = array<i32: 1, 1, {rank}, 0>, strides = array<i32>"
