@@ -116,6 +116,14 @@ pub(crate) fn encode(
         DType::F32 => (512, 512, 512),
         _ => (1024, 1024, 512),
     };
+    // TUNING (temporary): LUMEN_TPU_DOT_BLOCKS=bm,bn,bk.
+    let (cap_m, cap_n, cap_k) = match std::env::var("LUMEN_TPU_DOT_BLOCKS") {
+        Ok(v) => {
+            let b: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            (b[0], b[1], b[2])
+        }
+        Err(_) => (cap_m, cap_n, cap_k),
+    };
     let blocks = (
         block(f.m, unit_m, cap_m),
         block(f.n, 128, cap_n),
