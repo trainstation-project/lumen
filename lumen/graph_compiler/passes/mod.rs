@@ -5,6 +5,7 @@
 //! folder (`graph_compiler/mps`).
 
 pub(crate) mod cse;
+pub(crate) mod fold_dot_reshapes;
 pub(crate) mod simplify;
 
 // Passes only the MPS pipeline runs so far: unused where it is not built.
