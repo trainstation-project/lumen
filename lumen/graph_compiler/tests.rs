@@ -263,6 +263,7 @@ fn casts_move_past_layout_primitives() {
     let slice = Slice {
         start_indices: vec![0, 0],
         limit_indices: vec![2, 2],
+        view: false,
     };
     let s = apply(&mut g, slice, &[t]);
     let n = apply(&mut g, cast(DType::BF16), &[s]);
@@ -283,7 +284,14 @@ fn casts_move_past_layout_primitives() {
         let mut g = Graph::new();
         let w = widened(&mut g);
         let c = apply(&mut g, full(&[2, 3], value), &[]);
-        let cat = apply(&mut g, Concatenate { dimension: 0 }, &[w, c]);
+        let cat = apply(
+            &mut g,
+            Concatenate {
+                dimension: 0,
+                in_place: false,
+            },
+            &[w, c],
+        );
         g.set_outputs(&[cat]).unwrap();
         let moved = super::simplify::simplify_with(&g, true);
         assert_eq!(names(&moved), want, "{moved}");

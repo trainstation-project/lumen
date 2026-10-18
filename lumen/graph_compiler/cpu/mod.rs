@@ -16,11 +16,9 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         donate: options.donate.clone(),
         donate_into: options.donate_into.clone(),
         parameters: options.parameters.clone(),
-        views: Vec::new(),
         scalars: positions(&options.scalars),
         memory_limit: options.config.memory_limit(),
         blocks: Vec::new(),
-        concats: Vec::new(),
     };
     Ok(Plan::compile_with(&module.graph, &plan))
 }

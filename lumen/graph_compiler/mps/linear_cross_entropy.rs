@@ -105,6 +105,7 @@ pub(crate) fn linear_cross_entropy(graph: &Graph) -> Graph {
             let slice = Primitive::Slice {
                 start_indices: vec![row, 0],
                 limit_indices: vec![row + 1, b],
+                view: false,
             };
             let v = apply(&mut out, slice, &[rows]);
             map[nodes[k].output] = apply(&mut out, Primitive::Reshape { new_sizes: vec![b] }, &[v]);
@@ -170,6 +171,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
                 Primitive::Slice {
                     start_indices,
                     limit_indices,
+                    ..
                 } if s.inputs[0] == f.h && start_indices[1] == 0 && limit_indices[1] == d => {
                     Some((k, start_indices[0], limit_indices[0]))
                 }
@@ -234,6 +236,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             let target = Primitive::Slice {
                 start_indices: vec![start],
                 limit_indices: vec![end],
+                view: false,
             };
             let mut local = vec![usize::MAX; graph.types.len()];
             local[nodes[dot].output] = map[node.output];
@@ -273,6 +276,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
         if let Primitive::Slice {
             start_indices,
             limit_indices,
+            ..
         } = &node.primitive
             && let Some(r) = rows
                 .iter()
@@ -326,7 +330,13 @@ fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
             .map(|part| match part {
                 [v] => Some(*v),
                 _ => out
-                    .apply(Primitive::Concatenate { dimension: 0 }, part)
+                    .apply(
+                        Primitive::Concatenate {
+                            dimension: 0,
+                            in_place: false,
+                        },
+                        part,
+                    )
                     .ok(),
             })
             .collect::<Option<_>>()?;

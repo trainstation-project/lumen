@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
 
+pub use crate::graph::View;
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, Var};
 use crate::ops::reference;
 use crate::tensor::contiguous_strides;
@@ -37,15 +38,6 @@ impl fmt::Display for Buffer {
     }
 }
 
-/// An operand read in place as a strided view of its buffer (a slice the
-/// plan does not compute, [`PlanOptions::views`]): the element offset of
-/// its first element and its strides, in elements.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct View {
-    pub offset: usize,
-    pub strides: Vec<usize>,
-}
-
 /// One kernel launch, `output = primitive(inputs...)`, with each buffer's
 /// type (a `reshape` with the operand's own shape is a copy).
 #[derive(Debug, Clone)]
@@ -55,8 +47,8 @@ pub struct Step {
     /// unless the compiler names it (a merged dot, `3x dot_general`).
     pub label: &'static str,
     pub inputs: Vec<(Buffer, TensorType)>,
-    /// Each input's view of its buffer, if it reads one (else the whole
-    /// buffer, contiguous).
+    /// Each input's view of its buffer, if it reads one (a slice read in
+    /// place, [`Graph::placements`]; else the whole buffer, contiguous).
     pub views: Vec<Option<View>>,
     pub output: (Buffer, TensorType),
     /// A multi-output fusion's other outputs, in order (its
@@ -64,7 +56,7 @@ pub struct Step {
     pub extra_outputs: Vec<(Buffer, TensorType)>,
     /// Each output's (the first, then the others) view of its buffer, if
     /// it writes one (an in-place concatenate's operand, at its place in
-    /// the result: [`PlanOptions::concats`]), else the whole buffer,
+    /// the result: [`Graph::placements`]), else the whole buffer,
     /// contiguous.
     pub output_views: Vec<Option<View>>,
     /// Workspace bytes the kernel uses while it runs (its offset and
@@ -173,11 +165,6 @@ pub struct PlanOptions {
     /// in place too, or copied where they cannot be). `None`: the inputs
     /// and outputs are the caller's ([`Plan::run`]).
     pub parameters: Option<Vec<bool>>,
-    /// Slices the plan does not compute: each a view of its operand's
-    /// buffer, which the steps reading it read in place at its offset and
-    /// strides ([`Step::views`]). The device compiler picks them: slices
-    /// read only by kernels that take strided operands.
-    pub views: Vec<Var>,
     /// Inputs passed to the kernels reading them by value (one-element
     /// runtime scalars: `lumen.compile`'s floats): [`Buffer::Scalar`], no
     /// memory of their own. The device compiler picks them: inputs only
@@ -194,29 +181,6 @@ pub struct PlanOptions {
     /// a donated output only once no step reads its block either (an
     /// optimizer's update after the merged dots reading the old weights).
     pub blocks: Vec<(usize, Vec<usize>)>,
-    /// Concatenates the plan does not compute: each operand written in
-    /// its place in the result ([`slot`]) by the step computing it, whose
-    /// kernel writes it there. The device compiler picks them: those whose
-    /// operands' kernels write through such views, each read by the
-    /// concatenate alone.
-    pub concats: Vec<Var>,
-}
-
-/// Where operand `k` of concatenate `node` is in its result: the element
-/// offset of its first element and its strides (the result's).
-pub(crate) fn slot(graph: &Graph, node: &Node, k: usize) -> View {
-    let Primitive::Concatenate { dimension } = node.primitive else {
-        unreachable!("a concatenate")
-    };
-    let strides = contiguous_strides(&graph.type_of(node.output).shape);
-    let before: usize = node.inputs[..k]
-        .iter()
-        .map(|&v| graph.type_of(v).shape[dimension])
-        .sum();
-    View {
-        offset: before * strides[dimension],
-        strides,
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -356,12 +320,17 @@ impl Plan {
         // or an index) and they are no output's, nor the caller's: an
         // input's (a donated input's: below).
         let callers = |r: Var| graph.inputs().contains(&r);
+        // Where the graph places values in others' memory (its layout):
+        // a slice read in place in its operand's, an in-place
+        // concatenate's operands in its result's, each written there by its
+        // own step.
+        let placements = graph.placements();
         let in_place = |node: &Node| {
-            matches!(node.primitive, Primitive::Concatenate { .. })
-                && options.concats.contains(&node.output)
+            matches!(
+                node.primitive,
+                Primitive::Concatenate { in_place: true, .. }
+            )
         };
-        // An in-place concatenate's operands: written in its result, by
-        // their own steps.
         let mut placed = vec![false; n];
         for node in graph.nodes().iter().filter(|node| in_place(node)) {
             node.inputs.iter().for_each(|&v| placed[v] = true);
@@ -480,24 +449,20 @@ impl Plan {
                 }
             }
             if in_place(node) {
-                for (k, &v) in node.inputs.iter().enumerate() {
+                for &v in &node.inputs {
                     assert!(
                         root[v] == v,
                         "an in-place concatenate's operand in its own memory"
                     );
                     root[v] = root[node.output];
-                    written_at[v] = Some(slot(graph, node, k));
+                    written_at[v] = placements[v].as_ref().map(|(_, at)| at.clone());
                 }
             }
-            if let Primitive::Slice { start_indices, .. } = &node.primitive
-                && options.views.contains(&node.output)
-            {
+            if let Primitive::Slice { view: true, .. } = node.primitive {
                 let x = node.inputs[0];
                 assert!(view[x].is_none(), "a view of a view");
-                let strides = contiguous_strides(&graph.type_of(x).shape);
-                let offset = start_indices.iter().zip(&strides).map(|(s, t)| s * t).sum();
                 root[node.output] = root[x];
-                view[node.output] = Some(View { offset, strides });
+                view[node.output] = placements[node.output].as_ref().map(|(_, at)| at.clone());
             }
         }
         let is_view = |v: Var| view[v].is_some();

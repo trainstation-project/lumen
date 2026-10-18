@@ -287,7 +287,10 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         out.set_origins(
                             &p.g.iter().filter_map(|&g| producer(g)).collect::<Vec<_>>(),
                         );
-                        let concat = Primitive::Concatenate { dimension: p.g_dim };
+                        let concat = Primitive::Concatenate {
+                            dimension: p.g_dim,
+                            in_place: false,
+                        };
                         out.apply(concat, &g).expect("cotangents of one type")
                     });
                     out.set_origins(&merged);
@@ -296,7 +299,10 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         else {
                             return true;
                         };
-                        let concat = Primitive::Concatenate { dimension: p.a_dim };
+                        let concat = Primitive::Concatenate {
+                            dimension: p.a_dim,
+                            in_place: false,
+                        };
                         let a = out.apply(concat, &a).expect("operands of one type");
                         let ins = if p.g_first { [stack, a] } else { [a, stack] };
                         let merged = out.apply(nodes[p.dots[0]].primitive.clone(), &ins);
@@ -331,6 +337,7 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                     let slice = Primitive::Slice {
                         start_indices: starts,
                         limit_indices: limits,
+                        view: false,
                     };
                     out.set_origin(node);
                     map[node.output] = Some(out.apply(slice, &[merged]).expect("its part"));

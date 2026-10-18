@@ -102,10 +102,14 @@ pub enum Primitive {
         permutation: Vec<usize>,
     },
     /// The elements from `start_indices` up to `limit_indices` (exclusive),
-    /// per dimension (`lax.slice`, unit strides).
+    /// per dimension (`lax.slice`, unit strides). With `view` (a device
+    /// compiler's choice, [`crate::graph::Graph::placements`]) its value is
+    /// its operand's memory, read in place as a strided view of it: no step
+    /// computes it.
     Slice {
         start_indices: Vec<usize>,
         limit_indices: Vec<usize>,
+        view: bool,
     },
     /// The `slice_sizes` block of the operand at start indices known when it
     /// runs: the operands after it, an integer scalar (int32 or int64, one
@@ -138,9 +142,13 @@ pub enum Primitive {
         axis: usize,
     },
     /// The operands one after another along `dimension`, their other
-    /// dimensions equal (`lax.concatenate`).
+    /// dimensions equal (`lax.concatenate`). `in_place` (a device
+    /// compiler's choice, [`crate::graph::Graph::placements`]): each operand
+    /// is written at its place in the result by the step computing it,
+    /// whose kernel writes it there: no step copies them.
     Concatenate {
         dimension: usize,
+        in_place: bool,
     },
     Full {
         shape: Vec<usize>,
@@ -448,6 +456,7 @@ impl Primitive {
             Slice {
                 start_indices,
                 limit_indices,
+                ..
             } => {
                 let x = args[0];
                 let rank = x.shape.len();
@@ -503,7 +512,7 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            Concatenate { dimension } => {
+            Concatenate { dimension, .. } => {
                 let x = args[0];
                 if *dimension >= x.shape.len() {
                     return err(format!("dimension {dimension} is not a dimension of {x}"));
@@ -769,13 +778,22 @@ impl fmt::Display for Primitive {
             Slice {
                 start_indices,
                 limit_indices,
+                view,
             } => write!(
                 f,
-                "[limit_indices={} start_indices={}]",
+                "[limit_indices={} start_indices={}{}]",
                 Tuple(limit_indices),
-                Tuple(start_indices)
+                Tuple(start_indices),
+                if *view { " view=True" } else { "" }
             ),
-            Concatenate { dimension } => write!(f, "[dimension={dimension}]"),
+            Concatenate {
+                dimension,
+                in_place,
+            } => write!(
+                f,
+                "[dimension={dimension}{}]",
+                if *in_place { " in_place=True" } else { "" }
+            ),
             FusionOutput { index, .. } => write!(f, "[index={index}]"),
             Full {
                 shape,

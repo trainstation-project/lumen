@@ -86,7 +86,11 @@ impl Tensor {
             .iter()
             .map(|m| TensorType::new(m.dtype(), m.shape()))
             .collect();
-        let ty = Primitive::Concatenate { dimension }.infer(&types.iter().collect::<Vec<_>>())?;
+        let ty = Primitive::Concatenate {
+            dimension,
+            in_place: false,
+        }
+        .infer(&types.iter().collect::<Vec<_>>())?;
         let options = TensorOptions::new().dtype(ty.dtype).device(device);
         let block = Tensor::zeros(&ty.shape, options);
         let mut start = 0;

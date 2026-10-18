@@ -382,6 +382,7 @@ impl Lower<'_> {
             Slice {
                 start_indices,
                 limit_indices,
+                ..
             } => {
                 let x = self.full(input(0))?;
                 let (b, e) = (self.ints(start_indices)?, self.ints(limit_indices)?);
@@ -397,7 +398,7 @@ impl Lower<'_> {
                     ty.shape.clone(),
                 )
             }
-            Concatenate { dimension } => {
+            Concatenate { dimension, .. } => {
                 let mut values = Vec::new();
                 for &v in &node.inputs {
                     values.push(self.full(v)?);

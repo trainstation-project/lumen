@@ -23,7 +23,6 @@ fn fuse(g: &Graph) -> Graph {
         g,
         &super::diamonds::diamonds(g),
         &[],
-        &[],
         &config,
         |body, by_value| codegen::kernel(body, by_value, &config, &Default::default()).0,
     )
@@ -315,6 +314,7 @@ fn slices_fuse_into_their_readers() {
         let s = Slice {
             start_indices: vec![0, start],
             limit_indices: vec![16, start + 64],
+            view: false,
         };
         apply(g, s, &[h])
     };
@@ -336,7 +336,14 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
         .iter()
         .map(|t| g.input(ty(t.dtype(), t.shape())))
         .collect();
-    let out = apply(&mut g, Concatenate { dimension }, &vars);
+    let out = apply(
+        &mut g,
+        Concatenate {
+            dimension,
+            in_place: false,
+        },
+        &vars,
+    );
     g.set_outputs(&[out]).unwrap();
     let parts: Vec<Tensor> = parts.iter().map(|&t| t.clone()).collect();
     reference::run(&g, &parts).unwrap().remove(0)
@@ -987,7 +994,6 @@ fn dots_fuse_their_epilogue() {
         &g,
         &super::diamonds::diamonds(&g),
         &[],
-        &[],
         &config,
         |body, by_value| codegen::kernel(body, by_value, &config, &Default::default()).0,
     );
@@ -1013,6 +1019,7 @@ fn dots_read_slices_in_place() {
     let slice = |start: Vec<usize>, limit: Vec<usize>| Slice {
         start_indices: start,
         limit_indices: limit,
+        view: false,
     };
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[16, 32]));
