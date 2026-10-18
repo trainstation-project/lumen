@@ -30,12 +30,15 @@ from lumen._C import Kernel
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
+from .call import ANY, ShapeDtypeStruct, pallas_call, program
 from .pipeline import BlockSpec, emit_pipeline, num_programs, program_id
 
 __all__ = [
+    "ANY",
     "BlockSpec",
     "Ref",
     "SemaphoreType",
+    "ShapeDtypeStruct",
     "VMEM",
     "async_copy",
     "bitcast",
@@ -49,6 +52,7 @@ __all__ = [
     "make_async_copy",
     "multiple_of",
     "num_programs",
+    "pallas_call",
     "program_id",
     "shift_left",
     "shift_right_logical",

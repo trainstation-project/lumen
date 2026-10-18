@@ -187,6 +187,25 @@ pub(crate) fn encode(
         Primitive::DotGeneral { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
         }
+        Primitive::PallasCall { kernel, .. } => {
+            // Its operands, its value, then its other outputs (which `inputs`
+            // ends with).
+            let n = step.inputs.len();
+            let rows: Vec<*const u8> = inputs[..n]
+                .iter()
+                .copied()
+                .chain(std::iter::once(output.cast_const()))
+                .chain(inputs[n..].iter().copied())
+                .collect();
+            let launched = Launch {
+                module: "lumen.pallas",
+                spec: format!("\"kernel\": {kernel}"),
+                rows: &rows,
+                scalars: &[],
+                host: &[],
+            };
+            launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
+        }
         _ => Err(format!("{} does not run on TPU yet", step.primitive.name())),
     }
 }

@@ -1056,6 +1056,17 @@ impl Plan {
         } else {
             Device::Cpu(0)
         };
+        if let Some(step) = self
+            .steps
+            .iter()
+            .find(|s| matches!(s.primitive, Primitive::PallasCall { .. }))
+            && !matches!(executor, Device::Tpu(_))
+        {
+            return Err(format!(
+                "{}: a lumen.pallas kernel runs on a TPU, not {device}",
+                step.label
+            ));
+        }
         if executor == Device::Mps(0) {
             let f64_step = self.steps.iter().find(|s| {
                 s.inputs

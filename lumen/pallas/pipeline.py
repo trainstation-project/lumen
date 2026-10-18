@@ -48,11 +48,15 @@ def num_programs(axis):
 
 
 class BlockSpec:
-    """An operand's blocks: ``block_shape``, and ``index_map(*indices)``,
-    the block (in blocks, not elements) a grid step works on."""
+    """An operand's blocks: ``block_shape`` (its whole shape if None; a
+    ``None`` dimension of size 1, squeezed from the block the body sees),
+    and ``index_map(*indices)``, the block (in blocks, not elements) a grid
+    step works on (the first if None). ``memory_space=ANY``: no blocks, the
+    operand's HBM ref as it is (``pallas_call``)."""
 
-    def __init__(self, block_shape, index_map):
-        self.block_shape, self.index_map = tuple(block_shape), index_map
+    def __init__(self, block_shape=None, index_map=None, *, memory_space=None):
+        self.block_shape = None if block_shape is None else tuple(block_shape)
+        self.index_map, self.memory_space = index_map, memory_space
 
 
 # Scalar logic of Python values (decided as traced) and traced ones.
@@ -112,11 +116,15 @@ class _Buffered:
         from lumen import pallas as pl
 
         self.ref, self.spec = ref, spec
-        shape = spec.block_shape
-        self.window = pl.scratch(pl.VMEM((2, *shape), ref.dtype))
+        block = ref.shape if spec.block_shape is None else spec.block_shape
+        self.squeezed = [d is None for d in block]
+        self.sizes = [1 if d is None else d for d in block]
+        self.window = pl.scratch(pl.VMEM((2, *self.sizes), ref.dtype))
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
     def block(self, indices):
+        if self.spec.index_map is None:
+            return (0,) * len(self.sizes)
         return tuple(self.spec.index_map(*indices))
 
     def hbm(self, block):
@@ -124,7 +132,7 @@ class _Buffered:
         from lumen import pallas as pl
 
         at = []
-        for b, size in zip(block, self.spec.block_shape):
+        for b, size in zip(block, self.sizes):
             start = b * size
             at.append(pl.ds(pl.multiple_of(start, size), size))
         return self.ref.at[tuple(at)]
@@ -134,6 +142,13 @@ class _Buffered:
 
         parity = pl.bitwise_and(counter, 1)
         return self.window.at[parity], self.sems.at[parity]
+
+    def view(self, window):
+        """A slot's block as the body sees it: its ``None`` dimensions
+        squeezed."""
+        if not any(self.squeezed):
+            return window
+        return window.at[tuple(0 if s else slice(None) for s in self.squeezed)]
 
 
 def emit_pipeline(body, *, grid, in_specs, out_specs):
@@ -184,8 +199,8 @@ def emit_pipeline(body, *, grid, in_specs, out_specs):
                 def _():
                     pl.make_async_copy(b.hbm(b.block(index)), window, sem).wait()
 
-            blocks = [b.slot(c[1])[0] for b, c in zip(ins, in_counters)]
-            blocks += [b.slot(c[0])[0] for b, c in zip(outs, out_counters)]
+            blocks = [b.view(b.slot(c[1])[0]) for b, c in zip(ins, in_counters)]
+            blocks += [b.view(b.slot(c[0])[0]) for b, c in zip(outs, out_counters)]
             _GRID.append((list(index), grid))
             try:
                 body(*blocks)

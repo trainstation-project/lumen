@@ -96,6 +96,15 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             mutated: dims("mutated")?,
             overlappable: get("overlappable")?.extract()?,
         },
+        "pallas_call" => PallasCall {
+            label: crate::graph::intern(get("op")?.extract()?),
+            kernel: get("kernel")?.extract()?,
+            outputs: get("outputs")?
+                .extract::<Vec<(String, Vec<usize>)>>()?
+                .into_iter()
+                .map(|(dtype, shape)| Ok(TensorType::new(parse_dtype(&dtype)?, &shape)))
+                .collect::<PyResult<_>>()?,
+        },
         "fusion_output" => FusionOutput {
             index: get("index")?.extract()?,
             ty: TensorType::new(dtype("dtype")?, &dims("shape")?),

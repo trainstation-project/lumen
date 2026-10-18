@@ -214,6 +214,16 @@ pub enum Primitive {
         mutated: Vec<usize>,
         overlappable: Vec<(usize, usize)>,
     },
+    /// A kernel of lumen's Pallas (`lumen.pallas.pallas_call`) named
+    /// `label`: the kernel `kernel` (a handle of `lumen.pallas`'s) on its
+    /// operands, computing values of `outputs`' types. Its value is the
+    /// first; the k-th, a [`Primitive::FusionOutput`] of it at index `k`.
+    /// It runs on a TPU only.
+    PallasCall {
+        label: &'static str,
+        kernel: usize,
+        outputs: Vec<TensorType>,
+    },
 }
 
 impl Primitive {
@@ -257,7 +267,7 @@ impl Primitive {
             LinearCrossEntropy => "linear_cross_entropy",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
-            CustomCall { label, .. } => label,
+            CustomCall { label, .. } | PallasCall { label, .. } => label,
         }
     }
 
@@ -291,7 +301,7 @@ impl Primitive {
             Select | ScatterAdd { .. } | LinearCrossEntropy => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
-            CustomCall { .. } => args.len(),
+            CustomCall { .. } | PallasCall { .. } => args.len(),
             // An index a dimension of the operand (none if it is missing).
             DynamicSlice { .. } => 1 + args.first().map_or(0, |x| x.shape.len()),
             DynamicUpdateSlice => 2 + args.first().map_or(0, |x| x.shape.len()),
@@ -551,6 +561,10 @@ impl Primitive {
                     None => err("mutates no operand: it would compute nothing".into()),
                 }
             }
+            PallasCall { outputs, .. } => match outputs.first() {
+                Some(t) => Ok(t.clone()),
+                None => err("computes no output".into()),
+            },
             LinearCrossEntropy => {
                 let (h, w, target) = (args[0], args[1], args[2]);
                 let rows = |t: &TensorType| t.shape.len() == 2;
