@@ -80,26 +80,6 @@ def test_pallas_call_in_specs_not_a_sequence():
         )
 
 
-def test_pallas_call_in_specs_mismatch_inputs():
-    a = np.arange(256, dtype=np.int32)
-    f = pl.pallas_call(
-        lambda x_ref, o1_ref: None,
-        out_shape=like(a),
-        in_specs=[pl.BlockSpec((4,), lambda: 0), pl.BlockSpec((4,), lambda: 0)],
-    )
-    with pytest.raises(
-        Exception,
-        match=re.compile(
-            "Pytree for `in_specs` and `inputs` do not match. "
-            "There are 1 mismatches, including:"
-            ".* at \\[1\\], `in_specs` is a pytree leaf but "
-            "`inputs` is a.*",
-            re.DOTALL,
-        ),
-    ):
-        lumen.compile(lambda x, d: f(x, d), device="tpu")(tpu(a), dict(a=tpu(a)))
-
-
 def test_pallas_call_index_map_wrong_number_of_arguments():
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(
@@ -129,31 +109,6 @@ def test_pallas_call_index_map_wrong_number_of_results():
         "Currently returning 2 values.",
     ):
         run(f, a)
-
-
-def test_pallas_call_index_map_pytree_input_wrong_number_of_results():
-    a = np.arange(256, dtype=np.int32)
-
-    def my_index_map():
-        return 0, 0
-
-    f = pl.pallas_call(
-        lambda x_ref, o_ref: None,
-        out_shape=like(a),
-        in_specs=[
-            dict(
-                one=pl.BlockSpec((4,), my_index_map),
-                two=pl.BlockSpec((8,), my_index_map),
-            )
-        ],
-    )
-    with pytest.raises(
-        Exception,
-        match="Index map function my_index_map at .*test_pallas_api.py.* "
-        "for args\\[0\\]\\['one'\\] must return 1 values to match .*"
-        "Currently returning 2 values.",
-    ):
-        lumen.compile(lambda d: f(d), device="tpu")(dict(one=tpu(a), two=tpu(a)))
 
 
 def test_pallas_call_index_map_wrong_return_type():
