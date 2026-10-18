@@ -131,6 +131,8 @@ fn refs(ins: &[(String, String)]) -> Vec<(&str, String)> {
 struct Emitter<'a> {
     kernel: &'a Kernel,
     names: Vec<String>,
+    /// Each view's memory and element offset in it (names).
+    views: std::collections::HashMap<Var, (String, String)>,
     temps: usize,
     out: String,
     depth: usize,
@@ -281,6 +283,59 @@ impl Emitter<'_> {
                 let attrs = format!("multiple = {m} : i32");
                 self.op("tpu.assume_multiple", &refs(&ins), &attrs, &out_types)
             }
+            Op::Slice { starts, .. } if matches!(self.ty(node.inputs[0]), Type::View(..)) => {
+                let tiled = match self.ty(node.inputs[0]) {
+                    Type::View(_, tiled) => tiled.clone(),
+                    _ => unreachable!("a view"),
+                };
+                let (memory, base) = self.views[&node.inputs[0]].clone();
+                // Its first element: its operand's, plus each start in tiles
+                // times that dimension's stride, in tiles of elements.
+                let rank = starts.len();
+                let first = rank - tiled.tile.len().min(rank);
+                let tile_elems: usize = tiled.tile.iter().product();
+                let mut dynamic = node.inputs[1..].iter();
+                let mut offset = base;
+                for (d, start) in starts.iter().enumerate() {
+                    let per = if d >= first { tiled.tile[d - first] } else { 1 };
+                    let step = tiled.strides[d] * tile_elems;
+                    let term = match start {
+                        Some(0) => continue,
+                        Some(s) => self.i32(s / per * step),
+                        None => {
+                            let s = self.name(*dynamic.next().expect("checked when built")).to_string();
+                            let s = match per {
+                                1 => s,
+                                per => {
+                                    let p = self.i32(per);
+                                    self.op("arith.divsi", &[(&s, "i32".into()), (&p, "i32".into())], "", &["i32".into()])
+                                        .remove(0)
+                                }
+                            };
+                            let k = self.i32(step);
+                            self.op("arith.muli", &[(&s, "i32".into()), (&k, "i32".into())], OVERFLOW, &["i32".into()])
+                                .remove(0)
+                        }
+                    };
+                    offset = self
+                        .op("arith.addi", &[(&offset, "i32".into()), (&term, "i32".into())], OVERFLOW, &["i32".into()])
+                        .remove(0);
+                }
+                let Type::View(t, _) = self.ty(node.outputs[0]) else {
+                    unreachable!("a view's window")
+                };
+                let words = 32 / t.dtype.size_of().max(if t.dtype == DType::Bool { 4 } else { 1 });
+                let attrs = format!("multiple = {words} : i32");
+                let at = self.op("tpu.assume_multiple", &[(&offset, "i32".into())], &attrs, &["i32".into()]);
+                let memory_type = type_name(self.ty(*self.kernel.params().last().expect("the memory")));
+                self.views.insert(node.outputs[0], (memory.clone(), at[0].clone()));
+                self.op(
+                    "tpu.reinterpret_cast",
+                    &[(&memory, memory_type), (&at[0], "i32".into())],
+                    "operandSegmentSizes = array<i32: 1, 1, 0, 0>",
+                    &out_types,
+                )
+            }
             Op::Slice { starts, sizes, squeezed } => {
                 let src = node.inputs[0];
                 let mut dynamic = node.inputs[1..].iter();
@@ -315,6 +370,7 @@ impl Emitter<'_> {
                 let at = self.op("arith.muli", &[(&ins[1].0, "i32".into()), (&k, "i32".into())], OVERFLOW, &["i32".into()]);
                 let attrs = format!("multiple = {per_row} : i32");
                 let at = self.op("tpu.assume_multiple", &[(&at[0], "i32".into())], &attrs, &["i32".into()]);
+                self.views.insert(node.outputs[0], (ins[0].0.clone(), at[0].clone()));
                 let operands = [(ins[0].0.as_str(), ins[0].1.clone()), (at[0].as_str(), "i32".to_string())];
                 self.op(
                     "tpu.reinterpret_cast",
@@ -703,6 +759,7 @@ pub fn lower(kernel: &Kernel, name: &str) -> Result<String, String> {
     let mut e = Emitter {
         kernel,
         names: vec![String::new(); kernel.types.len()],
+        views: Default::default(),
         temps: 0,
         out: String::new(),
         depth: 2,

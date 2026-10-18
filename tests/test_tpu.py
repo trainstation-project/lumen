@@ -87,6 +87,6 @@ def test_small_dots_take_their_dimensions_whole():
 
 
 def test_a_dot_the_kernel_cannot_run_says_why():
-    x, w = (lumen.zeros([8, 128], "int32").to("tpu") for _ in range(2))
+    x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
     with pytest.raises(ValueError, match="accumulating in float32"):
         lumen.compile(lambda x, w: x @ w)(x, w)

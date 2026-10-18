@@ -48,11 +48,12 @@ pub enum Type {
     View(TensorType, Tiled),
 }
 
-/// A view's tiled layout: its tiles (Mosaic's, `(8,128)(2,1)`) and each
-/// dimension's stride in tiles.
+/// A view's tiled layout: its tiles (Mosaic's, `(8,128)(2,1)`), a tile's
+/// shape (its last dimensions'), and each dimension's stride in tiles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tiled {
     pub tiles: String,
+    pub tile: Vec<usize>,
     pub strides: Vec<usize>,
 }
 
@@ -312,6 +313,19 @@ impl Kernel {
                 return Err(format!("dimension {d} is squeezed but of size {size}"));
             }
         }
+        // A view's window is a view of whole tiles of it (in its tiled
+        // dimensions): its own, from the memory (`tpu.reinterpret_cast`).
+        if let Type::View(_, tiled) = &self.types[src] {
+            let first = rank - tiled.tile.len().min(rank);
+            for d in first..rank {
+                let t = tiled.tile[d - first];
+                if starts[d].is_some_and(|s| !s.is_multiple_of(t)) || squeezed[d] {
+                    return Err(format!(
+                        "a window of a tiled view starts on a tile ({t}) of dimension {d}, unsqueezed"
+                    ));
+                }
+            }
+        }
         for &v in dynamic {
             if *self.value(v)? != TensorType::new(DType::I32, &[]) {
                 return Err("dynamic starts are int32 scalars".into());
@@ -335,6 +349,7 @@ impl Kernel {
                     .collect();
                 let tiled = Tiled {
                     tiles: tiled.tiles.clone(),
+                    tile: tiled.tile.clone(),
                     strides,
                 };
                 Type::View(TensorType::new(t.dtype, &kept), tiled)
@@ -364,7 +379,15 @@ impl Kernel {
         }
         let layout = crate::device::tpu::layout::Layout::new(ty.dtype, &ty.shape)?;
         let (tiles, strides) = layout.tiles();
-        let ty = Type::View(ty, Tiled { tiles, strides });
+        let tile = layout.tile_shape();
+        let ty = Type::View(
+            ty,
+            Tiled {
+                tiles,
+                tile,
+                strides,
+            },
+        );
         Ok(self.push(Op::View, &[memory, row], vec![ty])[0])
     }
 

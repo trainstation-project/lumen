@@ -141,6 +141,14 @@ impl Layout {
         }
     }
 
+    /// A tile's shape: `[tm, 128]`, or `[128]` for one dimension.
+    pub fn tile_shape(&self) -> Vec<usize> {
+        match self.tiled() {
+            true => vec![self.rows, 128],
+            false => vec![128],
+        }
+    }
+
     /// Its Mosaic memref layout: its tiles (`(8,128)`, `(16,128)(2,1)`) and
     /// each dimension's stride in tiles.
     pub fn tiles(&self) -> (String, Vec<usize>) {
