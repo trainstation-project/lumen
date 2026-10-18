@@ -474,8 +474,18 @@ def shift_right_arithmetic(x, y):
 
 
 def integer_pow(x, y):
-    """``x ** y``, ``y`` a Python int (``lax.integer_pow``)."""
-    return x**y
+    """``x ** y``, ``y`` a Python int (``lax.integer_pow``): by squaring, as
+    XLA, then its reciprocal if ``y`` is negative."""
+    acc, n = None, abs(y)
+    while n:
+        if n & 1:
+            acc = x if acc is None else acc * x
+        n >>= 1
+        if n:
+            x = x * x
+    if acc is None:
+        return _like(x, 1)
+    return _like(acc, 1) / acc if y < 0 else acc
 
 
 def reduce_precision(x, exponent_bits, mantissa_bits):

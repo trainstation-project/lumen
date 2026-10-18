@@ -54,6 +54,7 @@ mod tpu_layout {
             "#tpu.tiled<(8,128),[4,2,1]>"
         );
         assert_eq!(attr(DType::F32, &[8]), "#tpu.tiled<(128),[1]>");
+        assert_eq!(attr(DType::BF16, &[8]), "#tpu.tiled<(256)(128)(2,1),[1]>");
         assert_eq!(
             attr(DType::I4, &[64, 128]),
             "#tpu.tiled<(64,128)(8,1),[1,1]>"
@@ -85,6 +86,7 @@ mod tpu_layout {
             (DType::I4, vec![70, 129]),
             (DType::U2, vec![3, 5]),
             (DType::F8E5M2, vec![33, 2]),
+            (DType::BF16, vec![300]),
         ] {
             let layout = Layout::new(dtype, &shape).unwrap();
             let numel: usize = shape.iter().product();

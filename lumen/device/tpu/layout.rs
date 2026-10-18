@@ -13,7 +13,9 @@
 //!   of a tile holds `pack` (`32 / bits`) elements of one column, of rows
 //!   one after another (the first in its low bits).
 //! * A tensor of one dimension (or none: one element) is its elements in
-//!   order, padded to whole rows of 512 bytes.
+//!   order, padded to whole rows of 512 bytes; of a dtype narrower than 32
+//!   bits, in tiles of `128 · pack` elements (a row), a word holding
+//!   elements 128 apart (Mosaic's `(256)(128)(2,1)` for bfloat16).
 //! * bool is stored as int32 (0 or 1), as Mosaic loads it; 64-bit dtypes
 //!   are not stored on a TPU.
 
@@ -90,7 +92,13 @@ impl Layout {
     fn positions(&self) -> Vec<usize> {
         let numel: usize = self.shape.iter().product();
         if !self.tiled() {
-            return (0..numel).collect();
+            let tile = 128 * self.pack;
+            return (0..numel)
+                .map(|i| {
+                    let within = i % tile;
+                    i - within + (within % 128) * self.pack + within / 128
+                })
+                .collect();
         }
         let r = self.shape.len();
         let (m, n) = (self.shape[r - 2], self.shape[r - 1]);
@@ -149,11 +157,11 @@ impl Layout {
         }
     }
 
-    /// A tile's shape: `[tm, 128]`, or `[128]` for one dimension.
+    /// A tile's shape: `[tm, 128]`, or `[128 · pack]` for one dimension.
     pub fn tile_shape(&self) -> Vec<usize> {
         match self.tiled() {
             true => vec![self.rows, 128],
-            false => vec![128],
+            false => vec![128 * self.pack],
         }
     }
 
@@ -161,9 +169,11 @@ impl Layout {
     /// each dimension's stride in tiles.
     pub fn tiles(&self) -> (String, Vec<usize>) {
         if !self.tiled() {
-            // Its elements in order: 32-bit ones (others, packed in words,
-            // are laid out otherwise in one dimension: not viewed yet).
-            return ("(128)".into(), vec![1; self.shape.len().max(1)]);
+            let tiles = match self.pack {
+                1 => "(128)".into(),
+                p => format!("({})(128)({p},1)", 128 * p),
+            };
+            return (tiles, vec![1; self.shape.len().max(1)]);
         }
         let r = self.shape.len();
         let (_, mp, np) = self.padded();

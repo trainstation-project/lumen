@@ -760,7 +760,7 @@ impl Emitter<'_> {
                     (ReduceSum { .. }, true, _) => ("add", Scalar::Float(0.0)),
                     (ReduceSum { .. }, false, _) => ("add", Scalar::Int(0)),
                     (_, true, _) => ("maximumf", Scalar::Float(f64::NEG_INFINITY)),
-                    (_, false, false) => ("maxsi", Scalar::Int(i64::MIN)),
+                    (_, false, false) => ("maxsi", Scalar::Int(-(1 << (accum.bits() - 1)))),
                     _ => ("maxui", Scalar::Int(0)),
                 };
                 let acc = (self.constant(&identity, out), out.clone());
@@ -1128,11 +1128,10 @@ impl Emitter<'_> {
             return Err("erf_inv runs in TPU kernels on float32".into());
         }
         let c = |e: &mut Self, v: f64| e.splat(Scalar::Float(v), &t);
-        let one = c(self, 1.0);
-        let lo = self.apply("arith.subf", &[&one, x], FAST, &t);
-        let hi = self.apply("arith.addf", &[&one, x], FAST, &t);
-        let prod = self.apply("arith.mulf", &[&lo, &hi], FAST, &t);
-        let log = self.apply("math.log", &[&prod], FAST, &t);
+        // `-log1p(x · -x)`, as Pallas.
+        let neg = self.apply("arith.negf", &[x], FAST, &t);
+        let square = self.apply("arith.mulf", &[x, &neg], FAST, &t);
+        let log = self.apply("math.log1p", &[&square], FAST, &t);
         let w = self.apply("arith.negf", &[&log], FAST, &t);
         let poly = |e: &mut Self, w: &(String, TensorType), cs: &[f64]| {
             let mut p = c(e, cs[0]);
@@ -1183,6 +1182,7 @@ impl Emitter<'_> {
         let p = self.select(&small, &p1, &p2);
         let px = self.apply("arith.mulf", &[&p, x], FAST, &t);
         let abs = self.apply("math.absf", &[x], FAST, &t);
+        let one = c(self, 1.0);
         let edge = self.compare(&abs, &one, 1);
         let inf = c(self, f64::INFINITY);
         let infinite = self.apply("arith.mulf", &[x, &inf], FAST, &t);

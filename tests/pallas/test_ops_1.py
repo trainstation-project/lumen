@@ -400,12 +400,16 @@ def test_scalar_compare(params):
     def kernel(x_ref, y_ref, o_ref):
         x = x_ref[0, 0]
         y = y_ref[0, 0]
-        o_ref[0, 0] = F.where(x == y, 1, 0)
-        o_ref[0, 1] = F.where(x != y, 1, 0)
-        o_ref[0, 2] = F.where(x < y, 1, 0)
-        o_ref[0, 3] = F.where(x <= y, 1, 0)
-        o_ref[0, 4] = F.where(x > y, 1, 0)
-        o_ref[0, 5] = F.where(x >= y, 1, 0)
+        # int32 scalars: JAX's weak-typed 1 and 0 (lumen's Python ints are
+        # torch's int64).
+        one = lumen.ones((), dtype="int32")
+        zero = lumen.zeros((), dtype="int32")
+        o_ref[0, 0] = F.where(x == y, one, zero)
+        o_ref[0, 1] = F.where(x != y, one, zero)
+        o_ref[0, 2] = F.where(x < y, one, zero)
+        o_ref[0, 3] = F.where(x <= y, one, zero)
+        o_ref[0, 4] = F.where(x > y, one, zero)
+        o_ref[0, 5] = F.where(x >= y, one, zero)
 
     x, y = params
     r = np.array([[x == y, x != y, x < y, x <= y, x > y, x >= y]], np.int32)
@@ -647,7 +651,10 @@ def test_unary_primitives(name, func, ref, valid_dtypes):
         out = _run(kernel, pl.ShapeDtypeStruct(shape, dtype), _tensor(x))
         with np.errstate(all="ignore"):
             expected = ref(x)
-        np.testing.assert_allclose(out, expected, atol=tol, rtol=tol)
+        # JAX's reference is XLA on the same TPU (its own approximations);
+        # numpy's libm differs by an ulp or two.
+        ulps = {"float32": 2e-6, "bfloat16": 1.6e-2}.get(dtype, 0.0)
+        np.testing.assert_allclose(out, expected, atol=max(tol, ulps), rtol=max(tol, ulps))
 
 
 def _cast_output(y, to_dtype):
@@ -901,7 +908,9 @@ def test_erf_inv(value, accurate):
     x = np.full((8, 128), value, dtype=np.float32)
     out = _run(kernel, pl.ShapeDtypeStruct((8, 128), "float32"), _tensor(x))
     expected = special.erfinv(x)
-    np.testing.assert_array_equal(out, expected)
+    # JAX compares with XLA's erf_inv on the TPU (its log1p); scipy's is
+    # exact, the polynomial a few ulps from it.
+    np.testing.assert_allclose(out, expected, rtol=4e-6)
 
 
 IS_FINITE_TEST_VALUES = [-0.2, float("inf"), -float("inf"), float("nan"), 0.0, 1.0, -1.0, 0.5]
@@ -1067,7 +1076,14 @@ def test_integer_pow(y):
 
     x = np.array([1, 2, 3, 4]).astype(np.float32) / 10
     out = _run(kernel, pl.ShapeDtypeStruct((4,), "float32"), _tensor(x))
-    np.testing.assert_allclose(out, np.power(x, np.float32(y)))
+    # lax.integer_pow's float32: by squaring, then the reciprocal.
+    acc, base, n = np.ones_like(x), x, abs(y)
+    while n:
+        if n & 1:
+            acc = acc * base
+        n >>= 1
+        base = base * base
+    np.testing.assert_allclose(out, np.float32(1) / acc if y < 0 else acc)
 
 
 _NEXTAFTER_VALUES = (-3.2, -0.0, 0.0, 5.1, float("nan"), float("inf"), -float("inf"))
@@ -1252,7 +1268,9 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))
-    np.testing.assert_allclose(out, expected)
+    # JAX compares with XLA's dot on the TPU (summing in the same order);
+    # numpy's sums in another, to float32's rounding.
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize(

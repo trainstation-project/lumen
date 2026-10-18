@@ -193,7 +193,7 @@ def where(condition, input, other):
     if not isinstance(input, TracedTensor) and not isinstance(other, TracedTensor):
         # Two Python scalars: of their kind's default dtype (torch's).
         kind = "bool" if isinstance(input, bool) and isinstance(other, bool) else None
-        ints = all(isinstance(v, int) for v in (input, other))
+        ints = builtins.all(isinstance(v, int) for v in (input, other))
         dtype = kind or ("int64" if ints else "float32")
         input = prims.full(condition.shape, input, dtype)
     dtype = _common_dtype("where", (input, other))
@@ -665,10 +665,10 @@ def pad(input, pad, mode="constant", value=0):
         n = out.shape[d]
         if mode == "constant":
             side = lambda k: prims.full(tuple(k if j == d else s for j, s in enumerate(out.shape)), value, out.dtype)
-            parts = [side(before)] * (before > 0) + [out] + [side(after)] * (after > 0)
+            parts = ([side(before)] if before > 0 else []) + [out] + ([side(after)] if after > 0 else [])
         elif mode == "circular":
             part = lambda a, b: out.narrow(d, a, b - a)
-            parts = [part(n - before, n)] * (before > 0) + [out] + [part(0, after)] * (after > 0)
+            parts = ([part(n - before, n)] if before > 0 else []) + [out] + ([part(0, after)] if after > 0 else [])
         else:
             raise NotImplementedError(f"pad mode {mode!r}")
         out = prims.concatenate(parts, d) if len(parts) > 1 else out
