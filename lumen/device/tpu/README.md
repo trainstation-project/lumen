@@ -21,8 +21,8 @@ Without it, the `Tpu` backend still exists and reports no devices.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `Tpu` / `TPU`, the `DeviceBackend` (name `"tpu"`, device count, `check` with the shim's reason when none are found); the shim's FFI (`ffi`), `error()`, and for tests `memory(index)` and `ONE_AT_A_TIME` (the lock every TPU test holds). |
-| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program as a portable executable (`lumen_tpu_compile`), running one on the memory, donated (`lumen_tpu_run`), and memory statistics. |
+| `mod.rs` | `Tpu` / `TPU`, the `DeviceBackend` (name `"tpu"`, device count, `check` with the shim's reason when none are found); the shim's FFI (`ffi`), `error()`, `kind(index)`, and for tests `memory(index)` and `ONE_AT_A_TIME` (the lock every TPU test holds). |
+| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program as a portable executable (`lumen_tpu_compile`), running one on the memory, donated (`lumen_tpu_run`), a device's kind (`lumen_tpu_device_kind`: what its kernels are lowered for), and memory statistics. |
 | `pjrt_c_api.h` | XLA's PJRT C API header (`xla/pjrt/c/pjrt_c_api.h`, Apache 2.0), vendored. |
 
 ## How TPU memory works (and why the allocator is shaped this way)
@@ -55,7 +55,8 @@ What libtpu does (0.0.17 to 0.0.50, PJRT API 0.69 on), as probed on a v6e:
   (the same memory). A copy from the host uploads the bytes as an argument
   (`PJRT_Client_BufferFromHostBuffer`) for a kernel to copy in.
 * **Programs** are StableHLO text (`format = "mlir"`) of one
-  `tpu_custom_call` (a Mosaic kernel, `lumen/ops/tpu`), compiled once with
+  `tpu_custom_call` (a Pallas kernel, lowered by JAX: `lumen/ops/tpu`),
+  compiled once with
   hand-encoded `CompileOptionsProto` bytes: one replica, one partition,
   `compile_portable_executable`, so one executable runs on any device
   (`execute_device`).
@@ -84,5 +85,5 @@ What libtpu does (0.0.17 to 0.0.50, PJRT API 0.69 on), as probed on a v6e:
 - [`../`](../README.md) — the `DeviceBackend` trait and the `Device` enum (`Device::Tpu`).
 - [`../../allocator/`](../../allocator/README.md) — `TpuAllocator`, a `Region` over the buffer this folder reserves.
 - [`../../ops/device_transfer/`](../../ops/device_transfer/README.md) — copies to and from a TPU (`tpu.rs`).
-- [`../../ops/tpu/`](../../ops/tpu/README.md) — the kernels: Mosaic modules, their StableHLO wrapper, launching.
+- [`../../ops/tpu/`](../../ops/tpu/README.md) — the kernels: Pallas, lowered by JAX, launched.
 - [`../../stream/`](../../stream/README.md) — `TpuStream`.

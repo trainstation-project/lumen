@@ -819,7 +819,7 @@ impl Plan {
 
     /// Run the plan on `inputs`, which must be on one device, returning
     /// its outputs on that device (the CPU if there are no inputs). On MPS
-    /// the steps are Metal kernels ([`crate::ops::mps`]), on a TPU Mosaic
+    /// the steps are Metal kernels ([`crate::ops::mps`]), on a TPU Pallas
     /// kernels (`ops::tpu`); elsewhere they run on the host, with device
     /// inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
