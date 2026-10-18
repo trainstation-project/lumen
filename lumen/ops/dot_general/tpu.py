@@ -8,9 +8,10 @@ in a TPU's tiles: the lhs as ``[batch * lead, m, k]``, the rhs as
 ``[batch * lead, m, n]``. One pipeline (``emit_pipeline``, its block copies
 double-buffered against compute) runs over a grid of
 ``(batch * lead, m/bm, n/bn, k/bk)``: each step multiplies an lhs and a rhs
-block on the matrix unit into a float32 accumulator (VMEM), and the last k
-step writes the output block, through ``epilogue`` if any, in the output's
-dtype.
+block on the matrix unit: the first k step's product is a float32
+accumulator (VMEM), the next ones add to it, and the last adds its own as
+it writes the output block, through ``epilogue`` if any, in the output's
+dtype (one k step: no accumulator).
 """
 
 from lumen import pallas as pl
@@ -49,21 +50,32 @@ def program(spec, epilogue=None):
             y_spec = pl.BlockSpec((None, bk, bn), lambda b, i, j, s: (rhs_batch(b), s, j))
         o_spec = pl.BlockSpec((None, bm, bn), lambda b, i, j, s: (b, i, j))
 
+        def finish(v, ob):
+            if epilogue is not None:
+                v = epilogue(v)
+            ob[...] = v.to(out_dtype)
+
         def body(xb, yb, ob):
+            product = pl.dot(xb[...], yb[...], trans_b=t)
+            if kb == 1:
+                # One block of k: no accumulator.
+                finish(product, ob)
+                return
             step = pl.program_id(3)
 
+            # The first product the accumulator, the last added to it as
+            # the output is written (neither zeroed nor stored first).
             @pl.when(step == 0)
             def _():
-                acc[...] = 0.0
+                acc[...] = product
 
-            acc[...] += pl.dot(xb[...], yb[...], trans_b=t)
+            @pl.when((step > 0) & (step < kb - 1))
+            def _():
+                acc[...] += product
 
             @pl.when(step == kb - 1)
             def _():
-                v = acc[...]
-                if epilogue is not None:
-                    v = epilogue(v)
-                ob[...] = v.to(out_dtype)
+                finish(acc[...] + product, ob)
 
         grid = (batch * lead, mb, nb, kb)
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec], out_specs=[o_spec])(x, y, out)
