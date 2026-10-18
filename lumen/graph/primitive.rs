@@ -19,6 +19,184 @@ pub const FUSION_SEPARATOR: &str = " → ";
 /// program's, not a kernel's.
 pub const NEURAL_ENGINE: &str = "coreml_";
 
+/// The elementwise functions of one operand of [`Primitive::Unary`], each
+/// `lax`'s of its name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnaryOp {
+    // Of floats.
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Floor,
+    Ceil,
+    /// To the nearest integer, ties to even (`lax.round` with
+    /// `ROUND_TO_NEAREST_EVEN`, `jnp.round`).
+    RoundEven,
+    Log1p,
+    Expm1,
+    Exp2,
+    Log2,
+    Rsqrt,
+    Cbrt,
+    ErfInv,
+    /// Whether finite (a bool).
+    IsFinite,
+    /// The operand rounded to a float of `exponent_bits` and
+    /// `mantissa_bits` (`lax.reduce_precision`), of its dtype.
+    ReducePrecision {
+        exponent_bits: u32,
+        mantissa_bits: u32,
+    },
+    // Of numbers.
+    Abs,
+    Sign,
+    // Of integers (and bools: `Not`).
+    Not,
+    PopulationCount,
+    Clz,
+}
+
+impl UnaryOp {
+    /// Its `lax` name.
+    pub fn name(&self) -> &'static str {
+        use UnaryOp::*;
+        match self {
+            Sin => "sin",
+            Cos => "cos",
+            Tan => "tan",
+            Asin => "asin",
+            Acos => "acos",
+            Atan => "atan",
+            Sinh => "sinh",
+            Cosh => "cosh",
+            Asinh => "asinh",
+            Acosh => "acosh",
+            Atanh => "atanh",
+            Floor => "floor",
+            Ceil => "ceil",
+            RoundEven => "round",
+            Log1p => "log1p",
+            Expm1 => "expm1",
+            Exp2 => "exp2",
+            Log2 => "log2",
+            Rsqrt => "rsqrt",
+            Cbrt => "cbrt",
+            ErfInv => "erf_inv",
+            IsFinite => "is_finite",
+            ReducePrecision { .. } => "reduce_precision",
+            Abs => "abs",
+            Sign => "sign",
+            Not => "not",
+            PopulationCount => "population_count",
+            Clz => "clz",
+        }
+    }
+
+    /// The op of `lax` name `name` (`reduce_precision` takes parameters:
+    /// not here).
+    pub fn of_name(name: &str) -> Option<Self> {
+        use UnaryOp::*;
+        [
+            Sin,
+            Cos,
+            Tan,
+            Asin,
+            Acos,
+            Atan,
+            Sinh,
+            Cosh,
+            Asinh,
+            Acosh,
+            Atanh,
+            Floor,
+            Ceil,
+            RoundEven,
+            Log1p,
+            Expm1,
+            Exp2,
+            Log2,
+            Rsqrt,
+            Cbrt,
+            ErfInv,
+            IsFinite,
+            Abs,
+            Sign,
+            Not,
+            PopulationCount,
+            Clz,
+        ]
+        .into_iter()
+        .find(|op| op.name() == name)
+    }
+}
+
+/// The elementwise functions of two operands of one type of
+/// [`Primitive::Binary`], each `lax`'s of its name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BinaryOp {
+    /// `x ** y`, of floats.
+    Pow,
+    /// The remainder of truncated division (its sign the dividend's).
+    Rem,
+    Min,
+    /// Bitwise (logical, of bools).
+    And,
+    Or,
+    Xor,
+    /// Shifts of integers, by the second operand's bits (all of them out
+    /// past the width: 0, or the sign's for an arithmetic right shift).
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+    /// The float after `x` towards `y`.
+    Nextafter,
+}
+
+impl BinaryOp {
+    /// Its `lax` name.
+    pub fn name(&self) -> &'static str {
+        use BinaryOp::*;
+        match self {
+            Pow => "pow",
+            Rem => "rem",
+            Min => "min",
+            And => "and",
+            Or => "or",
+            Xor => "xor",
+            ShiftLeft => "shift_left",
+            ShiftRightLogical => "shift_right_logical",
+            ShiftRightArithmetic => "shift_right_arithmetic",
+            Nextafter => "nextafter",
+        }
+    }
+
+    pub fn of_name(name: &str) -> Option<Self> {
+        use BinaryOp::*;
+        [
+            Pow,
+            Rem,
+            Min,
+            And,
+            Or,
+            Xor,
+            ShiftLeft,
+            ShiftRightLogical,
+            ShiftRightArithmetic,
+            Nextafter,
+        ]
+        .into_iter()
+        .find(|op| op.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     // elementwise, two operands of the same type
@@ -39,6 +217,12 @@ pub enum Primitive {
     Cast {
         new_dtype: DType,
     },
+    /// An elementwise function of one operand beyond those above (`lax`'s:
+    /// [`UnaryOp`]).
+    Unary(UnaryOp),
+    /// An elementwise function of two operands of one type beyond those
+    /// above (`lax`'s: [`BinaryOp`]).
+    Binary(BinaryOp),
     /// `select(pred, on_true, on_false)`, elementwise.
     Select,
     /// The sum over `axes`, accumulated in `accum_dtype`, the result's
@@ -244,6 +428,8 @@ impl Primitive {
             Tanh => "tanh",
             Logistic => "logistic",
             Cast { .. } => "cast",
+            Unary(op) => op.name(),
+            Binary(op) => op.name(),
             Select => "select",
             ReduceSum { .. } => "reduce_sum",
             ReduceMax { .. } => "reduce_max",
@@ -298,6 +484,7 @@ impl Primitive {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
+            Binary(_) => 2,
             Select | ScatterAdd { .. } | LinearCrossEntropy => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
@@ -346,6 +533,55 @@ impl Primitive {
                 Ok(x.clone())
             }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
+            Unary(op) => {
+                use UnaryOp::*;
+                let x = args[0];
+                let (floats, ints) = (x.dtype.is_float(), x.dtype.is_int());
+                let fits = match op {
+                    Abs | Sign => floats || ints,
+                    Not => ints || x.dtype == DType::Bool,
+                    PopulationCount | Clz => ints,
+                    _ => floats,
+                };
+                if !fits {
+                    return err(format!("does not take {x}"));
+                }
+                if floats
+                    && !matches!(
+                        op,
+                        Abs | Sign | Floor | Ceil | RoundEven | IsFinite | ReducePrecision { .. }
+                    )
+                {
+                    no_bf16_math(x).map_err(prefix)?;
+                }
+                match op {
+                    IsFinite => Ok(TensorType::new(DType::Bool, &x.shape)),
+                    _ => Ok(x.clone()),
+                }
+            }
+            Binary(op) => {
+                use BinaryOp::*;
+                let (x, y) = (args[0], args[1]);
+                if x != y {
+                    return err(format!("operands must have the same type, got {x} and {y}"));
+                }
+                let (floats, ints, bools) =
+                    (x.dtype.is_float(), x.dtype.is_int(), x.dtype == DType::Bool);
+                let fits = match op {
+                    Pow | Nextafter => floats,
+                    Rem => floats || ints,
+                    Min => true,
+                    And | Or | Xor => ints || bools,
+                    ShiftLeft | ShiftRightLogical | ShiftRightArithmetic => ints,
+                };
+                if !fits {
+                    return err(format!("does not take {x}"));
+                }
+                if matches!(op, Pow) {
+                    no_bf16_math(x).map_err(prefix)?;
+                }
+                Ok(x.clone())
+            }
             Wait | ToHost | ToDevice => Ok(args[0].clone()),
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
@@ -731,6 +967,13 @@ impl fmt::Display for Primitive {
         f.write_str(self.name())?;
         match self {
             Cast { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
+            Unary(UnaryOp::ReducePrecision {
+                exponent_bits,
+                mantissa_bits,
+            }) => write!(
+                f,
+                "[exponent_bits={exponent_bits} mantissa_bits={mantissa_bits}]"
+            ),
             ReduceSum { axes, accum_dtype } => {
                 write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
             }

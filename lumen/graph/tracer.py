@@ -794,6 +794,51 @@ def _binary(prim, reflected=False):
     return op
 
 
+def _floor_mod(x, y):
+    """``x % y`` with Python's (and torch's) sign: the divisor's."""
+    x, y = _operands("rem", x, y)
+    r = prims.rem(x, y)
+    zero = prims.full(r.shape, 0, r.dtype)
+    fix = _and(_ne(r, zero), _ne(prims.lt(r, zero), prims.lt(y, zero)))
+    return prims.select(fix, prims.add(r, y), r)
+
+
+def _floor_div(x, y):
+    """``x // y``: the quotient rounded down (``torch.floor_divide``)."""
+    x, y = _operands("div", x, y)
+    if _is_float(x.dtype):
+        return prims.floor(prims.div(x, y))
+    q = prims.div(x, y)
+    zero = prims.full(q.shape, 0, q.dtype)
+    inexact = _ne(prims.rem(x, y), zero)
+    fix = _and(inexact, _ne(prims.lt(x, zero), prims.lt(y, zero)))
+    return prims.select(fix, prims.sub(q, prims.full(q.shape, 1, q.dtype)), q)
+
+
+def _and(x, y):
+    return prims.and_(x, y)
+
+
+def _right_shift(x, y):
+    """``x >> y``: arithmetic for signed integers, logical for unsigned."""
+    x, y = _operands("shift_right", x, y)
+    shift = prims.shift_right_logical if x.dtype.startswith("uint") else prims.shift_right_arithmetic
+    return shift(x, y)
+
+
+def _power(x, y):
+    """``x ** y``: a float's power; an integer's to a non-negative Python int
+    exponent, by multiplications (``lax.integer_pow``)."""
+    if isinstance(y, int) and not isinstance(y, bool) and not _is_float(x.dtype) and y >= 0:
+        result, base = prims.full(x.shape, 1, x.dtype), x
+        while y:
+            if y & 1:
+                result = prims.mul(result, base)
+            base, y = prims.mul(base, base), y >> 1
+        return result
+    return _elementwise(prims.pow, x, y)
+
+
 def _true_div(x, y):
     # By a scalar (a Python number, a runtime scalar): times its reciprocal.
     if isinstance(y, (int, float)) and not isinstance(y, bool) and y != 0:
@@ -976,6 +1021,33 @@ class TracedTensor:
 
     def __neg__(self):
         return prims.neg(self)
+
+    __and__ = _binary(prims.and_)
+    __rand__ = _binary(prims.and_, reflected=True)
+    __or__ = _binary(prims.or_)
+    __ror__ = _binary(prims.or_, reflected=True)
+    __xor__ = _binary(prims.xor)
+    __rxor__ = _binary(prims.xor, reflected=True)
+    __lshift__ = _binary(prims.shift_left)
+    __rlshift__ = _binary(prims.shift_left, reflected=True)
+    __rshift__ = _binary(_right_shift)
+    __rrshift__ = _binary(_right_shift, reflected=True)
+    __mod__ = _binary(_floor_mod)
+    __rmod__ = _binary(_floor_mod, reflected=True)
+    __floordiv__ = _binary(_floor_div)
+    __rfloordiv__ = _binary(_floor_div, reflected=True)
+
+    def __pow__(self, other):
+        return _power(self, other) if _is_operand(other) else NotImplemented
+
+    def __rpow__(self, other):
+        return _elementwise(prims.pow, other, self) if _is_operand(other) else NotImplemented
+
+    def __invert__(self):
+        return prims.not_(self)
+
+    def __abs__(self):
+        return prims.abs(self)
 
     def copy_(self, value):
         """Assign ``value`` (of its type) to it, in place (torch's ``copy_``):

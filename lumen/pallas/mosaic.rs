@@ -784,6 +784,8 @@ impl Emitter<'_> {
                 );
                 self.unary("vector.extract_strided_slice", &[a], &attrs, out)
             }
+            Unary(op) => self.unary_op(*op, a, out)?,
+            Binary(op) => self.binary_op(*op, a, &args[1], out)?,
             Transpose { permutation } => {
                 let attrs = format!(
                     "permutation = array<i64: {}>",
@@ -797,6 +799,332 @@ impl Emitter<'_> {
             }
             other => return Err(format!("{} does not run in TPU kernels yet", other.name())),
         })
+    }
+
+    /// A constant of `ty` (a value's type) of `v`, named.
+    fn splat(&mut self, v: Scalar, ty: &TensorType) -> (String, TensorType) {
+        (self.constant(&v, ty), ty.clone())
+    }
+
+    /// `name` of operands `args`, of type `out`, named.
+    fn apply(
+        &mut self,
+        name: &str,
+        args: &[&(String, TensorType)],
+        attrs: &str,
+        out: &TensorType,
+    ) -> (String, TensorType) {
+        (self.unary(name, args, attrs, out), out.clone())
+    }
+
+    /// A comparison of `a` and `b` by `predicate` (`arith.cmpf`'s for floats,
+    /// `arith.cmpi`'s for integers), a bool.
+    fn compare(
+        &mut self,
+        a: &(String, TensorType),
+        b: &(String, TensorType),
+        predicate: u32,
+    ) -> (String, TensorType) {
+        let out = TensorType::new(DType::Bool, &a.1.shape);
+        match a.1.dtype.is_float() {
+            true => self.apply(
+                "arith.cmpf",
+                &[a, b],
+                &format!("{FAST}, predicate = {predicate} : i64"),
+                &out,
+            ),
+            false => self.apply(
+                "arith.cmpi",
+                &[a, b],
+                &format!("predicate = {predicate} : i64"),
+                &out,
+            ),
+        }
+    }
+
+    fn select(
+        &mut self,
+        c: &(String, TensorType),
+        t: &(String, TensorType),
+        f: &(String, TensorType),
+    ) -> (String, TensorType) {
+        let out = t.1.clone();
+        self.apply("arith.select", &[c, t, f], "", &out)
+    }
+
+    /// An elementwise function of one operand ([`UnaryOp`]), as Pallas
+    /// lowers it.
+    fn unary_op(
+        &mut self,
+        op: crate::graph::UnaryOp,
+        a: &(String, TensorType),
+        out: &TensorType,
+    ) -> Result<String, String> {
+        use crate::graph::UnaryOp as U;
+        let t = a.1.clone();
+        let float = t.dtype.is_float();
+        let math = |op: U| match op {
+            U::Sin => "math.sin",
+            U::Cos => "math.cos",
+            U::Tan => "math.tan",
+            U::Asin => "math.asin",
+            U::Acos => "math.acos",
+            U::Atan => "math.atan",
+            U::Sinh => "math.sinh",
+            U::Cosh => "math.cosh",
+            U::Asinh => "math.asinh",
+            U::Acosh => "math.acosh",
+            U::Atanh => "math.atanh",
+            U::Floor => "math.floor",
+            U::Ceil => "math.ceil",
+            U::RoundEven => "math.roundeven",
+            U::Log1p => "math.log1p",
+            U::Expm1 => "math.expm1",
+            U::Exp2 => "math.exp2",
+            U::Log2 => "math.log2",
+            U::Rsqrt => "math.rsqrt",
+            U::Cbrt => "math.cbrt",
+            _ => "",
+        };
+        Ok(match op {
+            U::Abs if float => self.unary("math.absf", &[a], FAST, out),
+            U::Abs => self.unary("math.absi", &[a], "", out),
+            U::PopulationCount => self.unary("math.ctpop", &[a], "", out),
+            U::Clz => self.unary("math.ctlz", &[a], "", out),
+            U::Not => {
+                let ones = match t.dtype {
+                    DType::Bool => Scalar::Bool(true),
+                    _ => Scalar::Int(-1),
+                };
+                let ones = self.splat(ones, &t);
+                self.unary("arith.xori", &[a, &ones], "", out)
+            }
+            U::Sign => {
+                // 1 above zero, -1 below, else itself (zero, NaN).
+                let (zero, one, minus) = match float {
+                    true => (Scalar::Float(0.0), Scalar::Float(1.0), Scalar::Float(-1.0)),
+                    false => (Scalar::Int(0), Scalar::Int(1), Scalar::Int(-1)),
+                };
+                let (zero, one, minus) = (
+                    self.splat(zero, &t),
+                    self.splat(one, &t),
+                    self.splat(minus, &t),
+                );
+                let (gt, lt) = match (float, unsigned(t.dtype)) {
+                    (true, _) => (2, 4),
+                    (false, false) => (4, 2),
+                    (false, true) => (8, 6),
+                };
+                let above = self.compare(a, &zero, gt);
+                let below = self.compare(a, &zero, lt);
+                let rest = self.select(&below, &minus, a);
+                self.select(&above, &one, &rest).0
+            }
+            U::IsFinite => {
+                let abs = self.apply("math.absf", &[a], FAST, &t);
+                let inf = self.splat(Scalar::Float(f64::INFINITY), &t);
+                self.compare(&abs, &inf, 4).0
+            }
+            U::ErfInv => self.erf_inv(a)?,
+            U::ReducePrecision {
+                exponent_bits,
+                mantissa_bits,
+            } => self.reduce_precision(a, exponent_bits, mantissa_bits)?,
+            op => self.unary(math(op), &[a], FAST, out),
+        })
+    }
+
+    /// An elementwise function of two operands ([`BinaryOp`]), as Pallas
+    /// lowers it.
+    fn binary_op(
+        &mut self,
+        op: crate::graph::BinaryOp,
+        a: &(String, TensorType),
+        b: &(String, TensorType),
+        out: &TensorType,
+    ) -> Result<String, String> {
+        use crate::graph::BinaryOp as B;
+        let (float, uns) = (a.1.dtype.is_float(), unsigned(a.1.dtype));
+        let (name, attrs) = match op {
+            B::Pow => ("math.powf", FAST),
+            B::Rem if float => ("arith.remf", FAST),
+            B::Rem if uns => ("arith.remui", ""),
+            B::Rem => ("arith.remsi", ""),
+            B::Min if float => ("arith.minimumf", FAST),
+            B::Min if uns => ("arith.minui", ""),
+            B::Min => ("arith.minsi", ""),
+            B::And => ("arith.andi", ""),
+            B::Or => ("arith.ori", ""),
+            B::Xor => ("arith.xori", ""),
+            B::ShiftLeft => ("arith.shli", OVERFLOW),
+            B::ShiftRightLogical => ("arith.shrui", ""),
+            B::ShiftRightArithmetic => ("arith.shrsi", ""),
+            B::Nextafter => return self.nextafter(a, b),
+        };
+        Ok(self.unary(name, &[a, b], attrs, out))
+    }
+
+    /// `lax.erf_inv` (float32): XLA's polynomial, `±inf` at `±1`.
+    fn erf_inv(&mut self, x: &(String, TensorType)) -> Result<String, String> {
+        let t = x.1.clone();
+        if t.dtype != DType::F32 {
+            return Err("erf_inv runs in TPU kernels on float32".into());
+        }
+        let c = |e: &mut Self, v: f64| e.splat(Scalar::Float(v), &t);
+        let one = c(self, 1.0);
+        let lo = self.apply("arith.subf", &[&one, x], FAST, &t);
+        let hi = self.apply("arith.addf", &[&one, x], FAST, &t);
+        let prod = self.apply("arith.mulf", &[&lo, &hi], FAST, &t);
+        let log = self.apply("math.log", &[&prod], FAST, &t);
+        let w = self.apply("arith.negf", &[&log], FAST, &t);
+        let poly = |e: &mut Self, w: &(String, TensorType), cs: &[f64]| {
+            let mut p = c(e, cs[0]);
+            for &k in &cs[1..] {
+                let pw = e.apply("arith.mulf", &[&p, w], FAST, &t);
+                let k = c(e, k);
+                p = e.apply("arith.addf", &[&k, &pw], FAST, &t);
+            }
+            p
+        };
+        let two_half = c(self, 2.5);
+        let w1 = self.apply("arith.subf", &[&w, &two_half], FAST, &t);
+        let p1 = poly(
+            self,
+            &w1,
+            &[
+                2.810_226_36e-08,
+                3.432_739_39e-07,
+                -3.523_387_7e-06,
+                -4.391_506_54e-06,
+                0.000_218_580_87,
+                -0.001_253_725_03,
+                -0.004_177_681_64,
+                0.246_640_727,
+                1.501_409_41,
+            ],
+        );
+        let root = self.apply("math.sqrt", &[&w], FAST, &t);
+        let three = c(self, 3.0);
+        let w2 = self.apply("arith.subf", &[&root, &three], FAST, &t);
+        let p2 = poly(
+            self,
+            &w2,
+            &[
+                -0.000_200_214_257,
+                0.000_100_950_558,
+                0.001_349_343_22,
+                -0.003_673_428_44,
+                0.005_739_507_73,
+                -0.007_622_461_3,
+                0.009_438_870_47,
+                1.001_674_06,
+                2.832_976_82,
+            ],
+        );
+        let five = c(self, 5.0);
+        let small = self.compare(&w, &five, 4);
+        let p = self.select(&small, &p1, &p2);
+        let px = self.apply("arith.mulf", &[&p, x], FAST, &t);
+        let abs = self.apply("math.absf", &[x], FAST, &t);
+        let edge = self.compare(&abs, &one, 1);
+        let inf = c(self, f64::INFINITY);
+        let infinite = self.apply("arith.mulf", &[x, &inf], FAST, &t);
+        Ok(self.select(&edge, &infinite, &px).0)
+    }
+
+    /// `lax.reduce_precision` (float32, or narrower floats through it): XLA's
+    /// algorithm on its bits.
+    fn reduce_precision(
+        &mut self,
+        x: &(String, TensorType),
+        exponent_bits: u32,
+        mantissa_bits: u32,
+    ) -> Result<String, String> {
+        let t = x.1.clone();
+        let f32t = TensorType::new(DType::F32, &t.shape);
+        let i32t = TensorType::new(DType::I32, &t.shape);
+        let wide = match t.dtype {
+            DType::F32 => x.clone(),
+            DType::BF16 | DType::F16 => self.apply("arith.extf", &[x], "", &f32t),
+            other => return Err(format!("reduce_precision of {other} in TPU kernels")),
+        };
+        let int = |e: &mut Self, v: i64| e.splat(Scalar::Int(v), &i32t);
+        let mut bits = self.apply("tpu.bitcast", &[&wide], "", &i32t);
+        if mantissa_bits < 23 {
+            let shift = 23 - mantissa_bits;
+            let last = int(self, 1 << shift);
+            let base = int(self, (1 << (shift - 1)) - 1);
+            let s = int(self, i64::from(shift));
+            let lastbit = self.apply("arith.andi", &[&bits, &last], "", &i32t);
+            let lastbit = self.apply("arith.shrui", &[&lastbit, &s], "", &i32t);
+            let bias = self.apply("arith.addi", &[&lastbit, &base], OVERFLOW, &i32t);
+            let sum = self.apply("arith.addi", &[&bits, &bias], OVERFLOW, &i32t);
+            let mask = int(self, !((1i64 << shift) - 1));
+            bits = self.apply("arith.andi", &[&sum, &mask], "", &i32t);
+        }
+        if exponent_bits < 8 {
+            let reduced = (1i64 << (exponent_bits - 1)) - 1;
+            let exp_mask = int(self, 0x7F80_0000);
+            let exponent = self.apply("arith.andi", &[&bits, &exp_mask], "", &i32t);
+            let max = int(self, (127 + reduced) << 23);
+            let min = int(self, (127 - reduced) << 23);
+            let over = self.compare(&exponent, &max, 8);
+            let under = self.compare(&exponent, &min, 7);
+            let sign_mask = int(self, -0x8000_0000);
+            let sign = self.apply("arith.andi", &[&bits, &sign_mask], "", &i32t);
+            let inf = self.apply("arith.ori", &[&sign, &exp_mask], "", &i32t);
+            let kept = self.select(&under, &sign, &bits);
+            bits = self.select(&over, &inf, &kept);
+        }
+        let back = self.apply("tpu.bitcast", &[&bits], "", &f32t);
+        let nan = self.compare(&wide, &wide, 14);
+        let result = self.select(&nan, &wide, &back);
+        Ok(match t.dtype {
+            DType::F32 => result.0,
+            _ => self.unary("arith.truncf", &[&result], "", &t),
+        })
+    }
+
+    /// `lax.nextafter`: the float after `x` towards `y`, on their bits.
+    fn nextafter(
+        &mut self,
+        x: &(String, TensorType),
+        y: &(String, TensorType),
+    ) -> Result<String, String> {
+        let t = x.1.clone();
+        let bits_dtype = match t.dtype {
+            DType::F32 => DType::I32,
+            DType::BF16 | DType::F16 => DType::I16,
+            other => return Err(format!("nextafter of {other} in TPU kernels")),
+        };
+        let it = TensorType::new(bits_dtype, &t.shape);
+        let width = 8 * t.dtype.size_of() as i64;
+        let int = |e: &mut Self, v: i64| e.splat(Scalar::Int(v), &it);
+        let xb = self.apply("tpu.bitcast", &[x], "", &it);
+        let one = int(self, 1);
+        let up = self.apply("arith.addi", &[&xb, &one], OVERFLOW, &it);
+        let down = self.apply("arith.subi", &[&xb, &one], OVERFLOW, &it);
+        let zero = self.splat(Scalar::Float(0.0), &t);
+        // Away from zero (one bit more) if `y` is further out than `x`.
+        let towards_up = self.compare(x, y, 4);
+        let positive = self.compare(x, &zero, 2);
+        let away = self.compare(&towards_up, &positive, 1);
+        let next = self.select(&away, &down, &up);
+        // From zero: the smallest of `y`'s sign.
+        let sign_bit = int(self, -(1i64 << (width - 1)) | 1);
+        let tiny_neg = sign_bit;
+        let below = self.compare(y, &zero, 4);
+        let tiny = self.select(&below, &tiny_neg, &one);
+        let is_zero = self.compare(x, &zero, 1);
+        let next = self.select(&is_zero, &tiny, &next);
+        let next = self.apply("tpu.bitcast", &[&next], "", &t);
+        let same = self.compare(x, y, 1);
+        let next = self.select(&same, y, &next);
+        let nan_x = self.compare(x, x, 14);
+        let nan_y = self.compare(y, y, 14);
+        let nan = self.apply("arith.ori", &[&nan_x, &nan_y], "", &nan_x.1);
+        let quiet = self.splat(Scalar::Float(f64::NAN), &t);
+        Ok(self.select(&nan, &quiet, &next).0)
     }
 
     /// `a` converted to `dtype` (`convert_element_type`).

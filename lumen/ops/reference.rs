@@ -189,6 +189,130 @@ fn lowest(dtype: DType) -> Values {
     }
 }
 
+fn fmin(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        f64::NAN
+    } else {
+        x.min(y)
+    }
+}
+
+/// An integer dtype's bits.
+fn bits(dtype: DType) -> u32 {
+    match dtype {
+        DType::Bool => 1,
+        d => 8 * d.size_of() as u32,
+    }
+}
+
+/// `x` (of an integer dtype of `w` bits) as its unsigned bits.
+fn unsigned_bits(x: i128, w: u32) -> u128 {
+    (x as u128) & ((1u128 << w) - 1)
+}
+
+/// `lax.erf_inv`, as XLA computes it in float32 (Giles' approximation).
+fn erf_inv(x: f64) -> f64 {
+    if x.abs() == 1.0 {
+        return x * f64::INFINITY;
+    }
+    let w = -((1.0 - x) * (1.0 + x)).ln();
+    let p = if w < 5.0 {
+        let w = w - 2.5;
+        [
+            2.810_226_36e-08,
+            3.432_739_39e-07,
+            -3.523_387_7e-06,
+            -4.391_506_54e-06,
+            0.000_218_580_87,
+            -0.001_253_725_03,
+            -0.004_177_681_64,
+            0.246_640_727,
+            1.501_409_41,
+        ]
+        .iter()
+        .fold(0.0, |p, c| c + p * w)
+    } else {
+        let w = w.sqrt() - 3.0;
+        [
+            -0.000_200_214_257,
+            0.000_100_950_558,
+            0.001_349_343_22,
+            -0.003_673_428_44,
+            0.005_739_507_73,
+            -0.007_622_461_3,
+            0.009_438_870_47,
+            1.001_674_06,
+            2.832_976_82,
+        ]
+        .iter()
+        .fold(0.0, |p, c| c + p * w)
+    };
+    p * x
+}
+
+/// `x` rounded to a float of `exponent_bits` and `mantissa_bits`
+/// (`lax.reduce_precision`, XLA's algorithm on its float64 bits: it is
+/// exact in them).
+fn reduce_precision(x: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let mut b = x.to_bits();
+    if mantissa_bits < 52 {
+        let last = 1u64 << (52 - mantissa_bits);
+        let bias = (last >> 1) - 1 + ((b & last) >> (52 - mantissa_bits));
+        b = (b + bias) & !(last - 1);
+    }
+    if exponent_bits < 11 {
+        let reduced_bias = (1u64 << (exponent_bits - 1)) - 1;
+        let exponent = b & 0x7FF0_0000_0000_0000;
+        let sign = b & 0x8000_0000_0000_0000;
+        if exponent > (1023 + reduced_bias) << 52 {
+            b = sign | 0x7FF0_0000_0000_0000;
+        } else if exponent <= (1023 - reduced_bias) << 52 {
+            b = sign;
+        }
+    }
+    f64::from_bits(b)
+}
+
+/// The float of `dtype` after `x` towards `y` (`lax.nextafter`).
+fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    if x == y {
+        return y;
+    }
+    // The next of a float `bits` wide, its bits: away from or towards zero.
+    let step = |bits: u64, sign: u64, up: bool| -> u64 {
+        match bits & !sign {
+            0 => (if y > x { 0 } else { sign }) | 1,
+            _ if up == (bits & sign == 0) => bits + 1,
+            _ => bits - 1,
+        }
+    };
+    let up = y > x;
+    match dtype {
+        DType::F32 => f64::from(f32::from_bits(
+            step(u64::from((x as f32).to_bits()), 1 << 31, up) as u32,
+        )),
+        DType::F16 => {
+            crate::tensor::dtype::f16::from_bits(
+                step(u64::from(to_f16(x).to_bits()), 1 << 15, up) as u16
+            )
+            .to_f64()
+        }
+        DType::BF16 => {
+            crate::tensor::dtype::bf16::from_bits(
+                step(u64::from(to_bf16(x).to_bits()), 1 << 15, up) as u16,
+            )
+            .to_f64()
+        }
+        _ => f64::from_bits(step(x.to_bits(), 1 << 63, up)),
+    }
+}
+
 fn fmax(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         f64::NAN
@@ -289,6 +413,102 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             Int(x) => Int(x.iter().map(|&a| wrap(-a, dtype)).collect()),
             Float(x) => Float(x.iter().map(|&a| -a).collect()),
         },
+        Unary(op) => {
+            use crate::graph::UnaryOp as U;
+            let w = bits(types[0].dtype);
+            match args[0] {
+                Int(x) => Int(x
+                    .iter()
+                    .map(|&a| match op {
+                        U::Abs => wrap(a.abs(), dtype),
+                        U::Sign => a.signum(),
+                        U::Not if types[0].dtype == DType::Bool => 1 - a,
+                        U::Not => wrap(!a, dtype),
+                        U::PopulationCount => i128::from(unsigned_bits(a, w).count_ones()),
+                        U::Clz => i128::from(unsigned_bits(a, w).leading_zeros() - (128 - w)),
+                        _ => unreachable!("{} of an integer", op.name()),
+                    })
+                    .collect()),
+                Float(x) => {
+                    let f = |a: f64| match op {
+                        U::Sin => a.sin(),
+                        U::Cos => a.cos(),
+                        U::Tan => a.tan(),
+                        U::Asin => a.asin(),
+                        U::Acos => a.acos(),
+                        U::Atan => a.atan(),
+                        U::Sinh => a.sinh(),
+                        U::Cosh => a.cosh(),
+                        U::Asinh => a.asinh(),
+                        U::Acosh => a.acosh(),
+                        U::Atanh => a.atanh(),
+                        U::Floor => a.floor(),
+                        U::Ceil => a.ceil(),
+                        U::RoundEven => a.round_ties_even(),
+                        U::Log1p => a.ln_1p(),
+                        U::Expm1 => a.exp_m1(),
+                        U::Exp2 => a.exp2(),
+                        U::Log2 => a.log2(),
+                        U::Rsqrt => 1.0 / a.sqrt(),
+                        U::Cbrt => a.cbrt(),
+                        U::ErfInv => erf_inv(a),
+                        U::ReducePrecision {
+                            exponent_bits,
+                            mantissa_bits,
+                        } => reduce_precision(a, *exponent_bits, *mantissa_bits),
+                        U::Abs => a.abs(),
+                        // Zero (signed) and NaN as they are.
+                        U::Sign if a == 0.0 || a.is_nan() => a,
+                        U::Sign => a.signum(),
+                        _ => unreachable!("{} of a float", op.name()),
+                    };
+                    match op {
+                        U::IsFinite => Int(x.iter().map(|&a| a.is_finite() as i128).collect()),
+                        _ => Float(x.iter().map(|&a| round(f(a), dtype)).collect()),
+                    }
+                }
+            }
+        }
+        Binary(op) => {
+            use crate::graph::BinaryOp as B;
+            let w = bits(types[0].dtype);
+            match (args[0], args[1]) {
+                (Int(x), Int(y)) => Int(x
+                    .iter()
+                    .zip(y)
+                    .map(|(&a, &b)| match op {
+                        // By zero: the dividend, as XLA's.
+                        B::Rem if b == 0 => a,
+                        B::Rem => a % b,
+                        B::Min => a.min(b),
+                        B::And => wrap(a & b, dtype),
+                        B::Or => wrap(a | b, dtype),
+                        B::Xor => wrap(a ^ b, dtype),
+                        _ if b < 0 || b >= i128::from(w) => match op {
+                            B::ShiftRightArithmetic if a < 0 => -1,
+                            _ => 0,
+                        },
+                        B::ShiftLeft => wrap(a << b, dtype),
+                        B::ShiftRightLogical => wrap((unsigned_bits(a, w) >> b) as i128, dtype),
+                        B::ShiftRightArithmetic => a >> b,
+                        _ => unreachable!("{} of integers", op.name()),
+                    })
+                    .collect()),
+                (Float(x), Float(y)) => Float(
+                    x.iter()
+                        .zip(y)
+                        .map(|(&a, &b)| match op {
+                            B::Pow => round(a.powf(b), dtype),
+                            B::Rem => round(a % b, dtype),
+                            B::Min => fmin(a, b),
+                            B::Nextafter => nextafter(a, b, dtype),
+                            _ => unreachable!("{} of floats", op.name()),
+                        })
+                        .collect(),
+                ),
+                _ => unreachable!("operands of one dtype"),
+            }
+        }
         Exp | Log | Sqrt | Tanh | Logistic => {
             let Float(x) = args[0] else {
                 unreachable!("float operand")

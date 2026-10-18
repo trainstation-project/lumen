@@ -59,6 +59,10 @@ pub(crate) fn encode(
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
     }
 
+    if let Unary(_) | Binary(_) = step.primitive {
+        return Err(format!("{} does not run on MPS yet", step.primitive.name()));
+    }
+
     let encode = match step.primitive {
         Add
         | Sub
@@ -94,6 +98,7 @@ pub(crate) fn encode(
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
         CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),
         PallasCall { .. } => unreachable!("a plan with a lumen.pallas kernel runs on a TPU"),
+        Unary(_) | Binary(_) => unreachable!("refused above"),
     };
     encode(step, inputs, output, keep)
 }

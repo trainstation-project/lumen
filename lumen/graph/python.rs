@@ -128,6 +128,16 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             offset: get("offset")?.extract()?,
         },
         "linear_cross_entropy" => LinearCrossEntropy,
+        "reduce_precision" => Unary(crate::graph::UnaryOp::ReducePrecision {
+            exponent_bits: get("exponent_bits")?.extract()?,
+            mantissa_bits: get("mantissa_bits")?.extract()?,
+        }),
+        other if crate::graph::UnaryOp::of_name(other).is_some() => {
+            Unary(crate::graph::UnaryOp::of_name(other).expect("checked"))
+        }
+        other if crate::graph::BinaryOp::of_name(other).is_some() => {
+            Binary(crate::graph::BinaryOp::of_name(other).expect("checked"))
+        }
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown primitive {other:?}"
