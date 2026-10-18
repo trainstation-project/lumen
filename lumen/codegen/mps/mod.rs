@@ -53,7 +53,7 @@ pub(crate) fn kernel(
         .map(|&v| emitter.value(v, "j".into()))
         .collect();
     let out_type = metal_type(body.type_of(out).dtype);
-    let (params, args) = io_params(body, by_value, out_type);
+    let (params, args) = io_params(body, by_value, out_type, &[]);
     let writes = written(body, views, &result, &extra);
     let lines = &emitter.lines;
     named(formatdoc!(
@@ -177,7 +177,7 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         writeln!(fields, "    device {vt} *out{};", e + 1).unwrap();
         members.push(format!("out{}", e + 1));
     }
-    let first_arg = io_params(body, by_value, t).1;
+    let first_arg = io_params(body, by_value, t, &[]).1;
     let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", first_arg + k);
     // The epilogue: the output from the reduction's value `r`, every value
     // of it the same for each output (none reads an input), so computed as
@@ -287,7 +287,10 @@ fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
         _ => String::new(),
     };
     let (epilogue, lines) = (epilogue.as_deref().unwrap_or(""), &emitter.lines);
-    let (params, members) = (io_params(body, by_value, written).0, members.join(", "));
+    let (params, members) = (
+        io_params(body, by_value, written, &[]).0,
+        members.join(", "),
+    );
     named(formatdoc!(
         "
         {epilogue}struct NAME_input {{
@@ -461,7 +464,7 @@ fn transpose_kernel(
 ) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = metal_type(body.type_of(out).dtype);
-    let (params, _) = io_params(body, by_value, out_type);
+    let (params, _) = io_params(body, by_value, out_type, &[]);
     let (a, b, sa) = (tiling.a, tiling.b, tiling.a_stride);
     let (sizes, strides): (Vec<usize>, Vec<usize>) = tiling.batch.iter().copied().unzip();
     let base = gather_index("group.z", &sizes, &strides);
@@ -616,11 +619,12 @@ fn named(source: String) -> (String, String) {
 
 /// A fusion kernel's buffer parameters: `body`'s inputs (those `by_value`
 /// marks aside), `out` (of Metal type `out`) and a multi-output fusion's
-/// other outputs (`out1`, ...), as device buffers; then its by-value
+/// other outputs (`out1`, ...), as device buffers, then `extra` ones (a
+/// kernel's own: a wide row fusion's partials); then its by-value
 /// inputs, as constants (`setBytes`, `ops/mps/mod.rs`). The parameters (each
 /// followed by a comma), and the index the kernel's own arguments start
 /// at.
-fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
+fn io_params(body: &Graph, by_value: &[bool], out: &str, extra: &[String]) -> (String, usize) {
     let (mut params, mut index) = (String::new(), 0);
     let mut param = |decl: String| {
         write!(params, "{decl} [[buffer({index})]], ").unwrap();
@@ -641,6 +645,9 @@ fn io_params(body: &Graph, by_value: &[bool], out: &str) -> (String, usize) {
             metal_type(body.type_of(v).dtype),
             e + 1
         ));
+    }
+    for decl in extra {
+        param(decl.clone());
     }
     for (k, &v) in inputs.filter(|&(k, _)| scalar(k)) {
         param(format!(
@@ -825,20 +832,7 @@ fn row_kernel(
     // pass's reductions together (a cross entropy's pick, beside its max
     // and sum), and (`online_softmax`) a softmax's max and its sum of
     // exp(x - max) together, the sum rescaled as the max grows.
-    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    let reads = |v: Var, of: &[Var]| {
-        let (mut stack, mut seen) = (vec![v], Vec::new());
-        while let Some(v) = stack.pop() {
-            if of.contains(&v) {
-                return true;
-            }
-            if !seen.contains(&v) {
-                seen.push(v);
-                stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
-            }
-        }
-        false
-    };
+    let reads = |v: Var, of: &[Var]| depends_on(body, v, of);
     let mut passes: Vec<Vec<(usize, bool)>> = Vec::new();
     let mut k = 0;
     while k < reductions.len() {
@@ -880,10 +874,18 @@ fn row_kernel(
         false => reduce::REDUCE_THREADS,
     };
     let per_thread = n.div_ceil(lanes);
-    let kept = match per_thread <= config.row_cache {
+    let mut kept = match per_thread <= config.row_cache {
         true => kept_values(body, &e.invariant, &roots),
         false => Vec::new(),
     };
+    // A dot's rows wider than a tile (`gemm_tiles`): its first pass's
+    // reductions from each tile's partials, no pass over the row; nothing
+    // kept from it.
+    let wide = tile.is_some() && n > ROW_TILE;
+    let tiles = n.div_ceil(ROW_TILE);
+    if wide {
+        kept.retain(|&(_, p)| p > 0);
+    }
     let (mut source, mut decls) = (String::new(), String::new());
     for (m, &(v, _)) in kept.iter().enumerate() {
         let t = metal_type(body.type_of(v).dtype);
@@ -936,7 +938,15 @@ fn row_kernel(
         (values, stores)
     };
     for (p, members) in passes.iter().enumerate() {
-        let (values, stores) = pass(&mut e, p);
+        let from_tiles = wide && p == 0;
+        let (values, stores) = match from_tiles {
+            true => {
+                (e.lines, e.hoisted) = (String::new(), String::new());
+                let partial = |&(k, _): &(usize, bool)| format!("tiles{k}[row * {tiles}u + c]");
+                (members.iter().map(partial).collect(), String::new())
+            }
+            false => pass(&mut e, p),
+        };
         // Each reduction's accumulators before the loop, its step in it,
         // and its threads' combining after it (into `r{k}`).
         let (mut init, mut step, mut combine) = (String::new(), String::new(), String::new());
@@ -1054,6 +1064,10 @@ fn row_kernel(
             locals.push((r.output, format!("r{k}")));
         }
         let (hoisted, lines) = (hoisted(&e.hoisted), &e.lines);
+        let header = match from_tiles {
+            true => format!("for (uint c = t; c < {tiles}u; c += {lanes}u) {{\n"),
+            false => header.clone(),
+        };
         writedoc!(
             source,
             "
@@ -1193,21 +1207,41 @@ fn row_kernel(
     // An element's column, `j % n` (an iota along the row, a one-hot's), is
     // the loops' `c` (`j = row * n + c`, `c < n`): no division.
     let source = source.replace(&format!("(j) % {n}u"), "c");
-    let (params, _) = io_params(body, by_value, metal_type(out_type.dtype));
+    // A wide dot's rows read its first pass's partials.
+    let partials_of = |&(k, _): &(usize, bool)| {
+        let a = metal_type(body.type_of(reductions[k].output).dtype);
+        format!("device const {a} *tiles{k}")
+    };
+    let extra: Vec<String> = match wide {
+        true => passes[0].iter().map(partials_of).collect(),
+        false => Vec::new(),
+    };
+    let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
     let signature = format!(
         "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]])"
     );
     // A dot's rows, computed in its kernel (`gemm_row_kernel`: the dot's
-    // value this body's last input).
-    if let Some((real, by_value, dot)) = tile {
-        let staged = body.inputs().len() - 1;
-        return gemm_rows(real, by_value, dot, &read_staged(&source, staged), rows, n);
-    }
+    // value this body's last input): in its epilogue, or, wider than a
+    // tile, from its value and its tiles' partials (`gemm_tiles`, the
+    // kernel before this one).
+    let staged = body.inputs().len() - 1;
+    let prelude = match tile {
+        Some((real, by_value, dot)) if !wide => {
+            let source = read_staged(&source, staged, |x| format!("staged[({x}) - m0n]"));
+            return gemm_rows(real, by_value, dot, &source, rows, n);
+        }
+        Some((real, by_value, dot)) => {
+            gemm_tiles(real, by_value, dot, body, reductions, &passes[0], rows, n)
+        }
+        None => String::new(),
+    };
     // Short rows: a SIMD group a row, SIMD_ROWS a threadgroup (none past
     // the last row: they meet no barrier).
     if simd && partials.is_empty() {
-        return named(formatdoc!(
-            "
+        return named(
+            prelude.clone()
+                + &formatdoc!(
+                    "
             {signature} {{
                 uint row = group.x * {SIMD_ROWS}u + sg, t = lane;
                 if (row >= {rows}u) {{
@@ -1216,11 +1250,12 @@ fn row_kernel(
                 {source}
             }}
             "
-        ));
+                ),
+        );
     }
     if simd {
         let block = rows / row_groups(body);
-        return named(formatdoc!(
+        return named(prelude.clone() + &formatdoc!(
             "
             {signature} {{
                 uint t = lane;
@@ -1233,19 +1268,22 @@ fn row_kernel(
         ));
     }
     if partials.is_empty() {
-        return named(formatdoc!(
-            "
+        return named(
+            prelude.clone()
+                + &formatdoc!(
+                    "
             {signature} {{
                 uint row = group.x, t = tid.y * 16 + tid.x;
                 {decls}{source}
             }}
             "
-        ));
+                ),
+        );
     }
     // A block of rows a threadgroup, each as above, the threadgroup's
     // memory reused once every thread is done with the row.
     let block = rows / row_groups(body);
-    named(formatdoc!(
+    named(prelude + &formatdoc!(
         "
         {signature} {{
             uint t = tid.y * 16 + tid.x;
@@ -1267,9 +1305,11 @@ pub(crate) const ROW_TILE: usize = 64;
 /// The dot a row fusion's rows are of, if its kernel computes them in its
 /// epilogue (`gemm_row_kernel`): its one dot, a plain matmul (no batch)
 /// accumulating in float32, its value `[rows, n]` the rows' (a
-/// normalization of a projection's output, a residual added), no wider
-/// than a tile ([`ROW_TILE`]), its operands the fusion's inputs; a row
-/// kernel of short rows ([`simd_rows`]) without partials.
+/// normalization of a projection's output, a residual added), its
+/// operands the fusion's inputs, without partials; rows no wider than a
+/// tile ([`ROW_TILE`]) of a row kernel of short rows ([`simd_rows`]), or
+/// wider ones whose first pass is taken from each tile's partials
+/// ([`tile_reductions`]).
 pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     let dot = gemm_dot(body)?;
     let Primitive::DotGeneral {
@@ -1290,9 +1330,14 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     }
     let float = |v: Var| matches!(body.type_of(v).dtype, DType::F16 | DType::BF16 | DType::F32);
     let (rows, n) = row_shape(body);
+    // Rows inside a tile, or wider: each tile's partials then a row kernel
+    // ([`tile_reductions`]).
+    let rows_fit = match n <= ROW_TILE {
+        true => simd_rows(body),
+        false => tile_reductions(body).is_some(),
+    };
     let fits = body.type_of(dot.output).shape == [rows, n]
-        && n <= ROW_TILE
-        && simd_rows(body)
+        && rows_fit
         && row_partials(body).is_empty()
         && dot
             .inputs
@@ -1300,6 +1345,176 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
             .all(|v| body.inputs().contains(v) && float(*v))
         && float(dot.output);
     fits.then_some(dot)
+}
+
+/// A row fusion's reductions (by index in [`row_reductions`]) its dot's
+/// kernel computes as partials of each tile's columns when its rows are
+/// wider than a tile (`gemm_tiles`, CODA's tile reductions combined in a
+/// following kernel): its first pass's, those reading no reduction
+/// before them, each a sum or max a SIMD group combines (of float32,
+/// float16 or int32). None if its rows hold a softmax's max and sum
+/// (combined online, rescaled: not as partials).
+fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
+    let reductions = row_reductions(body);
+    if reductions
+        .windows(2)
+        .any(|w| softmax_pair(body, w[0], w[1]))
+    {
+        return None;
+    }
+    let mut first: Vec<usize> = Vec::new();
+    for (k, r) in reductions.iter().enumerate() {
+        let earlier: Vec<Var> = first.iter().map(|&i| reductions[i].output).collect();
+        if depends_on(body, r.inputs[0], &earlier) {
+            break;
+        }
+        first.push(k);
+    }
+    let simd = |&k: &usize| {
+        matches!(
+            body.type_of(reductions[k].output).dtype,
+            DType::F32 | DType::F16 | DType::I32
+        )
+    };
+    first.iter().all(simd).then_some(first)
+}
+
+/// A row fusion's scratch when its dot's rows are wider than a tile
+/// (`gemm_tiles`): the offsets of its dot's value and of each of its
+/// first pass's reductions' partials (`[rows, tiles]`), and its bytes.
+pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
+    let dot = row_dot(body)?;
+    let (rows, n) = row_shape(body);
+    if n <= ROW_TILE {
+        return None;
+    }
+    let reductions = row_reductions(body);
+    let tiles = n.div_ceil(ROW_TILE);
+    let aligned = |bytes: usize| bytes.next_multiple_of(crate::graph_compiler::plan::ALIGNMENT);
+    let mut offsets = vec![0];
+    let mut at = aligned(rows * n * body.type_of(dot.output).dtype.size_of());
+    for k in tile_reductions(body)? {
+        offsets.push(at);
+        at += aligned(rows * tiles * body.type_of(reductions[k].output).dtype.size_of());
+    }
+    Some((offsets, at))
+}
+
+/// The kernel before a wide row fusion's row kernel (`NAME_tiles`): the
+/// matmul on 64 x 64 tiles, each tile's accumulators rounded to the dot's
+/// dtype, written to the dot's value (`dotv`, the row kernel's input) and
+/// staged in threadgroup memory; then each of its rows' first-pass
+/// reductions over the tile's columns (a SIMD group a row), written as
+/// that tile's partial (`tiles{k}`, `[rows, tiles]`). `rows` is the body
+/// with the dot's value its last input, read from the staged tile.
+#[allow(clippy::too_many_arguments)]
+fn gemm_tiles(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    rows_body: &Graph,
+    reductions: &[&Node],
+    first: &[(usize, bool)],
+    rows: usize,
+    n: usize,
+) -> String {
+    let t = metal_type(body.type_of(dot.inputs[0]).dtype);
+    let o = metal_type(body.type_of(dot.output).dtype);
+    let out = metal_type(body.type_of(body.outputs()[0]).dtype);
+    let operand = |v: Var| {
+        let k = body.inputs().iter().position(|&i| i == v);
+        format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
+    };
+    let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
+    let (tile, tiles) = (ROW_TILE, n.div_ceil(ROW_TILE));
+    let mut extra = vec![format!("device {o} *dotv")];
+    let mut read = by_value.to_vec();
+    read.resize(body.inputs().len(), false);
+    read.push(false);
+    let mut e = Emitter::new(rows_body, &read);
+    let (mut init, mut step, mut write) = (String::new(), String::new(), String::new());
+    for &(k, _) in first {
+        let r = reductions[k];
+        let a = metal_type(rows_body.type_of(r.output).dtype);
+        let op = functor_of_reduction(&r.primitive);
+        let value = e.value(r.inputs[0], "j".into());
+        let lanes = match op {
+            "Add" => "simd_sum",
+            _ => "simd_max",
+        };
+        extra.push(format!("device {a} *tiles{k}"));
+        writeln!(init, "{a} acc{k} = {op}::template identity<{a}>();").unwrap();
+        writeln!(step, "acc{k} = {op}::apply(acc{k}, {a}({value}));").unwrap();
+        writedoc!(
+            write,
+            "
+            acc{k} = {lanes}(acc{k});
+            if (lane == 0) {{
+                tiles{k}[row * {tiles}u + group.x] = acc{k};
+            }}
+            "
+        )
+        .unwrap();
+    }
+    let staged = rows_body.inputs().len() - 1;
+    let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
+        format!("staged[(ulong({x}) / {n}ul - m0) * {tile}ul + ulong({x}) % {n}ul - n0]")
+    });
+    let (params, first_arg) = io_params(body, by_value, out, &extra);
+    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
+    formatdoc!(
+        "
+        struct NAME_tiles_staging {{
+            threadgroup {o} *staged;
+            device {o} *dotv;
+            ulong M, N;
+            // Each lane's elements of the accumulators (two of each 8x8
+            // matrix), rounded to the dot's dtype: staged, and written to
+            // the dot's value inside it.
+            template <uint FM, uint FN>
+            void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+                      ulong m0,
+                      ulong n0,
+                      uint sy,
+                      uint sx,
+                      uint flat,
+                      uint lane) {{
+                const uint fr = frag_row(lane), fc = frag_col(lane);
+                UNROLL for (uint i = 0; i < FM; ++i) {{
+                    UNROLL for (uint j = 0; j < FN; ++j) {{
+                        const vec<float, 2> e = frag(c[i][j]);
+                        const uint r = (sy * FM + i) * 8 + fr, col = (sx * FN + j) * 8 + fc;
+                        for (uint h = 0; h < 2; ++h) {{
+                            const {o} v = {o}(e[h]);
+                            staged[r * {tile}u + col + h] = v;
+                            if (m0 + r < M && n0 + col + h < N) {{
+                                dotv[(m0 + r) * N + n0 + col + h] = v;
+                            }}
+                        }}
+                    }}
+                }}
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }}
+        }};
+        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]], {args}) {{
+            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
+            threadgroup {o} staged[{tile} * {tile}];
+            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o}, NAME_tiles_staging, false, false, false, true>({lhs}, {rhs}, (device {o} *)nullptr, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
+            const ulong m0 = ulong(group.y) * {tile}, n0 = ulong(group.x) * {tile};
+            for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
+                uint row = uint(m0) + rr;
+                if (row >= {rows}u) {{
+                    break;
+                }}
+                {init}for (uint cc = lane; cc < {tile}u && n0 + cc < {n}u; cc += 32u) {{
+                    uint j = row * {n}u + uint(n0) + cc;
+                    {lines}{step}
+                }}
+                {write}
+            }}
+        }}
+        "
+    )
 }
 
 /// The kernel of a row fusion of a dot's rows ([`row_dot`]): the matmul
@@ -1343,9 +1558,9 @@ fn gemm_row_kernel(
 }
 
 /// `source` reading input `k` (`in{k}[j]`, `j` a flat index of the dot's
-/// rows) from the tile staged in threadgroup memory (`staged`, its rows
-/// from `m0n`, the tile's first element's index).
-fn read_staged(source: &str, k: usize) -> String {
+/// rows) from the tile staged in threadgroup memory: each read `staged`
+/// of its index's expression.
+fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
     let name = format!("in{k}[");
     let (mut out, mut rest) = (String::new(), source);
     while let Some(at) = rest.find(&name) {
@@ -1370,7 +1585,7 @@ fn read_staged(source: &str, k: usize) -> String {
         out.push_str(&rest[..at]);
         match ident {
             true => out.push_str(&rest[at..at + name.len() + end + 1]),
-            false => out.push_str(&format!("staged[({}) - m0n]", &after[..end])),
+            false => out.push_str(&staged(&after[..end])),
         }
         rest = &after[end + 1..];
     }
@@ -1398,7 +1613,7 @@ fn gemm_rows(
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, out);
+    let (params, first) = io_params(body, by_value, out, &[]);
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let tile = ROW_TILE;
     named(formatdoc!(
@@ -1447,6 +1662,22 @@ fn gemm_rows(
         }}
         "
     ))
+}
+
+/// Whether `v` of `body` is computed from any of `of` (or is one).
+fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let (mut stack, mut seen) = (vec![v], Vec::new());
+    while let Some(v) = stack.pop() {
+        if of.contains(&v) {
+            return true;
+        }
+        if !seen.contains(&v) {
+            seen.push(v);
+            stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
+        }
+    }
+    false
 }
 
 /// Whether row reductions `max` then `sum` are a softmax's: the max of
@@ -2502,7 +2733,7 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, w);
+    let (params, first) = io_params(body, by_value, w, &[]);
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
     let (operands, paired) = match (pair, expanded) {

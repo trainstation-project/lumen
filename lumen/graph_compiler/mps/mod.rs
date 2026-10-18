@@ -465,6 +465,44 @@ pub(crate) fn encode(
             (_, true) => format!("{name}_mid"),
             _ => name.clone(),
         };
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        buffers.extend(extra);
+        let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
+        // Its rows wider than a tile: the dot's value and each tile's
+        // partials into its scratch (`NAME_tiles`), then its row kernel
+        // from them (a threadgroup a row, or SIMD_ROWS).
+        if let Some((offsets, _)) = codegen::tile_scratch(body) {
+            let at = |o: usize| scratch.wrapping_add(o).cast_const();
+            let (dotv, tiles): (*const u8, Vec<*const u8>) = (
+                at(offsets[0]),
+                offsets[1..].iter().map(|&o| at(o)).collect(),
+            );
+            let [m, n] = [plan.p[0], plan.p[1]];
+            let mut first = buffers.clone();
+            first.push(dotv);
+            first.extend(&tiles);
+            let grid = Grid::Groups([
+                n.div_ceil(codegen::ROW_TILE),
+                m.div_ceil(codegen::ROW_TILE),
+                1,
+            ]);
+            launch(
+                &format!("{name}_tiles"),
+                &first,
+                &args,
+                grid,
+                keep.clone(),
+                step.label,
+            )?;
+            let mut rows = inputs.to_vec();
+            rows.push(dotv);
+            rows.push(output.cast_const());
+            rows.extend(extra);
+            rows.extend(&tiles);
+            let grid = Grid::Groups([codegen::row_groups(body), 1, 1]);
+            return launch(name, &rows, &scalars, grid, keep, step.label);
+        }
         // Its rows computed in its epilogue: one kernel, a threadgroup the
         // rows of a tile (all of each row's columns).
         let (kernel, grid) = match codegen::row_dot(body) {
@@ -474,10 +512,6 @@ pub(crate) fn encode(
             ),
             None => (kernel, plan.grid),
         };
-        let mut buffers = inputs.to_vec();
-        buffers.push(output.cast_const());
-        buffers.extend(extra);
-        let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
         return launch(&kernel, &buffers, &args, grid, keep, step.label);
     }
     // A row kernel: a threadgroup a row of the last dimension (a block of
@@ -541,6 +575,10 @@ pub(crate) fn encode(
 /// The workspace bytes fusion `body`'s kernel needs: a reduction fusion's
 /// split reduction's partials ([`crate::ops::reduce::mps::scratch_bytes`]).
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
+    // A dot's rows wider than a tile: its value and its tiles' partials.
+    if let Some((_, bytes)) = codegen::tile_scratch(body) {
+        return bytes;
+    }
     if split_k::atomic_dot(body).is_some() {
         return 0;
     }
