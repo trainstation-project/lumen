@@ -189,5 +189,8 @@ fn unsupported_dots_say_why() {
         ty(f32, &[8, 16]),
     );
     let error = actual.unwrap_err();
-    assert!(error.contains("a multiple of 128"), "{error}");
+    assert!(
+        error.ends_with("needs N (16) a multiple of 128 and K (8) a multiple of 128"),
+        "{error}"
+    );
 }

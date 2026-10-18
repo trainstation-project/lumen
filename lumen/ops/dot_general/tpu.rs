@@ -144,10 +144,22 @@ pub(crate) fn encode(
         block(f.k, unit_k, 512 * pin),
     );
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
+        let failed = [
+            (
+                blocks.0,
+                format!("M ({}) at most 512 or a multiple of 8", f.m),
+            ),
+            (blocks.1, format!("N ({}) a multiple of {unit_n}", f.n)),
+            (blocks.2, format!("K ({}) a multiple of {unit_k}", f.k)),
+        ];
+        let failed: Vec<String> = failed
+            .into_iter()
+            .filter_map(|(b, why)| b.is_none().then_some(why))
+            .collect();
         return Err(format!(
-            "dot_general on TPU: M ({}) must be at most 512 or a multiple of 8, N ({}) a \
-             multiple of {unit_n} and K ({}) of {unit_k}",
-            f.m, f.n, f.k
+            "dot_general on TPU of {} needs {}",
+            lhs.dtype,
+            failed.join(" and ")
         ));
     };
     let rows = crate::allocator::tpu::rows(index)?;
