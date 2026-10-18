@@ -71,7 +71,10 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
   primitive's `output_dtype` if it is not the accumulator's.
 * Constants are exact: integers wrapped to their width, floats to 17
   digits (hex bits if not finite).
-* Not lowered yet (they error): gathers and scatters, cumulative sums,
+* `take_along_axis` (`F.gather`) as `tpu.dynamic_gather`, as Pallas: along
+  one of the last two dimensions, indices of the operand's shape, extended
+  to its elements' width (Mosaic's).
+* Not lowered yet (they error): `jnp.take`-like gathers and scatters, cumulative sums,
   dots of operands of two dtypes, dots of several contracting dimensions
   (libtpu 0.0.48's Mosaic aborts on them, under JAX too), `pl.delay`,
   `pl.Element`/`BoundedSlice` block dimensions.

@@ -45,6 +45,7 @@ of any module). The order is load-bearing; the comments in
 
 | # | Pass name | Runs when | File | What it does |
 | --- | --- | --- | --- | --- |
+| 0 | `take_along_axis` | always | `../passes/take_along_axis.rs` | Gathers along an axis (`F.gather`) as gathers of the operand's flat positions, which the MPS's kernels (and the cross-entropy patterns) read. |
 | 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
 | 2 | `gated_backward` | `fuse && merge_dots && contraction_epilogues` | `../passes/gated_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
 | 3 | `merge_dots` | `fuse && merge_dots` | `merge_dots.rs` | Merge dots over packable parameters into blocks; fills `MpsModule::packed`. |

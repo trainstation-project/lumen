@@ -67,7 +67,7 @@ broadcast or promotion; results are values.
 | Reductions / scans | `ReduceSum { axes, accum_dtype }`, `ReduceMax { axes }`, `Cumsum { axis, reverse, accum_dtype }` |
 | Contraction | `DotGeneral { lhs/rhs_contracting, lhs/rhs_batch, accum_dtype, output_dtype }` |
 | Layout | `Reshape`, `BroadcastInDim`, `Transpose`, `Slice { .., view }`, `Concatenate { dimension, in_place }` |
-| Indexing | `DynamicSlice`, `DynamicUpdateSlice`, `Gather { axis }`, `ScatterAdd { axis }` |
+| Indexing | `DynamicSlice`, `DynamicUpdateSlice`, `Gather { axis }`, `TakeAlongAxis { axis }`, `ScatterAdd { axis }` |
 | Creation | `Full`, `Iota`, `RandomBits { shape, offset }` (counter-based Philox) |
 | Host/device | `Wait`, `ToHost`, `ToDevice` |
 | Fused ops | `LinearCrossEntropy` (cut cross-entropy, `[2, B]` f32 out) |

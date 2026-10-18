@@ -19,6 +19,8 @@ sizes, or fuse for it) live in that device's folder, e.g.
 | `linear_cross_entropy.rs` | `LinearCrossEntropy` (`linear_cross_entropy`) | A cross entropy of a dot's logits nothing else reads, as written, becomes `Primitive::LinearCrossEntropy` (Cut Cross-Entropy): the logits never reach memory. Also the pattern matcher (`matched`, `uses`, `Found`) the chunked pass reuses. |
 | `chunked_cross_entropy.rs` | `ChunkedCrossEntropy` (`chunked_cross_entropy`) | A linear cross entropy trained a chunk of rows at a time (`fused_linear_cross_entropy_chunk_size`): its losses computed from the chunks' logits its gradient computes, each chunk's logits once (XMA's fused linear cross entropy). |
 | `dot_strength.rs` | `DotStrength` (`dot_strength`) | A dot with a vector operand becomes a product and a `reduce_sum` (XLA's `DotStrengthReduction`). |
+| `take_along_axis.rs` | `TakeAlongAxis` (`take_along_axis`) | Each `take_along_axis` a `Gather` of its operand flattened, at each element's flat position (iotas and the indices times strides): for a device that gathers along one axis only (the MPS). |
+| `fold_dot_reshapes.rs` | `FoldDotReshapes` (`fold_dot_reshapes`) | A dot of a reshape merging its lhs's leading dimensions a dot of the lhs itself, reshaped back (a TPU's, where those reshapes are copies). |
 | `clamp_indices.rs` | `ClampIndices` (`clamp_indices`) | With `safe_kernels`: gather, scatter-add and linear cross entropy indices clamped into range before the kernels read them (XLA's gather semantics). |
 
 ## Writing a pass
