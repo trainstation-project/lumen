@@ -159,21 +159,26 @@ impl Layout {
 
     /// A tile's shape: `[tm, 128]`, or `[128 · pack]` for one dimension.
     pub fn tile_shape(&self) -> Vec<usize> {
-        match self.tiled() {
-            true => vec![self.rows, 128],
-            false => vec![128 * self.pack],
+        match self.shape.len() {
+            0 => vec![],
+            1 => vec![128 * self.pack],
+            _ => vec![self.rows, 128],
         }
     }
 
     /// Its Mosaic memref layout: its tiles (`(8,128)`, `(16,128)(2,1)`) and
     /// each dimension's stride in tiles.
     pub fn tiles(&self) -> (String, Vec<usize>) {
+        if self.shape.is_empty() {
+            // One element: no tiles (Mosaic's `#tpu.tiled<,[]>`).
+            return (String::new(), vec![]);
+        }
         if !self.tiled() {
             let tiles = match self.pack {
                 1 => "(128)".into(),
                 p => format!("({})(128)({p},1)", 128 * p),
             };
-            return (tiles, vec![1; self.shape.len().max(1)]);
+            return (tiles, vec![1]);
         }
         let r = self.shape.len();
         let (_, mp, np) = self.padded();

@@ -47,6 +47,28 @@ def num_programs(axis):
     return _GRID[-1][1][axis]
 
 
+# The names of the axes of the pallas_call grids being traced (a named
+# grid's, ``grid=(("i", 2), ...)``), innermost last.
+_NAMES = []
+
+
+def _axis(name):
+    for names in reversed(_NAMES):
+        if name in names:
+            return names.index(name)
+    raise NameError(f"no grid axis is named {name!r}")
+
+
+def axis_index(name):
+    """The index along the grid axis named ``name`` (``lax.axis_index``)."""
+    return program_id(_axis(name))
+
+
+def axis_size(name):
+    """The size of the grid axis named ``name`` (``lax.axis_size``)."""
+    return num_programs(_axis(name))
+
+
 class BlockSpec:
     """An operand's blocks: ``block_shape`` (its whole shape if None; a
     ``None`` dimension of size 1, squeezed from the block the body sees),

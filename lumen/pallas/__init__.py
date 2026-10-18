@@ -31,7 +31,7 @@ from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
 from .call import ANY, ShapeDtypeStruct, pallas_call, program
-from .pipeline import BlockSpec, emit_pipeline, num_programs, program_id
+from .pipeline import BlockSpec, axis_index, axis_size, emit_pipeline, num_programs, program_id
 
 __all__ = [
     "ANY",
@@ -42,6 +42,8 @@ __all__ = [
     "ShapeDtypeStruct",
     "VMEM",
     "async_copy",
+    "axis_index",
+    "axis_size",
     "bitcast",
     "bitwise_and",
     "bitwise_not",

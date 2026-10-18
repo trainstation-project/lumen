@@ -129,6 +129,10 @@ def ones(shape, dtype=None, device=None):
 
 def full(shape, value, dtype=None, device=None):
     if prims := _prims():
+        if getattr(value, "shape", None) == ():
+            # A traced scalar, broadcast (converted to ``dtype``).
+            value = value if dtype in (None, value.dtype) else prims.cast(value, dtype)
+            return prims.broadcast_in_dim(value, shape, ())
         inferred = "bool" if isinstance(value, builtins.bool) else "int64" if isinstance(value, int) else default_dtype
         return prims.full(shape, value, dtype or inferred)
     return Tensor.full(list(shape), value, dtype, device)

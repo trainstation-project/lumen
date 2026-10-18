@@ -739,6 +739,15 @@ impl Emitter<'_> {
                 (false, false) => self.unary("vector.shape_cast", &[a], "", out),
                 _ => self.extract(a, out),
             },
+            // Of bools (which Mosaic does not reduce): through int32.
+            ReduceMax { .. } if a.1.dtype == DType::Bool => {
+                let words = TensorType::new(DType::I32, &a.1.shape);
+                let w = (self.unary("arith.extui", &[a], "", &words), words);
+                let reduced = TensorType::new(DType::I32, &out.shape);
+                let r = (self.primitive(p, &[w], &reduced)?, reduced.clone());
+                let zero = (self.constant(&Scalar::Int(0), &reduced), reduced);
+                self.unary("arith.cmpi", &[&r, &zero], "predicate = 1 : i64", out)
+            }
             ReduceSum { axes, .. } | ReduceMax { axes } if out.shape.is_empty() => {
                 // As Pallas: over every dimension of the operand given a
                 // leading one, then its one element.

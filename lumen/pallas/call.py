@@ -23,6 +23,8 @@ dtype a TPU stores.
 
 from lumen.graph import prims, tracer
 
+from .pipeline import _NAMES
+
 # The kernels of the pallas_calls traced so far, by handle: each a function
 # of a spec (the program's scalars and rows) to its Mosaic.
 _CALLS = []
@@ -43,18 +45,34 @@ def program(spec):
     return _CALLS[spec["kernel"]](spec)
 
 
-def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, scratch_shapes=(), name=None):
+def pallas_call(
+    kernel,
+    out_shape,
+    *,
+    grid=(),
+    in_specs=None,
+    out_specs=None,
+    scratch_shapes=(),
+    input_output_aliases=None,
+    name=None,
+):
     """``kernel`` as an op: a function of the operands, returning outputs of
     ``out_shape`` (a ``ShapeDtypeStruct``, or a list or tuple of them)
-    (``pl.pallas_call``)."""
+    (``pl.pallas_call``). An output of ``input_output_aliases``
+    (``{input: output}``) starts as its input (which JAX donates)."""
+    aliases = dict(input_output_aliases or {})
     single = not isinstance(out_shape, (list, tuple))
     outs = [out_shape] if single else list(out_shape)
     grid = (grid,) if isinstance(grid, int) else tuple(grid)
+    # A named grid's axes: (name, size) each.
+    names = [a[0] for a in grid] if grid and all(isinstance(a, tuple) for a in grid) else []
+    grid = tuple(a[1] for a in grid) if names else grid
     label = f"pallas_call[{name or getattr(kernel, '__name__', 'kernel')}]"
 
     def call(*args):
         args = [tracer._lift(a) for a in args]
         types = [(a.dtype, tuple(a.shape)) for a in args] + [(o.dtype, o.shape) for o in outs]
+        _check_aliases(aliases, types[: len(args)], types[len(args) :])
 
         def build(spec):
             from . import kernel as trace
@@ -66,7 +84,19 @@ def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, sc
                     view(memory if i < len(args) else result, scalars[i], shape, dtype)
                     for i, (dtype, shape) in enumerate(types)
                 ]
-                _run(kernel, refs[: len(args)], refs[len(args) :], grid, in_specs, out_specs, scratch_shapes)
+                if aliases:
+                    from . import SemaphoreType, make_async_copy, scratch
+
+                    sem = scratch(SemaphoreType.DMA)
+                    for i, o in aliases.items():
+                        c = make_async_copy(refs[i], refs[len(args) + o], sem)
+                        c.start()
+                        c.wait()
+                _NAMES.append(names)
+                try:
+                    _run(kernel, refs[: len(args)], refs[len(args) :], grid, in_specs, out_specs, scratch_shapes)
+                finally:
+                    _NAMES.pop()
 
             return trace(body, scalars=spec["scalars"], rows=spec["rows"], host_rows=spec["host_rows"], name=label)
 
@@ -83,6 +113,26 @@ def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, sc
         return first if single else (first, *rest)
 
     return call
+
+
+def _check_aliases(aliases, ins, outs):
+    """Errors (JAX's) for ``aliases`` of inputs ``ins`` and outputs ``outs``
+    (dtype and shape each) out of range or of different types."""
+
+    def abstract(t):
+        return f"{t[0]}[{','.join(map(str, t[1]))}]"
+
+    for i, o in aliases.items():
+        mapping = f"input_output_aliases contains the mapping '{i}:{o}'"
+        if not 0 <= i < len(ins):
+            raise ValueError(f"{mapping} with input index {i} outside the range [0, {len(ins)})")
+        if not 0 <= o < len(outs):
+            raise ValueError(f"{mapping} with output index {o} outside the range [0, {len(outs)})")
+        if (ins[i][0], tuple(ins[i][1])) != (outs[o][0], tuple(outs[o][1])):
+            raise ValueError(
+                f"{mapping} referring to input[{i}] with abstract value {abstract(ins[i])} and to "
+                f"output[{o}] with a different abstract value {abstract(outs[o])}"
+            )
 
 
 def _specs(specs, count):
