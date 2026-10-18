@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use super::MpsModule;
 use crate::codegen::mps::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
@@ -242,7 +242,7 @@ fn lowerable(graph: &Graph, node: &crate::graph::Node) -> bool {
 /// `graph` with the regions of its float16 work the Neural Engine runs
 /// (see the module's documentation) each one `coreml_*` fusion step;
 /// `fixed`: which of its inputs are fixed weights (baked in).
-pub(crate) fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
+fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
     let mut producer: Vec<Option<usize>> = vec![None; n];
@@ -588,7 +588,7 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
 /// [`crate::stream::mps::synchronize`] (every host read) waits for it too.
 /// `keep` keeps their memory alive until it has run. Its first run (its
 /// weights read on the host, baked into the program) waits.
-pub(crate) fn encode(
+pub(super) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
@@ -765,14 +765,14 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
     }
 }
 
-pub(crate) struct NeuralEngine;
+pub(super) struct NeuralEngine;
 
-impl<'a> Pass<MpsModule<'a>> for NeuralEngine {
+impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
     fn name(&self) -> &'static str {
         "neural_engine"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let options = m.options;
         let written = |i: usize| {
             options.donate.contains(&i) || options.donate_into.iter().any(|&(j, _)| j == i)

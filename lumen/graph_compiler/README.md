@@ -20,9 +20,7 @@ and *where it lives in memory*.
 | --- | --- |
 | `mod.rs` | `Options`, `compile` / `compile_with` (frontend pipeline, stage split, per-device dispatch), and shared helpers `elementwise` and `constant`. |
 | `config.rs` | `CompilerConfig` (every compiler flag, with defaults) and the process-wide `config()` / `update()` snapshot. |
-| `pass.rs` | XLA-style pass infrastructure: `Module`, `GraphModule`, `Pass`, `Rewrite`, `Pipeline` (profiling ranges and `dump_to`). |
-| `cse.rs` | Common subexpression elimination (`HloCSE`); commutative ops match in either operand order; `CustomCall`s never merge. |
-| `simplify.rs` | Algebraic simplification; `simplify_with(g, matched)` also moves rearranges/casts and folds any transpose into dots when `matched`. Ends with `prune` + `cse`. |
+| `pass.rs` | XLA-style pass infrastructure: `Module`, `GraphModule`, the `CompilerPass` trait, `Pipeline` (profiling ranges and `dump_to`). |
 | `plan.rs` | `Plan`, `PlanOptions`, `Step`, `Buffer`, `Staged`/`Stage`/`Source`; buffer assignment, donation, in-place reuse, workspace packing, running (`run`, `run_on`, `run_in`), `Display`. |
 | `schedule.rs` | Memory-reducing topological orders: `list` (XLA `ListScheduler`), `dfs` (XLA `DFSMemoryScheduler`), and `Graph::reordered`. |
 | `remat.rs` | Rematerialization under `memory_limit` (XLA `hlo_rematerialization`). |
@@ -36,6 +34,7 @@ and *where it lives in memory*.
 
 ## Subfolders
 
+- [`passes/`](passes/README.md) — the device-independent passes (`cse`, `simplify`, pattern rewrites), each a `CompilerPass` of any module.
 - [`cpu/`](cpu/README.md) — the host compiler (one `simplify` pass, then plan).
 - [`mps/`](mps/README.md) — the MPS compiler: fusion passes, Metal codegen driving, `encode`.
 - [`mps/ane/`](mps/ane/README.md) — optional Apple Neural Engine offload through Core ML.
@@ -77,9 +76,10 @@ there too.
 
 - `Module` — what a pass rewrites (graph + options). `GraphModule` is the
   plain one used by the frontend and CPU; MPS has its own `MpsModule`.
-- `Pass<M>` — `name()` + `run(&mut M)`.
-- `Rewrite(name, fn(&Graph, &CompilerConfig) -> Graph)` — a pass that only
-  replaces the graph.
+- `CompilerPass<M>` — the pass interface every pass implements: `name()` +
+  `apply(&mut M)`. A pass of the graph alone (`passes/`) implements it for
+  any `M: Module`, so every device's pipeline can run it; a device's pass
+  implements it for its own module (`MpsModule`).
 - `Pipeline::new(name).add(..).run(&mut module)` — runs passes in order,
   each inside a profiler range `<pipeline>::<pass>`.
 - **`dump_to`**: with `lumen.config.compiler.dump_to = dir`, each pipeline

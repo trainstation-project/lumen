@@ -39,7 +39,7 @@ use super::MpsModule;
 use super::fusion::{elementwise, fusible};
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// Dots that can merge: their nodes, in graph order.
 struct Group {
@@ -72,7 +72,7 @@ struct Link {
 /// and the inputs it adds: each the block of these inputs (positions,
 /// among those `packable`; those `donated` contiguous in it) side by side
 /// along a dimension.
-pub(crate) fn merge_dots(
+pub(super) fn merge_dots(
     graph: &Graph,
     packable: &[bool],
     donated: &[bool],
@@ -465,14 +465,14 @@ fn concat_dimension(p: &Primitive, side: usize, rank: usize) -> Option<usize> {
 /// ([`merge_dots`]). A donated parameter (a weight the program assigns)
 /// only as a contiguous part of its block, its new value written into it
 /// in place.
-pub(crate) struct MergeDots;
+pub(super) struct MergeDots;
 
-impl<'a> Pass<MpsModule<'a>> for MergeDots {
+impl<'a> CompilerPass<MpsModule<'a>> for MergeDots {
     fn name(&self) -> &'static str {
         "merge_dots"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let options = m.options;
         let donated: Vec<bool> = (0..options.packable.len())
             .map(|i| {

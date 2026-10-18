@@ -17,7 +17,7 @@ use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{constant, elementwise};
 
 /// Buffers a Metal kernel binds (31), less the output and the element count.
@@ -104,7 +104,7 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// (its `in_place`: its operands' kernels write them there) is left as it
 /// is, no kernel's. `config` says which of the
 /// fusions below to make (`reduction_epilogues`, `multi_output_fusion`).
-pub(crate) fn fuse(
+pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
@@ -935,14 +935,14 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
 /// loop fusions, one kernel each group ([`horizontal::fuse`]), again while
 /// a runtime scalar some step other than a fusion reads is dropped from
 /// those the kernels take by value (it is a buffer).
-pub(crate) struct LoopFusion;
+pub(super) struct LoopFusion;
 
-impl<'a> Pass<MpsModule<'a>> for LoopFusion {
+impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
     fn name(&self) -> &'static str {
         "loop_fusion"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
         let requested = m.kernels.len();
         let graph = loop {

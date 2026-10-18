@@ -96,7 +96,7 @@ pub struct CompilerConfig {
     pub fused_linear_cross_entropy_chunk_size: Option<usize>,
     /// Clamp the indices a program reads at (a gather's, a scatter-add's, a
     /// linear cross entropy's classes) into range before the kernels read
-    /// them (XLA's gather semantics; `compiler::mps::bounds`): an index out
+    /// them (XLA's gather semantics; `graph_compiler::passes::clamp_indices`): an index out
     /// of range reads an element at the end of its axis, never past it. Off
     /// by default: the kernels read at the indices as given, one out of
     /// range the program's error (undefined, as an out-of-bounds read).

@@ -9,19 +9,19 @@ use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::attention;
-use crate::graph_compiler::pass::Pass;
+use crate::graph_compiler::pass::CompilerPass;
 
 /// Each fusion's kernel generated as Metal source ([`codegen`]), the
 /// fusion named by it (the name its step launches); a kernel generated
 /// once for all the fusions sharing it.
 pub(super) struct Codegen;
 
-impl<'a> Pass<MpsModule<'a>> for Codegen {
+impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     fn name(&self) -> &'static str {
         "codegen"
     }
 
-    fn run(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
         // A concatenate marked in place whose operands' kernels, as fused,
         // cannot write them there: unmarked, a kernel of its own.

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// Earlier nodes by primitive name and operands (sorted for commutative
 /// primitives): their primitives, to compare parameters, and values.
@@ -54,4 +55,18 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
 fn commutative(p: &Primitive) -> bool {
     use Primitive::*;
     matches!(p, Add | Mul | Max | Eq)
+}
+
+/// [`cse`] as a pass.
+pub(crate) struct Cse;
+
+impl<M: Module> CompilerPass<M> for Cse {
+    fn name(&self) -> &'static str {
+        "cse"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = cse(m.graph());
+        Ok(())
+    }
 }

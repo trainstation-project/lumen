@@ -29,6 +29,7 @@
 //! and gradient one row kernel of them (XMA's fused linear cross entropy).
 
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
 /// A match: the dot's operands and the pattern's nodes (by index), `loss`
@@ -36,21 +37,21 @@ use crate::{DType, Scalar};
 /// class's logit: where it is computed).
 pub(super) struct Found {
     pub(super) h: Var,
-    pub(super) w: Var,
+    w: Var,
     /// Whether `w` is `[D, V]` (read transposed).
-    pub(super) transposed: bool,
+    transposed: bool,
     pub(super) target: Var,
     pub(super) members: Vec<usize>,
     pub(super) loss: usize,
     pub(super) lse: usize,
-    pub(super) first: usize,
+    first: usize,
     /// The gather of the class's logit.
     pub(super) pick: usize,
 }
 
 /// `graph` with each linear cross entropy whose logits nothing else reads
 /// as a [`Primitive::LinearCrossEntropy`].
-pub(crate) fn linear_cross_entropy(graph: &Graph) -> Graph {
+fn linear_cross_entropy(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let (producer, readers) = uses(graph);
     let found: Vec<Found> = (0..nodes.len())
@@ -292,4 +293,18 @@ fn row_offsets_plus(
     };
     let t = graph.type_of(target);
     (t.shape == [b] && matches!(t.dtype, DType::I32 | DType::I64)).then_some(target)
+}
+
+/// [`linear_cross_entropy`] as a pass.
+pub(crate) struct LinearCrossEntropy;
+
+impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
+    fn name(&self) -> &'static str {
+        "linear_cross_entropy"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = linear_cross_entropy(m.graph());
+        Ok(())
+    }
 }

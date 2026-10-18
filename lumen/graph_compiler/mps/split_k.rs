@@ -17,6 +17,7 @@
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::ops::dot_general::mps::float_groups;
 
 /// The threadgroups that fill the GPU (on an M4 Pro: about 13 per GPU
@@ -37,7 +38,7 @@ const MIN_K: usize = 2048;
 /// `graph` with each dot launching few threadgroups and of a long
 /// contraction split along it, its chunks added atomically if `atomic` and
 /// its partials would cost more than its operands.
-pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
+pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
         nodes
@@ -154,7 +155,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
 
 /// The dot of a fusion's `body` if it is a split dot whose chunks are added
 /// atomically (see [`split_k`]): the dot, then the sum over its chunks.
-pub(crate) fn atomic_dot(body: &Graph) -> Option<&Node> {
+pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
     match body.nodes() {
         [dot, sum] => {
             let split = matches!(dot.primitive, Primitive::DotGeneral { .. })
@@ -181,4 +182,19 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
         s /= 2;
     }
     (s >= 2).then_some(s)
+}
+
+/// [`split_k`] as a pass: its chunks added atomically unless
+/// `deterministic`.
+pub(super) struct SplitK;
+
+impl<M: Module> CompilerPass<M> for SplitK {
+    fn name(&self) -> &'static str {
+        "split_k"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = split_k(m.graph(), !m.config().deterministic);
+        Ok(())
+    }
 }

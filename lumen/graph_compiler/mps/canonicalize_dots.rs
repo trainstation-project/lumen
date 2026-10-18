@@ -1,6 +1,7 @@
 //! Dots given their operands in matmul form ([`canonicalize_dots`]).
 
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::ops::dot_general::mps::{collapsed, matmul_order};
 use crate::tensor::contiguous_strides;
 
@@ -81,4 +82,18 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// [`canonicalize_dots`] as a pass.
+pub(super) struct CanonicalizeDots;
+
+impl<M: Module> CompilerPass<M> for CanonicalizeDots {
+    fn name(&self) -> &'static str {
+        "canonicalize_dots"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = canonicalize_dots(m.graph());
+        Ok(())
+    }
 }

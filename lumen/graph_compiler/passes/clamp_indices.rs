@@ -10,10 +10,11 @@
 
 use crate::Scalar;
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// `graph` with each index a gather, scatter-add or linear cross entropy
 /// reads clamped into its axis first.
-pub(crate) fn clamp_indices(graph: &Graph) -> Graph {
+fn clamp_indices(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -56,4 +57,18 @@ fn clamped(out: &mut Graph, i: Var, n: usize) -> Var {
     let low = apply(Primitive::Max, &[i, zero]);
     let past = apply(Primitive::Lt, &[last, low]);
     apply(Primitive::Select, &[past, last, low])
+}
+
+/// [`clamp_indices`] as a pass.
+pub(crate) struct ClampIndices;
+
+impl<M: Module> CompilerPass<M> for ClampIndices {
+    fn name(&self) -> &'static str {
+        "clamp_indices"
+    }
+
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        *m.graph_mut() = clamp_indices(m.graph());
+        Ok(())
+    }
 }
