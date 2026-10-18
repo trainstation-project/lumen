@@ -175,8 +175,11 @@ def _bits(name):
 def _convert(x, from_dtype, to_dtype):
     """``x.astype(to_dtype)`` as XLA converts: floats to integers truncated
     and saturated (NaN to 0), integers to narrower ones wrapped, floats
-    rounded to nearest even."""
+    rounded to nearest even; float32 and bfloat16 subnormals read as zero, as
+    a TPU reads them (JAX's reference, converting on the TPU, too)."""
     wide = x.astype(np.int64) if _is_int(from_dtype) or from_dtype == "bool" else x.astype(np.float64)
+    if from_dtype in ("float32", "bfloat16"):
+        wide = np.where(np.abs(wide) < np.finfo(np.float32).tiny, np.copysign(0.0, wide), wide)
     if to_dtype == "bool":
         return wide != 0
     to = _np_dtype(to_dtype)

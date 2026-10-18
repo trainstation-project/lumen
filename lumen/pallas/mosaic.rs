@@ -1324,6 +1324,12 @@ impl Emitter<'_> {
                     false => self.unary("arith.cmpi", &[a, &zero], "predicate = 1 : i64", &out),
                 });
             }
+            // Of one width (float8s): through float32, as Pallas.
+            (true, true) if bits_out == bits_in => {
+                let wide = TensorType::new(DType::F32, &a.1.shape);
+                let w = (self.unary("arith.extf", &[a], "", &wide), wide);
+                return self.cast(&w, dtype);
+            }
             (true, true) if bits_out > bits_in => "arith.extf",
             (true, true) => "arith.truncf",
             (false, true) if unsigned(from) => "arith.uitofp",
