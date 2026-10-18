@@ -4,10 +4,10 @@ import lumen
 
 
 def pytest_collection_modifyitems(config, items):
-    """Tests marked with a device (``mps``, ``cuda``) skipped where it is not
-    available: those that plan for it without placing a tensor there would
-    fail, not skip."""
-    for device in ("mps", "cuda"):
+    """Tests marked with a device (``mps``, ``cuda``, ``tpu``) skipped where it
+    is not available: those that plan for it without placing a tensor there
+    would fail, not skip."""
+    for device in ("mps", "cuda", "tpu"):
         if getattr(lumen, device).is_available():
             continue
         skip = pytest.mark.skip(reason=f"{device} is not available")

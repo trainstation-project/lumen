@@ -45,4 +45,5 @@ line_length = 119
 markers = [
     "mps: needs an MPS (Metal) device",
     "cuda: needs a CUDA device and a wheel built with the `cuda` feature",
+    "tpu: needs a TPU and a wheel built with the `tpu` feature",
 ]
