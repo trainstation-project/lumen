@@ -17,7 +17,7 @@
 use crate::DType;
 use crate::graph::{Primitive, TensorType};
 
-pub(crate) mod mosaic;
+pub mod mosaic;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 #[cfg(test)]
