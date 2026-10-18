@@ -93,6 +93,11 @@ pub enum Op {
     Load,
     /// Stores a value in a VMEM ref (of its shape): `(ref, value)`.
     Store,
+    /// A VMEM ref's every `strides`-th element of each dimension, from i32
+    /// starts (`tpu.strided_load`): `(ref, starts...)`.
+    StridedLoad(Vec<usize>),
+    /// Stores a value in those elements: `(ref, value, starts...)`.
+    StridedStore(Vec<usize>),
     /// Starts copying `src` to `dst` (of one shape), signalling `sem`:
     /// `(src, dst, sem)`.
     DmaStart,
@@ -502,6 +507,66 @@ impl Kernel {
             .collect();
         self.push(Op::Store, &inputs, vec![]);
         Ok(())
+    }
+
+    /// A VMEM ref `src`'s `sizes` elements of each dimension from i32
+    /// `starts`, every `strides`-th.
+    pub fn load_strided(
+        &mut self,
+        src: Var,
+        starts: &[Var],
+        sizes: &[usize],
+        strides: &[usize],
+    ) -> Result<Var, String> {
+        let dtype = self.strided(src, starts, sizes, strides)?;
+        let ty = Type::Value(TensorType::new(dtype, sizes));
+        let inputs: Vec<Var> = std::iter::once(src).chain(starts.iter().copied()).collect();
+        Ok(self.push(Op::StridedLoad(strides.to_vec()), &inputs, vec![ty])[0])
+    }
+
+    /// Stores `value` in those elements of VMEM ref `dst`.
+    pub fn store_strided(
+        &mut self,
+        dst: Var,
+        value: Var,
+        starts: &[Var],
+        strides: &[usize],
+    ) -> Result<(), String> {
+        self.check(&[value])?;
+        let v = self.value(value)?.clone();
+        let dtype = self.strided(dst, starts, &v.shape, strides)?;
+        if v.dtype != dtype {
+            return Err(format!("a strided store of {dtype} got {v}"));
+        }
+        let inputs: Vec<Var> = [dst, value].into_iter().chain(starts.iter().copied()).collect();
+        self.push(Op::StridedStore(strides.to_vec()), &inputs, vec![]);
+        Ok(())
+    }
+
+    /// The dtype of VMEM ref `r`, whose `sizes` elements from `starts`
+    /// every `strides`-th are read or written.
+    fn strided(&self, r: Var, starts: &[Var], sizes: &[usize], strides: &[usize]) -> Result<DType, String> {
+        self.check(&[r])?;
+        self.check(starts)?;
+        let (t, space) = self.reference(r)?;
+        let rank = t.shape.len();
+        let fits = space == Space::Vmem
+            && t.dtype != DType::Bool
+            && [starts.len(), sizes.len(), strides.len()] == [rank; 3]
+            && !strides.contains(&0)
+            && t.shape.iter().zip(sizes).zip(strides).all(|((n, k), s)| *k == 0 || (k - 1) * s < *n);
+        if !fits {
+            return Err(
+                "strided loads and stores are of a VMEM ref (not bool): a start, size and positive stride a dimension, within it"
+                    .into(),
+            );
+        }
+        for &s in starts {
+            if *self.value(s)? != TensorType::new(DType::I32, &[]) {
+                return Err("a strided access's starts are int32 scalars".into());
+            }
+        }
+        Ok(t.dtype)
     }
 
     /// Starts (or with `wait`, waits for) copying `src` to `dst` with `sem`.

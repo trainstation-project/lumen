@@ -519,8 +519,10 @@ def isnan(input):
 
 
 def _truth(input):
-    """``input`` as bools: nonzero."""
+    """``input`` as bools: nonzero (a Python scalar's truth)."""
     input = _lift(input)
+    if not isinstance(input, TracedTensor):
+        return bool(input)
     return input if input.dtype == "bool" else _ne(input, prims.full(input.shape, 0, input.dtype))
 
 

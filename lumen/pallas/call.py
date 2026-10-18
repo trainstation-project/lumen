@@ -79,7 +79,8 @@ def pallas_call(kernel, out_shape, *, grid=(), in_specs=None, out_specs=None, sc
             prims.bind("fusion_output", first, index=k, dtype=o.dtype, shape=o.shape)
             for k, o in enumerate(outs[1:], 1)
         ]
-        return first if single else type(out_shape)([first, *rest])
+        # A tuple for a list too (as JAX: "we normalize out_shape to a tuple").
+        return first if single else (first, *rest)
 
     return call
 

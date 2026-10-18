@@ -102,15 +102,13 @@ def _like(x, v):
 
 class ds:
     """A window of a ref's dimension: ``size`` elements from ``start`` (an
-    int, or a traced int32 scalar) (``pl.ds``, ``pl.dslice``); a ``stride``
-    other than 1 is not supported yet."""
+    int, or a traced int32 scalar), every ``stride``-th (``pl.ds``,
+    ``pl.dslice``)."""
 
     def __init__(self, start, size=None, stride=None):
         if size is None:
             start, size = 0, start
-        if stride not in (None, 1):
-            raise NotImplementedError("strided windows of a ref are not supported yet")
-        self.start, self.size = start, size
+        self.start, self.size, self.stride = start, size, stride or 1
 
 
 dslice = ds
@@ -186,7 +184,17 @@ class Ref:
     def _window(self, index):
         """The window of ``index``: ints and traced scalars pick an element
         (the dimension squeezed), slices and ``ds`` a range, ``...`` the
-        rest."""
+        rest. A strided range's window covers it; its strides are
+        :meth:`_strided`'s."""
+        window, strided = self._strided(index)
+        if strided is not None:
+            raise IndexError("a ref's window is contiguous: read strided elements with ref[index]")
+        return window
+
+    def _strided(self, index):
+        """``index``'s window (whole in its strided dimensions) and, if any
+        dimension is strided, each of the window's dimensions' start, count
+        and stride."""
         index = index if isinstance(index, tuple) else (index,)
         if any(i is Ellipsis for i in index):
             at = index.index(Ellipsis)
@@ -194,17 +202,23 @@ class Ref:
         index = index + (slice(None),) * (self.ndim - len(index))
         if len(index) != self.ndim:
             raise IndexError(f"{len(index)} indices for a ref of {self.ndim} dimensions")
-        starts, dynamic, sizes, squeezed = [], [], [], []
+        starts, dynamic, sizes, squeezed, strides = [], [], [], [], []
         for i, n in zip(index, self.shape):
             if isinstance(i, slice):
                 start, stop, step = i.indices(n)
-                if step != 1:
-                    raise IndexError("ref windows are contiguous")
-                start, size, squeeze = start, stop - start, False
+                if step < 1:
+                    raise IndexError("ref windows go forwards")
+                start, size, squeeze, stride = start, len(range(start, stop, step)), False, step
             elif isinstance(i, ds):
-                start, size, squeeze = i.start, i.size, False
+                start, size, squeeze, stride = i.start, i.size, False, i.stride
             else:
-                start, size, squeeze = i, 1, True
+                start, size, squeeze, stride = i, 1, True, 1
+            if stride != 1:
+                # Whole in the window, its elements picked by the access.
+                strides.append((start, size, stride))
+                start, size = 0, n
+            elif not squeeze:
+                strides.append((0, size, 1))
             if isinstance(start, TracedTensor):
                 starts.append(None)
                 dynamic.append(start.var)
@@ -212,30 +226,50 @@ class Ref:
                 starts.append(int(start))
             sizes.append(size)
             squeezed.append(squeeze)
+        strided = strides if any(s != 1 for _, _, s in strides) else None
         if starts == [0] * self.ndim and sizes == list(self.shape) and not any(squeezed):
-            return self
-        return Ref(self.kernel, self.kernel.slice(self.var, starts, dynamic, sizes, squeezed))
+            return self, strided
+        return Ref(self.kernel, self.kernel.slice(self.var, starts, dynamic, sizes, squeezed)), strided
 
     def _element(self, index):
-        """An SMEM ref's element ``index`` (an index a dimension): its
-        indices' values."""
+        """An SMEM ref's element ``index``: an index a dimension, or a whole
+        dimension of one (``...`` all the rest). Its indices' values and the
+        shape it is read as (its whole dimensions' ones)."""
         index = index if isinstance(index, tuple) else (index,)
-        if len(index) != self.ndim or any(isinstance(i, (slice, ds)) or i is Ellipsis for i in index):
+        if any(i is Ellipsis for i in index):
+            at = index.index(Ellipsis)
+            index = index[:at] + (slice(None),) * (self.ndim - len(index) + 1) + index[at + 1 :]
+        whole = [isinstance(i, slice) and i.indices(n) == (0, 1, 1) for i, n in zip(index, self.shape)]
+        if len(index) != self.ndim or any(isinstance(i, (slice, ds)) and not w for i, w in zip(index, whole)):
             raise IndexError(f"an SMEM ref's element takes {self.ndim} indices, got {index!r}")
-        return [_i32(i).var for i in index]
+        indices = [_i32(0 if w else i).var for i, w in zip(index, whole)]
+        return indices, (1,) * sum(whole)
 
     def __getitem__(self, index):
         if self.space == "smem":
-            return TracedTensor(self.kernel, self.kernel.load(self.var, self._element(index)))
-        return TracedTensor(self.kernel, self.kernel.load(self._window(index).var))
+            indices, shape = self._element(index)
+            value = TracedTensor(self.kernel, self.kernel.load(self.var, indices))
+            return value.reshape(shape) if shape else value
+        window, strided = self._strided(index)
+        if strided is not None:
+            starts = [_i32(a).var for a, _, _ in strided]
+            sizes, strides = [k for _, k, _ in strided], [s for _, _, s in strided]
+            return TracedTensor(self.kernel, self.kernel.load_strided(window.var, starts, sizes, strides))
+        return TracedTensor(self.kernel, self.kernel.load(window.var))
 
     def __setitem__(self, index, value):
         if self.space == "smem":
-            indices = self._element(index)
+            indices, _ = self._element(index)
             value = prims.full((), value, self.dtype) if not isinstance(value, TracedTensor) else value
-            self.kernel.store(self.var, value.var, indices)
+            self.kernel.store(self.var, value.reshape(()).var, indices)
             return
-        window = self._window(index)
+        window, strided = self._strided(index)
+        if strided is not None:
+            shape = [k for _, k, _ in strided]
+            value = prims.full(shape, value, window.dtype) if not isinstance(value, TracedTensor) else value
+            starts = [_i32(a).var for a, _, _ in strided]
+            self.kernel.store_strided(window.var, value.var, starts, [s for _, _, s in strided])
+            return
         value = prims.full(window.shape, value, window.dtype) if not isinstance(value, TracedTensor) else value
         self.kernel.store(window.var, value.var)
 
@@ -542,7 +576,11 @@ def multiple_of(x, m):
 def dot(a, b, trans_b=False, preferred_element_type=None):
     """``a @ b`` (``b.T`` if ``trans_b``) on the matrix unit, accumulated as
     ``@`` accumulates (floats in float32 or wider) and returned in
-    ``preferred_element_type`` (the accumulator's by default)."""
+    ``preferred_element_type`` (the accumulator's by default); integers
+    accumulate in ``preferred_element_type`` if given (int32 for the
+    matrix unit)."""
     accum = tracer._accum_dtype(a.dtype)
+    if preferred_element_type is not None and not tracer._is_float(a.dtype):
+        accum = preferred_element_type
     numbers = (([1], [1 if trans_b else 0]), ([], []))
     return prims.dot_general(a, b, numbers, accum, preferred_element_type or accum)

@@ -481,6 +481,23 @@ impl Emitter<'_> {
                 );
                 self.op("tpu.vector_store", &operands, &attrs, &[])
             }
+            Op::StridedLoad(strides) | Op::StridedStore(strides) => {
+                let list: Vec<String> = strides.iter().map(usize::to_string).collect();
+                let attrs = format!("strides = array<i32: {}>", list.join(", "));
+                let (mut operands, starts) = match node.outputs.is_empty() {
+                    true => (vec![ins[1].clone(), ins[0].clone()], &ins[2..]),
+                    false => (vec![ins[0].clone()], &ins[1..]),
+                };
+                for (i, _) in starts {
+                    let i = self.op("arith.index_cast", &[(i, "i32".into())], "", &["index".into()]);
+                    operands.push((i[0].clone(), "index".into()));
+                }
+                let name = match node.outputs.is_empty() {
+                    true => "tpu.strided_store",
+                    false => "tpu.strided_load",
+                };
+                self.op(name, &refs(&operands), &attrs, &out_types)
+            }
             Op::DmaStart => self.op(
                 "tpu.enqueue_dma",
                 &refs(&ins),

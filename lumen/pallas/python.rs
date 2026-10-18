@@ -156,6 +156,20 @@ impl PyKernel {
         self.inner.store(dst, value, &indices).map_err(err)
     }
 
+    fn load_strided(
+        &mut self,
+        src: Var,
+        starts: Vec<Var>,
+        sizes: Vec<usize>,
+        strides: Vec<usize>,
+    ) -> PyResult<Var> {
+        self.inner.load_strided(src, &starts, &sizes, &strides).map_err(err)
+    }
+
+    fn store_strided(&mut self, dst: Var, value: Var, starts: Vec<Var>, strides: Vec<usize>) -> PyResult<()> {
+        self.inner.store_strided(dst, value, &starts, &strides).map_err(err)
+    }
+
     /// An SMEM scratch buffer of `dtype` and `shape`.
     fn smem(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
         let ty = Type::Ref(TensorType::new(parse_dtype(dtype)?, &shape), Space::Smem);

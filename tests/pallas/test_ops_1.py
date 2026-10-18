@@ -80,7 +80,7 @@ def _numpy(t):
 def _run(kernel, out_shape, *args, **kwargs):
     """``pl.pallas_call(kernel, out_shape, **kwargs)`` compiled on TPU tensors
     ``args``: its output, in numpy."""
-    out = lumen.compile(lambda *xs: pl.pallas_call(kernel, out_shape=out_shape, **kwargs)(*xs))(*args)
+    out = lumen.compile(lambda *xs: pl.pallas_call(kernel, out_shape=out_shape, **kwargs)(*xs), device="tpu")(*args)
     return _numpy(out)
 
 

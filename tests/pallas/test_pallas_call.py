@@ -30,7 +30,7 @@ def to_numpy(t):
 def run(f, *arrays):
     """``f`` compiled on numpy ``arrays`` placed on the TPU: its outputs as numpy (a tuple or list of them as ``f``
     returns them)."""
-    out = lumen.compile(f)(*[to_tpu(a) for a in arrays])
+    out = lumen.compile(f, device="tpu")(*[to_tpu(a) for a in arrays])
     if isinstance(out, (list, tuple)):
         return type(out)(to_numpy(o) for o in out)
     return to_numpy(out)
