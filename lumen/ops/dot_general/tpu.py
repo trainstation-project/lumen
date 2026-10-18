@@ -66,6 +66,28 @@ def program(spec, epilogue=None):
                 finish(product(), ob)
                 return
             step = pl.program_id(3)
+            import os  # TUNING (temporary)
+
+            variant = int(os.environ.get("LUMEN_TPU_DOT_VARIANT", "2"))
+            if variant in (0, 1):
+
+                @pl.when(step == 0)
+                def _():
+                    if variant == 0:
+                        acc[...] = 0.0
+                        acc[...] += product()
+                    else:
+                        acc[...] = product()
+
+                @pl.when(step > 0)
+                def _():
+                    acc[...] += product()
+
+                @pl.when(step == kb - 1)
+                def _():
+                    finish(acc[...], ob)
+
+                return
 
             # The first product the accumulator, the last added to it as
             # the output is written (neither zeroed nor stored first).
