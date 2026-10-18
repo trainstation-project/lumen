@@ -37,21 +37,21 @@ use crate::{DType, Scalar};
 /// class's logit: where it is computed).
 pub(super) struct Found {
     pub(super) h: Var,
-    pub(super) w: Var,
+    w: Var,
     /// Whether `w` is `[D, V]` (read transposed).
-    pub(super) transposed: bool,
+    transposed: bool,
     pub(super) target: Var,
     pub(super) members: Vec<usize>,
     pub(super) loss: usize,
     pub(super) lse: usize,
-    pub(super) first: usize,
+    first: usize,
     /// The gather of the class's logit.
     pub(super) pick: usize,
 }
 
 /// `graph` with each linear cross entropy whose logits nothing else reads
 /// as a [`Primitive::LinearCrossEntropy`].
-pub(crate) fn linear_cross_entropy(graph: &Graph) -> Graph {
+fn linear_cross_entropy(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let (producer, readers) = uses(graph);
     let found: Vec<Found> = (0..nodes.len())

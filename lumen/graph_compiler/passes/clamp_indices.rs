@@ -14,7 +14,7 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// `graph` with each index a gather, scatter-add or linear cross entropy
 /// reads clamped into its axis first.
-pub(crate) fn clamp_indices(graph: &Graph) -> Graph {
+fn clamp_indices(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {

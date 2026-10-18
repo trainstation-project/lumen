@@ -43,7 +43,7 @@ struct Group {
 
 /// `graph` with each gated pair's (or group's) backward's dots merged
 /// ([`Group`]).
-pub(crate) fn gated_backward(graph: &Graph) -> Graph {
+fn gated_backward(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
     let mut producer: Vec<Option<usize>> = vec![None; n];

@@ -69,7 +69,7 @@ struct Group {
 /// fused horizontally: each group one [`Primitive::Fusion`], its kernel
 /// named by `kernel` (given its body and which of its inputs it takes by
 /// value: `scalars`).
-pub(crate) fn fuse(
+pub(super) fn fuse(
     graph: &Graph,
     scalars: &[Var],
     mut kernel: impl FnMut(&Graph, &[bool]) -> String,

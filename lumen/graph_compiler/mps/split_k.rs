@@ -38,7 +38,7 @@ const MIN_K: usize = 2048;
 /// `graph` with each dot launching few threadgroups and of a long
 /// contraction split along it, its chunks added atomically if `atomic` and
 /// its partials would cost more than its operands.
-pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
+pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
         nodes
@@ -155,7 +155,7 @@ pub(crate) fn split_k(graph: &Graph, atomic: bool) -> Graph {
 
 /// The dot of a fusion's `body` if it is a split dot whose chunks are added
 /// atomically (see [`split_k`]): the dot, then the sum over its chunks.
-pub(crate) fn atomic_dot(body: &Graph) -> Option<&Node> {
+pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
     match body.nodes() {
         [dot, sum] => {
             let split = matches!(dot.primitive, Primitive::DotGeneral { .. })
@@ -186,7 +186,7 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
 
 /// [`split_k`] as a pass: its chunks added atomically unless
 /// `deterministic`.
-pub(crate) struct SplitK;
+pub(super) struct SplitK;
 
 impl<M: Module> CompilerPass<M> for SplitK {
     fn name(&self) -> &'static str {

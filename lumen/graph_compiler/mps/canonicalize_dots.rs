@@ -85,7 +85,7 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
 }
 
 /// [`canonicalize_dots`] as a pass.
-pub(crate) struct CanonicalizeDots;
+pub(super) struct CanonicalizeDots;
 
 impl<M: Module> CompilerPass<M> for CanonicalizeDots {
     fn name(&self) -> &'static str {

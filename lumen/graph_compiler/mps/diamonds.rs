@@ -72,7 +72,7 @@ const MAX_COLUMNS: usize = 16;
 /// (`[groups, rows / groups, n]` over its middle), which the kernel
 /// accumulates as it goes (a normalization's weight's gradient).
 #[derive(Debug, Clone)]
-pub(crate) struct Row {
+pub(super) struct Row {
     pub root: usize,
     pub reductions: Vec<usize>,
     pub inner: Vec<usize>,
@@ -81,7 +81,7 @@ pub(crate) struct Row {
 }
 
 /// The chains of diamonds in `graph`, each a [`Row`].
-pub(crate) fn diamonds(graph: &Graph) -> Vec<Row> {
+pub(super) fn diamonds(graph: &Graph) -> Vec<Row> {
     let finder = Finder::new(graph);
     let mut rows: Vec<Row> = Vec::new();
     for i in 0..graph.nodes().len() {
@@ -513,7 +513,7 @@ fn row_length(finder: &Finder, root: usize) -> Option<usize> {
 /// fusion computes or reads (a normalization's weight's gradient, `Σ g·y`,
 /// its `dx`'s `g`), never its root, nor one depending on it, and on which
 /// nothing the row fusion computes depends.
-pub(crate) fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
+fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
     let finder = Finder::new(graph);
     let nodes = graph.nodes();
     let mut row_of = vec![None; nodes.len()];
@@ -953,7 +953,7 @@ impl<'a> Finder<'a> {
 /// Normalization diamonds: each chain one row, its reductions inside, and
 /// the sums over rows they compute as they go ([`partials`]), for the loop
 /// fusion after it.
-pub(crate) struct Diamonds;
+pub(super) struct Diamonds;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Diamonds {
     fn name(&self) -> &'static str {

@@ -104,7 +104,7 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
 /// (its `in_place`: its operands' kernels write them there) is left as it
 /// is, no kernel's. `config` says which of the
 /// fusions below to make (`reduction_epilogues`, `multi_output_fusion`).
-pub(crate) fn fuse(
+pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
@@ -935,7 +935,7 @@ fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, 
 /// loop fusions, one kernel each group ([`horizontal::fuse`]), again while
 /// a runtime scalar some step other than a fusion reads is dropped from
 /// those the kernels take by value (it is a buffer).
-pub(crate) struct LoopFusion;
+pub(super) struct LoopFusion;
 
 impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
     fn name(&self) -> &'static str {

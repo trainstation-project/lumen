@@ -84,7 +84,7 @@ const PRELUDE: &str = concat!(
 /// fusion kernels compiled.
 /// What the MPS passes rewrite: the graph, and what they found for the
 /// passes after them and the plan.
-pub(crate) struct MpsModule<'a> {
+struct MpsModule<'a> {
     graph: Graph,
     options: &'a Options,
     /// The parameter blocks dot merging added ([`merge_dots`]), after the
@@ -197,7 +197,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
 
 /// `graph` rewritten by the MPS passes (as `options.config` says) and
 /// planned, its fusion kernels compiled.
-pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let config = &options.config;
     let mut module = MpsModule {
         graph: graph.clone(),

@@ -4,8 +4,9 @@
 //! graph's primitives as they are.
 //!
 //! Each compiler is a [`pass`] pipeline (XLA's `HloPassPipeline`): every
-//! device first runs the passes that hold for any, [`cse`] (common
-//! subexpression elimination) and [`simplify`], then its own.
+//! device first runs the passes that hold for any, [`passes::cse`] (common
+//! subexpression elimination) and [`passes::simplify`], then its own; the
+//! other device-independent passes ([`passes`]) are in its pipeline too.
 //!
 //! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
 //!   kernels, planned with the kernels' scratch.

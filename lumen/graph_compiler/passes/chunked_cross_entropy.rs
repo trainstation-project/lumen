@@ -18,7 +18,7 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 /// logits of a chunk computed once, its gradient formed with its loss.
 /// Not where the gradient's `g` reads the losses (waiting for every
 /// chunk's, each chunk's logits would be kept until then).
-pub(crate) fn chunked_cross_entropy(graph: &Graph) -> Graph {
+fn chunked_cross_entropy(graph: &Graph) -> Graph {
     let (producer, readers) = uses(graph);
     for i in 0..graph.nodes().len() {
         if let Some(f) = matched(graph, &producer, &readers, i)
