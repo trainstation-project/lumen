@@ -1231,7 +1231,7 @@ fn row_kernel(
             return gemm_rows(real, by_value, dot, &source, rows, n);
         }
         Some((real, by_value, dot)) => {
-            gemm_tiles(real, by_value, dot, body, &reductions, &passes[0], rows, n)
+            gemm_tiles(real, by_value, dot, body, reductions, &passes[0], rows, n)
         }
         None => String::new(),
     };
