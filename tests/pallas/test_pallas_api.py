@@ -334,7 +334,8 @@ def test_pallas_error_for_ref_to_jax():
     y = rng.standard_normal((k, n), dtype=np.float32)
     with pytest.raises(
         Exception,
-        match=r"Attempting to pass a Ref.*float32\[8,32\].* to a primitive: dot_general -- did you forget to unpack"
+        # (JAX names its primitive, dot_general; lumen its function, matmul.)
+        match=r"Attempting to pass a Ref.*float32\[8,32\].* to a primitive: matmul -- did you forget to unpack"
         r" \(\[...\]\) the ref?",
     ):
         run(dot_general_kernel, x, y)

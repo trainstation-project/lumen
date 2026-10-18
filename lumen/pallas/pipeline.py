@@ -223,13 +223,13 @@ class _Buffered:
         self.ref, self.spec, self.label = ref, spec, label
         block = ref.shape if spec.block_shape is None else spec.block_shape
         self.sizes = [1 if d is None else getattr(d, "block_size", d) for d in block]
-        # Its index map's errors first (JAX's order): traced at the first step.
-        self.block((0,) * len(grid))
         if len(block) != len(ref.shape):
             raise ValueError(
                 f"Block shape for {label} (= {tuple(block)}) must have the same number of dimensions as the "
                 f"array shape {tuple(ref.shape)}."
             )
+        # Its index map's errors next (JAX's order): traced at the first step.
+        self.block((0,) * len(grid))
         for d in block:
             if isinstance(d, BoundedSlice):
                 raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
@@ -257,11 +257,16 @@ class _Buffered:
     def block(self, indices):
         if self.spec.index_map is None:
             return (0,) * len(self.sizes)
-        block = self.spec.index_map(*indices)
-        block = tuple(block) if isinstance(block, (tuple, list)) else (block,)
         from .call import where
 
         mapped = f"Index map function {where(self.spec.index_map)} for {self.label}"
+        # Arrays it closes over (JAX's trace would capture them as constants).
+        for cell in getattr(self.spec.index_map, "__closure__", None) or ():
+            value = cell.cell_contents
+            if isinstance(value, Tensor) or type(value).__module__ == "numpy" and hasattr(value, "shape"):
+                raise ValueError(f"{mapped} must not capture constants: {value!r}")
+        block = self.spec.index_map(*indices)
+        block = tuple(block) if isinstance(block, (tuple, list)) else (block,)
         if len(block) != len(self.sizes):
             raise ValueError(
                 f"{mapped} must return {len(self.sizes)} values to match the block shape {tuple(self.sizes)}. "
