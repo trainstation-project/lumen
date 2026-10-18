@@ -17,6 +17,7 @@ profiler modules build on top of.
 | `cuda.rs` | `Cuda` / `CUDA` — NVIDIA backend; queries `cudart` FFI when linked, otherwise reports zero devices. |
 | `mps.rs` | `Mps` / `MPS` — Apple Metal backend; queries the `lumen_mps_shim` FFI when linked. |
 | `meta.rs` | `Meta` / `META` — the placeholder/"no data" device, like `torch.device("meta")`. |
+| `tpu/` | `Tpu` / `TPU` — Google TPUs through libtpu's PJRT C API, loaded at run time; see [`tpu/README.md`](tpu/README.md). |
 | `python.rs` | Python bindings (`python` feature): the `lumen.device` class and `resolve_device`, registered into `lumen._C`. |
 | `__init__.py` | The `lumen.device` package: re-exports the class (`from lumen.device import device`); `lumen/__init__.py` rebinds `lumen.device` to it. |
 | `_C.pyi` | Type stub for what `python.rs` defines, re-exported by `lumen/_C.pyi`. |
@@ -76,6 +77,12 @@ and hashing/equality are the derived ones (the enum derives
 `Debug, Clone, Copy, PartialEq, Eq, Hash`).
 
 ## Backends
+
+### TPU
+`tpu/` (the `tpu` feature, Linux): libtpu is loaded at run time and one PJRT
+client created on first use; its addressable devices are `tpu:0..n`. Without
+the feature, libtpu or TPUs, it reports none, and `check()` says why. See
+[`tpu/README.md`](tpu/README.md).
 
 ### CPU
 Trivial: one device, index 0, always available. Any other index fails via the

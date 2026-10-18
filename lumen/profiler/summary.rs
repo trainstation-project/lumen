@@ -224,23 +224,25 @@ impl Profile {
             .collect()
     }
 
-    /// The device column name: `CUDA`, `MPS`, or `DEVICE` when both ran.
+    /// The device column name: `CUDA`, `MPS`, `TPU`, or `DEVICE` when
+    /// more than one ran.
     fn device_name(&self) -> &'static str {
-        let mut cuda = false;
-        let mut mps = false;
+        let (mut cuda, mut mps, mut tpu) = (false, false, false);
         for e in &self.events {
             if matches!(e.kind, EventKind::Gpu | EventKind::Memory) {
                 match e.device {
                     Device::Cuda(_) => cuda = true,
                     Device::Mps(_) => mps = true,
+                    Device::Tpu(_) => tpu = true,
                     Device::Cpu(_) | Device::Meta(_) => {}
                 }
             }
         }
-        match (cuda, mps) {
-            (true, true) => "DEVICE",
-            (false, true) => "MPS",
-            _ => "CUDA",
+        match (cuda, mps, tpu) {
+            (false, true, false) => "MPS",
+            (false, false, true) => "TPU",
+            (true, false, false) | (false, false, false) => "CUDA",
+            _ => "DEVICE",
         }
     }
 

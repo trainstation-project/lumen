@@ -18,21 +18,36 @@ ci: fmt-check clang-format-check clippy test miri
 # covers every machine. MPS needs nothing extra: Metal is a default feature,
 # compiled on macOS. CUDA is built where a GPU driver is visible (the crate
 # and wheel with the `cuda` feature, the wheel with the CuTe DSL extras),
-# so CPU-only machines skip the heavy extras.
+# so CPU-only machines skip the heavy extras. A TPU is built where its chips
+# are: a PCI device of Google's (vendor 0x1ae0) of the processing
+# accelerator class (0x12; Google's virtual NIC and disk share the vendor).
+# The crate and wheel get the `tpu` feature and the wheel the `tpu` extra
+# (libtpu), which the TPU tests load (TPU_ENV; a TPU_LIBRARY_PATH already
+# set wins).
 HAS_CUDA := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo yes)
-CARGO_TEST_FEATURES := $(if $(HAS_CUDA),--features cuda)
+HAS_TPU := $(shell for d in /sys/bus/pci/devices/*; do [ "$$(cat $$d/vendor 2>/dev/null)" = 0x1ae0 ] && case "$$(cat $$d/class)" in (0x12*) echo yes; break;; esac; done)
 comma := ,
-MATURIN_FEATURES := $(if $(HAS_CUDA),--features python$(comma)cuda --extras cuda)
+empty :=
+space := $(empty) $(empty)
+DEVICE_FEATURES := $(strip $(if $(HAS_CUDA),cuda) $(if $(HAS_TPU),tpu))
+CARGO_TEST_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),$(DEVICE_FEATURES)))
+MATURIN_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),python $(DEVICE_FEATURES)) --extras $(subst $(space),$(comma),$(DEVICE_FEATURES)))
+TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$(python -c 'import libtpu, os; print(os.path.join(os.path.dirname(libtpu.__file__), "libtpu.so"))')}")
 # The build Linux CI gets: the Metal backend is compiled only on macOS, so
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
 ## test: every test: the unit and doc tests, then the Python tests. CPU
-## tests always run; MPS and CUDA ones run where the device is available.
+## tests always run; MPS, CUDA and TPU ones run where the device is
+## available. The wheel is built first: it installs the device extras the
+## tests load (libtpu). On a TPU machine where lumen sees no TPU, it fails
+## rather than skip the TPU tests.
 test:
-	cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
+	maturin develop $(MATURIN_FEATURES)
+	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
+	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
 	cargo test --doc
-	maturin develop $(MATURIN_FEATURES) && python -m pytest tests -q -rs
+	$(TPU_ENV) python -m pytest tests -q -rs
 
 fmt-check:
 	cargo fmt --all -- --check

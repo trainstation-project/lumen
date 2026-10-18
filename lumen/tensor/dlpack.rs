@@ -222,6 +222,11 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
             "meta tensors have no data to export",
         ));
     }
+    if let Device::Tpu(_) = t.device() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "TPU tensors cannot be exported: DLPack has no TPU device",
+        ));
+    }
     let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
     unsafe {
         PyCapsule::new_with_pointer_and_destructor(
@@ -249,7 +254,9 @@ fn dl_device(device: Device) -> DLDevice {
         Device::Cpu(_) => (K_DL_CPU, 0),
         Device::Cuda(index) => (K_DL_CUDA, index as i32),
         Device::Mps(_) => (K_DL_METAL, 0),
-        Device::Meta(_) => unreachable!("meta tensors are not exported (to_capsule)"),
+        Device::Meta(_) | Device::Tpu(_) => {
+            unreachable!("meta and TPU tensors are not exported (to_capsule)")
+        }
     };
     DLDevice {
         device_type,

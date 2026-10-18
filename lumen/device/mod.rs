@@ -4,6 +4,7 @@ pub mod meta;
 pub mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+pub mod tpu;
 
 use std::fmt;
 
@@ -33,6 +34,7 @@ pub enum Device {
     Cpu(usize),
     Mps(usize),
     Cuda(usize),
+    Tpu(usize),
     Meta(usize),
 }
 
@@ -42,6 +44,7 @@ impl Device {
             "cpu" => Some(Device::Cpu(index)),
             "mps" => Some(Device::Mps(index)),
             "cuda" => Some(Device::Cuda(index)),
+            "tpu" => Some(Device::Tpu(index)),
             "meta" => Some(Device::Meta(index)),
             _ => None,
         }
@@ -52,15 +55,18 @@ impl Device {
             Device::Cpu(_) => cpu::CPU,
             Device::Mps(_) => mps::MPS,
             Device::Cuda(_) => cuda::CUDA,
+            Device::Tpu(_) => tpu::TPU,
             Device::Meta(_) => meta::META,
         }
     }
 
     pub fn index(self) -> usize {
         match self {
-            Device::Cpu(index) | Device::Mps(index) | Device::Cuda(index) | Device::Meta(index) => {
-                index
-            }
+            Device::Cpu(index)
+            | Device::Mps(index)
+            | Device::Cuda(index)
+            | Device::Tpu(index)
+            | Device::Meta(index) => index,
         }
     }
 

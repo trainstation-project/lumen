@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(lumen_cuda_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_mps_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_cupti_linked)");
+    println!("cargo:rustc-check-cfg=cfg(lumen_tpu_linked)");
 
     // Re-run only when the relevant configuration changes.
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -30,6 +31,26 @@ fn main() {
     if env::var_os("CARGO_FEATURE_MPS").is_some() {
         build_mps_shim();
     }
+
+    if env::var_os("CARGO_FEATURE_TPU").is_some() {
+        build_tpu_shim();
+    }
+}
+
+/// Compile the PJRT shim (Linux only, where libtpu runs): it loads libtpu
+/// at run time, so nothing links against it.
+fn build_tpu_shim() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=lumen/device/tpu/pjrt.c");
+    println!("cargo:rerun-if-changed=lumen/device/tpu/pjrt_c_api.h");
+    cc::Build::new()
+        .file("lumen/device/tpu/pjrt.c")
+        .flag("-std=c11")
+        .compile("lumen_tpu_shim");
+    println!("cargo:rustc-link-lib=dl");
+    println!("cargo:rustc-cfg=lumen_tpu_linked");
 }
 
 fn detect_cuda() {

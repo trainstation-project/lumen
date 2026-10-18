@@ -424,3 +424,130 @@ mod mps {
         assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
     }
 }
+
+mod tpu {
+    use crate::Device;
+    use crate::allocator::allocator_for;
+    use crate::device::DeviceBackend;
+
+    #[test]
+    fn availability_matches_the_device_count() {
+        let tpu: &dyn DeviceBackend = crate::device::tpu::TPU;
+        assert_eq!(tpu.is_available(), tpu.device_count() > 0);
+        let missing = allocator_for(Device::Tpu(tpu.device_count())).err();
+        assert!(missing.is_some_and(|e| e.starts_with("TPU device")));
+    }
+
+    #[cfg(lumen_tpu_linked)]
+    mod device {
+        use std::ptr::NonNull;
+
+        use crate::allocator::tpu::copy_to_host;
+        use crate::allocator::{ALIGNMENT, TpuAllocator, allocator_for};
+        use crate::device::tpu::{TPU, memory};
+        use crate::{Allocator, DType, Device, Storage, Tensor, TensorOptions};
+
+        /// Held by each test: they measure the devices' memory, which the
+        /// others would change.
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        macro_rules! require_tpu {
+            () => {
+                let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+                if !TPU.is_available() {
+                    eprintln!("no TPU device, skipping");
+                    return;
+                }
+            };
+        }
+
+        /// The bytes at `ptr` (of device 0's shared allocator), read back.
+        fn read(ptr: NonNull<u8>, nbytes: usize) -> Vec<u8> {
+            let mut bytes = vec![0; nbytes];
+            copy_to_host(0, ptr, &mut bytes).unwrap();
+            bytes
+        }
+
+        #[test]
+        fn reports_tpu_devices() {
+            require_tpu!();
+            let last = TPU.device_count() - 1;
+            assert_eq!(
+                Storage::new(8, Device::Tpu(last)).device(),
+                Device::Tpu(last)
+            );
+            assert_eq!(Device::of_type("tpu", 1), Some(Device::Tpu(1)));
+            assert_eq!(Device::Tpu(1).to_string(), "tpu:1");
+        }
+
+        #[test]
+        fn the_allocator_reserves_device_memory_and_rewinds() {
+            require_tpu!();
+            let (before, limit) = memory(0).unwrap();
+            let capacity = 64 << 20;
+            assert!(limit > capacity);
+            let allocator = TpuAllocator::new(0, capacity);
+            let a = allocator.allocate(1000);
+            let b = allocator.allocate(1000);
+            // Offsets from the region's base, aligned; the region in the
+            // device's memory once reserved.
+            assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
+            assert!(memory(0).unwrap().0 >= before + capacity);
+            unsafe {
+                allocator.deallocate(b, 1000);
+                allocator.deallocate(a, 1000);
+            }
+            assert_eq!(allocator.allocate(ALIGNMENT), a);
+            drop(allocator);
+            assert!(memory(0).unwrap().0 < before + capacity);
+        }
+
+        #[test]
+        fn allocations_read_back_at_their_offsets() {
+            require_tpu!();
+            let allocator = allocator_for(Device::Tpu(0)).unwrap();
+            let a = allocator.allocate(4096);
+            let b = allocator.allocate(300);
+            // Each read, aligned or not (staged for the TPU's DMA), the
+            // same bytes of the region: those at its offset.
+            let whole = read(a, 4096);
+            assert_eq!(read(a, 4096), whole);
+            let inside = NonNull::new(a.as_ptr().wrapping_add(100)).unwrap();
+            assert_eq!(read(inside, 200), whole[100..300]);
+            assert_eq!(read(b, 300).len(), 300);
+            unsafe {
+                allocator.deallocate(b, 300);
+                allocator.deallocate(a, 4096);
+            }
+        }
+
+        #[test]
+        fn reads_past_the_region_fail() {
+            require_tpu!();
+            let allocator = allocator_for(Device::Tpu(0)).unwrap();
+            let a = allocator.allocate(256);
+            let past = NonNull::new(a.as_ptr().wrapping_add(4 << 30)).unwrap();
+            assert!(copy_to_host(0, past, &mut [0; 16]).is_err());
+            unsafe { allocator.deallocate(a, 256) };
+        }
+
+        #[test]
+        fn a_tpu_tensor_copies_to_the_host() {
+            require_tpu!();
+            let options = TensorOptions::new()
+                .dtype(DType::F32)
+                .device(Device::Tpu(0));
+            // SAFETY: only its bytes, whatever they are, are compared.
+            let t = unsafe { Tensor::empty(&[64, 3], options) };
+            let host = t.to(Device::Cpu(0));
+            assert_eq!(host.shape(), &[64, 3]);
+            let ptr = NonNull::new(t.data_ptr()).unwrap();
+            let bytes: Vec<u8> = host
+                .to_vec::<f32>()
+                .iter()
+                .flat_map(|x| x.to_ne_bytes())
+                .collect();
+            assert_eq!(bytes, read(ptr, 64 * 3 * 4));
+        }
+    }
+}

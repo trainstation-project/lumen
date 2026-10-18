@@ -3,6 +3,8 @@ mod cpu;
 mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
+#[cfg(lumen_tpu_linked)]
+mod tpu;
 
 use crate::Tensor;
 use crate::device::Device;
@@ -28,6 +30,8 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Cuda => Some(cuda::copy_h2d),
         #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
+        // Not yet: a TPU's memory is written only by its programs.
+        DispatchKey::Tpu => None,
         // Meta tensors have no data to copy (`Tensor::copy_to`).
         DispatchKey::Meta => None,
     }
@@ -45,6 +49,10 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Cuda => Some(cuda::copy_d2h),
         #[cfg(not(lumen_cuda_linked))]
         DispatchKey::Cuda => None,
+        #[cfg(lumen_tpu_linked)]
+        DispatchKey::Tpu => Some(tpu::copy_d2h),
+        #[cfg(not(lumen_tpu_linked))]
+        DispatchKey::Tpu => None,
         DispatchKey::Meta => None,
     }
 }
