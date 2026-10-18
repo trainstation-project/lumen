@@ -88,7 +88,7 @@ fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     (1..=cap / unit)
         .rev()
         .map(|i| i * unit)
-        .find(|b| n % b == 0)
+        .find(|&b| n.is_multiple_of(b))
 }
 
 /// Elements of `dtype` in a 32-bit word: 1 for float32, 2 for bfloat16.
