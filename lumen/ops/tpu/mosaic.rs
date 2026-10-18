@@ -405,7 +405,8 @@ impl Kernel {
         body(self);
         self.op("scf.yield", &[], "", None);
         self.depth -= 1;
-        let _ = writeln!(self.body, "{pad}}}) : (i1) -> ()");
+        // No else: its region empty.
+        let _ = writeln!(self.body, "{pad}}}, {{\n{pad}}}) : (i1) -> ()");
     }
 
     /// The module: the kernel, named `name`.
