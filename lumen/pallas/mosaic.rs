@@ -718,14 +718,26 @@ impl Emitter<'_> {
                             .into(),
                     );
                 }
-                let wide = TensorType::new(DType::I32, &a.1.shape);
+                // Mosaic's indices are as wide as the operand's elements.
+                let bits = a.1.dtype.bits();
+                let index = match bits {
+                    8 => DType::I8,
+                    16 => DType::I16,
+                    _ => DType::I32,
+                };
+                let wide = TensorType::new(index, &a.1.shape);
                 let indices = match args[1].1.dtype.bits() {
-                    32 => args[1].clone(),
-                    b if b < 32 => {
+                    b if b == bits => args[1].clone(),
+                    b if b < bits => {
                         let ext = if unsigned(args[1].1.dtype) { "arith.extui" } else { "arith.extsi" };
                         (self.unary(ext, &[&args[1]], "", &wide), wide)
                     }
-                    _ => return Err("take_along_axis's indices in TPU kernels are 32-bit or narrower".into()),
+                    _ => {
+                        return Err(format!(
+                            "take_along_axis of {} in TPU kernels: indices of its width or narrower, got {}",
+                            a.1.dtype, args[1].1.dtype
+                        ));
+                    }
                 };
                 let attrs = format!("dimensions = array<i32: {axis}>");
                 self.unary("tpu.dynamic_gather", &[a, &indices], &attrs, out)
