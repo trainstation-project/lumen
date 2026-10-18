@@ -8,10 +8,9 @@ in a TPU's tiles: the lhs as ``[batch * lead, m, k]``, the rhs as
 ``[batch * lead, m, n]``. One pipeline (``emit_pipeline``, its block copies
 double-buffered against compute) runs over a grid of
 ``(batch * lead, m/bm, n/bn, k/bk)``: each step multiplies an lhs and a rhs
-block on the matrix unit: the first k step's product is a float32
-accumulator (VMEM), the next ones add to it, and the last adds its own as
-it writes the output block, through ``epilogue`` if any, in the output's
-dtype (one k step: no accumulator).
+block on the matrix unit into a float32 accumulator (VMEM), and the last k
+step writes the output block, through ``epilogue`` if any, in the output's
+dtype (one k step: the product itself, no accumulator).
 """
 
 from lumen import pallas as pl
@@ -39,7 +38,7 @@ def program(spec, epilogue=None):
             return b // lead
         return prims.div(b, prims.full((), lead, "int32"))
 
-    def kernel(rows, memory, result, acc):
+    def kernel(rows, memory, result, *scratch):
         x = pallas.view(memory, rows[0], (batch * lead, m, k), dtype)
         y = pallas.view(memory, rows[1], (batch, n, k) if t else (batch, k, n), dtype)
         out = pallas.view(result, rows[2], (batch * lead, m, n), out_dtype)
@@ -56,54 +55,26 @@ def program(spec, epilogue=None):
             ob[...] = v.to(out_dtype)
 
         def body(xb, yb, ob):
-            # Each step's product where it is added, so the matrix unit
-            # accumulates it (a product of its own would be a block of VMEM).
-            def product():
-                return pl.dot(xb[...], yb[...], trans_b=t)
-
+            # One product a step: the matrix unit's code is unrolled over
+            # the block, so a second copy of it (a branch's) costs dearly.
             if kb == 1:
                 # One block of k: no accumulator.
-                finish(product(), ob)
+                finish(pl.dot(xb[...], yb[...], trans_b=t), ob)
                 return
-            step = pl.program_id(3)
-            import os  # TUNING (temporary)
+            step, acc = pl.program_id(3), scratch[0]
 
-            variant = int(os.environ.get("LUMEN_TPU_DOT_VARIANT", "2"))
-            if variant in (0, 1):
-
-                @pl.when(step == 0)
-                def _():
-                    if variant == 0:
-                        acc[...] = 0.0
-                        acc[...] += product()
-                    else:
-                        acc[...] = product()
-
-                @pl.when(step > 0)
-                def _():
-                    acc[...] += product()
-
-                @pl.when(step == kb - 1)
-                def _():
-                    finish(acc[...], ob)
-
-                return
-
-            # The first product the accumulator, the last added to it as
-            # the output is written (neither zeroed nor stored first).
             @pl.when(step == 0)
             def _():
-                acc[...] = product()
+                acc[...] = 0.0
 
-            @pl.when((step > 0) & (step < kb - 1))
-            def _():
-                acc[...] += product()
+            acc[...] += pl.dot(xb[...], yb[...], trans_b=t)
 
             @pl.when(step == kb - 1)
             def _():
-                finish(acc[...] + product(), ob)
+                finish(acc[...], ob)
 
         grid = (batch * lead, mb, nb, kb)
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec], out_specs=[o_spec])(x, y, out)
 
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")])
+    # The accumulator, for more than one block of k.
+    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if kb > 1 else [])
