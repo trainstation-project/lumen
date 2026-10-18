@@ -754,6 +754,11 @@ impl Emitter<'_> {
                 output_dtype,
             } => {
                 let b = &args[1];
+                // libtpu 0.0.48's Mosaic aborts the process on these (as
+                // under JAX): an error, then.
+                if lhs_contracting.len() > 1 {
+                    return Err("a dot of more than one contracting dimension is not lowered".into());
+                }
                 // Mosaic's dimension numbers: the operands' contracting and
                 // free dimensions, the result's dimensions as (operand,
                 // dimension) pairs (the batch, the lhs's free, the rhs's
