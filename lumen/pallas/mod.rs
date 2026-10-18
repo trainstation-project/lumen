@@ -98,8 +98,20 @@ pub enum Op {
     DmaStart,
     /// Waits for the copy of `(src, dst, sem)`.
     DmaWait,
-    /// Runs its block if its i1 operand.
-    If(Block),
+    /// Runs its block if its i1 operand, else `otherwise` (none: nothing):
+    /// its values the results of the block that ran (of one type).
+    If {
+        then: Block,
+        otherwise: Option<Block>,
+    },
+    /// While `before` (of the carried values, its arguments) gives a true
+    /// i1 (its first result; the others are passed on), runs `after` on
+    /// them, its results the next carried values; its operands the first,
+    /// its values the last (`scf.while`).
+    While {
+        before: Block,
+        after: Block,
+    },
     /// Runs its block for `i` in `lo..hi` (i32 operands), carrying values
     /// (the operands after them): the block's arguments are `i` and the
     /// carried values, its results the next ones, the node's the last.
@@ -125,8 +137,22 @@ pub struct Block {
 /// A block being written: the kernel's body, an `If`'s or a `For`'s.
 #[derive(Debug)]
 enum Open {
-    If { cond: Var, block: Block },
-    For { inputs: Vec<Var>, block: Block },
+    If {
+        cond: Var,
+        block: Block,
+        /// The `then` block, once its `else` is being written.
+        then: Option<Block>,
+    },
+    For {
+        inputs: Vec<Var>,
+        block: Block,
+    },
+    While {
+        inputs: Vec<Var>,
+        block: Block,
+        /// The condition's block, once the body is being written.
+        before: Option<Block>,
+    },
 }
 
 /// A kernel: its parameters, scratch and body.
@@ -208,7 +234,9 @@ impl Kernel {
 
     fn block(&mut self) -> &mut Block {
         match self.open.last_mut() {
-            Some(Open::If { block, .. } | Open::For { block, .. }) => block,
+            Some(Open::If { block, .. } | Open::For { block, .. } | Open::While { block, .. }) => {
+                block
+            }
             None => &mut self.body,
         }
     }
@@ -503,21 +531,129 @@ impl Kernel {
         self.open.push(Open::If {
             cond,
             block: Block::default(),
+            then: None,
         });
         Ok(())
     }
 
-    pub fn end_if(&mut self) -> Result<(), String> {
-        match self.open.pop() {
-            Some(Open::If { cond, block }) => {
-                self.push(Op::If(block), &[cond], vec![]);
+    /// Ends the open `If`'s `then` block, its values `results`, and starts
+    /// its `else`.
+    pub fn begin_else(&mut self, results: &[Var]) -> Result<(), String> {
+        self.check(results)?;
+        match self.open.last_mut() {
+            Some(Open::If { block, then, .. }) if then.is_none() => {
+                let mut done = std::mem::take(block);
+                done.results = results.to_vec();
+                *then = Some(done);
                 Ok(())
             }
-            other => {
-                self.open.extend(other);
-                Err("no `If` is open".into())
-            }
+            _ => Err("no `If` without an else is open".into()),
         }
+    }
+
+    /// Ends the open `If`: its values, `results` (its else's, which must be
+    /// of its then's types) or none.
+    pub fn end_if(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
+        self.check(results)?;
+        let Some(Open::If { cond, block, then }) = self.open.pop() else {
+            return Err("no `If` is open".into());
+        };
+        let (then, otherwise) = match then {
+            Some(then) => {
+                let mut otherwise = block;
+                otherwise.results = results.to_vec();
+                (then, Some(otherwise))
+            }
+            None if results.is_empty() => (block, None),
+            None => return Err("an `If` without an else has no values".into()),
+        };
+        let types: Vec<Type> = then
+            .results
+            .iter()
+            .map(|&v| self.types[v].clone())
+            .collect();
+        let others: Vec<Type> = otherwise
+            .iter()
+            .flat_map(|b| &b.results)
+            .map(|&v| self.types[v].clone())
+            .collect();
+        if otherwise.is_some() && types != others {
+            return Err(format!("an `If`'s branches give {types:?} and {others:?}"));
+        }
+        let op = Op::If { then, otherwise };
+        Ok(self.push(op, &[cond], types))
+    }
+
+    /// Starts a `While` carrying `carried`: its condition's block, of the
+    /// carried values (as it sees them: returned).
+    pub fn begin_while(&mut self, carried: &[Var]) -> Result<Vec<Var>, String> {
+        self.check(carried)?;
+        let types = carried
+            .iter()
+            .map(|&v| self.value(v).cloned().map(Type::Value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let args: Vec<Var> = types.into_iter().map(|t| self.var(t)).collect();
+        let block = Block {
+            args: args.clone(),
+            ..Block::default()
+        };
+        self.open.push(Open::While {
+            inputs: carried.to_vec(),
+            block,
+            before: None,
+        });
+        Ok(args)
+    }
+
+    /// Ends the open `While`'s condition, `cond` (a bool scalar), and
+    /// starts its body: of the carried values (returned).
+    pub fn begin_while_body(&mut self, cond: Var) -> Result<Vec<Var>, String> {
+        self.check(&[cond])?;
+        if *self.value(cond)? != TensorType::new(DType::Bool, &[]) {
+            return Err("a loop's condition is a bool scalar".into());
+        }
+        let Some(Open::While { block, before, .. }) = self.open.last() else {
+            return Err("no `While` is open".into());
+        };
+        if before.is_some() {
+            return Err("the `While`'s body has begun".into());
+        }
+        let types: Vec<Type> = block.args.iter().map(|&v| self.types[v].clone()).collect();
+        let args: Vec<Var> = types.into_iter().map(|t| self.var(t)).collect();
+        let Some(Open::While { block, before, .. }) = self.open.last_mut() else {
+            unreachable!("checked above")
+        };
+        let mut done = std::mem::take(block);
+        done.results = std::iter::once(cond)
+            .chain(done.args.iter().copied())
+            .collect();
+        *before = Some(done);
+        block.args = args.clone();
+        Ok(args)
+    }
+
+    /// Ends the open `While`, `results` its next carried values: the last.
+    pub fn end_while(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
+        self.check(results)?;
+        let Some(Open::While {
+            inputs,
+            mut block,
+            before: Some(before),
+        }) = self.open.pop()
+        else {
+            return Err("no `While` with a body is open".into());
+        };
+        let types: Vec<Type> = block.args.iter().map(|&v| self.types[v].clone()).collect();
+        let given: Vec<Type> = results.iter().map(|&v| self.types[v].clone()).collect();
+        if given != types {
+            return Err(format!("a loop carries {types:?}, its body gave {given:?}"));
+        }
+        block.results = results.to_vec();
+        let op = Op::While {
+            before,
+            after: block,
+        };
+        Ok(self.push(op, &inputs, types))
     }
 
     /// Starts a `For` over i32 scalars `lo..hi` carrying `carried`: its

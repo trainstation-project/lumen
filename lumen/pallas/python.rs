@@ -170,8 +170,25 @@ impl PyKernel {
         self.inner.begin_if(cond).map_err(err)
     }
 
-    fn end_if(&mut self) -> PyResult<()> {
-        self.inner.end_if().map_err(err)
+    #[pyo3(signature = (results = Vec::new()))]
+    fn end_if(&mut self, results: Vec<Var>) -> PyResult<Vec<Var>> {
+        self.inner.end_if(&results).map_err(err)
+    }
+
+    fn begin_else(&mut self, results: Vec<Var>) -> PyResult<()> {
+        self.inner.begin_else(&results).map_err(err)
+    }
+
+    fn begin_while(&mut self, carried: Vec<Var>) -> PyResult<Vec<Var>> {
+        self.inner.begin_while(&carried).map_err(err)
+    }
+
+    fn begin_while_body(&mut self, cond: Var) -> PyResult<Vec<Var>> {
+        self.inner.begin_while_body(cond).map_err(err)
+    }
+
+    fn end_while(&mut self, results: Vec<Var>) -> PyResult<Vec<Var>> {
+        self.inner.end_while(&results).map_err(err)
     }
 
     fn begin_for(&mut self, lo: Var, hi: Var, carried: Vec<Var>) -> PyResult<(Var, Vec<Var>)> {

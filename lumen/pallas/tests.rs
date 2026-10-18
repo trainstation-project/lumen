@@ -74,7 +74,7 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
     };
     let zeros = k.apply(zeros, &[]).unwrap();
     k.store(acc, zeros, &[]).unwrap();
-    k.end_if().unwrap();
+    k.end_if(&[]).unwrap();
     let (xv, yv, av) = (
         k.load(x, &[]).unwrap(),
         k.load(y, &[]).unwrap(),
@@ -207,6 +207,6 @@ fn kernels_refuse_what_tpus_cannot_do() {
     let t = k.apply(t, &[]).unwrap();
     k.begin_if(t).unwrap();
     assert!(lower(&k, "open").is_err());
-    k.end_if().unwrap();
+    k.end_if(&[]).unwrap();
     assert!(lower(&k, "closed").is_ok());
 }

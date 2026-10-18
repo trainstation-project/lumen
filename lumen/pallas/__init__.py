@@ -44,12 +44,25 @@ __all__ = [
     "async_copy",
     "bitcast",
     "bitwise_and",
+    "bitwise_not",
     "bitwise_or",
+    "bitwise_xor",
+    "cdiv",
+    "cond",
+    "dot_general",
+    "dslice",
+    "erf_inv",
+    "integer_pow",
+    "reduce_precision",
+    "scan",
+    "select_n",
+    "shift_right_arithmetic",
     "dot",
     "ds",
     "emit_pipeline",
     "fori_loop",
     "kernel",
+    "loop",
     "make_async_copy",
     "multiple_of",
     "num_programs",
@@ -57,7 +70,9 @@ __all__ = [
     "program_id",
     "shift_left",
     "shift_right_logical",
+    "switch",
     "when",
+    "while_loop",
 ]
 
 
@@ -85,10 +100,23 @@ def _like(x, v):
 
 class ds:
     """A window of a ref's dimension: ``size`` elements from ``start`` (an
-    int, or a traced int32 scalar) (``pl.ds``)."""
+    int, or a traced int32 scalar) (``pl.ds``, ``pl.dslice``); a ``stride``
+    other than 1 is not supported yet."""
 
-    def __init__(self, start, size):
+    def __init__(self, start, size=None, stride=None):
+        if size is None:
+            start, size = 0, start
+        if stride not in (None, 1):
+            raise NotImplementedError("strided windows of a ref are not supported yet")
         self.start, self.size = start, size
+
+
+dslice = ds
+
+
+def cdiv(a, b):
+    """``a / b`` rounded up (ints, or traced int32 scalars)."""
+    return (a + b - 1) // b
 
 
 class VMEM:
@@ -284,6 +312,8 @@ def _flatten(tree):
             return type(tree)(out)
 
         return leaves, rebuild
+    if tree is None:
+        return [], lambda values: None
     return [_i32(tree) if isinstance(tree, int) else tree], lambda values: values[0]
 
 
@@ -297,6 +327,84 @@ def fori_loop(lower, upper, body, init_val):
     out, _ = _flatten(body(TracedTensor(k, i), carried))
     results = k.end_for([v.var for v in out])
     return rebuild([TracedTensor(k, r) for r in results])
+
+
+def cond(pred, true_fun, false_fun, *operands):
+    """``true_fun(*operands)`` if ``pred`` (a bool, or a traced bool scalar),
+    else ``false_fun(*operands)``, their values of one structure and types
+    (``lax.cond``)."""
+    if not isinstance(pred, TracedTensor):
+        return (true_fun if pred else false_fun)(*operands)
+    k = _kernel()
+    k.begin_if(pred.var)
+    then, rebuild = _flatten(true_fun(*operands))
+    k.begin_else([v.var for v in then])
+    otherwise, _ = _flatten(false_fun(*operands))
+    results = k.end_if([v.var for v in otherwise])
+    return rebuild([TracedTensor(k, r) for r in results])
+
+
+def switch(index, branches, *operands):
+    """``branches[index](*operands)``, ``index`` (an int, or a traced int32
+    scalar) clamped to the branches (``lax.switch``)."""
+    branches = list(branches)
+    if not isinstance(index, TracedTensor):
+        return branches[min(max(int(index), 0), len(branches) - 1)](*operands)
+    if len(branches) == 1:
+        return branches[0](*operands)
+    rest = lambda *o: switch(index - 1, branches[1:], *o)  # noqa: E731
+    return cond(index <= 0, branches[0], rest, *operands)
+
+
+def while_loop(cond_fun, body_fun, init_val):
+    """``body_fun`` of the carried values (from ``init_val``) while
+    ``cond_fun`` of them (a traced bool scalar) holds (``lax.while_loop``)."""
+    k = _kernel()
+    leaves, rebuild = _flatten(init_val)
+    args = k.begin_while([v.var for v in leaves])
+    c = cond_fun(rebuild([TracedTensor(k, a) for a in args]))
+    args = k.begin_while_body(c.var)
+    out, _ = _flatten(body_fun(rebuild([TracedTensor(k, a) for a in args])))
+    results = k.end_while([v.var for v in out])
+    return rebuild([TracedTensor(k, r) for r in results])
+
+
+def scan(f, init, xs=None, length=None):
+    """``lax.scan`` as Pallas lowers it on a TPU: of a carry alone, ``f``
+    (``carry, None -> carry, ()``) run ``length`` times; the last carry and
+    ``()``."""
+    xs_leaves, rebuild = _flatten(xs)
+
+    def body(_, carry):
+        # Pallas checks the outputs first: an element of each of `xs`, then.
+        x = rebuild([prims.full(v.shape[1:], 0, v.dtype) for v in xs_leaves])
+        carry, ys = f(carry, x)
+        ys_leaves, _ = _flatten(ys)
+        if ys_leaves:
+            raise ValueError(f"Scan with {len(ys_leaves)} extensive output(s) is not supported")
+        if xs_leaves:
+            raise ValueError(f"Scan with {len(xs_leaves)} extensive argument(s) is not supported")
+        return carry
+
+    return fori_loop(0, length, body, init), ()
+
+
+def loop(lower, upper, *, step=1, init_carry=None, unroll=None):
+    """Runs the decorated ``body(i)`` (``body(i, carry)`` with
+    ``init_carry``, giving the next) for ``i`` from ``lower`` below
+    ``upper`` by ``step`` (``pl.loop``): the decorated name, the last carry."""
+    del unroll
+
+    def decorate(body):
+        trips = (upper - lower + (step - 1 if step > 0 else step + 1)) // step
+        if not isinstance(trips, TracedTensor):
+            trips = max(trips, 0)
+        if init_carry is None:
+            fori_loop(0, trips, lambda j, c: body(_i32(lower) + j * step) and None, None)
+            return None
+        return fori_loop(0, trips, lambda j, c: body(_i32(lower) + j * step, c), init_carry)
+
+    return decorate
 
 
 class _Copy:
@@ -349,6 +457,56 @@ def bitwise_and(x, y):
 
 def bitwise_or(x, y):
     return _bits("or", x, y)
+
+
+def bitwise_xor(x, y):
+    return prims.xor(x, _like(x, y))
+
+
+def bitwise_not(x):
+    return prims.not_(x)
+
+
+def shift_right_arithmetic(x, y):
+    return prims.shift_right_arithmetic(x, _like(x, y))
+
+
+def integer_pow(x, y):
+    """``x ** y``, ``y`` a Python int (``lax.integer_pow``)."""
+    return x**y
+
+
+def reduce_precision(x, exponent_bits, mantissa_bits):
+    return prims.reduce_precision(x, exponent_bits, mantissa_bits)
+
+
+def erf_inv(x):
+    return prims.erf_inv(x)
+
+
+def select_n(which, *cases):
+    """The case of index ``which`` (a bool: two cases; an int32), elementwise
+    (``lax.select_n``)."""
+    if not isinstance(which, TracedTensor):
+        return cases[int(which)]
+    if which.dtype == "bool":
+        return prims.select(which, cases[1], cases[0])
+    out = cases[0]
+    for k, case in enumerate(cases[1:], 1):
+        out = prims.select(which == k, case, out)
+    return out
+
+
+def dot_general(x, y, dimension_numbers, preferred_element_type=None):
+    """``lax.dot_general``: ``dimension_numbers = ((lhs_contracting,
+    rhs_contracting), (lhs_batch, rhs_batch))``, accumulated in float32
+    (floats) or int32 (narrower integers if asked), returned in
+    ``preferred_element_type`` (the operands' dtype by default)."""
+    out = preferred_element_type or x.dtype
+    accum = tracer._accum_dtype(x.dtype)
+    if out == "int32" and x.dtype in ("int8", "int16", "uint8", "uint16"):
+        accum = "int32"
+    return prims.dot_general(x, y, dimension_numbers, accum, out)
 
 
 def multiple_of(x, m):

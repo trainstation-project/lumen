@@ -934,12 +934,14 @@ fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> 
 }
 
 fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
-    let widened =
-        x.dtype.is_float() && x.dtype.size_of() < DType::F32.size_of() && accum == DType::F32;
+    let narrower = x.dtype.size_of() < 4;
+    let widened = narrower
+        && ((x.dtype.is_float() && accum == DType::F32)
+            || (x.dtype.is_int() && accum == DType::I32));
     match accum == x.dtype || widened {
         true => Ok(()),
         false => Err(format!(
-            "accumulates in the operand's dtype, or float32 for narrower floats: got accum_dtype {accum} for {x}"
+            "accumulates in the operand's dtype, or float32 (int32) for narrower floats (integers): got accum_dtype {accum} for {x}"
         )),
     }
 }

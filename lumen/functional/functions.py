@@ -190,6 +190,12 @@ def where(condition, input, other):
     condition, input, other = _lift(condition), _lift(input), _lift(other)
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
+    if not isinstance(input, TracedTensor) and not isinstance(other, TracedTensor):
+        # Two Python scalars: of their kind's default dtype (torch's).
+        kind = "bool" if isinstance(input, bool) and isinstance(other, bool) else None
+        ints = all(isinstance(v, int) for v in (input, other))
+        dtype = kind or ("int64" if ints else "float32")
+        input = prims.full(condition.shape, input, dtype)
     dtype = _common_dtype("where", (input, other))
     input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
     shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
@@ -443,8 +449,22 @@ cosh = _float_fn(prims.cosh, "cosh")
 asinh = _float_fn(prims.asinh, "asinh")
 acosh = _float_fn(prims.acosh, "acosh")
 atanh = _float_fn(prims.atanh, "atanh")
-floor = _float_fn(prims.floor, "floor")
-ceil = _float_fn(prims.ceil, "ceil")
+
+
+def _integral_fn(prim, name):
+    """``prim`` of a float; an integer as it is (already integral)."""
+
+    def f(input):
+        input = _lift(input)
+        return input if not _is_float(input.dtype) else prim(input)
+
+    f.__name__ = name
+    f.__doc__ = f"Elementwise ``{name}``: an integer tensor as it is."
+    return f
+
+
+floor = _integral_fn(prims.floor, "floor")
+ceil = _integral_fn(prims.ceil, "ceil")
 # To the nearest integer, ties to even (``torch.round``, ``numpy.rint``).
 round = _float_fn(prims.round, "round")
 rint = _float_fn(prims.round, "rint")
