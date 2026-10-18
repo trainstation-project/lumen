@@ -52,7 +52,8 @@ def program(spec, epilogue=None):
         return pltpu.bitcast(w << 16, jnp.float32).astype(jnp.bfloat16)
 
     def high(w):
-        # Its high half, by shifts: a mask constant would be an int32's.
+        # Its high half, by shifts: a mask (0xFFFF0000) would overflow the
+        # int32 JAX takes a Python int for.
         return pltpu.bitcast((w >> 16) << 16, jnp.float32).astype(jnp.bfloat16)
 
     def rounded(v):

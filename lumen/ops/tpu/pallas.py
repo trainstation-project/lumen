@@ -25,18 +25,11 @@ import sys
 
 
 def jax():
-    """JAX, its platform the CPU unless something imported it before, its
-    Mosaic kernels serialized in its current version."""
+    """JAX, its platform the CPU unless something imported it before."""
     if "jax" not in sys.modules:
         os.environ.setdefault("JAX_PLATFORMS", "cpu")
     import jax
-    from jax._src import tpu_custom_call
 
-    # Without a TPU backend, JAX serializes Mosaic for older libtpus (its
-    # forward-compatible version), and that downgrade changes what some
-    # kernels compute (a bfloat16 dot's). The libtpu lumen loads is the one
-    # `jax[tpu]` pins (the `tpu` extra): it reads JAX's current version.
-    tpu_custom_call.get_ir_version = lambda ctx: None
     return jax
 
 
