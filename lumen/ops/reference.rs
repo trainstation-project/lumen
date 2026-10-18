@@ -508,6 +508,13 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                         _ => unreachable!("{} of integers", op.name()),
                     })
                     .collect()),
+                // A float's power of integers.
+                (Float(x), Int(y)) => Float(
+                    x.iter()
+                        .zip(y)
+                        .map(|(&a, &b)| round(a.powf(b as f64), dtype))
+                        .collect(),
+                ),
                 (Float(x), Float(y)) => Float(
                     x.iter()
                         .zip(y)

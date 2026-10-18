@@ -831,8 +831,9 @@ def _right_shift(x, y):
 
 
 def _power(x, y):
-    """``x ** y``: a float's power; an integer's to a non-negative Python int
-    exponent, by multiplications (``lax.integer_pow``)."""
+    """``x ** y``: a float's power (of floats, or integers: ``lax.pow``); an
+    integer's to a non-negative Python int exponent, by multiplications
+    (``lax.integer_pow``)."""
     if isinstance(y, int) and not isinstance(y, bool) and not _is_float(x.dtype) and y >= 0:
         result, base = prims.full(x.shape, 1, x.dtype), x
         while y:
@@ -840,6 +841,10 @@ def _power(x, y):
                 result = prims.mul(result, base)
             base, y = prims.mul(base, base), y >> 1
         return result
+    if isinstance(y, TracedTensor) and _is_float(x.dtype) and not _is_float(y.dtype) and y.dtype != "bool":
+        # A float's power of integers (``lax.pow``'s), broadcast.
+        shape = _broadcast_shapes(x.shape, y.shape)
+        return prims.pow(_broadcast_to(x, shape), _broadcast_to(y, shape))
     return _elementwise(prims.pow, x, y)
 
 

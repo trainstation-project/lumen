@@ -561,6 +561,10 @@ impl Primitive {
             Binary(op) => {
                 use BinaryOp::*;
                 let (x, y) = (args[0], args[1]);
+                // A float's power of integers (`lax.pow`'s): of its shape.
+                if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape {
+                    return Ok(x.clone());
+                }
                 if x != y {
                     return err(format!("operands must have the same type, got {x} and {y}"));
                 }

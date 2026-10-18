@@ -228,8 +228,8 @@ class _Buffered:
                 f"Block shape for {label} (= {tuple(block)}) must have the same number of dimensions as the "
                 f"array shape {tuple(ref.shape)}."
             )
-        # Its index map's errors next (JAX's order): traced at the first step.
-        self.block((0,) * len(grid))
+        # Its index map's errors next (JAX's order): traced, as JAX does.
+        self.block(tuple(prims.full((), 0, "int32") for _ in grid), traced=True)
         for d in block:
             if isinstance(d, BoundedSlice):
                 raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
@@ -254,18 +254,26 @@ class _Buffered:
         self.window = pl.scratch(pl.VMEM(slots, ref.dtype))
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
-    def block(self, indices):
+    def block(self, indices, traced=False):
         if self.spec.index_map is None:
             return (0,) * len(self.sizes)
         from .call import where
 
         mapped = f"Index map function {where(self.spec.index_map)} for {self.label}"
-        # Arrays it closes over (JAX's trace would capture them as constants).
-        for cell in getattr(self.spec.index_map, "__closure__", None) or ():
-            value = cell.cell_contents
-            if isinstance(value, Tensor) or type(value).__module__ == "numpy" and hasattr(value, "shape"):
-                raise ValueError(f"{mapped} must not capture constants: {value!r}")
-        block = self.spec.index_map(*indices)
+        try:
+            block = self.spec.index_map(*indices)
+        except TypeError:
+            # Of traced indices, an array it closes over is read at them: a
+            # constant JAX's trace would capture.
+            cells = getattr(self.spec.index_map, "__closure__", None) or ()
+            arrays = [
+                c.cell_contents
+                for c in cells
+                if isinstance(c.cell_contents, Tensor) or type(c.cell_contents).__module__ == "numpy"
+            ]
+            if traced and arrays:
+                raise ValueError(f"{mapped} must not capture constants: {arrays[0]!r}") from None
+            raise
         block = tuple(block) if isinstance(block, (tuple, list)) else (block,)
         if len(block) != len(self.sizes):
             raise ValueError(

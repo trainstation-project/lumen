@@ -1172,6 +1172,12 @@ impl Emitter<'_> {
     ) -> Result<String, String> {
         use crate::graph::BinaryOp as B;
         let (float, uns) = (a.1.dtype.is_float(), unsigned(a.1.dtype));
+        // A float's power of integers: of them as floats, as Pallas.
+        if matches!(op, B::Pow) && b.1.dtype.is_int() {
+            let to = if unsigned(b.1.dtype) { "arith.uitofp" } else { "arith.sitofp" };
+            let y = (self.unary(to, &[b], "", &a.1), a.1.clone());
+            return Ok(self.unary("math.powf", &[a, &y], FAST, out));
+        }
         let (name, attrs) = match op {
             B::Pow => ("math.powf", FAST),
             B::Rem if float => ("arith.remf", FAST),

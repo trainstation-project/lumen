@@ -193,7 +193,12 @@ def test_dot_general_with_1d_lhs(batch_size, transpose_rhs, dtype):
 @pytest.mark.parametrize("dtype, out_dtype", [("int32", "float32"), ("float32", "float32"), ("bfloat16", "bfloat16")])
 def test_true_divide(dtype, out_dtype):
     def kernel(x_ref, y_ref, o_ref):
-        o_ref[...] = x_ref[...] / y_ref[...]
+        # jnp.true_divide converts integers to float32 first; lumen asks
+        # for that conversion.
+        x, y = x_ref[...], y_ref[...]
+        if dtype == "int32":
+            x, y = x.to("float32"), y.to("float32")
+        o_ref[...] = x / y
 
     x = np.array([1, 3, -4, -6, 2, 5, 4, -7])
     y = np.array([3, 1, -4, -5, 2, -2, 2, 4])
