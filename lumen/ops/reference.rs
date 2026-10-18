@@ -1,6 +1,6 @@
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::tensor::dtype::{bf16, dispatch_dtype, f16};
+use crate::tensor::dtype::{dispatch_dtype, to_bf16, to_f16};
 use crate::tensor::for_each_index;
 use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
@@ -155,8 +155,8 @@ fn wrap(x: i128, dtype: DType) -> i128 {
 
 fn round(x: f64, dtype: DType) -> f64 {
     match dtype {
-        DType::F16 => crate::tensor::dtype::to_f16(x).to_f64(),
-        DType::BF16 => crate::tensor::dtype::to_bf16(x).to_f64(),
+        DType::F16 => to_f16(x).to_f64(),
+        DType::BF16 => to_bf16(x).to_f64(),
         DType::F32 => x as f32 as f64,
         DType::F64 => x,
         _ => unreachable!("{dtype} is not a float dtype"),
