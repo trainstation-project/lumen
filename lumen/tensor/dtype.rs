@@ -172,11 +172,39 @@ impl Element for bool {
     }
 }
 
+/// `x` rounded to float32 "to odd": the float32 itself if `x` is one, else
+/// whichever of its two float32 neighbours has an odd last bit. Rounding
+/// that to nearest in a narrower float (float16, bfloat16) is `x` rounded
+/// to it once (Boldo and Melquiond, "Emulation of FMA and correctly rounded
+/// sums: proved algorithms using rounding to odd"): `half`'s conversions
+/// from f64 drop the mantissa's last 32 bits first, or round twice, so a
+/// value just above a halfway point can round down.
+fn round_to_odd(x: f64) -> f32 {
+    let f = x as f32;
+    let bits = f.to_bits();
+    if !f.is_finite() || f64::from(f) == x || bits & 1 == 1 {
+        return f;
+    }
+    // Its neighbour towards `x`: away from zero if `x` is further out.
+    let outward = (f64::from(f) < x) != f.is_sign_negative();
+    f32::from_bits(if outward { bits + 1 } else { bits - 1 })
+}
+
+/// `x` rounded to nearest (ties to even) in float16.
+pub(crate) fn to_f16(x: f64) -> f16 {
+    f16::from_f32(round_to_odd(x))
+}
+
+/// `x` rounded to nearest (ties to even) in bfloat16.
+pub(crate) fn to_bf16(x: f64) -> bf16 {
+    bf16::from_f32(round_to_odd(x))
+}
+
 impl Element for f16 {
     const DTYPE: DType = DType::F16;
     const ZERO: Self = f16::ZERO;
     fn from_scalar(v: Scalar) -> Self {
-        f16::from_f64(v.to_f64())
+        to_f16(v.to_f64())
     }
     fn to_scalar(self) -> Scalar {
         Scalar::Float(self.to_f64())
@@ -187,7 +215,7 @@ impl Element for bf16 {
     const DTYPE: DType = DType::BF16;
     const ZERO: Self = bf16::ZERO;
     fn from_scalar(v: Scalar) -> Self {
-        bf16::from_f64(v.to_f64())
+        to_bf16(v.to_f64())
     }
     fn to_scalar(self) -> Scalar {
         Scalar::Float(self.to_f64())

@@ -800,3 +800,32 @@ mod to_dtype {
         }
     }
 }
+
+#[test]
+fn half_floats_round_to_nearest_once() {
+    use crate::tensor::dtype::{to_bf16, to_f16};
+    // Just above a halfway point (its sticky bit the float32's last): up.
+    let above = f64::from(f32::from_bits(0x3f80_8001));
+    assert_eq!(to_bf16(above).to_bits(), 0x3f81);
+    assert_eq!(to_bf16(-28.312_508_f32 as f64).to_f32(), -28.375);
+    // Halfway: to even, either way.
+    assert_eq!(
+        to_bf16(f64::from(f32::from_bits(0x3f80_8000))).to_bits(),
+        0x3f80
+    );
+    assert_eq!(
+        to_bf16(f64::from(f32::from_bits(0x3f81_8000))).to_bits(),
+        0x3f82
+    );
+    // float16: 1 + 2^-11 (halfway) + 2^-40 (beyond float32) is above it.
+    assert_eq!(
+        to_f16(1.0 + 2f64.powi(-11) + 2f64.powi(-40)).to_bits(),
+        0x3c01
+    );
+    assert_eq!(to_f16(1.0 + 2f64.powi(-11)).to_bits(), 0x3c00);
+    // Exact, signed zeros, the extremes.
+    assert_eq!(to_bf16(1.5).to_f32(), 1.5);
+    assert_eq!(to_bf16(-1e-300).to_bits(), 0x8000);
+    assert!(to_bf16(f64::INFINITY).is_infinite());
+    assert!(to_f16(f64::NAN).is_nan());
+}

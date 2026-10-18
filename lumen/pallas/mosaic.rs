@@ -85,8 +85,10 @@ fn literal(v: &Scalar, dtype: DType) -> String {
                 (true, _) => format!("{x:.17e}"),
                 (false, DType::F64) => format!("0x{:016X}", x.to_bits()),
                 (false, DType::F32) => format!("0x{:08X}", (x as f32).to_bits()),
-                (false, DType::BF16) => format!("0x{:04X}", half::bf16::from_f64(x).to_bits()),
-                (false, _) => format!("0x{:04X}", half::f16::from_f64(x).to_bits()),
+                (false, DType::BF16) => {
+                    format!("0x{:04X}", crate::tensor::dtype::to_bf16(x).to_bits())
+                }
+                (false, _) => format!("0x{:04X}", crate::tensor::dtype::to_f16(x).to_bits()),
             }
         }
         (false, _) if dtype == DType::Bool => (v.to_f64() != 0.0).to_string(),

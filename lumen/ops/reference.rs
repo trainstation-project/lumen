@@ -155,8 +155,8 @@ fn wrap(x: i128, dtype: DType) -> i128 {
 
 fn round(x: f64, dtype: DType) -> f64 {
     match dtype {
-        DType::F16 => f16::from_f64(x).to_f64(),
-        DType::BF16 => bf16::from_f64(x).to_f64(),
+        DType::F16 => crate::tensor::dtype::to_f16(x).to_f64(),
+        DType::BF16 => crate::tensor::dtype::to_bf16(x).to_f64(),
         DType::F32 => x as f32 as f64,
         DType::F64 => x,
         _ => unreachable!("{dtype} is not a float dtype"),

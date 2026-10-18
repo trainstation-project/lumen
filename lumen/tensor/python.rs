@@ -108,7 +108,10 @@ fn tensor_from_flat(
         ($t:ty) => {{
             let v: Vec<$t> = flat
                 .iter()
-                .map(|o| o.extract::<f64>().map(<$t>::from_f64))
+                .map(|o| {
+                    let v = o.extract::<f64>()?;
+                    Ok(<$t as crate::Element>::from_scalar(crate::Scalar::Float(v)))
+                })
                 .collect::<PyResult<_>>()?;
             Tensor::from_slice(&v, device).reshape(shape)
         }};
@@ -167,7 +170,10 @@ fn set_value(t: &Tensor, index: &[usize], value: &Bound<'_, PyAny>) -> PyResult<
     }
     macro_rules! set_half {
         ($t:ty) => {
-            t.set(index, <$t>::from_f64(value.extract::<f64>()?))
+            t.set(
+                index,
+                <$t as crate::Element>::from_scalar(crate::Scalar::Float(value.extract::<f64>()?)),
+            )
         };
     }
     match t.dtype() {
