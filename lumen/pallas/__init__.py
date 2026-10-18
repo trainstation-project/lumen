@@ -192,6 +192,14 @@ class Ref:
     def __repr__(self):
         return f"Ref(%{self.var}, {self.dtype}{list(self.shape)}, {self.space})"
 
+    def _not_an_operand(self, primitive):
+        """Why it is not an operand of ``primitive`` (JAX's message)."""
+        shape = ",".join(map(str, self.shape))
+        return (
+            f"Attempting to pass a Ref <{self.dtype}[{shape}]> to a primitive: {primitive} "
+            "-- did you forget to unpack ([...]) the ref?"
+        )
+
     @property
     def ndim(self):
         return len(self.shape)
@@ -316,6 +324,8 @@ class Ref:
         return TracedTensor(self.kernel, self.kernel.load(window.var))
 
     def __setitem__(self, index, value):
+        if isinstance(value, Ref):
+            raise ValueError("Cannot store a Ref into another Ref. Did you forget to load from it using `[...]`?")
         if hasattr(value, "shape") and not isinstance(value, TracedTensor):
             raise ValueError(
                 f"The kernel function of a pallas_call captures constants ({value.dtype}{list(value.shape)}): "

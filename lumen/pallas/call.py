@@ -23,7 +23,7 @@ dtype a TPU stores.
 
 from lumen.graph import prims, tracer
 
-from .pipeline import _NAMES
+from .pipeline import _NAMES, BoundedSlice
 
 # The kernels of the pallas_calls traced so far, by handle: each a function
 # of a spec (the program's scalars and rows) to its Mosaic.
@@ -61,6 +61,21 @@ def pallas_call(
     (``pl.pallas_call``). An output of ``input_output_aliases``
     (``{input: output}``) starts as its input (which JAX donates)."""
     aliases = dict(input_output_aliases or {})
+    if in_specs is not None and not isinstance(in_specs, (list, tuple)):
+        raise TypeError("`in_specs` must be a tuple or a list")
+    for spec in _specs(in_specs, 0) + _specs(out_specs, 0):
+        for d in getattr(spec, "block_shape", None) or ():
+            if isinstance(d, BoundedSlice):
+                raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
+    if (
+        isinstance(out_specs, (list, tuple))
+        and isinstance(out_shape, (list, tuple))
+        and len(out_specs) != len(out_shape)
+    ):
+        raise ValueError(
+            "Pytree for `out_specs` and `out_shape` do not match. There are 1 mismatches, including:\n"
+            f"    * `out_specs` is a tuple of length {len(out_specs)} but `out_shape` is a tuple of length {len(out_shape)}"
+        )
     single = not isinstance(out_shape, (list, tuple))
     outs = [out_shape] if single else list(out_shape)
     grid = (grid,) if isinstance(grid, int) else tuple(grid)
@@ -116,6 +131,19 @@ def pallas_call(
         return first if single else (first, *rest)
 
     return call
+
+
+def where(f):
+    """Function ``f``'s name and where it is defined (for JAX's messages)."""
+    code = getattr(f, "__code__", None)
+    name = getattr(f, "__name__", repr(f))
+    return f"{name} at {code.co_filename}:{code.co_firstlineno}" if code else name
+
+
+def _call(kernel, *refs):
+    """``kernel(*refs)``, which returns nothing."""
+    if kernel(*refs) is not None:
+        raise ValueError(f"The kernel function of pallas_call {where(kernel)} should return None")
 
 
 def _check_aliases(aliases, ins, outs):
@@ -191,17 +219,19 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         def body(*blocks):
             for i, b in zip(piped, blocks):
                 args[i] = b
-            kernel(*args, *extra)
+            _call(kernel, *args, *extra)
 
         n_in = sum(1 for i in piped if i < len(ins))
+        labels = [f"args[{i}]" if i < len(ins) else f"outputs[{i - len(ins)}]" for i in piped]
         emit_pipeline(
             body,
             grid=grid,
             in_specs=[specs[i] for i in piped[:n_in]],
             out_specs=[specs[i] for i in piped[n_in:]],
+            labels=labels,
         )(*[refs[i] for i in piped])
     else:
-        kernel(*args, *extra)
+        _call(kernel, *args, *extra)
     for i, _ in staged:
         if i >= len(ins):
             copy(args[i], refs[i])

@@ -327,7 +327,7 @@ def test_pallas_error_for_ref_to_jax():
 
     @functools.partial(pl.pallas_call, out_shape=pl.ShapeDtypeStruct((m, n), "float32"))
     def dot_general_kernel(x_ref, y_ref, o_ref):
-        o_ref[...] = F.matmul(x_ref, y_ref)
+        o_ref[...] = F.matmul(x_ref, y_ref, "float32", "float32")
 
     rng = np.random.default_rng(0)
     x = rng.standard_normal((m, k), dtype=np.float32)

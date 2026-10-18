@@ -91,6 +91,9 @@ def bind(name, *operands, **params):
     operands = [tracer._lift(x) for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
+            # An operand that says why it is not one (a kernel's ref).
+            if hasattr(x, "_not_an_operand"):
+                raise TypeError(x._not_an_operand(name))
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")
     inputs = [x.var for x in operands]
     var = graph.apply(name, inputs, params)

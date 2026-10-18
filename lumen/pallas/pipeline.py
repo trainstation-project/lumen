@@ -166,6 +166,34 @@ def _bits(dtype):
     return int("".join(c for c in dtype if c.isdigit()))
 
 
+def _check_block(label, sizes, shape, dtype):
+    """JAX's errors for a VMEM block of ``sizes`` of ``shape`` its TPU
+    lowering does not support (``_check_block_mappings``)."""
+    details = f" Block spec for {label} has block shape {tuple(sizes)}, array shape {tuple(shape)}."
+    if not sizes:
+        raise ValueError("The Pallas TPU lowering currently supports only blocks of rank >= 1." + details)
+    bs0, as0 = sizes[-1], shape[-1]
+    if len(sizes) >= 2:
+        bs1, as1 = sizes[-2], shape[-2]
+        if not ((bs0 == as0 or bs0 % 128 == 0) and (bs1 == as1 or bs1 % 8 == 0)):
+            raise ValueError(
+                "The Pallas TPU lowering currently requires that the last two dimensions of your block shape are "
+                "divisible by 8 and 128 respectively, or be equal to the respective dimensions of the overall array."
+                + details
+            )
+        return
+    bits = _bits(dtype)
+    min_tiling, chunk = 128 * (32 // bits), 8 * 128
+    if not (bs0 == as0 or bs0 % chunk == 0 or (bs0 >= min_tiling and bs0 & (bs0 - 1) == 0)):
+        raise ValueError(
+            "The Pallas TPU lowering currently requires that rank 1 block shapes, either 1) the first (and only) "
+            "dimension of the block shape is equal to the first (and only) dimension of the array shape, or 2) the "
+            f"first (and only) dimension of the block shape is a multiple of {chunk}, or 3) the first (and only) "
+            f"dimension of the block shape is a power of 2 and at least the tiling size ({min_tiling} = 128 * "
+            f"(32 // {bits})) of the array shape." + details
+        )
+
+
 def _padded(ref, shape):
     """HBM view ``ref`` (a pallas_call operand's) as ``shape``, no smaller:
     its bytes the same (padded to whole tiles as they are), or an error."""
@@ -179,7 +207,7 @@ def _padded(ref, shape):
 
     if getattr(ref, "_view", None) is None or tiles(shape) != tiles(ref.shape):
         raise NotImplementedError(
-            f"an Element block padded past the tiles of its operand {ref.dtype}{list(ref.shape)} is not supported yet"
+            f"a block past the tiles of its operand {ref.dtype}{list(ref.shape)} is not supported yet"
         )
     memory, row = ref._view
     return view(memory, row, shape, ref.dtype)
@@ -188,11 +216,16 @@ def _padded(ref, shape):
 class _Buffered:
     """An operand's HBM ref, its blocks, and its VMEM slots and semaphores."""
 
-    def __init__(self, ref, spec):
+    def __init__(self, ref, spec, label):
         from lumen import pallas as pl
 
-        self.ref, self.spec = ref, spec
+        self.ref, self.spec, self.label = ref, spec, label
         block = ref.shape if spec.block_shape is None else spec.block_shape
+        if len(block) != len(ref.shape):
+            raise ValueError(
+                f"Block shape for {label} (= {tuple(block)}) must have the same number of dimensions as the "
+                f"array shape {tuple(ref.shape)}."
+            )
         for d in block:
             if isinstance(d, BoundedSlice):
                 raise NotImplementedError(f"Unsupported block dimension type: {type(d).__name__}")
@@ -201,16 +234,42 @@ class _Buffered:
         self.sizes = [1 if d is None else getattr(d, "block_size", d) for d in block]
         if any(e is not None and e.padding[0] for e in self.elements):
             raise NotImplementedError("Element blocks padded below their operand are not supported yet")
+        _check_block(label, self.sizes, ref.shape, ref.dtype)
+        # Its blocks past its end (an Element's padding, a last block
+        # partly out): the operand viewed that much larger, its tiles' padding.
         high = [e.padding[1] if e is not None else 0 for e in self.elements]
-        if any(high):
-            self.ref = _padded(ref, [n + h for n, h in zip(ref.shape, high)])
-        self.window = pl.scratch(pl.VMEM((2, *self.sizes), ref.dtype))
+        whole = [
+            n + h if e is not None else max(n, -(-n // size) * size)
+            for n, h, e, size in zip(ref.shape, high, self.elements, self.sizes)
+        ]
+        if whole != list(ref.shape):
+            self.ref = _padded(ref, whole)
+        # One dimension of whole 1-D tiles: its two slots one after another
+        # (Mosaic slices packed tiles whole).
+        self.flat = len(self.sizes) == 1 and self.sizes[0] % (128 * (32 // _bits(ref.dtype))) == 0
+        slots = (2 * self.sizes[0],) if self.flat else (2, *self.sizes)
+        self.window = pl.scratch(pl.VMEM(slots, ref.dtype))
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
     def block(self, indices):
         if self.spec.index_map is None:
             return (0,) * len(self.sizes)
-        return tuple(self.spec.index_map(*indices))
+        block = self.spec.index_map(*indices)
+        block = tuple(block) if isinstance(block, (tuple, list)) else (block,)
+        from .call import where
+
+        mapped = f"Index map function {where(self.spec.index_map)} for {self.label}"
+        if len(block) != len(self.sizes):
+            raise ValueError(
+                f"{mapped} must return {len(self.sizes)} values to match the block shape {tuple(self.sizes)}. "
+                f"Currently returning {len(block)} values."
+            )
+        for k, b in enumerate(block):
+            scalar = isinstance(b, TracedTensor) and b.shape == () and not b.dtype.startswith(("float", "bf"))
+            if not (scalar or (isinstance(b, int) and not isinstance(b, bool))):
+                kind = f"{b.dtype}[{','.join(map(str, b.shape))}]" if isinstance(b, TracedTensor) else type(b).__name__
+                raise ValueError(f"{mapped} must return integer scalars. Output[{k}] has type {kind}")
+        return block
 
     def hbm(self, block):
         """The HBM window of ``block``."""
@@ -230,6 +289,9 @@ class _Buffered:
         from lumen import pallas as pl
 
         parity = pl.bitwise_and(counter, 1)
+        if self.flat:
+            n = self.sizes[0]
+            return self.window.at[pl.ds(pl.multiple_of(parity * n, n), n)], self.sems.at[parity]
         return self.window.at[parity], self.sems.at[parity]
 
     def view(self, window):
@@ -240,10 +302,11 @@ class _Buffered:
         return window.at[tuple(0 if s else slice(None) for s in self.squeezed)]
 
 
-def emit_pipeline(body, *, grid, in_specs, out_specs):
+def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
     """``body(*input_blocks, *output_blocks)`` over ``grid``, each a VMEM ref
     of its ``BlockSpec``'s block, copied from and to the HBM refs the
-    returned function is called with (``pltpu.emit_pipeline``)."""
+    returned function is called with (``pltpu.emit_pipeline``); ``labels``
+    name those refs in its errors."""
     from lumen import pallas as pl
 
     grid = tuple(grid)
@@ -254,8 +317,9 @@ def emit_pipeline(body, *, grid, in_specs, out_specs):
             raise TypeError(f"the pipeline takes {len(in_specs) + len(out_specs)} refs, got {len(refs)}")
         if steps == 0:
             return
-        ins = [_Buffered(r, s) for r, s in zip(refs, in_specs)]
-        outs = [_Buffered(r, s) for r, s in zip(refs[len(in_specs) :], out_specs)]
+        names = labels or [f"refs[{i}]" for i in range(len(refs))]
+        ins = [_Buffered(r, s, n) for r, s, n in zip(refs, in_specs, names)]
+        outs = [_Buffered(r, s, n) for r, s, n in zip(refs[len(in_specs) :], out_specs, names[len(in_specs) :])]
         start = [0] * len(grid)
 
         # Each input's first block, into slot 0.
