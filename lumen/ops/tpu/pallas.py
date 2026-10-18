@@ -3,8 +3,9 @@
 A TPU kernel is a module of Pallas source beside its op
 (``lumen/ops/<op>/tpu.py``) defining ``program(spec)``: its kernel for
 ``spec`` (a dict the Rust side chose: shapes, blocks, dtypes; and the
-TPU's ``kind`` and memory ``rows``), lowered by :func:`program` here. Rust (``lumen/ops/tpu/mod.rs``) calls :func:`lower`
-once per kernel and spec, then compiles the text with libtpu and runs it.
+TPU's ``kind`` and memory ``rows``), lowered by :func:`program` here. Rust
+(``lumen/ops/tpu/mod.rs``) calls :func:`lower` once per kernel and spec,
+then compiles the text with libtpu and runs it.
 
 Every kernel works on a device's whole memory: the TPU allocator's one
 buffer, ``u32[rows, 1, 128]`` (rows of 512 bytes, laid out as the host lays
@@ -73,8 +74,11 @@ def program(kernel, *, kind: str, rows: int, scalars: int, host_rows: int = 0, s
     jitted = jax_.jit(call, donate_argnums=memory)
     device = jax_.sharding.AbstractDevice(device_kind=kind, num_cores=1, platform="tpu")
     mesh = jax_.sharding.AbstractMesh((1,), ("device",), abstract_device=device)
+    # The TPU's kind is for lowering (Pallas asks it of the mesh); traced
+    # under the mesh, the refs would carry its shardings.
+    traced = jitted.trace(*args)
     with jax_.sharding.use_abstract_mesh(mesh):
-        return jitted.trace(*args).lower(lowering_platforms=("tpu",)).as_text()
+        return traced.lower(lowering_platforms=("tpu",)).as_text()
 
 
 def matrix(ref, row, shape):
