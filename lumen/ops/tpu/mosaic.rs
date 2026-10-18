@@ -434,7 +434,8 @@ impl Kernel {
             semantics.join(", "),
             types.join(", "),
             bounds.join(", "),
-            self.scratch,
+            // The semaphore is scratch too.
+            self.scratch + 1,
             vec!["{}"; self.windows].join(", "),
         )
     }
