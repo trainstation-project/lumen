@@ -38,11 +38,50 @@ __all__ = [
     "dynamic_slice",
     "dynamic_update_slice",
     "gather",
+    "take_along_axis",
     "scatter_add",
     "concatenate",
     "full",
     "iota",
     "random_bits",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "floor",
+    "ceil",
+    "round",
+    "log1p",
+    "expm1",
+    "exp2",
+    "log2",
+    "rsqrt",
+    "cbrt",
+    "erf_inv",
+    "is_finite",
+    "abs",
+    "sign",
+    "not_",
+    "population_count",
+    "clz",
+    "pow",
+    "rem",
+    "min",
+    "and_",
+    "or_",
+    "xor",
+    "shift_left",
+    "shift_right_logical",
+    "shift_right_arithmetic",
+    "nextafter",
+    "reduce_precision",
 ]
 
 
@@ -52,6 +91,9 @@ def bind(name, *operands, **params):
     operands = [tracer._lift(x) for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
+            # An operand that says why it is not one (a kernel's ref).
+            if hasattr(x, "_not_an_operand"):
+                raise TypeError(x._not_an_operand(name))
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")
     inputs = [x.var for x in operands]
     var = graph.apply(name, inputs, params)
@@ -234,6 +276,13 @@ def gather(x, indices, axis):
     return bind("gather", x, indices, axis=axis)
 
 
+def take_along_axis(x, indices, axis):
+    """``x``'s entries along ``axis`` at ``indices`` (integers of ``x``'s
+    rank, no larger but along ``axis``), the others where they are
+    (``jnp.take_along_axis``, ``torch.gather``)."""
+    return bind("take_along_axis", x, indices, axis=axis)
+
+
 def scatter_add(x, indices, updates, axis):
     """``x`` with ``updates`` (shaped as :func:`gather` of it at ``indices``)
     added at the entries along ``axis`` the indices pick, in range as the
@@ -291,3 +340,160 @@ def linear_cross_entropy(h, w, target):
 def iota(dtype, shape, dimension):
     """The index along ``dimension`` (``lax.broadcasted_iota``)."""
     return bind("iota", dtype=dtype, shape=tuple(shape), dimension=dimension)
+
+
+# Elementwise functions beyond the core ones (``lax``'s of their names).
+
+
+def sin(x):
+    return bind("sin", x)
+
+
+def cos(x):
+    return bind("cos", x)
+
+
+def tan(x):
+    return bind("tan", x)
+
+
+def asin(x):
+    return bind("asin", x)
+
+
+def acos(x):
+    return bind("acos", x)
+
+
+def atan(x):
+    return bind("atan", x)
+
+
+def sinh(x):
+    return bind("sinh", x)
+
+
+def cosh(x):
+    return bind("cosh", x)
+
+
+def asinh(x):
+    return bind("asinh", x)
+
+
+def acosh(x):
+    return bind("acosh", x)
+
+
+def atanh(x):
+    return bind("atanh", x)
+
+
+def floor(x):
+    return bind("floor", x)
+
+
+def ceil(x):
+    return bind("ceil", x)
+
+
+def round(x):
+    return bind("round", x)
+
+
+def log1p(x):
+    return bind("log1p", x)
+
+
+def expm1(x):
+    return bind("expm1", x)
+
+
+def exp2(x):
+    return bind("exp2", x)
+
+
+def log2(x):
+    return bind("log2", x)
+
+
+def rsqrt(x):
+    return bind("rsqrt", x)
+
+
+def cbrt(x):
+    return bind("cbrt", x)
+
+
+def erf_inv(x):
+    return bind("erf_inv", x)
+
+
+def is_finite(x):
+    return bind("is_finite", x)
+
+
+def abs(x):
+    return bind("abs", x)
+
+
+def sign(x):
+    return bind("sign", x)
+
+
+def not_(x):
+    return bind("not", x)
+
+
+def population_count(x):
+    return bind("population_count", x)
+
+
+def clz(x):
+    return bind("clz", x)
+
+
+def pow(x, y):
+    return bind("pow", x, y)
+
+
+def rem(x, y):
+    return bind("rem", x, y)
+
+
+def min(x, y):
+    return bind("min", x, y)
+
+
+def and_(x, y):
+    return bind("and", x, y)
+
+
+def or_(x, y):
+    return bind("or", x, y)
+
+
+def xor(x, y):
+    return bind("xor", x, y)
+
+
+def shift_left(x, y):
+    return bind("shift_left", x, y)
+
+
+def shift_right_logical(x, y):
+    return bind("shift_right_logical", x, y)
+
+
+def shift_right_arithmetic(x, y):
+    return bind("shift_right_arithmetic", x, y)
+
+
+def nextafter(x, y):
+    return bind("nextafter", x, y)
+
+
+def reduce_precision(x, exponent_bits, mantissa_bits):
+    """``x`` rounded to a float of ``exponent_bits`` and ``mantissa_bits``,
+    of its dtype."""
+    return bind("reduce_precision", x, exponent_bits=exponent_bits, mantissa_bits=mantissa_bits)

@@ -271,6 +271,9 @@ fn dl_dtype(dtype: DType) -> DLDataType {
         DType::I8 | DType::I16 | DType::I32 | DType::I64 => K_DL_INT,
         DType::F16 | DType::F32 | DType::F64 => K_DL_FLOAT,
         DType::BF16 => K_DL_BFLOAT,
+        // DLPack's sub-byte types are packed, and numpy reads no float8:
+        // these are read as their bytes (`lumen.to_numpy`).
+        _ => K_DL_UINT,
     };
     DLDataType {
         code,

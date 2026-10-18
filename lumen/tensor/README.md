@@ -19,7 +19,7 @@ and runs it through `graph_compiler::compile`.
 | `mod.rs` | Module wiring; re-exports `Tensor` (path `lumen::tensor::Tensor`) and crate-internal stride helpers. |
 | `tensor.rs` | `Tensor { storage: Arc<Storage>, dtype, shape, strides, offset }`: factories (`zeros`, `ones`, `full`, `arange`, `from_slice`, unsafe `empty`), views (`reshape`, `narrow`, `select`, `transpose`, `permute`, `squeeze_dim`, `unsqueeze`), `contiguous`, `to(device)`, `to_dtype`, `to_vec`, `get`/`set`, `fill_`, `copy_`, `zero_`, `wait_`, `Display`; `contiguous_strides`, `flat_offset`, `for_each_index`. |
 | `storage.rs` | `Storage`: an owning byte buffer on a device (`DataPtr` from the device's allocator), a unique `id`, and the meta-tensor `Parameter` state. |
-| `dtype.rs` | `DType` (Bool, U8–U64, I8–I64, F16, BF16, F32, F64), the `Element` trait for the Rust element types (`half::f16`/`bf16` re-exported), and the `dispatch_dtype!` macro. |
+| `dtype.rs` | `DType` (Bool, U8–U64, I8–I64, F16, BF16, F32, F64, and JAX's narrow I2/I4/U2/U4, F8E4M3FN, F8E5M2, F8E4M3B11FNUZ), the `Element` trait for the Rust element types (`half::f16`/`bf16` re-exported; the narrow ones a byte each, as `ml_dtypes` keeps them: `i4`, `f8e4m3fn`, ...), and the `dispatch_dtype!` macro. |
 | `scalar.rs` | `Scalar { Bool, Int, Float }` (`c10::Scalar`): `full`'s value and `arange`'s end; `inferred_dtype` (bool / int64 / float32). |
 | `tensor_options.rs` | `TensorOptions` (dtype + device builder) and `DEFAULT_DTYPE = F32`. |
 | `parameter.rs` | Weights as meta tensors: `is_parameter`, `placed(device)`, `pack(members, dimension, device)`, `version` / `mark_written`, `copy_into_placements`. |

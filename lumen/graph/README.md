@@ -18,7 +18,7 @@ bindings, the Python tracer that builds graphs (`TracedTensor`,
 | `python.rs` | `lumen._C.Graph` bindings (build by primitive name + params dict, `nodes()`, `attentions()`, `run()` on the reference executor), `_register_custom_op`, `FUSION_SEPARATOR`. |
 | `_C.pyi` | Type stub for `python.rs`. |
 | `__init__.py` | Re-exports `Graph`, `TracedTensor`, `compile`, `make_graph`, `prims` (tracer imported before `prims`). |
-| `tracer.py` | Tracing: `TracedTensor` (torch-like methods), `compile`, `make_graph`, trace-global state (scopes, sources, tapes, RNG). |
+| `tracer.py` | Tracing: `TracedTensor` (torch-like methods), `compile`, `make_graph`, trace-global state (scopes, sources, tapes, RNG), and `tracing` (a trace of one's own, of a graph or anything answering as one: a `lumen.pallas` kernel). |
 | `prims.py` | One Python function per primitive (`jax.lax`-like); `bind` records a node. |
 | `viz.py` | `dump_graph`'s backend: profiles fused and unfused plans and writes one self-contained HTML page; also a CLI (`python -m lumen.graph.viz`). |
 | `viz.html` | The page template (`__TITLE__`, `__DATA__` placeholders), its CSS and JS. |
@@ -67,7 +67,7 @@ broadcast or promotion; results are values.
 | Reductions / scans | `ReduceSum { axes, accum_dtype }`, `ReduceMax { axes }`, `Cumsum { axis, reverse, accum_dtype }` |
 | Contraction | `DotGeneral { lhs/rhs_contracting, lhs/rhs_batch, accum_dtype, output_dtype }` |
 | Layout | `Reshape`, `BroadcastInDim`, `Transpose`, `Slice { .., view }`, `Concatenate { dimension, in_place }` |
-| Indexing | `DynamicSlice`, `DynamicUpdateSlice`, `Gather { axis }`, `ScatterAdd { axis }` |
+| Indexing | `DynamicSlice`, `DynamicUpdateSlice`, `Gather { axis }`, `TakeAlongAxis { axis }`, `ScatterAdd { axis }` |
 | Creation | `Full`, `Iota`, `RandomBits { shape, offset }` (counter-based Philox) |
 | Host/device | `Wait`, `ToHost`, `ToDevice` |
 | Fused ops | `LinearCrossEntropy` (cut cross-entropy, `[2, B]` f32 out) |

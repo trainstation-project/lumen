@@ -38,6 +38,13 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 
 ## The pipeline, in order
 
+Before them, `compile` refuses what a graph may have but the MPS has no
+kernel for (`unsupported`): exp, log, sqrt, tanh and logistic of bfloat16
+(Metal's take and return float, and a program runs as traced, so it
+converts to float32 itself), and dots of two dtypes. The rules are the
+MPS's alone: the CPU's reference and a TPU (whose v6e computes those in
+bfloat16, and multiplies bfloat16 by float8) run them.
+
 `pipeline(config)` builds these passes, each a `CompilerPass` (MPS ones of
 `MpsModule`; the device-independent ones from [`../passes/`](../passes/README.md),
 of any module). The order is load-bearing; the comments in
@@ -45,6 +52,7 @@ of any module). The order is load-bearing; the comments in
 
 | # | Pass name | Runs when | File | What it does |
 | --- | --- | --- | --- | --- |
+| 0 | `take_along_axis` | always | `../passes/take_along_axis.rs` | Gathers along an axis (`F.gather`) as gathers of the operand's flat positions, which the MPS's kernels (and the cross-entropy patterns) read. |
 | 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
 | 2 | `gated_backward` | `fuse && merge_dots && contraction_epilogues` | `../passes/gated_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
 | 3 | `merge_dots` | `fuse && merge_dots` | `merge_dots.rs` | Merge dots over packable parameters into blocks; fills `MpsModule::packed`. |

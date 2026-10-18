@@ -83,7 +83,7 @@ fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
         Scalar::Float(f) => f,
     };
     match dtype {
-        DType::F16 => half::f16::from_f64(f).to_le_bytes().to_vec(),
+        DType::F16 => crate::tensor::dtype::to_f16(f).to_le_bytes().to_vec(),
         DType::F32 => (f as f32).to_le_bytes().to_vec(),
         DType::I32 => match value {
             Scalar::Int(i) => (i as i32).to_le_bytes().to_vec(),

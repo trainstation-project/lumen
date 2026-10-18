@@ -194,6 +194,37 @@ def producer(var):
     return _PRODUCERS[-1].get(var)
 
 
+@contextlib.contextmanager
+def tracing(graph, device=None, sources=None, tape=None, leaves=None):
+    """Ops record into ``graph`` (a ``Graph``, or anything answering as one:
+    a ``lumen.pallas`` kernel) inside: a trace of its own, on ``device``,
+    its values' source lines in ``sources``, its nodes on ``tape`` (for
+    ``.backward()`` of ``leaves``). Yields its random state."""
+    tape = [] if tape is None else tape
+    rng = {"state": None, "drawn": 0}
+    _TRACES.append(graph)
+    _SCOPES.append([])
+    _SCOPE_OF.append({})
+    _DEVICES.append(device)
+    _RNG.append(rng)
+    _SOURCES.append({} if sources is None else sources)
+    _PRODUCERS.append({})
+    _TAPES.append(tape)
+    _BACKWARD.append((tape, [] if leaves is None else leaves))
+    try:
+        yield rng
+    finally:
+        _TRACES.pop()
+        _SCOPES.pop()
+        _SCOPE_OF.pop()
+        _DEVICES.pop()
+        _RNG.pop()
+        _SOURCES.pop()
+        _PRODUCERS.pop()
+        _TAPES.pop()
+        _BACKWARD.pop()
+
+
 def current_graph():
     if not _TRACES:
         raise RuntimeError("lumen ops run only while tracing, inside a function passed to lumen.compile")
@@ -271,28 +302,8 @@ def _trace(fn, args, device):
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
-    _TRACES.append(graph)
-    _SCOPES.append([])
-    _SCOPE_OF.append({})
-    _DEVICES.append(device)
-    _RNG.append({"state": None, "drawn": 0})
-    _SOURCES.append(sources)
-    _PRODUCERS.append({})
-    _TAPES.append(tape)
-    _BACKWARD.append((tape, leaves))
-
-    try:
+    with tracing(graph, device, sources, tape, leaves) as rng:
         out = fn(*traced)
-    finally:
-        _TRACES.pop()
-        _SCOPES.pop()
-        _SCOPE_OF.pop()
-        _DEVICES.pop()
-        rng = _RNG.pop()
-        _SOURCES.pop()
-        _PRODUCERS.pop()
-        _TAPES.pop()
-        _BACKWARD.pop()
 
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
@@ -643,6 +654,10 @@ def _common_dtype(op, operands):
     tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
     dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
+        # An operand that says why it is not one (a kernel's ref).
+        for x in operands:
+            if hasattr(x, "_not_an_operand"):
+                raise TypeError(x._not_an_operand(op))
         raise TypeError(f"{op} needs a tensor operand")
     if len(dtypes) > 1:
         raise TypeError(f"{op} got tensors of dtypes {' and '.join(dtypes)}: convert them to one with .to(dtype)")
@@ -781,6 +796,56 @@ def _binary(prim, reflected=False):
         return _elementwise(prim, other, self) if reflected else _elementwise(prim, self, other)
 
     return op
+
+
+def _floor_mod(x, y):
+    """``x % y`` with Python's (and torch's) sign: the divisor's."""
+    x, y = _operands("rem", x, y)
+    r = prims.rem(x, y)
+    zero = prims.full(r.shape, 0, r.dtype)
+    fix = _and(_ne(r, zero), _ne(prims.lt(r, zero), prims.lt(y, zero)))
+    return prims.select(fix, prims.add(r, y), r)
+
+
+def _floor_div(x, y):
+    """``x // y``: the quotient rounded down (``torch.floor_divide``)."""
+    x, y = _operands("div", x, y)
+    if _is_float(x.dtype):
+        return prims.floor(prims.div(x, y))
+    q = prims.div(x, y)
+    zero = prims.full(q.shape, 0, q.dtype)
+    inexact = _ne(prims.rem(x, y), zero)
+    fix = _and(inexact, _ne(prims.lt(x, zero), prims.lt(y, zero)))
+    return prims.select(fix, prims.sub(q, prims.full(q.shape, 1, q.dtype)), q)
+
+
+def _and(x, y):
+    return prims.and_(x, y)
+
+
+def _right_shift(x, y):
+    """``x >> y``: arithmetic for signed integers, logical for unsigned."""
+    x, y = _operands("shift_right", x, y)
+    shift = prims.shift_right_logical if x.dtype.startswith("uint") else prims.shift_right_arithmetic
+    return shift(x, y)
+
+
+def _power(x, y):
+    """``x ** y``: a float's power (of floats, or integers: ``lax.pow``); an
+    integer's to a non-negative Python int exponent, by multiplications
+    (``lax.integer_pow``)."""
+    if isinstance(y, int) and not isinstance(y, bool) and not _is_float(x.dtype) and y >= 0:
+        result, base = prims.full(x.shape, 1, x.dtype), x
+        while y:
+            if y & 1:
+                result = prims.mul(result, base)
+            base, y = prims.mul(base, base), y >> 1
+        return result
+    if isinstance(y, TracedTensor) and _is_float(x.dtype) and not _is_float(y.dtype) and y.dtype != "bool":
+        # A float's power of integers (``lax.pow``'s), broadcast.
+        shape = _broadcast_shapes(x.shape, y.shape)
+        return prims.pow(_broadcast_to(x, shape), _broadcast_to(y, shape))
+    return _elementwise(prims.pow, x, y)
 
 
 def _true_div(x, y):
@@ -965,6 +1030,33 @@ class TracedTensor:
 
     def __neg__(self):
         return prims.neg(self)
+
+    __and__ = _binary(prims.and_)
+    __rand__ = _binary(prims.and_, reflected=True)
+    __or__ = _binary(prims.or_)
+    __ror__ = _binary(prims.or_, reflected=True)
+    __xor__ = _binary(prims.xor)
+    __rxor__ = _binary(prims.xor, reflected=True)
+    __lshift__ = _binary(prims.shift_left)
+    __rlshift__ = _binary(prims.shift_left, reflected=True)
+    __rshift__ = _binary(_right_shift)
+    __rrshift__ = _binary(_right_shift, reflected=True)
+    __mod__ = _binary(_floor_mod)
+    __rmod__ = _binary(_floor_mod, reflected=True)
+    __floordiv__ = _binary(_floor_div)
+    __rfloordiv__ = _binary(_floor_div, reflected=True)
+
+    def __pow__(self, other):
+        return _power(self, other) if _is_operand(other) else NotImplemented
+
+    def __rpow__(self, other):
+        return _elementwise(prims.pow, other, self) if _is_operand(other) else NotImplemented
+
+    def __invert__(self):
+        return prims.not_(self)
+
+    def __abs__(self):
+        return prims.abs(self)
 
     def copy_(self, value):
         """Assign ``value`` (of its type) to it, in place (torch's ``copy_``):

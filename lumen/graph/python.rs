@@ -15,7 +15,7 @@ pub(crate) struct PyGraph {
 }
 
 /// The primitive named `name` (its `lax` name) with parameters `params`.
-fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
+pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
     use Primitive::*;
     let get = |key: &str| {
         params
@@ -87,6 +87,9 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
         "gather" => Gather {
             axis: get("axis")?.extract()?,
         },
+        "take_along_axis" => TakeAlongAxis {
+            axis: get("axis")?.extract()?,
+        },
         "scatter_add" => ScatterAdd {
             axis: get("axis")?.extract()?,
         },
@@ -95,6 +98,15 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             kernel: get("kernel")?.extract()?,
             mutated: dims("mutated")?,
             overlappable: get("overlappable")?.extract()?,
+        },
+        "pallas_call" => PallasCall {
+            label: crate::graph::intern(get("op")?.extract()?),
+            kernel: get("kernel")?.extract()?,
+            outputs: get("outputs")?
+                .extract::<Vec<(String, Vec<usize>)>>()?
+                .into_iter()
+                .map(|(dtype, shape)| Ok(TensorType::new(parse_dtype(&dtype)?, &shape)))
+                .collect::<PyResult<_>>()?,
         },
         "fusion_output" => FusionOutput {
             index: get("index")?.extract()?,
@@ -119,6 +131,16 @@ fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
             offset: get("offset")?.extract()?,
         },
         "linear_cross_entropy" => LinearCrossEntropy,
+        "reduce_precision" => Unary(crate::graph::UnaryOp::ReducePrecision {
+            exponent_bits: get("exponent_bits")?.extract()?,
+            mantissa_bits: get("mantissa_bits")?.extract()?,
+        }),
+        other if crate::graph::UnaryOp::of_name(other).is_some() => {
+            Unary(crate::graph::UnaryOp::of_name(other).expect("checked"))
+        }
+        other if crate::graph::BinaryOp::of_name(other).is_some() => {
+            Binary(crate::graph::BinaryOp::of_name(other).expect("checked"))
+        }
         other => {
             return Err(PyValueError::new_err(format!(
                 "unknown primitive {other:?}"

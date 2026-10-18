@@ -235,8 +235,36 @@ def _scatter_add_transpose(ct, x, indices, updates, axis):
     ]
 
 
+def _take_along_axis_jvp(primals, tangents, out, axis):
+    if tangents[0] is None:
+        return None
+    return prims.take_along_axis(tangents[0], primals[1], axis)
+
+
+def _take_along_axis_transpose(ct, x, indices, axis):
+    # Each entry's cotangent where it was read, summed (as a gather's): at
+    # its flat position in x, Σ position · stride.
+    dtype = "int64" if indices.dtype in ("int64", "uint64") else "int32"
+    flat, stride = None, 1
+    for d in reversed(range(len(x.shape))):
+        at = (indices if indices.dtype == dtype else prims.cast(indices, dtype)) if d == axis else None
+        at = at if at is not None else prims.iota(dtype, indices.shape, d)
+        term = prims.mul(at, prims.full(indices.shape, stride, dtype))
+        flat = term if flat is None else prims.add(flat, term)
+        stride *= x.shape[d]
+    accum = tracer._accum_dtype(x.dtype)
+    ct = ct if ct.dtype == accum else prims.cast(ct, accum)
+    numel = 1
+    for n in x.shape:
+        numel *= n
+    out = prims.reshape(prims.scatter_add(prims.full((numel,), 0, accum), flat, ct, 0), tuple(x.shape))
+    return [out if accum == x.dtype else prims.cast(out, x.dtype), None]
+
+
 primitive_jvps[prims.gather] = _gather_jvp
 primitive_transposes[prims.gather] = _gather_transpose
+primitive_jvps[prims.take_along_axis] = _take_along_axis_jvp
+primitive_transposes[prims.take_along_axis] = _take_along_axis_transpose
 primitive_jvps[prims.scatter_add] = _scatter_add_jvp
 primitive_transposes[prims.scatter_add] = _scatter_add_transpose
 primitive_jvps[prims.dynamic_slice] = _dynamic_slice_jvp

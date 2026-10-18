@@ -1,6 +1,8 @@
 // libtpu's PJRT C API (`pjrt_c_api.h`, vendored from XLA), loaded at run
-// time: the process's one PJRT client, its TPU devices, and the device
-// memory the TPU allocator reserves and reads (lumen/allocator/tpu.rs).
+// time: the process's one PJRT client, its TPU devices, the device memory
+// the TPU allocator reserves and reads (lumen/allocator/tpu.rs), and the
+// programs that write it (lumen/ops/tpu): compiled once, each run on the
+// memory as a donated argument.
 //
 // libtpu is found at `TPU_LIBRARY_PATH` (as JAX and torch_xla find it), else
 // by the loader's search for `libtpu.so`. Its PJRT API may be older than this
@@ -77,7 +79,8 @@ static void initialize(void) {
     if (!(HAS(PJRT_Error_Message) && HAS(PJRT_Error_Destroy) && HAS(PJRT_Event_Await) && HAS(PJRT_Event_Destroy) &&
           HAS(PJRT_Client_Create) && HAS(PJRT_Client_AddressableDevices) &&
           HAS(PJRT_Client_CreateUninitializedBuffer) && HAS(PJRT_Buffer_UnsafePointer) &&
-          HAS(PJRT_Buffer_CopyRawToHost) && HAS(PJRT_Buffer_Destroy))) {
+          HAS(PJRT_Buffer_CopyRawToHost) && HAS(PJRT_Buffer_Destroy) && HAS(PJRT_Client_Compile) &&
+          HAS(PJRT_Client_BufferFromHostBuffer) && HAS(PJRT_LoadedExecutable_Execute))) {
         snprintf(error,
                  sizeof error,
                  "%s's PJRT API (%d.%d) lacks a function lumen needs",
@@ -117,21 +120,26 @@ const char *lumen_tpu_error(void) {
     return error;
 }
 
-// `nbytes` (a multiple of 4) of device `index`'s memory: a 1-D u32 buffer,
-// which a TPU stores byte for byte as the host does (a u8 buffer's bytes are
-// packed in tiles). Its handle, and the runtime's address of its memory in
-// `*address`; none (and `error`) if it cannot be reserved.
+// The bytes of a row of TPU memory: 128 u32s. A `u32[rows, 1, 128]` buffer
+// is tiled in rows, (1, 128), so a TPU stores it byte for byte as the host
+// does (a u8 buffer's bytes are packed in tiles), and a program can address
+// it at any row.
+#define ROW 512
+
+// `nbytes` (a multiple of `ROW`) of device `index`'s memory: a
+// `u32[nbytes / ROW, 1, 128]` buffer. Its handle, and the runtime's address
+// of its memory in `*address`; none (and `error`) if it cannot be reserved.
 void *lumen_tpu_alloc(int index, size_t nbytes, uintptr_t *address) {
     if (lumen_tpu_device_count() <= index || index < 0) {
         snprintf(error, sizeof error, "no TPU device %d", index);
         return NULL;
     }
-    int64_t words = (int64_t)(nbytes / 4);
+    int64_t dims[3] = {(int64_t)(nbytes / ROW), 1, ROW / 4};
     PJRT_Client_CreateUninitializedBuffer_Args create = {
         .struct_size = PJRT_Client_CreateUninitializedBuffer_Args_STRUCT_SIZE,
         .client = client,
-        .shape_dims = &words,
-        .shape_num_dims = 1,
+        .shape_dims = dims,
+        .shape_num_dims = 3,
         .shape_element_type = PJRT_Buffer_Type_U32,
         .device = devices[index],
     };
@@ -187,6 +195,106 @@ int lumen_tpu_read(void *buffer, size_t size, size_t offset, void *dst, size_t n
     }
     free(staging);
     return bad;
+}
+
+// `code` (`size` bytes of StableHLO) compiled as a portable executable, one
+// that runs on any device; none (and `error`) if it does not compile.
+void *lumen_tpu_compile(const char *code, size_t size) {
+    if (!lumen_tpu_device_count()) {
+        return NULL;
+    }
+    PJRT_Program program = {.struct_size = PJRT_Program_STRUCT_SIZE,
+                            .code = (char *)code,
+                            .code_size = size,
+                            .format = "mlir",
+                            .format_size = 4};
+    // A CompileOptionsProto: executable_build_options (3) of one replica (4)
+    // and one partition (5), and compile_portable_executable (4).
+    static const char options[] = {0x1a, 0x04, 0x20, 0x01, 0x28, 0x01, 0x20, 0x01};
+    PJRT_Client_Compile_Args compile = {.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE,
+                                        .client = client,
+                                        .program = &program,
+                                        .compile_options = options,
+                                        .compile_options_size = sizeof options};
+    if (failed(api->PJRT_Client_Compile(&compile), "compiling a TPU program")) {
+        return NULL;
+    }
+    return compile.executable;
+}
+
+// A `type` buffer of `dims` on device `index`, `data` copied into it: none
+// (and `error`) if it cannot be made.
+static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, const int64_t *dims, size_t num_dims) {
+    PJRT_Client_BufferFromHostBuffer_Args create = {
+        .struct_size = PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE,
+        .client = client,
+        .data = data,
+        .type = type,
+        .dims = dims,
+        .num_dims = num_dims,
+        .host_buffer_semantics = PJRT_HostBufferSemantics_kImmutableOnlyDuringCall,
+        .device = devices[index],
+    };
+    if (failed(api->PJRT_Client_BufferFromHostBuffer(&create), "copying to the TPU") ||
+        awaited(create.done_with_host_buffer, "copying to the TPU")) {
+        return NULL;
+    }
+    return create.buffer;
+}
+
+// Runs `executable` (an `lumen_tpu_compile`'s) on device `index`, enqueued
+// after what reads or writes `*region` (an `lumen_tpu_alloc`'s) before.
+// Its arguments: `count` i32 `scalars`; if `nbytes` (a multiple of `ROW`),
+// `host`'s bytes as a `u32[nbytes / ROW, 1, 128]`; then the region,
+// donated: the program's one result, which `*region` becomes (the same
+// memory). Whether it failed (`error` says why).
+int lumen_tpu_run(void *executable,
+                  int index,
+                  const int32_t *scalars,
+                  size_t count,
+                  const void *host,
+                  size_t nbytes,
+                  void **region) {
+    if (lumen_tpu_device_count() <= index || index < 0) {
+        snprintf(error, sizeof error, "no TPU device %d", index);
+        return 1;
+    }
+    PJRT_Buffer *args[3];
+    size_t num_args = 0;
+    int64_t length = (int64_t)count;
+    if (!(args[num_args++] = upload(index, scalars, PJRT_Buffer_Type_S32, &length, 1))) {
+        return 1;
+    }
+    int64_t rows[3] = {(int64_t)(nbytes / ROW), 1, ROW / 4};
+    if (nbytes && !(args[num_args++] = upload(index, host, PJRT_Buffer_Type_U32, rows, 3))) {
+        lumen_tpu_free(args[0]);
+        return 1;
+    }
+    args[num_args++] = (PJRT_Buffer *)*region;
+    PJRT_Buffer *result = NULL;
+    PJRT_Buffer **results = &result;
+    PJRT_Buffer *const *lists = args;
+    PJRT_ExecuteOptions options = {.struct_size = PJRT_ExecuteOptions_STRUCT_SIZE};
+    PJRT_LoadedExecutable_Execute_Args execute = {.struct_size = PJRT_LoadedExecutable_Execute_Args_STRUCT_SIZE,
+                                                  .executable = (PJRT_LoadedExecutable *)executable,
+                                                  .options = &options,
+                                                  .argument_lists = &lists,
+                                                  .num_devices = 1,
+                                                  .num_args = num_args,
+                                                  .output_lists = &results,
+                                                  .execute_device = devices[index]};
+    int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
+    // The scalars and host bytes are the runtime's until the program has run.
+    for (size_t i = 0; i + 1 < num_args; i++) {
+        lumen_tpu_free(args[i]);
+    }
+    if (bad) {
+        return 1;
+    }
+    // The donated region, now the result's.
+    lumen_tpu_free(*region);
+    *region = result;
+    return 0;
 }
 
 // Device `index`'s memory in use and its limit, in bytes: whether it failed.

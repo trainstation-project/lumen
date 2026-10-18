@@ -3,6 +3,7 @@ from lumen._C import __version__, cpu, cuda, meta, mps, tpu
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.device import device
+from lumen.functional import cat
 from lumen.graph import compile, make_graph, prims
 from lumen.random import get_rng_state, initial_seed, manual_seed, rand, randint, randn, set_rng_state
 from lumen.stream import Stream

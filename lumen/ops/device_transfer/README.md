@@ -15,7 +15,7 @@ and `COPY_D2H` (`lumen::copy_d2h`, dispatched on the **source's** device).
 | `cpu.rs` | `memcpy`: a plain `copy_nonoverlapping` of `nbytes`. |
 | `cuda.rs` | `cudaMemcpy` (host-to-device / device-to-host), wrapped in CUPTI correlation; compiled only with `lumen_cuda_linked`. |
 | `mps.rs` | `copy_h2d` for MPS (only with `lumen_mps_linked`). |
-| `tpu.rs` | `copy_d2h` for TPU, through the TPU allocator's read at the allocation's offset (only with `lumen_tpu_linked`). |
+| `tpu.rs` | `copy_d2h` for TPU, through the TPU allocator's read at the allocation's offset; `copy_h2d`, a kernel in lumen's Pallas (`tpu.py`) copying the host's bytes (uploaded with it, padded to whole rows) to the destination's rows (only with `lumen_tpu_linked`). |
 
 ## Kernels per key
 
@@ -24,7 +24,7 @@ and `COPY_D2H` (`lumen::copy_d2h`, dispatched on the **source's** device).
 | `Cpu` | `cpu::memcpy` | `cpu::memcpy` |
 | `Mps` | `mps::copy_h2d` | `cpu::memcpy` (MPS memory is host-visible) |
 | `Cuda` | `cuda::copy_h2d` | `cuda::copy_d2h` |
-| `Tpu` | none (writing TPU memory needs a TPU program: not yet) | `tpu::copy_d2h` |
+| `Tpu` | `tpu::copy_h2d` | `tpu::copy_d2h` |
 | `Meta` | none | none |
 
 ## How MPS copies work

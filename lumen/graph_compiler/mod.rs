@@ -34,6 +34,7 @@ mod schedule;
 mod stages;
 #[cfg(test)]
 mod tests;
+mod tpu;
 
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
@@ -109,6 +110,7 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
     match device {
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
+        Device::Tpu(_) => tpu::compile(graph, options),
         _ => cpu::compile(graph, options),
     }
 }

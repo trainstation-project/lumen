@@ -424,6 +424,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
+        layout: None,
     };
     let plan = Plan::compile_with(g, &options);
     let out = plan
@@ -492,6 +493,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
             scalars: Vec::new(),
             memory_limit: None,
             blocks: Vec::new(),
+            layout: None,
         },
     );
     let outputs: Vec<Buffer> = plan
@@ -719,6 +721,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         scalars: Vec::new(),
         memory_limit: None,
         blocks: Vec::new(),
+        layout: None,
     };
     let plan = Plan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];
@@ -963,10 +966,20 @@ pub(crate) mod mps {
                 check_node(p, &two);
             }
             check_node(Neg, std::slice::from_ref(&x));
-            // No bfloat16 kernels for these (graph rejects them).
+            // No bfloat16 kernels for these (the MPS compiler refuses them).
             if dtype.is_float() && dtype != DType::BF16 {
                 for p in [Exp, Log, Sqrt, Tanh, Logistic] {
                     check_node(p, std::slice::from_ref(&x));
+                }
+            }
+            if dtype == DType::BF16 {
+                for p in [Exp, Log, Sqrt, Tanh, Logistic] {
+                    let mut g = Graph::new();
+                    let v = g.input(x.clone());
+                    let out = g.apply(p, &[v]).unwrap();
+                    g.set_outputs(&[out]).unwrap();
+                    let e = crate::graph_compiler::compile(&g, Device::Mps(0)).unwrap_err();
+                    assert!(e.contains("no bfloat16 kernel on MPS"), "{e}");
                 }
             }
         }

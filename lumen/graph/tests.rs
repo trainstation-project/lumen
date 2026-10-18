@@ -28,10 +28,9 @@ fn elementwise_is_strict() {
     assert!(infer(Add, &[x.clone(), ty(DType::F32, &[3])]).is_err());
     assert!(infer(Add, &[x.clone(), ty(DType::F16, &[2, 3])]).is_err());
     assert!(infer(Exp, &[ty(DType::I32, &[2])]).is_err());
-    // Nothing computes bfloat16 math as traced: convert it first.
+    // bfloat16 math is a graph's (a device without it refuses it: MPS).
     for p in [Exp, Log, Sqrt, Tanh, Logistic] {
-        let e = infer(p, &[ty(DType::BF16, &[2])]).unwrap_err();
-        assert!(e.contains("convert to float32"), "{e}");
+        assert!(infer(p, &[ty(DType::BF16, &[2])]).is_ok());
     }
     assert!(infer(Neg, &[ty(DType::BF16, &[2])]).is_ok());
     assert!(infer(Add, &[ty(DType::Bool, &[2]), ty(DType::Bool, &[2])]).is_err());
@@ -101,7 +100,7 @@ fn reduce_drops_axes() {
     assert!(infer(ReduceMax { axes: vec![3] }, std::slice::from_ref(&x)).is_err());
     assert!(infer(ReduceMax { axes: vec![1, 1] }, &[x]).is_err());
     // A sum accumulates in its accum_dtype, its result's: the operand's,
-    // or float32 for narrower floats.
+    // or float32 (int32) for narrower floats (integers).
     let sum = |accum_dtype| ReduceSum {
         axes: vec![0],
         accum_dtype,
@@ -111,7 +110,7 @@ fn reduce_drops_axes() {
     for (d, accum) in [
         (DType::F32, DType::F16),
         (DType::F32, DType::F64),
-        (DType::I8, DType::I32),
+        (DType::I8, DType::I16),
     ] {
         let e = infer(sum(accum), &[ty(d, &[4])]).unwrap_err();
         assert!(e.contains("accum_dtype"), "{e}");
@@ -158,6 +157,9 @@ fn dot_general_accumulates_in_accum_dtype() {
         (DType::BF16, DType::F32, DType::F32),
         (DType::F16, DType::F32, DType::F16),
         (DType::I32, DType::I32, DType::I32),
+        // Narrower integers in int32 (the TPU's matrix unit's int8 dots).
+        (DType::I8, DType::I32, DType::I32),
+        (DType::I8, DType::I32, DType::I8),
     ] {
         assert_eq!(
             infer(dot(accum, output), &operands(d)).unwrap().dtype,
@@ -168,13 +170,25 @@ fn dot_general_accumulates_in_accum_dtype() {
         (DType::F32, DType::F16, DType::F32, "accum_dtype"),
         (DType::F32, DType::F64, DType::F32, "accum_dtype"),
         (DType::BF16, DType::F16, DType::BF16, "accum_dtype"),
-        (DType::I8, DType::I32, DType::I8, "accum_dtype"),
+        (DType::I8, DType::I16, DType::I8, "accum_dtype"),
         (DType::BF16, DType::F32, DType::F16, "output_dtype"),
         (DType::BF16, DType::BF16, DType::F32, "output_dtype"),
     ] {
         let e = infer(dot(accum, output), &operands(d)).unwrap_err();
         assert!(e.contains(word), "{e}");
     }
+    // Two float dtypes (a TPU's bfloat16 by float8); not an integer's.
+    let mixed = |l, r| [ty(l, &[2, 3]), ty(r, &[3, 4])];
+    let f8 = DType::F8E4M3B11FNUZ;
+    assert_eq!(
+        infer(dot(DType::F32, DType::F32), &mixed(DType::BF16, f8))
+            .unwrap()
+            .dtype,
+        DType::F32
+    );
+    assert!(infer(dot(DType::F32, f8), &mixed(DType::BF16, f8)).is_ok());
+    let e = infer(dot(DType::I32, DType::I32), &mixed(DType::I8, DType::BF16)).unwrap_err();
+    assert!(e.contains("non-bool dtype"), "{e}");
     assert_eq!(
         dot(DType::F32, DType::BF16).to_string(),
         "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=bf16]"
@@ -370,4 +384,96 @@ fn rejects_mismatched_inputs() {
     let x = Tensor::from_slice(&[1.0f64, 2.0], DType::F64);
     assert!(reference::run(&g, &[x]).is_err());
     assert!(reference::run(&g, &[]).is_err());
+}
+
+#[test]
+fn bit_ops_follow_xla() {
+    use crate::graph::BinaryOp::*;
+    use crate::graph::UnaryOp::{Clz, Not, PopulationCount};
+    let i = |v: &[i32]| Tensor::from_slice(v, DType::I32);
+    let x = i(&[-8, 5, 1, -1]);
+    // Shifts by the width or more: 0, or the sign's.
+    let by = i(&[1, 2, 32, 40]);
+    assert_eq!(
+        run(Binary(ShiftLeft), &[x.clone(), by.clone()]).to_vec::<i32>(),
+        [-16, 20, 0, 0]
+    );
+    assert_eq!(
+        run(Binary(ShiftRightArithmetic), &[x.clone(), by.clone()]).to_vec::<i32>(),
+        [-4, 1, 0, -1]
+    );
+    assert_eq!(
+        run(Binary(ShiftRightLogical), &[x.clone(), by]).to_vec::<i32>(),
+        [0x7FFF_FFFC, 1, 0, 0]
+    );
+    // The remainder has the dividend's sign.
+    let d = i(&[3, -3, 1, 2]);
+    assert_eq!(
+        run(Binary(Rem), &[x.clone(), d.clone()]).to_vec::<i32>(),
+        [-2, 2, 0, -1]
+    );
+    assert_eq!(
+        run(Binary(Min), &[x.clone(), d]).to_vec::<i32>(),
+        [-8, -3, 1, -1]
+    );
+    assert_eq!(
+        run(Unary(Not), std::slice::from_ref(&x)).to_vec::<i32>(),
+        [7, -6, -2, 0]
+    );
+    assert_eq!(
+        run(Unary(PopulationCount), std::slice::from_ref(&x)).to_vec::<i32>(),
+        [29, 2, 1, 32]
+    );
+    assert_eq!(run(Unary(Clz), &[x]).to_vec::<i32>(), [0, 29, 31, 0]);
+    let b = Tensor::from_slice(&[true, false], DType::Bool);
+    assert_eq!(run(Unary(Not), &[b]).to_vec::<bool>(), [false, true]);
+}
+
+#[test]
+fn float_functions_follow_xla() {
+    use crate::graph::BinaryOp::Nextafter;
+    use crate::graph::UnaryOp::*;
+    let f = |v: &[f32]| Tensor::from_slice(v, DType::F32);
+    // Ties to even; sign keeps zero and NaN.
+    assert_eq!(
+        run(Unary(RoundEven), &[f(&[0.5, 1.5, -2.5])]).to_vec::<f32>(),
+        [0.0, 2.0, -2.0]
+    );
+    let s = run(Unary(Sign), &[f(&[-3.0, 0.0, 2.0, f32::NAN])]).to_vec::<f32>();
+    assert_eq!(s[..3], [-1.0, 0.0, 1.0]);
+    assert!(s[3].is_nan());
+    // nextafter on float32's bits, from zero the smallest of the target's sign.
+    let n = run(
+        Binary(Nextafter),
+        &[f(&[1.0, 0.0, 0.0]), f(&[2.0, -1.0, 1.0])],
+    )
+    .to_vec::<f32>();
+    assert_eq!(
+        n,
+        [
+            f32::from_bits(0x3f80_0001),
+            -f32::from_bits(1),
+            f32::from_bits(1)
+        ]
+    );
+    // reduce_precision to bfloat16's: ties to even, as a cast does.
+    let r = ReducePrecision {
+        exponent_bits: 8,
+        mantissa_bits: 7,
+    };
+    let x = f(&[f32::from_bits(0x3f80_8001), f32::from_bits(0x3f80_8000)]);
+    let bits: Vec<u32> = run(Unary(r), &[x])
+        .to_vec::<f32>()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+    assert_eq!(bits, [0x3f81_0000, 0x3f80_0000]);
+    assert_eq!(
+        run(Unary(IsFinite), &[f(&[1.0, f32::INFINITY, f32::NAN])]).to_vec::<bool>(),
+        [true, false, false]
+    );
+    let e = run(Unary(ErfInv), &[f(&[0.0, 0.5, -1.0])]).to_vec::<f32>();
+    assert_eq!(e[0], 0.0);
+    assert!((e[1] - 0.476_936_3).abs() < 1e-6, "{e:?}");
+    assert_eq!(e[2], f32::NEG_INFINITY);
 }

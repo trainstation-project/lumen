@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
-pub use primitive::{FUSION_SEPARATOR, NEURAL_ENGINE, Primitive};
+pub use primitive::{BinaryOp, FUSION_SEPARATOR, NEURAL_ENGINE, Primitive, UnaryOp};
 
 use crate::DType;
 use crate::tensor::contiguous_strides;

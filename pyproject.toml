@@ -19,8 +19,9 @@ cuda = [
     # Its compiled kernels are called from Rust through TVM-FFI's C ABI.
     "apache-tvm-ffi; sys_platform == 'linux'",
 ]
-# A TPU's runtime: libtpu.so, which lumen/device/tpu loads at run time
-# (`make test` points TPU_LIBRARY_PATH at this package's). Linux only.
+# A TPU's runtime: libtpu.so, which lumen/device/tpu loads at run time and
+# which compiles lumen's kernels (`make test` points TPU_LIBRARY_PATH at
+# this package's). Linux only.
 tpu = ["libtpu; sys_platform == 'linux'"]
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
@@ -45,4 +46,5 @@ line_length = 119
 markers = [
     "mps: needs an MPS (Metal) device",
     "cuda: needs a CUDA device and a wheel built with the `cuda` feature",
+    "tpu: needs a TPU and a wheel built with the `tpu` feature",
 ]

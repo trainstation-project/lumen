@@ -21,7 +21,7 @@ result).
 | `cuda.rs` | `CudaAllocator`: a `Region` over one `cudaMalloc` per device (FFI), and the per-device registry. |
 | `mps/mod.rs` | `MpsAllocator`: a `Region` over one Metal buffer (the shim's FFI), and its shared instance. |
 | `mps/mps_shim.mm` | Objective-C++: `MTLBuffer` creation, the pointer→buffer map, and device limits. |
-| `tpu.rs` | `TpuAllocator`: a `Region` over one byte-linear PJRT buffer per TPU (`lumen/device/tpu`), its per-device registry, and `copy_to_host` (reads at an offset). Only with `cfg(lumen_tpu_linked)`. |
+| `tpu.rs` | `TpuAllocator`: a `Region` over one byte-linear PJRT buffer per TPU (`lumen/device/tpu`), in whole rows (`ROW`, 512 bytes); its per-device registry, `copy_to_host` (reads at an offset), `run` (a TPU program on the buffer) and `rows`. Only with `cfg(lumen_tpu_linked)`. |
 | `python.rs` | `lumen.config` (`Config` pyclass), plus the `compiler` sub-config. |
 | `__init__.py`, `_C.pyi` | Python-side re-export and type stubs. |
 | `tests.rs` | CPU, static-allocator, device-crossing, CUDA, MPS and TPU test modules. |
@@ -199,14 +199,19 @@ The shim (`mps/mps_shim.mm`) does the Objective-C work:
 ### TPU
 `tpu.rs`, over `lumen/device/tpu`'s PJRT shim. Each TPU's `TpuAllocator` is a
 `Region` like CUDA's and MPS's, sized by `static_allocator_bytes`, its range
-one **1-D `u32` PJRT buffer** (the only kind a TPU stores byte for byte as
-the host does; see [`../device/tpu/README.md`](../device/tpu/README.md)).
-TPU memory is not host-addressable: the pointers handed out are the
-runtime's address of that buffer plus the allocation's offset, never
-dereferenced. `copy_to_host(index, ptr, dst)` reads an allocation back at its
-offset (the TPU-to-host copy kernel's). Writing the region needs a TPU
-program: not yet. The allocator keeps its buffer handle itself
-(`Region::base` is the CUDA and MPS allocators').
+one **`u32[rows, 1, 128]` PJRT buffer**: rows of 512 bytes (`ROW`), tiled
+`(1, 128)`, so stored byte for byte as the host does and addressable by a
+program at any row (see [`../device/tpu/README.md`](../device/tpu/README.md)).
+Every allocation is rounded up to whole rows. TPU memory is not
+host-addressable: the pointers handed out are the runtime's address of
+that buffer plus the allocation's offset, never dereferenced.
+`copy_to_host(index, ptr, dst)` reads an allocation back at its offset (the
+TPU-to-host copy kernel's); `run(index, executable, rows, scalars, host)`
+runs a TPU program (`lumen/ops/tpu`) on the buffer, the rows of the TPU
+pointers `rows` its first scalars (each must start a row), and keeps the
+handle of its result, the same memory donated and written. The allocator
+keeps its buffer handle itself (`Region::base` is the CUDA and MPS
+allocators').
 
 ## Configuration
 
@@ -253,8 +258,9 @@ compiler's flags, defined in `lumen/graph_compiler`).
   unexpectedly.
 * `cuda` / `mps` / `tpu` — hardware-gated, with `require_cuda!` /
   `require_mps!` / `require_tpu!` macros that print "unavailable,
-  skipping" and return early. The TPU tests run one at a time (they measure
-  the device's memory, which the others would change): the region is in the
+  skipping" and return early. The TPU tests run one at a time
+  (`device::tpu::ONE_AT_A_TIME`, which `ops/tpu`'s tests hold too: they
+  measure the device's memory, which the others would change): the region is in the
   device's memory once reserved and gone when dropped, offsets are aligned
   and reused, reads at any offset agree, reads past the region fail, and a
   TPU tensor copies to the host.

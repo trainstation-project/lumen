@@ -19,6 +19,184 @@ pub const FUSION_SEPARATOR: &str = " → ";
 /// program's, not a kernel's.
 pub const NEURAL_ENGINE: &str = "coreml_";
 
+/// The elementwise functions of one operand of [`Primitive::Unary`], each
+/// `lax`'s of its name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnaryOp {
+    // Of floats.
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Floor,
+    Ceil,
+    /// To the nearest integer, ties to even (`lax.round` with
+    /// `ROUND_TO_NEAREST_EVEN`, `jnp.round`).
+    RoundEven,
+    Log1p,
+    Expm1,
+    Exp2,
+    Log2,
+    Rsqrt,
+    Cbrt,
+    ErfInv,
+    /// Whether finite (a bool).
+    IsFinite,
+    /// The operand rounded to a float of `exponent_bits` and
+    /// `mantissa_bits` (`lax.reduce_precision`), of its dtype.
+    ReducePrecision {
+        exponent_bits: u32,
+        mantissa_bits: u32,
+    },
+    // Of numbers.
+    Abs,
+    Sign,
+    // Of integers (and bools: `Not`).
+    Not,
+    PopulationCount,
+    Clz,
+}
+
+impl UnaryOp {
+    /// Its `lax` name.
+    pub fn name(&self) -> &'static str {
+        use UnaryOp::*;
+        match self {
+            Sin => "sin",
+            Cos => "cos",
+            Tan => "tan",
+            Asin => "asin",
+            Acos => "acos",
+            Atan => "atan",
+            Sinh => "sinh",
+            Cosh => "cosh",
+            Asinh => "asinh",
+            Acosh => "acosh",
+            Atanh => "atanh",
+            Floor => "floor",
+            Ceil => "ceil",
+            RoundEven => "round",
+            Log1p => "log1p",
+            Expm1 => "expm1",
+            Exp2 => "exp2",
+            Log2 => "log2",
+            Rsqrt => "rsqrt",
+            Cbrt => "cbrt",
+            ErfInv => "erf_inv",
+            IsFinite => "is_finite",
+            ReducePrecision { .. } => "reduce_precision",
+            Abs => "abs",
+            Sign => "sign",
+            Not => "not",
+            PopulationCount => "population_count",
+            Clz => "clz",
+        }
+    }
+
+    /// The op of `lax` name `name` (`reduce_precision` takes parameters:
+    /// not here).
+    pub fn of_name(name: &str) -> Option<Self> {
+        use UnaryOp::*;
+        [
+            Sin,
+            Cos,
+            Tan,
+            Asin,
+            Acos,
+            Atan,
+            Sinh,
+            Cosh,
+            Asinh,
+            Acosh,
+            Atanh,
+            Floor,
+            Ceil,
+            RoundEven,
+            Log1p,
+            Expm1,
+            Exp2,
+            Log2,
+            Rsqrt,
+            Cbrt,
+            ErfInv,
+            IsFinite,
+            Abs,
+            Sign,
+            Not,
+            PopulationCount,
+            Clz,
+        ]
+        .into_iter()
+        .find(|op| op.name() == name)
+    }
+}
+
+/// The elementwise functions of two operands of one type of
+/// [`Primitive::Binary`], each `lax`'s of its name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BinaryOp {
+    /// `x ** y`, of floats.
+    Pow,
+    /// The remainder of truncated division (its sign the dividend's).
+    Rem,
+    Min,
+    /// Bitwise (logical, of bools).
+    And,
+    Or,
+    Xor,
+    /// Shifts of integers, by the second operand's bits (all of them out
+    /// past the width: 0, or the sign's for an arithmetic right shift).
+    ShiftLeft,
+    ShiftRightLogical,
+    ShiftRightArithmetic,
+    /// The float after `x` towards `y`.
+    Nextafter,
+}
+
+impl BinaryOp {
+    /// Its `lax` name.
+    pub fn name(&self) -> &'static str {
+        use BinaryOp::*;
+        match self {
+            Pow => "pow",
+            Rem => "rem",
+            Min => "min",
+            And => "and",
+            Or => "or",
+            Xor => "xor",
+            ShiftLeft => "shift_left",
+            ShiftRightLogical => "shift_right_logical",
+            ShiftRightArithmetic => "shift_right_arithmetic",
+            Nextafter => "nextafter",
+        }
+    }
+
+    pub fn of_name(name: &str) -> Option<Self> {
+        use BinaryOp::*;
+        [
+            Pow,
+            Rem,
+            Min,
+            And,
+            Or,
+            Xor,
+            ShiftLeft,
+            ShiftRightLogical,
+            ShiftRightArithmetic,
+            Nextafter,
+        ]
+        .into_iter()
+        .find(|op| op.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     // elementwise, two operands of the same type
@@ -39,6 +217,12 @@ pub enum Primitive {
     Cast {
         new_dtype: DType,
     },
+    /// An elementwise function of one operand beyond those above (`lax`'s:
+    /// [`UnaryOp`]).
+    Unary(UnaryOp),
+    /// An elementwise function of two operands of one type beyond those
+    /// above (`lax`'s: [`BinaryOp`]).
+    Binary(BinaryOp),
     /// `select(pred, on_true, on_false)`, elementwise.
     Select,
     /// The sum over `axes`, accumulated in `accum_dtype`, the result's
@@ -133,6 +317,14 @@ pub enum Primitive {
     Gather {
         axis: usize,
     },
+    /// The operand's entries along `axis` at `indices` (its second operand:
+    /// integers, of its rank, no larger than it but along `axis`), the
+    /// others where they are: `out[..., i, ...] = x[..., indices[..., i, ...], ...]`
+    /// (`jnp.take_along_axis`, `torch.gather`). An index out of the axis is
+    /// the program's error (the reference clamps it into the axis).
+    TakeAlongAxis {
+        axis: usize,
+    },
     /// The operand with `updates` (its third operand, shaped as a
     /// [`Primitive::Gather`] of it at `indices`, its second) added at the
     /// entries along `axis` the indices pick (in range, as the gather's),
@@ -214,6 +406,16 @@ pub enum Primitive {
         mutated: Vec<usize>,
         overlappable: Vec<(usize, usize)>,
     },
+    /// A kernel of lumen's Pallas (`lumen.pallas.pallas_call`) named
+    /// `label`: the kernel `kernel` (a handle of `lumen.pallas`'s) on its
+    /// operands, computing values of `outputs`' types. Its value is the
+    /// first; the k-th, a [`Primitive::FusionOutput`] of it at index `k`.
+    /// It runs on a TPU only.
+    PallasCall {
+        label: &'static str,
+        kernel: usize,
+        outputs: Vec<TensorType>,
+    },
 }
 
 impl Primitive {
@@ -234,6 +436,8 @@ impl Primitive {
             Tanh => "tanh",
             Logistic => "logistic",
             Cast { .. } => "cast",
+            Unary(op) => op.name(),
+            Binary(op) => op.name(),
             Select => "select",
             ReduceSum { .. } => "reduce_sum",
             ReduceMax { .. } => "reduce_max",
@@ -249,6 +453,7 @@ impl Primitive {
             DynamicSlice { .. } => "dynamic_slice",
             DynamicUpdateSlice => "dynamic_update_slice",
             Gather { .. } => "gather",
+            TakeAlongAxis { .. } => "take_along_axis",
             ScatterAdd { .. } => "scatter_add",
             Concatenate { .. } => "concatenate",
             Full { .. } => "full",
@@ -257,7 +462,7 @@ impl Primitive {
             LinearCrossEntropy => "linear_cross_entropy",
             Fusion { label, .. } => label,
             FusionOutput { .. } => "fusion_output",
-            CustomCall { label, .. } => label,
+            CustomCall { label, .. } | PallasCall { label, .. } => label,
         }
     }
 
@@ -288,10 +493,12 @@ impl Primitive {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
+            TakeAlongAxis { .. } => 2,
+            Binary(_) => 2,
             Select | ScatterAdd { .. } | LinearCrossEntropy => 3,
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
-            CustomCall { .. } => args.len(),
+            CustomCall { .. } | PallasCall { .. } => args.len(),
             // An index a dimension of the operand (none if it is missing).
             DynamicSlice { .. } => 1 + args.first().map_or(0, |x| x.shape.len()),
             DynamicUpdateSlice => 2 + args.first().map_or(0, |x| x.shape.len()),
@@ -330,12 +537,52 @@ impl Primitive {
                 if !matches!(self, Neg) && !x.dtype.is_float() {
                     return err(format!("takes a floating-point operand, got {x}"));
                 }
-                if !matches!(self, Neg) {
-                    no_bf16_math(x).map_err(prefix)?;
-                }
                 Ok(x.clone())
             }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
+            Unary(op) => {
+                use UnaryOp::*;
+                let x = args[0];
+                let (floats, ints) = (x.dtype.is_float(), x.dtype.is_int());
+                let fits = match op {
+                    Abs | Sign => floats || ints,
+                    Not => ints || x.dtype == DType::Bool,
+                    PopulationCount | Clz => ints,
+                    _ => floats,
+                };
+                if !fits {
+                    return err(format!("does not take {x}"));
+                }
+                match op {
+                    IsFinite => Ok(TensorType::new(DType::Bool, &x.shape)),
+                    _ => Ok(x.clone()),
+                }
+            }
+            Binary(op) => {
+                use BinaryOp::*;
+                let (x, y) = (args[0], args[1]);
+                // A float's power of integers (`lax.pow`'s): of its shape.
+                if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape
+                {
+                    return Ok(x.clone());
+                }
+                if x != y {
+                    return err(format!("operands must have the same type, got {x} and {y}"));
+                }
+                let (floats, ints, bools) =
+                    (x.dtype.is_float(), x.dtype.is_int(), x.dtype == DType::Bool);
+                let fits = match op {
+                    Pow | Nextafter => floats,
+                    Rem => floats || ints,
+                    Min => true,
+                    And | Or | Xor => ints || bools,
+                    ShiftLeft | ShiftRightLogical | ShiftRightArithmetic => ints,
+                };
+                if !fits {
+                    return err(format!("does not take {x}"));
+                }
+                Ok(x.clone())
+            }
             Wait | ToHost | ToDevice => Ok(args[0].clone()),
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
@@ -386,13 +633,20 @@ impl Primitive {
                 output_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
-                if lhs.dtype != rhs.dtype || lhs.dtype == DType::Bool {
+                // Of one dtype, or two floats (a TPU multiplies bfloat16 by
+                // float8: a device that cannot refuses them).
+                let floats = lhs.dtype.is_float() && rhs.dtype.is_float();
+                if (lhs.dtype != rhs.dtype && !floats) || lhs.dtype == DType::Bool {
                     return err(format!(
-                        "operands must share a non-bool dtype, got {lhs} and {rhs}"
+                        "operands must share a non-bool dtype (or be floats), got {lhs} and {rhs}"
                     ));
                 }
                 check_accum(lhs, *accum_dtype).map_err(prefix)?;
-                if *output_dtype != lhs.dtype && output_dtype != accum_dtype {
+                check_accum(rhs, *accum_dtype).map_err(prefix)?;
+                if *output_dtype != lhs.dtype
+                    && *output_dtype != rhs.dtype
+                    && output_dtype != accum_dtype
+                {
                     return err(format!(
                         "outputs the operands' dtype or accum_dtype ({accum_dtype}): got output_dtype {output_dtype} for {lhs}"
                     ));
@@ -491,6 +745,19 @@ impl Primitive {
                 Ok(TensorType::new(x.dtype, slice_sizes))
             }
             Gather { axis } => gathered(args[0], args[1], *axis).map_err(prefix),
+            TakeAlongAxis { axis } => {
+                let (x, indices) = (args[0], args[1]);
+                let fits = *axis < x.shape.len()
+                    && indices.dtype.is_int()
+                    && indices.shape.len() == x.shape.len()
+                    && (0..x.shape.len()).all(|d| d == *axis || indices.shape[d] <= x.shape[d]);
+                match fits {
+                    true => Ok(TensorType::new(x.dtype, &indices.shape)),
+                    false => Err(prefix(format!(
+                        "indices into {x} along axis {axis} are integers of its rank, no larger but along the axis, got {indices}"
+                    ))),
+                }
+            }
             ScatterAdd { axis } => {
                 let (x, updates) = (args[0], args[2]);
                 let want = gathered(x, args[1], *axis).map_err(prefix)?;
@@ -551,6 +818,10 @@ impl Primitive {
                     None => err("mutates no operand: it would compute nothing".into()),
                 }
             }
+            PallasCall { outputs, .. } => match outputs.first() {
+                Some(t) => Ok(t.clone()),
+                None => err("computes no output".into()),
+            },
             LinearCrossEntropy => {
                 let (h, w, target) = (args[0], args[1], args[2]);
                 let rows = |t: &TensorType| t.shape.len() == 2;
@@ -684,25 +955,15 @@ fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> 
 }
 
 fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
-    let widened =
-        x.dtype.is_float() && x.dtype.size_of() < DType::F32.size_of() && accum == DType::F32;
+    let narrower = x.dtype.size_of() < 4;
+    let widened = narrower
+        && ((x.dtype.is_float() && accum == DType::F32)
+            || (x.dtype.is_int() && accum == DType::I32));
     match accum == x.dtype || widened {
         true => Ok(()),
         false => Err(format!(
-            "accumulates in the operand's dtype, or float32 for narrower floats: got accum_dtype {accum} for {x}"
+            "accumulates in the operand's dtype, or float32 (int32) for narrower floats (integers): got accum_dtype {accum} for {x}"
         )),
-    }
-}
-
-/// Ok, unless `x` is bfloat16: no device computes exp, log, sqrt, tanh or
-/// logistic in it (Metal's take and return float), and a program is run as
-/// traced, never in another dtype; it computes them in float32 itself.
-fn no_bf16_math(x: &TensorType) -> Result<(), String> {
-    match x.dtype {
-        DType::BF16 => Err(format!(
-            "has no bfloat16 kernel, got {x}: convert to float32 first (x.to(dtype=float32))"
-        )),
-        _ => Ok(()),
     }
 }
 
@@ -717,6 +978,13 @@ impl fmt::Display for Primitive {
         f.write_str(self.name())?;
         match self {
             Cast { new_dtype } => write!(f, "[new_dtype={new_dtype}]"),
+            Unary(UnaryOp::ReducePrecision {
+                exponent_bits,
+                mantissa_bits,
+            }) => write!(
+                f,
+                "[exponent_bits={exponent_bits} mantissa_bits={mantissa_bits}]"
+            ),
             ReduceSum { axes, accum_dtype } => {
                 write!(f, "[axes={} accum_dtype={accum_dtype}]", Tuple(axes))
             }
@@ -774,7 +1042,9 @@ impl fmt::Display for Primitive {
                 Tuple(shape)
             ),
             Transpose { permutation } => write!(f, "[permutation={}]", Tuple(permutation)),
-            Gather { axis } | ScatterAdd { axis } => write!(f, "[axis={axis}]"),
+            Gather { axis } | ScatterAdd { axis } | TakeAlongAxis { axis } => {
+                write!(f, "[axis={axis}]")
+            }
             Slice {
                 start_indices,
                 limit_indices,

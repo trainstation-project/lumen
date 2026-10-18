@@ -228,8 +228,9 @@ impl Dtype {
         })
     }
 
-    pub fn from_lumen(dtype: DType) -> Self {
-        match dtype {
+    /// The file's dtype of a lumen dtype, if it has one.
+    pub fn from_lumen(dtype: DType) -> Option<Self> {
+        Some(match dtype {
             DType::Bool => Dtype::BOOL,
             DType::U8 => Dtype::U8,
             DType::U16 => Dtype::U16,
@@ -243,7 +244,8 @@ impl Dtype {
             DType::BF16 => Dtype::BF16,
             DType::F32 => Dtype::F32,
             DType::F64 => Dtype::F64,
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -475,6 +477,12 @@ fn prepare<'a>(
     if cfg!(target_endian = "big") {
         return Err(Error::BigEndian);
     }
+    for &(name, t) in tensors {
+        if Dtype::from_lumen(t.dtype()).is_none() {
+            let dtype = t.dtype().full_name().to_owned();
+            return Err(Error::UnsupportedDtype(name.to_owned(), dtype));
+        }
+    }
     let mut order = tensors.to_vec();
     // Decreasing dtype alignment, then by name.
     order.sort_by(|(ln, lt), (rn, rt)| {
@@ -495,7 +503,7 @@ fn prepare<'a>(
         infos.push((
             name.to_owned(),
             TensorInfo {
-                dtype: Dtype::from_lumen(t.dtype()),
+                dtype: Dtype::from_lumen(t.dtype()).expect("checked above"),
                 shape: t.shape().to_vec(),
                 data_offsets: (offset, offset + n),
             },

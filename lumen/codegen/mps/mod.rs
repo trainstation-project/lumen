@@ -2138,7 +2138,7 @@ pub(crate) fn metal_type(dtype: DType) -> &'static str {
         DType::F16 => "half",
         DType::BF16 => "bfloat",
         DType::F32 => "float",
-        DType::F64 => unreachable!("Metal has no float64"),
+        other => unreachable!("Metal has no {other}"),
     }
 }
 

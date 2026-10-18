@@ -4,6 +4,7 @@ from lumen.device._C import DeviceLike, cpu, cuda, device, meta, mps, tpu
 from lumen.graph._C import FUSION_SEPARATOR, Graph, _register_custom_op
 from lumen.graph_compiler._C import Plan
 from lumen.ops._C import _dummy_op, _register_kernel, _registered_ops, _unregister_kernel
+from lumen.pallas._C import Kernel
 from lumen.profiler._C import (
     _Profile,
     _profiler_cuda_timing,

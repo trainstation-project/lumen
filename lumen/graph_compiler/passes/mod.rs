@@ -5,6 +5,7 @@
 //! folder (`graph_compiler/mps`).
 
 pub(crate) mod cse;
+pub(crate) mod fold_dot_reshapes;
 pub(crate) mod simplify;
 
 // Passes only the MPS pipeline runs so far: unused where it is not built.
@@ -18,3 +19,5 @@ pub(crate) mod dot_strength;
 pub(crate) mod gated_backward;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+pub(crate) mod take_along_axis;

@@ -285,7 +285,7 @@ def test_mps_kernels_match_cpu(dtype):
 
     def block(x, wq, wk, w1):
         scores = (x @ wq) @ (x @ wk).t() * 0.25
-        # Softmax in float32 (bfloat16 has no exp).
+        # Softmax in float32 (bfloat16 has no exp on MPS).
         h = x + F.softmax(scores.float(), -1).to(dtype=x.dtype) @ x
         return F.mean(F.relu(h @ w1), -1), F.amax(h, 0), F.sum(F.where(h > 0, h, -h))
 
@@ -1543,7 +1543,8 @@ def test_float_fields_are_runtime_scalars(device):
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
-    tanh, logistic, softmax) has no kernel and raises; a dot accumulates in
+    tanh, logistic, softmax) has no MPS kernel and raises there (the CPU's
+    reference rounds it once); a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
     program; `@` always float32; sum and mean in their input's dtype). A
     dot returns its required output_dtype (`@`: its inputs'), a sum its
@@ -1553,7 +1554,11 @@ def test_programs_run_in_their_dtypes(device):
     except RuntimeError as e:
         pytest.skip(str(e))
     for f in (F.exp, F.sqrt, lambda a: F.softmax(a, -1), F.tanh):
-        with pytest.raises(ValueError, match="convert to float32"):
+        if device == "cpu":
+            assert lumen.compile(f)(x).dtype == "bfloat16"
+            continue
+        # (Refused compiling for MPS, as a device's errors are.)
+        with pytest.raises(RuntimeError, match="convert to float32"):
             lumen.compile(f)(x)
     out = lumen.compile(lambda a: F.exp(a.float()))(x)
     assert out.dtype == "float32"

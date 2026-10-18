@@ -181,6 +181,18 @@ pub struct PlanOptions {
     /// a donated output only once no step reads its block either (an
     /// optimizer's update after the merged dots reading the old weights).
     pub blocks: Vec<(usize, Vec<usize>)>,
+    /// How the device lays values out, if not row-major (a TPU's tiles,
+    /// `device::tpu::layout`): each value's bytes, and whether two types'
+    /// layouts are the same bytes (a reshape between them a view, else a
+    /// step of its own).
+    pub layout: Option<DeviceLayout>,
+}
+
+/// A device's layout of values: see [`PlanOptions::layout`].
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceLayout {
+    pub bytes: fn(&TensorType) -> usize,
+    pub same: fn(&TensorType, &TensorType) -> bool,
 }
 
 #[derive(Debug, Clone)]
@@ -292,8 +304,18 @@ impl Plan {
     fn compile_in_order(graph: &Graph, options: &PlanOptions) -> Self {
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
-        let is_reshape = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
-        let bytes = |v: Var| graph.type_of(v).numel() * graph.type_of(v).dtype.size_of();
+        // A reshape whose bytes are its operand's (any, but on a device
+        // whose layout depends on the shape).
+        let is_reshape = |node: &Node| {
+            matches!(node.primitive, Primitive::Reshape { .. })
+                && options.layout.is_none_or(|l| {
+                    (l.same)(graph.type_of(node.inputs[0]), graph.type_of(node.output))
+                })
+        };
+        let bytes = |v: Var| match options.layout {
+            Some(l) => (l.bytes)(graph.type_of(v)),
+            None => graph.type_of(v).numel() * graph.type_of(v).dtype.size_of(),
+        };
 
         let mut live = vec![false; n];
         for &v in graph.outputs() {
@@ -342,7 +364,7 @@ impl Plan {
         for (t, node) in graph.nodes().iter().enumerate() {
             // A wait's value is its operand's memory too (in place), but it
             // is a step: the host waits there.
-            if is_reshape(&node.primitive) || matches!(node.primitive, Primitive::Wait) {
+            if is_reshape(node) || matches!(node.primitive, Primitive::Wait) {
                 root[node.output] = root[node.inputs[0]];
             }
             // Each value it writes in place, with the operand position it
@@ -472,7 +494,7 @@ impl Plan {
             .iter()
             .filter(|node| {
                 live[node.output]
-                    && !is_reshape(&node.primitive)
+                    && !is_reshape(node)
                     && !is_view(node.output)
                     && !is_fusion_output(&node.primitive)
                     && !in_place(node)
@@ -819,8 +841,9 @@ impl Plan {
 
     /// Run the plan on `inputs`, which must be on one device, returning
     /// its outputs on that device (the CPU if there are no inputs). On MPS
-    /// the steps are Metal kernels ([`crate::ops::mps`]); elsewhere they run on
-    /// the host, with device inputs copied there and the outputs back.
+    /// the steps are Metal kernels ([`crate::ops::mps`]), on a TPU Pallas
+    /// kernels (`ops::tpu`); elsewhere they run on the host, with device
+    /// inputs copied there and the outputs back.
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         self.run_on(
             inputs,
@@ -1045,14 +1068,27 @@ impl Plan {
         Ok(())
     }
 
-    /// Where the steps of a run on `device` run: MPS kernels on MPS, else
-    /// the host.
+    /// Where the steps of a run on `device` run: MPS kernels on MPS, TPU
+    /// kernels on a TPU, else the host.
     fn executor(&self, device: Device) -> Result<Device, String> {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
+        } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_)) {
+            device
         } else {
             Device::Cpu(0)
         };
+        if let Some(step) = self
+            .steps
+            .iter()
+            .find(|s| matches!(s.primitive, Primitive::PallasCall { .. }))
+            && !matches!(executor, Device::Tpu(_))
+        {
+            return Err(format!(
+                "{}: a lumen.pallas kernel runs on a TPU, not {device}",
+                step.label
+            ));
+        }
         if executor == Device::Mps(0) {
             let f64_step = self.steps.iter().find(|s| {
                 s.inputs
@@ -1178,6 +1214,11 @@ impl Plan {
                     }
                     crate::ops::mps::encode(step, &args, out, scratch, keep)?;
                 }
+                #[cfg(lumen_tpu_linked)]
+                Device::Tpu(index) => {
+                    let _ = scratch;
+                    crate::ops::tpu::encode(index, step, &args, out)?;
+                }
                 _ => {
                     // The reference evaluates each step whole: no scratch.
                     let _ = scratch;
@@ -1237,6 +1278,10 @@ impl Plan {
                 match executor {
                     _ if !src.is_contiguous() => {
                         out.copy_(src)?;
+                    }
+                    #[cfg(lumen_tpu_linked)]
+                    Device::Tpu(_) => {
+                        return Err(format!("{}: custom ops do not run on TPU yet", step.label));
                     }
                     #[cfg(lumen_mps_linked)]
                     Device::Mps(_) => crate::ops::dynamic_slice::mps::copy(

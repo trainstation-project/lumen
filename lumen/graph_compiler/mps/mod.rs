@@ -37,6 +37,7 @@ use super::passes::dot_strength::DotStrength;
 use super::passes::gated_backward::GatedBackward;
 use super::passes::linear_cross_entropy::LinearCrossEntropy;
 use super::passes::simplify::Simplify;
+use super::passes::take_along_axis::TakeAlongAxis;
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::graph::{Graph, Primitive, Var};
@@ -137,6 +138,9 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
 /// The MPS passes `config` turns on, in order.
 fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
+    // Gathers along an axis as gathers of flat positions, first: the
+    // passes after match those (a cross entropy's).
+    p.add(TakeAlongAxis);
     // A cross entropy of a dot's logits whose gradient recomputes them a
     // chunk at a time: its rows computed from those chunks' logits (before
     // any dot is merged, or its forward matched as a linear cross entropy).
@@ -195,9 +199,36 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     p
 }
 
+/// An error for a node of `graph` the MPS has no kernel for, though a graph
+/// may have it: exp, log, sqrt, tanh or logistic of bfloat16 (Metal's take
+/// and return float, and a program runs as traced, never in another dtype:
+/// it computes them in float32 itself), and dots of two dtypes.
+fn unsupported(graph: &Graph) -> Result<(), String> {
+    use Primitive::*;
+    for node in graph.nodes() {
+        let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
+        if matches!(node.primitive, Exp | Log | Sqrt | Tanh | Logistic) && x.dtype == DType::BF16 {
+            return Err(format!(
+                "{}: has no bfloat16 kernel on MPS, got {x}: convert to float32 first (x.to(dtype=float32))",
+                node.primitive.name()
+            ));
+        }
+        if let DotGeneral { .. } = node.primitive {
+            let y = graph.type_of(node.inputs[1]);
+            if x.dtype != y.dtype {
+                return Err(format!(
+                    "dot_general: has no kernel of two dtypes on MPS, got {x} and {y}: convert them to one first"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `graph` rewritten by the MPS passes (as `options.config` says) and
 /// planned, its fusion kernels compiled.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+    unsupported(graph)?;
     let config = &options.config;
     let mut module = MpsModule {
         graph: graph.clone(),
@@ -235,6 +266,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             .enumerate()
             .map(|(k, (members, _))| (fused.inputs().len() - packed.len() + k, members.clone()))
             .collect(),
+        layout: None,
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     // A dot reading a block of N packed weights computes N dots: named

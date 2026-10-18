@@ -14,6 +14,7 @@ reduce in their input's dtype. Convert first with ``.to(dtype)``
 (``F.sum(x.float())``).
 """
 
+import builtins
 import math
 
 from lumen.autograd.function import Function
@@ -75,6 +76,52 @@ __all__ = [
     "rms_norm",
     # contractions
     "matmul",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "floor",
+    "ceil",
+    "round",
+    "rint",
+    "log1p",
+    "expm1",
+    "exp2",
+    "log2",
+    "cbrt",
+    "erfinv",
+    "abs",
+    "sign",
+    "square",
+    "reciprocal",
+    "pow",
+    "nextafter",
+    "isfinite",
+    "isnan",
+    "logical_and",
+    "logical_or",
+    "logical_not",
+    "clamp",
+    "amin",
+    "min",
+    "any",
+    "all",
+    "argmax",
+    "argmin",
+    "cat",
+    "stack",
+    "triu",
+    "diagonal",
+    "pad",
+    "gather",
+    "einsum",
 ]
 
 
@@ -143,6 +190,12 @@ def where(condition, input, other):
     condition, input, other = _lift(condition), _lift(input), _lift(other)
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
+    if not isinstance(input, TracedTensor) and not isinstance(other, TracedTensor):
+        # Two Python scalars: of their kind's default dtype (torch's).
+        kind = "bool" if isinstance(input, bool) and isinstance(other, bool) else None
+        ints = builtins.all(isinstance(v, int) for v in (input, other))
+        dtype = kind or ("int64" if ints else "float32")
+        input = prims.full(condition.shape, input, dtype)
     dtype = _common_dtype("where", (input, other))
     input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
     shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
@@ -190,7 +243,7 @@ def dropout(input, p=0.5, training=True):
         raise ValueError(f"dropout probability has to be between 0 and 1, but got {p}")
     if not training or p == 0.0:
         return input
-    if round(p * 2**32) >= 2**32:
+    if builtins.round(p * 2**32) >= 2**32:
         return where(prims.full(tuple(input.shape), True, "bool"), 0.0, input)
     return where(_dropped(input.shape, p), 0.0, input * (1.0 / (1.0 - p)))
 
@@ -202,7 +255,7 @@ def _dropped(shape, p):
     from lumen import random
 
     bits = random._bits(shape)
-    return bits < prims.full(tuple(shape), round(p * 2**32), "uint32")
+    return bits < prims.full(tuple(shape), builtins.round(p * 2**32), "uint32")
 
 
 # ---------------------------------------------------------------------
@@ -371,3 +424,287 @@ def matmul(input, other, accum_dtype, output_dtype):
         out = out.squeeze(-1)
 
     return out
+
+
+# -- elementwise functions beyond the core ones ---------------------------
+
+
+def _float_fn(prim, name):
+    def f(input):
+        return prim(_require_float(_lift(input), name))
+
+    f.__name__ = name
+    f.__doc__ = f"Elementwise ``{name}`` of a floating-point tensor."
+    return f
+
+
+sin = _float_fn(prims.sin, "sin")
+cos = _float_fn(prims.cos, "cos")
+tan = _float_fn(prims.tan, "tan")
+asin = _float_fn(prims.asin, "asin")
+acos = _float_fn(prims.acos, "acos")
+atan = _float_fn(prims.atan, "atan")
+sinh = _float_fn(prims.sinh, "sinh")
+cosh = _float_fn(prims.cosh, "cosh")
+asinh = _float_fn(prims.asinh, "asinh")
+acosh = _float_fn(prims.acosh, "acosh")
+atanh = _float_fn(prims.atanh, "atanh")
+
+
+def _integral_fn(prim, name):
+    """``prim`` of a float; an integer as it is (already integral)."""
+
+    def f(input):
+        input = _lift(input)
+        return input if not _is_float(input.dtype) else prim(input)
+
+    f.__name__ = name
+    f.__doc__ = f"Elementwise ``{name}``: an integer tensor as it is."
+    return f
+
+
+floor = _integral_fn(prims.floor, "floor")
+ceil = _integral_fn(prims.ceil, "ceil")
+# To the nearest integer, ties to even (``torch.round``, ``numpy.rint``).
+round = _float_fn(prims.round, "round")
+rint = _float_fn(prims.round, "rint")
+log1p = _float_fn(prims.log1p, "log1p")
+expm1 = _float_fn(prims.expm1, "expm1")
+exp2 = _float_fn(prims.exp2, "exp2")
+log2 = _float_fn(prims.log2, "log2")
+cbrt = _float_fn(prims.cbrt, "cbrt")
+erfinv = _float_fn(prims.erf_inv, "erfinv")
+
+
+def abs(input):
+    return prims.abs(_lift(input))
+
+
+def sign(input):
+    """-1, 0 or 1 by ``input``'s sign (a float's zero and NaN as they are)."""
+    return prims.sign(_lift(input))
+
+
+def square(input):
+    input = _lift(input)
+    return prims.mul(input, input)
+
+
+def reciprocal(input):
+    return _true_div(1.0, _lift(input))
+
+
+def pow(input, exponent):
+    """``input ** exponent`` (an integer's to a non-negative int exponent)."""
+    return _lift(input) ** exponent
+
+
+def nextafter(input, other):
+    """The float after ``input`` towards ``other``, elementwise."""
+    return _elementwise(prims.nextafter, input, other)
+
+
+def isfinite(input):
+    input = _lift(input)
+    if not _is_float(input.dtype):
+        return prims.full(input.shape, True, "bool")
+    return prims.is_finite(input)
+
+
+def isnan(input):
+    input = _lift(input)
+    if not _is_float(input.dtype):
+        return prims.full(input.shape, False, "bool")
+    return _ne(input, input)
+
+
+def _truth(input):
+    """``input`` as bools: nonzero (a Python scalar's truth)."""
+    input = _lift(input)
+    if not isinstance(input, TracedTensor):
+        return bool(input)
+    return input if input.dtype == "bool" else _ne(input, prims.full(input.shape, 0, input.dtype))
+
+
+def logical_and(input, other):
+    return _elementwise(prims.and_, _truth(input), _truth(other))
+
+
+def logical_or(input, other):
+    return _elementwise(prims.or_, _truth(input), _truth(other))
+
+
+def logical_not(input):
+    return prims.not_(_truth(input))
+
+
+def clamp(input, min=None, max=None):
+    """``input`` clamped to ``[min, max]`` (either may be None, a scalar or a
+    tensor)."""
+    out = _lift(input)
+    if min is not None:
+        out = maximum(out, min)
+    if max is not None:
+        out = minimum(out, max)
+    return out
+
+
+# -- reductions -------------------------------------------------------------
+
+
+def _flip(input):
+    """An order-reversing bijection of ``input``'s values: its negation, or
+    its bitwise not (unsigned integers, bools)."""
+    if input.dtype == "bool" or input.dtype.startswith("uint"):
+        return prims.not_(input)
+    return prims.neg(input)
+
+
+def amin(input, dim=(), keepdim=False):
+    """Minimum over ``dim`` (all dimensions if empty)."""
+    input = _lift(input)
+    return _flip(amax(_flip(input), dim, keepdim))
+
+
+def min(input, other=None):
+    """``min(input)`` over every element, or the elementwise
+    ``min(input, other)``."""
+    if other is None:
+        return amin(input)
+    return minimum(input, other)
+
+
+def any(input, dim=None, keepdim=False):
+    """Whether any element over ``dim`` (all if None) is nonzero."""
+    return amax(_truth(input), () if dim is None else dim, keepdim)
+
+
+def all(input, dim=None, keepdim=False):
+    """Whether every element over ``dim`` (all if None) is nonzero."""
+    return logical_not(any(logical_not(input), dim, keepdim))
+
+
+def _arg(input, dim, keepdim, best):
+    input = _lift(input)
+    if dim is None:
+        flat = input.reshape((-1,))
+        return _arg(flat, 0, False, best)
+    d = _dim(dim, input.ndim)
+    target = best(input, d, True)
+    index = prims.iota("int32", input.shape, d)
+    big = prims.full(input.shape, input.shape[d], "int32")
+    hit = prims.eq(input, _broadcast_to(target, input.shape))
+    return amin(prims.select(hit, index, big), d, keepdim)
+
+
+def argmax(input, dim=None, keepdim=False):
+    """The index of the (first) maximum over ``dim`` (of every element, if
+    None), as int32."""
+    return _arg(input, dim, keepdim, amax)
+
+
+def argmin(input, dim=None, keepdim=False):
+    """The index of the (first) minimum over ``dim`` (of every element, if
+    None), as int32."""
+    return _arg(input, dim, keepdim, amin)
+
+
+# -- layout -------------------------------------------------------------------
+
+
+def cat(tensors, dim=0):
+    """``tensors`` one after another along ``dim`` (``torch.cat``)."""
+    tensors = [_lift(t) for t in tensors]
+    return prims.concatenate(tensors, _dim(dim, tensors[0].ndim))
+
+
+def stack(tensors, dim=0):
+    """``tensors`` (of one shape) stacked along a new dimension ``dim``."""
+    tensors = [_lift(t) for t in tensors]
+    d = _dim(dim, tensors[0].ndim + 1)
+    return cat([t.unsqueeze(d) for t in tensors], d)
+
+
+def triu(input, diagonal=0):
+    """``input``'s upper triangle (its last two dimensions): the elements on
+    and above diagonal ``diagonal``, the others zero."""
+    input = _lift(input)
+    r = input.ndim
+    rows = prims.iota("int32", input.shape, r - 2)
+    cols = prims.iota("int32", input.shape, r - 1)
+    keep = _le(prims.add(rows, prims.full(input.shape, diagonal, "int32")), cols)
+    return prims.select(keep, input, prims.full(input.shape, 0, input.dtype))
+
+
+def diagonal(input, offset=0, dim1=0, dim2=1):
+    """The diagonal of ``input``'s dimensions ``dim1`` and ``dim2`` (two
+    dimensions), ``offset`` above the main one."""
+    input = _lift(input)
+    if input.ndim != 2 or (_dim(dim1, 2), _dim(dim2, 2)) != (0, 1):
+        raise NotImplementedError("diagonal takes a matrix's (dim1=0, dim2=1)")
+    n, m = input.shape
+    length = builtins.max(0, builtins.min(n, m - offset) if offset >= 0 else builtins.min(n + offset, m))
+    rows = prims.iota("int32", input.shape, 0)
+    cols = prims.iota("int32", input.shape, 1)
+    on = prims.eq(prims.add(rows, prims.full(input.shape, offset, "int32")), cols)
+    picked = prims.select(on, input, prims.full(input.shape, 0, input.dtype))
+    # Each column's (offset >= 0) or row's one element.
+    if offset >= 0:
+        line = prims.reduce_sum(picked, (0,), input.dtype)
+        return prims.slice(line, (offset,), (offset + length,))
+    line = prims.reduce_sum(picked, (1,), input.dtype)
+    return prims.slice(line, (-offset,), (-offset + length,))
+
+
+def pad(input, pad, mode="constant", value=0):
+    """``input`` padded (``torch.nn.functional.pad``): ``pad`` pairs of
+    before and after sizes, the last dimension's first; ``"constant"``
+    with ``value``, or ``"circular"`` (wrapping around, as many times as
+    it takes)."""
+    out = _lift(input)
+    for i in range(len(pad) // 2):
+        d = out.ndim - 1 - i
+        before, after = pad[2 * i], pad[2 * i + 1]
+        n = out.shape[d]
+        if mode == "constant":
+            side = lambda k: prims.full(tuple(k if j == d else s for j, s in enumerate(out.shape)), value, out.dtype)
+            parts = ([side(before)] if before > 0 else []) + [out] + ([side(after)] if after > 0 else [])
+        elif mode == "circular" and (before > n or after > n):
+            # Wider than the dimension (numpy's "wrap"): it repeated, then
+            # the window.
+            k = -(-before // n)
+            repeated = prims.concatenate([out] * (k + 1 + -(-after // n)), d)
+            out = repeated.narrow(d, k * n - before, n + before + after)
+            continue
+        elif mode == "circular":
+            part = lambda a, b: out.narrow(d, a, b - a)
+            parts = ([part(n - before, n)] if before > 0 else []) + [out] + ([part(0, after)] if after > 0 else [])
+        else:
+            raise NotImplementedError(f"pad mode {mode!r}")
+        out = prims.concatenate(parts, d) if len(parts) > 1 else out
+    return out
+
+
+def gather(input, dim, index):
+    """``input``'s elements along ``dim`` at ``index`` (of its rank):
+    ``out[i][j] = input[i][index[i][j]]`` for ``dim=1``
+    (``torch.gather``, ``numpy.take_along_axis``)."""
+    input, index = _lift(input), _lift(index)
+    return prims.take_along_axis(input, index, _dim(dim, input.ndim))
+
+
+def einsum(equation, *operands):
+    """A contraction of two operands (``torch.einsum``): no index repeated
+    within one, the output's indices the inputs' batch and free ones."""
+    inputs, output = equation.replace(" ", "").split("->")
+    a, b = inputs.split(",")
+    x, y = (_lift(t) for t in operands)
+    contracting = [c for c in a if c in b and c not in output]
+    batch = [c for c in a if c in b and c in output]
+    numbers = (
+        ([a.index(c) for c in contracting], [b.index(c) for c in contracting]),
+        ([a.index(c) for c in batch], [b.index(c) for c in batch]),
+    )
+    out = prims.dot_general(x, y, numbers, _accum_dtype(x.dtype), x.dtype)
+    order = batch + [c for c in a if c not in b] + [c for c in b if c not in a]
+    return out.permute(tuple(order.index(c) for c in output)) if order != list(output) else out
