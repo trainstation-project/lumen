@@ -48,6 +48,7 @@ __all__ = [
     "bitwise_or",
     "bitwise_xor",
     "cdiv",
+    "clz",
     "cond",
     "dot_general",
     "dslice",
@@ -67,6 +68,7 @@ __all__ = [
     "multiple_of",
     "num_programs",
     "pallas_call",
+    "population_count",
     "program_id",
     "shift_left",
     "shift_right_logical",
@@ -480,8 +482,18 @@ def reduce_precision(x, exponent_bits, mantissa_bits):
     return prims.reduce_precision(x, exponent_bits, mantissa_bits)
 
 
-def erf_inv(x):
+def erf_inv(x, accurate=True):
+    """``lax.erf_inv``: XLA's polynomial (accurate either way)."""
+    del accurate
     return prims.erf_inv(x)
+
+
+def population_count(x):
+    return prims.population_count(x)
+
+
+def clz(x):
+    return prims.clz(x)
 
 
 def select_n(which, *cases):

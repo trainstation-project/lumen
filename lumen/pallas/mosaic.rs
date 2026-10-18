@@ -664,6 +664,15 @@ impl Emitter<'_> {
                 self.unary("arith.divf", &[&one, &sum], FAST, out)
             }
             Cast { new_dtype } => self.cast(a, *new_dtype)?,
+            // Of bool vectors (which Mosaic does not select between), by
+            // logic: `c & t | !c & f`.
+            Select if out.dtype == DType::Bool && !out.shape.is_empty() => {
+                let ones = self.splat(Scalar::Bool(true), out);
+                let not_a = self.apply("arith.xori", &[a, &ones], "", out);
+                let t = self.apply("arith.andi", &[a, &args[1]], "", out);
+                let f = self.apply("arith.andi", &[&not_a, &args[2]], "", out);
+                self.unary("arith.ori", &[&t, &f], "", out)
+            }
             Select => self.unary("arith.select", &[a, &args[1], &args[2]], "", out),
             BroadcastInDim {
                 shape,
@@ -965,6 +974,14 @@ impl Emitter<'_> {
         }
     }
 
+    /// Whether `x`'s elements are NaN: not equal to themselves (Mosaic has
+    /// no `uno`).
+    fn is_nan(&mut self, x: &(String, TensorType)) -> (String, TensorType) {
+        let eq = self.compare(x, x, 1);
+        let ones = self.splat(Scalar::Bool(true), &eq.1);
+        self.apply("arith.xori", &[&eq, &ones], "", &eq.1.clone())
+    }
+
     fn select(
         &mut self,
         c: &(String, TensorType),
@@ -1200,7 +1217,7 @@ impl Emitter<'_> {
             bits = self.select(&over, &inf, &kept);
         }
         let back = self.apply("tpu.bitcast", &[&bits], "", &f32t);
-        let nan = self.compare(&wide, &wide, 14);
+        let nan = self.is_nan(&wide);
         let result = self.select(&nan, &wide, &back);
         Ok(match t.dtype {
             DType::F32 => result.0,
@@ -1231,7 +1248,7 @@ impl Emitter<'_> {
         // Away from zero (one bit more) if `y` is further out than `x`.
         let towards_up = self.compare(x, y, 4);
         let positive = self.compare(x, &zero, 2);
-        let away = self.compare(&towards_up, &positive, 1);
+        let away = self.apply("arith.xori", &[&towards_up, &positive], "", &positive.1.clone());
         let next = self.select(&away, &down, &up);
         // From zero: the smallest of `y`'s sign.
         let sign_bit = int(self, -(1i64 << (width - 1)) | 1);
@@ -1243,8 +1260,8 @@ impl Emitter<'_> {
         let next = self.apply("tpu.bitcast", &[&next], "", &t);
         let same = self.compare(x, y, 1);
         let next = self.select(&same, y, &next);
-        let nan_x = self.compare(x, x, 14);
-        let nan_y = self.compare(y, y, 14);
+        let nan_x = self.is_nan(x);
+        let nan_y = self.is_nan(y);
         let nan = self.apply("arith.ori", &[&nan_x, &nan_y], "", &nan_x.1);
         let quiet = self.splat(Scalar::Float(f64::NAN), &t);
         Ok(self.select(&nan, &quiet, &next).0)
