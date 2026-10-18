@@ -38,6 +38,7 @@ __all__ = [
     "dynamic_slice",
     "dynamic_update_slice",
     "gather",
+    "take_along_axis",
     "scatter_add",
     "concatenate",
     "full",
@@ -270,6 +271,13 @@ def gather(x, indices, axis):
     (one out of it the program's error; clamped into it with
     ``lumen.config.compiler.safe_kernels``)."""
     return bind("gather", x, indices, axis=axis)
+
+
+def take_along_axis(x, indices, axis):
+    """``x``'s entries along ``axis`` at ``indices`` (integers of ``x``'s
+    rank, no larger but along ``axis``), the others where they are
+    (``jnp.take_along_axis``, ``torch.gather``)."""
+    return bind("take_along_axis", x, indices, axis=axis)
 
 
 def scatter_add(x, indices, updates, axis):

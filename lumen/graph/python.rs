@@ -87,6 +87,9 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
         "gather" => Gather {
             axis: get("axis")?.extract()?,
         },
+        "take_along_axis" => TakeAlongAxis {
+            axis: get("axis")?.extract()?,
+        },
         "scatter_add" => ScatterAdd {
             axis: get("axis")?.extract()?,
         },

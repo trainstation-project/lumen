@@ -37,6 +37,7 @@ use super::passes::dot_strength::DotStrength;
 use super::passes::gated_backward::GatedBackward;
 use super::passes::linear_cross_entropy::LinearCrossEntropy;
 use super::passes::simplify::Simplify;
+use super::passes::take_along_axis::TakeAlongAxis;
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::graph::{Graph, Primitive, Var};
@@ -137,6 +138,9 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
 /// The MPS passes `config` turns on, in order.
 fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
+    // Gathers along an axis as gathers of flat positions, first: the
+    // passes after match those (a cross entropy's).
+    p.add(TakeAlongAxis);
     // A cross entropy of a dot's logits whose gradient recomputes them a
     // chunk at a time: its rows computed from those chunks' logits (before
     // any dot is merged, or its forward matched as a linear cross entropy).

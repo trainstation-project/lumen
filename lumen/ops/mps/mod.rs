@@ -99,6 +99,7 @@ pub(crate) fn encode(
         CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),
         PallasCall { .. } => unreachable!("a plan with a lumen.pallas kernel runs on a TPU"),
         Unary(_) | Binary(_) => unreachable!("refused above"),
+        TakeAlongAxis { .. } => unreachable!("rewritten as a gather (passes/take_along_axis.rs)"),
     };
     encode(step, inputs, output, keep)
 }

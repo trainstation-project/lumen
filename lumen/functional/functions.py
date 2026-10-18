@@ -682,18 +682,7 @@ def gather(input, dim, index):
     ``out[i][j] = input[i][index[i][j]]`` for ``dim=1``
     (``torch.gather``, ``numpy.take_along_axis``)."""
     input, index = _lift(input), _lift(index)
-    d = _dim(dim, input.ndim)
-    shape = index.shape
-    # Each element's flat position in input.
-    strides = [1] * input.ndim
-    for k in range(input.ndim - 2, -1, -1):
-        strides[k] = strides[k + 1] * input.shape[k + 1]
-    flat = None
-    for k in range(input.ndim):
-        at = index.to("int32") if k == d else prims.iota("int32", shape, k)
-        term = prims.mul(at, prims.full(shape, strides[k], "int32"))
-        flat = term if flat is None else prims.add(flat, term)
-    return prims.gather(input.reshape((-1,)), flat, 0)
+    return prims.take_along_axis(input, index, _dim(dim, input.ndim))
 
 
 def einsum(equation, *operands):

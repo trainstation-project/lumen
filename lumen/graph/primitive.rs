@@ -317,6 +317,14 @@ pub enum Primitive {
     Gather {
         axis: usize,
     },
+    /// The operand's entries along `axis` at `indices` (its second operand:
+    /// integers, of its rank, no larger than it but along `axis`), the
+    /// others where they are: `out[..., i, ...] = x[..., indices[..., i, ...], ...]`
+    /// (`jnp.take_along_axis`, `torch.gather`). An index out of the axis is
+    /// the program's error (the reference clamps it into the axis).
+    TakeAlongAxis {
+        axis: usize,
+    },
     /// The operand with `updates` (its third operand, shaped as a
     /// [`Primitive::Gather`] of it at `indices`, its second) added at the
     /// entries along `axis` the indices pick (in range, as the gather's),
@@ -445,6 +453,7 @@ impl Primitive {
             DynamicSlice { .. } => "dynamic_slice",
             DynamicUpdateSlice => "dynamic_update_slice",
             Gather { .. } => "gather",
+            TakeAlongAxis { .. } => "take_along_axis",
             ScatterAdd { .. } => "scatter_add",
             Concatenate { .. } => "concatenate",
             Full { .. } => "full",
@@ -484,6 +493,7 @@ impl Primitive {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
+            TakeAlongAxis { .. } => 2,
             Binary(_) => 2,
             Select | ScatterAdd { .. } | LinearCrossEntropy => 3,
             Fusion { body, .. } => body.inputs().len(),
@@ -737,6 +747,19 @@ impl Primitive {
                 Ok(TensorType::new(x.dtype, slice_sizes))
             }
             Gather { axis } => gathered(args[0], args[1], *axis).map_err(prefix),
+            TakeAlongAxis { axis } => {
+                let (x, indices) = (args[0], args[1]);
+                let fits = *axis < x.shape.len()
+                    && indices.dtype.is_int()
+                    && indices.shape.len() == x.shape.len()
+                    && (0..x.shape.len()).all(|d| d == *axis || indices.shape[d] <= x.shape[d]);
+                match fits {
+                    true => Ok(TensorType::new(x.dtype, &indices.shape)),
+                    false => Err(prefix(format!(
+                        "indices into {x} along axis {axis} are integers of its rank, no larger but along the axis, got {indices}"
+                    ))),
+                }
+            }
             ScatterAdd { axis } => {
                 let (x, updates) = (args[0], args[2]);
                 let want = gathered(x, args[1], *axis).map_err(prefix)?;
@@ -1033,7 +1056,9 @@ impl fmt::Display for Primitive {
                 Tuple(shape)
             ),
             Transpose { permutation } => write!(f, "[permutation={}]", Tuple(permutation)),
-            Gather { axis } | ScatterAdd { axis } => write!(f, "[axis={axis}]"),
+            Gather { axis } | ScatterAdd { axis } | TakeAlongAxis { axis } => {
+                write!(f, "[axis={axis}]")
+            }
             Slice {
                 start_indices,
                 limit_indices,

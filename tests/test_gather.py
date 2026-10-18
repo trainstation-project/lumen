@@ -194,3 +194,46 @@ def test_scatter_add_in_place():
         lumen.graph_compiler.Plan(lumen.make_graph(lambda x, i, u: prims.scatter_add(x * 2.0, i, u, 0))(*args), "cpu")
     )
     assert "out0:f32[4,6] = scatter_add[axis=0] out0 " in plan, plan
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("index_dtype", [np.int8, np.int32, np.int64])
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_take_along_axis(device, index_dtype, axis):
+    """``F.gather`` (``torch.gather``, ``np.take_along_axis``): each entry
+    along the axis at its index, the others where they are; the indices no
+    larger than the operand off the axis, of any integer dtype."""
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal((4, 5, 6)).astype(np.float32)
+    shape = [3, 4, 5]
+    shape[axis] = 7
+    ids = rng.integers(0, x.shape[axis], shape).astype(index_dtype)
+    got = lumen.compile(lambda x, i: F.gather(x, axis, i))(_tensor(x, device), _tensor(ids, device))
+    want = np.take_along_axis(x[tuple(slice(n) if d != axis else slice(None) for d, n in enumerate(shape))], ids, axis)
+    np.testing.assert_array_equal(lumen.to_numpy(got), want)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_take_along_axis_gradient(device):
+    """Its gradient: each entry's cotangent summed over its reads, zeros
+    where none read it."""
+    rng = np.random.default_rng(6)
+    x, c = rng.standard_normal((4, 3)).astype(np.float32), rng.standard_normal((5, 3)).astype(np.float32)
+    ids = rng.integers(0, 4, (5, 3)).astype(np.int64)
+    grad = lumen.grad(lambda x, i, c: F.sum(F.gather(x, 0, i) * c))
+    got = lumen.compile(grad)(_tensor(x, device), _tensor(ids, device), _tensor(c, device))
+    want = np.zeros_like(x)
+    np.add.at(want, (ids, np.arange(3)[None, :]), c)
+    np.testing.assert_allclose(lumen.to_numpy(got), want, rtol=1e-6, atol=1e-6)
+
+
+def test_take_along_axis_checks_its_operands():
+    """Indices are integers of the operand's rank, no larger off the axis."""
+    m = lambda shape, dtype="float32": lumen.empty(shape, dtype=dtype, device="meta")  # noqa: E731
+    g = lumen.make_graph(lambda x, i: prims.take_along_axis(x, i, 1))(m([4, 6]), m([3, 9], "int8"))
+    assert "f32[3,9] = take_along_axis[axis=1]" in str(g)
+    for x, i in [([4, 6], [5, 2]), ([4, 6], [4]), ([4, 6], [4, 2, 1])]:
+        with pytest.raises(ValueError, match="along axis 1"):
+            lumen.make_graph(lambda x, i: prims.take_along_axis(x, i, 1))(m(x), m(i, "int32"))
+    with pytest.raises(ValueError, match="along axis 1"):
+        lumen.make_graph(lambda x, i: prims.take_along_axis(x, i, 1))(m([4, 6]), m([4, 6]))

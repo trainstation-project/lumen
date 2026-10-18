@@ -708,6 +708,28 @@ impl Emitter<'_> {
                 self.unary("arith.ori", &[&t, &f], "", out)
             }
             Select => self.unary("arith.select", &[a, &args[1], &args[2]], "", out),
+            // As Pallas: of indices of the operand's shape, along one of its
+            // last two dimensions (`tpu.dynamic_gather`).
+            TakeAlongAxis { axis } => {
+                let rank = a.1.shape.len();
+                if args[1].1.shape != a.1.shape || axis + 2 < rank {
+                    return Err(
+                        "take_along_axis runs in TPU kernels of indices of the operand's shape, along one of its last two dimensions"
+                            .into(),
+                    );
+                }
+                let wide = TensorType::new(DType::I32, &a.1.shape);
+                let indices = match args[1].1.dtype.bits() {
+                    32 => args[1].clone(),
+                    b if b < 32 => {
+                        let ext = if unsigned(args[1].1.dtype) { "arith.extui" } else { "arith.extsi" };
+                        (self.unary(ext, &[&args[1]], "", &wide), wide)
+                    }
+                    _ => return Err("take_along_axis's indices in TPU kernels are 32-bit or narrower".into()),
+                };
+                let attrs = format!("dimensions = array<i32: {axis}>");
+                self.unary("tpu.dynamic_gather", &[a, &indices], &attrs, out)
+            }
             BroadcastInDim {
                 shape,
                 broadcast_dimensions,

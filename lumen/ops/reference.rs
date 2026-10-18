@@ -631,6 +631,16 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ravel(at, &x.shape)
             })
         }
+        TakeAlongAxis { axis } => {
+            let x = types[0];
+            let picked = taken(args[1], x.shape[*axis]);
+            gather(args[0], out, |idx| {
+                // The index at this output element (the indices of its shape).
+                let k = picked[ravel(idx.iter().copied(), &out.shape)];
+                let at = idx.iter().enumerate().map(|(d, &i)| if d == *axis { k } else { i });
+                ravel(at, &x.shape)
+            })
+        }
         ScatterAdd { axis } => {
             let (x, indices, u) = (types[0], types[1], types[2]);
             let picked = taken(args[1], x.shape[*axis]);
