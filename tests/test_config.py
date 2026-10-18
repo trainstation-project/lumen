@@ -122,7 +122,8 @@ def _read_early_and_late(a, w):
 def test_dump_to_writes_each_pass(compiler, tmp_path):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
-    ``--xla_dump_to``); the MPS pipeline's last pass generates the kernels."""
+    ``--xla_dump_to``); the MPS pipeline's last passes generate the
+    kernels, then place the slices read in place."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
     compiler.dump_to = str(tmp_path)
@@ -134,9 +135,10 @@ def test_dump_to_writes_each_pass(compiler, tmp_path):
     assert "cpu.01.simplify.txt" in steps
     if "mps" in devices:
         mps = sorted(s for s in steps if s.startswith("mps."))
-        assert mps[-1].endswith(".codegen.txt") and any(".loop_fusion." in s for s in mps)
+        assert mps[-2].endswith(".codegen.txt") and mps[-1].endswith(".place_views.txt"), mps
+        assert any(".loop_fusion." in s for s in mps)
         assert (
-            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-1]))).read_text()
+            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-2]))).read_text()
         )
     compiler.reset()
     count = len(list(tmp_path.iterdir()))
