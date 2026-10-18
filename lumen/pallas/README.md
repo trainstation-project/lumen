@@ -39,7 +39,7 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 | `python.rs` | `lumen._C.Kernel`, the bindings the Python API drives; it answers the tracer as a `Graph` does (`apply`, `type_of`, `_set_source`, `_set_scope`). |
 | `__init__.py` | `lumen.pallas`: `kernel` (trace and lower a kernel on a device's memory), `Ref` (loads, stores, strided indexing, `.at` windows, `reshape`, `bitcast`), `ds`, `VMEM`, `SMEM`, `SemaphoreType`, control flow (`when`, `cond`, `switch`, `fori_loop`, `while_loop`, `scan` of a carry, `loop`), `make_async_copy` / `async_copy`, bit ops, `multiple_of`, `dot`, `dot_general`, `select_n`, `integer_pow`, `reduce_precision`, `erf_inv`, `population_count`, `clz`. |
 | `call.py` | `pallas_call`: a kernel as an op of a lumen program, its operands staged as JAX stages them (whole in VMEM or SMEM, as HBM refs, or pipelined in blocks over a grid, named or not), `input_output_aliases`. |
-| `pipeline.py` | `emit_pipeline`, `BlockSpec`, `program_id`, `num_programs`, `axis_index`, `axis_size`: Pallas's two-slot double-buffered pipeline over a grid (see the module doc for its schedule). |
+| `pipeline.py` | `emit_pipeline`, `BlockSpec` (`Blocked`, `Element`, `None` dimensions), `program_id`, `num_programs`, `axis_index`, `axis_size`: Pallas's two-slot double-buffered pipeline over a grid (see the module doc for its schedule), with JAX's checks of block shapes and index maps. A block past its operand's end reads the operand viewed larger where that is its tiles' padding, else (at a static position) copies the operand's rows alone, the rest of the slot undefined. |
 | `_C.pyi` | Type stub for `Kernel`. |
 | `tests.rs` | Lowering tests, without a TPU: a copy kernel, a loop accumulating a matmul in VMEM, bfloat16 word unpacking, exact constants, and what kernels refuse. |
 
@@ -75,9 +75,10 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
   one of the last two dimensions, indices of the operand's shape, extended
   to its elements' width (Mosaic's).
 * Not lowered yet (they error): `jnp.take`-like gathers and scatters, cumulative sums,
-  dots of operands of two dtypes, dots of several contracting dimensions
-  (libtpu 0.0.48's Mosaic aborts on them, under JAX too), `pl.delay`,
-  `pl.Element`/`BoundedSlice` block dimensions.
+  dots of several contracting dimensions
+  (libtpu 0.0.48's Mosaic aborts on them, under JAX too), `BoundedSlice`
+  block dimensions (as under JAX on a TPU), `Element` padding below an
+  operand.
 
 ## Related
 
