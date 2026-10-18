@@ -341,9 +341,9 @@ int lumen_tpu_run(void *executable,
                                                   .output_lists = &results,
                                                   .execute_device = devices[index]};
     struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    timespec_get(&t0, TIME_UTC);
     int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
-    clock_gettime(CLOCK_MONOTONIC, &t1);
+    timespec_get(&t1, TIME_UTC);
     execute_ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
     // The scalars (uncached) and host bytes are the runtime's until the
     // program has run.
