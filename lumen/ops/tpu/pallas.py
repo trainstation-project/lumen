@@ -1,0 +1,81 @@
+"""lumen's TPU kernels, written in Pallas, lowered to the programs lumen runs.
+
+A TPU kernel is a module of Pallas source beside its op
+(``lumen/ops/<op>/tpu.py``) defining ``program(spec)``: its kernel for
+``spec`` (a dict the Rust side chose: shapes, blocks, dtypes), lowered by
+:func:`program` here. Rust (``lumen/ops/tpu/mod.rs``) calls :func:`lower`
+once per kernel and spec, then compiles the text with libtpu and runs it.
+
+Every kernel works on a device's whole memory: the TPU allocator's one
+buffer, ``u32[rows, 1, 128]`` (rows of 512 bytes, laid out as the host lays
+out bytes). Its arguments are ``i32`` scalars (the rows of the buffers it
+reads and writes, first), optionally host bytes copied to the TPU
+(``u32[host_rows, 1, 128]``), and the memory, which it returns written
+(aliased, donated: the same memory).
+
+JAX only lowers here, on its CPU platform: it never opens the TPU, which
+lumen's own PJRT client holds.
+"""
+
+import importlib
+import json
+import os
+import sys
+
+
+def jax():
+    """JAX, its platform the CPU unless something imported it before."""
+    if "jax" not in sys.modules:
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    import jax
+
+    return jax
+
+
+def lower(module: str, spec: str) -> str:
+    """The StableHLO text of ``module``'s kernel for ``spec`` (JSON)."""
+    return importlib.import_module(module).program(json.loads(spec))
+
+
+def program(kernel, *, rows: int, scalars: int, host_rows: int = 0, scratch=()) -> str:
+    """``kernel`` as a program on a device of ``rows`` rows of memory:
+    ``kernel(scalars, [host,] memory, result, *scratch)``, its refs in SMEM
+    (the ``scalars`` i32s) and HBM (the rest), ``scratch`` in VMEM or
+    semaphores. It writes ``result``, the memory (as it reads ``memory``)."""
+    jax_ = jax()
+    import jax.numpy as jnp
+    from jax.experimental import pallas as pl
+    from jax.experimental.pallas import tpu as pltpu
+
+    def words(n):
+        return jax_.ShapeDtypeStruct((n, 1, 128), jnp.uint32)
+
+    args = [jax_.ShapeDtypeStruct((scalars,), jnp.int32)]
+    args += [words(host_rows)] if host_rows else []
+    args += [words(rows)]
+    memory = len(args) - 1
+    hbm = pl.BlockSpec(memory_space=pl.ANY)
+
+    def call(*args):
+        return pl.pallas_call(
+            kernel,
+            out_shape=words(rows),
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=1,
+                in_specs=[hbm] * memory,
+                out_specs=hbm,
+                scratch_shapes=list(scratch),
+            ),
+            input_output_aliases={memory: 0},
+        )(*args)
+
+    jitted = jax_.jit(call, donate_argnums=memory)
+    return jitted.trace(*args).lower(lowering_platforms=("tpu",)).as_text()
+
+
+def matrix(ref, row, shape):
+    """The ``shape`` (rows, words; words a multiple of 128) of 32-bit words
+    in memory ``ref`` from row ``row``."""
+    from jax.experimental import pallas as pl
+
+    return ref.at[pl.ds(row, shape[0] * shape[1] // 128)].reshape(*shape)

@@ -1,27 +1,10 @@
-//! `dot_general` on TPU: one Mosaic kernel ([`crate::ops::tpu::mosaic`]) of
-//! the matrix unit, over a grid of output blocks and K blocks: each step
-//! copies its operands' blocks from the device's memory to VMEM, multiplies
-//! them into a float32 accumulator, and the last K block writes the output
-//! block.
-//!
-//! The device's memory holds tensors as the host does, row-major, which is
-//! not how a TPU lays out a 16-bit matrix (it packs two rows' elements in a
-//! 32-bit word); a kernel reads it as 32-bit words. A word of a bfloat16
-//! row holds two neighbours: elements `2w` (low half) and `2w + 1`. So a
-//! bfloat16 kernel splits each operand by parity, its words' halves
-//! (widened to float32 exactly, then narrowed back to bfloat16 for the
-//! matrix unit), and sums parities:
-//! `out[:, q::2] = Σ_p lhs[:, p::2] · rhs[p::2, q::2]`, four matmuls of a
-//! quarter of the work each; a rhs whose rows hold N pairs its rows by k
-//! parity (two rows a row of `[K/2, 2 · N/2]` words), and one whose rows
-//! hold K pairs them by n parity. A bfloat16 output is written as words
-//! too: its even columns' bits in the low halves, its odd columns' in the
-//! high.
+//! `dot_general` on TPU: the spec of its Pallas kernel (`tpu.py` beside
+//! this file, which says how it works): the dot's form, its blocks and
+//! dtypes. A dot the kernel cannot run errors here, saying why.
 
 use crate::DType;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::ops::tpu::mosaic::{Kernel, Space, Type, Value};
 use crate::ops::tpu::{Launch, launch};
 
 /// A `dot_general` as `out[b] = lhs[b] · rhs[b]`: `batch` of `[m, k]` times
@@ -133,21 +116,32 @@ pub(crate) fn encode(
             lhs.dtype, out.dtype
         ));
     }
+    // Blocks of whole rows of 128 words (a pair of rows, a word two
+    // elements), as large as fit VMEM: tuned on a v6e.
     let unit_n = 128 * pout.max(if f.transposed { 1 } else { pin });
     let unit_k = 128 * pin;
+    let (cap_m, cap_n, cap_k) = match pin {
+        1 => (512, 512, 512),
+        _ => (1024, 1024, 512),
+    };
+    // An lhs block's rows are M's whole, or a multiple of 8 (the batch's
+    // matrices are one).
     let blocks = (
-        match f.m <= 512 {
+        match f.batch == 1 && f.m <= cap_m {
             true => Some(f.m),
-            false => block(f.m, 8, 512),
+            false => block(f.m, 8, cap_m),
         },
-        block(f.n, unit_n, 512),
-        block(f.k, unit_k, 512 * pin),
+        block(f.n, unit_n, cap_n),
+        block(f.k, unit_k, cap_k),
     );
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [
             (
                 blocks.0,
-                format!("M ({}) at most 512 or a multiple of 8", f.m),
+                format!(
+                    "M ({}) a multiple of 8 (or at most {cap_m}, unbatched)",
+                    f.m
+                ),
             ),
             (blocks.1, format!("N ({}) a multiple of {unit_n}", f.n)),
             (blocks.2, format!("K ({}) a multiple of {unit_k}", f.k)),
@@ -162,230 +156,18 @@ pub(crate) fn encode(
             failed.join(" and ")
         ));
     };
-    let rows = crate::allocator::tpu::rows(index)?;
-    let body = kernel(&f, (pin, pout), (bm, bn, bk), rows);
-    let name = format!("dot_general_{}_{}", lhs.dtype, out.dtype);
+    let spec = format!(
+        "\"batch\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"operands\": \
+         \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}]",
+        f.batch, f.m, f.n, f.k, f.transposed, lhs.dtype, out.dtype
+    );
     let rows = [inputs[0], inputs[1], output.cast_const()];
     let launched = Launch {
-        name: &name,
-        body,
+        module: "lumen.ops.dot_general.tpu",
+        spec,
         rows: &rows,
         scalars: &[],
         host: &[],
     };
     launch(index, launched)
-}
-
-/// `a + Σ v · c` of i32 scalars.
-fn sum(k: &mut Kernel, terms: &[(&Value, usize)], constant: usize) -> Value {
-    let mut acc = k.i32(constant as i64);
-    for (v, c) in terms {
-        acc = k.affine(&acc, v, *c as i64);
-    }
-    acc
-}
-
-/// The kernel: `f` of operands of `pin` and an output of `pout` elements
-/// a word, in blocks of `bm × bn` outputs and `bk` contracting, on a device
-/// of `rows` rows of memory. Its scalars are the rows of the lhs, the rhs
-/// and the output.
-fn kernel(
-    f: &Form,
-    (pin, pout): (usize, usize),
-    (bm, bn, bk): (usize, usize, usize),
-    rows: usize,
-) -> String {
-    let Form {
-        batch,
-        m,
-        n,
-        k: kk,
-        transposed,
-    } = *f;
-    let words = |shape: Vec<usize>| Type::Memref(shape, "i32", Space::Vmem);
-    let rhs_block = match (pin, transposed) {
-        (1, false) => vec![bk, bn],
-        (1, true) => vec![bn, bk],
-        (_, false) => vec![bk / 2, bn / 2],
-        (_, true) => vec![bn / pout, bk / 2],
-    };
-    let rhs_buffers = match (pin, transposed, pout) {
-        (2, false, _) | (2, true, 2) => 2,
-        _ => 1,
-    };
-    let mut scratch = vec![words(vec![bm, bk / pin])];
-    scratch.extend((0..rhs_buffers).map(|_| words(rhs_block.clone())));
-    let acc_shape = vec![bm, bn / pout];
-    scratch.extend((0..pout).map(|_| Type::Memref(acc_shape.clone(), "f32", Space::Vmem)));
-    scratch.push(words(vec![bm, bn / pout]));
-    let grid = [batch, m / bm, n / bn, kk / bk];
-    let mut k = Kernel::new(&grid, 3, None, rows, &scratch);
-    let (b, i, j, step) = (
-        k.program_id(0),
-        k.program_id(1),
-        k.program_id(2),
-        k.program_id(3),
-    );
-    let xv = k.scratch(0);
-    let yv: Vec<Value> = (0..rhs_buffers).map(|r| k.scratch(1 + r)).collect();
-    let accs: Vec<Value> = (0..pout).map(|q| k.scratch(1 + rhs_buffers + q)).collect();
-    let ov = k.scratch(1 + rhs_buffers + pout);
-
-    // A matrix of `shape` words at the row of scalar `s`, in `memory`.
-    let matrix = |k: &mut Kernel, memory: &Value, s: usize, shape: [usize; 2]| {
-        let row = k.scalar(s);
-        let zero = k.i32(0);
-        let all = k.slice(
-            memory,
-            &[&row, &zero, &zero],
-            &[shape[0] * shape[1] / 128, 1, 128],
-        );
-        k.reshape(&all, &shape)
-    };
-    // `matrix`'s `shape` at row `r`, column `c` (a multiple of 128).
-    let at = |k: &mut Kernel, matrix: &Value, r: &Value, c: &Value, shape: &[usize]| {
-        let c = k.multiple_of(c, 128);
-        k.slice(matrix, &[r, &c], shape)
-    };
-
-    let memory = k.memory();
-    let x = matrix(&mut k, &memory, 0, [batch * m, kk / pin]);
-    let r = sum(&mut k, &[(&b, m), (&i, bm)], 0);
-    let c = sum(&mut k, &[(&step, bk / pin)], 0);
-    let x = at(&mut k, &x, &r, &c, &[bm, bk / pin]);
-    k.copy(&x, &xv);
-
-    // The rhs: a matrix of words whose blocks `yv` holds.
-    let y_shape = match (pin, transposed, pout) {
-        (1, false, _) => [batch * kk, n],
-        (1, true, _) => [batch * n, kk],
-        (_, false, _) => [batch * kk / 2, n],
-        (_, true, 2) => [batch * n / 2, kk],
-        (_, true, _) => [batch * n, kk / 2],
-    };
-    let y = matrix(&mut k, &memory, 1, y_shape);
-    let (r, c, half) = match (pin, transposed, pout) {
-        (1, false, _) => (
-            sum(&mut k, &[(&b, kk), (&step, bk)], 0),
-            sum(&mut k, &[(&j, bn)], 0),
-            0,
-        ),
-        (1, true, _) => (
-            sum(&mut k, &[(&b, n), (&j, bn)], 0),
-            sum(&mut k, &[(&step, bk)], 0),
-            0,
-        ),
-        (_, false, _) => (
-            sum(&mut k, &[(&b, kk / 2), (&step, bk / 2)], 0),
-            sum(&mut k, &[(&j, bn / 2)], 0),
-            n / 2,
-        ),
-        (_, true, 2) => (
-            sum(&mut k, &[(&b, n / 2), (&j, bn / 2)], 0),
-            sum(&mut k, &[(&step, bk / 2)], 0),
-            kk / 2,
-        ),
-        (_, true, _) => (
-            sum(&mut k, &[(&b, n), (&j, bn)], 0),
-            sum(&mut k, &[(&step, bk / 2)], 0),
-            0,
-        ),
-    };
-    for (h, yv) in yv.iter().enumerate() {
-        let shift = k.i32((h * half) as i64);
-        let c = k.add(&c, &shift);
-        let y = at(&mut k, &y, &r, &c, &rhs_block);
-        k.copy(&y, yv);
-    }
-
-    // The operands' parities, as matrix unit inputs.
-    let unpack = |k: &mut Kernel, words: &Value, high: bool| {
-        let shape = words.shape().to_vec();
-        let half = match high {
-            false => {
-                let sixteen = k.splat_i32(16, &shape);
-                k.shift_left(words, &sixteen)
-            }
-            true => {
-                let mask = k.splat_i32(-65536, &shape);
-                k.and(words, &mask)
-            }
-        };
-        let float = k.bitcast(&half, "f32");
-        k.truncate(&float, "bf16")
-    };
-    let xw = k.load(&xv);
-    let ys: Vec<Value> = yv.iter().map(|yv| k.load(yv)).collect();
-    let xs: Vec<Value> = match pin {
-        1 => vec![k.bitcast(&xw, "f32")],
-        _ => vec![unpack(&mut k, &xw, false), unpack(&mut k, &xw, true)],
-    };
-    // `y[p][q]`: the rhs of k parity `p` and n parity `q`.
-    let y: Vec<Vec<Value>> = match (pin, transposed, pout) {
-        (1, _, _) => vec![vec![k.bitcast(&ys[0], "f32")]],
-        (_, false, _) => ys
-            .iter()
-            .map(|w| vec![unpack(&mut k, w, false), unpack(&mut k, w, true)])
-            .collect(),
-        (_, true, 2) => (0..2)
-            .map(|p| ys.iter().map(|w| unpack(&mut k, w, p == 1)).collect())
-            .collect(),
-        (_, true, _) => (0..2)
-            .map(|p| vec![unpack(&mut k, &ys[0], p == 1)])
-            .collect(),
-    };
-    let zeros = k.zeros(&acc_shape);
-    let parts: Vec<Value> = (0..pout)
-        .map(|q| {
-            (0..pin).fold(zeros.clone(), |acc, p| {
-                k.matmul(&xs[p], &y[p][q], &acc, transposed)
-            })
-        })
-        .collect();
-
-    let zero = k.i32(0);
-    let first = k.equal(&step, &zero);
-    k.when(&first, |k| {
-        for acc in &accs {
-            k.store(&zeros, acc);
-        }
-    });
-    for (acc, part) in accs.iter().zip(&parts) {
-        let old = k.load(acc);
-        let new = k.add(&old, part);
-        k.store(&new, acc);
-    }
-    let last = k.i32((kk / bk - 1) as i64);
-    let last = k.equal(&step, &last);
-    k.when(&last, |k| {
-        let rounded = |k: &mut Kernel, acc: &Value| {
-            let v = k.load(acc);
-            let v = k.truncate(&v, "bf16");
-            let v = k.extend(&v, "f32");
-            k.bitcast(&v, "i32")
-        };
-        let words = match pout {
-            1 => {
-                let v = k.load(&accs[0]);
-                k.bitcast(&v, "i32")
-            }
-            _ => {
-                let even = rounded(k, &accs[0]);
-                let sixteen = k.splat_i32(16, &acc_shape);
-                let even = k.shift_right(&even, &sixteen);
-                let odd = rounded(k, &accs[1]);
-                let mask = k.splat_i32(-65536, &acc_shape);
-                let odd = k.and(&odd, &mask);
-                k.or(&even, &odd)
-            }
-        };
-        k.store(&words, &ov);
-        let result = k.result();
-        let o = matrix(k, &result, 2, [batch * m, n / pout]);
-        let r = sum(k, &[(&b, m), (&i, bm)], 0);
-        let c = sum(k, &[(&j, bn / pout)], 0);
-        let o = at(k, &o, &r, &c, &[bm, bn / pout]);
-        k.copy(&ov, &o);
-    });
-    k.finish("dot_general")
 }

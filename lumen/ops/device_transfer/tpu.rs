@@ -1,14 +1,13 @@
 //! TPU-to-host copies, through the TPU allocator's reads of its region
-//! (`allocator::tpu::copy_to_host`); host-to-TPU copies, through a kernel
-//! that copies the host's bytes (passed to it, whole rows) to the
-//! destination's rows.
+//! (`allocator::tpu::copy_to_host`); host-to-TPU copies, through a Pallas
+//! kernel (`tpu.py`) that copies the host's bytes (passed to it, whole
+//! rows) to the destination's rows.
 
 use std::ptr::NonNull;
 
 use crate::Tensor;
 use crate::allocator::tpu::ROW;
 use crate::device::Device;
-use crate::ops::tpu::mosaic::Kernel;
 use crate::ops::tpu::{Launch, launch};
 
 pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
@@ -20,24 +19,15 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let mut host = vec![0u8; nbytes.next_multiple_of(ROW)];
     // SAFETY: `src` is a host tensor of `nbytes` contiguous bytes.
     host[..nbytes].copy_from_slice(unsafe { std::slice::from_raw_parts(src.data_ptr(), nbytes) });
-    let copied = crate::allocator::tpu::rows(index).and_then(|rows| {
-        let mut k = Kernel::new(&[1], 1, Some(host.len() / ROW), rows, &[]);
-        let at = k.scalar(0);
-        let zero = k.i32(0);
-        let result = k.result();
-        let to = k.slice(&result, &[&at, &zero, &zero], &[host.len() / ROW, 1, 128]);
-        let from = k.host();
-        k.copy(&from, &to);
-        let launched = Launch {
-            name: "copy_h2d",
-            body: k.finish("copy_h2d"),
-            rows: &[dst.data_ptr().cast_const()],
-            scalars: &[],
-            host: &host,
-        };
-        launch(index, launched)
-    });
-    copied.unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));
+    let launched = Launch {
+        module: "lumen.ops.device_transfer.tpu",
+        spec: format!("\"host_rows\": {}", host.len() / ROW),
+        rows: &[dst.data_ptr().cast_const()],
+        scalars: &[],
+        host: &host,
+    };
+    launch(index, launched)
+        .unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));
 }
 
 pub(super) fn copy_d2h(dst: &Tensor, src: &Tensor) {
