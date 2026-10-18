@@ -123,4 +123,6 @@ def program(spec, epilogue=None):
         out_spec = pl.BlockSpec((bm, bn // pout), lambda b, i, j, s: (b * mb + i, j))
         pltpu.emit_pipeline(body, grid=(b_, mb, nb, kb), in_specs=specs, out_specs=[out_spec])(x, *ys, out)
 
-    return pallas.program(kernel, rows=spec["rows"], scalars=3, scratch=[pltpu.VMEM((bm, bn), jnp.float32)])
+    return pallas.program(
+        kernel, kind=spec["kind"], rows=spec["rows"], scalars=3, scratch=[pltpu.VMEM((bm, bn), jnp.float32)]
+    )

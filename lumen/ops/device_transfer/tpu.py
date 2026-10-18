@@ -17,4 +17,6 @@ def program(spec):
     def kernel(rows, host, memory, result, sem):
         pltpu.async_copy(host, result.at[pl.ds(rows[0], n)], sem).wait()
 
-    return pallas.program(kernel, rows=spec["rows"], scalars=1, host_rows=n, scratch=[pltpu.SemaphoreType.DMA])
+    return pallas.program(
+        kernel, kind=spec["kind"], rows=spec["rows"], scalars=1, host_rows=n, scratch=[pltpu.SemaphoreType.DMA]
+    )

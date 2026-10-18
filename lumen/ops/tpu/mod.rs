@@ -71,7 +71,7 @@ fn compiled(module: &str, spec: &str) -> Result<Executable, String> {
 
 /// A kernel to launch: the Pallas module of its source (`module`), its
 /// spec's fields (`spec`: JSON members, `"name": value, ...`; the device's
-/// memory's `rows` are added), its scalars: the rows of `rows` (TPU buffers, each at the start of
+/// `kind` and its memory's `rows` are added), its scalars: the rows of `rows` (TPU buffers, each at the start of
 /// a row) then `scalars`, and `host` bytes (whole rows) copied to the TPU
 /// for it.
 pub(crate) struct Launch<'a> {
@@ -86,9 +86,11 @@ pub(crate) struct Launch<'a> {
 /// before it.
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
+    let kind = crate::device::tpu::kind(index)?;
+    let device = format!("\"kind\": \"{kind}\", \"rows\": {rows}");
     let spec = match launch.spec.as_str() {
-        "" => format!("{{\"rows\": {rows}}}"),
-        fields => format!("{{{fields}, \"rows\": {rows}}}"),
+        "" => format!("{{{device}}}"),
+        fields => format!("{{{fields}, {device}}}"),
     };
     let executable =
         compiled(launch.module, &spec).map_err(|e| format!("{}: {e}", launch.module))?;

@@ -24,6 +24,7 @@ pub(crate) mod ffi {
             dst: *mut c_void,
             nbytes: usize,
         ) -> i32;
+        pub fn lumen_tpu_device_kind(index: i32, kind: *mut c_char, size: usize) -> i32;
         pub fn lumen_tpu_compile(code: *const c_char, size: usize) -> *mut c_void;
         pub fn lumen_tpu_run(
             executable: *mut c_void,
@@ -46,6 +47,19 @@ pub(crate) fn error() -> String {
     unsafe { std::ffi::CStr::from_ptr(ffi::lumen_tpu_error()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Device `index`'s kind (`"TPU v6 lite"`): the TPU a kernel is lowered for.
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn kind(index: usize) -> Result<String, String> {
+    let mut kind = [0u8; 256];
+    // SAFETY: a writable buffer of its size.
+    match unsafe { ffi::lumen_tpu_device_kind(index as i32, kind.as_mut_ptr().cast(), kind.len()) }
+    {
+        0 => Ok(std::ffi::CStr::from_bytes_until_nul(&kind)
+            .map_or_else(|_| String::new(), |k| k.to_string_lossy().into_owned())),
+        _ => Err(error()),
+    }
 }
 
 /// Device `index`'s memory in use and its limit, in bytes.
