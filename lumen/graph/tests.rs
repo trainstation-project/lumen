@@ -101,7 +101,7 @@ fn reduce_drops_axes() {
     assert!(infer(ReduceMax { axes: vec![3] }, std::slice::from_ref(&x)).is_err());
     assert!(infer(ReduceMax { axes: vec![1, 1] }, &[x]).is_err());
     // A sum accumulates in its accum_dtype, its result's: the operand's,
-    // or float32 for narrower floats.
+    // or float32 (int32) for narrower floats (integers).
     let sum = |accum_dtype| ReduceSum {
         axes: vec![0],
         accum_dtype,
@@ -111,7 +111,7 @@ fn reduce_drops_axes() {
     for (d, accum) in [
         (DType::F32, DType::F16),
         (DType::F32, DType::F64),
-        (DType::I8, DType::I32),
+        (DType::I8, DType::I16),
     ] {
         let e = infer(sum(accum), &[ty(d, &[4])]).unwrap_err();
         assert!(e.contains("accum_dtype"), "{e}");
@@ -158,6 +158,9 @@ fn dot_general_accumulates_in_accum_dtype() {
         (DType::BF16, DType::F32, DType::F32),
         (DType::F16, DType::F32, DType::F16),
         (DType::I32, DType::I32, DType::I32),
+        // Narrower integers in int32 (the TPU's matrix unit's int8 dots).
+        (DType::I8, DType::I32, DType::I32),
+        (DType::I8, DType::I32, DType::I8),
     ] {
         assert_eq!(
             infer(dot(accum, output), &operands(d)).unwrap().dtype,
@@ -168,7 +171,7 @@ fn dot_general_accumulates_in_accum_dtype() {
         (DType::F32, DType::F16, DType::F32, "accum_dtype"),
         (DType::F32, DType::F64, DType::F32, "accum_dtype"),
         (DType::BF16, DType::F16, DType::BF16, "accum_dtype"),
-        (DType::I8, DType::I32, DType::I8, "accum_dtype"),
+        (DType::I8, DType::I16, DType::I8, "accum_dtype"),
         (DType::BF16, DType::F32, DType::F16, "output_dtype"),
         (DType::BF16, DType::BF16, DType::F32, "output_dtype"),
     ] {
