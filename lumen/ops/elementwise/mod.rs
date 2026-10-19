@@ -1,7 +1,4 @@
-//! Elementwise primitives (add, sub, mul, div, max, eq, lt, neg, exp, log,
-//! sqrt, tanh, logistic, cast, select): their kernels per
-//! backend, `mps/` (`kernels.metal`, `mod.rs`) for graph plans on MPS (see
-//! [`crate::ops::mps`]).
-
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;

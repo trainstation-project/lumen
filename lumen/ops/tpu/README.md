@@ -2,8 +2,9 @@
 
 TPU kernels and how they run. A plan step on a TPU (`Plan::execute`, the
 executor `Device::Tpu`) goes to `encode`, which routes on the step's
-`Primitive`; so far only `dot_general` has a kernel
-([`../dot_general/`](../dot_general/README.md)), and any other step errors
+`Primitive`; so far `dot_general` ([`../dot_general/`](../dot_general/README.md))
+and the elementwise primitives ([`../elementwise/tpu/`](../elementwise/tpu/))
+have kernels, and any other step errors
 (`<primitive> does not run on TPU yet`). The host-to-TPU copy
 (`../device_transfer/tpu.rs`) is a kernel too.
 
@@ -78,6 +79,7 @@ by that chain of handles: each takes the previous one's result, and reads
 
 * [`../../pallas/`](../../pallas/README.md) — lumen's Pallas: the kernel API, its IR and Mosaic lowering.
 * [`../dot_general/`](../dot_general/README.md) — the dot (`tpu.rs`: its spec; `tpu.py`: its kernel).
+* [`../elementwise/tpu/`](../elementwise/tpu/) — elementwise primitives, a node a launch (`mod.rs`: their spec; `__init__.py`: their kernel).
 * [`../device_transfer/`](../device_transfer/README.md) — host ↔ TPU copies.
 * [`../../device/tpu/`](../../device/tpu/README.md) — the PJRT shim: compile and run.
 * [`../../allocator/`](../../allocator/README.md) — `TpuAllocator`: the memory, its rows, `run`.

@@ -220,7 +220,11 @@ fn bits(dtype: DType) -> u32 {
 /// `x` (of an integer dtype of `w` bits) as its bits read as signed.
 fn signed_bits(x: i128, w: u32) -> i128 {
     let bits = unsigned_bits(x, w) as i128;
-    if w > 0 && bits >= 1 << (w - 1) { bits - (1 << w) } else { bits }
+    if w > 0 && bits >= 1 << (w - 1) {
+        bits - (1 << w)
+    } else {
+        bits
+    }
 }
 
 /// `x` (of an integer dtype of `w` bits) as its unsigned bits.

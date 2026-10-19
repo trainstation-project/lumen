@@ -295,6 +295,11 @@ enum Kind {
     Fnuz,
 }
 
+/// `2^e`, exactly (`powi` need not be): a normal `f64`'s bits.
+fn pow2(e: i32) -> f64 {
+    f64::from_bits(((e + 1023) as u64) << 52)
+}
+
 impl Float8 {
     fn decode(self, bits: u8) -> f64 {
         let (e_max, m_max) = ((1u32 << self.exponent) - 1, (1u32 << self.mantissa) - 1);
@@ -310,8 +315,8 @@ impl Float8 {
         }
         let unit = f64::from(1u32 << self.mantissa);
         let value = match e {
-            0 => f64::from(m) / unit * 2f64.powi(1 - self.bias),
-            e => (1.0 + f64::from(m) / unit) * 2f64.powi(e as i32 - self.bias),
+            0 => f64::from(m) / unit * pow2(1 - self.bias),
+            e => (1.0 + f64::from(m) / unit) * pow2(e as i32 - self.bias),
         };
         sign * value
     }
@@ -341,19 +346,12 @@ impl Float8 {
         // normals' exponent and mantissa continuing them.
         let min_exp = 1 - self.bias;
         let m = self.mantissa as i32;
-        let bits: u32 = if a < 2f64.powi(min_exp) {
-            (a / 2f64.powi(min_exp - m)).round_ties_even() as u32
+        let bits: u32 = if a < pow2(min_exp) {
+            (a / pow2(min_exp - m)).round_ties_even() as u32
         } else {
-            let e = a.log2().floor() as i32;
-            // `log2` can be one off at the edges: a mantissa in [1, 2).
-            let e = if a < 2f64.powi(e) {
-                e - 1
-            } else if a >= 2f64.powi(e + 1) {
-                e + 1
-            } else {
-                e
-            };
-            let q = (a / 2f64.powi(e - m)).round_ties_even() as u32;
+            // `a` is a normal `f64`: its exponent is in its bits.
+            let e = ((a.to_bits() >> 52) & 0x7FF) as i32 - 1023;
+            let q = (a / pow2(e - m)).round_ties_even() as u32;
             (((e - min_exp + 1) as u32) << self.mantissa) + q - (1 << self.mantissa)
         };
         if bits == 0 && self.kind == Kind::Fnuz {
