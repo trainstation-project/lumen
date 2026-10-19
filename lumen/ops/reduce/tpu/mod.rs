@@ -33,13 +33,7 @@ pub(crate) fn encode(
     let failed = |what: &str| format!("reduce_sum on TPU: {what} has no block of whole tiles");
     let rows = |d: DType| Layout::new(d, &[1, 1]).map(|l| l.rows);
     let (m, n) = (x.shape[rank - 2], x.shape[rank - 1]);
-    // The summed dimension in blocks of lanes, stepped over into an
-    // accumulator; the rows, whole tiles of the operand's and the output's
-    // (its lanes, or a 1-D output's 1024s); of more dimensions, the one
-    // before them the output's rows.
-    let bn = block(n, 128, 512).ok_or_else(|| failed("its last dimension"))?;
-    let unit_m = if rank == 2 { 1024 } else { 128 };
-    let bm = block(m, unit_m.max(rows(x.dtype)?), 1024).ok_or_else(|| failed("its rows"))?;
+    // Of more dimensions, the one before the last two the output's rows.
     let (h, bh) = match rank {
         2 => (1, 1),
         _ => {
@@ -51,6 +45,14 @@ pub(crate) fn encode(
             )
         }
     };
+    // The summed dimension in blocks of lanes, stepped over into an
+    // accumulator (whole, if none divides it); the rows, whole tiles of the
+    // operand's and the output's (its lanes, or a 1-D output's 1024s), an
+    // operand block at most 2^21 elements (8 MiB of float32).
+    let bn = block(n, 128, 512).unwrap_or(n);
+    let unit_m = (if rank == 2 { 1024 } else { 128 }).max(rows(x.dtype)?);
+    let cap = (1024).min(((1 << 21) / (bh * bn)).max(unit_m));
+    let bm = block(m, unit_m, cap).ok_or_else(|| failed("its rows"))?;
     let lead: usize = x.shape[..rank.saturating_sub(3)].iter().product();
     let spec = format!(
         "\"rank\": {rank}, \"lead\": {lead}, \"h\": {h}, \"m\": {m}, \"n\": {n}, \"input\": \"{}\", \
