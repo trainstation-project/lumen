@@ -4,8 +4,8 @@ operands over the device's memory.
 ``lumen/ops/elementwise/tpu/mod.rs`` writes the spec (the operands' and output's
 dtypes, their shape, the nodes and the blocks); this is the kernel. The
 operands and output are viewed in place, in a TPU's tiles: as
-``[lead, m, n]`` (their leading dimensions merged) or, of one dimension or
-none, as ``[elements]``. One pipeline (``emit_pipeline``, its copies
+``[lead, m, n]`` (their leading dimensions merged) or, of one dimension,
+as ``[elements]``. One pipeline (``emit_pipeline``, its copies
 double-buffered against compute) runs over their blocks: each step loads
 every operand's block, applies the nodes (lumen's primitives, which the
 kernel lowers as Pallas does) and stores the last one's value as the
@@ -43,43 +43,45 @@ def program(spec):
 
     scalar = not shape
 
+    def apply(values):
+        """The last node's value, of the operands' ``values``."""
+        values = list(values)
+        for node in spec["nodes"]:
+            args = [values[i] for i in node["args"]]
+            params = node["params"]
+            if node["name"] in ("full", "broadcast_in_dim"):
+                params = {**params, "shape": () if scalar else block_shape}
+            values.append(prims.bind(node["name"], *args, **params))
+        return values[-1]
+
     def kernel(rows, memory, result):
         def copy(src, dst):
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
 
-        def staged(dtype):
-            # As `pallas_call` stages a scalar: a (1,) in VMEM (the same
-            # bytes), read as a scalar.
-            vmem = pl.scratch(pl.VMEM((1,), dtype))
-            return vmem, type(vmem)(vmem.kernel, vmem.var, shape=())
-
+        # A 0-d value staged as `pallas_call` stages a scalar: a (1,) in
+        # VMEM (the same bytes), its one element read.
         piped, scalars = [], {}
         for i, dtype in enumerate(dtypes):
             if not (broadcast[i] or scalar):
                 piped.append(pallas.view(memory, rows[i], view, dtype))
                 continue
-            vmem, scalars[i] = staged(dtype)
-            copy(pallas.view(memory, rows[i], (), dtype), vmem)
+            scalars[i] = pl.scratch(pl.VMEM((1,), dtype))
+            copy(pallas.view(memory, rows[i], (), dtype), scalars[i])
+        read = {i: prims.reshape(s[...], ()) for i, s in scalars.items()}
+        out = pallas.view(result, rows[len(dtypes)], () if scalar else view, spec["output"])
+        if scalar:
+            vmem = pl.scratch(pl.VMEM((1,), spec["output"]))
+            vmem[...] = prims.reshape(apply(read[i] for i in range(len(dtypes))), (1,))
+            copy(vmem, out)
+            return
 
         def body(*blocks):
             blocks = iter(blocks)
-            values = [scalars[i][...] if i in scalars else next(blocks)[...] for i in range(len(dtypes))]
-            for node in spec["nodes"]:
-                args = [values[i] for i in node["args"]]
-                params = node["params"]
-                if node["name"] in ("full", "broadcast_in_dim"):
-                    params = {**params, "shape": () if scalar else block_shape}
-                values.append(prims.bind(node["name"], *args, **params))
-            next(blocks)[...] = values[-1]
+            values = [read[i] if i in read else next(blocks)[...] for i in range(len(dtypes))]
+            next(blocks)[...] = apply(values)
 
-        if scalar:
-            vmem, value = staged(spec["output"])
-            body(value)
-            copy(vmem, pallas.view(result, rows[len(dtypes)], (), spec["output"]))
-            return
-        out = pallas.view(result, rows[len(dtypes)], view, spec["output"])
         pl.emit_pipeline(body, grid=grid, in_specs=[block] * len(piped), out_specs=[block])(*piped, out)
 
     return pallas.program(kernel, spec)
