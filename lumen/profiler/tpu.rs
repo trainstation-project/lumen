@@ -101,10 +101,13 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
         let Some((start, end, unix)) = device_runs.1.pop_front() else {
             continue;
         };
-        let name = context
-            .parent
-            .and_then(&name_of)
-            .unwrap_or_else(|| kernel.clone());
+        let module = kernel
+            .trim_start_matches("lumen.ops.")
+            .trim_end_matches(".tpu");
+        let name = match context.parent.and_then(&name_of) {
+            Some(op) => format!("{op} [{module}]"),
+            None => module.to_owned(),
+        };
         let (start, end) = (to_ns(start, unix), to_ns(end, unix));
         super::record_kernel_in(context, &name, Some(kernel), Device::Tpu(index), start, end);
     }
