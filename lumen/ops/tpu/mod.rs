@@ -135,18 +135,6 @@ fn compiled(
     }
     // Not holding the cache: lowering runs Python, which may run lumen.
     let code = program(module, &lower(module, spec)?, scalars, host, rows);
-    // With `LUMEN_TPU_DUMP=dir`, each program as compiled, numbered (as
-    // XLA's `--xla_dump_to`): to run or profile it elsewhere.
-    if let Ok(dir) = std::env::var("LUMEN_TPU_DUMP") {
-        static DUMPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = DUMPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = module.rsplit('.').nth(1).unwrap_or(module);
-        let path =
-            std::path::Path::new(&dir).join(format!("{}.{n:04}.{name}.mlir", std::process::id()));
-        std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&path, format!("// {module} {spec}\n{code}")))
-            .map_err(|e| format!("dumping a TPU program to {}: {e}", path.display()))?;
-    }
     // SAFETY: `code`'s bytes.
     let executable =
         unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };

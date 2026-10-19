@@ -53,11 +53,6 @@ allocator keeps (`allocator::tpu::run`). Runs are asynchronous and ordered
 by that chain of handles: each takes the previous one's result, and reads
 (`copy_to_host`) wait for the latest.
 
-With `LUMEN_TPU_DUMP=dir`, each program is written there as it is compiled
-(`<pid>.NNNN.<op>.mlir`: the StableHLO, after a comment line of the module and
-spec), as XLA's `--xla_dump_to` does: to run or profile elsewhere (JAX's
-backend compiles it as it is).
-
 ## Invariants & gotchas
 
 * **Python only.** Kernels are traced from Python: TPU kernels run where
