@@ -90,50 +90,8 @@ fn types_json(types: &[TensorType]) -> (String, String) {
     )
 }
 
-/// `ns` as a JSON array.
-fn ints_json(ns: &[usize]) -> String {
-    let ns: Vec<String> = ns.iter().map(|n| n.to_string()).collect();
-    format!("[{}]", ns.join(","))
-}
-
-/// The event's operands as one table (`Operands`, a row each: its role,
-/// type, dims and, if known, strides): a trace viewer draws a list of two
-/// rows or more as a table, but PyTorch's keys' one-row and string lists as
-/// raw JSON.
-fn operands_arg(e: &Event) -> String {
-    let side = |role: &str, types: &[TensorType], strides: &[Vec<usize>]| {
-        let rows: Vec<String> = types
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let role = match types.len() {
-                    1 if role == "output" => role.to_owned(),
-                    _ => format!("{role} {i}"),
-                };
-                let strides = strides
-                    .get(i)
-                    .map_or(String::new(), |s| format!(",\"strides\":{}", ints_json(s)));
-                format!(
-                    "{{\"operand\":{},\"type\":{},\"dims\":{}{strides}}}",
-                    json_str(&role),
-                    json_str(t.dtype.name()),
-                    ints_json(&t.shape)
-                )
-            })
-            .collect();
-        rows
-    };
-    let mut rows = side("input", &e.inputs, &e.input_strides);
-    rows.extend(side("output", &e.outputs, &e.output_strides));
-    match rows.is_empty() {
-        true => String::new(),
-        false => format!(",\"Operands\":[{}]", rows.join(",")),
-    }
-}
-
 fn types_args(e: &Event) -> String {
-    // Readable as a table, then PyTorch's keys (which tools read).
-    let mut args = operands_arg(e);
+    let mut args = String::new();
     let sides = [
         ("Input", &e.inputs, &e.input_strides),
         ("Output", &e.outputs, &e.output_strides),

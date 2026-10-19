@@ -123,11 +123,7 @@ once, not again in the ops that issued them.
 `chrome::trace` emits `"X"` events per op/range/kernel plus `ac2g` flow arrows
 from the issuing op to its GPU or host-kernel work. Arg keys follow PyTorch:
 `External id`, `Input Dims`, `Input type`, `Input Strides`, `Output Dims`,
-`Output type`, `Output Strides`, plus `Accum type`, and before them
-`Operands`: a row per input and output (`operand`, `type`, `dims`,
-`strides`), which a trace viewer draws as a table (it draws a list as one
-only from two rows, so PyTorch's one-output and string lists show as raw
-JSON); GPU events add `device`,
+`Output type`, `Output Strides`, plus `Accum type`; GPU events add `device`,
 `stream` (7), `correlation`, and `kernel`; memory events carry `Device Type`,
 `Device Id`, `Addr`, `Bytes`, `Total Allocated`, `Total Reserved`. Processes:
 "CPU dispatch" (ops), one per device ("CUDA i" / "MPS" / "TPU i"), "Neural Engine" (host
