@@ -67,7 +67,7 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
 
 /// A block of a dimension of `n`: the whole if at most `cap`, else the
 /// largest multiple of `unit` at most `cap` that divides it.
-fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
+pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     if n <= cap {
         return Some(n);
     }

@@ -196,6 +196,9 @@ pub(crate) fn encode(
         Primitive::DotGeneral { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
         }
+        ref p if super::elementwise::tpu::elementwise(p) => {
+            super::elementwise::tpu::encode(index, step, inputs, output)
+        }
         Primitive::PallasCall { kernel, .. } => {
             // Its operands, its value, then its other outputs (which `inputs`
             // ends with).
