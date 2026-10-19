@@ -90,3 +90,12 @@ def test_a_dot_the_kernel_cannot_run_says_why():
     x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
     with pytest.raises(ValueError, match="accumulating in float32"):
         lumen.compile(lambda x, w: x @ w)(x, w)
+
+
+def test_programs_of_other_primitives_say_they_do_not_run_yet():
+    """Outside a kernel, a TPU program runs dots and Pallas kernels alone:
+    another primitive (an add, a sin) says it does not run on a TPU yet."""
+    x = lumen.ones([8, 128]).to("tpu")
+    for f, name in [(lambda a: a + a, "add"), (lumen.functional.sin, "sin")]:
+        with pytest.raises(ValueError, match=f"{name} does not run on TPU yet"):
+            lumen.compile(f, device="tpu")(x)

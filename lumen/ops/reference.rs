@@ -217,6 +217,12 @@ fn bits(dtype: DType) -> u32 {
     }
 }
 
+/// `x` (of an integer dtype of `w` bits) as its bits read as signed.
+fn signed_bits(x: i128, w: u32) -> i128 {
+    let bits = unsigned_bits(x, w) as i128;
+    if w > 0 && bits >= 1 << (w - 1) { bits - (1 << w) } else { bits }
+}
+
 /// `x` (of an integer dtype of `w` bits) as its unsigned bits.
 fn unsigned_bits(x: i128, w: u32) -> u128 {
     (x as u128) & ((1u128 << w) - 1)
@@ -496,13 +502,15 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                         B::And => wrap(a & b, dtype),
                         B::Or => wrap(a | b, dtype),
                         B::Xor => wrap(a ^ b, dtype),
+                        // An arithmetic shift extends the bits' sign, of
+                        // unsigned dtypes too (XLA's: their bits as signed).
                         _ if b < 0 || b >= i128::from(w) => match op {
-                            B::ShiftRightArithmetic if a < 0 => -1,
+                            B::ShiftRightArithmetic if signed_bits(a, w) < 0 => wrap(-1, dtype),
                             _ => 0,
                         },
                         B::ShiftLeft => wrap(a << b, dtype),
                         B::ShiftRightLogical => wrap((unsigned_bits(a, w) >> b) as i128, dtype),
-                        B::ShiftRightArithmetic => a >> b,
+                        B::ShiftRightArithmetic => wrap(signed_bits(a, w) >> b, dtype),
                         _ => unreachable!("{} of integers", op.name()),
                     })
                     .collect()),
