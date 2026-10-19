@@ -105,23 +105,16 @@ impl TpuAllocator {
         }
     }
 
-    /// Runs `executable` on the region (see `lumen_tpu_run`), its scalars
-    /// the rows of `rows` (allocations of this allocator) and then `scalars`,
-    /// and `host` (whole rows) copied to the TPU for it.
-    fn run(
-        &self,
-        executable: *mut c_void,
-        rows: &[*const u8],
-        scalars: &[i32],
-        host: &[u8],
-    ) -> Result<(), String> {
-        let mut reserved = self.lock();
-        let Some(Reserved { buffer, base, size }) = reserved.as_mut() else {
+    /// The rows of the region at `ptrs` (allocations of this allocator), as
+    /// a program addresses them.
+    fn rows_of(&self, ptrs: &[*const u8]) -> Result<Vec<i32>, String> {
+        let reserved = self.lock();
+        let Some(&Reserved { base, size, .. }) = reserved.as_ref() else {
             return Err(format!("nothing is allocated on tpu:{}", self.index));
         };
         let row = |ptr: &*const u8| {
-            let offset = ptr.addr().wrapping_sub(*base);
-            match offset < *size && offset % ROW == 0 {
+            let offset = ptr.addr().wrapping_sub(base);
+            match offset < size && offset % ROW == 0 {
                 true => Ok((offset / ROW) as i32),
                 false => Err(format!(
                     "TPU programs read and write whole rows of {ROW} bytes: offset {offset} of \
@@ -130,8 +123,16 @@ impl TpuAllocator {
                 )),
             }
         };
-        let rows = rows.iter().map(row).collect::<Result<Vec<_>, _>>()?;
-        let scalars = [rows.as_slice(), scalars].concat();
+        ptrs.iter().map(row).collect()
+    }
+
+    /// Runs `executable` on the region (see `lumen_tpu_run`), its `scalars`
+    /// and `host` (whole rows) copied to the TPU for it.
+    fn run(&self, executable: *mut c_void, scalars: &[i32], host: &[u8]) -> Result<(), String> {
+        let mut reserved = self.lock();
+        let Some(Reserved { buffer, .. }) = reserved.as_mut() else {
+            return Err(format!("nothing is allocated on tpu:{}", self.index));
+        };
         let mut region = buffer.as_ptr();
         // SAFETY: a compiled program, the region's buffer (replaced by the
         // run's result, the same memory) and readable scalars and bytes.
@@ -220,11 +221,15 @@ fn allocated(index: usize) -> Result<Arc<TpuAllocator>, String> {
 pub(crate) fn run(
     index: usize,
     executable: *mut c_void,
-    rows: &[*const u8],
     scalars: &[i32],
     host: &[u8],
 ) -> Result<(), String> {
-    allocated(index)?.run(executable, rows, scalars, host)
+    allocated(index)?.run(executable, scalars, host)
+}
+
+/// The rows of device `index`'s memory at `ptrs`: see [`TpuAllocator::rows_of`].
+pub(crate) fn rows_of(index: usize, ptrs: &[*const u8]) -> Result<Vec<i32>, String> {
+    allocated(index)?.rows_of(ptrs)
 }
 
 /// Waits for the programs run on device `index`'s memory so far (none if

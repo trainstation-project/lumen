@@ -22,8 +22,9 @@ Without it, the `Tpu` backend still exists and reports no devices.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `Tpu` / `TPU`, the `DeviceBackend` (name `"tpu"`, device count, `check` with the shim's reason when none are found); the shim's FFI (`ffi`), `error()`, and for tests `memory(index)` and `ONE_AT_A_TIME` (the lock every TPU test holds). |
-| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program for a device (`lumen_tpu_compile`; a portable executable launches at twice the cost), running one on the memory, donated (`lumen_tpu_run`) and memory statistics. |
+| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program for a device (`lumen_tpu_compile`; a portable executable launches at twice the cost), running one on the memory, donated (`lumen_tpu_run`), memory statistics, and libtpu's profiler (`lumen_tpu_profiler_start` / `_stop` / `_free`: a session's XSpace, read by `lumen/profiler/tpu.rs`). |
 | `pjrt_c_api.h` | XLA's PJRT C API header (`xla/pjrt/c/pjrt_c_api.h`, Apache 2.0), vendored. |
+| `profiler_c_api.h` | XLA's profiler plugin C API header (`xla/backends/profiler/plugin/profiler_c_api.h`, Apache 2.0), vendored: PJRT's profiler extension's functions. |
 
 ## How TPU memory works (and why the allocator is shaped this way)
 

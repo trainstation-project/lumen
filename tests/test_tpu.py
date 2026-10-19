@@ -117,3 +117,31 @@ def test_programs_of_other_primitives_say_they_do_not_run_yet():
     x = lumen.ones([8, 128]).to("tpu")
     with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
         lumen.compile(lambda a: lumen.functional.sum(a, 0), device="tpu")(x)
+
+
+def test_the_profiler_times_each_tpu_program():
+    """``ProfilerActivity.TPU``: each step's kernel run, timed by libtpu's
+    profiler, on its device's row, inside the op that launched it: its
+    kernel named and typed as an MPS kernel is."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    x = lumen.ones([256, 512]).to("tpu:1")
+    f = lumen.compile(lambda x: lumen.functional.exp(x) * x)
+    f(x)
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU], record_shapes=True) as prof:
+        f(x)
+    events = prof.events()
+    runs = [e for e in events if e["kind"] == "gpu"]
+    assert [e["name"] for e in runs] == ["exp", "mul"]
+    assert [e["kernel"] for e in runs] == ["exp_f32_256x512", "mul_f32_256x512"]
+    ops = {e["id"]: e for e in events if e["kind"] == "op"}
+    for run in runs:
+        assert run["device"] == "tpu:1"
+        # Its op's types, as an MPS kernel's.
+        assert run["outputs"] == [("float32", [256, 512])]
+        assert run["duration_us"] > 0
+        assert ops[run["parent"]]["name"] == run["name"]
+    assert runs[0]["end_us"] <= runs[1]["start_us"]
+    # Each run once: in its op's row, as its device time.
+    (row,) = [r for r in prof.key_averages() if r.key == "exp"]
+    assert row.count == 1 and row.self_device_time_total == pytest.approx(runs[0]["duration_us"], rel=1e-3)

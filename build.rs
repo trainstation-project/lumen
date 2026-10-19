@@ -45,6 +45,7 @@ fn build_tpu_shim() {
     }
     println!("cargo:rerun-if-changed=lumen/device/tpu/pjrt.c");
     println!("cargo:rerun-if-changed=lumen/device/tpu/pjrt_c_api.h");
+    println!("cargo:rerun-if-changed=lumen/device/tpu/profiler_c_api.h");
     cc::Build::new()
         .file("lumen/device/tpu/pjrt.c")
         .flag("-std=c11")

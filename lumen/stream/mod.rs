@@ -38,7 +38,7 @@ pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
         #[cfg(lumen_cuda_linked)]
         Device::Cuda(index) => Arc::new(CudaStream { index }),
         #[cfg(lumen_tpu_linked)]
-        Device::Tpu(_) => Arc::new(TpuStream),
+        Device::Tpu(index) => Arc::new(TpuStream { index }),
         #[allow(unreachable_patterns)]
         _ => unreachable!("{device} is never available without its backend"),
     })

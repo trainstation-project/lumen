@@ -12,7 +12,10 @@
 //! - **GPU activity** (`Activity::Cuda` / `Activity::Mps`): device-side
 //!   start/end of copies and fills, timed with CUDA events or Metal command
 //!   buffer timestamps and correlated with the op that issued them
-//!   (PyTorch: Kineto's `gpu_memcpy` / `gpu_memset` activities).
+//!   (PyTorch: Kineto's `gpu_memcpy` / `gpu_memset` activities);
+//! - **TPU activity** (`Activity::Tpu`): each TPU program's run, timed by
+//!   libtpu's own profiler ([`tpu`]) and correlated with the op that
+//!   launched it.
 //!
 //! The result is a [`Profile`]: raw events, PyTorch-style `key_averages`
 //! tables, and a Chrome trace.
@@ -28,6 +31,8 @@ pub(crate) mod python;
 mod summary;
 #[cfg(test)]
 mod tests;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
 
 pub use summary::{EventAvg, Profile, SortBy};
 
@@ -49,6 +54,8 @@ pub enum Activity {
     Cuda,
     /// Device-side timing of Metal (MPS) fills.
     Mps,
+    /// Device-side timing of TPU programs.
+    Tpu,
 }
 
 /// Session options (PyTorch: `torch.profiler.profile(...)` arguments).
@@ -145,6 +152,7 @@ const MEMORY: u8 = 2;
 const CUDA: u8 = 4;
 const MPS: u8 = 8;
 const SHAPES: u8 = 16;
+const TPU: u8 = 32;
 
 static FLAGS: AtomicU8 = AtomicU8::new(0);
 /// Increments per session, so events from a previous one are dropped.
@@ -230,13 +238,16 @@ pub(crate) fn memory_enabled() -> bool {
 
 /// Whether the session times device work on `device`.
 // Called by the Metal and CUDA (CUPTI) backends, compiled only when linked.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 pub(crate) fn device_enabled(device: Device) -> bool {
     let bit = match device {
-        // (Nothing times TPU work yet.)
-        Device::Cpu(_) | Device::Meta(_) | Device::Tpu(_) => return false,
+        Device::Cpu(_) | Device::Meta(_) => return false,
         Device::Cuda(_) => CUDA,
         Device::Mps(_) => MPS,
+        Device::Tpu(_) => TPU,
     };
     flags() & bit != 0
 }
@@ -254,6 +265,7 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
             Activity::Cpu => CPU,
             Activity::Cuda => CUDA,
             Activity::Mps => MPS,
+            Activity::Tpu => TPU,
         };
     }
     if config.profile_memory {
@@ -261,6 +273,12 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
     }
     if config.record_shapes {
         bits |= SHAPES;
+    }
+    if bits & TPU != 0 {
+        #[cfg(lumen_tpu_linked)]
+        tpu::start()?;
+        #[cfg(not(lumen_tpu_linked))]
+        return Err("timing TPUs needs lumen built with the TPU backend".to_owned());
     }
     #[cfg(lumen_cupti_linked)]
     if bits & CUDA != 0 {
@@ -285,6 +303,10 @@ pub fn stop() -> Result<Profile, String> {
     crate::stream::mps::synchronize();
     #[cfg(lumen_cupti_linked)]
     cupti::stop();
+    #[cfg(lumen_tpu_linked)]
+    if let Err(e) = tpu::stop(op_name) {
+        eprintln!("{}: the TPU profile: {e}", crate::LIBRARY_NAME);
+    }
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
@@ -320,6 +342,18 @@ pub fn stop() -> Result<Profile, String> {
         }
     }
     Ok(Profile::new(events, session.config))
+}
+
+/// The name of the running session's event `id` (an op, once it ended).
+#[cfg(lumen_tpu_linked)]
+fn op_name(id: u64) -> Option<String> {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let events = &state.as_ref()?.events;
+    events
+        .iter()
+        .rev()
+        .find(|e| e.id == id)
+        .map(|e| e.name.clone())
 }
 
 /// Add an event to the running session, if it is still session `session`.
@@ -552,7 +586,10 @@ pub(crate) struct GpuContext {
 
 /// The current op's context for device work on `device`, if the session
 /// times it.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
     let launch = NEXT_LAUNCH.with(|l| l.borrow_mut().take());
     device_enabled(device).then(|| GpuContext {
@@ -576,7 +613,10 @@ pub(crate) fn record_gpu_in(
 }
 
 /// [`record_gpu_in`], for work that ran `kernel`.
-#[cfg_attr(not(any(lumen_mps_linked, lumen_cupti_linked)), allow(dead_code))]
+#[cfg_attr(
+    not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
+    allow(dead_code)
+)]
 pub(crate) fn record_kernel_in(
     context: GpuContext,
     name: &str,

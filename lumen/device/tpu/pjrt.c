@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "pjrt_c_api.h"
+#include "profiler_c_api.h"
 
 static const PJRT_Api *api;
 static PJRT_Client *client;
@@ -277,7 +278,7 @@ static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, c
 // Programs' scalars, uploaded once for each device and values: a launch
 // reuses them (programs only read them; PJRT keeps a buffer while queued
 // programs use it), so it neither copies them nor waits for the copy.
-#define SCALARS 64
+#define SCALARS 1024
 #define CACHED 256
 static struct {
     PJRT_Buffer *buffer;
@@ -399,4 +400,93 @@ int lumen_tpu_memory(int index, int64_t *in_use, int64_t *limit) {
     *in_use = stats.bytes_in_use;
     *limit = stats.bytes_limit;
     return 0;
+}
+
+// ------------------------------- Profiling -----------------------------------
+
+// libtpu's profiler (PJRT's profiler extension, `profiler_c_api.h`, vendored
+// from XLA: what JAX's profiler runs), one session at a time: what the TPUs
+// run while it does, serialized as an XSpace (`tsl/profiler/protobuf/
+// xplane.proto`).
+
+// `pjrt_c_api_profiler_extension.h`'s one struct.
+typedef struct {
+    PJRT_Extension_Base base;
+    PLUGIN_Profiler_Api *profiler_api;
+    int64_t traceme_context_id;
+} PJRT_Profiler_Extension;
+
+static PLUGIN_Profiler *profiler;
+
+// Records `e`'s message (prefixed by `what`) and frees it: whether it is one.
+static int profiler_failed(const PLUGIN_Profiler_Api *p, PLUGIN_Profiler_Error *e, const char *what) {
+    if (!e) {
+        return 0;
+    }
+    PLUGIN_Profiler_Error_Message_Args message = {.struct_size = PLUGIN_Profiler_Error_Message_Args_STRUCT_SIZE,
+                                                  .error = e};
+    p->error_message(&message);
+    snprintf(error, sizeof error, "%s: %.*s", what, (int)message.message_size, message.message);
+    PLUGIN_Profiler_Error_Destroy_Args destroy = {.struct_size = PLUGIN_Profiler_Error_Destroy_Args_STRUCT_SIZE,
+                                                  .error = e};
+    p->error_destroy(&destroy);
+    return 1;
+}
+
+// The plugin's profiler, if it has one (`error` says why not).
+static const PLUGIN_Profiler_Api *profiler_api(void) {
+    if (!lumen_tpu_device_count()) {
+        return NULL;
+    }
+    for (const PJRT_Extension_Base *e = api->extension_start; e; e = e->next) {
+        if (e->type == PJRT_Extension_Type_Profiler) {
+            return ((const PJRT_Profiler_Extension *)e)->profiler_api;
+        }
+    }
+    snprintf(error, sizeof error, "libtpu has no profiler (PJRT's profiler extension)");
+    return NULL;
+}
+
+// Starts a profiling session (the plugin's default options): whether it
+// failed (`error` says why).
+int lumen_tpu_profiler_start(void) {
+    const PLUGIN_Profiler_Api *p = profiler_api();
+    if (!p) {
+        return 1;
+    }
+    PLUGIN_Profiler_Create_Args create = {.struct_size = PLUGIN_Profiler_Create_Args_STRUCT_SIZE, .options = ""};
+    if (profiler_failed(p, p->create(&create), "creating the TPU profiler")) {
+        return 1;
+    }
+    profiler = create.profiler;
+    PLUGIN_Profiler_Start_Args start = {.struct_size = PLUGIN_Profiler_Start_Args_STRUCT_SIZE, .profiler = profiler};
+    return profiler_failed(p, p->start(&start), "starting the TPU profiler");
+}
+
+// Stops the session, its XSpace's `*size` bytes at `*data` (the profiler's,
+// until `lumen_tpu_profiler_free`): whether it failed (`error` says why).
+int lumen_tpu_profiler_stop(const uint8_t **data, size_t *size) {
+    const PLUGIN_Profiler_Api *p = profiler_api();
+    PLUGIN_Profiler_Stop_Args stop = {.struct_size = PLUGIN_Profiler_Stop_Args_STRUCT_SIZE, .profiler = profiler};
+    if (profiler_failed(p, p->stop(&stop), "stopping the TPU profiler")) {
+        return 1;
+    }
+    // One call: it serializes into a buffer of its own (one byte longer).
+    PLUGIN_Profiler_CollectData_Args collect = {.struct_size = PLUGIN_Profiler_CollectData_Args_STRUCT_SIZE,
+                                                .profiler = profiler};
+    if (profiler_failed(p, p->collect_data(&collect), "collecting the TPU profile")) {
+        return 1;
+    }
+    *data = collect.buffer;
+    *size = collect.buffer_size_in_bytes ? collect.buffer_size_in_bytes - 1 : 0;
+    return 0;
+}
+
+// Frees the session (and its XSpace).
+void lumen_tpu_profiler_free(void) {
+    const PLUGIN_Profiler_Api *p = profiler_api();
+    PLUGIN_Profiler_Destroy_Args destroy = {.struct_size = PLUGIN_Profiler_Destroy_Args_STRUCT_SIZE,
+                                            .profiler = profiler};
+    profiler_failed(p, p->destroy(&destroy), "freeing the TPU profiler");
+    profiler = NULL;
 }

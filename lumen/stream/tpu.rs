@@ -1,10 +1,15 @@
 use super::Stream;
 
-/// A TPU's stream. Everything the TPU backend runs so far (the allocator's
-/// reads of device memory) waits for its own work before returning: nothing
-/// is in flight to wait for.
-pub struct TpuStream;
+/// A TPU's stream: its programs run in order on its memory, asynchronously
+/// (each reads the one before's results, `lumen/ops/tpu`); every read of it
+/// (`copy_to_host`) waits for them itself.
+pub struct TpuStream {
+    pub index: usize,
+}
 
 impl Stream for TpuStream {
-    fn synchronize(&self) {}
+    /// Waits for the programs run on the device so far.
+    fn synchronize(&self) {
+        crate::allocator::tpu::wait(self.index).unwrap_or_else(|e| panic!("{e}"))
+    }
 }

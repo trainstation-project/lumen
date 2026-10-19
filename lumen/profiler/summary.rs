@@ -184,14 +184,25 @@ impl Profile {
     }
 
     /// Per-name totals, in first-seen order (PyTorch: `key_averages()`).
-    /// GPU events get rows of their own; memory events only count toward
-    /// the ops they happened in.
+    /// GPU events get rows of their own, but one named as the op that
+    /// issued it (an MPS or TPU step's run) is that op's row's device time
+    /// alone; memory events only count toward the ops they happened in.
     pub fn key_averages(&self) -> Vec<EventAvg> {
         let totals = self.totals();
+        let names: HashMap<u64, &str> = self
+            .events
+            .iter()
+            .filter(|e| e.kind == EventKind::Op)
+            .map(|e| (e.id, e.name.as_str()))
+            .collect();
         let mut order: Vec<String> = Vec::new();
         let mut rows: HashMap<String, EventAvg> = HashMap::new();
         for event in &self.events {
             if event.kind == EventKind::Memory {
+                continue;
+            }
+            let op = event.parent.and_then(|p| names.get(&p));
+            if event.kind == EventKind::Gpu && op == Some(&event.name.as_str()) {
                 continue;
             }
             let row = rows.entry(event.name.clone()).or_insert_with(|| {
@@ -256,12 +267,12 @@ impl Profile {
         }
         let total_self_cpu: u64 = rows.iter().map(|r| r.self_cpu_time_total).sum();
         // Like PyTorch, the device total (and each row's share of it) sums
-        // the device rows only: the ops that issued the work would count it
-        // a second time.
-        let total_self_device: u64 = rows
+        // the device work once: not again in the ops that issued it.
+        let total_self_device: u64 = self
+            .events
             .iter()
-            .filter(|r| r.is_device_event)
-            .map(|r| r.self_device_time_total)
+            .filter(|e| e.kind == EventKind::Gpu)
+            .map(Event::duration_ns)
             .sum();
         if let Some(limit) = row_limit {
             rows.truncate(limit);

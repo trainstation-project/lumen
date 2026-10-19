@@ -18,8 +18,9 @@ fn start(activities: Vec<String>, profile_memory: bool, record_shapes: bool) -> 
             "cpu" => Ok(Activity::Cpu),
             "cuda" => Ok(Activity::Cuda),
             "mps" => Ok(Activity::Mps),
+            "tpu" => Ok(Activity::Tpu),
             other => Err(PyValueError::new_err(format!(
-                "unknown profiler activity {other:?}; expected cpu, cuda or mps"
+                "unknown profiler activity {other:?}; expected cpu, cuda, mps or tpu"
             ))),
         })
         .collect::<PyResult<Vec<_>>>()?;

@@ -20,6 +20,7 @@ When no session is running, every hook is one relaxed atomic load.
 | `summary.rs` | `Profile`, `EventAvg`, `SortBy`: per-name aggregation (`key_averages`), the summary `table`, and PyTorch-style time/memory formatting. |
 | `chrome.rs` | Chrome trace JSON writer (`trace`), with PyTorch's categories and arg keys. |
 | `cupti.rs` | CUDA device timing through CUPTI's activity API; compiled only with `cfg(lumen_cupti_linked)`. |
+| `tpu.rs` | TPU device timing through libtpu's own profiler (PJRT's profiler extension), its XSpace read by a small protobuf reader; compiled only with `cfg(lumen_tpu_linked)`. |
 | `python.rs` | `lumen._C` bindings: `_profiler_start/_stop/_enabled/_cuda_timing`, `_record_function_enter`, `_RecordFunction`, `_Profile`. |
 | `__init__.py` | The `lumen.profiler` Python API (see below). |
 | `_C.pyi` | Type stubs for `python.rs`. |
@@ -31,7 +32,7 @@ When no session is running, every hook is one relaxed atomic load.
   session per process. It turns the config into bit flags in `FLAGS`
   (`CPU`, `MEMORY`, `CUDA`, `MPS`, `SHAPES`) and bumps `SESSION`.
 * `ProfilerConfig { activities, profile_memory, record_shapes }`; default is
-  CPU only, no memory, no shapes. `Activity` is `Cpu`, `Cuda` or `Mps`.
+  CPU only, no memory, no shapes. `Activity` is `Cpu`, `Cuda`, `Mps` or `Tpu`.
 * `stop()` first synchronizes the MPS stream (and, via `cupti::stop`, every
   CUDA device) so in-flight GPU work lands, clears the flags, sorts events by
   `(start_ns, id)`, then copies each op's types/strides/accum onto the GPU and
@@ -87,18 +88,35 @@ With `record_shapes`, ops record (via closures that only run then):
   ops, with timestamps shifted by a (CUPTI ns, profiler ns) pair taken at
   `start`. Without CUPTI linked, starting a CUDA session from Python raises
   (`CUDA_TIMING_MISSING` tells you to set `CUPTI_LIB_DIR`).
+* **TPU** (`Activity::Tpu`): `tpu.rs` starts libtpu's profiler (once the
+  programs in flight have run) and `ops/tpu`'s `launch` records each
+  kernel's `GpuContext` and name (the variant its spec makes, as MPS names
+  its kernels: `matmul_bf16_f32_bf16_2048x1024x4096`, `max_bf16_512x1024`).
+  At `stop`, libtpu's
+  XSpace gives each device's kernel runs in order (plane `/device:TPU:<i>`,
+  line `XLA Ops`, its custom calls: a plan's kernels are one program, each a
+  `tpu_custom_call`), and a device runs its kernels in the order they were
+  launched: the n-th run is the n-th launch's, named as the op (plan step)
+  that launched it. libtpu's clock is its own, so the
+  runs are shifted onto the profiler clock by causality: the least shift
+  that starts no run before its launch (each launch records when its
+  program was launched), which starts the most launch-bound run at its launch, to within
+  the device's launch latency. Without the TPU backend, starting a TPU
+  session errors.
 
 ## `key_averages` and the table
 
 `Profile::key_averages` groups by name in first-seen order. Memory events
 get no row; they count toward their enclosing ops' `cpu_memory_usage` /
 `device_memory_usage` (total = inside, self = directly). GPU events get rows of
-their own (`is_device_event`); ops get `device_time_total` from work issued
-inside them. `table(sort_by, row_limit)` sorts descending by a `SortBy`
+their own (`is_device_event`), except one named as the op that issued it (an
+MPS or TPU plan step's kernel run, its kernel in `kernel`): that is the op's
+row's device time alone, not a second row of the same name counting it
+again. Ops get `device_time_total` from work issued inside them. `table(sort_by, row_limit)` sorts descending by a `SortBy`
 (PyTorch names; `cuda_*` aliases map to the device columns), labels the device
-columns `CUDA`, `MPS` or `DEVICE`, and only shows device/memory columns when
-there is something to show. The self-device total sums device rows only, to
-avoid double counting.
+columns `CUDA`, `MPS`, `TPU` or `DEVICE`, and only shows device/memory columns
+when there is something to show. The self-device total sums the GPU events
+once, not again in the ops that issued them.
 
 ## Chrome trace
 
@@ -108,13 +126,13 @@ from the issuing op to its GPU or host-kernel work. Arg keys follow PyTorch:
 `Output type`, `Output Strides`, plus `Accum type`; GPU events add `device`,
 `stream` (7), `correlation`, and `kernel`; memory events carry `Device Type`,
 `Device Id`, `Addr`, `Bytes`, `Total Allocated`, `Total Reserved`. Processes:
-"CPU dispatch" (ops), one per device ("CUDA i" / "MPS"), "Neural Engine" (host
+"CPU dispatch" (ops), one per device ("CUDA i" / "MPS" / "TPU i"), "Neural Engine" (host
 kernels named `coreml*`), and "CPU" (host kernels). `record_function` ranges
 are also drawn as `gpu_user_annotation` spans covering their device work.
 
 ## Python API (`__init__.py`)
 
-* `ProfilerActivity` (`CPU`, `CUDA`, `MPS`) and `supported_activities()` —
+* `ProfilerActivity` (`CPU`, `CUDA`, `MPS`, `TPU`) and `supported_activities()` —
   CPU plus each device that can allocate (CUDA also needs CUPTI).
 * `profile(activities=None, profile_memory=False, record_shapes=False)` —
   a `with` block (or `start()` / `stop()`); defaults to all supported
