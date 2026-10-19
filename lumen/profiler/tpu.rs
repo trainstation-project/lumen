@@ -5,14 +5,16 @@
 //! Compiled only with the TPU backend (cfg `lumen_tpu_linked`).
 //!
 //! A run is tied to the op that launched it by order: a device runs its
-//! programs in the order they were launched (`ops/tpu`), each launch records
-//! its op's context ([`launched`]), and the XSpace has each device's runs in
-//! order (its plane `/device:TPU:<i>`, line `XLA Modules`).
+//! kernels in the order they were launched (`ops/tpu`; a plan's batched in
+//! one program, each its own `tpu_custom_call`), each launch records its
+//! op's context ([`launched`]), and the XSpace has each device's kernel
+//! runs in order (its plane `/device:TPU:<i>`, line `XLA Ops`: the custom
+//! calls).
 //!
 //! An XSpace's clock is libtpu's own (offsets from somewhere in its
 //! session's start, which takes tens of milliseconds), so runs are put on the
-//! profiler clock by causality instead: each launch records when it was made,
-//! a run cannot start before its launch, and the runs are shifted by the
+//! profiler clock by causality instead: each launch records when its program
+//! was launched ([`ran`]), a run cannot start before that, and the runs are shifted by the
 //! least that keeps every one at or after its own. The most launch-bound run
 //! then starts as its launch is made: right to within the device's launch
 //! latency (microseconds).
@@ -51,6 +53,17 @@ pub(crate) fn launched(index: usize, kernel: &str) {
     };
     if let Some(s) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         s.push((index, context, kernel.to_owned(), super::now_ns()));
+    }
+}
+
+/// Records that the last `count` launches on device `index` were run, as
+/// one program, now.
+pub(crate) fn ran(index: usize, count: usize) {
+    let now = super::now_ns();
+    if let Some(s) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        for launch in s.iter_mut().rev().filter(|l| l.0 == index).take(count) {
+            launch.3 = now;
+        }
     }
 }
 
@@ -124,15 +137,28 @@ fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
         else {
             continue;
         };
+        // XPlane.event_metadata = 4 (a map: key = 1, value = 2; its
+        // XEventMetadata.name = 2): the custom calls' ids.
+        let calls: Vec<u64> = Fields(plane)
+            .filter_map(|(n, v)| (n == 4).then_some(v.bytes()))
+            .filter_map(|entry| {
+                let name = field(field(entry, 2)?.bytes(), 2)?.bytes();
+                let call = name.windows(12).any(|w| w == b"custom-call(");
+                call.then(|| field(entry, 1).map_or(0, Value::int))
+            })
+            .collect();
         let mut device = VecDeque::new();
-        // XLine.name = 2, .timestamp_ns = 3, .events = 4; XEvent.offset_ps
-        // = 2, .duration_ps = 3.
+        // XLine.name = 2, .timestamp_ns = 3, .events = 4; XEvent.metadata_id
+        // = 1, .offset_ps = 2, .duration_ps = 3.
         for line in Fields(plane).filter_map(|(n, v)| (n == 3).then_some(v.bytes())) {
-            if field(line, 2).map(Value::bytes) != Some(b"XLA Modules".as_slice()) {
+            if field(line, 2).map(Value::bytes) != Some(b"XLA Ops".as_slice()) {
                 continue;
             }
             let timestamp = field(line, 3).map_or(0, Value::int);
             for event in Fields(line).filter_map(|(n, v)| (n == 4).then_some(v.bytes())) {
+                if !calls.contains(&field(event, 1).map_or(0, Value::int)) {
+                    continue;
+                }
                 let offset = field(event, 2).map_or(0, Value::int);
                 let duration = field(event, 3).map_or(0, Value::int);
                 let start = timestamp + offset / 1000;

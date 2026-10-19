@@ -1136,6 +1136,12 @@ impl Plan {
             return Err("operands read as views run on MPS only".into());
         }
         let mut scopes = crate::profiler::is_enabled().then(OpenScopes::default);
+        // A TPU runs the steps' kernels as one program, launched once.
+        #[cfg(lumen_tpu_linked)]
+        let batch = match executor {
+            Device::Tpu(index) => Some(crate::ops::tpu::Batch::new(index)),
+            _ => None,
+        };
         for step in &self.steps {
             if let Some(scopes) = &mut scopes {
                 scopes.enter(step.scope);
@@ -1232,6 +1238,10 @@ impl Plan {
                     };
                 }
             }
+        }
+        #[cfg(lumen_tpu_linked)]
+        if let Some(batch) = batch {
+            batch.run()?;
         }
         Ok(())
     }

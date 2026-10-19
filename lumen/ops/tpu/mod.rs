@@ -1,17 +1,19 @@
 //! TPU kernels: lumen's Pallas kernels (each `lumen/ops/<op>/tpu.py`, on
-//! `lumen.pallas`), lowered to Mosaic by lumen (`lumen/pallas`), each
-//! wrapped in a one-op StableHLO program (a `tpu_custom_call`) that libtpu
-//! compiles, run on a device's memory: the TPU allocator's one buffer,
-//! which the program takes donated and returns written
+//! `lumen.pallas`), lowered to Mosaic by lumen (`lumen/pallas`), each a
+//! `tpu_custom_call` of a StableHLO program that libtpu compiles (a plan's
+//! kernels one program, [`Batch`], as XLA compiles a jitted function's),
+//! run on a device's memory: the TPU allocator's one buffer, which the
+//! program takes donated and returns written
 //! (`allocator::tpu::run`). Rust chooses each kernel's spec (shapes,
 //! blocks, dtypes); the kernel's Python traces it, so TPU kernels run where
 //! lumen runs from Python (the `python` feature). Kernels address the
 //! memory by row (512 bytes): each buffer they read or write starts at
 //! one, at a row the run passes them as a scalar.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
@@ -42,12 +44,16 @@ fn lower(module: &str, _spec: &str) -> Result<String, String> {
 /// `vmem_limit_bytes`; the default is far smaller).
 const VMEM_LIMIT: usize = 100 << 20;
 
-/// `body` (a Mosaic module) as the StableHLO program libtpu compiles: one
-/// `tpu_custom_call` of it on `scalars` i32s, `host` rows of host bytes (if
-/// any) and the device's `rows` of memory, which it returns written.
-fn program(name: &str, body: &str, scalars: usize, host: Option<usize>, rows: usize) -> String {
+/// The StableHLO program libtpu compiles of `kernels` (each its name,
+/// its Mosaic module and its scalars' count): one `tpu_custom_call` of each
+/// in order, as XLA runs a jitted function's Pallas kernels, on its slice
+/// of the program's scalars (their counts' sum of i32s), `host` rows of
+/// host bytes (if any) and the device's `rows` of memory, which each takes
+/// from the one before and the program returns written.
+fn program(kernels: &[(&str, &str, usize)], host: Option<usize>, rows: usize) -> String {
     let rows_of = |n| format!("tensor<{n}x1x128xui32>");
-    let mut types = vec![format!("tensor<{scalars}xi32>")];
+    let total: usize = kernels.iter().map(|k| k.2).sum();
+    let mut types = vec![format!("tensor<{total}xi32>")];
     types.extend(host.map(rows_of));
     types.push(rows_of(rows));
     let memory = types.len() - 1;
@@ -59,7 +65,6 @@ fn program(name: &str, body: &str, scalars: usize, host: Option<usize>, rows: us
             false => format!("%arg{i}: {t}"),
         })
         .collect();
-    let args: Vec<String> = (0..types.len()).map(|i| format!("%arg{i}")).collect();
     let layouts: Vec<&str> = (0..types.len())
         .map(|i| match i {
             0 => "dense<0> : tensor<1xindex>",
@@ -67,21 +72,50 @@ fn program(name: &str, body: &str, scalars: usize, host: Option<usize>, rows: us
         })
         .collect();
     let result = rows_of(rows);
+    let mut body = String::new();
+    let (mut start, mut value) = (0, format!("%arg{memory}"));
+    for (k, &(name, mosaic, count)) in kernels.iter().enumerate() {
+        // Its scalars: the program's whole, or a slice of them.
+        let mut scalars = types[0].clone();
+        let mut operands = vec!["%arg0".to_string()];
+        if count != total {
+            scalars = format!("tensor<{count}xi32>");
+            operands[0] = format!("%s{k}");
+            body += &format!(
+                "    %s{k} = \"stablehlo.slice\"(%arg0) {{start_indices = array<i64: {start}>, \
+                 limit_indices = array<i64: {}>, strides = array<i64: 1>}} : ({}) -> {scalars}\n",
+                start + count,
+                types[0],
+            );
+        }
+        start += count;
+        let mut operand_types = vec![scalars];
+        if host.is_some() {
+            operands.push("%arg1".into());
+            operand_types.push(types[1].clone());
+        }
+        operands.push(value);
+        operand_types.push(result.clone());
+        value = format!("%m{k}");
+        body += &format!(
+            "    {value} = stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \
+             \"{{\\22custom_call_config\\22: {{\\22body\\22: \\22{}\\22, \\22serialization_format\\22: 1, \
+             \\22needs_layout_passes\\22: true}}, \\22scoped_memory_configs\\22: [{{\\22memory_space\\22: 1, \
+             \\22offset\\22: 0, \\22size\\22: {VMEM_LIMIT}}}]}}\", kernel_name = \"{name}\", operand_layouts = [{}], \
+             output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [], \
+             operand_index = {}, operand_tuple_indices = []>], result_layouts = [dense<[2, 1, 0]> : \
+             tensor<3xindex>]}} : ({}) -> {result}\n",
+            operands.join(", "),
+            base64(mosaic.as_bytes()),
+            layouts.join(", "),
+            operands.len() - 1,
+            operand_types.join(", "),
+        );
+    }
     format!(
         "module @lumen attributes {{mhlo.num_partitions = 1 : i32, mhlo.num_replicas = 1 : i32}} {{\n  \
-         func.func public @main({}) -> {result} {{\n    \
-         %0 = stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \
-         \"{{\\22custom_call_config\\22: {{\\22body\\22: \\22{}\\22, \\22serialization_format\\22: 1, \
-         \\22needs_layout_passes\\22: true}}, \\22scoped_memory_configs\\22: [{{\\22memory_space\\22: 1, \
-         \\22offset\\22: 0, \\22size\\22: {VMEM_LIMIT}}}]}}\", kernel_name = \"{name}\", operand_layouts = [{}], \
-         output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [], \
-         operand_index = {memory}, operand_tuple_indices = []>], result_layouts = [dense<[2, 1, 0]> : \
-         tensor<3xindex>]}} : ({}) -> {result}\n    return %0 : {result}\n  }}\n}}\n",
+         func.func public @main({}) -> {result} {{\n{body}    return {value} : {result}\n  }}\n}}\n",
         params.join(", "),
-        args.join(", "),
-        base64(body.as_bytes()),
-        layouts.join(", "),
-        types.join(", "),
     )
 }
 
@@ -111,38 +145,128 @@ struct Executable(*mut c_void);
 // SAFETY: a PJRT executable, which PJRT's API runs from any thread.
 unsafe impl Send for Executable {}
 
-/// Module `module`'s kernel for `spec`, lowered and compiled once per
-/// process and device `index`: a program of `scalars` scalars and `host`
-/// rows of host bytes.
-fn compiled(
-    index: usize,
-    module: &str,
-    spec: &str,
-    scalars: usize,
-    host: Option<usize>,
-    rows: usize,
-) -> Result<Executable, String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
-    let key = format!("{index} {module} {spec} {scalars} {host:?}");
+/// Module `module`'s kernel for `spec` (JSON), lowered once per process: its
+/// Mosaic module.
+fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
+    let key = format!("{module} {spec}");
     let cache = || {
         CACHE
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     };
-    if let Some(&executable) = cache().get(&key) {
-        return Ok(executable);
+    if let Some(mosaic) = cache().get(&key) {
+        return Ok(Arc::clone(mosaic));
     }
     // Not holding the cache: lowering runs Python, which may run lumen.
-    let code = program(module, &lower(module, spec)?, scalars, host, rows);
+    let mosaic: Arc<str> = lower(module, spec)?.into();
+    cache().insert(key, Arc::clone(&mosaic));
+    Ok(mosaic)
+}
+
+/// A launch, lowered: its kernel (its module, the spec it was lowered for
+/// and the Mosaic) and its scalars.
+struct Lowered {
+    module: String,
+    spec: String,
+    mosaic: Arc<str>,
+    scalars: Vec<i32>,
+}
+
+/// The program of `launches` (on `host` rows of host bytes, if any),
+/// compiled once per process and device `index`, of its `rows` of memory.
+fn compiled(
+    index: usize,
+    launches: &[Lowered],
+    host: Option<usize>,
+    rows: usize,
+) -> Result<Executable, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
+    let mut key = format!("{index} {host:?} {rows}");
+    for l in launches {
+        key += &format!("\n{} {} {}", l.module, l.spec, l.scalars.len());
+    }
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&executable) = cache.get(&key) {
+        return Ok(executable);
+    }
+    let kernels: Vec<(&str, &str, usize)> = launches
+        .iter()
+        .map(|l| (l.module.as_str(), &*l.mosaic, l.scalars.len()))
+        .collect();
+    let code = program(&kernels, host, rows);
     // SAFETY: `code`'s bytes.
     let executable =
         unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
     if executable.is_null() {
         return Err(error());
     }
-    cache().insert(key, Executable(executable));
+    cache.insert(key, Executable(executable));
     Ok(Executable(executable))
+}
+
+/// Runs `launches` on device `index`'s memory as one program (with `host`
+/// bytes, whole rows, copied to the TPU for it), in order after those before.
+fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
+    if launches.is_empty() {
+        return Ok(());
+    }
+    let what = || {
+        let modules: Vec<&str> = launches.iter().map(|l| l.module.as_str()).collect();
+        modules.join(", ")
+    };
+    let rows = crate::allocator::tpu::rows(index)?;
+    let host_rows = (!host.is_empty()).then_some(host.len() / crate::allocator::tpu::ROW);
+    let executable =
+        compiled(index, launches, host_rows, rows).map_err(|e| format!("{}: {e}", what()))?;
+    let scalars: Vec<i32> = launches
+        .iter()
+        .flat_map(|l| l.scalars.iter().copied())
+        .collect();
+    crate::profiler::tpu::ran(index, launches.len());
+    crate::allocator::tpu::run(index, executable.0, &scalars, host)
+        .map_err(|e| format!("{}: {e}", what()))
+}
+
+thread_local! {
+    /// The launches batched on this thread ([`Batch`]): each batch's device
+    /// and launches, the innermost last.
+    static BATCHES: RefCell<Vec<(usize, Vec<Lowered>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// While it lives, the launches on device `index` on this thread are
+/// batched, and [`Batch::run`] runs them as one program (a plan's steps,
+/// launched once, as XLA launches a jitted function's kernels: no program
+/// switches between them, nor a launch each). Dropped without running, its
+/// launches are not run.
+pub(crate) struct Batch {
+    ran: bool,
+}
+
+impl Batch {
+    pub(crate) fn new(index: usize) -> Batch {
+        BATCHES.with(|b| b.borrow_mut().push((index, Vec::new())));
+        Batch { ran: false }
+    }
+
+    /// Runs the batched launches.
+    pub(crate) fn run(mut self) -> Result<(), String> {
+        self.ran = true;
+        let (index, launches) = BATCHES.with(|b| b.borrow_mut().pop()).expect("a batch");
+        run(index, &launches, &[])
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        if !self.ran {
+            BATCHES.with(|b| b.borrow_mut().pop());
+        }
+    }
 }
 
 /// A kernel to launch: the Pallas module of its source (`module`), its
@@ -159,7 +283,8 @@ pub(crate) struct Launch<'a> {
 }
 
 /// Runs `launch` on device `index`'s memory, in order after the kernels
-/// before it.
+/// before it: in a [`Batch`] of the device, when it runs; one with host
+/// bytes, on its own (the batch's launches so far before it).
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
     let scalars = launch.rows.len() + launch.scalars.len();
@@ -172,17 +297,35 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         "" => format!("{{{device}}}"),
         fields => format!("{{{fields}, {device}}}"),
     };
-    let executable = compiled(index, launch.module, &spec, scalars, host, rows)
-        .map_err(|e| format!("{}: {e}", launch.module))?;
+    let lowered = Lowered {
+        mosaic: lowered(launch.module, &spec).map_err(|e| format!("{}: {e}", launch.module))?,
+        module: launch.module.to_owned(),
+        spec,
+        scalars: [
+            crate::allocator::tpu::rows_of(index, launch.rows)?.as_slice(),
+            launch.scalars,
+        ]
+        .concat(),
+    };
     crate::profiler::tpu::launched(index, launch.module);
-    crate::allocator::tpu::run(
-        index,
-        executable.0,
-        launch.rows,
-        launch.scalars,
-        launch.host,
-    )
-    .map_err(|e| format!("{}: {e}", launch.module))
+    let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
+        Some((i, launches)) if *i == index => match launch.host.is_empty() {
+            true => {
+                launches.push(lowered);
+                Ok(None)
+            }
+            false => Ok(Some((std::mem::take(launches), lowered))),
+        },
+        _ => Err(lowered),
+    });
+    match batched {
+        Ok(None) => Ok(()),
+        Ok(Some((before, lowered))) => {
+            run(index, &before, &[])?;
+            run(index, std::slice::from_ref(&lowered), launch.host)
+        }
+        Err(lowered) => run(index, std::slice::from_ref(&lowered), launch.host),
+    }
 }
 
 /// Runs plan step `step` on device `index`: its operands at `inputs`, its

@@ -32,27 +32,40 @@ kernel and nothing else.
 
 A TPU's memory is the TPU allocator's one buffer, `u32[rows, 1, 128]`: rows
 of 512 bytes, laid out byte for byte as the host does (`(1, 128)` tiles).
-Every program (`mod.rs`'s `program`) is
+Every program (`mod.rs`'s `program`) is a chain of kernels, each a
+`tpu_custom_call` on its slice of the scalars and the memory the one before
+returned:
 
 ```text
 main(scalars: i32[n], [host: u32[h, 1, 128]], memory: u32[rows, 1, 128] {aliased to the result})
-  -> u32[rows, 1, 128] = tpu_custom_call(scalars, [host], memory)   // the kernel
+  -> u32[rows, 1, 128]
+  m0 = tpu_custom_call(scalars[0:n0], [host], memory)   // the first kernel
+  m1 = tpu_custom_call(scalars[n0:n0+n1], [host], m0)   // the next, ...
+  return mK
 ```
 
-and its kernel is `kernel(scalars, [host,] memory, result, *scratch)`: the
+and each kernel is `kernel(scalars, [host,] memory, result, *scratch)`: its
 scalars in SMEM, the memory in HBM, read as `memory` and written as
 `result` (the same buffer). `pallas.matrix(memory, row, shape)` is a matrix
 of 32-bit words at a row (a window of rows, reshaped: its last dimension a
 multiple of 128 words), which a kernel can pipeline over
 (`pl.emit_pipeline`, its blocks' copies double-buffered against compute).
 
-`launch` passes the rows of the buffers the kernel reads and writes (TPU
-pointers, each at the start of a row, as the allocator hands them out) as
-its first scalars, uploads `host` bytes if any, and runs the program with
-the memory **donated**: the result is the same memory, whose new handle the
-allocator keeps (`allocator::tpu::run`). Runs are asynchronous and ordered
-by that chain of handles: each takes the previous one's result, and reads
-(`copy_to_host`) wait for the latest.
+`launch` lowers a kernel (once per spec, `lowered`) and gives it the rows
+of the buffers it reads and writes (TPU pointers, each at the start of a
+row, as the allocator hands them out) as its first scalars. Inside a
+**`Batch`** (a plan's run on a TPU: `Plan::execute`) launches are queued,
+and the batch runs them as **one program**, as XLA runs a jitted function's
+Pallas kernels: launched once, with no program switches between its kernels
+(a TPU loads a program's code when it switches to it: a large dot's
+unrolled blocks, ~2 MiB, take ~14 µs). A program is compiled once per
+sequence of kernels (`compiled`). A launch with `host` bytes (a host-to-TPU
+copy) runs on its own, after the batch's launches so far; one outside a
+batch runs at once. A program runs with the memory **donated**: the result
+is the same memory, whose new handle the allocator keeps
+(`allocator::tpu::run`). Runs are asynchronous and ordered by that chain of
+handles: each takes the previous one's result, and reads (`copy_to_host`)
+wait for the latest.
 
 ## Invariants & gotchas
 
@@ -63,8 +76,9 @@ by that chain of handles: each takes the previous one's result, and reads
 * **Specs are numbers.** A spec carries what the kernel needs as numbers
   (packing: elements a 32-bit word, not dtype names), its fields JSON that
   Rust writes by hand.
-* **One program per spec**: each distinct shape traces and compiles once
-  per process (a host-to-TPU copy of each distinct row count, too).
+* **One program per plan**: each distinct kernel spec traces once per
+  process, and each plan's sequence of kernels compiles once (a host-to-TPU
+  copy of each distinct row count, too).
 * **Rows, not bytes**: a buffer a kernel touches must start at a row
   (`allocator::tpu::run` errors otherwise). The allocator rounds every
   allocation up to whole rows; a plan's workspace offsets are aligned to 256

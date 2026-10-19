@@ -278,7 +278,7 @@ static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, c
 // Programs' scalars, uploaded once for each device and values: a launch
 // reuses them (programs only read them; PJRT keeps a buffer while queued
 // programs use it), so it neither copies them nor waits for the copy.
-#define SCALARS 64
+#define SCALARS 1024
 #define CACHED 256
 static struct {
     PJRT_Buffer *buffer;

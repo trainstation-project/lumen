@@ -91,13 +91,14 @@ With `record_shapes`, ops record (via closures that only run then):
 * **TPU** (`Activity::Tpu`): `tpu.rs` starts libtpu's profiler (once the
   programs in flight have run) and `ops/tpu`'s `launch` records each
   program's `GpuContext` and kernel (its Pallas module). At `stop`, libtpu's
-  XSpace gives each device's program runs in order (plane
-  `/device:TPU:<i>`, line `XLA Modules`), and a device runs its programs in
-  the order they were launched: the n-th run is the n-th launch's, named as
-  the op (plan step) that launched it. libtpu's clock is its own, so the
+  XSpace gives each device's kernel runs in order (plane `/device:TPU:<i>`,
+  line `XLA Ops`, its custom calls: a plan's kernels are one program, each a
+  `tpu_custom_call`), and a device runs its kernels in the order they were
+  launched: the n-th run is the n-th launch's, named as the op (plan step)
+  that launched it. libtpu's clock is its own, so the
   runs are shifted onto the profiler clock by causality: the least shift
-  that starts no run before its launch (each launch records when it was
-  made), which starts the most launch-bound run at its launch, to within
+  that starts no run before its launch (each launch records when its
+  program was launched), which starts the most launch-bound run at its launch, to within
   the device's launch latency. Without the TPU backend, starting a TPU
   session errors.
 
