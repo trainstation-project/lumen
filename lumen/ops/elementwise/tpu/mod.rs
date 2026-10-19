@@ -1,18 +1,27 @@
 //! Elementwise primitives on TPU: the spec of their kernel (`__init__.py`
 //! beside this file, in lumen's Pallas): its operands' and output's dtypes,
 //! their shape (one), the nodes it applies (a primitive each, by name and
-//! parameters, of the operands and the nodes before) and its blocks.
+//! parameters, of the operands and the nodes before) and its blocks. A
+//! `full` and a 0-d value's broadcast are elementwise too: the kernel
+//! computes them at its blocks' shape.
 
-use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Primitive, UnaryOp};
 use crate::graph_compiler::plan::Step;
 use crate::ops::dot_general::tpu::block;
 use crate::ops::tpu::{Launch, launch};
+use crate::{DType, Scalar};
 
 /// Whether `p` is elementwise: its kernel runs it.
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
+    if let BroadcastInDim {
+        broadcast_dimensions,
+        ..
+    } = p
+    {
+        return broadcast_dimensions.is_empty();
+    }
     matches!(
         p,
         Add | Sub
@@ -28,6 +37,7 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
             | Tanh
             | Logistic
             | Cast { .. }
+            | Full { .. }
             | Select
             | Unary(_)
             | Binary(_)
@@ -35,9 +45,28 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
 }
 
 /// `p` as a node of the spec, of the values `args` (the operands, then the
-/// nodes before): its name and parameters as `lumen.graph.prims` takes them.
+/// nodes before): its name and parameters as `lumen.graph.prims` takes them
+/// (a shape the kernel's, its blocks').
 fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
+        Primitive::Full {
+            fill_value, dtype, ..
+        } => {
+            let value = match *fill_value {
+                Scalar::Bool(b) => b.to_string(),
+                Scalar::Int(i) => i.to_string(),
+                Scalar::Float(f) if f.is_nan() => "NaN".into(),
+                Scalar::Float(f) if f.is_infinite() => {
+                    format!("{}Infinity", if f < 0.0 { "-" } else { "" })
+                }
+                Scalar::Float(f) => format!("{f:?}"),
+            };
+            format!(
+                "\"fill_value\": {value}, \"dtype\": \"{}\"",
+                dtype.full_name()
+            )
+        }
+        Primitive::BroadcastInDim { .. } => "\"broadcast_dimensions\": []".into(),
         Primitive::Cast { new_dtype } => format!("\"new_dtype\": \"{}\"", new_dtype.full_name()),
         Primitive::Unary(UnaryOp::ReducePrecision {
             exponent_bits,
@@ -88,12 +117,22 @@ pub(crate) fn encode(
     if out.numel() == 0 {
         return Ok(());
     }
-    if step.inputs.iter().any(|(_, t)| t.shape != out.shape) {
+    // Each operand of the output's shape, or 0-d (a broadcast's).
+    if step
+        .inputs
+        .iter()
+        .any(|(_, t)| t.shape != out.shape && !t.shape.is_empty())
+    {
         return Err(format!(
             "elementwise on TPU: operands of the output's shape, got {}",
             step.primitive.name()
         ));
     }
+    let broadcast: Vec<bool> = step
+        .inputs
+        .iter()
+        .map(|(_, t)| t.shape != out.shape)
+        .collect();
     let dtypes: Vec<DType> = step
         .inputs
         .iter()
@@ -107,7 +146,7 @@ pub(crate) fn encode(
         .collect();
     let args: Vec<usize> = (0..step.inputs.len()).collect();
     let spec = format!(
-        "\"shape\": {:?}, \"inputs\": [{}], \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}",
+        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}",
         out.shape,
         names.join(", "),
         node(&step.primitive, &args),
