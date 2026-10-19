@@ -137,7 +137,7 @@ def test_supported_activities_always_include_cpu():
 
 def test_unknown_activity_names_are_rejected():
     with pytest.raises(ValueError):
-        profile(activities=["tpu"])
+        profile(activities=["npu"])
 
 
 # ---------------- devices ----------------
