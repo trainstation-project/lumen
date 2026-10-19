@@ -233,10 +233,10 @@ void *lumen_tpu_compile(const char *code, size_t size, int index) {
     char options[32];
     size_t n = 0;
     options[n++] = 0x1a;
-    options[n++] = (char)(10 + id_size);
+    options[n++] = (char)(13 + id_size);
     options[n++] = 0x20, options[n++] = 0x01, options[n++] = 0x28, options[n++] = 0x01;
     options[n++] = 0x4a;
-    options[n++] = (char)(6 + id_size);
+    options[n++] = (char)(7 + id_size);
     options[n++] = 0x08, options[n++] = 0x01, options[n++] = 0x10, options[n++] = 0x01;
     options[n++] = 0x1a;
     options[n++] = (char)(1 + id_size);
