@@ -215,18 +215,12 @@ impl PyPlan {
         workspace: PyRef<'_, PyTensor>,
         inputs: Vec<PyRef<'_, PyTensor>>,
     ) -> PyResult<Vec<PyTensor>> {
-        // TIMING (temporary)
-        let t0 = std::time::Instant::now();
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
         let outputs = self
             .inner
             .run_in(&workspace.inner, &inputs)
             .map_err(PyValueError::new_err)?;
-        let r = Ok(outputs.into_iter().map(PyTensor::wrap).collect());
-        #[cfg(lumen_tpu_linked)]
-        crate::ops::tpu::T_RUN_IN.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        let _ = t0;
-        r
+        Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
     /// Whether it runs steps on the Apple Neural Engine (Core ML programs,

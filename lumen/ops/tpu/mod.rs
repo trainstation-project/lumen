@@ -160,29 +160,7 @@ pub(crate) struct Launch<'a> {
 
 /// Runs `launch` on device `index`'s memory, in order after the kernels
 /// before it.
-// TIMING (temporary)
-pub static T_RUN_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static T_LAUNCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static T_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let t0 = std::time::Instant::now();
-    let r = launch_(index, launch);
-    T_LAUNCH.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
-    if N.fetch_add(1, Relaxed) % 2000 == 1999 && std::env::var("LUMEN_TPU_TIMING").is_ok() {
-        eprintln!(
-            "per launch: run_in {:.1} us, launch {:.1} us, run {:.1} us",
-            T_RUN_IN.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
-            T_LAUNCH.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
-            T_RUN.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
-        );
-    }
-    r
-}
-
-fn launch_(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
     let scalars = launch.rows.len() + launch.scalars.len();
     let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
@@ -196,17 +174,14 @@ fn launch_(index: usize, launch: Launch) -> Result<(), String> {
     };
     let executable = compiled(index, launch.module, &spec, scalars, host, rows)
         .map_err(|e| format!("{}: {e}", launch.module))?;
-    let t1 = std::time::Instant::now();
-    let r = crate::allocator::tpu::run(
+    crate::allocator::tpu::run(
         index,
         executable.0,
         launch.rows,
         launch.scalars,
         launch.host,
     )
-    .map_err(|e| format!("{}: {e}", launch.module));
-    T_RUN.fetch_add(t1.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    r
+    .map_err(|e| format!("{}: {e}", launch.module))
 }
 
 /// Runs plan step `step` on device `index`: its operands at `inputs`, its
