@@ -111,12 +111,12 @@ def test_elementwise_primitives_agree_with_numpy(shape):
 
 
 def test_programs_of_other_primitives_say_they_do_not_run_yet():
-    """Outside a kernel, a TPU program runs dots, elementwise primitives and
-    Pallas kernels: another primitive (a sum) says it does not run on a TPU
-    yet."""
+    """Outside a kernel, a TPU program runs dots, elementwise primitives,
+    sums and Pallas kernels: another primitive (a max) says it does not run
+    on a TPU yet."""
     x = lumen.ones([8, 128]).to("tpu")
-    with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
-        lumen.compile(lambda a: lumen.functional.sum(a, 0), device="tpu")(x)
+    with pytest.raises(ValueError, match="reduce_max does not run on TPU yet"):
+        lumen.compile(lambda a: lumen.functional.amax(a, 0), device="tpu")(x)
 
 
 def test_the_profiler_times_each_tpu_program():
@@ -145,3 +145,34 @@ def test_the_profiler_times_each_tpu_program():
     # Each run once: in its op's row, as its device time.
     (row,) = [r for r in prof.key_averages() if r.key == "exp"]
     assert row.count == 1 and row.self_device_time_total == pytest.approx(runs[0]["duration_us"], rel=1e-3)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_a_dot_of_two_vectors_runs_as_a_product_and_a_sum(dtype):
+    """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
+    free dimensions (no matmul runs it): dot strength reduction's product
+    and row sum, in float32."""
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal([2, 8, 1024, 128], dtype=np.float32) for _ in range(2))
+    x, y = (lumen.from_numpy(t).to(dtype=dtype).to("tpu") for t in (a, b))
+    out = lumen.compile(lambda x, y: lumen.functional.einsum("bhsd,bhsd->bhs", x, y))(x, y)
+    assert out.device == "tpu:0" and list(out.shape) == [2, 8, 1024]
+    expected = (floats(x) * floats(y)).sum(-1)
+    assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
+
+
+@pytest.mark.parametrize("shape", [[64, 128], [2048, 2048], [3, 16, 256, 128], [8, 1024, 1000]])
+def test_sums_over_the_last_dimension(shape):
+    """Two dimensions or more, the summed one in blocks of an accumulator
+    (2048: four), bfloat16 summed in float32."""
+    rng = np.random.default_rng(0)
+    x = lumen.from_numpy(rng.standard_normal(shape, dtype=np.float32)).to(dtype="bfloat16").to("tpu")
+    out = lumen.compile(lambda x: lumen.functional.sum(x.float(), -1))(x)
+    assert out.dtype == "float32" and list(out.shape) == shape[:-1]
+    np.testing.assert_allclose(floats(out), floats(x).sum(-1), rtol=1e-5, atol=1e-4)
+
+
+def test_a_sum_over_another_dimension_says_so():
+    x = lumen.ones([64, 128]).to("tpu")
+    with pytest.raises(ValueError, match="over the last dimension"):
+        lumen.compile(lambda x: lumen.functional.sum(x, 0))(x)

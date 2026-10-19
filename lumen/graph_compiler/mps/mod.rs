@@ -177,7 +177,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     if config.neural_engine {
         p.add(ane::NeuralEngine);
     }
-    p.add(DotStrength);
+    p.add(DotStrength { matrices: true });
     if config.split_k {
         p.add(split_k::SplitK);
     }

@@ -4,6 +4,7 @@
 //! Its steps run as lumen's TPU kernels (`ops/tpu`).
 
 use super::pass::{GraphModule, Pipeline};
+use super::passes::dot_strength::DotStrength;
 use super::passes::fold_dot_reshapes::FoldDotReshapes;
 use super::passes::simplify::Simplify;
 use super::plan::DeviceLayout;
@@ -27,10 +28,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         options,
     };
     // A matmul's reshapes, which would move tiles, folded into its dot
-    // first, then simplified away.
+    // first, then simplified away; then the dots of two vectors (no matmul
+    // runs them) a product and a row's sum.
     Pipeline::new("tpu")
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
+        .add(DotStrength { matrices: false })
         .run(&mut module)?;
     let plan = PlanOptions {
         scratch: None,
