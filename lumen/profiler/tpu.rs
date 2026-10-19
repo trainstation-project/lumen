@@ -8,49 +8,38 @@
 //! programs in the order they were launched (`ops/tpu`), each launch records
 //! its op's context ([`launched`]), and the XSpace has each device's runs in
 //! order (its plane `/device:TPU:<i>`, line `XLA Modules`).
+//!
+//! An XSpace's clock is libtpu's own (offsets from somewhere in its
+//! session's start, which takes tens of milliseconds), so runs are put on the
+//! profiler clock by causality instead: each launch records when it was made,
+//! a run cannot start before its launch, and the runs are shifted by the
+//! least that keeps every one at or after its own. The most launch-bound run
+//! then starts as its launch is made: right to within the device's launch
+//! latency (microseconds).
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::GpuContext;
 use crate::device::Device;
 use crate::device::tpu::{TPU, error, ffi};
 
-struct Session {
-    /// When libtpu's session started, on the profiler clock and the Unix
-    /// clock (an XSpace's times are one or the other's).
-    start_ns: u64,
-    start_unix_ns: u64,
-    /// Each launch: its device, its op's context, its kernel (Pallas module).
-    launches: Vec<(usize, GpuContext, String)>,
-}
+/// Each launch of the session: its device, its op's context, its kernel
+/// (Pallas module) and when it was made (the profiler clock).
+type Launches = Vec<(usize, GpuContext, String, u64)>;
 
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
-
-fn unix_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64)
-}
+static SESSION: Mutex<Option<Launches>> = Mutex::new(None);
 
 /// Starts libtpu's session, once the programs launched before have run.
 pub(crate) fn start() -> Result<(), String> {
     for index in 0..TPU.device_count() {
         crate::allocator::tpu::wait(index)?;
     }
-    // Its times count from when it is started, not from when that returns
-    // (tens of milliseconds later).
-    let (start_ns, start_unix_ns) = (super::now_ns(), unix_ns());
     // SAFETY: the shim's call; it fails without TPUs.
     if unsafe { ffi::lumen_tpu_profiler_start() } != 0 {
         return Err(error());
     }
-    *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Session {
-        start_ns,
-        start_unix_ns,
-        launches: Vec::new(),
-    });
+    *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
     Ok(())
 }
 
@@ -61,7 +50,7 @@ pub(crate) fn launched(index: usize, kernel: &str) {
         return;
     };
     if let Some(s) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        s.launches.push((index, context, kernel.to_owned()));
+        s.push((index, context, kernel.to_owned(), super::now_ns()));
     }
 }
 
@@ -69,10 +58,10 @@ pub(crate) fn launched(index: usize, kernel: &str) {
 /// op that launched it (`name_of` its id) and the kernel's Pallas module
 /// (`max [elementwise]`), its own row apart from the op's.
 pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String> {
-    let Some(session) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+    let Some(launches) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());
     };
-    let mut devices: Vec<usize> = session.launches.iter().map(|l| l.0).collect();
+    let mut devices: Vec<usize> = launches.iter().map(|l| l.0).collect();
     devices.sort_unstable();
     devices.dedup();
     for &index in &devices {
@@ -91,19 +80,22 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
     let mut runs = runs(space);
     // SAFETY: frees the session; `space` is not read after.
     unsafe { ffi::lumen_tpu_profiler_free() };
-    // An XSpace's times: the Unix clock's, or (a line of no timestamp) the
-    // session's.
-    let to_ns = |t: u64, unix: bool| match unix {
-        true => session.start_ns + t.saturating_sub(session.start_unix_ns),
-        false => session.start_ns + t,
-    };
-    for (index, context, kernel) in session.launches {
-        let Some(device_runs) = runs.iter_mut().find(|(i, _)| *i == index) else {
-            continue;
-        };
-        let Some((start, end, unix)) = device_runs.1.pop_front() else {
-            continue;
-        };
+    // Each launch's run, in order on its device.
+    let ran: Vec<_> = launches
+        .into_iter()
+        .filter_map(|launch| {
+            let device_runs = &mut runs.iter_mut().find(|(i, _)| *i == launch.0)?.1;
+            Some((launch, device_runs.pop_front()?))
+        })
+        .collect();
+    // The least shift that starts no run before its launch.
+    let shift = ran
+        .iter()
+        .map(|((.., launched), (start, _))| i128::from(*launched) - i128::from(*start))
+        .max()
+        .unwrap_or(0);
+    let to_ns = |t: u64| (i128::from(t) + shift).max(0) as u64;
+    for ((index, context, kernel, _), (start, end)) in ran {
         let module = kernel
             .trim_start_matches("lumen.ops.")
             .trim_end_matches(".tpu");
@@ -111,15 +103,15 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
             Some(op) => format!("{op} [{module}]"),
             None => module.to_owned(),
         };
-        let (start, end) = (to_ns(start, unix), to_ns(end, unix));
+        let (start, end) = (to_ns(start), to_ns(end));
         super::record_kernel_in(context, &name, Some(kernel), Device::Tpu(index), start, end);
     }
     Ok(())
 }
 
 /// A device's program runs, in order: each one's start and end
-/// (nanoseconds) and whether those are on the Unix clock.
-type Runs = VecDeque<(u64, u64, bool)>;
+/// (nanoseconds, libtpu's clock).
+type Runs = VecDeque<(u64, u64)>;
 
 /// Each TPU's program runs in XSpace `space`.
 fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
@@ -147,7 +139,7 @@ fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
                 let offset = field(event, 2).map_or(0, Value::int);
                 let duration = field(event, 3).map_or(0, Value::int);
                 let start = timestamp + offset / 1000;
-                device.push_back((start, start + duration / 1000, timestamp != 0));
+                device.push_back((start, start + duration / 1000));
             }
         }
         out.push((index, device));

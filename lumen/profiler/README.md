@@ -94,9 +94,12 @@ With `record_shapes`, ops record (via closures that only run then):
   XSpace gives each device's program runs in order (plane
   `/device:TPU:<i>`, line `XLA Modules`), and a device runs its programs in
   the order they were launched: the n-th run is the n-th launch's, named as
-  the op (plan step) that launched it. Its times are offsets from libtpu's
-  session start (a line of no timestamp), shifted by the profiler clock
-  taken then. Without the TPU backend, starting a TPU session errors.
+  the op (plan step) that launched it. libtpu's clock is its own, so the
+  runs are shifted onto the profiler clock by causality: the least shift
+  that starts no run before its launch (each launch records when it was
+  made), which starts the most launch-bound run at its launch, to within
+  the device's launch latency. Without the TPU backend, starting a TPU
+  session errors.
 
 ## `key_averages` and the table
 
