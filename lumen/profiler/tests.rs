@@ -183,9 +183,18 @@ fn device_events_have_their_ops_types() {
     assert_eq!(kernel.accum, [DType::F32]);
     let trace = p.chrome_trace();
     let line = trace
-        .split("},{")
+        .split("{\"ph\"")
         .find(|e| e.contains("\"cat\":\"kernel\""))
         .expect("the kernel's event");
+    // A row each, which a trace viewer draws as a table.
+    assert!(
+        line.contains(
+            "\"Operands\":[{\"operand\":\"input 0\",\"type\":\"f16\",\"dims\":[2,3]},\
+             {\"operand\":\"input 1\",\"type\":\"f16\",\"dims\":[3,4]},\
+             {\"operand\":\"output\",\"type\":\"f16\",\"dims\":[2,4]}]"
+        ),
+        "{line}"
+    );
     assert!(
         line.contains("\"Input Dims\":[[2,3],[3,4]],\"Input type\":[\"f16\",\"f16\"]"),
         "{line}"
