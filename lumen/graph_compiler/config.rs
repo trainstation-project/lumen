@@ -141,6 +141,14 @@ impl Default for CompilerConfig {
 
 static CONFIG: RwLock<Option<CompilerConfig>> = RwLock::new(None);
 
+/// How many times the flags changed: whether they did since a reading.
+static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The flags' version, which each [`update`] changes.
+pub fn version() -> u64 {
+    VERSION.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// The flags graphs are compiled with from now on.
 pub fn config() -> CompilerConfig {
     let config = CONFIG.read().unwrap_or_else(PoisonError::into_inner);
@@ -154,4 +162,5 @@ pub fn update(change: impl FnOnce(&mut CompilerConfig)) {
     let mut next = config.clone().unwrap_or_default();
     change(&mut next);
     *config = Some(next);
+    VERSION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }

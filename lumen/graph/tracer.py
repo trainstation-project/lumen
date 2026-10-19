@@ -370,6 +370,19 @@ def _signature(args):
     ) + (shared,)
 
 
+# The compiler flags' repr as of their version (rendered again once they
+# change, not on each call).
+_flags = [None, None]
+
+
+def _compiler_flags():
+    """``repr(config.compiler)``, the flags plans are compiled with."""
+    version = config.compiler._version
+    if _flags[0] != version:
+        _flags[:] = [version, repr(config.compiler)]
+    return _flags[1]
+
+
 def _device(args, device):
     """Where a function of ``args`` runs: ``device``, or the first tensor
     argument with data's, or the meta device if all are meta (nothing
@@ -438,14 +451,16 @@ def compile(fn, device=None):
     # before the weights).
     plans = {}
     latest = []
+    # The device asked for, resolved once.
+    named = None if device is None else _device_name(device)
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
         workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
-        target = _device(args, device)
+        target = named or _device(args, None)
         # The compiler's flags too: a plan compiled with others is not reused.
-        key = _signature(args), target, repr(config.compiler)
+        key = _signature(args), target, _compiler_flags()
         # The arguments the plan copies in: tensors, then runtime scalars.
         # The kernels take the scalars by value, read from the host on each
         # call: a new value needs no new plan.

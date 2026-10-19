@@ -44,6 +44,12 @@ macro_rules! flags {
                 config::update(|c| *c = CompilerConfig::default());
             }
 
+            /// The flags' version, which each change of them changes.
+            #[getter]
+            fn _version(&self) -> u64 {
+                config::version()
+            }
+
             fn __repr__(&self) -> String {
                 let c = config::config();
                 let flags: Vec<String> = vec![$(format!("{}={}", stringify!($name), py_value(&c.$name))),*];
