@@ -39,13 +39,16 @@ pub(crate) fn start() -> Result<(), String> {
     for index in 0..TPU.device_count() {
         crate::allocator::tpu::wait(index)?;
     }
+    // Its times count from when it is started, not from when that returns
+    // (tens of milliseconds later).
+    let (start_ns, start_unix_ns) = (super::now_ns(), unix_ns());
     // SAFETY: the shim's call; it fails without TPUs.
     if unsafe { ffi::lumen_tpu_profiler_start() } != 0 {
         return Err(error());
     }
     *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Session {
-        start_ns: super::now_ns(),
-        start_unix_ns: unix_ns(),
+        start_ns,
+        start_unix_ns,
         launches: Vec::new(),
     });
     Ok(())
