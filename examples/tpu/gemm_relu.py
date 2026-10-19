@@ -10,8 +10,9 @@ The result is checked against numpy, a few calls are profiled (their host
 time per call printed), and a Chrome trace, ``tpu_gemm_relu_trace.json``,
 is written (open it in Perfetto or ``chrome://tracing``): each call's
 steps on the CPU timeline. lumen's profiler records no TPU device
-activity yet; a TPU step's host time is its launch and, as each waits for
-the one before, about the step before's device time.
+activity yet, and TPU programs run asynchronously: a step's host time is
+its launch, and the calls' time is to ``lumen.tpu.synchronize()`` after
+the last.
 
 Run on a TPU VM: ``python examples/tpu/gemm_relu.py``.
 """
@@ -50,17 +51,18 @@ error = np.abs(host(y) - expected).max() / np.abs(expected).max()
 print(f"relu(x @ w), {M}x{K} @ {K}x{N} bfloat16 on {y.device}: max error {error:.1e} of the largest output")
 assert error < 1e-2
 
+lumen.tpu.synchronize()
 with profile(activities=[ProfilerActivity.CPU]) as prof:
-    for k in range(PROFILED_CALLS):
-        with record_function(f"gemm_relu {k}"):
-            y = gemm_relu(x, w)
-    # The last call's result read: its kernels done before the profile ends.
-    host(y)
+    with record_function("gemm_relu calls"):
+        for k in range(PROFILED_CALLS):
+            with record_function(f"gemm_relu {k}"):
+                y = gemm_relu(x, w)
+        # So the range ends with the calls' programs.
+        lumen.tpu.synchronize()
 
-events = prof.events()
-calls = [e for e in events if e["kind"] == "user_range" and e["name"].startswith("gemm_relu")]
-per_call = sum(e["end_us"] - e["start_us"] for e in calls) / len(calls)
-print(f"{per_call:.1f} us of host time a call ({2 * M * K * N / per_call / 1e6:.0f} TFLOP/s)")
+(r,) = [e for e in prof.events() if e["kind"] == "user_range" and e["name"] == "gemm_relu calls"]
+per_call = (r["end_us"] - r["start_us"]) / PROFILED_CALLS
+print(f"{per_call:.1f} us a call ({2 * M * K * N / per_call / 1e6:.0f} TFLOP/s)")
 print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
 prof.export_chrome_trace("tpu_gemm_relu_trace.json")
 print("wrote tpu_gemm_relu_trace.json")
