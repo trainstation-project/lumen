@@ -146,11 +146,6 @@ pub(crate) fn encode(
     // Blocks of whole tiles (or whole dimensions), as large as fit VMEM.
     let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
-    // TUNING (temporary): LUMEN_TPU_DOT_BLOCKS=bm,bn,bk.
-    if let Ok(v) = std::env::var("LUMEN_TPU_DOT_BLOCKS") {
-        let b: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
-        (cap_m, cap_n, cap_k) = (b[0], b[1], b[2]);
-    }
     let mut blocks;
     loop {
         blocks = (
@@ -171,6 +166,16 @@ pub(crate) fn encode(
             (m, _, _) if m > 512 => cap_m = m / 2,
             _ => break,
         }
+    }
+    // A few steps at least, so its copies overlap its products: n's
+    // blocks halved (the lhs's block stays, the rhs's stream past it).
+    while let (Some(bm), Some(bn), Some(bk)) = blocks {
+        let steps = f.batch * f.lead * (f.m / bm) * (f.n / bn) * (f.k / bk);
+        if steps >= 4 || cap_n <= 256 || bn < 512 {
+            break;
+        }
+        cap_n = bn / 2;
+        blocks.1 = block(f.n, 128, cap_n);
     }
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [

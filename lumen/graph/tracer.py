@@ -526,8 +526,28 @@ def compile(fn, device=None):
     # last ran (their values baked into its programs).
     baked = {}
 
+    # Calls of tensors alone whose plan reads them as they are and writes
+    # nothing back (no weights, runtime scalars, random numbers, packed
+    # blocks or arguments it assigns): that plan, its workspace, what fn
+    # returns, which outputs come back to the host, and its key, by the
+    # tensors' types and devices and the compiler's flags. A call there
+    # runs it directly.
+    fast = {}
+
     @functools.wraps(fn)
     def compiled(*args):
+        if all(type(a) is Tensor for a in args):
+            hit = fast.get((tuple((a.dtype, tuple(a.shape), a.device) for a in args), _compiler_flags()))
+            if hit is not None:
+                plan, workspace, out, to_host, key = hit
+                latest[:] = [key]
+                outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
+
+                def returned(_):
+                    value, host = next(outputs)
+                    return value.cpu() if host else value
+
+                return _tree_map(returned, out)
         graph, plan, workspace, out, inputs = prepare(args)
         ran = not (workspace is None or any(isinstance(a, Tensor) and _device_type(a.device) == "meta" for a in args))
         if ran and plan.neural_engine:
@@ -546,12 +566,23 @@ def compile(fn, device=None):
 
         # A host value the plan has on the device (an input or a constant as
         # it is: no host op computed it), copied.
+        to_host = []
+
         def result_of(t):
             value = next(outputs)
-            host = _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
-            return value.cpu() if ran and host else value
+            host = ran and _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
+            to_host.append(host)
+            return value.cpu() if host else value
 
         result = _tree_map(result_of, out)
+        if ran and all(type(a) is Tensor for a in args):
+            # A call of tensors alone, read as they are, writing nothing
+            # back: the next such call runs its plan directly.
+            written, written_scalars, written_arguments = plans[latest[0]][2]
+            plain = not (written or written_scalars or written_arguments or plans[latest[0]][3] is not None)
+            if plain and not plan.neural_engine and len(inputs) == len(args):
+                signature = tuple((a.dtype, tuple(a.shape), a.device) for a in args)
+                fast[signature, _compiler_flags()] = (plan, workspace, out, to_host, latest[0])
         if ran:
             # The weights it assigned, written back (functionalized: as
             # torch.compile does a mutation).
