@@ -346,6 +346,7 @@ pub(crate) fn encode(
         ref p if super::elementwise::tpu::elementwise(p) => {
             super::elementwise::tpu::encode(index, step, inputs, output)
         }
+        Primitive::ReduceSum { .. } => super::reduce::tpu::encode(index, step, inputs, output),
         Primitive::PallasCall { kernel, .. } => {
             // Its operands, its value, then its other outputs (which `inputs`
             // ends with).

@@ -7,13 +7,21 @@
 //! the accumulation dtype (exactly: a product of two floats of half its
 //! width is exact in it), the sum accumulates in it, and the result is cast
 //! to the dot's.
+//!
+//! Which dots, as XLA's backends choose: a vector·vector dot (both
+//! operands' free dimensions of one element: `rowsum(dO * O)`) always (XLA's
+//! CPU and GPU both: no matmul suits it, and a TPU's dot kernel cannot run
+//! it), a vector·matrix one only with `matrices` (the MPS's: its matmuls'
+//! tiles would be mostly padding; a TPU's dot kernel streams the matrix at
+//! nearly its memory's bandwidth, and its product, unfused, would not).
 
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// `graph` with each dot of a vector a product and a sum.
-pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
+/// `graph` with each dot of a vector a product and a sum: of two vectors,
+/// and with `matrices` of a vector and a matrix.
+pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -44,9 +52,14 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
                 };
                 let accum = *accum_dtype;
                 match (vector(&operands[0]), vector(&operands[1])) {
-                    (true, _) => Some(product(&mut out, operands[0], operands[1], accum)),
-                    (false, true) => Some(product(&mut out, operands[1], operands[0], accum)),
-                    (false, false) => None,
+                    (true, true) => Some(product(&mut out, operands[0], operands[1], accum)),
+                    (true, false) if matrices => {
+                        Some(product(&mut out, operands[0], operands[1], accum))
+                    }
+                    (false, true) if matrices => {
+                        Some(product(&mut out, operands[1], operands[0], accum))
+                    }
+                    _ => None,
                 }
                 .map(|sum| {
                     // The vector's free dimensions (of size 1) back.
@@ -181,8 +194,11 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     }
 }
 
-/// [`reduce_vector_dots`] as a pass.
-pub(crate) struct DotStrength;
+/// [`reduce_vector_dots`] as a pass: of vector·matrix dots too with
+/// `matrices`.
+pub(crate) struct DotStrength {
+    pub(crate) matrices: bool,
+}
 
 impl<M: Module> CompilerPass<M> for DotStrength {
     fn name(&self) -> &'static str {
@@ -190,7 +206,7 @@ impl<M: Module> CompilerPass<M> for DotStrength {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = reduce_vector_dots(m.graph());
+        *m.graph_mut() = reduce_vector_dots(m.graph(), self.matrices);
         Ok(())
     }
 }
