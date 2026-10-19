@@ -371,7 +371,9 @@ int lumen_tpu_run(void *executable,
         return 1;
     }
     // The donated region, now the result's.
-    lumen_tpu_free(*region);
+    if (!getenv("LUMEN_TPU_NO_FREE")) { // EXPERIMENT (temporary)
+        lumen_tpu_free(*region);
+    }
     *region = result;
     return 0;
 }
