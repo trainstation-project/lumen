@@ -10,9 +10,10 @@ double-buffered against compute) runs over their blocks: each step loads
 every operand's block, applies the nodes (lumen's primitives, which the
 kernel lowers as Pallas does) and stores the last one's value as the
 output's block. A 0-d operand (a broadcast's) is copied to VMEM once,
-before the pipeline, and read as a scalar at every step; a ``full`` or a
+before the pipeline, and read at every step as a ``(1,)`` (Mosaic extracts
+no narrow scalars), which its broadcast broadcasts; a ``full`` or a
 broadcast computes the blocks' shape. A 0-d program has no pipeline: its
-operands copied in, its value computed and copied out.
+operands copied in, its value computed (a ``(1,)``) and copied out.
 """
 
 import math
@@ -43,14 +44,19 @@ def program(spec):
 
     scalar = not shape
 
+    # A 0-d value is a (1,) in the kernel.
+    shape_of = (1,) if scalar else block_shape
+
     def apply(values):
         """The last node's value, of the operands' ``values``."""
         values = list(values)
         for node in spec["nodes"]:
             args = [values[i] for i in node["args"]]
             params = node["params"]
-            if node["name"] in ("full", "broadcast_in_dim"):
-                params = {**params, "shape": () if scalar else block_shape}
+            if node["name"] == "full":
+                params = {**params, "shape": shape_of}
+            if node["name"] == "broadcast_in_dim":
+                params = {"shape": shape_of, "broadcast_dimensions": (len(shape_of) - 1,)}
             values.append(prims.bind(node["name"], *args, **params))
         return values[-1]
 
@@ -61,7 +67,7 @@ def program(spec):
             c.wait()
 
         # A 0-d value staged as `pallas_call` stages a scalar: a (1,) in
-        # VMEM (the same bytes), its one element read.
+        # VMEM (the same bytes).
         piped, scalars = [], {}
         for i, dtype in enumerate(dtypes):
             if not (broadcast[i] or scalar):
@@ -69,11 +75,11 @@ def program(spec):
                 continue
             scalars[i] = pl.scratch(pl.VMEM((1,), dtype))
             copy(pallas.view(memory, rows[i], (), dtype), scalars[i])
-        read = {i: prims.reshape(s[...], ()) for i, s in scalars.items()}
+        read = {i: s[...] for i, s in scalars.items()}
         out = pallas.view(result, rows[len(dtypes)], () if scalar else view, spec["output"])
         if scalar:
             vmem = pl.scratch(pl.VMEM((1,), spec["output"]))
-            vmem[...] = prims.reshape(apply(read[i] for i in range(len(dtypes))), (1,))
+            vmem[...] = apply(read[i] for i in range(len(dtypes)))
             copy(vmem, out)
             return
 
