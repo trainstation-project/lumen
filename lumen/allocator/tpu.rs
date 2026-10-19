@@ -153,6 +153,19 @@ impl TpuAllocator {
         }
     }
 
+    /// Waits for the programs run on the region so far.
+    fn wait(&self) -> Result<(), String> {
+        let reserved = self.lock();
+        let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
+            return Ok(());
+        };
+        // SAFETY: the region's buffer.
+        match unsafe { ffi::lumen_tpu_wait(buffer.as_ptr()) } {
+            0 => Ok(()),
+            _ => Err(error()),
+        }
+    }
+
     /// The region's rows: a program's view of it is `u32[rows, 1, 128]`.
     fn rows(&self) -> usize {
         self.lock().as_ref().map_or(0, |r| r.size / ROW)
@@ -212,6 +225,13 @@ pub(crate) fn run(
     host: &[u8],
 ) -> Result<(), String> {
     allocated(index)?.run(executable, rows, scalars, host)
+}
+
+/// Waits for the programs run on device `index`'s memory so far (none if
+/// nothing is allocated there).
+pub(crate) fn wait(index: usize) -> Result<(), String> {
+    let allocator = allocators().get(&index).cloned();
+    allocator.map_or(Ok(()), |a| a.wait())
 }
 
 /// The rows of device `index`'s memory, as a program sees it.

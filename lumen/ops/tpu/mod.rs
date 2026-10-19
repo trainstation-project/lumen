@@ -37,6 +37,11 @@ fn lower(module: &str, _spec: &str) -> Result<String, String> {
     ))
 }
 
+/// The VMEM a kernel may use (Mosaic's scoped limit, `memory_space` 1):
+/// most of a v6e's 128 MiB, leaving Mosaic's own room (JAX's
+/// `vmem_limit_bytes`; the default is far smaller).
+const VMEM_LIMIT: usize = 100 << 20;
+
 /// `body` (a Mosaic module) as the StableHLO program libtpu compiles: one
 /// `tpu_custom_call` of it on `scalars` i32s, `host` rows of host bytes (if
 /// any) and the device's `rows` of memory, which it returns written.
@@ -67,7 +72,8 @@ fn program(name: &str, body: &str, scalars: usize, host: Option<usize>, rows: us
          func.func public @main({}) -> {result} {{\n    \
          %0 = stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \
          \"{{\\22custom_call_config\\22: {{\\22body\\22: \\22{}\\22, \\22serialization_format\\22: 1, \
-         \\22needs_layout_passes\\22: true}}}}\", kernel_name = \"{name}\", operand_layouts = [{}], \
+         \\22needs_layout_passes\\22: true}}, \\22scoped_memory_configs\\22: [{{\\22memory_space\\22: 1, \
+         \\22offset\\22: 0, \\22size\\22: {VMEM_LIMIT}}}]}}\", kernel_name = \"{name}\", operand_layouts = [{}], \
          output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [], \
          operand_index = {memory}, operand_tuple_indices = []>], result_layouts = [dense<[2, 1, 0]> : \
          tensor<3xindex>]}} : ({}) -> {result}\n    return %0 : {result}\n  }}\n}}\n",
@@ -106,8 +112,10 @@ struct Executable(*mut c_void);
 unsafe impl Send for Executable {}
 
 /// Module `module`'s kernel for `spec`, lowered and compiled once per
-/// process: a program of `scalars` scalars and `host` rows of host bytes.
+/// process and device `index`: a program of `scalars` scalars and `host`
+/// rows of host bytes.
 fn compiled(
+    index: usize,
     module: &str,
     spec: &str,
     scalars: usize,
@@ -115,7 +123,7 @@ fn compiled(
     rows: usize,
 ) -> Result<Executable, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
-    let key = format!("{module} {spec} {scalars} {host:?}");
+    let key = format!("{index} {module} {spec} {scalars} {host:?}");
     let cache = || {
         CACHE
             .get_or_init(Default::default)
@@ -128,7 +136,8 @@ fn compiled(
     // Not holding the cache: lowering runs Python, which may run lumen.
     let code = program(module, &lower(module, spec)?, scalars, host, rows);
     // SAFETY: `code`'s bytes.
-    let executable = unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len()) };
+    let executable =
+        unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
     if executable.is_null() {
         return Err(error());
     }
@@ -163,7 +172,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         "" => format!("{{{device}}}"),
         fields => format!("{{{fields}, {device}}}"),
     };
-    let executable = compiled(launch.module, &spec, scalars, host, rows)
+    let executable = compiled(index, launch.module, &spec, scalars, host, rows)
         .map_err(|e| format!("{}: {e}", launch.module))?;
     crate::allocator::tpu::run(
         index,

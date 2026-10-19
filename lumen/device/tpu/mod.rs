@@ -26,7 +26,7 @@ pub(crate) mod ffi {
             dst: *mut c_void,
             nbytes: usize,
         ) -> i32;
-        pub fn lumen_tpu_compile(code: *const c_char, size: usize) -> *mut c_void;
+        pub fn lumen_tpu_compile(code: *const c_char, size: usize, index: i32) -> *mut c_void;
         pub fn lumen_tpu_run(
             executable: *mut c_void,
             index: i32,
@@ -36,6 +36,7 @@ pub(crate) mod ffi {
             nbytes: usize,
             region: *mut *mut c_void,
         ) -> i32;
+        pub fn lumen_tpu_wait(buffer: *mut c_void) -> i32;
         #[cfg(test)]
         pub fn lumen_tpu_memory(index: i32, in_use: *mut i64, limit: *mut i64) -> i32;
     }

@@ -29,30 +29,32 @@ accumulating in float32; the output float32 or bfloat16.
 * **Pipeline** over `(batch, M/bm, N/bn, K/bk)` (`pl.emit_pipeline`, the
   blocks' copies double-buffered against compute): each step multiplies an
   lhs and rhs block on the matrix unit into a float32 accumulator (VMEM,
-  zeroed at the first K step), and the last K step writes the output
+  zeroed at the first k step) and the last k step writes the output
   block, through the kernel's `epilogue` (a float32 block's function, not
-  yet passed by Rust) if any.
-* **Blocks** (`tpu.rs`): `bm` is M if unbatched and at most the cap, else a
-  multiple of 8 dividing it; `bn` and `bk` the largest multiples of their
-  unit (128 words of a row) up to the cap dividing N and K. Caps, tuned on
-  a v6e: 1024 × 1024 × 512 for bfloat16, 512 × 512 × 512 for float32.
+  used yet), in the output's dtype. One block of k needs no accumulator: the
+  product is written as it is. One product a step: Mosaic unrolls it over
+  the block's matrix-unit tiles, so a second copy of it costs dearly.
+* **Blocks** (`tpu.rs`, `caps`): as large as feed the matrix unit (a step
+  does `bm · bn / (bm + bn)` flops a byte read; a v6e's HBM moves a byte
+  while it does ~800), measured on a v6e (`benchmarks/tpu_matmul.py`):
+  bfloat16 2048 × 1024 × K for K ≤ 4096 (no accumulator), else
+  2048 × 2048 × 2048; float32 (full precision, six bfloat16 passes)
+  2048 × 1024 × 1024. Each is the whole dimension if smaller, else the
+  largest multiple of a tile's rows (M) or of 128 (N, K) dividing it,
+  shrunk (k's first) until its VMEM (`footprint`: double buffers, the
+  accumulator, float32's bfloat16 parts) fits 88 MiB of the kernel's
+  100 MiB; then n's halved (to 256) until the grid has 4 steps, so small
+  dots' copies overlap their products. On a v6e (one core pinned, a second
+  a shape) large dots run at ~770–785 TFLOP/s in bfloat16 (XLA's
+  730–790) and ~132 in float32 (XLA's 124): XLA's or faster at every shape
+  of `benchmarks/tpu_matmul.py` but bfloat16 4096³ (98.6%: its first
+  blocks' 24 MB copy, which nothing overlaps).
   Shapes that cannot block error, naming the dimension.
-* **Words.** The memory holds tensors row-major, as the host does; the
-  kernel reads 32-bit words. A bfloat16 word holds two neighbours of a row,
-  so a bfloat16 dot splits operands by parity: `out[:, q::2] = Σ_p
-  lhs[:, p::2] · rhs[p::2, q::2]` (a rhs `[K, N]` pairs its rows by k
-  parity: two rows a row of `[K/2, N]` words; a `[N, K]` one by n parity),
-  each half widened to float32 by a shift and narrowed to bfloat16 exactly.
-  A bfloat16 output is written as words: even columns' rounded bits in the
-  low halves, odd columns' in the high (its accumulator holds the even
-  columns, then the odd).
-* **Supported**: float32 → float32; bfloat16 → bfloat16; bfloat16 → float32
-  with a `[N, K]` rhs. The others (float32 → bfloat16, bfloat16 → float32
-  with a `[K, N]` rhs) would interleave columns across lanes: not yet.
+* **Tiles.** A TPU keeps tensors in its own tiles (`device/tpu/layout.rs`),
+  as Mosaic reads them: the kernel views its operands and output in place
+  (`tpu.reinterpret_cast`), with no packing or reshuffling of words.
 * float32 operands multiply in full float32 (`contract_precision<fp32>`),
-  not the matrix unit's bfloat16 passes.
-* On a v6e at 4096³, through `lumen.compile`: about 465 TFLOP/s in bfloat16
-  (XLA's: 770) and 110 in float32 (125): JAX's Pallas kernel's speed.
+  not the matrix unit's single bfloat16 pass.
 
 ## Subfolders
 

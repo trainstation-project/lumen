@@ -10,7 +10,7 @@ double-buffered against compute) runs over a grid of
 ``(batch * lead, m/bm, n/bn, k/bk)``: each step multiplies an lhs and a rhs
 block on the matrix unit into a float32 accumulator (VMEM), and the last k
 step writes the output block, through ``epilogue`` if any, in the output's
-dtype.
+dtype (one k step: the product itself, no accumulator).
 """
 
 from lumen import pallas as pl
@@ -38,7 +38,7 @@ def program(spec, epilogue=None):
             return b // lead
         return prims.div(b, prims.full((), lead, "int32"))
 
-    def kernel(rows, memory, result, acc):
+    def kernel(rows, memory, result, *scratch):
         x = pallas.view(memory, rows[0], (batch * lead, m, k), dtype)
         y = pallas.view(memory, rows[1], (batch, n, k) if t else (batch, k, n), dtype)
         out = pallas.view(result, rows[2], (batch * lead, m, n), out_dtype)
@@ -49,8 +49,19 @@ def program(spec, epilogue=None):
             y_spec = pl.BlockSpec((None, bk, bn), lambda b, i, j, s: (rhs_batch(b), s, j))
         o_spec = pl.BlockSpec((None, bm, bn), lambda b, i, j, s: (b, i, j))
 
+        def finish(v, ob):
+            if epilogue is not None:
+                v = epilogue(v)
+            ob[...] = v.to(out_dtype)
+
         def body(xb, yb, ob):
-            step = pl.program_id(3)
+            # One product a step: the matrix unit's code is unrolled over
+            # the block, so a second copy of it (a branch's) costs dearly.
+            if kb == 1:
+                # One block of k: no accumulator.
+                finish(pl.dot(xb[...], yb[...], trans_b=t), ob)
+                return
+            step, acc = pl.program_id(3), scratch[0]
 
             @pl.when(step == 0)
             def _():
@@ -60,12 +71,10 @@ def program(spec, epilogue=None):
 
             @pl.when(step == kb - 1)
             def _():
-                v = acc[...]
-                if epilogue is not None:
-                    v = epilogue(v)
-                ob[...] = v.to(out_dtype)
+                finish(acc[...], ob)
 
         grid = (batch * lead, mb, nb, kb)
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec], out_specs=[o_spec])(x, y, out)
 
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")])
+    # The accumulator, for more than one block of k.
+    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if kb > 1 else [])
