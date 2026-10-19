@@ -9,8 +9,10 @@ none, as ``[elements]``. One pipeline (``emit_pipeline``, its copies
 double-buffered against compute) runs over their blocks: each step loads
 every operand's block, applies the nodes (lumen's primitives, which the
 kernel lowers as Pallas does) and stores the last one's value as the
-output's block. A 0-d operand (a broadcast's) is one block of one element,
-read at every step; a ``full`` or broadcast computes the blocks' shape.
+output's block. A 0-d operand (a broadcast's) is copied to VMEM once,
+before the pipeline, and read as a scalar at every step; a ``full`` or a
+broadcast computes the blocks' shape. A 0-d program has no pipeline: its
+operands copied in, its value computed and copied out.
 """
 
 import math
@@ -38,25 +40,46 @@ def program(spec):
         view, block_shape = (max(math.prod(shape), 1),), (b,)
         block = pl.BlockSpec((b,), lambda i: (i,))
         grid = (view[0] // b,)
-    one = pl.BlockSpec((1,), lambda *_: (0,))
+
+    scalar = not shape
 
     def kernel(rows, memory, result):
-        operands = [
-            pallas.view(memory, rows[i], (1,) if broadcast[i] else view, dtype) for i, dtype in enumerate(dtypes)
-        ]
-        out = pallas.view(result, rows[len(dtypes)], view, spec["output"])
+        def copy(src, dst):
+            c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
+            c.start()
+            c.wait()
+
+        def staged(dtype):
+            # As `pallas_call` stages a scalar: a (1,) in VMEM (the same
+            # bytes), read as a scalar.
+            vmem = pl.scratch(pl.VMEM((1,), dtype))
+            return vmem, type(vmem)(vmem.kernel, vmem.var, shape=())
+
+        piped, scalars = [], {}
+        for i, dtype in enumerate(dtypes):
+            if not (broadcast[i] or scalar):
+                piped.append(pallas.view(memory, rows[i], view, dtype))
+                continue
+            vmem, scalars[i] = staged(dtype)
+            copy(pallas.view(memory, rows[i], (), dtype), vmem)
 
         def body(*blocks):
-            values = [prims.reshape(b[...], ()) if s else b[...] for b, s in zip(blocks, broadcast)]
+            blocks = iter(blocks)
+            values = [scalars[i][...] if i in scalars else next(blocks)[...] for i in range(len(dtypes))]
             for node in spec["nodes"]:
                 args = [values[i] for i in node["args"]]
                 params = node["params"]
                 if node["name"] in ("full", "broadcast_in_dim"):
-                    params = {**params, "shape": block_shape}
+                    params = {**params, "shape": () if scalar else block_shape}
                 values.append(prims.bind(node["name"], *args, **params))
-            blocks[-1][...] = values[-1]
+            next(blocks)[...] = values[-1]
 
-        in_specs = [one if s else block for s in broadcast]
-        pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=[block])(*operands, out)
+        if scalar:
+            vmem, value = staged(spec["output"])
+            body(value)
+            copy(vmem, pallas.view(result, rows[len(dtypes)], (), spec["output"]))
+            return
+        out = pallas.view(result, rows[len(dtypes)], view, spec["output"])
+        pl.emit_pipeline(body, grid=grid, in_specs=[block] * len(piped), out_specs=[block])(*piped, out)
 
     return pallas.program(kernel, spec)
