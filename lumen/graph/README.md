@@ -138,7 +138,11 @@ warnings at the source line.
     scalars / tensor args become extra outputs (written back after each
     call). Then prune and emit precision warnings.
   * `compile(fn, device=None)` — caches a `Plan` per signature, device and
-    `repr(config.compiler)`; runs in a single preallocated workspace;
+    `repr(config.compiler)` (rendered again only when the flags' version
+    changes); a call of tensors alone whose plan reads them as they are and
+    writes nothing back runs that plan directly, by the tensors' types and
+    devices (no tracing machinery a call); runs in a single preallocated
+    workspace;
     handles meta-tensor compile-only calls, weight packing for merged dots,
     Neural Engine invalidation, and `compiled.dump_graph(...)`.
   * `make_graph(fn)` — returns the traced `Graph` (like `jax.make_jaxpr`).

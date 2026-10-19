@@ -43,8 +43,12 @@ accumulating in float32; the output float32 or bfloat16.
   largest multiple of a tile's rows (M) or of 128 (N, K) dividing it,
   shrunk (k's first) until its VMEM (`footprint`: double buffers, the
   accumulator, float32's bfloat16 parts) fits 88 MiB of the kernel's
-  100 MiB. Large dots run at ~800 TFLOP/s in bfloat16 (87% of a v6e's
-  peak; XLA's 730–800) and ~135 in float32 (XLA's 125).
+  100 MiB; then n's halved (to 256) until the grid has 4 steps, so small
+  dots' copies overlap their products. On a v6e (one core pinned, a second
+  a shape) large dots run at ~770–785 TFLOP/s in bfloat16 (XLA's
+  730–790) and ~132 in float32 (XLA's 124): XLA's or faster at every shape
+  of `benchmarks/tpu_matmul.py` but bfloat16 4096³ (98.6%: its first
+  blocks' 24 MB copy, which nothing overlaps).
   Shapes that cannot block error, naming the dimension.
 * **Tiles.** A TPU keeps tensors in its own tiles (`device/tpu/layout.rs`),
   as Mosaic reads them: the kernel views its operands and output in place
