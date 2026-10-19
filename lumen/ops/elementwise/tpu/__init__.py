@@ -1,7 +1,7 @@
 """Elementwise primitives on TPU, in lumen's Pallas: nodes of one shape's
 operands over the device's memory.
 
-``lumen/ops/elementwise/tpu.rs`` writes the spec (the operands' and output's
+``lumen/ops/elementwise/tpu/mod.rs`` writes the spec (the operands' and output's
 dtypes, their shape, the nodes and the blocks); this is the kernel. The
 operands and output are viewed in place, in a TPU's tiles: as
 ``[lead, m, n]`` (their leading dimensions merged) or, of one dimension or

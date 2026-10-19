@@ -1,4 +1,4 @@
-//! Elementwise primitives on TPU: the spec of their kernel (`tpu.py`
+//! Elementwise primitives on TPU: the spec of their kernel (`__init__.py`
 //! beside this file, in lumen's Pallas): its operands' and output's dtypes,
 //! their shape (one), the nodes it applies (a primitive each, by name and
 //! parameters, of the operands and the nodes before) and its blocks.

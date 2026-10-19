@@ -92,10 +92,28 @@ def test_a_dot_the_kernel_cannot_run_says_why():
         lumen.compile(lambda x, w: x @ w)(x, w)
 
 
+@pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
+def test_elementwise_primitives_agree_with_numpy(shape):
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
+    x, y = (lumen.from_numpy(h).to("tpu") for h in (a, b))
+    cases = [
+        (lambda x, y: x + y, a + b),
+        (lambda x, y: x * y, a * b),
+        (lambda x, y: lumen.functional.sin(x), np.sin(a)),
+        (lambda x, y: lumen.functional.exp(x), np.exp(a)),
+    ]
+    for f, expected in cases:
+        out = lumen.compile(f)(x, y)
+        assert out.device == "tpu:0"
+        np.testing.assert_allclose(floats(out), expected, rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda x, y: x < y)(x, y).to("cpu")), a < b)
+
+
 def test_programs_of_other_primitives_say_they_do_not_run_yet():
-    """Outside a kernel, a TPU program runs dots and Pallas kernels alone:
-    another primitive (an add, a sin) says it does not run on a TPU yet."""
+    """Outside a kernel, a TPU program runs dots, elementwise primitives and
+    Pallas kernels: another primitive (a sum) says it does not run on a TPU
+    yet."""
     x = lumen.ones([8, 128]).to("tpu")
-    for f, name in [(lambda a: a + a, "add"), (lumen.functional.sin, "sin")]:
-        with pytest.raises(ValueError, match=f"{name} does not run on TPU yet"):
-            lumen.compile(f, device="tpu")(x)
+    with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
+        lumen.compile(lambda a: lumen.functional.sum(a, 0), device="tpu")(x)
