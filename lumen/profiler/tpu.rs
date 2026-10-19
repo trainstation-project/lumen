@@ -14,8 +14,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::GpuContext;
+use crate::device::Device;
 use crate::device::tpu::{TPU, error, ffi};
-use crate::device::{Device, DeviceBackend};
 
 struct Session {
     /// When libtpu's session started, on the profiler clock and the Unix
@@ -62,8 +62,9 @@ pub(crate) fn launched(index: usize, kernel: &str) {
     }
 }
 
-/// Stops libtpu's session and records each launch's run, named as the op
-/// that launched it (`name_of` its id), its kernel the launch's.
+/// Stops libtpu's session and records each launch's run as its kernel: the
+/// op that launched it (`name_of` its id) and the kernel's Pallas module
+/// (`max [elementwise]`), its own row apart from the op's.
 pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String> {
     let Some(session) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());
@@ -110,9 +111,12 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
     Ok(())
 }
 
-/// Each TPU's program runs in XSpace `space`, in order: their start and end
+/// A device's program runs, in order: each one's start and end
 /// (nanoseconds) and whether those are on the Unix clock.
-fn runs(space: &[u8]) -> Vec<(usize, VecDeque<(u64, u64, bool)>)> {
+type Runs = VecDeque<(u64, u64, bool)>;
+
+/// Each TPU's program runs in XSpace `space`.
+fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
     let mut out = Vec::new();
     // XSpace.planes = 1; XPlane.name = 2, .lines = 3.
     for plane in Fields(space).filter_map(|(n, v)| (n == 1).then_some(v)) {
