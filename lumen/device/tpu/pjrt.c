@@ -274,15 +274,6 @@ static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, c
     return create.buffer;
 }
 
-// TIMING (temporary)
-#include <time.h>
-static uint64_t execute_ns;
-uint64_t lumen_tpu_execute_ns(void) {
-    uint64_t n = execute_ns;
-    execute_ns = 0;
-    return n;
-}
-
 // Programs' scalars, uploaded once for each device and values: a launch
 // reuses them (programs only read them; PJRT keeps a buffer while queued
 // programs use it), so it neither copies them nor waits for the copy.
@@ -370,11 +361,7 @@ int lumen_tpu_run(void *executable,
                                                   .num_devices = 1,
                                                   .num_args = num_args,
                                                   .output_lists = &results};
-    struct timespec t0, t1;
-    timespec_get(&t0, TIME_UTC);
     int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
-    timespec_get(&t1, TIME_UTC);
-    execute_ns += (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000u + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
     // The scalars (uncached) and host bytes are the runtime's until the
     // program has run.
     for (size_t i = owned ? 0 : 1; i + 1 < num_args; i++) {

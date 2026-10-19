@@ -136,7 +136,8 @@ fn compiled(
     // Not holding the cache: lowering runs Python, which may run lumen.
     let code = program(module, &lower(module, spec)?, scalars, host, rows);
     // SAFETY: `code`'s bytes.
-    let executable = unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
+    let executable =
+        unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
     if executable.is_null() {
         return Err(error());
     }
@@ -159,28 +160,7 @@ pub(crate) struct Launch<'a> {
 
 /// Runs `launch` on device `index`'s memory, in order after the kernels
 /// before it.
-// TIMING (temporary)
-pub(crate) static T_LAUNCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static T_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static N_LAUNCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
-    let t0 = std::time::Instant::now();
-    let r = launch_(index, launch);
-    use std::sync::atomic::Ordering::Relaxed;
-    T_LAUNCH.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
-    if N_LAUNCH.fetch_add(1, Relaxed) % 1000 == 999 && std::env::var("LUMEN_TPU_TIMING").is_ok() {
-        eprintln!(
-            "launch {} us, run {} us, execute {} us",
-            T_LAUNCH.swap(0, Relaxed) / 1000 / 1000,
-            T_RUN.swap(0, Relaxed) / 1000 / 1000,
-            unsafe { ffi::lumen_tpu_execute_ns() } / 1000 / 1000
-        );
-    }
-    r
-}
-
-fn launch_(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
     let scalars = launch.rows.len() + launch.scalars.len();
     let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
@@ -194,17 +174,14 @@ fn launch_(index: usize, launch: Launch) -> Result<(), String> {
     };
     let executable = compiled(index, launch.module, &spec, scalars, host, rows)
         .map_err(|e| format!("{}: {e}", launch.module))?;
-    let t1 = std::time::Instant::now();
-    let r = crate::allocator::tpu::run(
+    crate::allocator::tpu::run(
         index,
         executable.0,
         launch.rows,
         launch.scalars,
         launch.host,
     )
-    .map_err(|e| format!("{}: {e}", launch.module));
-    T_RUN.fetch_add(t1.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    r
+    .map_err(|e| format!("{}: {e}", launch.module))
 }
 
 /// Runs plan step `step` on device `index`: its operands at `inputs`, its

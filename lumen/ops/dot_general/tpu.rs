@@ -77,6 +77,40 @@ fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
         .find(|&b| n.is_multiple_of(b))
 }
 
+/// The VMEM a dot's blocks may take: Mosaic's scoped limit (100 MiB,
+/// `ops/tpu`) less what it allocates itself.
+const VMEM: usize = 88 << 20;
+
+/// The largest blocks (bm, bn, bk) worth taking of operands of `dtype` (k
+/// of `k`), as measured on a v6e (`benchmarks/tpu_matmul.py`): about 87%
+/// of its peak on large dots, XLA's or better. Large blocks feed the
+/// matrix unit more flops per byte read: `bm · bn / (bm + bn)` a byte, and
+/// HBM moves a byte while it does ~800. A k of one block needs no
+/// accumulator (the product is written as it is), which pays at k ≤ 4096;
+/// float32 (full precision: six bfloat16 passes) needs smaller blocks.
+fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
+    match dtype {
+        DType::F32 => (2048, 1024, 1024),
+        _ if k <= 4096 => (2048, 1024, k),
+        _ => (2048, 2048, 2048),
+    }
+}
+
+/// The VMEM a dot's blocks take: two of each operand's and the output's
+/// (double-buffered), the float32 accumulator (more than one block of k),
+/// and float32 operands' bfloat16 parts (full precision splits them).
+fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, output: DType) -> usize {
+    let operands = bm * bk + bk * bn;
+    let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * output.size_of();
+    if kb > 1 {
+        bytes += bm * bn * 4;
+    }
+    if operand == DType::F32 {
+        bytes += operands * 4;
+    }
+    bytes
+}
+
 /// The rows of a tile of `dtype`: 8 for float32, 16 for bfloat16.
 fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     match dtype {
@@ -109,26 +143,30 @@ pub(crate) fn encode(
             lhs.dtype, rhs.dtype, accum_dtype
         ));
     }
-    // Blocks of whole tiles (or whole dimensions), as large as fit VMEM:
-    // tuned on a v6e.
+    // Blocks of whole tiles (or whole dimensions), as large as fit VMEM.
     let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
-    let (cap_m, cap_n, cap_k) = match lhs.dtype {
-        DType::F32 => (512, 512, 512),
-        _ => (1024, 1024, 512),
-    };
-    // TUNING (temporary): LUMEN_TPU_DOT_BLOCKS=bm,bn,bk.
-    let (cap_m, cap_n, cap_k) = match std::env::var("LUMEN_TPU_DOT_BLOCKS") {
-        Ok(v) => {
-            let b: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
-            (b[0], b[1], b[2])
+    let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
+    let mut blocks;
+    loop {
+        blocks = (
+            block(f.m, unit_m, cap_m),
+            block(f.n, 128, cap_n),
+            block(f.k, 128, cap_k),
+        );
+        let (Some(bm), Some(bn), Some(bk)) = blocks else {
+            break;
+        };
+        if footprint(bm, bn, bk, f.k / bk, lhs.dtype, out.dtype) <= VMEM {
+            break;
         }
-        Err(_) => (cap_m, cap_n, cap_k),
-    };
-    let blocks = (
-        block(f.m, unit_m, cap_m),
-        block(f.n, 128, cap_n),
-        block(f.k, 128, cap_k),
-    );
+        // Smaller: k's first, then n's, then m's.
+        match (cap_m, cap_n, cap_k) {
+            (_, _, k) if k > 512 => cap_k = k / 2,
+            (_, n, _) if n > 512 => cap_n = n / 2,
+            (m, _, _) if m > 512 => cap_m = m / 2,
+            _ => break,
+        }
+    }
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [
             (
