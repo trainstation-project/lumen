@@ -11,7 +11,8 @@ time per call printed), and a Chrome trace, ``tpu_gemm_relu_trace.json``,
 is written (open it in Perfetto or ``chrome://tracing``): each call's
 steps on the CPU timeline, and their programs' runs on the "TPU 0" row,
 timed by libtpu's own profiler (``ProfilerActivity.TPU``), each named as
-its step (its kernel in its ``args``). TPU programs run
+its step (its kernel and, with ``record_shapes``, its operands' and
+output's types in its ``args``, as MPS kernels'). TPU programs run
 asynchronously: a step's host time is its launch, its TPU time the
 program's run.
 
@@ -53,7 +54,7 @@ print(f"relu(x @ w), {M}x{K} @ {K}x{N} bfloat16 on {y.device}: max error {error:
 assert error < 1e-2
 
 lumen.tpu.synchronize()
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU]) as prof:
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU], record_shapes=True) as prof:
     with record_function("gemm_relu calls"):
         for k in range(PROFILED_CALLS):
             with record_function(f"gemm_relu {k}"):

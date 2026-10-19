@@ -145,13 +145,22 @@ pub(crate) fn encode(
         .map(|(_, t)| format!("\"{}\"", t.dtype.full_name()))
         .collect();
     let args: Vec<usize> = (0..step.inputs.len()).collect();
+    let blocks = blocks(&out.shape, &dtypes)?;
+    // Its primitive, its operands' dtype where not the output's (a cast's),
+    // the output's, and its blocks.
+    let mut kernel = step.primitive.name().to_owned();
+    if let Some((_, t)) = step.inputs.first().filter(|(_, t)| t.dtype != out.dtype) {
+        kernel += &format!("_{}", t.dtype);
+    }
+    let shown: Vec<String> = blocks.iter().map(usize::to_string).collect();
+    kernel += &format!("_{}_{}", out.dtype, shown.join("x"));
     let spec = format!(
         "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}",
         out.shape,
         names.join(", "),
         node(&step.primitive, &args),
         out.dtype.full_name(),
-        blocks(&out.shape, &dtypes)?,
+        blocks,
     );
     let rows: Vec<*const u8> = inputs
         .iter()
@@ -160,6 +169,7 @@ pub(crate) fn encode(
         .collect();
     let launched = Launch {
         module: "lumen.ops.elementwise.tpu",
+        kernel,
         spec,
         rows: &rows,
         scalars: &[],

@@ -270,12 +270,15 @@ impl Drop for Batch {
 }
 
 /// A kernel to launch: the Pallas module of its source (`module`), its
-/// spec's fields (`spec`: JSON members, `"name": value, ...`; the scalars'
+/// name (`kernel`: the variant its spec makes, as MPS names its kernels,
+/// `matmul_bf16_f32_bf16_2048x1024x4096`, for the profiler), its spec's
+/// fields (`spec`: JSON members, `"name": value, ...`; the scalars'
 /// count, the host rows and the memory's `rows` are added), its scalars:
 /// the rows of `rows` (TPU buffers, each at the start of a row) then
 /// `scalars`, and `host` bytes (whole rows) copied to the TPU for it.
 pub(crate) struct Launch<'a> {
     pub(crate) module: &'a str,
+    pub(crate) kernel: String,
     pub(crate) spec: String,
     pub(crate) rows: &'a [*const u8],
     pub(crate) scalars: &'a [i32],
@@ -307,7 +310,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         ]
         .concat(),
     };
-    crate::profiler::tpu::launched(index, launch.module);
+    crate::profiler::tpu::launched(index, &launch.kernel);
     let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
         Some((i, launches)) if *i == index => match launch.host.is_empty() {
             true => {
@@ -355,6 +358,7 @@ pub(crate) fn encode(
                 .collect();
             let launched = Launch {
                 module: "lumen.pallas",
+                kernel: step.primitive.name().to_owned(),
                 spec: format!("\"kernel\": {kernel}"),
                 rows: &rows,
                 scalars: &[],

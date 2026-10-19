@@ -217,6 +217,8 @@ pub(crate) fn encode(
     let rows = [inputs[0], inputs[1], output.cast_const()];
     let launched = Launch {
         module: "lumen.ops.dot_general.tpu",
+        // Its operands', accumulator's and output's dtypes, and blocks.
+        kernel: format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, out.dtype),
         spec,
         rows: &rows,
         scalars: &[],

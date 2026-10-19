@@ -120,21 +120,25 @@ def test_programs_of_other_primitives_say_they_do_not_run_yet():
 
 
 def test_the_profiler_times_each_tpu_program():
-    """``ProfilerActivity.TPU``: each step's program run, timed by libtpu's
-    profiler, on its device's row, inside the op that launched it."""
+    """``ProfilerActivity.TPU``: each step's kernel run, timed by libtpu's
+    profiler, on its device's row, inside the op that launched it: its
+    kernel named and typed as an MPS kernel is."""
     from lumen.profiler import ProfilerActivity, profile
 
     x = lumen.ones([256, 512]).to("tpu:1")
     f = lumen.compile(lambda x: lumen.functional.exp(x) * x)
     f(x)
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU]) as prof:
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU], record_shapes=True) as prof:
         f(x)
     events = prof.events()
     runs = [e for e in events if e["kind"] == "gpu"]
     assert [e["name"] for e in runs] == ["exp", "mul"]
+    assert [e["kernel"] for e in runs] == ["exp_f32_256x512", "mul_f32_256x512"]
     ops = {e["id"]: e for e in events if e["kind"] == "op"}
     for run in runs:
-        assert run["device"] == "tpu:1" and run["kernel"] == "lumen.ops.elementwise.tpu"
+        assert run["device"] == "tpu:1"
+        # Its op's types, as an MPS kernel's.
+        assert run["outputs"] == [("float32", [256, 512])]
         assert run["duration_us"] > 0
         assert ops[run["parent"]]["name"] == run["name"]
     assert runs[0]["end_us"] <= runs[1]["start_us"]

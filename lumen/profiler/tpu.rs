@@ -26,8 +26,8 @@ use super::GpuContext;
 use crate::device::Device;
 use crate::device::tpu::{TPU, error, ffi};
 
-/// Each launch of the session: its device, its op's context, its kernel
-/// (Pallas module) and when it was made (the profiler clock).
+/// Each launch of the session: its device, its op's context, its kernel's
+/// name and when it was made (the profiler clock).
 type Launches = Vec<(usize, GpuContext, String, u64)>;
 
 static SESSION: Mutex<Option<Launches>> = Mutex::new(None);
@@ -69,7 +69,7 @@ pub(crate) fn ran(index: usize, count: usize) {
 
 /// Stops libtpu's session and records each launch's run, named as the op
 /// that launched it (`name_of` its id), as MPS names its kernels, its kernel
-/// the launch's Pallas module.
+/// the launch's (`matmul_bf16_f32_bf16_2048x1024x4096`).
 pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String> {
     let Some(launches) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());

@@ -30,6 +30,7 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     debug_assert!(host.len().is_multiple_of(ROW));
     let launched = Launch {
         module: "lumen.ops.device_transfer.tpu",
+        kernel: "copy_h2d".to_owned(),
         spec: String::new(),
         rows: &[dst.data_ptr().cast_const()],
         scalars: &[],
