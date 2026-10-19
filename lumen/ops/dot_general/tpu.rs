@@ -146,6 +146,11 @@ pub(crate) fn encode(
     // Blocks of whole tiles (or whole dimensions), as large as fit VMEM.
     let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
+    // TUNING (temporary): LUMEN_TPU_DOT_BLOCKS=bm,bn,bk.
+    if let Ok(v) = std::env::var("LUMEN_TPU_DOT_BLOCKS") {
+        let b: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
+        (cap_m, cap_n, cap_k) = (b[0], b[1], b[2]);
+    }
     let mut blocks;
     loop {
         blocks = (
