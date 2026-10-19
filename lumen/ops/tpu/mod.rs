@@ -174,6 +174,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     };
     let executable = compiled(index, launch.module, &spec, scalars, host, rows)
         .map_err(|e| format!("{}: {e}", launch.module))?;
+    crate::profiler::tpu::launched(index, launch.module);
     crate::allocator::tpu::run(
         index,
         executable.0,

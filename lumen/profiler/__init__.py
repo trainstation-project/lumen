@@ -19,16 +19,17 @@ class ProfilerActivity(enum.Enum):
     CPU = "cpu"
     CUDA = "cuda"
     MPS = "mps"
+    TPU = "tpu"
 
 
 def supported_activities():
-    """The activities this build and machine can record: CPU, plus CUDA or
-    MPS when such a device is usable (PyTorch: ``supported_activities``).
+    """The activities this build and machine can record: CPU, plus CUDA,
+    MPS or TPU when such a device is usable (PyTorch: ``supported_activities``).
     Timing CUDA also needs a build with CUPTI."""
     import lumen
 
     activities = {ProfilerActivity.CPU}
-    for activity in (ProfilerActivity.CUDA, ProfilerActivity.MPS):
+    for activity in (ProfilerActivity.CUDA, ProfilerActivity.MPS, ProfilerActivity.TPU):
         if activity == ProfilerActivity.CUDA and not _C._profiler_cuda_timing():
             continue
         try:

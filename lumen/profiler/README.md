@@ -20,6 +20,7 @@ When no session is running, every hook is one relaxed atomic load.
 | `summary.rs` | `Profile`, `EventAvg`, `SortBy`: per-name aggregation (`key_averages`), the summary `table`, and PyTorch-style time/memory formatting. |
 | `chrome.rs` | Chrome trace JSON writer (`trace`), with PyTorch's categories and arg keys. |
 | `cupti.rs` | CUDA device timing through CUPTI's activity API; compiled only with `cfg(lumen_cupti_linked)`. |
+| `tpu.rs` | TPU device timing through libtpu's own profiler (PJRT's profiler extension), its XSpace read by a small protobuf reader; compiled only with `cfg(lumen_tpu_linked)`. |
 | `python.rs` | `lumen._C` bindings: `_profiler_start/_stop/_enabled/_cuda_timing`, `_record_function_enter`, `_RecordFunction`, `_Profile`. |
 | `__init__.py` | The `lumen.profiler` Python API (see below). |
 | `_C.pyi` | Type stubs for `python.rs`. |
@@ -31,7 +32,7 @@ When no session is running, every hook is one relaxed atomic load.
   session per process. It turns the config into bit flags in `FLAGS`
   (`CPU`, `MEMORY`, `CUDA`, `MPS`, `SHAPES`) and bumps `SESSION`.
 * `ProfilerConfig { activities, profile_memory, record_shapes }`; default is
-  CPU only, no memory, no shapes. `Activity` is `Cpu`, `Cuda` or `Mps`.
+  CPU only, no memory, no shapes. `Activity` is `Cpu`, `Cuda`, `Mps` or `Tpu`.
 * `stop()` first synchronizes the MPS stream (and, via `cupti::stop`, every
   CUDA device) so in-flight GPU work lands, clears the flags, sorts events by
   `(start_ns, id)`, then copies each op's types/strides/accum onto the GPU and
@@ -87,6 +88,15 @@ With `record_shapes`, ops record (via closures that only run then):
   ops, with timestamps shifted by a (CUPTI ns, profiler ns) pair taken at
   `start`. Without CUPTI linked, starting a CUDA session from Python raises
   (`CUDA_TIMING_MISSING` tells you to set `CUPTI_LIB_DIR`).
+* **TPU** (`Activity::Tpu`): `tpu.rs` starts libtpu's profiler (once the
+  programs in flight have run) and `ops/tpu`'s `launch` records each
+  program's `GpuContext` and kernel (its Pallas module). At `stop`, libtpu's
+  XSpace gives each device's program runs in order (plane
+  `/device:TPU:<i>`, line `XLA Modules`), and a device runs its programs in
+  the order they were launched: the n-th run is the n-th launch's, named as
+  the op (plan step) that launched it. Its times are offsets from libtpu's
+  session start (a line of no timestamp), shifted by the profiler clock
+  taken then. Without the TPU backend, starting a TPU session errors.
 
 ## `key_averages` and the table
 
@@ -114,7 +124,7 @@ are also drawn as `gpu_user_annotation` spans covering their device work.
 
 ## Python API (`__init__.py`)
 
-* `ProfilerActivity` (`CPU`, `CUDA`, `MPS`) and `supported_activities()` —
+* `ProfilerActivity` (`CPU`, `CUDA`, `MPS`, `TPU`) and `supported_activities()` —
   CPU plus each device that can allocate (CUDA also needs CUPTI).
 * `profile(activities=None, profile_memory=False, record_shapes=False)` —
   a `with` block (or `start()` / `stop()`); defaults to all supported

@@ -37,6 +37,9 @@ pub(crate) mod ffi {
             region: *mut *mut c_void,
         ) -> i32;
         pub fn lumen_tpu_wait(buffer: *mut c_void) -> i32;
+        pub fn lumen_tpu_profiler_start() -> i32;
+        pub fn lumen_tpu_profiler_stop(data: *mut *const u8, size: *mut usize) -> i32;
+        pub fn lumen_tpu_profiler_free();
         #[cfg(test)]
         pub fn lumen_tpu_memory(index: i32, in_use: *mut i64, limit: *mut i64) -> i32;
     }
