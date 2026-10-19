@@ -22,7 +22,7 @@ Without it, the `Tpu` backend still exists and reports no devices.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `Tpu` / `TPU`, the `DeviceBackend` (name `"tpu"`, device count, `check` with the shim's reason when none are found); the shim's FFI (`ffi`), `error()`, and for tests `memory(index)` and `ONE_AT_A_TIME` (the lock every TPU test holds). |
-| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program as a portable executable (`lumen_tpu_compile`), running one on the memory, donated (`lumen_tpu_run`) and memory statistics. |
+| `pjrt.c` | The C shim over the PJRT API: loading libtpu and creating the client once, the devices, reserving device memory (`lumen_tpu_alloc`, a `u32[rows, 1, 128]` buffer), freeing it, reading it back at an offset (`lumen_tpu_read`), compiling a StableHLO program for a device (`lumen_tpu_compile`; a portable executable launches at twice the cost), running one on the memory, donated (`lumen_tpu_run`) and memory statistics. |
 | `pjrt_c_api.h` | XLA's PJRT C API header (`xla/pjrt/c/pjrt_c_api.h`, Apache 2.0), vendored. |
 
 ## How TPU memory works (and why the allocator is shaped this way)

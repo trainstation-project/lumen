@@ -112,8 +112,10 @@ struct Executable(*mut c_void);
 unsafe impl Send for Executable {}
 
 /// Module `module`'s kernel for `spec`, lowered and compiled once per
-/// process: a program of `scalars` scalars and `host` rows of host bytes.
+/// process and device `index`: a program of `scalars` scalars and `host`
+/// rows of host bytes.
 fn compiled(
+    index: usize,
     module: &str,
     spec: &str,
     scalars: usize,
@@ -121,7 +123,7 @@ fn compiled(
     rows: usize,
 ) -> Result<Executable, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
-    let key = format!("{module} {spec} {scalars} {host:?}");
+    let key = format!("{index} {module} {spec} {scalars} {host:?}");
     let cache = || {
         CACHE
             .get_or_init(Default::default)
@@ -134,7 +136,7 @@ fn compiled(
     // Not holding the cache: lowering runs Python, which may run lumen.
     let code = program(module, &lower(module, spec)?, scalars, host, rows);
     // SAFETY: `code`'s bytes.
-    let executable = unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len()) };
+    let executable = unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
     if executable.is_null() {
         return Err(error());
     }
@@ -190,7 +192,7 @@ fn launch_(index: usize, launch: Launch) -> Result<(), String> {
         "" => format!("{{{device}}}"),
         fields => format!("{{{fields}, {device}}}"),
     };
-    let executable = compiled(launch.module, &spec, scalars, host, rows)
+    let executable = compiled(index, launch.module, &spec, scalars, host, rows)
         .map_err(|e| format!("{}: {e}", launch.module))?;
     let t1 = std::time::Instant::now();
     let r = crate::allocator::tpu::run(

@@ -80,8 +80,8 @@ static void initialize(void) {
           HAS(PJRT_Client_Create) && HAS(PJRT_Client_AddressableDevices) &&
           HAS(PJRT_Client_CreateUninitializedBuffer) && HAS(PJRT_Buffer_UnsafePointer) &&
           HAS(PJRT_Buffer_CopyRawToHost) && HAS(PJRT_Buffer_Destroy) && HAS(PJRT_Client_Compile) &&
-          HAS(PJRT_Client_BufferFromHostBuffer) && HAS(PJRT_LoadedExecutable_Execute) &&
-          HAS(PJRT_Buffer_ReadyEvent))) {
+          HAS(PJRT_Client_BufferFromHostBuffer) && HAS(PJRT_LoadedExecutable_Execute) && HAS(PJRT_Buffer_ReadyEvent) &&
+          HAS(PJRT_Device_GetDescription) && HAS(PJRT_DeviceDescription_Id))) {
         snprintf(error,
                  sizeof error,
                  "%s's PJRT API (%d.%d) lacks a function lumen needs",
@@ -198,10 +198,22 @@ int lumen_tpu_read(void *buffer, size_t size, size_t offset, void *dst, size_t n
     return bad;
 }
 
-// `code` (`size` bytes of StableHLO) compiled as a portable executable, one
-// that runs on any device; none (and `error`) if it does not compile.
-void *lumen_tpu_compile(const char *code, size_t size) {
-    if (!lumen_tpu_device_count()) {
+// `code` (`size` bytes of StableHLO) compiled for device `index` (a
+// portable executable, run on a device of the caller's, costs twice as much
+// to launch); none (and `error`) if it does not compile.
+void *lumen_tpu_compile(const char *code, size_t size, int index) {
+    if (lumen_tpu_device_count() <= index || index < 0) {
+        snprintf(error, sizeof error, "no TPU device %d", index);
+        return NULL;
+    }
+    PJRT_Device_GetDescription_Args describe = {.struct_size = PJRT_Device_GetDescription_Args_STRUCT_SIZE,
+                                                .device = devices[index]};
+    if (failed(api->PJRT_Device_GetDescription(&describe), "describing a TPU device")) {
+        return NULL;
+    }
+    PJRT_DeviceDescription_Id_Args id = {.struct_size = PJRT_DeviceDescription_Id_Args_STRUCT_SIZE,
+                                         .device_description = describe.device_description};
+    if (failed(api->PJRT_DeviceDescription_Id(&id), "describing a TPU device")) {
         return NULL;
     }
     PJRT_Program program = {.struct_size = PJRT_Program_STRUCT_SIZE,
@@ -209,14 +221,33 @@ void *lumen_tpu_compile(const char *code, size_t size) {
                             .code_size = size,
                             .format = "mlir",
                             .format_size = 4};
-    // A CompileOptionsProto: executable_build_options (3) of one replica (4)
-    // and one partition (5), and compile_portable_executable (4).
-    static const char options[] = {0x1a, 0x04, 0x20, 0x01, 0x28, 0x01, 0x20, 0x01};
+    // A CompileOptionsProto: executable_build_options (3) of one replica (4),
+    // one partition (5) and a device_assignment (9, a DeviceAssignmentProto)
+    // of one replica (1) and computation (2) on the device's id (3:
+    // replica_device_ids 1, a varint).
+    char id_bytes[10];
+    size_t id_size = 0;
+    for (uint64_t v = (uint64_t)id.id; id_size == 0 || v; v >>= 7) {
+        id_bytes[id_size++] = (char)((v & 0x7f) | (v >> 7 ? 0x80 : 0));
+    }
+    char options[32];
+    size_t n = 0;
+    options[n++] = 0x1a;
+    options[n++] = (char)(10 + id_size);
+    options[n++] = 0x20, options[n++] = 0x01, options[n++] = 0x28, options[n++] = 0x01;
+    options[n++] = 0x4a;
+    options[n++] = (char)(6 + id_size);
+    options[n++] = 0x08, options[n++] = 0x01, options[n++] = 0x10, options[n++] = 0x01;
+    options[n++] = 0x1a;
+    options[n++] = (char)(1 + id_size);
+    options[n++] = 0x08;
+    memcpy(options + n, id_bytes, id_size);
+    n += id_size;
     PJRT_Client_Compile_Args compile = {.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE,
                                         .client = client,
                                         .program = &program,
                                         .compile_options = options,
-                                        .compile_options_size = sizeof options};
+                                        .compile_options_size = n};
     if (failed(api->PJRT_Client_Compile(&compile), "compiling a TPU program")) {
         return NULL;
     }
@@ -338,8 +369,7 @@ int lumen_tpu_run(void *executable,
                                                   .argument_lists = &lists,
                                                   .num_devices = 1,
                                                   .num_args = num_args,
-                                                  .output_lists = &results,
-                                                  .execute_device = devices[index]};
+                                                  .output_lists = &results};
     struct timespec t0, t1;
     timespec_get(&t0, TIME_UTC);
     int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
