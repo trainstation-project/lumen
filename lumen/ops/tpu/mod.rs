@@ -141,7 +141,8 @@ fn compiled(
         static DUMPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = DUMPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = module.rsplit('.').nth(1).unwrap_or(module);
-        let path = std::path::Path::new(&dir).join(format!("{n:04}.{name}.mlir"));
+        let path =
+            std::path::Path::new(&dir).join(format!("{}.{n:04}.{name}.mlir", std::process::id()));
         std::fs::create_dir_all(&dir)
             .and_then(|()| std::fs::write(&path, format!("// {module} {spec}\n{code}")))
             .map_err(|e| format!("dumping a TPU program to {}: {e}", path.display()))?;
