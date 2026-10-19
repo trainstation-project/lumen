@@ -106,12 +106,14 @@ With `record_shapes`, ops record (via closures that only run then):
 `Profile::key_averages` groups by name in first-seen order. Memory events
 get no row; they count toward their enclosing ops' `cpu_memory_usage` /
 `device_memory_usage` (total = inside, self = directly). GPU events get rows of
-their own (`is_device_event`); ops get `device_time_total` from work issued
-inside them. `table(sort_by, row_limit)` sorts descending by a `SortBy`
+their own (`is_device_event`), except one named as the op that issued it (an
+MPS or TPU plan step's kernel run, its kernel in `kernel`): that is the op's
+row's device time alone, not a second row of the same name counting it
+again. Ops get `device_time_total` from work issued inside them. `table(sort_by, row_limit)` sorts descending by a `SortBy`
 (PyTorch names; `cuda_*` aliases map to the device columns), labels the device
-columns `CUDA`, `MPS` or `DEVICE`, and only shows device/memory columns when
-there is something to show. The self-device total sums device rows only, to
-avoid double counting.
+columns `CUDA`, `MPS`, `TPU` or `DEVICE`, and only shows device/memory columns
+when there is something to show. The self-device total sums the GPU events
+once, not again in the ops that issued them.
 
 ## Chrome trace
 

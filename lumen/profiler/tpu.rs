@@ -54,9 +54,9 @@ pub(crate) fn launched(index: usize, kernel: &str) {
     }
 }
 
-/// Stops libtpu's session and records each launch's run as its kernel: the
-/// op that launched it (`name_of` its id) and the kernel's Pallas module
-/// (`max [elementwise]`), its own row apart from the op's.
+/// Stops libtpu's session and records each launch's run, named as the op
+/// that launched it (`name_of` its id), as MPS names its kernels, its kernel
+/// the launch's Pallas module.
 pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String> {
     let Some(launches) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());
@@ -96,13 +96,10 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
         .unwrap_or(0);
     let to_ns = |t: u64| (i128::from(t) + shift).max(0) as u64;
     for ((index, context, kernel, _), (start, end)) in ran {
-        let module = kernel
-            .trim_start_matches("lumen.ops.")
-            .trim_end_matches(".tpu");
-        let name = match context.parent.and_then(&name_of) {
-            Some(op) => format!("{op} [{module}]"),
-            None => module.to_owned(),
-        };
+        let name = context
+            .parent
+            .and_then(&name_of)
+            .unwrap_or_else(|| kernel.clone());
         let (start, end) = (to_ns(start), to_ns(end));
         super::record_kernel_in(context, &name, Some(kernel), Device::Tpu(index), start, end);
     }

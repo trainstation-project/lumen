@@ -11,7 +11,7 @@ time per call printed), and a Chrome trace, ``tpu_gemm_relu_trace.json``,
 is written (open it in Perfetto or ``chrome://tracing``): each call's
 steps on the CPU timeline, and their programs' runs on the "TPU 0" row,
 timed by libtpu's own profiler (``ProfilerActivity.TPU``), each named as
-its step and kernel (``max [elementwise]``). TPU programs run
+its step (its kernel in its ``args``). TPU programs run
 asynchronously: a step's host time is its launch, its TPU time the
 program's run.
 
