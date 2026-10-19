@@ -274,6 +274,19 @@ static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, c
     return create.buffer;
 }
 
+// TIMING (temporary)
+#include <time.h>
+static uint64_t t_scalars, t_execute, t_free;
+static uint64_t now_ns(void) {
+    struct timespec t;
+    timespec_get(&t, TIME_UTC);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+void lumen_tpu_timing(uint64_t *out) {
+    out[0] = t_scalars, out[1] = t_execute, out[2] = t_free;
+    t_scalars = t_execute = t_free = 0;
+}
+
 // Programs' scalars, uploaded once for each device and values: a launch
 // reuses them (programs only read them; PJRT keeps a buffer while queued
 // programs use it), so it neither copies them nor waits for the copy.
@@ -339,7 +352,10 @@ int lumen_tpu_run(void *executable,
     PJRT_Buffer *args[3];
     size_t num_args = 0;
     int owned;
-    if (!(args[num_args++] = scalars_buffer(index, scalars, count, &owned))) {
+    uint64_t t0 = now_ns();
+    PJRT_Buffer *scalar_args = scalars_buffer(index, scalars, count, &owned);
+    t_scalars += now_ns() - t0;
+    if (!(args[num_args++] = scalar_args)) {
         return 1;
     }
     int64_t rows[3] = {(int64_t)(nbytes / ROW), 1, ROW / 4};
@@ -361,7 +377,9 @@ int lumen_tpu_run(void *executable,
                                                   .num_devices = 1,
                                                   .num_args = num_args,
                                                   .output_lists = &results};
+    uint64_t t1 = now_ns();
     int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
+    t_execute += now_ns() - t1;
     // The scalars (uncached) and host bytes are the runtime's until the
     // program has run.
     for (size_t i = owned ? 0 : 1; i + 1 < num_args; i++) {
@@ -371,7 +389,9 @@ int lumen_tpu_run(void *executable,
         return 1;
     }
     // The donated region, now the result's.
+    uint64_t t2 = now_ns();
     lumen_tpu_free(*region);
+    t_free += now_ns() - t2;
     *region = result;
     return 0;
 }

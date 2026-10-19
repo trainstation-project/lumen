@@ -172,11 +172,16 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     let r = launch_(index, launch);
     T_LAUNCH.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
     if N.fetch_add(1, Relaxed) % 2000 == 1999 && std::env::var("LUMEN_TPU_TIMING").is_ok() {
+        let mut c = [0u64; 3];
+        unsafe { ffi::lumen_tpu_timing(c.as_mut_ptr()) };
         eprintln!(
-            "per launch: run_in {:.1} us, launch {:.1} us, run {:.1} us",
+            "per launch: run_in {:.1} us, launch {:.1} us, run {:.1} us, scalars {:.1}, execute {:.1}, free {:.1}",
             T_RUN_IN.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
             T_LAUNCH.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
             T_RUN.swap(0, Relaxed) as f64 / 2000.0 / 1000.0,
+            c[0] as f64 / 2000.0 / 1000.0,
+            c[1] as f64 / 2000.0 / 1000.0,
+            c[2] as f64 / 2000.0 / 1000.0,
         );
     }
     r
