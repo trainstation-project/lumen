@@ -37,7 +37,6 @@ pub(crate) mod ffi {
             region: *mut *mut c_void,
         ) -> i32;
         pub fn lumen_tpu_wait(buffer: *mut c_void) -> i32;
-        pub fn lumen_tpu_timing(out: *mut u64);
         #[cfg(test)]
         pub fn lumen_tpu_memory(index: i32, in_use: *mut i64, limit: *mut i64) -> i32;
     }
