@@ -10,7 +10,7 @@ const MAX_INPUTS: usize = 29;
 
 const MAX_AUX: usize = 4;
 
-pub(super) fn fusible(graph: &Graph, node: &Node) -> bool {
+pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     let loop_op = matches!(
         node.primitive,

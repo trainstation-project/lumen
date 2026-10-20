@@ -52,6 +52,13 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     })
 }
 
+fn gcd(a: usize, b: usize) -> usize {
+    match b {
+        0 => a,
+        _ => gcd(b, a % b),
+    }
+}
+
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     if n <= cap {
         return Some(n);
@@ -105,10 +112,21 @@ pub(crate) fn encode(
     if out.numel() == 0 {
         return Ok(());
     }
-    let Primitive::DotGeneral { accum_dtype, .. } = step.primitive else {
+    let (dot, widths) = match &step.primitive {
+        Primitive::Fusion { body, .. } => (
+            &body.nodes()[0].primitive,
+            body.outputs()
+                .iter()
+                .map(|&v| *body.type_of(v).shape.last().expect("a matrix"))
+                .collect(),
+        ),
+        p => (p, Vec::new()),
+    };
+    let Primitive::DotGeneral { accum_dtype, .. } = *dot else {
         unreachable!("a dot_general step")
     };
-    let f = form(&step.primitive, &lhs.shape, &rhs.shape)?;
+    let f = form(dot, &lhs.shape, &rhs.shape)?;
+    let unit_n = widths.iter().fold(f.n, |g, &w| gcd(g, w));
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
         return Err(format!(
             "dot_general on TPU: operands of one dtype accumulating in float32, got {} · {} in {}",
@@ -121,7 +139,7 @@ pub(crate) fn encode(
     loop {
         blocks = (
             block(f.m, unit_m, cap_m),
-            block(f.n, 128, cap_n),
+            block(unit_n, 128, cap_n),
             block(f.k, 128, cap_k),
         );
         let (Some(bm), Some(bn), Some(bk)) = blocks else {
@@ -143,7 +161,7 @@ pub(crate) fn encode(
             break;
         }
         cap_n = bn / 2;
-        blocks.1 = block(f.n, 128, cap_n);
+        blocks.1 = block(unit_n, 128, cap_n);
     }
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [
@@ -172,7 +190,7 @@ pub(crate) fn encode(
     };
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \
-         \"operands\": \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}]",
+         \"operands\": \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"outputs\": {widths:?}",
         f.batch,
         f.lead,
         f.m,
@@ -182,7 +200,10 @@ pub(crate) fn encode(
         lhs.dtype.full_name(),
         out.dtype.full_name()
     );
-    let rows = [inputs[0], inputs[1], output.cast_const()];
+    let rows: Vec<*const u8> = [inputs[0], inputs[1], output.cast_const()]
+        .into_iter()
+        .chain(inputs[2..].iter().copied())
+        .collect();
     let launched = Launch {
         module: "lumen.ops.dot_general.tpu",
         kernel: format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, out.dtype),

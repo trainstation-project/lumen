@@ -1,5 +1,11 @@
 use super::codegen::metal_type;
-use super::merge_dots::merge_dots;
+use crate::graph_compiler::passes::merge_dots::{Target, merge_dots};
+
+const MPS: Target = Target {
+    reads: super::fusion::fusible,
+    views: true,
+    lanes: 1,
+};
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
@@ -605,7 +611,7 @@ fn dots_of_weights_computed_elementwise_merge() {
     };
     let packable = [false, true, true, true];
     let g = build([0.5; 3]);
-    let (merged, packs, _) = merge_dots(&g, &packable, &[]);
+    let (merged, packs, _) = merge_dots(&g, &packable, &[], &MPS);
     assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
     let casts = names(&merged.prune().0)
         .iter()
@@ -627,7 +633,7 @@ fn dots_of_weights_computed_elementwise_merge() {
     {
         assert_eq!(f32s(e), f32s(&a));
     }
-    let (merged, packs, _) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[]);
+    let (merged, packs, _) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[], &MPS);
     assert_eq!(packs, [(vec![1, 3], 0)], "{merged}");
 }
 
@@ -655,8 +661,8 @@ fn donated_weights_merge_only_contiguously() {
         g.set_outputs(&ys).unwrap();
         let packable = [false, true, true, true];
         (
-            merge_dots(&g, &packable, &[]).1,
-            merge_dots(&g, &packable, &packable).1,
+            merge_dots(&g, &packable, &[], &MPS).1,
+            merge_dots(&g, &packable, &packable, &MPS).1,
         )
     };
     assert_eq!(merged(0, [32, 64]), (vec![(vec![1, 2, 3], 1)], vec![]));
@@ -689,7 +695,7 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
             })
             .collect();
         g.set_outputs(&ys).unwrap();
-        merge_dots(&g, &[false, true, true, true], &[])
+        merge_dots(&g, &[false, true, true, true], &[], &MPS)
     };
     let (merged, packs, _) = dots([DType::F32; 3]);
     assert_eq!(packs, [(vec![1, 2, 3], 1)], "{merged}");
@@ -734,8 +740,8 @@ fn dots_sharing_an_operand_merge() {
     let y = apply(&mut g, matmul.clone(), &[h, w2]);
     g.set_outputs(&[y]).unwrap();
     let dots = |g: &Graph| names(g).iter().filter(|&&n| n == "dot_general").count();
-    assert_eq!(dots(&merge_dots(&g, &[false; 4], &[]).0), 3);
-    let (merged, packs, interleave) = merge_dots(&g, &[false, true, true, true], &[]);
+    assert_eq!(dots(&merge_dots(&g, &[false; 4], &[], &MPS).0), 3);
+    let (merged, packs, interleave) = merge_dots(&g, &[false, true, true, true], &[], &MPS);
     assert_eq!(packs, [(vec![1, 2], 1)]);
     assert_eq!(interleave, [vec![2]]);
     assert_eq!(dots(&merged), 2, "{merged}");
@@ -744,7 +750,7 @@ fn dots_sharing_an_operand_merge() {
     let w3_again = apply(&mut read_twice, Neg, &[w3]);
     read_twice.set_outputs(&[y, w3_again]).unwrap();
     assert!(
-        merge_dots(&read_twice, &[false, true, true, true], &[])
+        merge_dots(&read_twice, &[false, true, true, true], &[], &MPS)
             .1
             .is_empty()
     );
@@ -773,7 +779,7 @@ fn dots_sharing_an_operand_merge() {
         })
         .collect();
     alone.set_outputs(&outs).unwrap();
-    let packed = merge_dots(&alone, &[false, true, true], &[]);
+    let packed = merge_dots(&alone, &[false, true, true], &[], &MPS);
     assert_eq!(
         (packed.1, packed.2),
         (vec![(vec![1, 2], 1)], vec![vec![1, 1]])
@@ -794,7 +800,7 @@ fn dots_sharing_an_operand_merge() {
     let twice = apply(&mut g, matmul.clone(), &[xs[1], w]);
     outs.extend([apply(&mut g, Neg, &[dependent]), twice]);
     g.set_outputs(&outs).unwrap();
-    let (merged, packs, _) = merge_dots(&g, &[true; 4], &[]);
+    let (merged, packs, _) = merge_dots(&g, &[true; 4], &[], &MPS);
     assert_eq!(packs, [(vec![1, 2, 3], 0)]);
     assert_eq!(dots(&merged), 3, "{merged}");
     let mut inputs: Vec<Tensor> = [vec![32, 32], vec![4, 32], vec![6, 32], vec![4, 32]]
@@ -840,7 +846,7 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
     };
     let packable = [false, true, true];
     let pack = |g: &Graph, donated: &[bool]| {
-        let (_, packs, interleave) = merge_dots(g, &packable, donated);
+        let (_, packs, interleave) = merge_dots(g, &packable, donated, &MPS);
         (packs, interleave)
     };
     let rows = vec![(vec![1, 2], 0)];
@@ -857,7 +863,7 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         };
         Some(apply(g, block, &[w1, w3]))
     });
-    let (merged, packs, interleave) = merge_dots(&concatenated, &packable, &[]);
+    let (merged, packs, interleave) = merge_dots(&concatenated, &packable, &[], &MPS);
     assert_eq!((packs, interleave), (rows.clone(), vec![vec![1, 1]]));
     assert!(!names(&merged).contains(&"concatenate"), "{merged}");
     assert_eq!(
