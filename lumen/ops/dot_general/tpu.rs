@@ -315,7 +315,7 @@ pub(crate) fn encode(
     for &d in &streams {
         unit_m = unit_m.max(Layout::new(d, &[1, 1])?.rows);
     }
-    let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
+    let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, whole_k);
     let mut blocks;
     loop {
         blocks = (
