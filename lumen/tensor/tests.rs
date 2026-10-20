@@ -716,6 +716,52 @@ mod meta {
         TensorOptions::new().dtype(dtype).device(Device::Meta(0))
     }
 
+    /// Parameters packed into one block interleaved (`Tensor::pack`'s
+    /// `interleave`, `merge_dots`' gated pairs): each a stride-K view of it,
+    /// element `j` of the `i`th at `j K + i`; members of one size, as many as
+    /// K, or an error.
+    #[test]
+    fn parameters_pack_interleaved() {
+        let options = || TensorOptions::new().device(Device::Meta(0));
+        let (a, b) = (
+            Tensor::zeros(&[2, 3], options()),
+            Tensor::zeros(&[2, 3], options()),
+        );
+        let block = Tensor::pack(&[a.clone(), b.clone()], 1, 2, Device::Cpu(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.shape(), [2, 6]);
+        let (pa, pb) = (
+            a.placed(Device::Cpu(0)).unwrap(),
+            b.placed(Device::Cpu(0)).unwrap(),
+        );
+        assert_eq!((pa.strides(), pb.strides()), (&[6, 2][..], &[6, 2][..]));
+        assert_eq!((pa.storage_offset(), pb.storage_offset()), (0, 1));
+        let cpu = |v: &[f32]| Tensor::from_slice(v, DType::F32).reshape(&[2, 3]);
+        pa.copy_(&cpu(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])).unwrap();
+        pb.copy_(&cpu(&[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]))
+            .unwrap();
+        assert_eq!(
+            block.to_vec::<f32>(),
+            [
+                1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0
+            ]
+        );
+        // Members of different sizes, or not K of them: an error.
+        let c = Tensor::zeros(&[2, 4], options());
+        assert!(
+            Tensor::pack(
+                &[Tensor::zeros(&[2, 3], options()), c],
+                1,
+                2,
+                Device::Cpu(0)
+            )
+            .is_err()
+        );
+        let three: Vec<Tensor> = (0..3).map(|_| Tensor::zeros(&[2, 3], options())).collect();
+        assert!(Tensor::pack(&three, 1, 2, Device::Cpu(0)).is_err());
+    }
+
     #[test]
     fn factories_and_views_need_no_data() {
         for t in [

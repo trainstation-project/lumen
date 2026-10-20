@@ -911,6 +911,66 @@ fn dots_sharing_an_operand_merge() {
     }
 }
 
+/// A gated pair's block interleaved only where nothing else needs its
+/// weights side by side: `nn.Linear`'s `[out, in]` weights (rows, each a
+/// contiguous part of a side-by-side block, so they merge regardless), side
+/// by side if one is read elsewhere too, if a concatenate of them is (a
+/// backward's), or if the program assigns them (a training step's).
+#[test]
+fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() {
+    let linear = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    // x @ w1^T * x @ w3^T, and `extra` of the weights' too.
+    let build = |extra: &dyn Fn(&mut Graph, Var, Var) -> Option<Var>| {
+        let mut g = Graph::new();
+        let x = g.input(ty(DType::F32, &[16, 32]));
+        let w1 = g.input(ty(DType::F32, &[64, 32]));
+        let w3 = g.input(ty(DType::F32, &[64, 32]));
+        let gate = apply(&mut g, linear.clone(), &[x, w1]);
+        let up = apply(&mut g, linear.clone(), &[x, w3]);
+        let y = apply(&mut g, Mul, &[gate, up]);
+        let mut outs = vec![y];
+        outs.extend(extra(&mut g, w1, w3));
+        g.set_outputs(&outs).unwrap();
+        g
+    };
+    let packable = [false, true, true];
+    let pack = |g: &Graph, donated: &[bool]| {
+        let (_, packs, interleave) = merge_dots(g, &packable, donated);
+        (packs, interleave)
+    };
+    let rows = vec![(vec![1, 2], 0)];
+    // Alone: interleaved.
+    assert_eq!(pack(&build(&|_, _, _| None), &[]), (rows.clone(), vec![2]));
+    // w3 read elsewhere too (negated, an output): side by side.
+    let read = build(&|g, _, w3| Some(apply(g, Neg, &[w3])));
+    assert_eq!(pack(&read, &[]), (rows.clone(), vec![1]));
+    // A concatenate of them (a backward's block of the weights): side by
+    // side, the concatenate the block.
+    let concatenated = build(&|g, w1, w3| {
+        let block = Concatenate {
+            dimension: 0,
+            in_place: false,
+        };
+        Some(apply(g, block, &[w1, w3]))
+    });
+    let (merged, packs, interleave) = merge_dots(&concatenated, &packable, &[]);
+    assert_eq!((packs, interleave), (rows.clone(), vec![1]));
+    assert!(!names(&merged).contains(&"concatenate"), "{merged}");
+    // Assigned (donated: an optimizer's update written over them): side by
+    // side.
+    assert_eq!(
+        pack(&build(&|_, _, _| None), &[false, true, true]),
+        (rows, vec![1])
+    );
+}
+
 /// The gated MLP compiled to own its memory on MPS: its weights meta
 /// parameters, `w1` and `w3` placed side by side in one block the merged
 /// dot reads; the data copied into their places; `x` copied in each run.
