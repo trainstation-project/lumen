@@ -1,7 +1,5 @@
 use crate::DType;
-#[cfg(lumen_tpu_linked)]
-use crate::graph::Primitive;
-use crate::graph::{Graph, TensorType, Var};
+use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::attention::{self, Access, Score};
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
@@ -254,7 +252,19 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         view("delta", &operand(body, &b.delta, 1), &b.batch, false)?,
     ];
     let outputs: Vec<Var> = body.outputs().to_vec();
-    let at = |k: usize| outputs.iter().position(|&o| o == k).expect("an output");
+    let at = |base: Var| {
+        let reshaped = |o: Var| {
+            body.nodes().iter().any(|n| {
+                n.output == o
+                    && matches!(n.primitive, Primitive::Reshape { .. })
+                    && n.inputs[0] == base
+            })
+        };
+        outputs
+            .iter()
+            .position(|&o| o == base || reshaped(o))
+            .expect("an output")
+    };
     let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
         (Some(_), None, None) => "dq",
         (None, Some(_), Some(_)) => "dkv",

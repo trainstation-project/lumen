@@ -491,6 +491,103 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 }
 
+fn reshaped_outputs(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        node.inputs.iter().for_each(|&v| readers[v].push(i));
+    }
+    let attention = |p: &Primitive| matches!(p, Primitive::Fusion { name, .. } if name.starts_with("flash_attention"));
+    let folded = |v: Var| match readers[v].as_slice() {
+        [r] if matches!(nodes[*r].primitive, Primitive::Reshape { .. })
+            && !graph.outputs().contains(&v) =>
+        {
+            Some(*r)
+        }
+        _ => None,
+    };
+    let mut by_fusion: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes.len()];
+    let mut skipped = vec![false; nodes.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        if attention(&node.primitive) {
+            if let Some(r) = folded(node.output) {
+                by_fusion[i].push((0, r));
+                skipped[r] = true;
+            }
+            for &u in &readers[node.output] {
+                if let Primitive::FusionOutput { index, .. } = nodes[u].primitive
+                    && let Some(r) = folded(nodes[u].output)
+                {
+                    by_fusion[i].push((index, r));
+                    skipped[r] = true;
+                }
+            }
+        }
+    }
+    if by_fusion.iter().all(Vec::is_empty) {
+        return graph.clone();
+    }
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    for (i, node) in nodes.iter().enumerate() {
+        out.set_origin(node);
+        if skipped[i] {
+            map[node.output] = map[node.inputs[0]];
+            continue;
+        }
+        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let primitive = match &node.primitive {
+            Primitive::Fusion { name, label, body } if !by_fusion[i].is_empty() => {
+                let mut body = body.clone();
+                let mut outputs = body.outputs().to_vec();
+                for &(index, r) in &by_fusion[i] {
+                    outputs[index] = body
+                        .apply(nodes[r].primitive.clone(), &[outputs[index]])
+                        .expect("the output's reshape");
+                }
+                body.set_outputs(&outputs).expect("the body's values");
+                Primitive::Fusion {
+                    name: name.clone(),
+                    label,
+                    body,
+                }
+            }
+            Primitive::FusionOutput { index, .. }
+                if by_fusion[graph_producer(graph, node.inputs[0])]
+                    .iter()
+                    .any(|&(k, _)| k == *index) =>
+            {
+                let (_, r) = by_fusion[graph_producer(graph, node.inputs[0])]
+                    .iter()
+                    .copied()
+                    .find(|&(k, _)| k == *index)
+                    .expect("its reshape");
+                Primitive::FusionOutput {
+                    index: *index,
+                    ty: graph.type_of(nodes[r].output).clone(),
+                }
+            }
+            p => p.clone(),
+        };
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(map[node.output], node.label);
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
+fn graph_producer(graph: &Graph, v: Var) -> usize {
+    graph
+        .nodes()
+        .iter()
+        .position(|n| n.output == v)
+        .expect("a node's value")
+}
+
 fn attentions(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
         if let Primitive::Fusion { name, body, .. } = &node.primitive {
@@ -515,6 +612,7 @@ impl CompilerPass<TpuModule<'_>> for FlashAttention {
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph = attention::fuse(&m.graph, false, &[], |_| "flash_attention".into());
+        m.graph = reshaped_outputs(&m.graph);
         attentions(&m.graph)
     }
 }
@@ -529,6 +627,7 @@ impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph =
             attention::fuse_backward(&m.graph, |_| false, |_| "flash_attention_backward".into());
+        m.graph = reshaped_outputs(&m.graph);
         attentions(&m.graph)
     }
 }
