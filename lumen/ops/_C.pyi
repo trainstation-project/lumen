@@ -1,6 +1,6 @@
 from typing import Any
 
-from lumen.device._C import DeviceLike
+from lumen._C import DeviceLike
 from lumen.tensor._C import Scalar, Tensor
 
 def _register_kernel(name: str, device: DeviceLike, kernel: Any) -> None: ...

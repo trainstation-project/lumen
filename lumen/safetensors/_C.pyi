@@ -1,7 +1,7 @@
 import os
 from typing import Any, Optional, Sequence, Union
 
-from lumen.device._C import DeviceLike
+from lumen._C import DeviceLike
 from lumen.tensor._C import Tensor
 
 class safe_open:

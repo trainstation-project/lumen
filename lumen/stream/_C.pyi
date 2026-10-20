@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Union, final
 
-from lumen.device._C import device
+from lumen.device import device
 from lumen.tensor._C import Tensor
 
 @final

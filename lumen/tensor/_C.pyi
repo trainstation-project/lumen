@@ -1,6 +1,6 @@
 from typing import Any, Optional, Sequence, Union
 
-from lumen.device._C import DeviceLike
+from lumen._C import DeviceLike
 
 Scalar = Union[bool, int, float]
 

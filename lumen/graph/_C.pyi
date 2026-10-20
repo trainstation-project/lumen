@@ -1,6 +1,6 @@
 from typing import Any, Optional, Sequence
 
-from lumen.device._C import DeviceLike
+from lumen._C import DeviceLike
 from lumen.tensor._C import Tensor
 
 FUSION_SEPARATOR: str
