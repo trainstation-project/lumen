@@ -291,7 +291,14 @@ pub(crate) fn encode(
         true => parts.iter().fold(n, |g, &w| gcd(g, w)),
         false => n,
     };
-    let unit_n = gcd_of(f.n, &e.widths, !e.rows);
+    let windows: Vec<Option<(usize, usize)>> = (0..e.outputs.len())
+        .map(|o| super::super::elementwise::tpu::window(step, o))
+        .collect();
+    if e.rows && windows.iter().any(Option::is_some) {
+        return Err("dot_general on TPU: members of rows written into a wider buffer".into());
+    }
+    let starts: Vec<usize> = windows.iter().flatten().map(|w| w.1).collect();
+    let unit_n = gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true);
     let whole_m = gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m);
     let whole_k = gcd_of(f.k, &e.lhs, lhs_k);
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
@@ -386,7 +393,11 @@ pub(crate) fn encode(
     let outputs_spec: Vec<String> = e
         .outputs
         .iter()
-        .map(|(v, p, d)| format!("[{v}, {p}, \"{}\"]", d.full_name()))
+        .zip(&windows)
+        .map(|((v, p, d), w)| {
+            let (whole, start) = w.unwrap_or((0, 0));
+            format!("[{v}, {p}, \"{}\", {whole}, {start}]", d.full_name())
+        })
         .collect();
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"split_rows\": {}, \

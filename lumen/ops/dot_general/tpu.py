@@ -14,7 +14,9 @@ def program(spec):
     its columns, in order), ``inputs`` (its epilogue's other operands,
     each ``[dtype, 0-d, member]``), ``nodes`` (its epilogue, as the
     elementwise kernel's, its values the result, the inputs, then the
-    nodes) and ``outputs`` (each ``[value, member, dtype]``). Its scalars
+    nodes) and ``outputs`` (each ``[value, member, dtype, n, start]``:
+    written at columns ``start`` on of a buffer ``n`` wide, or, ``n`` 0, a
+    buffer of its own). Its scalars
     are the rows of the lhs's parts, the rhs, the inputs and the outputs."""
     batch, lead, m, n, k = spec["batch"], spec["lead"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
@@ -92,7 +94,10 @@ def program(spec):
 
         extra = [pallas.view(memory, rows[r + 1 + i], member_shape(inputs[i][2]), inputs[i][0]) for i in blocked]
         base = r + 1 + len(inputs)
-        outs = [pallas.view(result, rows[base + o], member_shape(p), d) for o, (_, p, d) in enumerate(outputs)]
+        outs = [
+            pallas.view(result, rows[base + o], (batch * lead, m, whole) if whole else member_shape(p), d)
+            for o, (_, p, d, whole, _) in enumerate(outputs)
+        ]
 
         def lhs_spec(p):
             start, count = part_starts[p], part_counts[p]
@@ -112,24 +117,29 @@ def program(spec):
         else:
             y_spec = pl.BlockSpec((None, bk, bn), lambda b, i, j, s: (rhs_batch(b), s, j))
 
-        def member_spec(p):
+        def member_spec(p, at=0):
             start, count = starts[p], counts[p]
 
             def index(b, i, j, s):
                 if rows_split:
                     return b, clamp(i, start, count), j
-                return b, i, clamp(j, start, count)
+                column = clamp(j, start, count)
+                if at and isinstance(column, int):
+                    column += at // bn
+                elif at:
+                    column = prims.add(column, prims.full((), at // bn, "int32"))
+                return b, i, column
 
             return pl.BlockSpec((None, bm, bn), index)
 
         e_specs = [member_spec(inputs[i][2]) for i in blocked]
-        o_specs = [member_spec(p) for _, p, _ in outputs]
+        o_specs = [member_spec(p, at) for _, p, _, _, at in outputs]
 
         def finish(acc, blocks, obs):
             result = acc.to(value)
-            members = sorted({p for _, p, _ in outputs})
+            members = sorted({o[1] for o in outputs})
             for p in members:
-                written = [o for o, (_, q, _) in enumerate(outputs) if q == p]
+                written = [o for o, out in enumerate(outputs) if out[1] == p]
 
                 def store(written=written):
                     wanted = needed([outputs[o][0] for o in written])
