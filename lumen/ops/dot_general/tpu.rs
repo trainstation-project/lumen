@@ -385,7 +385,7 @@ pub(crate) fn encode(
         .map(|(v, p, d)| format!("[{v}, {p}, \"{}\"]", d.full_name()))
         .collect();
     let spec = format!(
-        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"rows\": {}, \
+        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
          \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         f.batch,

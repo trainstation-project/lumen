@@ -416,12 +416,15 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         interleaved: Vec::new(),
     };
     let mut pipeline = Pipeline::new("tpu");
+    if options.config.merge_dots {
+        pipeline.add(MergeDotsBackward);
+    }
     pipeline
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
         .add(DotStrength { matrices: false });
     if options.config.merge_dots {
-        pipeline.add(MergeDotsBackward).add(MergeDots {
+        pipeline.add(MergeDots {
             target: Target {
                 reads: |_, _| true,
                 views: false,

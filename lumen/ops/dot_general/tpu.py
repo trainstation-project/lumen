@@ -10,7 +10,7 @@ def program(spec):
     lhs), ``lhs`` (the sizes of the lhs's parts, buffers of their own side
     by side along k if ``lhs_k``, else m; none: one buffer), the
     ``operands`` and ``value`` (its result's) dtypes, ``blocks`` (bm, bn,
-    bk), ``widths`` (its members: ranges of its rows if ``rows``, else of
+    bk), ``widths`` (its members: ranges of its rows if ``split_rows``, else of
     its columns, in order), ``inputs`` (its epilogue's other operands,
     each ``[dtype, 0-d, member]``), ``nodes`` (its epilogue, as the
     elementwise kernel's, its values the result, the inputs, then the
@@ -22,7 +22,7 @@ def program(spec):
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
     widths, inputs, nodes, outputs = spec["widths"], spec["inputs"], spec["nodes"], spec["outputs"]
-    rows_split, lhs_k = spec["rows"], spec["lhs_k"]
+    rows_split, lhs_k = spec["split_rows"], spec["lhs_k"]
     parts = spec["lhs"] or [k if lhs_k else m]
     unit = bm if rows_split else bn
     starts = [sum(widths[:p]) // unit for p in range(len(widths))]
