@@ -950,7 +950,7 @@ class GatedMLP(lumen.nn.Module):
 @pytest.mark.mps
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
 def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
-    """A gated pair's backward (``gated_backward``): its input's gradient one
+    """A gated pair's backward (``merge_dots_backward``): its input's gradient one
     dot of its cotangents side by side and the forward's weight block (K
     twice as long, no copy of the weights), its weights' gradients one dot;
     the cotangents the down projection's gradient GEMM's expanding
@@ -1033,7 +1033,7 @@ class _GatedMLPFunction(lumen.autograd.Function):
 
 
 @pytest.mark.mps
-def test_hand_written_gated_backward_merges_as_autodiffs():
+def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     """A gated pair's backward written by hand (a ``Function``, its
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
     transposes read as the dots' dimensions (no copies): the cotangents
@@ -1116,7 +1116,7 @@ class ProjectedAttention(lumen.nn.Module):
 @pytest.mark.mps
 @pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "deterministic"])
 def test_qkv_backward_merges_its_gradients_dots(deterministic):
-    """Attention's q, k and v projections' backward (``gated_backward``, a
+    """Attention's q, k and v projections' backward (``merge_dots_backward``, a
     group of three): its input's gradient one dot of ``[dq | dk | dv]``
     and the forward's weight block (K three times as long), its weights'
     gradients one dot. ``[dq | dk | dv]`` written in place by the flash

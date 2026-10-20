@@ -33,7 +33,7 @@
 //! interleaved too, each dot's its pairs' slice (a reshape into `[n / 2, 2]`,
 //! sliced, reshaped back): its kernel loads the weights as they are, each
 //! lane holding a pair (`codegen::gemm_interleaved`, `INTERLEAVED`).
-//! Its backward (`gated_backward`'s, written side by side) is interleaved
+//! Its backward (`merge_dots_backward`'s, written side by side) is interleaved
 //! too, consistently along each axis it permutes ([`backward`]): the
 //! concatenate of its weights the block, that of its cotangents `[dg | du]`
 //! interleaved (each given a last dimension of one, concatenated along it:
@@ -334,7 +334,7 @@ pub(super) fn merge_dots(
     // Each merged group's dots' operands (their parameters' chains: a
     // bfloat16 copy each), its dimension, and its block's chain: a
     // concatenate of those, side by side, is it (a gated pair's backward's
-    // `[W1 | W2]`, `gated_backward`).
+    // `[W1 | W2]`, `merge_dots_backward`).
     let mut parts: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
@@ -592,7 +592,7 @@ fn pairs(
 }
 
 /// The nodes of a backward an interleaved group's block rewrites
-/// (`gated_backward`'s: `dx = [g1 | g2] @ [W1 | W2]`, `dW = [g1 | g2]^T x`
+/// (`merge_dots_backward`'s: `dx = [g1 | g2] @ [W1 | W2]`, `dW = [g1 | g2]^T x`
 /// sliced into each weight's): the concatenates of its cotangents (each
 /// interleaved too, along the axis it contracts with its weights'), and the
 /// slices of its weights' gradients (each its member's pairs: the node, the

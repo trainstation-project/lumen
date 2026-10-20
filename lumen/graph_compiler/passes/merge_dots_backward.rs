@@ -1,7 +1,8 @@
-//! A gated pair's backward (SwiGLU's, ReGLU's: `z = f(x W1, x W2)`, two
-//! dots of one operand combined elementwise, CODA's pairwise epilogue
-//! forward, arXiv 2605.19269), or a group's (attention's q, k and v), its
-//! gradients' dots merged as the forward's are: of `x`'s gradient,
+//! Dots sharing an operand, merged in the backward as `merge_dots` merges
+//! the forward: a gated pair's backward (SwiGLU's, ReGLU's: `z = f(x W1, x
+//! W2)`, two dots of one operand combined elementwise, CODA's pairwise
+//! epilogue forward, arXiv 2605.19269), or a group's (attention's q, k and
+//! v), its gradients' dots merged as the forward's are: of `x`'s gradient,
 //! `g1 W1 + g2 W2` (two dots and their sum, `g1` and `g2` the pair's
 //! cotangents) one dot of `[g1 | g2]` and `[W1 | W2]` (contracting both
 //! halves: K twice as long), and of the weights', `x^T g1` and `x^T g2`
@@ -43,7 +44,7 @@ struct Group {
 
 /// `graph` with each gated pair's (or group's) backward's dots merged
 /// ([`Group`]).
-fn gated_backward(graph: &Graph) -> Graph {
+fn merge_dots_backward(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
     let mut producer: Vec<Option<usize>> = vec![None; n];
@@ -418,16 +419,16 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
     })
 }
 
-/// [`gated_backward`] as a pass.
-pub(crate) struct GatedBackward;
+/// [`merge_dots_backward`] as a pass.
+pub(crate) struct MergeDotsBackward;
 
-impl<M: Module> CompilerPass<M> for GatedBackward {
+impl<M: Module> CompilerPass<M> for MergeDotsBackward {
     fn name(&self) -> &'static str {
-        "gated_backward"
+        "merge_dots_backward"
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = gated_backward(m.graph());
+        *m.graph_mut() = merge_dots_backward(m.graph());
         Ok(())
     }
 }

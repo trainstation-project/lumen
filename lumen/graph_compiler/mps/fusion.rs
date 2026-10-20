@@ -386,7 +386,7 @@ pub(super) fn fuse(
                 continue;
             }
             // A gated pair's backward: its two cotangents, each of the dot's
-            // shape, concatenated along its last dimension (`gated_backward`),
+            // shape, concatenated along its last dimension (`merge_dots_backward`),
             // or interleaved (each given a last dimension of one, concatenated
             // along it: `merge_dots`' interleaved block's), the epilogue's
             // end (codegen's expanding epilogue).
@@ -829,7 +829,7 @@ pub(super) fn fuse(
                 let mut shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
                 // A contraction's first (its write-out cast with it), then
                 // its epilogue, as its kernel computes them: what it is, and
-                // the values its epilogue reads (a gated backward's saved
+                // the values its epilogue reads (a gated pair's backward's saved
                 // forward values), after.
                 if let Some(d) = dot_of[i] {
                     shown.sort_by_key(|&m| m != d);

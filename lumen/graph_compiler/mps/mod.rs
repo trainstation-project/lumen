@@ -34,8 +34,8 @@ use super::pass::{Module, Pipeline};
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot_strength::DotStrength;
-use super::passes::gated_backward::GatedBackward;
 use super::passes::linear_cross_entropy::LinearCrossEntropy;
+use super::passes::merge_dots_backward::MergeDotsBackward;
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
 use super::{CompilerConfig, Options};
@@ -152,7 +152,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     // A gated pair's backward's dots merged (before `merge_dots`, which
     // reads its weights' concatenate as the forward's block).
     if config.fuse && config.merge_dots && config.contraction_epilogues {
-        p.add(GatedBackward);
+        p.add(MergeDotsBackward);
     }
     // Merging needs fusion: the merged dot's readers read its slices.
     if config.fuse && config.merge_dots {
