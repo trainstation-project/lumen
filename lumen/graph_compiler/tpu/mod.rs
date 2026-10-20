@@ -494,8 +494,14 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
 fn reshaped_outputs(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+    let mut parts: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
-        node.inputs.iter().for_each(|&v| readers[v].push(i));
+        for &v in &node.inputs {
+            match node.primitive {
+                Primitive::FusionOutput { .. } => parts[v].push(i),
+                _ => readers[v].push(i),
+            }
+        }
     }
     let attention = |p: &Primitive| matches!(p, Primitive::Fusion { name, .. } if name.starts_with("flash_attention"));
     let reshape = |r: usize| matches!(nodes[r].primitive, Primitive::Reshape { .. });
@@ -527,7 +533,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         let forward =
             matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
         let mut values = vec![(0, node.output)];
-        for &u in readers[node.output].iter().filter(|_| !forward) {
+        for &u in parts[node.output].iter().filter(|_| !forward) {
             if let Primitive::FusionOutput { index, .. } = nodes[u].primitive {
                 values.push((index, nodes[u].output));
             }
