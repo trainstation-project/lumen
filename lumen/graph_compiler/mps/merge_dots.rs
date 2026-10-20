@@ -24,6 +24,14 @@
 //! one's side by side); any other reader of a dot's operand (a backward's
 //! dot of the same bfloat16 weight) reads its part of it.
 //!
+//! Dots whose results an epilogue combines (an elementwise value of K of
+//! them: SwiGLU's gate and up, K = 2) merge apart from the others, as a
+//! group of their own, and only if K divides the columns of a SIMD block
+//! (8: the K values of an output in one block of the merged dot's tile,
+//! which its epilogue's lanes read); else they stay apart, their
+//! combination their fusion's. The others, each read on its own, merge
+//! together.
+//!
 //! A parameter is in one block at most. Dots of the same parameters, in the
 //! same order through the same chain, sharing another operand (the same
 //! weights projecting another input: a gradient accumulation's next pass),
@@ -39,6 +47,7 @@ use super::MpsModule;
 use super::fusion::{elementwise, fusible};
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::combined;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Dots that can merge: their nodes, in graph order.
@@ -227,6 +236,7 @@ pub(super) fn merge_dots(
             )),
         }
     }
+    let mut groups = split_by_epilogue(graph, groups);
     // A dot in two groups of two or more merges in the first; the rest of
     // the second, if still two or more, merge at their first.
     let mut merged = vec![false; nodes.len()];
@@ -435,6 +445,72 @@ pub(super) fn merge_dots(
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     (out, packs)
+}
+
+/// The columns of a SIMD group's accumulator block (an 8 x 8
+/// `simdgroup_matrix`), a row of which its epilogue's lanes read: the
+/// values K dots' results combine are in one block only if K divides it.
+const SIMD_BLOCK: usize = 8;
+
+impl Group {
+    /// The group of its dots at `members` (positions in it).
+    fn subset(&self, members: &[usize]) -> Group {
+        Group {
+            shared: self.shared,
+            side: self.side,
+            primitive: self.primitive.clone(),
+            other: self.other.clone(),
+            dimension: self.dimension,
+            chain: self.chain.clone(),
+            nodes: members.iter().map(|&k| self.nodes[k]).collect(),
+            weights: members.iter().map(|&k| self.weights[k]).collect(),
+        }
+    }
+}
+
+/// `groups` split by how their dots' results are read: the dots whose
+/// results an elementwise value combines (K of a group's: SwiGLU's gate
+/// and up, `silu(x W1) * (x W2)`, [`combined`]) a group of their own if K
+/// divides [`SIMD_BLOCK`] (their values in one block of a tile, its
+/// epilogue's), else not merged (their dots apart, the combination their
+/// fusion's: a group would straddle blocks); the others, each read on its
+/// own, a group together.
+fn split_by_epilogue(graph: &Graph, groups: Vec<Group>) -> Vec<Group> {
+    let nodes = graph.nodes();
+    let mut dots: Vec<usize> = groups
+        .iter()
+        .flat_map(|g| g.nodes.iter().copied())
+        .collect();
+    dots.sort_unstable();
+    dots.dedup();
+    let outputs: Vec<Var> = dots.iter().map(|&i| nodes[i].output).collect();
+    let set = combined(graph, &outputs);
+    let set_of = |i: usize| set[dots.binary_search(&i).expect("a grouped dot")];
+    let mut split = Vec::new();
+    for g in groups {
+        // Its dots by set, in order: each set's positions.
+        let mut sets: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (k, &i) in g.nodes.iter().enumerate() {
+            match sets.iter_mut().find(|(s, _)| *s == set_of(i)) {
+                Some((_, members)) => members.push(k),
+                None => sets.push((set_of(i), vec![k])),
+            }
+        }
+        let alone: Vec<usize> = sets
+            .iter()
+            .filter(|(_, m)| m.len() == 1)
+            .map(|(_, m)| m[0])
+            .collect();
+        for (_, members) in sets.iter().filter(|(_, m)| m.len() > 1) {
+            if SIMD_BLOCK.is_multiple_of(members.len()) {
+                split.push(g.subset(members));
+            }
+        }
+        if alone.len() > 1 {
+            split.push(g.subset(&alone));
+        }
+    }
+    split
 }
 
 /// The batch and contracting dimensions of a dot's operand on `side`.

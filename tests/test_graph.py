@@ -1316,8 +1316,10 @@ def test_trained_projections_merge_into_one_matmul(module):
         pytest.skip(str(e))
 
     def step(model, x, c):
+        # Each projection read on its own (three combined in one value would
+        # not merge: merge_dots).
         q, k, v = model(x)
-        loss = F.sum((q * k + v) * c)
+        loss = F.sum(q * c) + F.sum(F.relu(k) * c) + F.sum(F.tanh(v) * c)
         loss.backward()
         for w in (model.wq, model.wk, model.wv):
             w.copy_(w - 0.1 * w.grad)

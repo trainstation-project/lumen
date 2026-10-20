@@ -287,6 +287,18 @@ impl PyGraph {
             .collect()
     }
 
+    /// Which of the values `sources` one elementwise value combines: each
+    /// one's set, equal for those combined (see
+    /// [`crate::graph_compiler::combined`]).
+    fn combined(&self, sources: Vec<Var>) -> PyResult<Vec<usize>> {
+        if let Some(v) = sources.iter().find(|&&v| v >= self.inner.types.len()) {
+            return Err(PyValueError::new_err(format!(
+                "%{v} is not a value of this graph"
+            )));
+        }
+        Ok(crate::graph_compiler::combined(&self.inner, &sources))
+    }
+
     /// See [`crate::graph::Graph::precision_warnings`].
     fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()

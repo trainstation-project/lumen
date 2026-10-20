@@ -144,6 +144,43 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
     )
 }
 
+/// Which of the values `sources` (dots' results) one elementwise value
+/// combines, as an epilogue would (SwiGLU's gate and up, `silu(g) * u`),
+/// through elementwise primitives alone: each source's set, the position
+/// of a source in it, equal for sources combined.
+#[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
+pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut parent: Vec<usize> = (0..sources.len()).collect();
+    // Each value's sources, through elementwise primitives.
+    let mut of: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+    let mut source = vec![false; graph.types.len()];
+    for (k, &v) in sources.iter().enumerate() {
+        of[v] = vec![k];
+        source[v] = true;
+    }
+    for node in graph.nodes() {
+        if source[node.output] || !elementwise(&node.primitive) {
+            continue;
+        }
+        let mut of_node: Vec<usize> = node.inputs.iter().flat_map(|&v| of[v].clone()).collect();
+        of_node.sort_unstable();
+        of_node.dedup();
+        for pair in of_node.windows(2) {
+            let (a, b) = (root(&mut parent, pair[0]), root(&mut parent, pair[1]));
+            parent[a] = b;
+        }
+        of[node.output] = of_node;
+    }
+    (0..sources.len()).map(|k| root(&mut parent, k)).collect()
+}
+
 /// Whether value `v` is the same everywhere and known when compiling: a
 /// `full`, perhaps through elementwise and layout primitives of such
 /// values (no input, iota or reduction).

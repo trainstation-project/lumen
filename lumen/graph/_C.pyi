@@ -28,6 +28,11 @@ class Graph:
         """Remove the nodes no output depends on; each value's new number,
         or None if removed."""
 
+    def combined(self, sources: list[int]) -> list[int]:
+        """Which of the values ``sources`` one elementwise value combines
+        (an epilogue's: SwiGLU's gate and up): each one's set, equal for
+        those combined."""
+
     def precision_warnings(self) -> list[tuple[int, int, str]]:
         """A warning for each dot or sum rounded to a narrower dtype than it
         accumulates in, then cast back up: its output, the cast's, the
