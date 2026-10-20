@@ -371,12 +371,7 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         for name in names {
             label += &format!(" → {name}");
         }
-        let inputs: Vec<Var> = node
-            .inputs
-            .iter()
-            .chain(&f.extras)
-            .map(|&v| map[v])
-            .collect();
+        let inputs: Vec<Var> = reads.iter().chain(&f.extras).map(|&v| map[v]).collect();
         let fused = out
             .apply(
                 Primitive::Fusion {
