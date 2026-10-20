@@ -7,7 +7,6 @@ mod flash_attention_backward;
 pub(crate) mod fusion;
 mod horizontal;
 mod kernel_codegen;
-mod merge_dots;
 mod place_concats;
 mod place_views;
 mod split_k;
@@ -23,6 +22,7 @@ use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot_strength::DotStrength;
 use super::passes::linear_cross_entropy::LinearCrossEntropy;
+use super::passes::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::passes::merge_dots_backward::MergeDotsBackward;
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
@@ -77,6 +77,12 @@ struct MpsModule<'a> {
     sources: BTreeMap<String, String>,
 }
 
+impl Blocks for MpsModule<'_> {
+    fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>) {
+        (&mut self.packed, &mut self.interleaved)
+    }
+}
+
 impl Module for MpsModule<'_> {
     fn graph(&self) -> &Graph {
         &self.graph
@@ -114,7 +120,14 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
         p.add(MergeDotsBackward);
     }
     if config.fuse && config.merge_dots {
-        p.add(merge_dots::MergeDots);
+        p.add(MergeDots {
+            target: Target {
+                reads: fusion::fusible,
+                views: true,
+                lanes: 1,
+                columns: crate::codegen::mps::ROW_COLUMNS,
+            },
+        });
     }
     if config.fuse && config.flash_attention {
         p.add(FlashAttention).add(FlashAttentionBackward);

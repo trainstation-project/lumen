@@ -169,3 +169,35 @@ def test_a_sum_over_another_dimension_says_so():
     x = lumen.ones([64, 128]).to("tpu")
     with pytest.raises(ValueError, match="over the last dimension"):
         lumen.compile(lambda x: lumen.functional.sum(x, 0))(x)
+
+
+class Projections(lumen.nn.Module):
+    ws: list
+
+    def __call__(self, x):
+        return [-(x @ w.t()) for w in self.ws]
+
+
+@pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)], ids=["float32", "bfloat16"])
+@pytest.mark.parametrize("sizes", [[256, 128, 128], [512, 512], [1024, 2048]], ids=["qkv", "pair", "wide"])
+def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
+    d, m = 256, 64
+    meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
+    make = lambda: Projections([meta(h, d) for h in sizes])
+    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(m, d))
+    params = list(range(1, len(sizes) + 1))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
+    assert plan.packed == [(params, 0)]
+    labels = [s["label"] for s in plan.steps()]
+    assert labels == [f"{len(sizes)}x dot_general"] + ["neg"] * len(sizes), labels
+    rng = np.random.default_rng(0)
+    values = [lumen.from_numpy(rng.standard_normal([h, d], dtype=np.float32)).to(dtype=dtype) for h in sizes]
+    model = make()
+    f = lumen.compile(lambda model, x: model(x), device="tpu")
+    f(model, meta(m, d))
+    model.load_state_dict({f"ws.{k}": v for k, v in enumerate(values)})
+    x = lumen.from_numpy(rng.standard_normal([m, d], dtype=np.float32)).to(dtype=dtype).to("tpu")
+    ys = f(model, x)
+    for y, w in zip(ys, values):
+        expected = -(floats(x) @ floats(w).T)
+        assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()

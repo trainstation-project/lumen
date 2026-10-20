@@ -55,6 +55,15 @@ accumulating in float32; the output float32 or bfloat16.
   (`tpu.reinterpret_cast`), with no packing or reshuffling of words.
 * float32 operands multiply in full float32 (`contract_precision<fp32>`),
   not the matrix unit's single bfloat16 pass.
+* **Merged dots** (`merge_dots`, then `split_dots` in
+  `graph_compiler/tpu/mod.rs`): a dot whose columns are read as slices
+  covering it is a `Fusion` of the dot and its slices, run by this kernel
+  with an output per slice (the spec's `outputs`: their widths). `bn`
+  divides every width; output `p`'s block index is the grid's `j` less its
+  first block, clamped to its blocks, and only steps within its columns
+  write it, so the pipeline copies each of its blocks out once. On a v6e,
+  bfloat16 q/k/v projections (`x [4096, 2048]`, 2048 + 512 + 512 outputs)
+  take 136 µs merged, 161 µs as three dots.
 
 ## Subfolders
 

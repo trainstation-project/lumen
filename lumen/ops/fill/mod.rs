@@ -26,7 +26,13 @@ fn fill_kernels(key: DispatchKey) -> Option<FillKernel> {
         ),
         #[cfg(not(lumen_mps_linked))]
         DispatchKey::Mps => None,
-        DispatchKey::Cuda | DispatchKey::Tpu => None,
+        #[cfg(lumen_tpu_linked)]
+        DispatchKey::Tpu => Some(|t, value| {
+            crate::ops::elementwise::tpu::fill(t, value).unwrap_or_else(|e| panic!("{e}"))
+        }),
+        #[cfg(not(lumen_tpu_linked))]
+        DispatchKey::Tpu => None,
+        DispatchKey::Cuda => None,
         DispatchKey::Meta => Some(|_, _| {}),
     }
 }

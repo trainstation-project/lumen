@@ -283,7 +283,7 @@ pub(crate) fn encode(
     output: *mut u8,
 ) -> Result<(), String> {
     match step.primitive {
-        Primitive::DotGeneral { .. } => {
+        Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
         }
         ref p if super::elementwise::tpu::elementwise(p) => {

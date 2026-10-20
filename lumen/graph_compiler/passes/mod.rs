@@ -10,6 +10,7 @@ pub(crate) mod clamp_indices;
 pub(crate) mod dot_strength;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;
+pub(crate) mod merge_dots;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod merge_dots_backward;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
