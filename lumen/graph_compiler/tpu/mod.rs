@@ -108,7 +108,13 @@ fn stacked(
         return None;
     };
     let rank = graph.type_of(lhs).shape.len();
-    let fits = users[lhs].len() == 1
+    let dots = users[lhs].iter().all(|&u| {
+        let reader = &graph.nodes()[u];
+        matches!(reader.primitive, Primitive::DotGeneral { .. })
+            && reader.inputs[0] == lhs
+            && reader.inputs[1] != lhs
+    });
+    let fits = dots
         && !graph.outputs().contains(&lhs)
         && dimension + 2 >= rank
         && graph.nodes()[k]
