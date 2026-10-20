@@ -32,7 +32,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
 
 /// The concatenates of `graph` that can be computed in place (by node,
 /// [`PlaceConcats`] marks them): concatenates of an attention backward's gradients
-/// (`[dq | dk | dv]`, which `gated_backward` merges attention's
+/// (`[dq | dk | dv]`, which `merge_dots_backward` merges attention's
 /// projections' gradients' dots on), each operand read by the concatenate
 /// alone and written at its place in the result ([`Graph::slot`]) by its kernel:
 /// an attention backward's, through its layout chain

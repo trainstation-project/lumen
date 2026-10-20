@@ -206,6 +206,14 @@ impl PyPlan {
         self.inner.packed().to_vec()
     }
 
+    /// Each of `packed`'s blocks' interleaving: 1, its parameters side by
+    /// side; K, interleaved along the dimension (element `j` of the `i`th
+    /// parameter at `j K + i`: SwiGLU's gate and up, `merge_dots`).
+    #[getter]
+    fn interleaved(&self) -> Vec<usize> {
+        self.inner.interleaved().to_vec()
+    }
+
     /// Run an executable that owns its memory in `workspace` (uint8, at
     /// least `workspace_bytes`): the inputs that are not parameters copied
     /// in, the parameters read in place; the outputs are views valid until

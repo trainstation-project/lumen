@@ -215,6 +215,10 @@ pub struct Plan {
     /// parameter inputs along a dimension: one block they are placed in
     /// side by side ([`crate::Tensor::pack`]), so no step concatenates them.
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
+    /// Each packed block's interleaving: 1, its parameters side by side;
+    /// K, interleaved along the dimension, element `j` of the `i`th at `j K +
+    /// i` ([`crate::Tensor::pack`]'s `interleave`).
+    pub(crate) interleaved: Vec<usize>,
     /// A program on a device and the host: its stages, each its own plan
     /// (`compiler::stages`), run in order instead of steps of its own.
     pub(crate) staged: Option<Box<Staged>>,
@@ -723,6 +727,7 @@ impl Plan {
             steps,
             workspace_bytes,
             packed: Vec::new(),
+            interleaved: Vec::new(),
             staged: None,
         }
     }
@@ -737,6 +742,7 @@ impl Plan {
         steps: Vec<Step>,
         workspace_bytes: usize,
         packed: Vec<(Vec<usize>, usize)>,
+        interleaved: Vec<usize>,
     ) -> Plan {
         Plan {
             aliases: vec![None; outputs.len()],
@@ -748,6 +754,7 @@ impl Plan {
             steps,
             workspace_bytes,
             packed,
+            interleaved,
             staged: Some(Box::new(staged)),
         }
     }
@@ -837,6 +844,12 @@ impl Plan {
     /// parameters side by side: their input positions and the dimension.
     pub fn packed(&self) -> &[(Vec<usize>, usize)] {
         &self.packed
+    }
+
+    /// Each of [`Plan::packed`]'s blocks' interleaving: 1, its parameters
+    /// side by side; K, interleaved.
+    pub fn interleaved(&self) -> &[usize] {
+        &self.interleaved
     }
 
     /// Run the plan on `inputs`, which must be on one device, returning

@@ -386,12 +386,21 @@ pub(super) fn fuse(
                 continue;
             }
             // A gated pair's backward: its two cotangents, each of the dot's
-            // shape, concatenated along its last dimension (`gated_backward`),
-            // the epilogue's end (codegen's expanding epilogue).
+            // shape, concatenated along its last dimension (`merge_dots_backward`),
+            // or interleaved (each given a last dimension of one, concatenated
+            // along it: `merge_dots`' interleaved block's), the epilogue's
+            // end (codegen's expanding epilogue).
             let shape = &graph.type_of(node.output).shape;
-            let expands = matches!(un.primitive, Primitive::Concatenate { dimension, .. } if dimension + 1 == shape.len())
-                && un.inputs.len() == 2
-                && un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+            let tupled: Vec<usize> = shape.iter().copied().chain([1]).collect();
+            let expands = match un.primitive {
+                Primitive::Concatenate { dimension, .. } if dimension + 1 == shape.len() => {
+                    un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+                }
+                Primitive::Concatenate { dimension, .. } if dimension == shape.len() => {
+                    un.inputs.iter().all(|&v| graph.type_of(v).shape == tupled)
+                }
+                _ => false,
+            } && un.inputs.len() == 2
                 && pair.is_none();
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
@@ -786,18 +795,41 @@ pub(super) fn fuse(
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
                 // A gated pair's halves are not computed (its kernel holds
-                // them interleaved): not in its label.
+                // them interleaved): not in its label; nor, its block
+                // interleaved, the reshapes and slices taking its pairs
+                // apart (`merge_dots`).
+                let of_dot = |v: Var, layout: &dyn Fn(&Primitive) -> bool| {
+                    producer[v].is_some_and(|d| members.contains(&d) && layout(&nodes[d].primitive))
+                };
+                let dot = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
+                let pairs = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
                 let half = |m: &&usize| {
-                    matches!(nodes[**m].primitive, Primitive::Slice { .. })
-                        && producer[nodes[**m].inputs[0]].is_some_and(|d| {
-                            members.contains(&d)
-                                && matches!(nodes[d].primitive, Primitive::DotGeneral { .. })
-                        })
+                    let node = &nodes[**m];
+                    let input = node.inputs.first().copied();
+                    match node.primitive {
+                        Primitive::Slice { .. } => input.is_some_and(|v| {
+                            of_dot(v, &dot)
+                                || producer[v].is_some_and(|r| {
+                                    pairs(&nodes[r].primitive) && of_dot(nodes[r].inputs[0], &dot)
+                                })
+                        }),
+                        Primitive::Reshape { .. } => input.is_some_and(|v| {
+                            of_dot(v, &dot)
+                                || producer[v].is_some_and(|s| {
+                                    matches!(nodes[s].primitive, Primitive::Slice { .. })
+                                        && producer[nodes[s].inputs[0]].is_some_and(|r| {
+                                            pairs(&nodes[r].primitive)
+                                                && of_dot(nodes[r].inputs[0], &dot)
+                                        })
+                                })
+                        }),
+                        _ => false,
+                    }
                 };
                 let mut shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
                 // A contraction's first (its write-out cast with it), then
                 // its epilogue, as its kernel computes them: what it is, and
-                // the values its epilogue reads (a gated backward's saved
+                // the values its epilogue reads (a gated pair's backward's saved
                 // forward values), after.
                 if let Some(d) = dot_of[i] {
                     shown.sort_by_key(|&m| m != d);

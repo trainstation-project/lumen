@@ -46,6 +46,12 @@ class Plan:
         """The inputs the compiler added after the graph's: each the block
         of these parameter inputs side by side along a dimension."""
 
+    @property
+    def interleaved(self) -> list[int]:
+        """Each of ``packed``'s blocks' interleaving: 1, its parameters side
+        by side; K, interleaved along the dimension (element ``j`` of the
+        ``i``-th parameter at ``j K + i``: SwiGLU's gate and up)."""
+
     def run_in(self, workspace: Tensor, inputs: Sequence[Tensor]) -> list[Tensor]:
         """Run in ``workspace`` (uint8, at least ``workspace_bytes``): inputs
         that are not parameters copied in, parameters read in place; the

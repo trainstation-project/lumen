@@ -674,9 +674,10 @@ class Gated(lumen.nn.Module):
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_dots_sharing_an_operand_merge(device):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
-    x and a block holding w1 and w3 side by side (XLA's DotMerger, with the
-    weights placed together instead of concatenated), the gate its epilogue
-    (a gated pair: one kernel)."""
+    x and a block holding w1 and w3 interleaved (XLA's DotMerger, with the
+    weights placed together instead of concatenated; a gated pair's columns
+    interleaved, w1's j its 2j, w3's its 2j + 1), the gate its epilogue (a
+    gated pair: one kernel)."""
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
     model = Gated(meta(32, 64), meta(32, 64))
     f = lumen.compile(lambda model, x: model(x), device=device)
@@ -692,6 +693,11 @@ def test_dots_sharing_an_operand_merge(device):
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
+        assert plan.interleaved == [2]
+        # Each weight a stride-2 view of the block: its columns every other.
+        w1, w3 = model.w1._placed("mps"), model.w3._placed("mps")
+        assert (list(w1.strides), list(w3.strides)) == ([128, 2], [128, 2])
+        assert w3.storage_offset - w1.storage_offset == 1
         assert len(steps) == 1 and "concatenate" not in steps
         # Named for the dots it computes, in the plan and the profiler.
         assert plan.steps()[0]["label"] == "2x dot_general → max → mul"
@@ -944,7 +950,7 @@ class GatedMLP(lumen.nn.Module):
 @pytest.mark.mps
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
 def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
-    """A gated pair's backward (``gated_backward``): its input's gradient one
+    """A gated pair's backward (``merge_dots_backward``): its input's gradient one
     dot of its cotangents side by side and the forward's weight block (K
     twice as long, no copy of the weights), its weights' gradients one dot;
     the cotangents the down projection's gradient GEMM's expanding
@@ -1027,7 +1033,7 @@ class _GatedMLPFunction(lumen.autograd.Function):
 
 
 @pytest.mark.mps
-def test_hand_written_gated_backward_merges_as_autodiffs():
+def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     """A gated pair's backward written by hand (a ``Function``, its
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
     transposes read as the dots' dimensions (no copies): the cotangents
@@ -1110,7 +1116,7 @@ class ProjectedAttention(lumen.nn.Module):
 @pytest.mark.mps
 @pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "deterministic"])
 def test_qkv_backward_merges_its_gradients_dots(deterministic):
-    """Attention's q, k and v projections' backward (``gated_backward``, a
+    """Attention's q, k and v projections' backward (``merge_dots_backward``, a
     group of three): its input's gradient one dot of ``[dq | dk | dv]``
     and the forward's weight block (K three times as long), its weights'
     gradients one dot. ``[dq | dk | dv]`` written in place by the flash
@@ -1296,6 +1302,117 @@ def test_projections_of_several_inputs_each_read_one_block(module):
         lumen.config.compiler.reset()
     for merged, alone in zip(*got):
         np.testing.assert_array_equal(merged, alone)
+
+
+class GatedPair(lumen.nn.Module):
+    """SwiGLU's gate and up projections, ``nn.Linear``'s ``[out, in]``
+    weights: ``silu(x W1^T) * (x W2^T)``."""
+
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w2.t()
+        return g * F.sigmoid(g) * u
+
+
+@pytest.mark.mps
+def test_gated_pairs_weights_are_interleaved():
+    """Inference: a gated pair's two weights packed into one block
+    interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
+    pair one kernel (its products' pairs adjacent in a lane), the values as
+    unmerged. A training step (its weights assigned) keeps them side by
+    side."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    graph = lumen.make_graph(lambda m, x: m(x))(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+
+    def step(model, x):
+        loss = F.sum(model(x))
+        loss.backward()
+        for w in (model.w1, model.w2):
+            w.copy_(w - 0.1 * w.grad)
+        return loss
+
+    graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
+    assert all(k == 1 for k in plan.interleaved), plan.interleaved
+    values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
+    x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = GatedPair(meta(64, 32), meta(64, 32))
+            f = lumen.compile(lambda m, x: m(x), device="mps")
+            f(model, meta(16, 32))
+            model.load_state_dict(values)
+            got.append(lumen.to_numpy(f(model, x)))
+    finally:
+        lumen.config.compiler.reset()
+    np.testing.assert_allclose(got[0], got[1], rtol=1e-5, atol=1e-6)
+
+
+class GatedMLP2(lumen.nn.Module):
+    """A gated pair, then its down projection (``nn.Linear``'s weights)."""
+
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w2.t()
+        return (g * F.sigmoid(g) * u) @ self.w3.t()
+
+
+@pytest.mark.mps
+def test_gated_pairs_backward_is_interleaved():
+    """Gradients of a gated MLP: the pair's block interleaved through its
+    backward too (``merge_dots``): its cotangents ``[dg | du]`` interleaved,
+    written side by side by the down projection's gradient's epilogue (one
+    kernel, ``EXPANDED``), x's gradient one dot of them and the block, the
+    weights' one dot, each weight's its pairs. The gradients the unmerged
+    program's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    h, d, m = 64, 32, 16
+
+    def step(model, x):
+        loss = F.sum(model(x))
+        loss.backward()
+        return loss, x.grad, model.w1.grad, model.w2.grad, model.w3.grad
+
+    make = lambda: GatedMLP2(meta(h, d), meta(h, d), meta(d, h))
+    graph = lumen.make_graph(step)(make(), meta(m, d))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    labels = [s["label"] for s in plan.steps()]
+    # The cotangents the epilogue of the dot of their gradient: one kernel.
+    (cotangents,) = [label for label in labels if label.endswith("concatenate")]
+    assert cotangents.startswith("dot_general → "), labels
+    assert labels.count("2x dot_general") == 2, labels
+    values = {"w1": rand(h, d, seed=1) / 4, "w2": rand(h, d, seed=2) / 4, "w3": rand(d, h, seed=3) / 4}
+    x = lumen.from_numpy(rand(m, d, seed=4)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = make()
+            f = lumen.compile(step, device="mps")
+            f(model, meta(m, d))
+            model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+            got.append([lumen.to_numpy(t) for t in f(model, x)])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.mps

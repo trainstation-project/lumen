@@ -2596,7 +2596,9 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
 
 /// A gated pair's halves (`gemm_kernel`'s `PAIRED`): the slices of
 /// `dot`'s value, its only readers, that are its two halves along its last
-/// dimension (the rhs's one free dimension; no batch), first then second.
+/// dimension (the rhs's one free dimension; no batch), first then second;
+/// or, its rhs interleaved in memory (`merge_dots`' interleaved block, see
+/// [`gemm_interleaved`]), the slices of its value's pairs.
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
     let Primitive::DotGeneral {
         lhs_batch,
@@ -2612,11 +2614,10 @@ pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'
     if !lhs_batch.is_empty() || rhs_rank != rhs_contracting.len() + 1 || n % 2 != 0 {
         return None;
     }
-    let readers: Vec<&Node> = body
-        .nodes()
-        .iter()
-        .filter(|node| node.inputs.contains(&dot.output))
-        .collect();
+    if let Some(pair) = gemm_interleaved(body, dot) {
+        return Some(pair);
+    }
+    let readers = readers_of(body, dot.output);
     let half = |node: &&Node, start: usize| match &node.primitive {
         Primitive::Slice {
             start_indices,
@@ -2638,24 +2639,99 @@ pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'
     }
 }
 
+/// The nodes of `body` reading `v`.
+fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
+    body.nodes()
+        .iter()
+        .filter(|node| node.inputs.contains(&v))
+        .collect()
+}
+
+/// A gated pair whose rhs is interleaved in memory (`merge_dots`' block of
+/// two weights, column `j` of each its `2j` and `2j + 1`), its value's pairs
+/// adjacent: its only reader a reshape of its last dimension into `[n / 2,
+/// 2]`, whose only readers are its two slices of that last one, first then
+/// second. Its kernel loads the rhs as it is (`INTERLEAVED`).
+pub(crate) fn gemm_interleaved<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
+    let shape = &body.type_of(dot.output).shape;
+    let (rank, n) = (shape.len(), *shape.last()?);
+    let pairs: Vec<usize> = shape[..rank - 1]
+        .iter()
+        .copied()
+        .chain([n / 2, 2])
+        .collect();
+    let outputs = body.outputs();
+    let reshape = match (
+        readers_of(body, dot.output).as_slice(),
+        outputs.contains(&dot.output),
+    ) {
+        ([r], false) if matches!(&r.primitive, Primitive::Reshape { new_sizes } if *new_sizes == pairs) => {
+            *r
+        }
+        _ => return None,
+    };
+    let one = |node: &&Node, start: usize| match &node.primitive {
+        Primitive::Slice {
+            start_indices,
+            limit_indices,
+            ..
+        } => (0..=rank).all(|d| match d == rank {
+            true => start_indices[d] == start && limit_indices[d] == start + 1,
+            false => start_indices[d] == 0 && limit_indices[d] == pairs[d],
+        }),
+        _ => false,
+    };
+    match (
+        readers_of(body, reshape.output).as_slice(),
+        outputs.contains(&reshape.output),
+    ) {
+        ([a, b], false) => match (one(a, 0) && one(b, 1), one(b, 0) && one(a, 1)) {
+            (true, _) => Some((a, b)),
+            (_, true) => Some((b, a)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A gated pair's backward's cotangents (`gemm_kernel`'s `EXPANDED`): the
 /// two values of `dot`'s shape its fusion's output concatenates along its
-/// last dimension, side by side, each computed at the dot's index.
+/// last dimension, side by side, each computed at the dot's index; or
+/// interleaved ([`gemm_expanded_interleaved`]).
 pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
     let out = body.outputs()[0];
     let node = body.nodes().iter().find(|n| n.output == out)?;
     let shape = &body.type_of(dot.output).shape;
+    let tupled: Vec<usize> = shape.iter().copied().chain([1]).collect();
     match (&node.primitive, node.inputs.as_slice()) {
         (Primitive::Concatenate { dimension, .. }, &[a, b])
-            if *dimension + 1 == shape.len()
-                && body.type_of(a).shape == *shape
-                && body.type_of(b).shape == *shape
-                && gemm_pair(body, dot).is_none() =>
+            if gemm_pair(body, dot).is_none()
+                && ((*dimension + 1 == shape.len()
+                    && body.type_of(a).shape == *shape
+                    && body.type_of(b).shape == *shape)
+                    || (*dimension == shape.len()
+                        && body.type_of(a).shape == tupled
+                        && body.type_of(b).shape == tupled)) =>
         {
             Some([a, b])
         }
         _ => None,
     }
+}
+
+/// Whether a gated pair's backward's cotangents are interleaved (each given
+/// a last dimension of one and concatenated along it: `merge_dots`'
+/// interleaved block's), its kernel writing each pair side by side
+/// (`EXPANDED`, `INTERLEAVED`).
+fn gemm_expanded_interleaved(body: &Graph, dot: &Node) -> bool {
+    let out = body.outputs()[0];
+    let rank = body.type_of(dot.output).shape.len();
+    gemm_expanded(body, dot).is_some()
+        && body
+            .nodes()
+            .iter()
+            .find(|n| n.output == out)
+            .is_some_and(|n| matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == rank))
 }
 
 /// The kernel of a contraction with its epilogue: the matmul template
@@ -2737,7 +2813,15 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
     let (operands, paired) = match (pair, expanded) {
+        (Some(_), _) if gemm_interleaved(body, dot).is_some() => (
+            format!("{o} r1, {o} r2"),
+            "NAME_epi, false, true, false, false, true",
+        ),
         (Some(_), _) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
+        (_, Some(_)) if gemm_expanded_interleaved(body, dot) => (
+            format!("{o} r"),
+            "NAME_epi, false, false, true, false, true",
+        ),
         (_, Some(_)) => (format!("{o} r"), "NAME_epi, false, false, true"),
         _ => (format!("{o} r"), "NAME_epi"),
     };

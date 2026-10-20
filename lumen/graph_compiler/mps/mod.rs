@@ -34,8 +34,8 @@ use super::pass::{Module, Pipeline};
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot_strength::DotStrength;
-use super::passes::gated_backward::GatedBackward;
 use super::passes::linear_cross_entropy::LinearCrossEntropy;
+use super::passes::merge_dots_backward::MergeDotsBackward;
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
 use super::{CompilerConfig, Options};
@@ -91,6 +91,8 @@ struct MpsModule<'a> {
     /// The parameter blocks dot merging added ([`merge_dots`]), after the
     /// graph's inputs.
     packed: Vec<(Vec<usize>, usize)>,
+    /// Each block's interleaving (1: its parameters side by side).
+    interleaved: Vec<usize>,
     /// The normalization diamonds' rows, by node: valid until the graph
     /// next changes (the loop fusion reading them).
     rows: Vec<diamonds::Row>,
@@ -150,7 +152,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     // A gated pair's backward's dots merged (before `merge_dots`, which
     // reads its weights' concatenate as the forward's block).
     if config.fuse && config.merge_dots && config.contraction_epilogues {
-        p.add(GatedBackward);
+        p.add(MergeDotsBackward);
     }
     // Merging needs fusion: the merged dot's readers read its slices.
     if config.fuse && config.merge_dots {
@@ -234,6 +236,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         graph: graph.clone(),
         options,
         packed: Vec::new(),
+        interleaved: Vec::new(),
         rows: Vec::new(),
         scalars: super::positions(&options.scalars),
         kernels: Vec::new(),
@@ -244,6 +247,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let MpsModule {
         graph: fused,
         packed,
+        interleaved,
         scalars,
         ..
     } = module;
@@ -307,6 +311,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }
     }
     plan.packed = packed;
+    plan.interleaved = interleaved;
     Ok(plan)
 }
 
