@@ -204,7 +204,8 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
     assert plan.packed == [(params, 0)]
     labels = [s["label"] for s in plan.steps()]
-    assert labels == [f"{len(sizes)}x dot_general" + " → neg" * len(sizes)], labels
+    rounded = "" if dtype == "float32" else " → cast(float32 -> bfloat16)"
+    assert labels == [f"{len(sizes)}x dot_general" + rounded + " → neg" * len(sizes)], labels
     rng = np.random.default_rng(0)
     values = [lumen.from_numpy(rng.standard_normal([h, d], dtype=np.float32)).to(dtype=dtype) for h in sizes]
     model = make()
@@ -233,7 +234,7 @@ def tpu(a, dtype="float32"):
         (
             lambda x, w, r: (F.matmul(x, w, "float32", x.dtype) * 2.0 + r).to(dtype="bfloat16"),
             lambda x, w, r: (x @ w) * 2 + r,
-            ["dot_general → mul → add → cast"],
+            ["dot_general → mul → add → cast(float32 -> bfloat16)"],
         ),
         (
             lambda x, w, r: (
@@ -303,7 +304,10 @@ def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, 
     params = list(range(1, n + 1))
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
     assert plan.packed == [(params, 0)]
-    assert [s["label"] for s in plan.steps()] == steps
+    rounded = "" if dtype == "float32" else " → cast(float32 -> bfloat16)"
+    assert [s["label"] for s in plan.steps()] == [
+        label.replace("dot_general", "dot_general" + rounded) for label in steps
+    ]
     rng = np.random.default_rng(0)
     ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(n)]
     x = rng.standard_normal([m, d], dtype=np.float32)
