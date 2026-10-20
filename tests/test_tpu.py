@@ -345,3 +345,44 @@ def test_projections_backward_merges_into_two_dots():
     expected = [dq.T @ x, dk.T @ x, dv.T @ x, dq @ ws[0] + dk @ ws[1] + dv @ ws[2]]
     for a, b in zip(got, expected):
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
+
+
+class SwiGLU(lumen.nn.Module):
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w3.t()
+        return (g * lumen.functional.sigmoid(g) * u) @ self.w2.t()
+
+
+def test_a_swiglu_backward_merges_its_gate_and_up():
+    d, h, m = 256, 512, 128
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+
+    def step(model, x, dy):
+        model(x).backward(dy)
+        return [model.w1.grad, model.w3.grad, model.w2.grad, x.grad]
+
+    make = lambda: SwiGLU(meta(h, d), meta(h, d), meta(d, h))
+    graph = lumen.make_graph(step)(make(), meta(m, d), meta(m, d))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[2, 3, 4], packable=[2, 3, 4])
+    assert plan.packed == [([2, 3], 0)]
+    labels = [s["label"] for s in plan.steps()]
+    assert len(labels) == 5 and labels[0].startswith("2x dot_general →") and "2x dot_general" in labels, labels
+    assert not any("concatenate" in label for label in labels), labels
+    rng = np.random.default_rng(0)
+    w1, w3, w2 = (rng.standard_normal(s, dtype=np.float32) / 16 for s in ([h, d], [h, d], [d, h]))
+    x, dy = (rng.standard_normal([m, d], dtype=np.float32) for _ in range(2))
+    model = make()
+    f = lumen.compile(step, device="tpu")
+    f(model, meta(m, d), meta(m, d))
+    model.load_state_dict({"w1": lumen.from_numpy(w1), "w3": lumen.from_numpy(w3), "w2": lumen.from_numpy(w2)})
+    got = [floats(t) for t in f(model, tpu(x), tpu(dy))]
+    g, u = x @ w1.T, x @ w3.T
+    s = 1 / (1 + np.exp(-g))
+    dh = dy @ w2
+    dg, du = dh * u * (s + g * s * (1 - s)), dh * g * s
+    for a, b in zip(got, [dg.T @ x, du.T @ x, dy.T @ (g * s * u), dg @ w1 + du @ w3]):
+        np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
