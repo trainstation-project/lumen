@@ -1,7 +1,3 @@
-# **************************************************
-# Copyright (c) 2026, Mayank Mishra
-# **************************************************
-
 import cutlass.cute as cute
 from cutlass import Float32, Numeric, const_expr, range_constexpr
 from cutlass.cute import TensorSSA

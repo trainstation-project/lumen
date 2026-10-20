@@ -1,26 +1,7 @@
-//! Dot strength reduction (XLA: `DotStrengthReduction`): a dot with one
-//! operand a vector (its free dimensions of size 1, or none: a decode
-//! step's `x @ W`, attention's backward `D = rowsum(dO * O)`) is a product
-//! and a sum, `reduce_sum(v * m)` over the contracted dimensions, the
-//! vector broadcast into the matrix's layout (read as it is, once), not a
-//! matmul (whose tiles would be mostly padding). The operands are cast to
-//! the accumulation dtype (exactly: a product of two floats of half its
-//! width is exact in it), the sum accumulates in it, and the result is cast
-//! to the dot's.
-//!
-//! Which dots, as XLA's backends choose: a vector·vector dot (both
-//! operands' free dimensions of one element: `rowsum(dO * O)`) always (XLA's
-//! CPU and GPU both: no matmul suits it, and a TPU's dot kernel cannot run
-//! it), a vector·matrix one only with `matrices` (the MPS's: its matmuls'
-//! tiles would be mostly padding; a TPU's dot kernel streams the matrix at
-//! nearly its memory's bandwidth, and its product, unfused, would not).
-
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// `graph` with each dot of a vector a product and a sum: of two vectors,
-/// and with `matrices` of a vector and a matrix.
 pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -43,8 +24,6 @@ pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
                     (inputs[0], lhs_batch, lhs_contracting),
                     (inputs[1], rhs_batch, rhs_contracting),
                 ];
-                // The matrix: the rhs, unless it is the vector (the lhs's
-                // free dimensions have more than one element).
                 let vector = |&(v, b, c): &(Var, &Vec<usize>, &Vec<usize>)| {
                     let shape = &out.type_of(v).shape;
                     let free = (0..shape.len()).filter(|d| !b.contains(d) && !c.contains(d));
@@ -62,7 +41,6 @@ pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
                     _ => None,
                 }
                 .map(|sum| {
-                    // The vector's free dimensions (of size 1) back.
                     let sum = reshaped(&mut out, sum, &graph.type_of(node.output).shape);
                     match accum == *output_dtype {
                         true => sum,
@@ -92,10 +70,6 @@ pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
     out
 }
 
-/// `sum_k vector * matrix` in `accum`, each operand `(value, batch,
-/// contracting)`: the vector broadcast into the matrix's dimensions, the
-/// product summed over its contracting ones; its dimensions in the dot's
-/// order but for the vector's free ones (of size 1).
 fn product(
     out: &mut Graph,
     (v, v_batch, v_contracting): (Var, &Vec<usize>, &Vec<usize>),
@@ -103,8 +77,6 @@ fn product(
     accum: DType,
 ) -> Var {
     let (v_ty, m_ty) = (out.type_of(v).clone(), out.type_of(m).clone());
-    // The vector's batch and contracting dimensions, each with the
-    // matrix's it is, in the matrix's order.
     let mut kept: Vec<(usize, usize)> = v_batch
         .iter()
         .zip(m_batch)
@@ -112,7 +84,6 @@ fn product(
         .map(|(&a, &b)| (a, b))
         .collect();
     kept.sort_by_key(|&(_, d)| d);
-    // Its free dimensions (of size 1) dropped, then in that order.
     let mut by_vector = kept.clone();
     by_vector.sort_unstable();
     let new_sizes: Vec<usize> = by_vector.iter().map(|&(d, _)| v_ty.shape[d]).collect();
@@ -126,7 +97,6 @@ fn product(
         x = apply(Primitive::Transpose { permutation }, &[x]);
     }
     let x = cast_with(&mut apply, x, v_ty.dtype, accum);
-    // Over the matrix's free dimensions (none: as it is).
     let x = match kept.len() == m_ty.shape.len() {
         true => x,
         false => apply(
@@ -148,8 +118,6 @@ fn product(
         },
         &[product],
     );
-    // The sum's dimensions (the matrix's others, in its order) in the
-    // dot's: batch, then the lhs's free ones, then the rhs's.
     let rest: Vec<usize> = (0..m_ty.shape.len())
         .filter(|d| !axes.contains(d))
         .collect();
@@ -165,7 +133,6 @@ fn product(
     }
 }
 
-/// `v` (of `from`) as `to`.
 fn cast_with(
     apply: &mut impl FnMut(Primitive, &[Var]) -> Var,
     v: Var,
@@ -178,8 +145,6 @@ fn cast_with(
     }
 }
 
-/// `v` of `out` reshaped to `shape`, if it is not of it (a reshape to its
-/// own shape is a copy).
 fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     match out.type_of(v).shape == shape {
         true => v,
@@ -194,8 +159,6 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     }
 }
 
-/// [`reduce_vector_dots`] as a pass: of vector·matrix dots too with
-/// `matrices`.
 pub(crate) struct DotStrength {
     pub(crate) matrices: bool,
 }

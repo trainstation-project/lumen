@@ -1,6 +1,3 @@
-"""Horizontal loop fusion on MPS (``lumen/graph_compiler/mps/horizontal.rs``):
-independent small loop fusions of as many elements, one kernel."""
-
 import re
 
 import numpy as np
@@ -41,8 +38,6 @@ def _merged(label):
 
 
 def _independent(a, b, c):
-    # Three chains, none reading another's value, of as many elements (b
-    # another shape), and a lone cast.
     return F.exp(a) * 2.0 + 1.0, (b - 1.0) * b, c.bfloat16()
 
 

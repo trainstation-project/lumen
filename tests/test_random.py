@@ -1,10 +1,3 @@
-"""Random numbers (``lumen.random``, modeled on PyTorch's generator):
-``lumen.manual_seed``, ``lumen.rand``, ``lumen.randn`` and ``F.dropout``,
-drawn from the ``random_bits`` primitive (Philox4x32-10) inside compiled
-functions: which numbers each draw reads (a Philox in Python here, against
-Random123's answers), the same on every device, a new run of the stream
-each call, and dropout's mask recomputed in its backward, never stored."""
-
 import math
 
 import numpy as np

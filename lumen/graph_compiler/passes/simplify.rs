@@ -8,8 +8,6 @@ use crate::{DType, Element, Scalar};
 
 pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
-    // The values read once, by a node (not an output): a dot's that a
-    // transpose alone reads is rewritten, never computed twice.
     let mut reads = vec![0usize; graph.types.len()];
     for n in nodes {
         for (k, &v) in n.inputs.iter().enumerate() {
@@ -21,9 +19,6 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     }
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-    // Each value of `out`'s node (to look at a value's producer), and
-    // whether it is read once (a dot's, by its transpose, may be swapped:
-    // never computed twice).
     let mut producer: HashMap<Var, usize> = HashMap::new();
     let mut once: HashMap<Var, bool> = HashMap::new();
     for &v in graph.inputs() {
@@ -36,9 +31,6 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
         let value = match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {
             Some(Rewrite::Value(v)) => v,
             Some(Rewrite::Node(p, ins)) => {
-                // Replacing the node and those it reads but the rewrite
-                // does not (`reshape(reshape(x))`, a dot rounding as the
-                // cast of it did): the lines of all of them.
                 let replaced: Vec<Node> = std::iter::once(node.clone())
                     .chain(
                         inputs
@@ -51,9 +43,6 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 out.apply(p, &ins).expect("a rewrite is typed as the node")
             }
             None => match &node.primitive {
-                // A dot of an input's transpose (or of the transpose's
-                // cast): the dot of the input (or its cast) at the
-                // dimensions the transpose maps.
                 Primitive::DotGeneral { .. } => {
                     folded(&mut out, &producer, matched, &node.primitive, &inputs)
                 }
@@ -68,14 +57,12 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 v
             }),
         };
-        // The nodes added: those before the last read by the next alone.
         for (k, n) in out.nodes().iter().enumerate().skip(first) {
             producer.insert(n.output, k);
             if n.output != value {
                 once.insert(n.output, true);
             }
         }
-        // A value a node simplified to has that node's readers too.
         let fresh = !once.contains_key(&value);
         once.insert(value, fresh && reads[node.output] == 1);
         map[node.output] = value;
@@ -86,13 +73,10 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
 }
 
 enum Rewrite {
-    /// The node's value is this one.
     Value(Var),
-    /// The node is this one.
     Node(Primitive, Vec<Var>),
 }
 
-/// What `primitive` applied to `inputs` (values of `out`) simplifies to.
 fn rewrite(
     out: &Graph,
     producer: &HashMap<Var, usize>,
@@ -180,7 +164,6 @@ fn rewrite(
                     ..
                 }) => {
                     let permutation: Vec<usize> = permutation.iter().map(|&d| inner[d]).collect();
-                    // Composing to the identity: x.
                     match permutation.iter().enumerate().all(|(i, &d)| i == d) {
                         true => Some(Rewrite::Value(x[0])),
                         false => Some(Rewrite::Node(Transpose { permutation }, vec![x[0]])),
@@ -215,7 +198,6 @@ fn rewrite(
                     shape: shape.clone(),
                     broadcast_dimensions,
                 };
-                // Only if it types (each kept dimension 1 or the size).
                 composed
                     .infer(&[out.type_of(x[0])])
                     .is_ok()
@@ -227,13 +209,10 @@ fn rewrite(
     }
 }
 
-/// The node of `out` computing `v`, if one does.
 fn node_of<'a>(out: &'a Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<&'a Node> {
     producer.get(&v).map(|&i| &out.nodes()[i])
 }
 
-/// `primitive` of `inputs`, a primitive moved past (the rewrites only
-/// `matched` makes, see the module's), added to `out`: its value, if it is.
 fn moved(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -249,11 +228,8 @@ fn moved(
         )
     };
     let read_once = |v: Var| once.get(&v) == Some(&true);
-    // Each new operand: a value, or a node of these inputs.
     let mut operands: Vec<(Option<Primitive>, Vec<Var>)> = Vec::new();
     let then: Primitive = match primitive {
-        // ReshapeMover: op(r(x), r(y), c) = r(op(x, y, c')), a reshape or
-        // transpose `r` read by `op` alone, not of a constant.
         p if crate::graph_compiler::elementwise(p) && !matches!(p, Cast { .. }) => {
             let rearranged = |v: Var| {
                 node_of(out, producer, v).filter(|n| {
@@ -279,9 +255,6 @@ fn moved(
             }
             r.primitive.clone()
         }
-        // ConvertMover: l(widen(x), widen(y), c) = widen(l(x, y, c')), a
-        // layout primitive `l` of casts from one dtype read by it alone, of
-        // constants exact in it.
         p if layout(p) => {
             let cast = |v: Var| {
                 node_of(out, producer, v)
@@ -320,8 +293,6 @@ fn moved(
             }
             Cast { new_dtype: to }
         }
-        // ConvertMover: narrow(l(x)) = l(narrow(x)), up through the layout
-        // primitives read by the next alone.
         Cast { new_dtype } => {
             let x = inputs[0];
             let n = node_of(out, producer, x).filter(|n| layout(&n.primitive) && read_once(x))?;
@@ -353,8 +324,6 @@ fn moved(
     Some(out.apply(then, &[x]).expect("the primitive moved past"))
 }
 
-/// `v` cast to `dtype`, up through the layout primitives (reshapes,
-/// transposes, slices and concatenates) read by the next alone.
 fn cast_up(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -385,10 +354,6 @@ fn cast_up(
     }
 }
 
-/// The node `n` (of a constant) computes, of the shape `shape` that
-/// `rearrange` (a reshape or transpose) takes to its own, if it computes
-/// that as simply (XLA: `ReshapeMover::CanTriviallyRearrange`): a `full`,
-/// a scalar's broadcast, a broadcast a transpose keeps in order.
 fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Primitive> {
     use Primitive::*;
     let shape = shape.to_vec();
@@ -433,14 +398,10 @@ fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Prim
     }
 }
 
-/// `value` as an element of `dtype`.
 fn round(dtype: DType, value: Scalar) -> Scalar {
     dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar())
 }
 
-/// The dot `dot(x[0], x[1])` transposed by `permutation`, if that swaps
-/// its free dimensions (batch, lhs free, rhs free → batch, rhs free, lhs
-/// free, each in order): the dot of the operands swapped.
 fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Option<Rewrite> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -474,13 +435,6 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
     })
 }
 
-/// `dot` of `x`, its operands' transposes of inputs folded into its
-/// dimension numbers, added to `out`: each input read as it is, at the
-/// dimensions the transpose maps them to (a cast of the transpose, as
-/// mixed precision casts a weight: the cast of the input, read so), if
-/// either is one that keeps its free dimensions in order (so the dot's
-/// result is the same); with `matched`, of any value. Its value, if it
-/// folded either.
 fn folded(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -508,7 +462,6 @@ fn folded(
     );
     let mut changed = false;
     for side in 0..2 {
-        // The operand's transpose of an input, and the cast after it.
         let (cast, transposed) = match node_of(out, producer, x[side]) {
             Some(Node {
                 primitive: cast @ Primitive::Cast { .. },
@@ -560,8 +513,6 @@ fn folded(
     })
 }
 
-/// The value of `v` if it is a constant everywhere: a `full`, through
-/// broadcasts, reshapes and casts.
 fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> {
     let mut v = v;
     loop {
@@ -576,8 +527,6 @@ fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> 
     }
 }
 
-/// [`simplify_with`] as a pass: `matched`, after the device's patterns
-/// are matched (transposes of dots swapped, layouts moved).
 pub(crate) struct Simplify {
     pub(crate) matched: bool,
 }

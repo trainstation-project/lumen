@@ -25,12 +25,10 @@ def test_explicit_dtype():
 
 
 def test_extended_dtypes():
-    # integer widths
     for dt in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]:
         t = Tensor([-1, 2] if dt.startswith("int") else [1, 2], dtype=dt)
         assert t.dtype == dt
         assert t[1] == 2
-    # half precision: values roundtrip through Python floats
     t = Tensor([1.5, 2.5], dtype="float16")
     assert t.dtype == "float16"
     assert t.tolist() == [1.5, 2.5]
@@ -84,7 +82,6 @@ def test_getitem_view_and_scalar():
     assert row.tolist() == [3.0, 4.0, 5.0]
     assert row.shares_storage_with(t)
     assert t[1, 2] == 5.0
-    # negative indexing
     assert t[-1].tolist() == [3.0, 4.0, 5.0]
 
 
@@ -92,11 +89,9 @@ def test_setitem():
     t = Tensor.zeros([2, 2])
     t[1, 1] = 5.0
     assert t.tolist() == [[0.0, 0.0], [0.0, 5.0]]
-    # single-int key on a 1-d view
     row = t[1]
     row[0] = 7.0
     assert t[1, 0] == 7.0
-    # negative index
     t[-1, -1] = 9.0
     assert t[1, 1] == 9.0
 
@@ -145,9 +140,9 @@ def test_errors():
     with pytest.raises(ValueError):
         Tensor([1, 2, 3], dtype="nope")
     with pytest.raises(ValueError):
-        Tensor([[1, 2], [3]])  # ragged
+        Tensor([[1, 2], [3]])
     with pytest.raises(ValueError):
-        Tensor([1, 2, 3], shape=[2, 2])  # numel mismatch
+        Tensor([1, 2, 3], shape=[2, 2])
     with pytest.raises(IndexError):
         Tensor.arange(3)[10]
 
@@ -169,8 +164,7 @@ def test_empty_has_the_requested_shape_dtype_and_device():
     assert t.shape == [2, 3]
     assert t.dtype == "int32"
     assert t.device == "cpu:0"
-    assert lumen.empty([4]).dtype == "float32"  # torch's default dtype
-    # Contents are unspecified until written; write, then read.
+    assert lumen.empty([4]).dtype == "float32"
     assert t.fill_(7).tolist() == [[7, 7, 7], [7, 7, 7]]
     e = lumen.empty([3])
     for i in range(3):
@@ -197,7 +191,7 @@ def test_to_converts_dtypes_and_moves():
     meta = x.to("meta", "float16")
     assert (meta.device, meta.dtype) == ("meta:0", "float16")
     with pytest.raises(ValueError, match="device"):
-        x.to("float16")  # a device, positionally
+        x.to("float16")
     try:
         m = x.to("mps", lumen.float16)
     except RuntimeError:

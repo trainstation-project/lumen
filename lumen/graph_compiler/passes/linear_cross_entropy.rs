@@ -1,56 +1,19 @@
-//! A linear layer's cross entropy, matched as written: `F.cross_entropy`
-//! of a dot's logits (`F.matmul(h, w.t(), "float32", "float32")`, an LM
-//! head's), however traced, run as [`Primitive::LinearCrossEntropy`] (two
-//! kernels, Cut Cross-Entropy's) when nothing else reads the logits: they
-//! never reach memory. As flash attention's ([`crate::graph_compiler::attention`]),
-//! no call of its own needed (trained, `lumen/autograd/cross_entropy.py`
-//! makes the gradient not read the logits).
-//!
-//! What is matched, from the dot (`F.cross_entropy`'s forward as traced):
-//!
-//! ```text
-//! x    = dot_general(h, w')         [B, V], h [B, D], w' [D, V] or [V, D], in and to float32
-//! m    = reduce_max(x, 1)           read as reshape(m, [B, 1]): r
-//! lse  = reshape(r, [B]) + log(reduce_sum(exp(x - broadcast(r)), 1))
-//! pick = gather(reshape(x, [B V]), iota(B) * V + target, 0)
-//! loss = lse - pick
-//! ```
-//!
-//! `loss` and `lse` are replaced by the primitive's rows (its kernels
-//! write the loss); each other value read by the pattern alone. Its logits
-//! accumulate in float32 as the dot's, but its log-sum-exp adds them in
-//! another order (each tile's classes' first), as the row kernel's online
-//! softmax does.
-//!
-//! Trained a chunk of rows at a time (its gradient recomputing a chunk's
-//! logits, `lumen.config.compiler.fused_linear_cross_entropy_chunk_size`),
-//! it is computed from those chunks' logits instead
-//! ([`super::chunked_cross_entropy`]): each chunk's logits once, its losses
-//! and gradient one row kernel of them (XMA's fused linear cross entropy).
-
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
-/// A match: the dot's operands and the pattern's nodes (by index), `loss`
-/// and `lse` its values read outside it (`pick`, the first of `lse` and the
-/// class's logit: where it is computed).
 pub(super) struct Found {
     pub(super) h: Var,
     w: Var,
-    /// Whether `w` is `[D, V]` (read transposed).
     transposed: bool,
     pub(super) target: Var,
     pub(super) members: Vec<usize>,
     pub(super) loss: usize,
     pub(super) lse: usize,
     first: usize,
-    /// The gather of the class's logit.
     pub(super) pick: usize,
 }
 
-/// `graph` with each linear cross entropy whose logits nothing else reads
-/// as a [`Primitive::LinearCrossEntropy`].
 fn linear_cross_entropy(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let (producer, readers) = uses(graph);
@@ -77,8 +40,6 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
             out.set_label(map[node.output], node.label);
             continue;
         };
-        // At the first of its values read outside it (the target defined
-        // before: `matched`'s).
         if i != f.first {
             continue;
         }
@@ -117,7 +78,6 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
     out
 }
 
-/// Each value's producing node and its readers (by node index).
 pub(super) fn uses(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     let mut producer = vec![None; graph.types.len()];
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -132,9 +92,6 @@ pub(super) fn uses(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     (producer, readers)
 }
 
-/// The linear cross entropy of the dot at node `dot`, if it is one (see
-/// the module's pattern) whose values but `lse` and `pick` nothing else
-/// reads, its target defined before both.
 pub(super) fn matched(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -169,12 +126,10 @@ pub(super) fn matched(
     }
     let x = node.output;
     let (b, v) = (h.shape[0], graph.type_of(x).shape[1]);
-    // The one node reading `v` (not an output), if it is one.
     let only = |v: Var| match (&readers[v][..], graph.outputs().contains(&v)) {
         (&[k], false) => Some(k),
         _ => None,
     };
-    // The logits' readers: the max, the shift, the rows flattened.
     if readers[x].len() != 3 || graph.outputs().contains(&x) {
         return None;
     }
@@ -182,8 +137,6 @@ pub(super) fn matched(
     let max = find(&|n| matches!(&n.primitive, ReduceMax { axes } if axes == &[1]))?;
     let shift = find(&|n| matches!(n.primitive, Sub) && n.inputs[0] == x)?;
     let flat = find(&|n| matches!(&n.primitive, Reshape { new_sizes } if new_sizes == &[b * v]))?;
-    // The max's reshapes (to [B, 1], back to [B]): the broadcast for the
-    // shift reads one, lse another (or the max).
     let mut views = vec![max];
     let mut k = 0;
     while k < views.len() {
@@ -202,7 +155,6 @@ pub(super) fn matched(
             && values.contains(&nodes[k].inputs[0])
             && only(nodes[k].output) == Some(shift)
     })?;
-    // exp, its sum over the classes, its log, plus the max.
     let exp = only(nodes[shift].output).filter(|&k| matches!(nodes[k].primitive, Exp))?;
     let sum = only(nodes[exp].output).filter(|&k| matches!(&nodes[k].primitive, ReduceSum { axes, accum_dtype: DType::F32 } if axes == &[1]))?;
     let log = only(nodes[sum].output).filter(|&k| matches!(nodes[k].primitive, Log))?;
@@ -215,7 +167,6 @@ pub(super) fn matched(
     if !values.contains(&max_read) || graph.type_of(max_read).shape != [b] {
         return None;
     }
-    // Nothing else reads the max.
     let inside = |r: &usize| views.contains(r) || *r == broadcast || *r == lse;
     if values
         .iter()
@@ -223,12 +174,10 @@ pub(super) fn matched(
     {
         return None;
     }
-    // The class's logit: the rows flattened at row * V + target.
     let pick = only(nodes[flat].output).filter(|&k| {
         matches!(nodes[k].primitive, Gather { axis: 0 }) && nodes[k].inputs[0] == nodes[flat].output
     })?;
     let target = row_offsets_plus(graph, producer, nodes[pick].inputs[1], b, v)?;
-    // The loss: lse less the class's logit, its only reader.
     let loss = only(nodes[pick].output).filter(|&k| {
         matches!(nodes[k].primitive, Sub)
             && nodes[k].inputs == [nodes[lse].output, nodes[pick].output]
@@ -254,8 +203,6 @@ pub(super) fn matched(
     })
 }
 
-/// `target` if `at` is `iota(B) * V + target` (`target` `[B]`, int32 or
-/// int64, either operand order).
 fn row_offsets_plus(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -295,7 +242,6 @@ fn row_offsets_plus(
     (t.shape == [b] && matches!(t.dtype, DType::I32 | DType::I64)).then_some(target)
 }
 
-/// [`linear_cross_entropy`] as a pass.
 pub(crate) struct LinearCrossEntropy;
 
 impl<M: Module> CompilerPass<M> for LinearCrossEntropy {

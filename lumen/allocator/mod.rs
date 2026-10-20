@@ -74,7 +74,6 @@ impl DataPtr {
 
 impl Drop for DataPtr {
     fn drop(&mut self) {
-        // SAFETY: an allocation of `allocator`'s, released only here.
         unsafe { self.allocator.deallocate(self.ptr, self.nbytes) }
     }
 }
@@ -123,13 +122,8 @@ pub(crate) struct Region {
     allow(dead_code)
 )]
 struct State {
-    /// The range's start, reserved on the first allocation.
     base: Option<Base>,
-    /// Free blocks, offset to length; offsets and lengths are multiples of
-    /// the alignment, and no two blocks touch (they are merged).
     free: BTreeMap<usize, usize>,
-    /// Allocations not yet freed, offset to requested bytes, and the sum of
-    /// their bytes.
     live: BTreeMap<usize, usize>,
     live_bytes: usize,
 }
@@ -140,8 +134,6 @@ struct State {
 )]
 struct Base(NonNull<u8>);
 
-// SAFETY: the range is device memory owned by the allocator; the pointer
-// is only offset and handed out, never dereferenced here.
 unsafe impl Send for Base {}
 
 #[cfg_attr(
@@ -214,14 +206,11 @@ impl Region {
             state.base = Some(Base(reserve(self.capacity)));
         }
         let block = self.block(nbytes);
-        // An empty allocation takes no block: any aligned offset will do.
         let (&offset, &len) = match nbytes {
             0 => state.free.iter().next().unwrap_or((&0, &0)),
             _ => state.free.iter().find(|&(_, &len)| len >= block)?,
         };
         let base = state.base.as_ref().expect("reserved above").0.as_ptr();
-        // In the device's address space: its memory is not a Rust
-        // allocation, so no `add`.
         let ptr = NonNull::new(base.wrapping_add(offset))?;
         if nbytes > 0 {
             state.free.remove(&offset);
@@ -273,7 +262,6 @@ impl Region {
         );
     }
 
-    // (The TPU's allocator keeps its region's buffer itself.)
     #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
     pub(crate) fn base(&mut self) -> Option<NonNull<u8>> {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());

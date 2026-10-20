@@ -1,58 +1,3 @@
-//! Dot merging (XLA: `DotMerger`): dots that share an operand, as `x @ w1`
-//! and `x @ w3` share `x`, become one dot of it with their other operands
-//! side by side, `x @ [w1 | w3]`, sliced back into each one's result: one
-//! larger matmul instead of several small ones. Nothing concatenates them:
-//! the other operands must be parameters not yet placed, which are then
-//! placed side by side in one block ([`crate::Tensor::pack`]), read by the
-//! merged dot as a new input.
-//!
-//! Dots merge if they have the same dimension numbers and accumulation
-//! dtype (the same primitive: one kernel accumulates in one dtype) and the
-//! same operand on the same side, and their other operands are distinct packable
-//! parameters, read by that dot alone (or, as contiguous parts of their
-//! block, read in place, by others too: an optimizer's update), differing
-//! only in their last free dimension (the one they are side by side along). Only dots whose results
-//! are read by primitives that fuse, or dots (and are not outputs), merge:
-//! those read their slices in place, where any other reader would need a
-//! copy of its own.
-//!
-//! A dot's operand may be computed from its parameter elementwise too (a
-//! chain of elementwise primitives, each of it and splat constants alone:
-//! mixed precision's bfloat16 copy of a float32 weight, a scaled weight),
-//! the same chain for each dot of a group: the merged dot reads the chain
-//! of their block, computed once (elementwise, the block's chain is each
-//! one's side by side); any other reader of a dot's operand (a backward's
-//! dot of the same bfloat16 weight) reads its part of it.
-//!
-//! A gated pair (two dots whose results one elementwise value combines:
-//! SwiGLU's gate and up, [`combined`]) of a shared lhs, whose weights the
-//! program does not assign (inference) and nothing else reads, has its block
-//! **interleaved** (CODA's layout, arXiv 2605.19269): column `j` of each
-//! weight its `2j` and `2j + 1`, each weight a stride-2 view of it
-//! ([`crate::Tensor::pack`]'s `interleave`). The merged dot's result is then
-//! interleaved too, each dot's its pairs' slice (a reshape into `[n / 2, 2]`,
-//! sliced, reshaped back): its kernel loads the weights as they are, each
-//! lane holding a pair (`codegen::gemm_interleaved`, `INTERLEAVED`).
-//! Its backward (`merge_dots_backward`'s, written side by side) is interleaved
-//! too, consistently along each axis it permutes ([`backward`]): the
-//! concatenate of its weights the block, that of its cotangents `[dg | du]`
-//! interleaved (each given a last dimension of one, concatenated along it:
-//! the epilogue writing them writes each pair side by side, `EXPANDED`), and
-//! the slices of its weights' gradient their pairs; if anything else reads
-//! those, side by side. Weights the program assigns (an optimizer's update)
-//! stay side by side.
-//!
-//! A parameter is in one block at most. Dots of the same parameters, in the
-//! same order through the same chain, sharing another operand (the same
-//! weights projecting another input: a gradient accumulation's next pass),
-//! merge too, reading that block (its chain computed once).
-//!
-//! A parameter the program assigns (donated: an optimizer's update, its new
-//! value written over it in place) merges only as a contiguous part of its
-//! block, side by side along its first dimension (past any of size 1): as
-//! PyTorch's fused QKV weights, `[3D, D]` blocks of `nn.Linear`'s `[out,
-//! in]` weights, each a slice an optimizer updates in place.
-
 use std::collections::HashMap;
 
 use super::MpsModule;
@@ -62,52 +7,31 @@ use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::combined;
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Dots that can merge: their nodes, in graph order.
 struct Group {
-    /// The operand they share, and its side (0 for lhs, 1 for rhs).
     shared: Var,
     side: usize,
     primitive: Primitive,
-    /// Their other operands' type, with the concatenated dimension 0.
     other: TensorType,
-    /// The concatenated dimension of those operands.
     dimension: usize,
-    /// The chain their operands are computed from their parameters by
-    /// (none: the parameters themselves).
     chain: Vec<Link>,
     nodes: Vec<usize>,
-    /// Their parameters, each once.
     weights: Vec<Var>,
 }
 
-/// One elementwise primitive of a chain from a parameter to a dot's
-/// operand ([`merge_dots`]): of the value before it alone, or of it and a
-/// splat constant (the operand position of the scalar `full` broadcast).
 #[derive(Debug, Clone, PartialEq)]
 struct Link {
     primitive: Primitive,
     splat: Option<(usize, Primitive)>,
 }
 
-/// The blocks [`merge_dots`] adds: each its parameters' input positions
-/// and the dimension they are side by side (or interleaved) along.
 type Packs = Vec<(Vec<usize>, usize)>;
 
-/// `graph` with each group of dots that share an operand merged into one,
-/// and the inputs it adds: each the block of these inputs (positions,
-/// among those `packable`; those `donated` contiguous in it) side by side
-/// along a dimension, or interleaved along it ([`interleaves`]): each
-/// block's interleaving (1: side by side).
 pub(super) fn merge_dots(
     graph: &Graph,
     packable: &[bool],
     donated: &[bool],
 ) -> (Graph, Packs, Vec<usize>) {
     let nodes = graph.nodes();
-    // Each packable input read by one node alone: its position. A
-    // concatenate of packable inputs alone does not count: if they merge,
-    // in its order and dimension, it is their block (a backward's, of the
-    // weights its dot's merged dots read, `lumen/autograd/dots.py`).
     let is_packable = |v: Var| {
         let i = graph.inputs().iter().position(|&i| i == v);
         i.is_some_and(|i| packable.get(i) == Some(&true))
@@ -125,8 +49,6 @@ pub(super) fn merge_dots(
     {
         reads[v] += 1;
     }
-    // Each packable input: its position, and whether one node alone reads
-    // it (else it merges only as a contiguous part of its block).
     let mut position: Vec<Option<usize>> = vec![None; graph.types.len()];
     let mut alone = vec![false; graph.types.len()];
     for (i, &v) in graph.inputs().iter().enumerate() {
@@ -135,14 +57,10 @@ pub(super) fn merge_dots(
             alone[v] = reads[v] == 1;
         }
     }
-    // The parameter each dot operand is, or is computed from by a chain of
-    // elementwise primitives (each value before the operand read by the
-    // next alone), and the chain.
     let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
-    // A scalar `full` broadcast: the `full`.
     let splat = |v: Var| -> Option<Primitive> {
         let b = &nodes[producer[v]?];
         let Primitive::BroadcastInDim { .. } = b.primitive else {
@@ -180,8 +98,6 @@ pub(super) fn merge_dots(
         chain.reverse();
         Some((x, chain))
     };
-    // Whether each value is read only in place: by fusible primitives, or
-    // by dots (which read a slice as a strided view of it).
     let mut read_in_place = vec![true; graph.types.len()];
     for &v in graph.outputs() {
         read_in_place[v] = false;
@@ -192,7 +108,6 @@ pub(super) fn merge_dots(
     for node in nodes.iter().filter(|node| !in_place(node)) {
         node.inputs.iter().for_each(|&v| read_in_place[v] = false);
     }
-    // Each dot joins the first group it can, else starts one on each side.
     let mut groups: Vec<Group> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
         if !matches!(node.primitive, Primitive::DotGeneral { .. }) || !read_in_place[node.output] {
@@ -207,8 +122,6 @@ pub(super) fn merge_dots(
             let Some(dimension) = concat_dimension(&node.primitive, side, other.shape.len()) else {
                 continue;
             };
-            // A donated parameter, or one read elsewhere too, only as a
-            // contiguous part of the block.
             let i = position[w].expect("a packable input");
             let strided = other.shape[..dimension].iter().any(|&n| n != 1);
             if strided && (donated.get(i) == Some(&true) || !alone[w]) {
@@ -253,20 +166,10 @@ pub(super) fn merge_dots(
             )),
         }
     }
-    // A dot in two groups of two or more merges in the first; the rest of
-    // the second, if still two or more, merge at their first.
     let mut merged = vec![false; nodes.len()];
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
-    // Each parameter in one block at most: a later group's dots of one an
-    // earlier group packed stay unmerged, unless they are of that block's
-    // parameters, in its order, through its chain (the same weights read
-    // again: a gradient accumulation's next forward), reading it too.
     let mut packed = vec![false; graph.types.len()];
     let mut reuses: Vec<Option<usize>> = vec![None; groups.len()];
-    // Each group's block interleaved by (1: side by side); the backward's
-    // concatenates of cotangents interleaved by, and the slices of a
-    // gradient taking its member's pairs (the member, K, the axis), its
-    // interleaving rewrites.
     let mut interleave: Vec<usize> = vec![1; groups.len()];
     let mut cotangents: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut pairs_of: Vec<Option<(usize, usize, usize)>> = vec![None; nodes.len()];
@@ -315,26 +218,15 @@ pub(super) fn merge_dots(
 
     let mut packs = Vec::new();
     let mut interleaved = Vec::new();
-    // Each interleaved value's reshape into its K-tuples, by axis.
     let mut tupled: HashMap<(Var, usize), Var> = HashMap::new();
-    // Each merged group's block: its operands in order, its dimension, its
-    // input.
     let mut blocks: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
-    // The dots' operands each part of a block's chain: never computed
-    // again (a later dot's, traced after the first one's merge).
     let mut parted = vec![false; graph.types.len()];
-    // Each merged group's operand: its block's chain (the block itself if
-    // none), for the groups reusing it.
     let mut chains: Vec<Option<Var>> = vec![None; groups.len()];
-    // Each merged group's dots' operands (their parameters' chains: a
-    // bfloat16 copy each), its dimension, and its block's chain: a
-    // concatenate of those, side by side, is it (a gated pair's backward's
-    // `[W1 | W2]`, `merge_dots_backward`).
     let mut parts: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
@@ -343,13 +235,11 @@ pub(super) fn merge_dots(
         }
         if let Some(k) = first_of[i] {
             let g = &groups[k];
-            // The merged dot (and its block's chain): all the group's lines.
             out.set_origins(&g.nodes.iter().map(|&m| &nodes[m]).collect::<Vec<_>>());
             let mut operands = [map[g.shared]; 2];
             let value = match reuses[k] {
                 Some(e) => chains[e].expect("an earlier group's block"),
                 None => {
-                    // The parameters (behind their chains).
                     let others: Vec<Var> = g
                         .nodes
                         .iter()
@@ -373,10 +263,7 @@ pub(super) fn merge_dots(
                     ));
                     interleaved.push(interleave[k]);
                     let block = out.input(block);
-                    // A concatenate of the parameters is the block (an
-                    // interleaved one's readers rewritten so: `backward`).
                     blocks.push((others.clone(), g.dimension, block));
-                    // Their chain: once, of the block.
                     let mut value = block;
                     for link in &g.chain {
                         let mut ins = vec![value];
@@ -398,8 +285,6 @@ pub(super) fn merge_dots(
                 }
             };
             operands[1 - g.side] = value;
-            // A concatenate of the dots' operands is the block's chain (an
-            // interleaved one's readers rewritten so: `backward`).
             parts.push((
                 g.nodes
                     .iter()
@@ -408,40 +293,31 @@ pub(super) fn merge_dots(
                 g.dimension,
                 value,
             ));
-            // Interleaved, each dot's operand is its alone (`interleaves`):
-            // no part of the block for another reader.
-            if interleave[k] == 1 {
-                // Each dot's operand, for its other readers: its part of the
-                // block's chain (once: a reusing group's may be the same).
-                if !g.chain.is_empty() {
-                    let shape = out.type_of(value).shape.clone();
-                    let mut start = 0;
-                    for &m in &g.nodes {
-                        let v = nodes[m].inputs[1 - g.side];
-                        let n = graph.type_of(v).shape[g.dimension];
-                        if parted[v] {
-                            start += n;
-                            continue;
-                        }
-                        let (mut starts, mut limits) = (vec![0; shape.len()], shape.clone());
-                        (starts[g.dimension], limits[g.dimension]) = (start, start + n);
-                        let part = Primitive::Slice {
-                            start_indices: starts,
-                            limit_indices: limits,
-                            view: false,
-                        };
-                        map[v] = out.apply(part, &[value]).expect("within the block");
-                        parted[v] = true;
+            if interleave[k] == 1 && !g.chain.is_empty() {
+                let shape = out.type_of(value).shape.clone();
+                let mut start = 0;
+                for &m in &g.nodes {
+                    let v = nodes[m].inputs[1 - g.side];
+                    let n = graph.type_of(v).shape[g.dimension];
+                    if parted[v] {
                         start += n;
+                        continue;
                     }
+                    let (mut starts, mut limits) = (vec![0; shape.len()], shape.clone());
+                    (starts[g.dimension], limits[g.dimension]) = (start, start + n);
+                    let part = Primitive::Slice {
+                        start_indices: starts,
+                        limit_indices: limits,
+                        view: false,
+                    };
+                    map[v] = out.apply(part, &[value]).expect("within the block");
+                    parted[v] = true;
+                    start += n;
                 }
             }
             let result = out
                 .apply(g.primitive.clone(), &operands)
                 .expect("the dots' dimension numbers");
-            // The concatenated dimension is its operand's last free one, so
-            // the result's last of that operand's: its last for an rhs, else
-            // the one before the rhs's free dimensions.
             let rank = out.type_of(result).shape.len();
             let dimension = match g.side {
                 0 => rank - 1,
@@ -452,10 +328,6 @@ pub(super) fn merge_dots(
             };
             let shape = out.type_of(result).shape.clone();
             if interleave[k] > 1 {
-                // Interleaved: each dot's result its elements every K-th
-                // along the dimension, through its pairs' (K-tuples')
-                // dimension: a reshape of it into [n / K, K], that one's
-                // slice, reshaped back.
                 for (j, &m) in g.nodes.iter().enumerate() {
                     out.set_origin(&nodes[m]);
                     let member = &graph.type_of(nodes[m].output).shape;
@@ -488,10 +360,6 @@ pub(super) fn merge_dots(
         if merged[i] {
             continue;
         }
-        // An interleaved block's backward: a concatenate of its cotangents
-        // interleaved too (each part's elements every K-th along its axis:
-        // the parts given a K-tuples' axis after it, concatenated along it,
-        // reshaped back); a slice of its gradient, its member's pairs.
         if let (
             Some(kk),
             Primitive::Concatenate {
@@ -535,8 +403,6 @@ pub(super) fn merge_dots(
             );
             continue;
         }
-        // A concatenate of a merged group's operands, as they are side by
-        // side: their block (or its chain).
         if let Primitive::Concatenate { dimension, .. } = node.primitive
             && let Some(&(_, _, block)) = blocks
                 .iter()
@@ -557,11 +423,6 @@ pub(super) fn merge_dots(
     (out, packs, interleaved)
 }
 
-/// Member `j` of `value` interleaved by `k` along `axis`, of `shape`: its
-/// elements every `k`-th from `j` (a reshape of the axis into `[n / k, k]`,
-/// that one's slice, reshaped back). One reshape of a value for all its
-/// members (`tupled`, by value and axis): codegen's interleaved pair reads
-/// it so.
 fn pairs(
     out: &mut Graph,
     tupled: &mut HashMap<(Var, usize), Var>,
@@ -591,28 +452,12 @@ fn pairs(
     out.apply(back, &[one]).expect("the member's elements")
 }
 
-/// The nodes of a backward an interleaved group's block rewrites
-/// (`merge_dots_backward`'s: `dx = [g1 | g2] @ [W1 | W2]`, `dW = [g1 | g2]^T x`
-/// sliced into each weight's): the concatenates of its cotangents (each
-/// interleaved too, along the axis it contracts with its weights'), and the
-/// slices of its weights' gradients (each its member's pairs: the node, the
-/// member, the axis of the value it slices).
 #[derive(Default)]
 struct Interleaving {
     cotangents: Vec<usize>,
     slices: Vec<(usize, usize, usize)>,
 }
 
-/// Whether group `g`'s block is interleaved (by its dots' count, each of
-/// its parameters' elements every K-th along its dimension), and the
-/// backward it rewrites so: K dots whose results one elementwise value
-/// combines ([`combined`]: SwiGLU's gate and up, the value of each pair in
-/// one lane of its kernel, `PAIRED`), K = 2; of a shared lhs (their results'
-/// last dimension the block's); their parameters of one size, the program
-/// not assigning them (`donated`: an optimizer's update would write each
-/// strided) and read by their dot alone (`alone`, its operand `reads` once:
-/// no part of the block for another reader); and each concatenate of them (a
-/// backward's: [`backward`]) read as one consistently interleaved.
 fn interleaves(
     graph: &Graph,
     g: &Group,
@@ -644,13 +489,6 @@ fn interleaves(
     }
 }
 
-/// The backward group `g`'s interleaving rewrites ([`Interleaving`]), if
-/// every concatenate of its weights (`operands`, or the parameters) along
-/// its dimension is read so: only by dots contracting that axis with a
-/// concatenate of K cotangents of one size (theirs interleaved too); each
-/// such concatenate read only by those, or by dots whose result is sliced
-/// into exactly its K parts along that axis (their slices its pairs').
-/// None if anything else reads them.
 fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> {
     let nodes = graph.nodes();
     let k = g.nodes.len();
@@ -662,7 +500,6 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
             .filter(move |(_, n)| n.inputs.contains(&v))
     };
     let produced = |v: Var| nodes.iter().position(|n| n.output == v);
-    // A concatenate of K parts of one size along `axis`.
     let concatenate_of_k = |n: &Node, axis: usize| {
         matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == axis)
             && n.inputs.len() == k
@@ -700,8 +537,6 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
             contractions.push(r);
         }
     }
-    // Each cotangents' other readers: dots of it whose result is sliced
-    // into its K parts along that axis.
     for &at in &found.cotangents {
         let cotangent = &nodes[at];
         let Primitive::Concatenate {
@@ -763,7 +598,6 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
     Some(found)
 }
 
-/// The contracting dimensions of a dot's operand on `side`.
 fn contracting(p: &Primitive, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -779,7 +613,6 @@ fn contracting(p: &Primitive, side: usize) -> Vec<usize> {
     }
 }
 
-/// The batch and contracting dimensions of a dot's operand on `side`.
 fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -797,16 +630,10 @@ fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
     }
 }
 
-/// The dimension the operands opposite `side` concatenate along: the last
-/// free one of the operand, if it has one.
 fn concat_dimension(p: &Primitive, side: usize, rank: usize) -> Option<usize> {
     free_dims(rank, &used_dims(p, 1 - side)).last()
 }
 
-/// The dots reading packable parameters merged into blocks of them
-/// ([`merge_dots`]). A donated parameter (a weight the program assigns)
-/// only as a contiguous part of its block, its new value written into it
-/// in place.
 pub(super) struct MergeDots;
 
 impl<'a> CompilerPass<MpsModule<'a>> for MergeDots {

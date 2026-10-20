@@ -11,7 +11,6 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     let (x, out) = (&step.inputs[0].1, &step.output.1);
     let n = out.numel();
-    // Threads take elements of the input (for select, of the cases).
     let (kernel, grid) = match &step.primitive {
         Cast { .. } => (
             format!("convert_{}_{}", x.dtype, out.dtype),

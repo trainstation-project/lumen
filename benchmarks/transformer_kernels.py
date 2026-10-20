@@ -1,19 +1,3 @@
-"""The MPS kernels of ``examples/transformer.py``'s training step, by GPU
-time (``lumen.profiler``'s gpu events), per step: each kernel's label, its
-Metal kernel, its shapes, launches and time; then the step's total and
-kernel count.
-
-    python benchmarks/transformer_kernels.py [--steps N] [--top K]
-
-``--op`` times one op on its own instead, compiled for MPS, for sweeping a
-kernel's parameters: a matmul ``a @ b`` of the shapes and dtype given.
-
-    python benchmarks/transformer_kernels.py --op matmul --shapes 1024x64 64x64 --dtype bfloat16
-    python benchmarks/transformer_kernels.py --op matmul_tn --shapes 1024x64 1024x64
-
-(``matmul_tn``: ``a.t() @ b``, a weight's gradient.)
-"""
-
 import argparse
 import pathlib
 from collections import defaultdict
@@ -46,7 +30,6 @@ def gpu_events(run, steps):
     shaped = events(1, [ProfilerActivity.CPU, ProfilerActivity.MPS])
     timed = events(steps, [ProfilerActivity.MPS])
     assert len(timed) == steps * len(shaped), "every step launches the same kernels"
-    # Each launch's median over the steps (the GPU's clock varies).
     for k, e in enumerate(shaped):
         e["duration_us"] = float(np.median([t["duration_us"] for t in timed[k :: len(shaped)]]))
     return shaped

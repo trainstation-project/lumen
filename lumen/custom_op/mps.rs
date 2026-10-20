@@ -54,7 +54,6 @@ impl MetalKernel {
 
 #[cfg(lumen_mps_linked)]
 unsafe extern "C" {
-    // In shim.mm.
     fn lumen_mps_compile_kernel(
         source: *const std::ffi::c_char,
         name: *const std::ffi::c_char,

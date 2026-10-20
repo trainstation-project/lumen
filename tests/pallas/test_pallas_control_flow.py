@@ -1,5 +1,3 @@
-"""Ported from jax/tests/pallas/pallas_test.py (JAX, Apache 2.0): PallasControlFlowTest."""
-
 import functools
 import itertools
 
@@ -95,7 +93,6 @@ def test_scan_with_extensive_outputs():
 
 def test_loop_with_float64_carry():
     pytest.skip("TODO: error on TPU")
-    # A float64 fori_loop carry (and an i64 index) stays float64.
 
     @functools.partial(pl.pallas_call, out_shape=pl.ShapeDtypeStruct((4,), "float64"))
     def f(x_ref, y_ref):
@@ -263,7 +260,6 @@ def test_conditional_write():
 
     np.testing.assert_allclose(run(f, np.bool_(True), arg), np.float32([0.0, -1, -2, -3, 6, -5, -6, -7]))
     np.testing.assert_allclose(run(f, np.bool_(False), arg), -arg)
-    # JAX also checks that jax.grad of it fails ("Linearization failed"): autodiff of pallas_call, not ported.
 
 
 def _scan_cond_vm_expected(x, params):
@@ -283,9 +279,9 @@ def test_scan_cond_vm_explicit_ref_arg():
         pl.pallas_call,
         out_shape=pl.ShapeDtypeStruct((x.shape[0],), "float32"),
         in_specs=[
-            pl.BlockSpec(program.shape, lambda _: (0,)),  # program
-            pl.BlockSpec(params.shape, lambda _: (0, 0)),  # params
-            pl.BlockSpec((bx,), lambda i: (i,)),  # x
+            pl.BlockSpec(program.shape, lambda _: (0,)),
+            pl.BlockSpec(params.shape, lambda _: (0, 0)),
+            pl.BlockSpec((bx,), lambda i: (i,)),
         ],
         out_specs=pl.BlockSpec((bx,), lambda i: (i,)),
         grid=pl.cdiv(x.shape[0], bx),
@@ -318,12 +314,10 @@ def test_scan_cond_vm_explicit_ref_arg():
         )[0]
 
     np.testing.assert_allclose(run(f, program, params, x), _scan_cond_vm_expected(x, params))
-    # JAX also checks that jax.value_and_grad of it fails ("Linearization failed"): autodiff, not ported.
 
 
 def test_scan_cond_vm_closing_over_ref():
     pytest.skip("TODO: error on TPU")
-    # ** Difference is the closure over params_ref in the switch branches. **
     program = np.int32([0, 1, 2, 3, 2, -1])
     params = np.arange(len(program) * 3.0, dtype=np.float32).reshape(len(program), 3)
     x = np.arange(7.0, dtype=np.float32)
@@ -333,9 +327,9 @@ def test_scan_cond_vm_closing_over_ref():
         pl.pallas_call,
         out_shape=pl.ShapeDtypeStruct((x.shape[0],), "float32"),
         in_specs=[
-            pl.BlockSpec(program.shape, lambda _: (0,)),  # program
-            pl.BlockSpec(params.shape, lambda _: (0, 0)),  # params
-            pl.BlockSpec((bx,), lambda i: (i,)),  # x
+            pl.BlockSpec(program.shape, lambda _: (0,)),
+            pl.BlockSpec(params.shape, lambda _: (0, 0)),
+            pl.BlockSpec((bx,), lambda i: (i,)),
         ],
         out_specs=pl.BlockSpec((bx,), lambda i: (i,)),
         grid=pl.cdiv(x.shape[0], bx),
@@ -368,7 +362,6 @@ def test_scan_cond_vm_closing_over_ref():
         )[0]
 
     np.testing.assert_allclose(run(f, program, params, x), _scan_cond_vm_expected(x, params))
-    # JAX also checks that jax.value_and_grad of it fails ("Linearization failed"): autodiff, not ported.
 
 
 @pytest.mark.parametrize("start, stop, step", list(itertools.product([0, 1, 2], [6, 7, 8], [None, 3])))
@@ -392,7 +385,7 @@ def test_loop_accumulates():
     def f(x_ref):
         x_ref[...] = pl.loop(0, 5, init_carry=32)(lambda i, acc: acc + i)
 
-    assert run(f) == 42  # 32 + 0 + 1 + 2 + 3 + 4 = 42
+    assert run(f) == 42
 
 
 def test_fori_loop_simple():
@@ -545,8 +538,6 @@ def test_while_with_dynamic_condition():
 
 def test_vmap_of_while_with_dynamic_condition():
     pytest.skip("TODO: error on TPU")
-    # jax.vmap of a pallas_call whose kernel runs a while_loop to a bound read from its operand; lumen has no
-    # vmap of pallas_call.
 
 
 def test_range_while_loop():
@@ -666,7 +657,6 @@ def test_vector_carry_while_loop():
         out_shape=pl.ShapeDtypeStruct((8, 128), "int32"),
     )
     r = run(fn, x)
-    # 3 -> 6 -> 12 -> 24
     np.testing.assert_array_equal(np.sum(r), 1024 * 24)
 
 
@@ -691,7 +681,6 @@ def test_vector_1d_slice_carry_while_loop():
         out_shape=pl.ShapeDtypeStruct((100,), "int32"),
     )
     r = run(fn, x)
-    # 3 -> 6 -> 12 -> 24
     np.testing.assert_array_equal(np.sum(r), 100 * 24)
 
 
@@ -736,7 +725,6 @@ def test_nested_while_loop():
     """Tests lowering a nested while_loop."""
 
     def kernel(in_key_ref, out_segment_count, out_size_ref, key_count):
-        # Compute the length of contiguous segments of keys.
 
         def inner_cond(carry):
             i, prev_key = carry
@@ -779,13 +767,10 @@ def test_nested_while_loop():
         kernel_fn,
         grid=(1,),
         in_specs=[
-            # keys.
             pl.BlockSpec((8, 128), lambda i: (0, 0), memory_space=pl.SMEM),
         ],
         out_specs=[
-            # Segments found.
             pl.BlockSpec((1, 1), memory_space=pl.SMEM),
-            # Segment sizes.
             pl.BlockSpec((8, 128), memory_space=pl.SMEM),
         ],
         out_shape=[

@@ -1,76 +1,15 @@
-//! Normalization diamonds (XLA's SoftmaxRewriterTriton, see
-//! xla/backends/gpu/transforms/softmax_rewriter_triton.cc): whatever
-//! normalizes rows by a reduction of them, however it is written, run as
-//! one row kernel (`codegen.rs`). Nothing here knows about any one
-//! normalization: an RMS norm (with `mean` or `sum`, `x / sqrt` or
-//! `x * (1 / sqrt)`), a softmax written out and a layer norm are all
-//! diamonds, or chains of them.
-//!
-//! A diamond is a root, an elementwise binary primitive, whose operands
-//! both come from one producer `p`: one through trivial primitives (below),
-//! the other through a reduction over the last dimension, trivial
-//! primitives, and a broadcast back along it:
-//!
-//! ```text
-//!              p
-//!            /   \
-//!     trivial     trivial → reduce (last dim) → trivial → broadcast
-//!            \   /
-//!            root
-//! ```
-//!
-//! A trivial primitive (XLA's `IsTriviallyFusible`) reads no more than it
-//! writes, at the same index, and has one reader: a reshape, a unary
-//! elementwise primitive, or a binary one of one value (`x * x`) or of one
-//! value and a splat (a constant, or a graph input broadcast: `+ eps`,
-//! `/ n`). Diamonds chain where one's root is (through elementwise
-//! primitives read only by the next) the next one's producer: a softmax's
-//! max then its sum, a layer norm's mean then its variance. Each chain is
-//! one row kernel, its reductions inside.
-//!
-//! A diamond's values of a row each (the reduction's, and the trivial
-//! primitives' between it and the broadcast: an RMS norm's `sqrt(mean +
-//! eps)`) may be read elsewhere too (a training step's backward): the row
-//! kernel writes them as well, once a row (its `outputs`), as a fused RMS
-//! norm writes each row's `rstd` for its backward. Its broadcast too, where
-//! every other reader is a loop fusion's primitive: that fusion broadcasts
-//! the written value itself.
-//!
-//! Beyond diamonds (XLA's rewriter stops there), any row fusion
-//! ([`grown`]): an elementwise root of rows, and every fusible node before
-//! it read by its nodes alone, each a value of the rows' shape or of a row
-//! each (or a constant), reductions over a row among them, a reduction's
-//! value broadcast back along its row: a normalization's backward
-//! (`dx = g·w / rms - x · Σ_row(…)`, its row's values two, `g` and `x`,
-//! not one producer's), a softmax's (`y · (g - Σ_row(g·y))`).
-
 use super::MpsModule;
 use super::fusion::{constant, elementwise, fusible};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::CompilerPass;
 use crate::ops::reduce::mps::REDUCE_THREADS;
 
-/// The most threadgroups a row kernel with partials runs (each a block of
-/// rows): their partials, a column each, are summed by one thread a
-/// column (`reduce_sum`'s, unsplit).
 const MAX_GROUPS: usize = 64;
 
-/// The fewest it runs, unless the rows are fewer: rows of no divisor in
-/// between keep their sum's own reduction.
 const MIN_GROUPS: usize = 16;
 
-/// The most columns of a row each thread of a row kernel with partials
-/// accumulates (in registers): rows of up to this x 256 elements.
 const MAX_COLUMNS: usize = 16;
 
-/// A row fusion: a chain of diamonds, run as one row kernel. `root` (a
-/// node index) is the fusion's root, `reductions` its reductions (in
-/// order), `inner` the other nodes between them and the root, which are
-/// read nowhere else but `outputs`: values of a row each (of reductions,
-/// or inner nodes) read after the root too, which the kernel writes.
-/// `partials` ([`partials`]): sums of blocks of rows, each a column's
-/// (`[groups, rows / groups, n]` over its middle), which the kernel
-/// accumulates as it goes (a normalization's weight's gradient).
 #[derive(Debug, Clone)]
 pub(super) struct Row {
     pub root: usize,
@@ -80,7 +19,6 @@ pub(super) struct Row {
     pub partials: Vec<usize>,
 }
 
-/// The chains of diamonds in `graph`, each a [`Row`].
 pub(super) fn diamonds(graph: &Graph) -> Vec<Row> {
     let finder = Finder::new(graph);
     let mut rows: Vec<Row> = Vec::new();
@@ -95,7 +33,6 @@ pub(super) fn diamonds(graph: &Graph) -> Vec<Row> {
         if row.inner.iter().any(|&n| taken(n)) {
             continue;
         }
-        // A diamond whose producer is an earlier one's root extends it.
         let earlier = finder.producer[producer].and_then(|p| rows.iter().position(|r| r.root == p));
         if let Some(k) = earlier {
             let mut inside = row.inner.clone();
@@ -115,16 +52,6 @@ pub(super) fn diamonds(graph: &Graph) -> Vec<Row> {
     rows
 }
 
-/// The row fusions beyond `rows` (diamonds): from each elementwise root of
-/// rows (`[rows..., n]`) not in one, last first, every node before it read
-/// by its nodes alone (no output), fusible, each a value of the root's
-/// shape, of a row each, or one element; or a reduction over a row of the
-/// root's shape (to a value of a row each); or a row fusion's root (read
-/// by its nodes alone, writing nothing else), the row fusion inside it
-/// whole (a chain: a layer norm's backward's two reductions). A diamond's
-/// root (writing nothing else) grows so too, from its nodes. One with a
-/// reduction is a row fusion: its value (of a row each) reaches the root
-/// (of rows) through a broadcast back along the row.
 fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -139,7 +66,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     }
     for i in (0..nodes.len()).rev() {
         let root = &nodes[i];
-        // A diamond's root grows from its row (writing nothing else).
         let own = rows
             .iter()
             .position(|r| r.root == i && r.outputs.is_empty());
@@ -155,8 +81,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
         };
         let ty = graph.type_of(root.output);
         let rows_of: &[Row] = rows;
-        // From its rows (`rows` elements, `n` a row), the nodes inside (and
-        // the row fusions it takes whole: its own, if a diamond's).
         let grow = |rows: usize, n: usize| -> (Vec<bool>, Vec<usize>, Vec<usize>) {
             let each = rows / n;
             let shaped = |v: Var| {
@@ -167,8 +91,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             let mut inside = vec![false; nodes.len()];
             inside[i] = true;
             let mut absorbed: Vec<usize> = Vec::new();
-            // Values of a row each read after the root too (a cross
-            // entropy's logsumexp, for its gradient): written as well.
             let mut outputs: Vec<usize> = Vec::new();
             if let Some(r) = own {
                 let row = &rows_of[r];
@@ -191,9 +113,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
                 if !finder.live[k] || inside[k] || !(read_inside || read_after) || shared {
                     continue;
                 }
-                // An earlier row fusion's root (of these rows, writing
-                // nothing read but here: a softmax's max, its logsumexp's):
-                // it, whole.
                 let own_reads = |r: &Row| {
                     r.outputs.iter().all(|&o| {
                         let w = nodes[o].output;
@@ -239,14 +158,10 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             (inside, absorbed, outputs)
         };
         let reduces = |inside: &[bool]| (0..i).any(|k| inside[k] && is_reduction(k));
-        // Of the root's rows; or, a value a row (a loss each), of the rows
-        // a reduction it reads (through values a row) reduces.
         let mut grown = match ty.shape.last() {
             Some(&n) if n > 1 => Some(grow(ty.numel(), n)),
             _ => None,
         };
-        // (Of several reductions: one, and its epilogue, is a reduction's
-        // own fusion.)
         if !grown.as_ref().is_some_and(|(inside, _, _)| reduces(inside)) {
             grown = row_length(finder, i)
                 .map(|n| grow(ty.numel() * n, n))
@@ -258,7 +173,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             continue;
         };
         let reductions: Vec<usize> = (0..i).filter(|&k| inside[k] && is_reduction(k)).collect();
-        // A diamond that took nothing more stays as it is.
         let grew = own.is_none_or(|r| {
             let row = &rows[r];
             (0..i).filter(|&k| inside[k]).count() > row.inner.len() + row.reductions.len()
@@ -285,9 +199,6 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     }
 }
 
-/// Whether `v` is computed from iotas and constants alone (a one-hot's
-/// classes, a gather's row offsets): copied into each fusion reading it,
-/// so no row's own (read by other rows too: a chunk's, another chunk's).
 fn indices(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     let Some(p) = producer[v] else { return false };
     let node = &graph.nodes()[p];
@@ -301,16 +212,6 @@ fn indices(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     }
 }
 
-/// Each row fusion of `rows` extended to an elementwise consumer of its
-/// values of the rows' shape after it (read by none such), computed from
-/// them, from values of its rows (a cross entropy's logits), from values
-/// of a row each computed from those (`g = 2·loss`, of `Σ loss²`) and from
-/// values not reading its own (`(exp(x - lse) - one_hot) · g`, its
-/// gradient, `g` a constant or an input: XMA's forward-backward kernel;
-/// not from every row's, `mean(loss)`): that consumer its root, its own
-/// root and the values read elsewhere (of a row each) its outputs, written
-/// once its reductions are done. Its readers before it wait for it (the
-/// fused graph's order), as none of its values reads them.
 fn consumed(finder: &Finder, rows: &mut [Row]) {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -350,9 +251,6 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                         | Primitive::Iota { .. }
                 )
         };
-        // The latest elementwise reader of its values of the rows' shape
-        // that its cone (its producers outside the row, cheap and taken by
-        // no other row) makes a fusion with it.
         let candidate = |c: usize| {
             finder.live[c]
                 && elementwise(&nodes[c].primitive)
@@ -360,9 +258,6 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                 && shaped(nodes[c].output)
                 && !taken(c)
         };
-        // Not a part of a larger one (`softmax - one_hot` of `(softmax -
-        // one_hot) · g`): if that one is not computed here, its parts are
-        // not either, but computed with it (from the row's values written).
         let candidates: Vec<usize> = (row.root + 1..nodes.len())
             .rev()
             .filter(|&c| {
@@ -396,7 +291,6 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                     }
                 }
             }
-            // Its nodes read inside it alone (but its root).
             let inside = |u: usize| cone.contains(&u) || mine.contains(&u);
             let closed = cone[1..].iter().all(|&k| {
                 let v = nodes[k].output;
@@ -405,8 +299,6 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
             if !reaches || !closed {
                 return None;
             }
-            // The row's values read elsewhere (of a row each): its outputs;
-            // nothing it reads computed from their readers.
             let mut outputs = Vec::new();
             let mut outside = Vec::new();
             for &k in &mine {
@@ -457,10 +349,6 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
     }
 }
 
-/// The length of the rows a value a row (node `root`'s) is of: that of the
-/// operand of a reduction over its last dimension to a value a row, read
-/// back from it through elementwise primitives, reshapes and broadcasts
-/// (a cross entropy's `logsumexp - picked`); None if none.
 fn row_length(finder: &Finder, root: usize) -> Option<usize> {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -498,21 +386,6 @@ fn row_length(finder: &Finder, root: usize) -> Option<usize> {
     None
 }
 
-/// `graph` with each sum over rows (`Σ_rows v`: over every dimension but
-/// the last) that a row fusion of `rows` can compute as it goes split in
-/// two (Liger's and Apex's normalization backward, a persistent kernel):
-/// the sums of `groups` blocks of rows, `reduce_sum(reshape(v, [groups,
-/// rows / groups, n]), 1)`, that row fusion's `partials` (its kernel a
-/// threadgroup a block, accumulating each column's sum in registers as
-/// it goes, rows in order), then their sum (`reduce_sum(·, 0)`, a column
-/// at a time, blocks in order): deterministic. The rows, of the graph
-/// returned.
-///
-/// A sum is a row fusion's whose value reads (back through fusible nodes
-/// no row fusion computes, which its kernel computes too) a value the row
-/// fusion computes or reads (a normalization's weight's gradient, `Σ g·y`,
-/// its `dx`'s `g`), never its root, nor one depending on it, and on which
-/// nothing the row fusion computes depends.
 fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
     let finder = Finder::new(graph);
     let nodes = graph.nodes();
@@ -525,8 +398,6 @@ fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
             row_of[k] = Some(r);
         }
     }
-    // Whether value `v` depends on a node `on` says, of index `floor` or
-    // more (none before it can).
     let depends = |v: Var, on: &dyn Fn(usize) -> bool, floor: usize| {
         let (mut seen, mut stack) = (vec![false; nodes.len()], vec![v]);
         while let Some(v) = stack.pop() {
@@ -541,7 +412,6 @@ fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
         }
         false
     };
-    // Each sum's row fusion and its groups.
     let mut attach: Vec<Option<(usize, usize)>> = vec![None; nodes.len()];
     for (c, node) in nodes.iter().enumerate() {
         let Primitive::ReduceSum { axes, .. } = &node.primitive else {
@@ -566,8 +436,6 @@ fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
         else {
             continue;
         };
-        // The values it reads: back from x through the fusible nodes no
-        // row fusion computes.
         let (mut reads, mut stack) = (Vec::new(), vec![x]);
         while let Some(v) = stack.pop() {
             match finder.producer[v] {
@@ -600,13 +468,10 @@ fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
                     finder.producer[v].is_some_and(in_row)
                         || finder.readers[v].iter().any(|&u| in_row(u))
                 });
-                // Its reads computed before the row fusion's kernel runs,
-                // not after (nothing of it but what it recomputes).
                 let before = reads.iter().all(|&v| match finder.producer[v] {
                     Some(k) if in_row(k) => k != row.root,
                     _ => !depends(v, &in_row, first),
                 });
-                // Nothing the row fusion computes depends on the sum.
                 let after = std::iter::once(&row.root)
                     .chain(&row.inner)
                     .chain(&row.reductions)
@@ -678,7 +543,6 @@ fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {
 struct Finder<'a> {
     graph: &'a Graph,
     producer: Vec<Option<usize>>,
-    /// Each value's live readers (once each), and whether it is an output.
     readers: Vec<Vec<usize>>,
     output: Vec<bool>,
     live: Vec<bool>,
@@ -719,13 +583,10 @@ impl<'a> Finder<'a> {
         }
     }
 
-    /// Whether `v` is read only by `nodes` (and is no output).
     fn read_only_by(&self, v: Var, nodes: &[usize]) -> bool {
         !self.output[v] && self.readers[v].iter().all(|r| nodes.contains(r))
     }
 
-    /// Whether `v` is a splat: the same everywhere along a row (a
-    /// constant, or a broadcast graph input: a runtime scalar, a weight).
     fn splat(&self, v: Var) -> bool {
         let graph_input = |v: Var| self.producer[v].is_none();
         constant(self.graph, &self.producer, v)
@@ -736,11 +597,6 @@ impl<'a> Finder<'a> {
             })
     }
 
-    /// Whether node `i` is trivially fusible (XLA's `IsTriviallyFusible`):
-    /// one reader (unless `shared`: a value of a row each, which the
-    /// kernel can write for other readers), and a reshape, a unary
-    /// elementwise primitive, or a binary one of one value or of one value
-    /// and a splat.
     fn trivial(&self, i: usize, shared: bool) -> bool {
         let node = &self.graph.nodes()[i];
         if !shared && (self.output[node.output] || self.readers[node.output].len() > 1) {
@@ -754,8 +610,6 @@ impl<'a> Finder<'a> {
         }
     }
 
-    /// The operand a trivial node `i` is followed through: its first that
-    /// is not a splat.
     fn through(&self, i: usize) -> Var {
         let inputs = &self.graph.nodes()[i].inputs;
         match inputs.len() > 1 && self.splat(inputs[0]) {
@@ -764,9 +618,6 @@ impl<'a> Finder<'a> {
         }
     }
 
-    /// From value `v` back through trivial nodes (XLA's `TrivialEdge`;
-    /// `shared`: perhaps read elsewhere too) to one whose primitive passes
-    /// `is`: it, and the trivial nodes passed.
     fn edge(
         &self,
         mut v: Var,
@@ -787,8 +638,6 @@ impl<'a> Finder<'a> {
         }
     }
 
-    /// The diamond rooted at node `i`, if it is one's root, and its
-    /// producer.
     fn diamond(&self, i: usize) -> Option<(Row, Var)> {
         let nodes = self.graph.nodes();
         let root = &nodes[i];
@@ -798,7 +647,6 @@ impl<'a> Finder<'a> {
         if !elementwise(p) {
             return None;
         }
-        // The broadcast side second, or (commutative) either.
         let commutative = matches!(p, Primitive::Add | Primitive::Mul | Primitive::Max);
         let sides: &[(Var, Var)] = if commutative {
             &[(a, b), (b, a)]
@@ -810,8 +658,6 @@ impl<'a> Finder<'a> {
             .find_map(|&(side, reduced)| self.closed(i, side, reduced))
     }
 
-    /// The diamond of root `i` whose operand `reduced` is a broadcast of a
-    /// reduction of the producer `side` comes from.
     fn closed(&self, i: usize, side: Var, reduced: Var) -> Option<(Row, Var)> {
         let nodes = self.graph.nodes();
         let ty = self.graph.type_of(nodes[i].output);
@@ -820,7 +666,6 @@ impl<'a> Finder<'a> {
             |p| matches!(p, Primitive::BroadcastInDim { .. }),
             false,
         )?;
-        // Values of a row each, which other nodes may read too.
         let (r, path) = self.edge(
             nodes[b].inputs[0],
             |p| matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }),
@@ -829,8 +674,6 @@ impl<'a> Finder<'a> {
         let per_row: Vec<usize> = std::iter::once(r).chain(path.iter().copied()).collect();
         inner.push(b);
         inner.extend(path);
-        // Over the last dimension of a value of the root's shape, broadcast
-        // back along it alone.
         let last = ty.shape.len().checked_sub(1)?;
         let x = nodes[r].inputs[0];
         let rows = ty.numel() / ty.shape[last].max(1);
@@ -849,21 +692,19 @@ impl<'a> Finder<'a> {
         let along = axes.as_slice() == [last]
             && self.graph.type_of(x).shape == ty.shape
             && self.graph.type_of(nodes[b].output).shape == ty.shape
-            && broadcast_dimensions.iter().enumerate().all(|(k, &d)| {
-                // Along the last dimension only from a size-1 one (keepdim).
-                d != last || self.graph.type_of(nodes[b].inputs[0]).shape[k] == 1
-            })
+            && broadcast_dimensions
+                .iter()
+                .enumerate()
+                .all(|(k, &d)| d != last || self.graph.type_of(nodes[b].inputs[0]).shape[k] == 1)
             && self.graph.type_of(nodes[b].inputs[0]).numel() == rows;
         if !along {
             return None;
         }
-        // The producer: the reduction's operand back through trivial nodes.
         let mut producer = x;
         while let Some(k) = self.producer[producer].filter(|&k| self.trivial(k, false)) {
             inner.push(k);
             producer = self.through(k);
         }
-        // The root's other operand reaches it trivially too.
         let mut v = side;
         while v != producer {
             let k = self.producer[v].filter(|&k| self.trivial(k, false))?;
@@ -871,9 +712,6 @@ impl<'a> Finder<'a> {
             v = self.through(k);
         }
         inner.push(r);
-        // Then further back, through elementwise nodes read only inside it
-        // (a softmax's exp, read by its sum and its division): its producer
-        // can be an earlier diamond's root.
         while let Some(k) = self.producer[producer] {
             let node = &nodes[k];
             let mut inside = inner.clone();
@@ -902,11 +740,6 @@ impl<'a> Finder<'a> {
         Some((row, producer))
     }
 
-    /// The values of a row each (`per_row`) that the row kernel rooted at
-    /// `root` (`inner` inside it) writes too: those read elsewhere, after
-    /// it (once it has written them), and the broadcast `b`'s operand if
-    /// `b` is read elsewhere, by loop fusions' primitives alone (each
-    /// broadcasting it itself); none if any is read otherwise.
     fn outputs(
         &self,
         root: usize,
@@ -950,9 +783,6 @@ impl<'a> Finder<'a> {
     }
 }
 
-/// Normalization diamonds: each chain one row, its reductions inside, and
-/// the sums over rows they compute as they go ([`partials`]), for the loop
-/// fusion after it.
 pub(super) struct Diamonds;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Diamonds {

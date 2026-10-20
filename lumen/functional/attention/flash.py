@@ -28,17 +28,14 @@ class _FlashAttention(Function):
         n = q.shape[2]
         accum = _accum_dtype(q.dtype)
         s = _scores(q, _expand_heads(k, n), scale, causal)
-        # The softmax, its max and sum kept for the log-sum-exp.
         m = amax(s, -1, keepdim=True)
         e = exp(s - m)
         total = sum(e, -1, keepdim=True)
         p = (e / total).to(q.dtype)
-        # Dropout of the probabilities (F.dropout's), as rounded.
         ctx.dropped = _dropped(p.shape, dropout_p) if dropout_p else None
         ctx.keep = 1.0 / (1.0 - dropout_p)
         if ctx.dropped is not None:
             p = where(ctx.dropped, 0.0, p * ctx.keep)
-        # [B, N, Sq, Hv], then [B, Sq, N, Hv].
         o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
         o = o.permute(0, 2, 1, 3)
         ctx.scale, ctx.causal = scale, causal
@@ -47,9 +44,6 @@ class _FlashAttention(Function):
 
     @staticmethod
     def backward(ctx, do):
-        # On the scores transposed, S^T = K Q^T [B, N, Sk, Sq] (a row a key,
-        # as dV = P^T dO and dK = dS^T Q read them): not the forward's Q K^T,
-        # so recomputed, never its [Sq, Sk] values read back.
         q, k, v, o = ctx.saved_tensors
         lse = ctx.saved_named_tensors["lse"]
         b, sq, n, _ = q.shape
@@ -61,29 +55,22 @@ class _FlashAttention(Function):
             keys = prims.iota("int64", st.shape, 2)
             queries = prims.iota("int64", st.shape, 3)
             st = where(le(keys, queries + (sk - sq)), st, float("-inf"))
-        # P^T, from each query's log-sum-exp; D = rowsum(dO * O), per query.
         pt = exp(st - lse.reshape(b, n, 1, sq))
-        # A dot over the head dimension, accumulated in float32: no value
-        # rounded (O by p @ v, dO by its producer) is widened.
         d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum, accum)
         d = d.permute(0, 2, 1).reshape(b, n, 1, sq)
-        # dP^T = V dO^T (dropped); dS^T = P^T (dP^T - D) * scale.
         dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
         if ctx.dropped is not None:
             dropped = ctx.dropped.permute(0, 1, 3, 2)
             dpt = where(dropped, 0.0, dpt * ctx.keep)
         dst = (pt * (dpt - d) * ctx.scale).to(dtype)
-        # dV reads P^T dropped.
         if ctx.dropped is not None:
             pt = where(dropped, 0.0, pt * ctx.keep)
         pt = pt.to(dtype)
-        # [B, N, Sk, Hv], [B, N, Sk, H] and [B, N, Sq, H]: in float32.
         dv = prims.dot_general(pt, do, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
         dk = prims.dot_general(dst, q, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
         dq = prims.dot_general(dst, ke, (((2,), (1,)), ((0, 1), (0, 2))), accum, accum)
         dq, dk, dv = (t.permute(0, 2, 1, 3) for t in (dq, dk, dv))
         if nkv != n:
-            # Summed over each key and value head's group of query heads.
             dk = sum(dk.reshape(b, sk, nkv, n // nkv, k.shape[3]), 3)
             dv = sum(dv.reshape(b, sk, nkv, n // nkv, v.shape[3]), 3)
         return dq.to(dtype), dk.to(dtype), dv.to(dtype)

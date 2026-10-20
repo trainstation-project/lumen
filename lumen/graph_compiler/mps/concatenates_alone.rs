@@ -1,12 +1,7 @@
-//! Each concatenate a fusion of its own (not computed in place): a
-//! concatenate has no kernel but a fusion's.
-
 use super::{Kernel, MpsModule, request};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Unfused, each concatenate a fusion of its own: it has no kernel but a
-/// fusion's. No kernel takes a runtime scalar by value.
 pub(super) struct ConcatenatesAlone;
 
 impl<'a> CompilerPass<MpsModule<'a>> for ConcatenatesAlone {
@@ -22,8 +17,6 @@ impl<'a> CompilerPass<MpsModule<'a>> for ConcatenatesAlone {
     }
 }
 
-/// `graph` with each concatenate a fusion of it alone (its kernel named by
-/// `kernel`): unfused, as it runs on MPS.
 pub(super) fn concatenates_alone(graph: &Graph, mut kernel: impl FnMut(&Graph) -> String) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];

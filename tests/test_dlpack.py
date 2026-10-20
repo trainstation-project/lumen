@@ -1,20 +1,3 @@
-"""DLPack interop: ``Tensor.__dlpack__``/``from_dlpack``.
-
-lumen exports a DLPack capsule that another framework can import as a view of
-the same buffer, and imports a foreign capsule (NumPy, PyTorch, CuTe DSL) the
-same way. Two properties carry the risk here, so both are pinned down
-explicitly:
-
-* lifetime — the capsule owns a storage reference, so importing outlives the
-  exporting ``Tensor``; a foreign capsule owns *its* buffer, so the imported
-  tensor outlives the producer;
-* single consumption — a capsule spent once must not be spendable twice,
-  because the second import would read a freed ``DLManagedTensor``.
-
-NumPy is the only producer available here, and it is optional: everything
-below skips if it is missing.
-"""
-
 import ctypes
 import gc
 
@@ -96,15 +79,12 @@ def test_export_survives_exporting_tensor():
     a = np.from_dlpack(t)
     del t
     gc.collect()
-    # The capsule holds a storage reference: the buffer must still be alive.
     assert a.tolist() == [3.0] * 4
 
 
 def test_export_observes_producer_writes():
     t = lumen.zeros([4], dtype=lumen.float32)
     a = np.from_dlpack(t)
-    # NumPy imports a DLPack array read-only (the protocol has no writability
-    # flag), so writes go through the producer and the view sees them.
     t.fill_(5.0)
     assert a.tolist() == [5.0] * 4
 
@@ -131,7 +111,6 @@ def test_import_survives_producer():
     ptr = a.ctypes.data
     del a
     gc.collect()
-    # The imported storage owns the producer's capsule, so the buffer lives.
     assert t.data_ptr() == ptr
     assert t.tolist() == [float(i) for i in range(8)]
 
@@ -171,7 +150,6 @@ def test_capsule_consumed_once():
     cap = t.__dlpack__()
     first = _C._from_dlpack(cap)
     assert first.tolist() == [1.0] * 4
-    # Spending the same capsule again would read a freed managed tensor.
     with pytest.raises(RuntimeError, match="consumed only once"):
         _C._from_dlpack(cap)
 

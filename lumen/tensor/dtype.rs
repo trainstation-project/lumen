@@ -1,36 +1,7 @@
-//! | torch                 | lumen      | Rust type       |
-//! |-----------------------|------------|-----------------|
-//! | Bool                  | [`DType::Bool`] | `bool`     |
-//! | Byte                  | [`DType::U8`]   | `u8`       |
-//! | Char                  | [`DType::I8`]   | `i8`       |
-//! | Short                 | [`DType::I16`]  | `i16`      |
-//! | Int                   | [`DType::I32`]  | `i32`      |
-//! | Long                  | [`DType::I64`]  | `i64`      |
-//! | UInt16/32/64          | `U16..U64` | `u16/u32/u64`   |
-//! | Half                  | [`DType::F16`]  | [`struct@f16`]    |
-//! | BFloat16              | [`DType::BF16`] | [`bf16`]   |
-//! | Float / Double        | `F32`/`F64`| `f32`/`f64`     |
-//!
-//! And JAX's narrow dtypes (`ml_dtypes`), each element a byte on the host
-//! as `ml_dtypes` keeps it (a sub-byte integer in its low bits):
-//!
-//! | ml_dtypes             | lumen      | Rust type       |
-//! |-----------------------|------------|-----------------|
-//! | int2 / int4           | `I2`/`I4`  | [`struct@i2`]/[`struct@i4`] |
-//! | uint2 / uint4         | `U2`/`U4`  | [`struct@u2`]/[`struct@u4`] |
-//! | float8_e4m3fn         | [`DType::F8E4M3FN`] | [`f8e4m3fn`] |
-//! | float8_e5m2           | [`DType::F8E5M2`]   | [`f8e5m2`]   |
-//! | float8_e4m3b11fnuz    | [`DType::F8E4M3B11FNUZ`] | [`f8e4m3b11fnuz`] |
-//!
-//! Not supported (they need storage/kernels beyond plain bytes):
-//! Complex*, quantized (QInt8/QUInt8/QInt32/QUInt4x2/QUInt2x4),
-//! Bits1x8..Bits16, and torch's other float8s and sub-byte types.
-
 use std::fmt;
 
 use super::scalar::Scalar;
 
-// Re-exported so users of the crate can name the element types directly.
 pub use half::{bf16, f16};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +29,6 @@ pub enum DType {
 }
 
 impl DType {
-    /// Size of one element in bytes (PyTorch: `TypeMeta::itemsize()`).
     pub const fn size_of(self) -> usize {
         use DType::*;
         match self {
@@ -95,8 +65,6 @@ impl DType {
         }
     }
 
-    /// Bits of one element's value: [`size_of`](Self::size_of)'s bytes
-    /// but for the sub-byte integers (bool's 8).
     pub const fn bits(self) -> usize {
         match self {
             DType::I2 | DType::U2 => 2,
@@ -105,7 +73,6 @@ impl DType {
         }
     }
 
-    /// The name Python (and PyTorch) gives it: `float32`, `bfloat16`.
     pub const fn full_name(self) -> &'static str {
         use DType::*;
         match self {
@@ -132,7 +99,6 @@ impl DType {
         }
     }
 
-    /// Floating-point (real) dtypes.
     pub const fn is_float(self) -> bool {
         matches!(
             self,
@@ -146,7 +112,6 @@ impl DType {
         )
     }
 
-    /// Signed or unsigned integer dtypes.
     pub const fn is_int(self) -> bool {
         matches!(
             self,
@@ -172,12 +137,9 @@ impl fmt::Display for DType {
     }
 }
 
-/// Marks Rust types that can be stored in a [`crate::Storage`].
 pub trait Element: Copy + fmt::Debug + fmt::Display + 'static {
     const DTYPE: DType;
     const ZERO: Self;
-    /// Convert like a C++ `static_cast` (PyTorch: `Scalar::to<T>()`):
-    /// floats truncate toward zero into integers, nonzero is `true`.
     fn from_scalar(v: Scalar) -> Self;
     fn to_scalar(self) -> Scalar;
 }
@@ -227,30 +189,20 @@ impl Element for bool {
     }
 }
 
-/// `x` rounded to float32 "to odd": the float32 itself if `x` is one, else
-/// whichever of its two float32 neighbours has an odd last bit. Rounding
-/// that to nearest in a narrower float (float16, bfloat16) is `x` rounded
-/// to it once (Boldo and Melquiond, "Emulation of FMA and correctly rounded
-/// sums: proved algorithms using rounding to odd"): `half`'s conversions
-/// from f64 drop the mantissa's last 32 bits first, or round twice, so a
-/// value just above a halfway point can round down.
 fn round_to_odd(x: f64) -> f32 {
     let f = x as f32;
     let bits = f.to_bits();
     if !f.is_finite() || f64::from(f) == x || bits & 1 == 1 {
         return f;
     }
-    // Its neighbour towards `x`: away from zero if `x` is further out.
     let outward = (f64::from(f) < x) != f.is_sign_negative();
     f32::from_bits(if outward { bits + 1 } else { bits - 1 })
 }
 
-/// `x` rounded to nearest (ties to even) in float16.
 pub(crate) fn to_f16(x: f64) -> f16 {
     f16::from_f32(round_to_odd(x))
 }
 
-/// `x` rounded to nearest (ties to even) in bfloat16.
 pub(crate) fn to_bf16(x: f64) -> bf16 {
     bf16::from_f32(round_to_odd(x))
 }
@@ -277,9 +229,6 @@ impl Element for bf16 {
     }
 }
 
-/// A float8 format: its exponent's and mantissa's bits, its exponent's
-/// bias, and whether it has infinities (IEEE-like: NaNs of an all-ones
-/// exponent) or only NaN (`fn`: all ones; `fnuz`: "negative zero").
 #[derive(Clone, Copy)]
 struct Float8 {
     exponent: u32,
@@ -295,7 +244,6 @@ enum Kind {
     Fnuz,
 }
 
-/// `2^e`, exactly (`powi` need not be): a normal `f64`'s bits.
 fn pow2(e: i32) -> f64 {
     f64::from_bits(((e + 1023) as u64) << 52)
 }
@@ -321,8 +269,6 @@ impl Float8 {
         sign * value
     }
 
-    /// `x` rounded to nearest (ties to even); NaN beyond the largest
-    /// finite value but where there are infinities (as `ml_dtypes`).
     fn encode(self, x: f64) -> u8 {
         let nan = match self.kind {
             Kind::Ieee => 0x7E,
@@ -342,14 +288,11 @@ impl Float8 {
                 nan
             };
         }
-        // Its bits as an integer: subnormals in units of the smallest one,
-        // normals' exponent and mantissa continuing them.
         let min_exp = 1 - self.bias;
         let m = self.mantissa as i32;
         let bits: u32 = if a < pow2(min_exp) {
             (a / pow2(min_exp - m)).round_ties_even() as u32
         } else {
-            // `a` is a normal `f64`: its exponent is in its bits.
             let e = ((a.to_bits() >> 52) & 0x7FF) as i32 - 1023;
             let q = (a / pow2(e - m)).round_ties_even() as u32;
             (((e - min_exp + 1) as u32) << self.mantissa) + q - (1 << self.mantissa)
@@ -370,8 +313,6 @@ impl Float8 {
     }
 }
 
-/// The narrow dtypes' element types: `$name` of `$dtype`, its value
-/// `to_f64`/`from_f64` from its byte.
 macro_rules! narrow {
     ($(#[$doc:meta])* $name:ident, $dtype:expr, $from:expr, $to:expr) => {
         $(#[$doc])*
@@ -409,7 +350,6 @@ macro_rules! narrow {
             const ZERO: Self = $name(0);
             fn from_scalar(v: Scalar) -> Self {
                 match v {
-                    // Integers wrap (a float truncated first).
                     Scalar::Float(x) if !DTYPE_IS_FLOAT[$dtype as usize] => {
                         $name::from_f64(x.trunc().clamp(i64::MIN as f64, i64::MAX as f64))
                     }
@@ -426,7 +366,6 @@ macro_rules! narrow {
     };
 }
 
-/// Each dtype's [`DType::is_float`], by its discriminant.
 const DTYPE_IS_FLOAT: [bool; 20] = {
     let all = [
         DType::Bool,
@@ -459,12 +398,10 @@ const DTYPE_IS_FLOAT: [bool; 20] = {
     out
 };
 
-/// `x` (an integer, as f64) wrapped to `bits` bits, its low bits a byte.
 fn wrap_bits(x: f64, bits: u32) -> u8 {
     ((x as i64) & ((1 << bits) - 1)) as u8
 }
 
-/// A byte's low `bits` bits as a signed integer.
 fn signed_bits(b: u8, bits: u32) -> f64 {
     f64::from(((b << (8 - bits)) as i8) >> (8 - bits))
 }
@@ -488,39 +425,21 @@ const E4M3B11FNUZ: Float8 = Float8 {
     kind: Kind::Fnuz,
 };
 
+narrow!(i2, DType::I2, |x| wrap_bits(x, 2), |b| signed_bits(b, 2));
+narrow!(i4, DType::I4, |x| wrap_bits(x, 4), |b| signed_bits(b, 4));
+narrow!(u2, DType::U2, |x| wrap_bits(x, 2), f64::from);
+narrow!(u4, DType::U4, |x| wrap_bits(x, 4), f64::from);
+narrow!(f8e4m3fn, DType::F8E4M3FN, |x| E4M3FN.encode(x), |b| E4M3FN
+    .decode(b));
+narrow!(f8e5m2, DType::F8E5M2, |x| E5M2.encode(x), |b| E5M2
+    .decode(b));
 narrow!(
-    /// A 2-bit signed integer.
-    i2, DType::I2, |x| wrap_bits(x, 2), |b| signed_bits(b, 2)
-);
-narrow!(
-    /// A 4-bit signed integer.
-    i4, DType::I4, |x| wrap_bits(x, 4), |b| signed_bits(b, 4)
-);
-narrow!(
-    /// A 2-bit unsigned integer.
-    u2, DType::U2, |x| wrap_bits(x, 2), f64::from
-);
-narrow!(
-    /// A 4-bit unsigned integer.
-    u4, DType::U4, |x| wrap_bits(x, 4), f64::from
-);
-narrow!(
-    /// float8: 4 exponent bits (bias 7), 3 mantissa bits, NaN but no
-    /// infinities.
-    f8e4m3fn, DType::F8E4M3FN, |x| E4M3FN.encode(x), |b| E4M3FN.decode(b)
-);
-narrow!(
-    /// float8: 5 exponent bits (bias 15), 2 mantissa bits, IEEE-like.
-    f8e5m2, DType::F8E5M2, |x| E5M2.encode(x), |b| E5M2.decode(b)
-);
-narrow!(
-    /// float8: 4 exponent bits (bias 11), 3 mantissa bits, one NaN (the
-    /// "negative zero"), no infinities.
-    f8e4m3b11fnuz, DType::F8E4M3B11FNUZ, |x| E4M3B11FNUZ.encode(x), |b| E4M3B11FNUZ.decode(b)
+    f8e4m3b11fnuz,
+    DType::F8E4M3B11FNUZ,
+    |x| E4M3B11FNUZ.encode(x),
+    |b| E4M3B11FNUZ.decode(b)
 );
 
-/// Run `$body` with `$T` bound to the Rust element type of runtime dtype
-/// `$dtype` (PyTorch: `AT_DISPATCH_ALL_TYPES`).
 macro_rules! dispatch_dtype {
     ($dtype:expr, $T:ident => $body:expr) => {
         match $dtype {

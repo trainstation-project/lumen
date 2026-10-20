@@ -81,7 +81,6 @@ struct Add {
 
 struct Max {
     template <typename A> static A apply(A x, A y) { return max_op(x, y); }
-    // -inf for floats, the lowest value for integers (saturated), false.
     template <typename A> static A identity() { return is_bool_t<A>() ? A(false) : from_float<A>(-INFINITY); }
 };
 

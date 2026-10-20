@@ -43,12 +43,6 @@ impl Tensor {
         Ok(tensor)
     }
 
-    /// `members` (parameters) placed in one block on `device`, side by side
-    /// along `dimension` (`interleave` 1), or interleaved along it by
-    /// `interleave` (members of one size: element `j` of member `i` at `j *
-    /// interleave + i`, `merge_dots`' interleaved block): each member a view
-    /// of the block. The block they are placed in already, if so (`None` if
-    /// they are placed otherwise).
     pub fn pack(
         members: &[Tensor],
         dimension: usize,
@@ -141,7 +135,6 @@ impl Tensor {
         self.storage().parameter.version.load(Ordering::Acquire)
     }
 
-    /// Count a write of this parameter's value ([`version`](Self::version)).
     pub fn mark_written(&self) {
         self.storage()
             .parameter
@@ -163,9 +156,6 @@ impl Tensor {
     }
 }
 
-/// Member `k` of `block`, of `n` along `dimension`: side by side, at
-/// `start` (`interleave` 1); or interleaved, its elements every
-/// `interleave`th from `k`.
 fn member(
     block: &Tensor,
     dimension: usize,

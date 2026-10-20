@@ -1,19 +1,3 @@
-//! lumen's Pallas: TPU kernels written in Python with Pallas's API
-//! (`lumen/pallas/__init__.py`), traced by lumen's tracer into a [`Kernel`],
-//! and lowered here to Mosaic ([`mosaic`]), the MLIR dialect of a TPU core's
-//! kernels, which libtpu compiles. No JAX: this is Pallas's front end, its
-//! lowering rules and pipeline ported to lumen (JAX's are Apache 2.0).
-//!
-//! A kernel is a block of nodes on values and refs. Values are scalars or
-//! vectors, computed by graph [`Primitive`]s (their types inferred as the
-//! graph's are) or by a TPU's bit ops; refs are buffers in a memory space
-//! (HBM, VMEM, SMEM), sliced, reshaped, loaded, stored and copied by DMA;
-//! `If` and `For` hold blocks of their own. Every kernel works on a
-//! device's whole memory (`u32[rows, 1, 128]`, the TPU allocator's buffer):
-//! its parameters are `i32` scalars (SMEM), optionally host bytes copied to
-//! the TPU, the memory as read, and the memory as written (the same
-//! buffer), then its scratch (VMEM buffers, DMA semaphores).
-
 use crate::DType;
 use crate::graph::{Primitive, TensorType};
 
@@ -25,8 +9,6 @@ mod tests;
 
 pub type Var = usize;
 
-/// Where a buffer is: HBM (`Any`: wherever XLA put it), a core's vector
-/// memory, or its scalar memory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Space {
     Any,
@@ -34,22 +16,14 @@ pub enum Space {
     Smem,
 }
 
-/// A kernel value's type.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
-    /// A scalar (shape `[]`) or a vector (in registers).
     Value(TensorType),
-    /// A buffer of a memory space.
     Ref(TensorType, Space),
-    /// DMA semaphores, an array of `shape` (`[]`: one).
     Semaphore(Vec<usize>),
-    /// A tensor in the device's memory, in a TPU's tiles
-    /// (`device::tpu::layout`): an HBM ref of that layout.
     View(TensorType, Tiled),
 }
 
-/// A view's tiled layout: its tiles (Mosaic's, `(8,128)(2,1)`), a tile's
-/// shape (its last dimensions'), and each dimension's stride in tiles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tiled {
     pub tiles: String,
@@ -57,72 +31,38 @@ pub struct Tiled {
     pub strides: Vec<usize>,
 }
 
-/// What a node does.
 #[derive(Clone, Debug)]
 pub enum Op {
-    /// A graph primitive on values: its operands, its result.
     Prim(Primitive),
-    /// A value's bits as another dtype of its width (`pltpu.bitcast`).
     Bitcast(DType),
-    /// A tensor of a type in the device's memory at an i32 row of it (its
-    /// operands the memory and the row), in its TPU layout
-    /// (`tpu.reinterpret_cast`).
     View,
-    /// Integer bit ops, of two values of one type (`lax.shift_left`,
-    /// `shift_right_logical`, `bitwise_and`, `bitwise_or`).
     ShiftLeft,
     ShiftRight,
     And,
     Or,
-    /// An i32 scalar, which the kernel promises is a multiple of this
-    /// (`pl.multiple_of`).
     MultipleOf(usize),
-    /// A ref's window: from `starts` (`None`: the next dynamic operand, an
-    /// i32 scalar) of `sizes`, without the dimensions `squeezed` (of size
-    /// 1). A semaphore array's too.
     Slice {
         starts: Vec<Option<usize>>,
         sizes: Vec<usize>,
         squeezed: Vec<bool>,
     },
-    /// A ref's elements, row-major, as another shape.
     Reshape(Vec<usize>),
-    /// A ref's bits as another dtype of its width.
     RefBitcast(DType),
-    /// A VMEM ref's whole value; an SMEM ref's element at an i32 index.
     Load,
-    /// Stores a value in a VMEM ref (of its shape): `(ref, value)`.
     Store,
-    /// A VMEM ref's every `strides`-th element of each dimension, from i32
-    /// starts (`tpu.strided_load`; `vector.load` of unit strides): `(ref,
-    /// starts...)`.
     StridedLoad(Vec<usize>),
-    /// Stores a value in those elements: `(ref, value, starts...)`.
     StridedStore(Vec<usize>),
-    /// Starts copying `src` to `dst` (of one shape), signalling `sem`:
-    /// `(src, dst, sem)`.
     DmaStart,
-    /// Waits for the copy of `(src, dst, sem)`.
     DmaWait,
-    /// Waits an i32 scalar's nanoseconds (`tpu.delay`).
     Delay,
-    /// Runs its block if its i1 operand, else `otherwise` (none: nothing):
-    /// its values the results of the block that ran (of one type).
     If {
         then: Block,
         otherwise: Option<Block>,
     },
-    /// While `before` (of the carried values, its arguments) gives a true
-    /// i1 (its first result; the others are passed on), runs `after` on
-    /// them, its results the next carried values; its operands the first,
-    /// its values the last (`scf.while`).
     While {
         before: Block,
         after: Block,
     },
-    /// Runs its block for `i` in `lo..hi` (i32 operands), carrying values
-    /// (the operands after them): the block's arguments are `i` and the
-    /// carried values, its results the next ones, the node's the last.
     For(Block),
 }
 
@@ -133,8 +73,6 @@ pub struct Node {
     pub outputs: Vec<Var>,
 }
 
-/// Nodes in order, with arguments (a loop's) and results (a loop's next
-/// carried values).
 #[derive(Clone, Debug, Default)]
 pub struct Block {
     pub args: Vec<Var>,
@@ -142,13 +80,11 @@ pub struct Block {
     pub results: Vec<Var>,
 }
 
-/// A block being written: the kernel's body, an `If`'s or a `For`'s.
 #[derive(Debug)]
 enum Open {
     If {
         cond: Var,
         block: Block,
-        /// The `then` block, once its `else` is being written.
         then: Option<Block>,
     },
     For {
@@ -158,12 +94,10 @@ enum Open {
     While {
         inputs: Vec<Var>,
         block: Block,
-        /// The condition's block, once the body is being written.
         before: Option<Block>,
     },
 }
 
-/// A kernel: its parameters, scratch and body.
 #[derive(Debug)]
 pub struct Kernel {
     types: Vec<Type>,
@@ -173,14 +107,11 @@ pub struct Kernel {
     open: Vec<Open>,
 }
 
-/// The memory, as a kernel sees it: `rows` rows of 128 32-bit words.
 fn words(rows: usize) -> Type {
     Type::Ref(TensorType::new(DType::U32, &[rows, 1, 128]), Space::Any)
 }
 
 impl Kernel {
-    /// A kernel taking `scalars` i32s, `host` rows of host bytes (if any)
-    /// and the device's `rows` rows of memory.
     pub fn new(scalars: usize, host: Option<usize>, rows: usize) -> Self {
         let mut k = Kernel {
             types: Vec::new(),
@@ -204,8 +135,6 @@ impl Kernel {
         self.types.len() - 1
     }
 
-    /// The parameters: the scalars, the host rows (if any), the memory as
-    /// read and as written.
     pub fn params(&self) -> &[Var] {
         &self.params
     }
@@ -222,7 +151,6 @@ impl Kernel {
         &self.types[var]
     }
 
-    /// A new scratch buffer or semaphore array.
     pub fn alloc(&mut self, ty: Type) -> Result<Var, String> {
         match ty {
             Type::Ref(_, Space::Vmem | Space::Smem) | Type::Semaphore(_) => {}
@@ -249,7 +177,6 @@ impl Kernel {
         }
     }
 
-    /// Appends `op` on `inputs`, of results of `types`.
     fn push(&mut self, op: Op, inputs: &[Var], types: Vec<Type>) -> Vec<Var> {
         let outputs: Vec<Var> = types.into_iter().map(|t| self.var(t)).collect();
         self.block().nodes.push(Node {
@@ -275,7 +202,6 @@ impl Kernel {
         }
     }
 
-    /// The value `primitive(inputs...)`.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check(inputs)?;
         let args = inputs
@@ -286,7 +212,6 @@ impl Kernel {
         Ok(self.push(Op::Prim(primitive), inputs, vec![Type::Value(ty)])[0])
     }
 
-    /// The value `op(inputs...)` of a TPU's own ops.
     pub fn bits(&mut self, op: Op, inputs: &[Var]) -> Result<Var, String> {
         self.check(inputs)?;
         let a = self.value(inputs[0])?.clone();
@@ -313,8 +238,6 @@ impl Kernel {
         Ok(self.push(op, inputs, vec![Type::Value(ty)])[0])
     }
 
-    /// `src`'s window (see [`Op::Slice`]); `dynamic` are the starts not in
-    /// `starts`, in order.
     pub fn slice(
         &mut self,
         src: Var,
@@ -349,8 +272,6 @@ impl Kernel {
                 return Err(format!("dimension {d} is squeezed but of size {size}"));
             }
         }
-        // A view's window is a view of whole tiles of it (in its tiled
-        // dimensions): its own, from the memory (`tpu.reinterpret_cast`).
         if let Type::View(_, tiled) = &self.types[src] {
             let first = rank - tiled.tile.len().min(rank);
             for d in first..rank {
@@ -374,8 +295,6 @@ impl Kernel {
             .collect();
         let ty = match &self.types[src] {
             Type::Ref(t, space) => Type::Ref(TensorType::new(t.dtype, &kept), *space),
-            // A window of a view: its tiles, the strides of its dimensions
-            // kept.
             Type::View(t, tiled) => {
                 let strides = tiled
                     .strides
@@ -403,8 +322,6 @@ impl Kernel {
         Ok(self.push(op, &inputs, vec![ty])[0])
     }
 
-    /// A `ty` tensor in `memory` (the kernel's, as read or written) at i32
-    /// row `row`, in its TPU layout.
     pub fn view(&mut self, memory: Var, row: Var, ty: TensorType) -> Result<Var, String> {
         self.check(&[memory, row])?;
         if !self.params.contains(&memory) || self.types[memory] != words(self.rows()) {
@@ -427,7 +344,6 @@ impl Kernel {
         Ok(self.push(Op::View, &[memory, row], vec![ty])[0])
     }
 
-    /// The memory's rows.
     fn rows(&self) -> usize {
         match &self.types[*self.params.last().expect("the memory")] {
             Type::Ref(t, _) => t.shape[0],
@@ -435,7 +351,6 @@ impl Kernel {
         }
     }
 
-    /// `src`'s elements as `shape`.
     pub fn reshape(&mut self, src: Var, shape: Vec<usize>) -> Result<Var, String> {
         self.check(&[src])?;
         if let Type::View(..) = self.types[src] {
@@ -449,7 +364,6 @@ impl Kernel {
         Ok(self.push(Op::Reshape(shape), &[src], vec![ty])[0])
     }
 
-    /// `src`'s bits as `dtype` (of its width).
     pub fn ref_bitcast(&mut self, src: Var, dtype: DType) -> Result<Var, String> {
         self.check(&[src])?;
         if let Type::View(..) = self.types[src] {
@@ -463,9 +377,6 @@ impl Kernel {
         Ok(self.push(Op::RefBitcast(dtype), &[src], vec![ty])[0])
     }
 
-    /// A VMEM ref's value, or an SMEM ref's element at i32 `index`.
-    /// A VMEM ref's whole value (no `indices`), or an SMEM ref's element at
-    /// i32 `indices` (one a dimension).
     pub fn load(&mut self, src: Var, indices: &[Var]) -> Result<Var, String> {
         self.check(&[src])?;
         self.check(indices)?;
@@ -487,8 +398,6 @@ impl Kernel {
         Ok(self.push(Op::Load, &inputs, vec![Type::Value(ty)])[0])
     }
 
-    /// Stores `value` in VMEM ref `dst` whole (no `indices`), or as an SMEM
-    /// ref's element at i32 `indices`.
     pub fn store(&mut self, dst: Var, value: Var, indices: &[Var]) -> Result<(), String> {
         self.check(&[dst, value])?;
         self.check(indices)?;
@@ -512,8 +421,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// A VMEM ref `src`'s `sizes` elements of each dimension from i32
-    /// `starts`, every `strides`-th.
     pub fn load_strided(
         &mut self,
         src: Var,
@@ -527,7 +434,6 @@ impl Kernel {
         Ok(self.push(Op::StridedLoad(strides.to_vec()), &inputs, vec![ty])[0])
     }
 
-    /// Stores `value` in those elements of VMEM ref `dst`.
     pub fn store_strided(
         &mut self,
         dst: Var,
@@ -549,8 +455,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// The dtype of VMEM ref `r`, whose `sizes` elements from `starts`
-    /// every `strides`-th are read or written.
     fn strided(
         &self,
         r: Var,
@@ -584,7 +488,6 @@ impl Kernel {
         Ok(t.dtype)
     }
 
-    /// Starts (or with `wait`, waits for) copying `src` to `dst` with `sem`.
     pub fn dma(&mut self, src: Var, dst: Var, sem: Var, wait: bool) -> Result<(), String> {
         self.check(&[src, dst, sem])?;
         let (s, d) = (self.reference(src)?.0, self.reference(dst)?.0);
@@ -601,7 +504,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// Waits i32 scalar `nanos` nanoseconds.
     pub fn delay(&mut self, nanos: Var) -> Result<(), String> {
         self.check(&[nanos])?;
         if *self.value(nanos)? != TensorType::new(DType::I32, &[]) {
@@ -611,8 +513,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// Starts an `If` on i1 scalar `cond`: what follows, until
-    /// [`end_if`](Self::end_if), runs only if it holds.
     pub fn begin_if(&mut self, cond: Var) -> Result<(), String> {
         self.check(&[cond])?;
         if *self.value(cond)? != TensorType::new(DType::Bool, &[]) {
@@ -626,8 +526,6 @@ impl Kernel {
         Ok(())
     }
 
-    /// Ends the open `If`'s `then` block, its values `results`, and starts
-    /// its `else`.
     pub fn begin_else(&mut self, results: &[Var]) -> Result<(), String> {
         self.check(results)?;
         match self.open.last_mut() {
@@ -641,8 +539,6 @@ impl Kernel {
         }
     }
 
-    /// Ends the open `If`: its values, `results` (its else's, which must be
-    /// of its then's types) or none.
     pub fn end_if(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::If { cond, block, then }) = self.open.pop() else {
@@ -674,8 +570,6 @@ impl Kernel {
         Ok(self.push(op, &[cond], types))
     }
 
-    /// Starts a `While` carrying `carried`: its condition's block, of the
-    /// carried values (as it sees them: returned).
     pub fn begin_while(&mut self, carried: &[Var]) -> Result<Vec<Var>, String> {
         self.check(carried)?;
         let types = carried
@@ -695,8 +589,6 @@ impl Kernel {
         Ok(args)
     }
 
-    /// Ends the open `While`'s condition, `cond` (a bool scalar), and
-    /// starts its body: of the carried values (returned).
     pub fn begin_while_body(&mut self, cond: Var) -> Result<Vec<Var>, String> {
         self.check(&[cond])?;
         if *self.value(cond)? != TensorType::new(DType::Bool, &[]) {
@@ -722,7 +614,6 @@ impl Kernel {
         Ok(args)
     }
 
-    /// Ends the open `While`, `results` its next carried values: the last.
     pub fn end_while(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::While {
@@ -746,8 +637,6 @@ impl Kernel {
         Ok(self.push(op, &inputs, types))
     }
 
-    /// Starts a `For` over i32 scalars `lo..hi` carrying `carried`: its
-    /// index and carried values, as its block sees them.
     pub fn begin_for(
         &mut self,
         lo: Var,
@@ -778,7 +667,6 @@ impl Kernel {
         Ok((index, args))
     }
 
-    /// Ends the open `For`, `results` its next carried values: the last.
     pub fn end_for(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::For { inputs, mut block }) = self.open.pop() else {
@@ -794,7 +682,6 @@ impl Kernel {
         Ok(self.push(Op::For(block), &inputs, types))
     }
 
-    /// Whether every `If` and `For` begun has ended.
     pub fn is_closed(&self) -> bool {
         self.open.is_empty()
     }

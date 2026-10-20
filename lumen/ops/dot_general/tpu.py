@@ -1,18 +1,3 @@
-"""``dot_general`` on TPU, in lumen's Pallas: a matmul over the device's
-memory.
-
-``lumen/ops/dot_general/tpu.rs`` chooses the spec (the dot's form and blocks)
-and runs the program; this is the kernel. The operands are viewed in place,
-in a TPU's tiles: the lhs as ``[batch * lead, m, k]``, the rhs as
-``[batch, k, n]`` (``[batch, n, k]`` if ``transposed``), the output as
-``[batch * lead, m, n]``. One pipeline (``emit_pipeline``, its block copies
-double-buffered against compute) runs over a grid of
-``(batch * lead, m/bm, n/bn, k/bk)``: each step multiplies an lhs and a rhs
-block on the matrix unit into a float32 accumulator (VMEM), and the last k
-step writes the output block, through ``epilogue`` if any, in the output's
-dtype (one k step: the product itself, no accumulator).
-"""
-
 from lumen import pallas as pl
 from lumen.graph import prims
 from lumen.ops.tpu import pallas
@@ -31,7 +16,6 @@ def program(spec, epilogue=None):
     mb, nb, kb = m // bm, n // bn, k // bk
 
     def rhs_batch(b):
-        # The lhs's batch and lead merged: the rhs's batch is b // lead.
         if lead == 1:
             return b
         if isinstance(b, int):
@@ -55,10 +39,7 @@ def program(spec, epilogue=None):
             ob[...] = v.to(out_dtype)
 
         def body(xb, yb, ob):
-            # One product a step: the matrix unit's code is unrolled over
-            # the block, so a second copy of it (a branch's) costs dearly.
             if kb == 1:
-                # One block of k: no accumulator.
                 finish(pl.dot(xb[...], yb[...], trans_b=t), ob)
                 return
             step, acc = pl.program_id(3), scratch[0]
@@ -76,5 +57,4 @@ def program(spec, epilogue=None):
         grid = (batch * lead, mb, nb, kb)
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec], out_specs=[o_spec])(x, y, out)
 
-    # The accumulator, for more than one block of k.
     return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if kb > 1 else [])

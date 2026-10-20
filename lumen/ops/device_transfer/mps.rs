@@ -5,10 +5,7 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let options = TensorOptions::new()
         .dtype(src.dtype())
         .device(Device::Mps(0));
-    // SAFETY: the copy below writes every element.
     let staging = unsafe { Tensor::empty(src.shape(), options) };
-    // SAFETY: distinct contiguous buffers of `nbytes`, both host-accessible
-    // (MPS memory is shared), the staging one new.
     unsafe { std::ptr::copy_nonoverlapping(src.data_ptr(), staging.data_ptr(), src.nbytes()) };
     let ty = TensorType::new(dst.dtype(), dst.shape());
     let (from, to) = (staging.data_ptr().cast_const(), dst.data_ptr());

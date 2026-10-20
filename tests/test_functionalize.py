@@ -1,14 +1,3 @@
-"""In-place assignment (``copy_``) in a compiled function, functionalized as
-``torch.compile`` does: every reference to a tensor, and every view of it
-(``reshape``/``view``, ``permute``/``transpose``, indexing and slicing,
-``narrow``/``split``/``chunk``), reads its assignments, and a view's
-assignment is its base's (``lumen/graph/tracer.py``: a view is derived
-again from its base when read; a view's assignment written into its base
-through a reshape back, the inverse permutation or a
-``dynamic_update_slice``). As torch, a reshape that is not a view (of a
-permuted tensor) copies. A tensor argument or a weight so assigned is
-written back after the call. Each expectation is torch's."""
-
 import numpy as np
 import pytest
 
@@ -35,18 +24,13 @@ def _add_one(t):
     t.copy_(t + 1.0)
 
 
-# Each a function of x, y = 2x = [0, 2, 4, 6] in it, and its result in torch.
-
-
 def assign_then_read(x):
-    # y = f(x); add_(y, 1); h(y): h reads y + 1.
     y = x * 2.0
     _add_one(y)
     return y * 10.0
 
 
 def reshape_view_reads_base(x):
-    # A view taken before its base is assigned reads the assignment.
     y = x * 2.0
     z = y.reshape(2, 2)
     _add_one(y)
@@ -54,7 +38,6 @@ def reshape_view_reads_base(x):
 
 
 def base_reads_reshape_view(x):
-    # A view's assignment reaches its base.
     y = x * 2.0
     _add_one(y.reshape(2, 2))
     return y * 1.0
@@ -85,14 +68,12 @@ def base_reads_split_piece(x):
 
 
 def base_reads_transposed_row(x):
-    # Through a view of a view: a row of the transpose is a column.
     y = x * 2.0
     _add_one(y.reshape(2, 2).t()[0])
     return y * 1.0
 
 
 def sibling_view(x):
-    # Another view of the same base reads it too.
     y = x * 2.0
     a, b = y[0:2], y.reshape(2, 2)
     _add_one(a)
@@ -100,7 +81,6 @@ def sibling_view(x):
 
 
 def view_after_twice(x):
-    # A view taken after the assignments reads them; they add up.
     y = x * 2.0
     _add_one(y[1:])
     _add_one(y[2:])
@@ -108,14 +88,12 @@ def view_after_twice(x):
 
 
 def permuted_reshape_copies(x):
-    # A reshape of a permuted tensor is a copy: assigning it leaves y.
     y = x * 2.0
     _add_one(y.reshape(2, 2).t().reshape(4))
     return y * 1.0
 
 
 def both_returned(x):
-    # A view and its base, each with the assignment.
     y = x * 2.0
     v = y[1:3]
     _add_one(v)
@@ -259,9 +237,6 @@ def test_weight_assigned_in_place(device):
     assert lumen.to_numpy(memory).tolist() == [[2] * 3] * 2
 
 
-# Every in-place op: functionalized as its out-of-place op then ``copy_``
-# (so through a view too). Each: the op on a traced tensor, the same on a
-# numpy array (out of place).
 def _iadd(t):
     t += 2.0
 
@@ -365,7 +340,7 @@ def test_inplace_op_errors():
     trace = lambda f, *args: lumen.make_graph(f)(*args)  # noqa: E731
     with pytest.raises(RuntimeError, match="doesn't match the broadcast shape"):
         trace(lambda x, y: x.add_(y), m([3]), m([2, 3]))
-    trace(lambda x, y: x.add_(y), m([2, 3]), m([3]))  # broadcast to x: fine
+    trace(lambda x, y: x.add_(y), m([2, 3]), m([3]))
     with pytest.raises(TypeError):
         trace(lambda x: x.add_(1.5), m([3], "int32"))
     with pytest.raises(TypeError):
@@ -465,10 +440,8 @@ def test_view_assignment_updates_its_base_in_place():
 
     graph = lumen.make_graph(f)(_meta(8, 16), _meta(16, 32))
     plan = lumen.graph_compiler.Plan(graph, "cpu", parameters=[0, 1])
-    # One write (``y[k] += v``'s ``y[k] = t`` writes nothing more).
     (step,) = [line for line in str(plan).splitlines() if "dynamic_update_slice" in line]
     written, operand = step.split(":")[0].strip(), step.split("dynamic_update_slice ")[1].split()[0]
     assert written == operand, plan
     y, part = 8 * 32 * 4, 8 * 8 * 4
-    # The base, the part's slice and its new value, and constants.
     assert plan.workspace_bytes <= y + 2 * part + 1024, plan

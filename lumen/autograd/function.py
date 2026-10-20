@@ -1,13 +1,9 @@
-"""Custom derivatives: ``torch.autograd.Function`` (JAX: ``custom_vjp``)."""
-
 import inspect
 
 from lumen.autograd.core import _accumulate, _full, _value
 from lumen.graph import tracer
 from lumen.graph.tracer import TracedTensor
 
-# The tape's name for a Function's call: ``(_FUNCTION, its tensor
-# arguments' vars, {"function", "ctx", "args"}, its outputs' vars)``.
 _FUNCTION = "autograd.Function"
 
 
@@ -62,7 +58,6 @@ class Function:
         if not outs or not all(isinstance(o, TracedTensor) for o in outs):
             raise TypeError(f"{cls.__name__}.forward must return a tensor or a tuple of them, got {out!r}")
 
-        # Each argument by key: its position, or its keyword's name.
         entries = list(enumerate(args)) + list(kwargs.items())
         inputs = [v.var for _, v in entries if isinstance(v, TracedTensor)]
         params = {"function": cls, "ctx": ctx, "entries": entries, "nargs": len(args)}
@@ -131,7 +126,6 @@ def _gradients(fn, grads, entries, n):
             grads, named = grads[:-1], grads[-1]
     else:
         grads = (grads,)
-    # All the positional ones, or (followed by names) the first of them.
     if len(grads) > n or (not named and len(grads) != n):
         raise ValueError(f"{fn.__name__}.backward returned {len(grads)} gradients for {n} positional arguments")
     names = list(inspect.signature(fn.forward).parameters)[1:]

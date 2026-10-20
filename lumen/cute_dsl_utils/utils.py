@@ -75,7 +75,6 @@ def tensor_to_cute_tensor(t: object, leading_dim: int) -> cute.Tensor:
 
     t = from_dlpack(t, assumed_align=get_alignment(t))
 
-    # A stride of 0 is a broadcast dimension: there is no leading dimension.
     if t.stride[leading_dim] == 0:
         leading_dim = None
 

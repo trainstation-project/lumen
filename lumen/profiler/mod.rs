@@ -1,28 +1,3 @@
-//! A profiler modeled on PyTorch's (`torch.profiler`, `torch/csrc/profiler`).
-//!
-//! While a session runs ([`start`] .. [`stop`]) it collects:
-//! - **ops**: every tensor op (`lumen::zeros`, `lumen::fill_`, ...) as a
-//!   timed range on the CPU clock, nested per thread (PyTorch:
-//!   `RecordFunction`), plus user ranges from [`record_function`];
-//! - **host kernels**: a plan step's run on the host, inside its op (the
-//!   step's dispatch), drawn on the CPU's timeline as a device's;
-//! - **memory** (`profile_memory`): each allocation and free by the CPU and
-//!   static allocators, with the allocator's totals (PyTorch: `[memory]`
-//!   events);
-//! - **GPU activity** (`Activity::Cuda` / `Activity::Mps`): device-side
-//!   start/end of copies and fills, timed with CUDA events or Metal command
-//!   buffer timestamps and correlated with the op that issued them
-//!   (PyTorch: Kineto's `gpu_memcpy` / `gpu_memset` activities);
-//! - **TPU activity** (`Activity::Tpu`): each TPU program's run, timed by
-//!   libtpu's own profiler ([`tpu`]) and correlated with the op that
-//!   launched it.
-//!
-//! The result is a [`Profile`]: raw events, PyTorch-style `key_averages`
-//! tables, and a Chrome trace.
-//!
-//! One session runs at a time, process-wide. When none runs, every hook is
-//! a single relaxed atomic load.
-
 mod chrome;
 #[cfg(lumen_cupti_linked)]
 pub(crate) mod cupti;
@@ -45,27 +20,18 @@ use crate::DType;
 use crate::device::Device;
 use crate::graph::TensorType;
 
-/// What a session records (PyTorch: `ProfilerActivity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Activity {
-    /// Ops and user ranges on the CPU clock.
     Cpu,
-    /// Device-side timing of CUDA copies and fills.
     Cuda,
-    /// Device-side timing of Metal (MPS) fills.
     Mps,
-    /// Device-side timing of TPU programs.
     Tpu,
 }
 
-/// Session options (PyTorch: `torch.profiler.profile(...)` arguments).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfilerConfig {
     pub activities: Vec<Activity>,
-    /// Record allocations and frees (PyTorch: `profile_memory`).
     pub profile_memory: bool,
-    /// Record the dtype and shape of each op's inputs and outputs (PyTorch:
-    /// `record_shapes`, which records the inputs').
     pub record_shapes: bool,
 }
 
@@ -79,62 +45,34 @@ impl Default for ProfilerConfig {
     }
 }
 
-/// What an [`Event`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
-    /// A lumen tensor op (Chrome trace category `cpu_op`).
     Op,
-    /// A [`record_function`] range (`user_annotation`).
     UserRange,
-    /// An allocation (`bytes > 0`) or free (`bytes < 0`) (`[memory]`).
     Memory,
-    /// Device-side work: a copy or fill (`gpu_memcpy` / `gpu_memset`).
     Gpu,
-    /// A plan step's kernel run on the host ([`record_host_kernel`]),
-    /// inside the op dispatching it (category `kernel`, on the CPU's
-    /// host-kernel row).
     HostKernel,
 }
 
-/// One recorded event. Times are nanoseconds since the session started.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: u64,
     pub name: String,
     pub kind: EventKind,
     pub start_ns: u64,
-    /// Equal to `start_ns` for memory events.
     pub end_ns: u64,
-    /// The recording thread (a small per-process id).
     pub thread: u64,
-    /// The op or range this event ran inside, on the same thread; for GPU
-    /// events, the op that issued the work (PyTorch: correlation id).
     pub parent: Option<u64>,
-    /// `Cpu` for ops; the memory's or GPU's device otherwise.
     pub device: Device,
-    /// The op's inputs' and outputs' types (dtype and shape), with
-    /// `record_shapes`.
     pub inputs: Vec<TensorType>,
     pub outputs: Vec<TensorType>,
-    /// Each input's and output's strides (in elements) as the kernel reads
-    /// and writes it, with `record_shapes`: a plan step's (a slice read in
-    /// place, an in-place concatenate's operand written in its result);
-    /// none for an op that does not say.
     pub input_strides: Vec<Vec<usize>>,
     pub output_strides: Vec<Vec<usize>>,
-    /// The dtypes the op accumulates in, with `record_shapes`: a dot's or
-    /// sum's `accum_dtype`, a max's dtype; a fusion's, each
-    /// of its reductions' (none for elementwise ops).
     pub accum: Vec<DType>,
-    /// Memory events: bytes allocated (positive) or freed (negative).
     pub bytes: i64,
-    /// Memory events: the block's address.
     pub addr: usize,
-    /// Memory events: the allocator's allocated and reserved bytes after it.
     pub total_allocated: usize,
     pub total_reserved: usize,
-    /// GPU events: the device kernel that ran (`reduce_sum_rows_f32`), where
-    /// the backend names it.
     pub kernel: Option<String>,
 }
 
@@ -144,9 +82,6 @@ impl Event {
     }
 }
 
-// ---------------- session state ----------------
-
-// What the current session records, as bits: checked on every hook.
 const CPU: u8 = 1;
 const MEMORY: u8 = 2;
 const CUDA: u8 = 4;
@@ -155,7 +90,6 @@ const SHAPES: u8 = 16;
 const TPU: u8 = 32;
 
 static FLAGS: AtomicU8 = AtomicU8::new(0);
-/// Increments per session, so events from a previous one are dropped.
 static SESSION: AtomicU64 = AtomicU64::new(0);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
@@ -170,15 +104,11 @@ struct Session {
 static STATE: Mutex<Option<Session>> = Mutex::new(None);
 
 thread_local! {
-    /// Ids of the ops and ranges open on this thread, innermost last.
     static STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static THREAD_ID: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
-    /// The next device launch's own name and types ([`next_launch`]).
     static NEXT_LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
 }
 
-/// A launch's inputs' and outputs' types, and their strides (in
-/// elements).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IoTypes {
     pub inputs: Vec<TensorType>,
@@ -187,20 +117,12 @@ pub(crate) struct IoTypes {
     pub output_strides: Vec<Vec<usize>>,
 }
 
-/// What one device launch of an op computes, where it is not the whole op
-/// (an op that launches several kernels: a split reduction's partials,
-/// then those to its output): its name (the primitives it runs) and, with
-/// `record_shapes`, the types it reads and writes.
 #[derive(Debug, Clone)]
 pub(crate) struct Launch {
     name: &'static str,
     types: Option<IoTypes>,
 }
 
-/// Record the next device launch on this thread as `name`, reading and
-/// writing `types` (only called with `record_shapes`), rather than as its
-/// op: the op's event keeps the op's name and types, and the launch's,
-/// nested in it, are its own. Launches with none set are their op's.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn next_launch(name: &'static str, types: impl FnOnce() -> IoTypes) {
     let bits = flags();
@@ -210,13 +132,11 @@ pub(crate) fn next_launch(name: &'static str, types: impl FnOnce() -> IoTypes) {
     }
 }
 
-/// Drop a [`next_launch`] for a launch that did not happen.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn clear_next_launch() {
     NEXT_LAUNCH.with(|l| l.borrow_mut().take());
 }
 
-/// The profiler clock: nanoseconds since the first time it was read.
 pub(crate) fn now_ns() -> u64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
@@ -226,18 +146,14 @@ fn flags() -> u8 {
     FLAGS.load(Ordering::Relaxed)
 }
 
-/// Whether a session is running.
 pub fn is_enabled() -> bool {
     flags() != 0
 }
 
-/// Whether the session records memory events.
 pub(crate) fn memory_enabled() -> bool {
     flags() & MEMORY != 0
 }
 
-/// Whether the session times device work on `device`.
-// Called by the Metal and CUDA (CUPTI) backends, compiled only when linked.
 #[cfg_attr(
     not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
     allow(dead_code)
@@ -252,8 +168,6 @@ pub(crate) fn device_enabled(device: Device) -> bool {
     flags() & bit != 0
 }
 
-/// Start a session. Errors if one is already running (PyTorch allows one
-/// profiler at a time too).
 pub fn start(config: ProfilerConfig) -> Result<(), String> {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if state.is_some() {
@@ -295,10 +209,7 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop the running session and return what it recorded.
 pub fn stop() -> Result<Profile, String> {
-    // Let in-flight GPU work finish, so its events are recorded (PyTorch's
-    // profiler synchronizes its MPS streams too).
     #[cfg(lumen_mps_linked)]
     crate::stream::mps::synchronize();
     #[cfg(lumen_cupti_linked)]
@@ -311,9 +222,7 @@ pub fn stop() -> Result<Profile, String> {
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
     let mut events = session.events;
-    // Events are pushed as they end; order them by start for readers.
     events.sort_by_key(|e| (e.start_ns, e.id));
-    // Device work has the types of the op that issued it, unless its own.
     let types: std::collections::HashMap<u64, (IoTypes, Vec<DType>)> = events
         .iter()
         .filter(|e| e.kind == EventKind::Op)
@@ -332,7 +241,6 @@ pub fn stop() -> Result<Profile, String> {
         .filter(|e| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel))
     {
         if let Some((io, accum)) = e.parent.and_then(|p| types.get(&p)) {
-            // A launch with types of its own ([`next_launch`]) keeps them.
             if e.inputs.is_empty() && e.outputs.is_empty() {
                 (e.inputs, e.outputs) = (io.inputs.clone(), io.outputs.clone());
                 (e.input_strides, e.output_strides) =
@@ -344,7 +252,6 @@ pub fn stop() -> Result<Profile, String> {
     Ok(Profile::new(events, session.config))
 }
 
-/// The name of the running session's event `id` (an op, once it ended).
 #[cfg(lumen_tpu_linked)]
 fn op_name(id: u64) -> Option<String> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -356,12 +263,9 @@ fn op_name(id: u64) -> Option<String> {
         .map(|e| e.name.clone())
 }
 
-/// Add an event to the running session, if it is still session `session`.
 fn push(session: u64, mut event: Event) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = state.as_mut().filter(|s| s.id == session) {
-        // Times are relative to the session start; clamp work that began
-        // just before it.
         event.start_ns = event.start_ns.saturating_sub(s.start_ns);
         event.end_ns = event.end_ns.saturating_sub(s.start_ns);
         s.events.push(event);
@@ -372,14 +276,10 @@ fn thread_id() -> u64 {
     THREAD_ID.with(|t| *t)
 }
 
-/// The innermost op or range open on this thread.
 fn current_parent() -> Option<u64> {
     STACK.with(|s| s.borrow().last().copied())
 }
 
-// ---------------- ranges ----------------
-
-/// An open op or range; recorded when dropped (PyTorch: `RecordFunction`).
 #[must_use = "the range ends when the guard is dropped"]
 pub struct RecordGuard {
     open: Option<OpenRange>,
@@ -392,10 +292,7 @@ struct OpenRange {
     kind: EventKind,
     start_ns: u64,
     parent: Option<u64>,
-    /// Inputs', outputs' and accumulation types; `None` without
-    /// `record_shapes`.
     types: Option<(Vec<TensorType>, Vec<TensorType>, Vec<DType>)>,
-    /// Inputs' and outputs' strides, if the op says ([`RecordGuard::strides`]).
     strides: (Vec<Vec<usize>>, Vec<Vec<usize>>),
 }
 
@@ -426,25 +323,18 @@ fn open_range(
 }
 
 impl RecordGuard {
-    /// Record the op's outputs' types (with `record_shapes`; `outputs` is
-    /// only called then), once it has them.
     pub(crate) fn outputs(&mut self, outputs: impl FnOnce() -> Vec<TensorType>) {
         if let Some((_, out, _)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
             *out = outputs();
         }
     }
 
-    /// Record the strides (in elements) the op's kernel reads its inputs
-    /// and writes its outputs at (with `record_shapes`; `strides` is only
-    /// called then).
     pub(crate) fn strides(&mut self, strides: impl FnOnce() -> (Vec<Vec<usize>>, Vec<Vec<usize>>)) {
         if let Some(open) = self.open.as_mut().filter(|o| o.types.is_some()) {
             open.strides = strides();
         }
     }
 
-    /// Record the dtypes the op accumulates in (with `record_shapes`;
-    /// `accum` is only called then).
     pub(crate) fn accum(&mut self, accum: impl FnOnce() -> Vec<DType>) {
         if let Some((_, _, a)) = self.open.as_mut().and_then(|o| o.types.as_mut()) {
             *a = accum();
@@ -460,7 +350,6 @@ impl Drop for RecordGuard {
         let end_ns = now_ns();
         STACK.with(|s| {
             let mut stack = s.borrow_mut();
-            // Usually the top; tolerate guards dropped out of order.
             if let Some(i) = stack.iter().rposition(|&id| id == open.id) {
                 stack.remove(i);
             }
@@ -494,21 +383,14 @@ impl Drop for RecordGuard {
     }
 }
 
-/// Time a user-defined range until the guard drops (PyTorch:
-/// `torch.profiler.record_function`). Ops inside it nest under it.
 pub fn record_function(name: impl Into<String>) -> RecordGuard {
     open_range(|| name.into(), EventKind::UserRange, Vec::new)
 }
 
-/// Time a plan step's kernel running on the host, inside its op, until
-/// the guard drops: its own row, apart from the dispatch's.
 pub(crate) fn record_host_kernel(name: &'static str) -> RecordGuard {
     open_range(|| name.to_owned(), EventKind::HostKernel, Vec::new)
 }
 
-/// Time a lumen op until the guard drops, given its inputs' types (only
-/// called with `record_shapes`); its outputs' go to
-/// [`RecordGuard::outputs`].
 pub(crate) fn record_op(
     name: &'static str,
     inputs: impl FnOnce() -> Vec<TensorType>,
@@ -516,10 +398,6 @@ pub(crate) fn record_op(
     open_range(|| name.to_owned(), EventKind::Op, inputs)
 }
 
-// ---------------- memory and device hooks ----------------
-
-/// Report an allocation (`bytes > 0`) or free (`bytes < 0`) on `device`,
-/// with the allocator's totals afterwards.
 pub(crate) fn report_memory(
     device: Device,
     addr: usize,
@@ -561,11 +439,6 @@ pub(crate) fn report_memory(
     );
 }
 
-/// Record device work on `device` that ran from `start_ns` to `end_ns` on
-/// the profiler clock ([`now_ns`]), issued by the current op.
-// Called by tests of the timing paths and by device code that captures a
-// context up front; the MPS and CUPTI paths call `record_gpu_in` directly
-// with a context captured at submission.
 #[cfg(test)]
 pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_ns: u64) {
     if let Some(context) = gpu_context(device) {
@@ -573,19 +446,14 @@ pub(crate) fn record_gpu(name: &'static str, device: Device, start_ns: u64, end_
     }
 }
 
-/// Who submitted device work, captured at submission, for work whose times
-/// arrive later (asynchronous MPS and CUDA work).
 #[derive(Debug, Clone)]
 pub(crate) struct GpuContext {
     session: u64,
     parent: Option<u64>,
     thread: u64,
-    /// The launch's own name and types ([`next_launch`]), if not its op's.
     launch: Option<Launch>,
 }
 
-/// The current op's context for device work on `device`, if the session
-/// times it.
 #[cfg_attr(
     not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
     allow(dead_code)
@@ -600,7 +468,6 @@ pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
     })
 }
 
-/// Record device work captured in `context`.
 #[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
 pub(crate) fn record_gpu_in(
     context: GpuContext,
@@ -612,7 +479,6 @@ pub(crate) fn record_gpu_in(
     record_kernel_in(context, name, None, device, start_ns, end_ns);
 }
 
-/// [`record_gpu_in`], for work that ran `kernel`.
 #[cfg_attr(
     not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),
     allow(dead_code)
@@ -636,9 +502,6 @@ pub(crate) fn record_kernel_in(
     );
 }
 
-/// A plan step's kernel that ran on the host from `start_ns` to `end_ns`
-/// (on another thread: a Core ML step's prediction), issued by the op
-/// `context` captured, as [`record_host_kernel`] records one inside it.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn record_host_kernel_in(context: GpuContext, name: &str, start_ns: u64, end_ns: u64) {
     record_in(
@@ -661,8 +524,6 @@ fn record_in(
     start_ns: u64,
     end_ns: u64,
 ) {
-    // Its own name and types, if set; else its op's (types given it when
-    // the session ends).
     let (name, types) = match context.launch {
         Some(Launch { name, types }) => (name, types),
         None => (name, None),

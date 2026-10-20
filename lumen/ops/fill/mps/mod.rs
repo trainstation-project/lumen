@@ -1,8 +1,3 @@
-//! The MPS `fill_` kernel: compute shaders for dense and strided fills
-//! (`shim.mm`), as in PyTorch, encoded into the MPS stream without
-//! waiting (see [`crate::stream::mps`]). Memory outside lumen's MPS segments
-//! (a custom allocator's) takes the CPU kernel: MPS memory is unified.
-
 use std::ffi::c_void;
 
 use crate::Tensor;
@@ -11,7 +6,6 @@ use crate::tensor::dtype::Element;
 use crate::tensor::storage::as_bytes;
 
 unsafe extern "C" {
-    // In mps.mm.
     fn lumen_mps_fill(
         ptr: *mut u8,
         pattern: *const u8,
@@ -33,11 +27,6 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     }
 
     let pattern = as_bytes(std::slice::from_ref(&value));
-    // A fill writes its elements in any order: take the dimensions in
-    // decreasing stride, so neighbouring threads write neighbouring
-    // addresses. Elements that make up one contiguous block in that order
-    // (a transposed tensor's, say) are filled as contiguous, which is passed
-    // without strides.
     let mut dims: Vec<(usize, usize)> = t
         .shape()
         .iter()
@@ -61,7 +50,6 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     };
     let dst = t.data_ptr();
 
-    // The Metal function lumen_mps_fill runs, for the profiler.
     let kernel = match (contiguous, pattern.len()) {
         (true, 1) => "fill_u8",
         (true, 2) => "fill_u16",
@@ -91,7 +79,6 @@ pub(super) fn fill<T: Element>(t: &Tensor, value: T) {
     match status {
         0 => {}
         -1 => {
-            // Not in a lumen MPS segment: not submitted.
             mps::cancel(context);
             super::cpu::fill(t, value);
         }

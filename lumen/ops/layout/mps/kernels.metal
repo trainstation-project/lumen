@@ -1,16 +1,4 @@
-// Layout primitives as one dtype-agnostic gather: element i of the
-// output reads the input at the offset of its index under per-dimension
-// strides, which express broadcast_in_dim (stride 0 on new or size-1
-// dimensions), transpose (permuted strides) and copies; a tiled transpose
-// where the reads would otherwise be strided.
-//
-// Compiled after lumen/ops/mps/kernels.metal, which build.rs puts first
-// in the one Metal source the kernels share.
 
-// Thread (x, y) writes elements x, x + X, ... of output row y (X the grid
-// width, so neighbouring threads write neighbouring elements): the row's
-// offset in the input comes from its index over the outer dimensions, and
-// x steps the innermost dimension's stride.
 #define GATHER(NAME, E)                                                      \
     kernel void gather_##NAME(device const E *in [[buffer(0)]],              \
                               device E *out [[buffer(1)]],                   \
@@ -28,12 +16,6 @@
         }                                                                    \
     }
 
-// A gather whose output's innermost dimension b reads the input at a
-// stride, while another dimension a reads it contiguously: a transpose of a
-// and b through a 32x32 tile in threadgroup memory, so that both the reads
-// (along a) and the writes (along b) are contiguous. Threadgroup (x, y, z)
-// of 16x16 threads takes a = 32x.. and b = 32y.. of batch z (whose offsets
-// come from its index over the other dimensions), each thread 2x2 elements.
 #define TRANSPOSE(NAME, E)                                                       \
     kernel void transpose_##NAME(device const E *in [[buffer(0)]],               \
                                  device E *out [[buffer(1)]],                    \

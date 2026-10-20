@@ -1,14 +1,8 @@
-//! Dots given their operands in matmul form ([`canonicalize_dots`]).
-
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::ops::dot_general::mps::{collapsed, matmul_order};
 use crate::tensor::contiguous_strides;
 
-/// `graph` with each dot_general whose operands' dimensions do not collapse
-/// into matmul form ([`crate::ops::dot_general::mps`]) given them in that
-/// order by a transpose first (XLA: GPU dot canonicalization): the copy is a
-/// step of the plan, in its workspace, rather than inside the kernel.
 pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -84,7 +78,6 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
     out
 }
 
-/// [`canonicalize_dots`] as a pass.
 pub(super) struct CanonicalizeDots;
 
 impl<M: Module> CompilerPass<M> for CanonicalizeDots {

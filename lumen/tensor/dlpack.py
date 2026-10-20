@@ -87,12 +87,10 @@ def from_dlpack(ext_tensor):
         kwargs = {"max_version": (1, 0)}
         device_type, _ = ext_tensor.__dlpack_device__()
         if device_type == DLDeviceType.kDLCUDA:
-            # lumen's CUDA work runs on the legacy default stream.
             kwargs["stream"] = 1
         try:
             capsule = ext_tensor.__dlpack__(**kwargs)
         except TypeError:
-            # A producer predating DLPack 1.0 takes no max_version.
             del kwargs["max_version"]
             capsule = ext_tensor.__dlpack__(**kwargs)
     else:

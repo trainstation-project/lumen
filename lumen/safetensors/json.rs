@@ -1,13 +1,5 @@
-//! The JSON a safetensors header needs: a reader for any JSON value (the
-//! header is an object of objects, arrays, strings and integers) and a
-//! writer for strings, keeping lumen free of a JSON dependency. It follows
-//! RFC 8259, as `serde_json` (which safetensors uses) does; numbers are
-//! kept as their text and read as integers where the format needs them.
-
 use std::fmt::Write;
 
-/// A JSON value. Objects keep their keys in order, duplicates included,
-/// for the caller to reject.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Value {
     Null,
@@ -18,11 +10,8 @@ pub(crate) enum Value {
     Object(Vec<(String, Value)>),
 }
 
-/// Values nested deeper than this are rejected rather than recursed into,
-/// so a hostile header cannot overflow the stack.
 const MAX_DEPTH: usize = 64;
 
-/// Parse `text` as one JSON value, surrounded by optional whitespace.
 pub(crate) fn parse(text: &str) -> Result<Value, String> {
     let mut p = Parser {
         bytes: text.as_bytes(),
@@ -196,14 +185,10 @@ impl Parser<'_> {
         self.expect(b'"')?;
         let mut out = String::new();
         loop {
-            // Copy the run of plain characters up to the next quote,
-            // backslash or control character in one go.
             let start = self.pos;
             while matches!(self.peek(), Some(c) if c != b'"' && c != b'\\' && c >= 0x20) {
                 self.pos += 1;
             }
-            // The input is a &str, and the run stops only at ASCII bytes,
-            // so it is valid UTF-8.
             out.push_str(std::str::from_utf8(&self.bytes[start..self.pos]).expect("UTF-8"));
             match self.peek() {
                 Some(b'"') => {
@@ -228,7 +213,6 @@ impl Parser<'_> {
                         b'u' => {
                             let mut code = self.hex4()?;
                             if (0xD800..0xDC00).contains(&code) {
-                                // A high surrogate: a low one must follow.
                                 if !self.bytes[self.pos..].starts_with(b"\\u") {
                                     return Err(self.error("unpaired surrogate"));
                                 }
@@ -254,9 +238,6 @@ impl Parser<'_> {
     }
 }
 
-/// Append `s` to `out` as a JSON string, escaped as `serde_json` does:
-/// quotes, backslashes and control characters; other characters as they
-/// are.
 pub(crate) fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {

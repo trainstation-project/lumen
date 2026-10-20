@@ -1,22 +1,3 @@
-"""Tracing, and traced tensors.
-
-``lumen.compile(fn)`` runs ``fn`` once per input signature with a
-``TracedTensor`` standing in for each input tensor, recording the ops it
-applies into a graph (JAX: a jaxpr), which then runs as a whole. Only
-traced tensors have ops: a ``lumen.Tensor`` holds data, and the graph is
-the only thing that computes with it.
-
-A traced tensor has PyTorch's operators (``+ - * / @ == < []``, ``-x``),
-layout methods (``reshape``, ``permute``, ``transpose``, ...) and dtype
-casts (``to``, ``float``, ...); every other op is a function in
-``lumen.functional`` (``import lumen.functional as F``). Each is a
-composition of the strict primitives in ``lumen.graph.prims``. Unlike
-PyTorch, no op changes a dtype the user did not ask for: operands must
-share a dtype (a Python scalar takes its tensor operand's, and must be of
-its kind), and floating-point functions take floating-point tensors.
-Convert with ``.to(dtype)``.
-"""
-
 import builtins
 import contextlib
 import dataclasses
@@ -37,44 +18,20 @@ __all__ = [
     "make_graph",
 ]
 
-# The graphs being traced, innermost last.
 _TRACES = []
-# Each trace's random state (``lumen.random``): its hidden inputs, the seed
-# and the stream's position, made at its first draw (None before), and the
-# numbers drawn so far.
 _RNG = []
-# Each trace's device: where its values are, unless on the host (``.cpu()``).
 _DEVICES = []
-# Each trace's open ``record_function`` ranges (``lumen.profiler``),
-# outermost first, each ``(name, call)``: the scope of the nodes traced
-# inside them, whose steps the profiler shows inside them when the plan
-# runs. ``call`` numbers each time a range was entered, so steps of two
-# calls of one name (two layers' ``attention``) open a range each, however
-# the plan orders them.
 _SCOPES = []
-# Each trace's values' scopes (a tuple of ranges), those traced inside a
-# range: their gradient ops' are each range's backward (``_backward_scope``).
 _SCOPE_OF = []
-# The calls of ranges entered so far.
 _CALLS = itertools.count()
-# Each trace's values' source lines (``(filename, lineno)``): the line
-# outside lumen that computed each.
 _SOURCES = []
-# Each trace's values' ops: ``(name, input vars, params)`` of the one that
-# computed each (an autodiff rule's look at a cotangent's).
 _PRODUCERS = []
 
 
-# Frames in lumen's package are lumen's, not the traced program's.
 _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# The autodiff tapes being recorded (``lumen/autograd``), innermost
-# last: each node bound while one is open, ``(name, input vars, params,
-# output var)``, is appended to each.
 _TAPES = []
-# Each trace's whole tape and the tensors ``.backward()`` differentiates
-# with respect to (its tensor arguments and weights), innermost last.
 _BACKWARD = []
 
 
@@ -231,11 +188,6 @@ def current_graph():
     return _TRACES[-1]
 
 
-# ---------------------------------------------------------------------
-# tracing
-# ---------------------------------------------------------------------
-
-
 def _weights(args):
     """The weights of ``args``' modules (``lumen.nn.Module``), each tensor
     once, in order: whole meta tensors."""
@@ -298,7 +250,6 @@ def _trace(fn, args, device):
     assigned = {sid: t.var for sid, t in weights.items()}
     assigned_scalars = [t.var for t in scalars]
     assigned_arguments = [t.var for t in arguments]
-    # Recorded from the start, for ``.backward()``.
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
@@ -308,9 +259,6 @@ def _trace(fn, args, device):
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
-    # A weight, a module's float or a tensor argument ``fn`` assigned
-    # (``w.copy_(value)``, or through a view of it): its new value is an
-    # output too, written back after each run (the float on the host).
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
     written_scalars = [k for k, t in enumerate(scalars) if t.var != assigned_scalars[k]]
     written_arguments = [k for k, t in enumerate(arguments) if t.var != assigned_arguments[k]]
@@ -320,8 +268,6 @@ def _trace(fn, args, device):
         + [scalars[k].var for k in written_scalars]
         + [arguments[k].var for k in written_arguments]
     )
-    # Without the values no output depends on (an autodiff transform's
-    # tangents its transpose does not read).
     renumbered = graph.prune()
     sources = {renumbered[v]: s for v, s in sources.items() if renumbered[v] is not None}
     grads = [t.grad for t in leaves if t.grad is not None]
@@ -354,10 +300,6 @@ def _lift(x):
 
 
 def _signature(args):
-    # Tensors are traced by dtype and shape (data or meta alike), floats as
-    # runtime scalars (their values change nothing), modules by their
-    # structure and which of their weights are one tensor; anything else is
-    # baked into the graph, so it must be hashable.
     ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
     shared = tuple(ids.index(i) for i in ids)
     return tuple(
@@ -370,8 +312,6 @@ def _signature(args):
     ) + (shared,)
 
 
-# The compiler flags' repr as of their version (rendered again once they
-# change, not on each call).
 _flags = [None, None]
 
 
@@ -444,14 +384,9 @@ def compile(fn, device=None):
     float16 work after them) on the Apple Neural Engine, their values baked
     into Core ML programs: compiled again once a weight is written
     (``copy_``, or by another compiled function)."""
-    compile_device = device  # dump_graph's own `device` shadows it
-    # Per signature and device: the graph, whether `fn` returns one tensor,
-    # its plans, each with its workspace (`None` on the meta device), tried
-    # in order, and the number of tensor arguments (the graph's inputs
-    # before the weights).
+    compile_device = device
     plans = {}
     latest = []
-    # The device asked for, resolved once.
     named = None if device is None else _device_name(device)
 
     def prepare(args):
@@ -459,20 +394,14 @@ def compile(fn, device=None):
         workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = named or _device(args, None)
-        # The compiler's flags too: a plan compiled with others is not reused.
         key = _signature(args), target, _compiler_flags()
-        # The arguments the plan copies in: tensors, then runtime scalars.
-        # The kernels take the scalars by value, read from the host on each
-        # call: a new value needs no new plan.
         tensors = [a for a in args if isinstance(a, Tensor)]
         scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
         tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
         if key not in plans:
             plans[key] = (*_trace(fn, args, target), [], len(tensors), scalars)
         graph, out, _, drawn, entries, _, _ = plans[key]
-        # The random state, if it draws numbers: inputs after the weights,
-        # runtime scalars.
-        from lumen import random  # lazily: lumen.random imports this module
+        from lumen import random
 
         rng = random._state() if drawn is not None else []
         weights = _weights(args)
@@ -482,14 +411,11 @@ def compile(fn, device=None):
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, tensors + weights + rng
         params = list(range(len(tensors), len(tensors) + len(weights)))
-        # The random state's scalars, after the weights.
         start = len(tensors) + len(weights)
         scalars = scalars + list(range(start, start + len(rng)))
         inputs = tensors + weights
 
         def inputs_for(plan):
-            # The weights in their blocks, if they are placed so (or not
-            # yet placed), else None.
             blocks = []
             for (positions, dimension), interleave in zip(plan.packed, plan.interleaved):
                 block = _pack([inputs[i] for i in positions], dimension, target, interleave)
@@ -502,13 +428,7 @@ def compile(fn, device=None):
             placed = inputs_for(plan)
             if placed is not None:
                 return graph, plan, workspace, out, placed
-        # A new plan: dots merged into blocks of weights while none of theirs
-        # is placed yet; once they are placed otherwise, without.
         packable = params if not entries else []
-        # The weights it assigns, each donated to its new value (an output
-        # after those it returns): written over the weight where nothing
-        # reads the old one after (in place: a cache's dynamic_update_slice),
-        # not copied back; no other output is written there.
         written, written_scalars, written_arguments = plans[key][2]
         returned = len(graph.outputs()) - len(written) - len(written_scalars) - len(written_arguments)
         donate = [(len(tensors) + w, returned + j) for j, w in enumerate(written)]
@@ -522,16 +442,8 @@ def compile(fn, device=None):
             placed = inputs_for(plan)
         return graph, plan, workspace, out, placed
 
-    # Per plan running Neural Engine steps: its weights' versions when it
-    # last ran (their values baked into its programs).
     baked = {}
 
-    # Calls of tensors alone whose plan reads them as they are and writes
-    # nothing back (no weights, runtime scalars, random numbers, packed
-    # blocks or arguments it assigns): that plan, its workspace, what fn
-    # returns, which outputs come back to the host, and its key, by the
-    # tensors' types and devices and the compiler's flags. A call there
-    # runs it directly.
     fast = {}
 
     @functools.wraps(fn)
@@ -556,7 +468,6 @@ def compile(fn, device=None):
                 plan._invalidate_neural_engine()
                 baked[id(plan)] = versions
         if not ran:
-            # Compiled (and the weights placed); nothing to run.
             outputs = [
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
             ]
@@ -564,8 +475,6 @@ def compile(fn, device=None):
             outputs = plan.run_in(workspace, inputs)
         outputs = iter(outputs)
 
-        # A host value the plan has on the device (an input or a constant as
-        # it is: no host op computed it), copied.
         to_host = []
 
         def result_of(t):
@@ -576,21 +485,16 @@ def compile(fn, device=None):
 
         result = _tree_map(result_of, out)
         if ran and all(type(a) is Tensor for a in args):
-            # A call of tensors alone, read as they are, writing nothing
-            # back: the next such call runs its plan directly.
             written, written_scalars, written_arguments = plans[latest[0]][2]
             plain = not (written or written_scalars or written_arguments or plans[latest[0]][3] is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
                 signature = tuple((a.dtype, tuple(a.shape), a.device) for a in args)
                 fast[signature, _compiler_flags()] = (plan, workspace, out, to_host, latest[0])
         if ran:
-            # The weights it assigned, written back (functionalized: as
-            # torch.compile does a mutation).
             weights = _weights(args)
             written, written_scalars, written_arguments = plans[latest[0]][2]
             target = latest[0][1]
             for k, value in zip(written, outputs):
-                # Written over its memory already (donated), or copied.
                 w = weights[k]
                 memory = w._placed(target) if w._is_parameter else w
                 if value.storage_id != memory.storage_id:
@@ -598,12 +502,11 @@ def compile(fn, device=None):
                 elif w._is_parameter:
                     w._mark_written()
             for k, value in zip(written_scalars, outputs):
-                (v,) = value.tolist()  # a 0-d tensor lists its one element
+                (v,) = value.tolist()
                 nn._set_float(args, k, float(v))
             arguments = [a for a in args if isinstance(a, Tensor)]
             for k, value in zip(written_arguments, outputs):
                 arguments[k].copy_(value)
-            # The next call draws the numbers after this one's.
             drawn = plans[latest[0]][3]
             if drawn is not None:
                 from lumen import random
@@ -626,11 +529,7 @@ def compile(fn, device=None):
         ((_, target, _),) = latest
         graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
         target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
-        # Kernels do not depend on the values: profile on ones, the weights
-        # packed where the compiler merges dots.
         types = [graph.type_of(v) for v in graph.inputs()]
-        # The weights: the inputs after the tensors but the random state,
-        # whose two scalars are runtime scalars.
         n_rng = 2 if drawn is not None else 0
         params = list(range(n_tensors, len(types) - n_rng))
         scalars = scalars + list(range(len(types) - n_rng, len(types)))
@@ -673,11 +572,6 @@ def make_graph(fn):
     return graph
 
 
-# ---------------------------------------------------------------------
-# dtypes: never changed implicitly
-# ---------------------------------------------------------------------
-
-
 def _is_float(dtype):
     return "float" in dtype
 
@@ -700,7 +594,6 @@ def _common_dtype(op, operands):
     tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
     dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
-        # An operand that says why it is not one (a kernel's ref).
         for x in operands:
             if hasattr(x, "_not_an_operand"):
                 raise TypeError(x._not_an_operand(op))
@@ -721,11 +614,6 @@ def _scalar_fits(x, dtype):
     return _is_float(dtype)
 
 
-# ---------------------------------------------------------------------
-# broadcasting and dimensions
-# ---------------------------------------------------------------------
-
-
 def _is_operand(x):
     return isinstance(x, (TracedTensor, bool, int, float))
 
@@ -735,7 +623,6 @@ def _as_tensor(x, dtype, op):
     as a traced tensor."""
     x = _lift(x)
     if isinstance(x, TracedTensor) and x.weak and x.dtype != dtype:
-        # A runtime scalar (float32): converted, as a Python float would be.
         if not _is_float(dtype):
             raise TypeError(f"{op} of a {dtype} tensor and a float: convert the tensor with .to(dtype)")
         return x.to(dtype)
@@ -812,7 +699,6 @@ def _sizes(args):
 
 
 def _min(x, y):
-    # -max(-x, -y) keeps NaN propagation for floats; integers select.
     if _is_float(x.dtype):
         return prims.neg(prims.max(prims.neg(x), prims.neg(y)))
     return prims.select(prims.lt(y, x), y, x)
@@ -825,11 +711,6 @@ def _le(x, y):
 
 def _ne(x, y):
     return prims.eq(prims.eq(x, y), prims.full(x.shape, False, "bool"))
-
-
-# ---------------------------------------------------------------------
-# TracedTensor
-# ---------------------------------------------------------------------
 
 
 def _binary(prim, reflected=False):
@@ -888,14 +769,12 @@ def _power(x, y):
             base, y = prims.mul(base, base), y >> 1
         return result
     if isinstance(y, TracedTensor) and _is_float(x.dtype) and not _is_float(y.dtype) and y.dtype != "bool":
-        # A float's power of integers (``lax.pow``'s), broadcast.
         shape = _broadcast_shapes(x.shape, y.shape)
         return prims.pow(_broadcast_to(x, shape), _broadcast_to(y, shape))
     return _elementwise(prims.pow, x, y)
 
 
 def _true_div(x, y):
-    # By a scalar (a Python number, a runtime scalar): times its reciprocal.
     if isinstance(y, (int, float)) and not isinstance(y, bool) and y != 0:
         return _elementwise(prims.mul, _require_float(x, "true division (/)"), 1 / y)
     if isinstance(y, TracedTensor) and y.weak and not getattr(x, "weak", True):
@@ -940,8 +819,6 @@ def _reshape_strides(shape, strides, new_shape):
         return [math.prod(new_shape[d + 1 :]) for d in range(len(new_shape))]
     new_strides = [0] * len(new_shape)
     view_d = len(new_shape) - 1
-    # The stride of the last dimension of the chunk being matched (a run
-    # of contiguous dimensions), and the elements matched on each side.
     chunk_stride, tensor_numel, view_numel = strides[-1], 1, 1
     for d in range(len(shape) - 1, -1, -1):
         tensor_numel *= shape[d]
@@ -998,18 +875,9 @@ class TracedTensor:
     def __init__(self, graph, var, device=None):
         self.graph = graph
         self._var = var
-        # A view's (torch's: ``reshape``, ``permute``, indexing): the tensor
-        # it is a view of and the ops deriving it from that, the base's
-        # version its value is of; a base's, how often it was assigned
-        # (``copy_``, its own or a view's).
         self._base, self._ops, self._seen, self._version = None, (), 0, 0
-        # A runtime scalar's (a float argument's): it takes its tensor
-        # operand's dtype, as a Python scalar does.
         self.weak = False
-        # Its gradient, once ``.backward()`` computed one (torch's ``.grad``).
         self.grad = None
-        # Where it is: the trace's device, or the host (``"cpu"``: ``.cpu()``
-        # made it, or an op of host values).
         self.device = device or (_DEVICES[-1] if _DEVICES else None)
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
@@ -1033,8 +901,6 @@ class TracedTensor:
 
     __hash__ = object.__hash__
 
-    # -- metadata -------------------------------------------------------
-
     @property
     def ndim(self):
         return len(self.shape)
@@ -1052,8 +918,6 @@ class TracedTensor:
         if not self.shape:
             raise TypeError("len() of a 0-d tensor")
         return self.shape[0]
-
-    # -- arithmetic and comparison ----------------------------------------
 
     __add__ = _binary(prims.add)
     __radd__ = _binary(prims.add, reflected=True)
@@ -1114,9 +978,6 @@ class TracedTensor:
         value = _lift(value)
         if not isinstance(value, TracedTensor) or (value.dtype, value.shape) != (self.dtype, self.shape):
             raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
-        # Functionalized (torch.compile's): a view's assignment is its
-        # base's, the view's part of it replaced (each view of the base
-        # derived again when read).
         base = self._base
         if base is None:
             self._var = value.var
@@ -1126,8 +987,6 @@ class TracedTensor:
             base._version += 1
             self._var, self._seen = value.var, base._version
         return self
-
-    # -- in place (functionalized: each an out-of-place op, then ``copy_``) --
 
     def _assign(self, value, op):
         """Assign ``value``, ``op`` of it computed out of place, as torch's
@@ -1216,7 +1075,6 @@ class TracedTensor:
         mask = _broadcast_to(mask, _broadcast_shapes(mask.shape, self.shape))
         return self._assign(prims.select(mask, value, self), "masked_fill_")
 
-    # ``x += y``: in place (torch's), not ``x = x + y``.
     def __iadd__(self, other):
         return self.add_(other)
 
@@ -1233,8 +1091,6 @@ class TracedTensor:
         """``x[key] = value``: the indexed view of it assigned ``value`` (a
         Python scalar, or a tensor of its dtype broadcast to the view)."""
         view = self[key]
-        # ``y[k] += v``: Python's ``t = y[k]; t += v; y[k] = t``, t already
-        # written through (the same part of the same base, up to date).
         base = view._base
         if isinstance(value, TracedTensor) and value is not view and base is not None:
             if value._base is base and value._ops == view._ops and value._seen == base._version:
@@ -1242,8 +1098,6 @@ class TracedTensor:
         value = _as_tensor(value, self.dtype, "index assignment")
         if value.dtype != self.dtype:
             raise TypeError(f"index assignment: got a {value.dtype} value for a {self.dtype} tensor")
-        # As torch: the value's leading size-1 dimensions dropped, then it
-        # broadcast to the view.
         shape = value.shape
         while len(shape) > view.ndim and shape[0] == 1:
             shape = shape[1:]
@@ -1262,7 +1116,7 @@ class TracedTensor:
         default) with respect to the traced function's tensor arguments and
         its modules' weights, added to their ``.grad`` (``torch.Tensor.backward``,
         within the trace: return them). As ``lumen.grad`` computes it."""
-        from lumen.autograd.transforms import backward  # it imports this module
+        from lumen.autograd.transforms import backward
 
         tape, leaves = _BACKWARD[-1]
 
@@ -1274,7 +1128,6 @@ class TracedTensor:
 
         for leaf, g in zip(leaves, backward(self, gradient, list(tape), leaves)):
             if g is not None:
-                # gradient accumulation
                 if leaf.grad is not None:
                     g = leaf.grad + g
 
@@ -1283,7 +1136,7 @@ class TracedTensor:
     def __matmul__(self, other):
         """F.matmul, accumulating floats in float32 (float64 in float64),
         its result of the operands' dtype."""
-        from lumen.functional import matmul  # it imports this module
+        from lumen.functional import matmul
 
         other = _lift(other)
         if not isinstance(other, TracedTensor):
@@ -1294,8 +1147,6 @@ class TracedTensor:
     def __rmatmul__(self, other):
         other = _lift(other)
         return TracedTensor.__matmul__(other, self) if isinstance(other, TracedTensor) else NotImplemented
-
-    # -- dtype conversion --------------------------------------------------
 
     def to(self, *args, dtype=None, device=None, non_blocking=False, copy=False):
         """It converted to ``dtype`` and/or on ``device`` (``Tensor.to``: a
@@ -1353,8 +1204,6 @@ class TracedTensor:
     def bool(self):
         return self.to("bool")
 
-    # -- shape -------------------------------------------------------------
-
     def reshape(self, *shape):
         shape = list(_sizes(shape))
         if shape.count(-1) > 1:
@@ -1369,9 +1218,6 @@ class TracedTensor:
         if tuple(shape) == self.shape:
             return self
         out = prims.reshape(self, shape)
-        # As torch's: a view where its strides allow (adding or dropping
-        # size-1 dimensions, merging contiguous ones), else a copy (of a
-        # permuted tensor, say).
         if _reshape_strides(self.shape, _strides(self), shape) is None:
             return out
         return _view(self, out, ("reshape", tuple(shape)))
@@ -1428,8 +1274,6 @@ class TracedTensor:
 
     def broadcast_to(self, shape):
         return self.expand(shape)
-
-    # -- indexing and splitting ----------------------------------------------
 
     def _slice(self, starts, limits):
         if list(starts) == [0] * self.ndim and list(limits) == list(self.shape):

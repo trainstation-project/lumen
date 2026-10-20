@@ -1,10 +1,3 @@
-//! Graphs of [`Primitive`]s, the program representation of compiled
-//! execution (JAX: a jaxpr). `lumen.compile` traces a Python function once
-//! per input signature into a [`Graph`]; the graph is then run as a whole.
-//! [`plan`] compiles a graph into a static [`Plan`] for execution;
-//! [`reference`](crate::ops::reference), a CPU interpreter, defines what
-//! each primitive computes.
-
 pub(crate) mod custom;
 pub mod primitive;
 #[cfg(feature = "python")]
@@ -21,8 +14,6 @@ pub use primitive::{BinaryOp, FUSION_SEPARATOR, NEURAL_ENGINE, Primitive, UnaryO
 use crate::DType;
 use crate::tensor::contiguous_strides;
 
-/// The static type of a graph value: a dtype and a shape (JAX:
-/// `ShapedArray`). Graph values have no strides or device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TensorType {
     pub dtype: DType,
@@ -42,7 +33,6 @@ impl TensorType {
     }
 }
 
-/// `f32[2,3]`, as in a jaxpr.
 impl fmt::Display for TensorType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dims: Vec<String> = self.shape.iter().map(usize::to_string).collect();
@@ -50,67 +40,38 @@ impl fmt::Display for TensorType {
     }
 }
 
-/// A value in a graph: an index into its types.
 pub type Var = usize;
 
-/// `output = primitive(inputs...)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub primitive: Primitive,
     pub inputs: Vec<Var>,
     pub output: Var,
-    /// The `record_function` ranges open where it was traced, outermost
-    /// first (a pass gives the nodes it makes of one its scope, as XLA's
-    /// passes keep an instruction's metadata): its step's ranges when a
-    /// plan runs it.
     pub scope: Scope,
-    /// The lines of the traced program that computed it (each the first
-    /// frame outside lumen), in order: the tracer's one; a pass's nodes,
-    /// those of the node it rewrites, or of all it merges into one
-    /// ([`Graph::set_origin`], [`Graph::set_origins`]).
     pub sources: Lines,
-    /// Its label, if not its primitive's ([`Graph::label`]): what a pass
-    /// made it for (a split-K dot's partials and their sum; a gated pair's
-    /// merged weights' gradients, `2x dot_general`), as profiled. The
-    /// passes after the one setting it keep it.
     pub label: Option<&'static str>,
 }
 
-/// A nesting of `record_function` ranges, outermost first ([`intern_scope`]).
 pub type Scope = &'static [Range];
 
-/// Lines of the traced program, each its file and line number
-/// ([`intern_lines`]).
 pub type Lines = &'static [(&'static str, u32)];
 
-/// A `record_function` range a node was traced in: its name, and which call
-/// of it (each time the traced code entered it; a backward range, the
-/// forward call's). Steps of one call share its range when a plan runs
-/// them, those of another call open their own (reordered steps too).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Range {
     pub name: &'static str,
     pub call: u64,
 }
 
-/// A function from typed inputs to outputs, in SSA form: each node
-/// defines one new value from earlier ones. Built by [`input`](Self::input)
-/// and [`apply`](Self::apply), which checks every node's types.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub(crate) types: Vec<TensorType>,
     pub(crate) inputs: Vec<Var>,
     pub(crate) nodes: Vec<Node>,
     pub(crate) outputs: Vec<Var>,
-    /// The scope [`apply`](Self::apply) gives the nodes it adds.
     pub(crate) scope: Scope,
-    /// The source lines it gives them.
     pub(crate) sources: Lines,
 }
 
-/// Where a value lives in another value's memory ([`Graph::placements`]):
-/// the element offset of its first element there and its strides, in
-/// elements (XLA's layout and buffer aliasing, as one annotation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
     pub offset: usize,
@@ -122,29 +83,21 @@ impl Graph {
         Self::default()
     }
 
-    /// A new input of type `ty`.
     pub fn input(&mut self, ty: TensorType) -> Var {
         self.types.push(ty);
         self.inputs.push(self.types.len() - 1);
         self.types.len() - 1
     }
 
-    /// Give the nodes added from now on `scope` (a pass: the scope of the
-    /// node it is rewriting).
     pub fn set_scope(&mut self, scope: Scope) {
         self.scope = scope;
     }
 
-    /// Give the nodes added from now on `node`'s scope and source lines (a
-    /// pass: the node it is rewriting's).
     pub fn set_origin(&mut self, node: &Node) {
         self.scope = node.scope;
         self.sources = node.sources;
     }
 
-    /// Give the nodes added from now on the first of `nodes`' scope and
-    /// all their source lines, each once (a pass: the nodes it merges into
-    /// one, `merge_dots`' dots).
     pub fn set_origins(&mut self, nodes: &[&Node]) {
         self.scope = nodes.first().map_or(&[], |n| n.scope);
         let mut lines = Vec::new();
@@ -156,7 +109,6 @@ impl Graph {
         self.sources = intern_lines(&lines);
     }
 
-    /// The value `primitive(inputs...)`, or why the types do not allow it.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check_vars(inputs)?;
         let args: Vec<&TensorType> = inputs.iter().map(|&v| &self.types[v]).collect();
@@ -174,8 +126,6 @@ impl Graph {
         Ok(output)
     }
 
-    /// Give the node defining `v` the source lines `sources` (the
-    /// tracer's, known once it is applied).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub(crate) fn set_sources(&mut self, v: Var, sources: Lines) {
         if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
@@ -183,8 +133,6 @@ impl Graph {
         }
     }
 
-    /// Label the node defining `v` ([`Node::label`]; `None`: its
-    /// primitive's).
     pub(crate) fn set_label(&mut self, v: Var, label: Option<&'static str>) {
         if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
             node.label = label;
@@ -197,9 +145,6 @@ impl Graph {
         Ok(())
     }
 
-    /// The graph without the nodes no output depends on (XLA's DCE: the
-    /// tangents a linearized program computes and its transpose does not
-    /// read), its inputs kept; and each value's new number, if kept.
     pub fn prune(&self) -> (Graph, Vec<Option<Var>>) {
         let mut live = vec![false; self.types.len()];
         for &v in &self.outputs {
@@ -251,8 +196,6 @@ impl Graph {
         &self.types[var]
     }
 
-    /// Where operand `k` of concatenate `node` is in its result: its view
-    /// of the result's memory (the result's strides).
     pub fn slot(&self, node: &Node, k: usize) -> View {
         let Primitive::Concatenate { dimension, .. } = node.primitive else {
             panic!("{}: not a concatenate", node.primitive)
@@ -268,13 +211,6 @@ impl Graph {
         }
     }
 
-    /// Where each value lives in another's memory, if it does (by value),
-    /// as the graph's primitives place it: a slice read in place
-    /// ([`Primitive::Slice`]'s `view`) in its operand's; an operand of a
-    /// concatenate computed in place ([`Primitive::Concatenate`]'s
-    /// `in_place`) in the result's, at its place there. That value, and the
-    /// value's view of it: what the passes, the kernels writing and reading
-    /// it and the plan all take, from this alone.
     pub fn placements(&self) -> Vec<Option<(Var, View)>> {
         let mut placed = vec![None; self.types.len()];
         for node in &self.nodes {
@@ -312,8 +248,6 @@ impl Graph {
         &self.outputs
     }
 
-    /// What `node` is profiled as: its primitive's name; a cast's, with
-    /// its dtypes: `cast(float32 -> bfloat16)`.
     pub fn label(&self, node: &Node) -> &'static str {
         if let Some(label) = node.label {
             return label;
@@ -324,8 +258,6 @@ impl Graph {
                 self.types[node.inputs[0]].dtype.full_name(),
                 new_dtype.full_name()
             )),
-            // A dot rounding its accumulator to a narrower output as it
-            // writes it: that cast, its write-out's epilogue, named too.
             Primitive::DotGeneral {
                 accum_dtype,
                 output_dtype,
@@ -339,11 +271,6 @@ impl Graph {
         }
     }
 
-    /// A warning for each dot or sum whose result is rounded to a narrower
-    /// dtype than it accumulates in, then cast back up (through primitives
-    /// keeping that dtype: a scale, a reshape): the rounding loses
-    /// precision the program then computes with; outputting the wider
-    /// dtype would not. Each: the node's output, the cast's, the message.
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
@@ -362,7 +289,6 @@ impl Graph {
             if accum_dtype.size_of() <= narrow.size_of() {
                 continue;
             }
-            // Each value reached, with the primitives from the node to it.
             let mut stack = vec![(node.output, Vec::new())];
             let mut seen = vec![false; self.types.len()];
             while let Some((v, path)) = stack.pop() {
@@ -415,8 +341,6 @@ impl Graph {
     }
 }
 
-/// `label` as a `&'static str`, as profiled names are: each distinct label
-/// is leaked once, however many graphs have it.
 pub(crate) fn intern(label: String) -> &'static str {
     static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
     let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -428,7 +352,6 @@ pub(crate) fn intern(label: String) -> &'static str {
     interned
 }
 
-/// `lines` as [`Lines`], one shared copy per list.
 pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
     static LINES: Mutex<BTreeSet<Lines>> = Mutex::new(BTreeSet::new());
     let mut interned = LINES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -440,7 +363,6 @@ pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
     lines
 }
 
-/// `ranges` as a [`Scope`], one shared copy per nesting.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
     static SCOPES: Mutex<BTreeSet<Scope>> = Mutex::new(BTreeSet::new());
@@ -453,13 +375,6 @@ pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
     interned
 }
 
-/// The graph as text, in the style of a jaxpr:
-///
-/// ```text
-/// { lambda %0:f32[2,3]. let
-///     %1:f32[2,3] = exp %0
-///   in (%1) }
-/// ```
 impl fmt::Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let typed = |v: Var| format!("%{v}:{}", self.types[v]);

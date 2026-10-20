@@ -2,12 +2,6 @@
 
 #define UNROLL _Pragma("clang loop unroll(full)")
 
-// The 8- to 32-bit integers: a threadgroup of 16x16 threads computes a 64x64
-// output tile, each thread 4x4 of it, staging 64x16 and 16x64 tiles of the
-// operands in threadgroup memory. Each thread loads a fixed column of them,
-// and loads the next k step's while the current one is multiplied. Each
-// output sums over k in increasing order, as the reference does (integers
-// wrap, so the order does not change the result).
 #define MM_TILE 64
 #define MM_TK 16
 template <typename T>
@@ -19,20 +13,17 @@ inline void matmul_impl(device const T *lhs,
                         threadgroup T *rt,
                         uint3 group,
                         uint2 tid) {
-    constexpr uint F = MM_TILE / 16;                                                // outputs a thread, each way
-    constexpr uint L = MM_TILE * MM_TK / 256, RA = 256 / MM_TK, RB = 256 / MM_TILE; // loads a thread
+    constexpr uint F = MM_TILE / 16;
+    constexpr uint L = MM_TILE * MM_TK / 256, RA = 256 / MM_TK, RB = 256 / MM_TILE;
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * MM_TILE, n0 = ulong(group.x) * MM_TILE;
-    // This thread loads lhs column ac of tile rows ar + RA t, and rhs
-    // column bc of tile rows br + RB t.
     const uint flat = tid.y * 16 + tid.x;
     const uint ac = flat % MM_TK, ar = flat / MM_TK, bc = flat % MM_TILE, br = flat / MM_TILE;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + (n0 + bc) * p[8];
     const bool full_m = m0 + MM_TILE <= M, full_n = n0 + MM_TILE <= N;
     T ra[L], rb[L];
-    // Tiles inside the operands load without bounds checks.
     auto fetch = [&](ulong k0) {
         bool full_k = k0 + MM_TK <= K;
         if (full_m && full_k) {
@@ -89,10 +80,6 @@ inline void matmul_impl(device const T *lhs,
     }
 }
 
-// The 64-bit integers, which have too few registers for the above: a
-// threadgroup of 16x16 threads computes a 32x32 output tile, each thread
-// 2x2 of it, staging 32x16 tiles of the operands in threadgroup memory
-// element by element.
 #define WIDE_TILE 32
 template <typename T>
 inline void matmul_wide_impl(device const T *lhs,
@@ -140,35 +127,12 @@ inline void matmul_wide_impl(device const T *lhs,
     }
 }
 
-// The float dtypes on simdgroup matrices, operands of T accumulating in A
-// (T, or float for half and bfloat: dot_general's accum_dtype), the output
-// of O (T or A: its output_dtype), each element rounded to it once: a threadgroup of 256 threads (8 SIMD groups in a
-// 4x2 grid) computes a BM x BN output tile (for 128x64, each SIMD group a 32x32 block of it as 4x2 8x8 accumulators).
-// BMxBK and BKxBN operand tiles are staged in threadgroup memory as T, zero-padded past the edges; each thread loads a
-// fixed column of them, and loads the next k step's while the current one is multiplied. Each output sums over k in
-// increasing order of 8-element blocks. Each output is written as epi(it, its flat index): Same for the primitive's
-// kernels; a fusion's epilogue (lumen/codegen/mps/mod.rs), writing Out. With ATOMIC (a split-K dot's: its batch
-// index a chunk of the contraction), each output is added to out[m, n] (float, zeroed before) atomically instead, the
-// chunks' in no fixed order. With PAIRED (a gated pair's: two dots of one operand merged, their rhs blocks [W1 | W2]
-// side by side, N = 2H, combined elementwise, as SwiGLU's silu(x W1) * (x W2)), the tile's columns are the two
-// halves' interleaved: column 2j is column j of the block, 2j + 1 column H + j (each thread loads its column so), so a
-// lane holds both of a pair (its two elements of an 8x8 block, adjacent columns), and writes out[m, j] = epi(first,
-// second, its flat index), out of H columns, from its registers. With INTERLEAVED too, the rhs is interleaved in
-// memory (W1's column j its 2j, W2's its 2j + 1: merge_dots' interleaved block), each thread loading its column as
-// it is. With
-// EXPANDED (a gated pair's backward: its two cotangents from the dot's value, side by side), epi returns a Pair, its
-// first written at out[m, n], its second at out[m, N + n], out of 2N columns (INTERLEAVED: at out[m, 2n] and
-// out[m, 2n + 1], merge_dots' interleaved block's). With TILE, nothing is written: the
-// accumulators (FM x FN 8x8 matrices of SIMD group (sy, sx)) are handed to epi.tile, which reduces them (a linear
-// cross entropy's rows of logits, lce_partials).
 template <typename T> struct Pair {
     T first, second;
 };
 #define SG_BK 16
-#define SMALL_BK 32 // the small tiles': fewer, deeper steps (each a round trip to memory)
-#define SG_COLS 2   // SIMD groups across the tile
-// The lhs tile's elements of T a threadgroup declares: its BM x BK, and at
-// least the 8 x 64 of A the epilogue stages in it.
+#define SMALL_BK 32
+#define SG_COLS 2
 #define SG_LT(BM, BK, T, A) (BM * BK > 8 * 64 * sizeof(A) / sizeof(T) ? BM * BK : 8 * 64 * sizeof(A) / sizeof(T))
 template <typename T,
           typename A,
@@ -195,22 +159,17 @@ inline void matmul_sg_impl(device const T *lhs,
                            uint lane,
                            Epi epi = Epi()) {
     constexpr uint FM = BM / (8 / SG_COLS) / 8, FN = BN / SG_COLS / 8;
-    constexpr uint LA = BM * BK / 256, LB = BK * BN / 256; // elements a thread loads
-    constexpr uint RA = 256 / BK, RB = 256 / BN;           // rows apart
+    constexpr uint LA = BM * BK / 256, LB = BK * BN / 256;
+    constexpr uint RA = 256 / BK, RB = 256 / BN;
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;
-    // This thread loads lhs column ac of tile rows ar + RA t, and rhs
-    // column bc of tile rows br + RB t.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
-    // Its rhs column (PAIRED: the halves' interleaved; INTERLEAVED, a
-    // pair's whose rhs is interleaved in memory: as it is).
     const ulong cn = PAIRED && !INTERLEAVED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
-    // Tiles inside the operands load without bounds checks.
     auto fetch = [&](ulong k0) {
         bool full_k = k0 + BK <= K;
         if (full_m && full_k) {
@@ -253,16 +212,10 @@ inline void matmul_sg_impl(device const T *lhs,
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    // Each SIMD group stages one 8x8 block at a time in its own 64 elements
-    // of A in lt (which holds at least 8 x 64 floats), from which its lanes
-    // write two elements each.
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
     if constexpr (TILE) {
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
     } else if constexpr (PAIRED) {
-        // A lane a pair, from its own registers (no staging): its two
-        // elements of each 8x8 block are adjacent columns (`frag_col` is
-        // even), a gate and its up (the columns interleaved).
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
         UNROLL for (uint i = 0; i < FM; ++i) {
@@ -289,8 +242,6 @@ inline void matmul_sg_impl(device const T *lhs,
                         } else if constexpr (EXPANDED) {
                             device Out *row = out + group.z * M * 2 * N + m * 2 * N;
                             Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
-                            // INTERLEAVED: the pair side by side (merge_dots'
-                            // interleaved block's cotangents).
                             row[INTERLEAVED ? 2 * n : n] = both.first;
                             row[INTERLEAVED ? 2 * n + 1 : N + n] = both.second;
                         } else {
@@ -328,12 +279,6 @@ inline void matmul_sg_impl(device const T *lhs,
         matmul_sg_impl<T, A, O, BM, BN, BK>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);       \
     }
 
-// matmul_<dtype> on 128x64 tiles, matmul_mid_<dtype> on 64x64 tiles for
-// matmuls whose M leaves at most half of a last 128x64 tile, and
-// matmul_small_<dtype> on 32x32 tiles for matmuls with too few 128x64
-// tiles to fill the GPU (or a last one of M at most 32): in the operands'
-// dtype throughout; matmul[_small]_<dtype>_f32_<output> accumulating in
-// float, writing the operands' dtype or float.
 #define MATMUL_FLOAT(NAME, T)                            \
     MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK)    \
     MATMUL_SG(matmul_mid_##NAME, T, T, T, 64, 64, SG_BK) \
@@ -346,8 +291,6 @@ inline void matmul_sg_impl(device const T *lhs,
     MATMUL_SG(matmul_mid_##NAME##_f32_f32, T, float, float, 64, 64, SG_BK)     \
     MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 32, 32, SMALL_BK)
 
-// matmul_atomic_<dtype>: a split-K dot's, on 64x64 tiles, accumulating in float, each chunk's (batch index's)
-// products added to the float output atomically.
 #define MATMUL_ATOMIC(NAME, T)                                                                                        \
     kernel void matmul_atomic_##NAME(                                                                                 \
         MATMUL_ARGS(T, float), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
@@ -356,21 +299,11 @@ inline void matmul_sg_impl(device const T *lhs,
             lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);                                           \
     }
 
-// linear_cross_entropy's two launches (Cut Cross-Entropy's: the logits h · wᵀ, [B, V], never stored). The first,
-// lce_partials_<dtype>_<class dtype>: a threadgroup a tile of them (BM x BN, accumulated in float: the matmul's large
-// 128 x 64 tile, or as the matmul would its _mid_ 64 x 64 or _small_ 32 x 32 for few rows), each of its rows reduced
-// from the accumulators (LceRows) to its max over the tile's classes and the sum of exp(logit - max): the partials,
-// maxima and sums ([B, tiles], tile group.x, of ceil(V / BN)); and a row's class's logit written to out[0, row] by the
-// lane holding it (its loss's place). Classes past V are not the row's. Its dimensions p are a matmul's: h as the lhs,
-// w (row-major [V, D]) read as the rhs transposed.
 template <typename L, uint BM, uint BN> struct LceRows {
     device const L *target;
     device float *out, *maxima, *sums;
-    threadgroup float *halves; // each tile row's (max, sum) over each SIMD group's columns: [BM][SG_COLS][2]
-    ulong B, V, column;        // column: the tile's, of ceil(V / BN)
-    // A lane's rows (one an 8x8 matrix row i) over its 2 FN columns, then the 4 lanes holding the row (lane bits 0
-    // and 3), then the SG_COLS SIMD groups across the tile (thread t < BM: row t), each sum rescaled to the larger
-    // max (none while that is -inf: a SIMD group's columns all past V).
+    threadgroup float *halves;
+    ulong B, V, column;
     template <uint FM, uint FN>
     void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
               ulong m0,
@@ -449,7 +382,6 @@ template <typename L, uint BM, uint BN> struct LceRows {
     LCE_PARTIALS_TILE(small_, NAME, T, LNAME, L, 32, 32, SMALL_BK)
 #define LCE_PARTIALS_CLASSES(NAME, T) LCE_PARTIALS(NAME, T, i32, int) LCE_PARTIALS(NAME, T, i64, long)
 
-// The generated kernels include the templates alone.
 #ifndef TEMPLATES_ONLY
 MATMUL(u8, uchar)
 MATMUL(u16, ushort)
@@ -465,9 +397,6 @@ MATMUL_WIDENED(f16, half)
 MATMUL_WIDENED(bf16, bfloat)
 FOR_FLOAT(LCE_PARTIALS_CLASSES)
 
-// The second, lce_combine: a SIMD group a row (8 a threadgroup), its tiles' (p[1]) (max, sum) pairs combined, each sum
-// rescaled to the larger max (none while that is -inf): out[1, row] = max + log(sum), the row's log-sum-exp, and
-// out[0, row] its loss, the log-sum-exp less the class's logit (the first's, there).
 kernel void lce_combine(device const float *maxima [[buffer(0)]],
                         device const float *sums [[buffer(1)]],
                         device float *out [[buffer(2)]],

@@ -1,6 +1,3 @@
-//! The reference implementation's tests (safetensors/src/tensor.rs), on
-//! lumen tensors, and round trips through files and devices.
-
 use std::collections::BTreeMap;
 
 use super::*;
@@ -17,10 +14,6 @@ fn assert_err(result: Result<impl std::fmt::Debug, Error>, expected: fn(&Error) 
         other => panic!("unexpected {other:?}"),
     }
 }
-
-// ---------------------------------------------------------------------
-// the reference implementation's tests
-// ---------------------------------------------------------------------
 
 #[test]
 fn serialization_is_byte_for_byte() {
@@ -103,7 +96,6 @@ fn empty_shapes_and_zero_sized_tensors() {
 
 #[test]
 fn overlapping_offsets_are_rejected() {
-    // Ten tensors all at [0, 16) (the reference's `test_json_attack`).
     let mut header = String::from("{");
     for i in 0..10 {
         if i > 0 {
@@ -186,10 +178,6 @@ fn oversized_headers_are_not_written() {
     });
 }
 
-// ---------------------------------------------------------------------
-// lumen
-// ---------------------------------------------------------------------
-
 const DTYPES: [DType; 13] = [
     DType::Bool,
     DType::U8,
@@ -206,7 +194,6 @@ const DTYPES: [DType; 13] = [
     DType::F64,
 ];
 
-/// A tensor of each dtype, with distinct values.
 fn tensors() -> Vec<(String, Tensor)> {
     DTYPES
         .iter()
@@ -245,8 +232,6 @@ fn every_dtype_round_trips() {
     let bytes = serialize(&named(&tensors), None).unwrap();
     let loaded = deserialize(&bytes, Device::Cpu(0)).unwrap();
     assert_same(&tensors, &loaded);
-    // Decreasing alignment, so each tensor's offset is a multiple of its
-    // element size.
     let (n, metadata) = read_metadata(&bytes).unwrap();
     assert_eq!((N_LEN + n) % N_LEN, 0);
     for (_, info) in metadata.tensors() {
@@ -263,7 +248,6 @@ fn files_round_trip_with_metadata() {
     let tensors = tensors();
     let metadata = BTreeMap::from([("format".to_string(), "lumen \"test\"\n".to_string())]);
     save_file(&named(&tensors), Some(metadata.clone()), &path).unwrap();
-    // The file is serialize's bytes.
     assert_eq!(
         std::fs::read(&path).unwrap(),
         serialize(&named(&tensors), Some(metadata.clone())).unwrap()
@@ -297,7 +281,6 @@ fn saving_needs_contiguous_tensors() {
     assert_err(serialize(&[("t", &t)], None), |e| {
         matches!(e, Error::NotContiguous(_))
     });
-    // A contiguous view is saved as its elements, not its storage.
     let row = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]).select(0, 1);
     let loaded = deserialize(&serialize(&[("row", &row)], None).unwrap(), Device::Cpu(0)).unwrap();
     assert_eq!(loaded[0].1.to_vec::<f32>(), [3.0, 4.0, 5.0]);
@@ -309,7 +292,6 @@ fn unsupported_dtypes_name_the_tensor() {
     let mut file = (header.len() as u64).to_le_bytes().to_vec();
     file.extend(header.as_bytes());
     file.extend([0u8; 2]);
-    // The header is valid; the tensor cannot be made.
     read_metadata(&file).unwrap();
     assert_err(
         deserialize(&file, Device::Cpu(0)),
@@ -337,7 +319,6 @@ fn tensors_load_onto_mps() {
     let loaded = deserialize(&bytes, Device::Mps(0)).unwrap();
     assert!(loaded.iter().all(|(_, t)| t.device() == Device::Mps(0)));
     assert_same(&tensors, &loaded);
-    // And MPS tensors save as their elements.
     let on_mps: Vec<(String, Tensor)> = tensors
         .iter()
         .map(|(n, t)| (n.clone(), t.to(Device::Mps(0))))

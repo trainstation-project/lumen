@@ -1,29 +1,14 @@
-//! The primitive ops a [`Graph`](super::Graph) is made of, modeled on
-//! JAX's `lax` primitives (StableHLO semantics). They are strict: operands
-//! of elementwise ops already share a shape and dtype (no implicit
-//! broadcasting or promotion), shapes are explicit, and results are values
-//! (no views, strides or in-place updates). The torch-like API in
-//! `lumen/graph/tracer.py` is written on top of these.
-
 use std::fmt;
 
 use super::{Graph, TensorType};
 use crate::{DType, Scalar};
 
-/// What a fusion's label (its primitives' names, as the profiler and the
-/// graph viewer show it) joins them with: `mul → tanh → add`.
 pub const FUSION_SEPARATOR: &str = " → ";
 
-/// What the name of a [`Primitive::Fusion`] the Apple Neural Engine runs
-/// (`compiler::mps::ane`, through Core ML) starts with: its body is a Core ML
-/// program's, not a kernel's.
 pub const NEURAL_ENGINE: &str = "coreml_";
 
-/// The elementwise functions of one operand of [`Primitive::Unary`], each
-/// `lax`'s of its name.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
-    // Of floats.
     Sin,
     Cos,
     Tan,
@@ -37,8 +22,6 @@ pub enum UnaryOp {
     Atanh,
     Floor,
     Ceil,
-    /// To the nearest integer, ties to even (`lax.round` with
-    /// `ROUND_TO_NEAREST_EVEN`, `jnp.round`).
     RoundEven,
     Log1p,
     Expm1,
@@ -47,25 +30,19 @@ pub enum UnaryOp {
     Rsqrt,
     Cbrt,
     ErfInv,
-    /// Whether finite (a bool).
     IsFinite,
-    /// The operand rounded to a float of `exponent_bits` and
-    /// `mantissa_bits` (`lax.reduce_precision`), of its dtype.
     ReducePrecision {
         exponent_bits: u32,
         mantissa_bits: u32,
     },
-    // Of numbers.
     Abs,
     Sign,
-    // Of integers (and bools: `Not`).
     Not,
     PopulationCount,
     Clz,
 }
 
 impl UnaryOp {
-    /// Its `lax` name.
     pub fn name(&self) -> &'static str {
         use UnaryOp::*;
         match self {
@@ -100,8 +77,6 @@ impl UnaryOp {
         }
     }
 
-    /// The op of `lax` name `name` (`reduce_precision` takes parameters:
-    /// not here).
     pub fn of_name(name: &str) -> Option<Self> {
         use UnaryOp::*;
         [
@@ -138,30 +113,21 @@ impl UnaryOp {
     }
 }
 
-/// The elementwise functions of two operands of one type of
-/// [`Primitive::Binary`], each `lax`'s of its name.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinaryOp {
-    /// `x ** y`, of floats.
     Pow,
-    /// The remainder of truncated division (its sign the dividend's).
     Rem,
     Min,
-    /// Bitwise (logical, of bools).
     And,
     Or,
     Xor,
-    /// Shifts of integers, by the second operand's bits (all of them out
-    /// past the width: 0, or the sign's for an arithmetic right shift).
     ShiftLeft,
     ShiftRightLogical,
     ShiftRightArithmetic,
-    /// The float after `x` towards `y`.
     Nextafter,
 }
 
 impl BinaryOp {
-    /// Its `lax` name.
     pub fn name(&self) -> &'static str {
         use BinaryOp::*;
         match self {
@@ -199,7 +165,6 @@ impl BinaryOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
-    // elementwise, two operands of the same type
     Add,
     Sub,
     Mul,
@@ -207,7 +172,6 @@ pub enum Primitive {
     Max,
     Eq,
     Lt,
-    // elementwise, one operand
     Neg,
     Exp,
     Log,
@@ -217,17 +181,9 @@ pub enum Primitive {
     Cast {
         new_dtype: DType,
     },
-    /// An elementwise function of one operand beyond those above (`lax`'s:
-    /// [`UnaryOp`]).
     Unary(UnaryOp),
-    /// An elementwise function of two operands of one type beyond those
-    /// above (`lax`'s: [`BinaryOp`]).
     Binary(BinaryOp),
-    /// `select(pred, on_true, on_false)`, elementwise.
     Select,
-    /// The sum over `axes`, accumulated in `accum_dtype`, the result's
-    /// dtype: the operand's, or float32 for floats narrower than it (each
-    /// element widened exactly), as [`Primitive::DotGeneral`].
     ReduceSum {
         axes: Vec<usize>,
         accum_dtype: DType,
@@ -235,21 +191,11 @@ pub enum Primitive {
     ReduceMax {
         axes: Vec<usize>,
     },
-    /// The inclusive cumulative sum along `axis` (from its end if
-    /// `reverse`), accumulated in `accum_dtype`, the result's dtype, as
-    /// [`Primitive::ReduceSum`] (`lax.cumsum`).
     Cumsum {
         axis: usize,
         reverse: bool,
         accum_dtype: DType,
     },
-    /// The result's dimensions are the batch dimensions, then the free
-    /// dimensions of `lhs`, then those of `rhs`, as in `lax.dot_general`.
-    /// It accumulates in `accum_dtype`: the operands', or float32 for
-    /// floats narrower than it (16-bit, later 8- and 4-bit), whose products
-    /// it holds exactly; the result is of `output_dtype`, the operands' or
-    /// `accum_dtype`, each element rounded to it once from the accumulator
-    /// (`lax.dot_general`'s `preferred_element_type`). Both required.
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
@@ -258,86 +204,37 @@ pub enum Primitive {
         accum_dtype: DType,
         output_dtype: DType,
     },
-    /// Its operand, once the device work producing it has finished: the host
-    /// blocks until then (PyTorch: `wait_tensor`). In place: its value is
-    /// the operand's memory ([`crate::ops::wait`]). Placed before what needs
-    /// a value on the host.
     Wait,
-    /// Its operand, copied to the host (PyTorch: `Tensor.cpu`): the ops
-    /// reading it run on the host, a stage of their own, compiled for the
-    /// CPU (`compiler::stages`); the copy waits for the operand. A host
-    /// value's own (no copy), as are both on a CPU plan.
     ToHost,
-    /// Its operand, a host value, copied to the plan's device (PyTorch:
-    /// `Tensor.to(device)`; `to_host`'s gradient), in stream order (the host
-    /// not waiting). A device value's own (no copy).
     ToDevice,
     Reshape {
         new_sizes: Vec<usize>,
     },
-    /// Operand dimension `i` becomes result dimension
-    /// `broadcast_dimensions[i]`; the other result dimensions are new.
     BroadcastInDim {
         shape: Vec<usize>,
         broadcast_dimensions: Vec<usize>,
     },
-    /// Result dimension `i` is operand dimension `permutation[i]`.
     Transpose {
         permutation: Vec<usize>,
     },
-    /// The elements from `start_indices` up to `limit_indices` (exclusive),
-    /// per dimension (`lax.slice`, unit strides). With `view` (a device
-    /// compiler's choice, [`crate::graph::Graph::placements`]) its value is
-    /// its operand's memory, read in place as a strided view of it: no step
-    /// computes it.
     Slice {
         start_indices: Vec<usize>,
         limit_indices: Vec<usize>,
         view: bool,
     },
-    /// The `slice_sizes` block of the operand at start indices known when it
-    /// runs: the operands after it, an integer scalar (int32 or int64, one
-    /// dtype) a dimension, each clamped so the block is inside the operand
-    /// (`lax.dynamic_slice`).
     DynamicSlice {
         slice_sizes: Vec<usize>,
     },
-    /// The operand with the block `update` (its second operand) written at
-    /// start indices (the operands after it, as [`Primitive::DynamicSlice`]'s,
-    /// clamped as its) (`lax.dynamic_update_slice`). Where nothing reads the
-    /// operand after it, its value is the operand's buffer, the update written
-    /// there alone (in place: `graph_compiler/plan.rs`).
     DynamicUpdateSlice,
-    /// The operand's entries along `axis` that `indices` (its second
-    /// operand: int32 or int64, any shape) pick: its shape with `axis`
-    /// replaced by the indices' (`jnp.take`; MLX's `take`, `weight[ids]`: an
-    /// embedding's lookup). An index out of the axis is the program's error
-    /// (the reference clamps it into the axis, as XLA's gather does; a
-    /// device's kernels, with `lumen.config.compiler.safe_kernels`).
     Gather {
         axis: usize,
     },
-    /// The operand's entries along `axis` at `indices` (its second operand:
-    /// integers, of its rank, no larger than it but along `axis`), the
-    /// others where they are: `out[..., i, ...] = x[..., indices[..., i, ...], ...]`
-    /// (`jnp.take_along_axis`, `torch.gather`). An index out of the axis is
-    /// the program's error (the reference clamps it into the axis).
     TakeAlongAxis {
         axis: usize,
     },
-    /// The operand with `updates` (its third operand, shaped as a
-    /// [`Primitive::Gather`] of it at `indices`, its second) added at the
-    /// entries along `axis` the indices pick (in range, as the gather's),
-    /// several at one entry each added: a gather's gradient
-    /// (`lax.scatter_add`, MLX's `scatter_add`).
     ScatterAdd {
         axis: usize,
     },
-    /// The operands one after another along `dimension`, their other
-    /// dimensions equal (`lax.concatenate`). `in_place` (a device
-    /// compiler's choice, [`crate::graph::Graph::placements`]): each operand
-    /// is written at its place in the result by the step computing it,
-    /// whose kernel writes it there: no step copies them.
     Concatenate {
         dimension: usize,
         in_place: bool,
@@ -347,70 +244,31 @@ pub enum Primitive {
         fill_value: Scalar,
         dtype: DType,
     },
-    /// The index along `dimension` (`lax.broadcasted_iota`).
     Iota {
         dtype: DType,
         shape: Vec<usize>,
         dimension: usize,
     },
-    /// Random bits (XLA's `RngBitGenerator` with Philox, as PyTorch's
-    /// `philox_rand`): element `i` (row-major) the first word of the
-    /// Philox4x32-10 block (Random123) keyed by its first operand, the seed,
-    /// at counter `start + offset + i`, its second the stream's position
-    /// `start` (each a uint64 scalar: kernels take them by value, as PyTorch
-    /// passes its generator's seed and offset). Counter-based: each element
-    /// computed from its index alone, so it fuses into its consumer
-    /// (dropout's mask is never stored), and a call's numbers are its
-    /// counters' (the caller advances `start` past them).
     RandomBits {
         shape: Vec<usize>,
         offset: u64,
     },
-    /// A linear layer's cross entropy, its logits never stored (Apple's Cut
-    /// Cross-Entropy): of rows `h` `[B, D]` (its first operand), classes'
-    /// weights `w` `[V, D]` and each row's class `target` `[B]` (int32 or
-    /// int64), each row's logits `h · wᵀ` (accumulated in float32) reduced
-    /// to their log-sum-exp: `[2, B]` of float32, each row's loss (the
-    /// log-sum-exp less the class's logit), then each row's log-sum-exp
-    /// (its gradient's).
     LinearCrossEntropy,
-    /// `body` run as one kernel, `name`: what a device's graph compiler
-    /// (`crate::graph_compiler`) groups the primitives it fuses into. Its value is
-    /// the body's first output; a body with more (a multi-output fusion)
-    /// has each other one read by a [`Primitive::FusionOutput`].
-    /// Profiled as `label`, its primitives' names joined by
-    /// [`FUSION_SEPARATOR`]: `mul → tanh → add`.
     Fusion {
         name: String,
         label: &'static str,
         body: Graph,
     },
-    /// Output `index` (of type `ty`) of its operand's fusion, whose body
-    /// has several (XLA: `get-tuple-element` of a multi-output fusion): a
-    /// value the fusion's kernel writes too, which no step computes.
     FusionOutput {
         index: usize,
         ty: TensorType,
     },
-    /// A custom op (`lumen.custom_op`), `label` its name: `kernel`, a
-    /// function opaque to the compilers (by its handle, `graph/custom.rs`),
-    /// reading its operands and writing those at `mutated` in place. Its
-    /// value is `mutated[0]`'s new value; `mutated[k]`'s, a
-    /// [`Primitive::FusionOutput`] of it at index `k`. Each `(m, j)` of
-    /// `overlappable`: the mutated operand `m` may be given operand `j`'s
-    /// memory (the function reads each element of `j` before writing `m`'s
-    /// at its index, and not `m`'s old value), which the planner decides.
     CustomCall {
         label: &'static str,
         kernel: usize,
         mutated: Vec<usize>,
         overlappable: Vec<(usize, usize)>,
     },
-    /// A kernel of lumen's Pallas (`lumen.pallas.pallas_call`) named
-    /// `label`: the kernel `kernel` (a handle of `lumen.pallas`'s) on its
-    /// operands, computing values of `outputs`' types. Its value is the
-    /// first; the k-th, a [`Primitive::FusionOutput`] of it at index `k`.
-    /// It runs on a TPU only.
     PallasCall {
         label: &'static str,
         kernel: usize,
@@ -466,11 +324,6 @@ impl Primitive {
         }
     }
 
-    /// The type of the result of applying this primitive to operands of
-    /// types `args`, or why it cannot be applied.
-    /// The dtypes this primitive accumulates in, given its `output`
-    /// dtype: a dot's and a sum's `accum_dtype`, a max's dtype; a fusion's, each of its body's reductions' and dots', in
-    /// order. None for the others, which accumulate nothing.
     pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
         use Primitive::*;
         match self {
@@ -499,7 +352,6 @@ impl Primitive {
             Fusion { body, .. } => body.inputs().len(),
             Concatenate { .. } => args.len().max(1),
             CustomCall { .. } | PallasCall { .. } => args.len(),
-            // An index a dimension of the operand (none if it is missing).
             DynamicSlice { .. } => 1 + args.first().map_or(0, |x| x.shape.len()),
             DynamicUpdateSlice => 2 + args.first().map_or(0, |x| x.shape.len()),
             _ => 1,
@@ -561,7 +413,6 @@ impl Primitive {
             Binary(op) => {
                 use BinaryOp::*;
                 let (x, y) = (args[0], args[1]);
-                // A float's power of integers (`lax.pow`'s): of its shape.
                 if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape
                 {
                     return Ok(x.clone());
@@ -633,8 +484,6 @@ impl Primitive {
                 output_dtype,
             } => {
                 let (lhs, rhs) = (args[0], args[1]);
-                // Of one dtype, or two floats (a TPU multiplies bfloat16 by
-                // float8: a device that cannot refuses them).
                 let floats = lhs.dtype.is_float() && rhs.dtype.is_float();
                 if (lhs.dtype != rhs.dtype && !floats) || lhs.dtype == DType::Bool {
                     return err(format!(
@@ -874,8 +723,6 @@ impl Primitive {
                 {
                     return err(format!("operand {i} must be {ty}, got {arg}"));
                 }
-                // Its value is its body's first output; any others are its
-                // `FusionOutput`s.
                 match body.outputs().first() {
                     Some(&out) => Ok(body.type_of(out).clone()),
                     None => err("the body must have an output".into()),
@@ -885,7 +732,6 @@ impl Primitive {
     }
 }
 
-/// Every dimension in `dims` is below `ndim`, and none repeats.
 fn check_dims(dims: &[usize], ndim: usize, what: &str) -> Result<(), String> {
     for (i, &d) in dims.iter().enumerate() {
         if d >= ndim || dims[..i].contains(&d) {
@@ -895,12 +741,10 @@ fn check_dims(dims: &[usize], ndim: usize, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The dimensions of a rank-`ndim` operand that are not in `used`, in order.
 pub(crate) fn free_dims(ndim: usize, used: &[usize]) -> impl Iterator<Item = usize> + '_ {
     (0..ndim).filter(move |d| !used.contains(d))
 }
 
-/// A tuple like `(1, 2)`, or `(1,)`, as in a jaxpr.
 struct Tuple<'a>(&'a [usize]);
 
 impl fmt::Display for Tuple<'_> {
@@ -913,12 +757,6 @@ impl fmt::Display for Tuple<'_> {
     }
 }
 
-/// Ok if a sum of elements of `x` may accumulate in `accum`: its dtype, or
-/// float32 for floats narrower than it (fp16, bf16, later fp8 and fp4).
-/// Ok if `indices` are start indices into `x`: integer scalars of one
-/// dtype, int32 or int64 (the MPS kernels', as XLA's).
-/// The type of a gather of `x` at `indices` along `axis`: `x`'s shape with
-/// `axis` replaced by the indices'.
 fn gathered(x: &TensorType, indices: &TensorType, axis: usize) -> Result<TensorType, String> {
     if axis >= x.shape.len() {
         return Err(format!("axis {axis} is not a dimension of {x}"));
@@ -967,8 +805,6 @@ fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
     }
 }
 
-/// The primitive with its parameters, as in a jaxpr:
-/// `reduce_sum[axes=(1,)]`.
 impl fmt::Display for Primitive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Primitive::*;

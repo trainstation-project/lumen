@@ -1,11 +1,3 @@
-"""Ported from jax/tests/pallas/indexing_test.py (JAX, Apache 2.0): IndexerTest,
-IndexerOpsTest and AdvancedIndexerOpsTest.
-
-lumen's Pallas on a TPU (a v6e: JAX's skips for older TPUs are left out).
-IndexerTest tests JAX's own ``NDIndexer``: its tests are listed, skipped.
-JAX draws some cases with hypothesis: here, a fixed sample of its strategy.
-"""
-
 import numpy as np
 import pytest
 
@@ -66,9 +58,6 @@ def _maybe_ds_to_slice(x):
     if isinstance(x, pl.ds):
         return slice(x.start, x.start + x.size)
     return x
-
-
-# -- IndexerTest: JAX's NDIndexer ------------------------------------------
 
 
 def test_simple_ndindexer():
@@ -145,9 +134,6 @@ def test_ndindexer():
     pytest.skip("JAX's NDIndexer internals")
 
 
-# -- IndexerOpsTest ----------------------------------------------------------
-
-
 def test_multi_indexing_interpreter_only():
     pytest.skip("Only supported in interpret mode")
 
@@ -200,7 +186,6 @@ def test_can_store_with_ref_at(case):
         y_ref[indexers[-1]] = x
 
     val = np.random.default_rng(0).standard_normal(val_shape, dtype=np.float32)
-    # Use NumPy arrays to do nested indexing and mutation.
     x = np.zeros(in_shape, dtype=dtype)
     y = x
     for indexer in indexers:
@@ -215,8 +200,6 @@ def test_can_store_with_ref_at(case):
 
 
 def _strided_cases(count=10):
-    # JAX's hypothesis strategy: ref_shape from ((8, 8, 32), (7, 7, 33)),
-    # indices in [0, 6] x [0, 6] x [0, 31], strides in [1, 10]^3.
     rng = np.random.default_rng(0)
     cases = []
     for _ in range(count):
@@ -256,9 +239,6 @@ def test_strided_load_and_store(slice_type, ref_shape, indices, strides):
 
 
 def _stride_0_cases(count=10):
-    # JAX's hypothesis strategy: rank in [2, 4], leading dimensions in
-    # [1, 10] (the last 128), leading strides 0 or 1, an index in the
-    # dimension where the stride is 0.
     rng = np.random.default_rng(0)
     cases = []
     for _ in range(count):
@@ -285,15 +265,11 @@ def test_load_and_broadcast_with_stride_0(shape, strides, indices):
     np.testing.assert_allclose(host(y), expected)
 
 
-# JAX passes these specs as pltpu.PrefetchScalarGridSpec(num_scalar_prefetch=0,
-# in_specs=...): with no scalars prefetched, pallas_call's in_specs.
 def vmem_smem():
     return [pl.BlockSpec(memory_space=pl.VMEM), pl.BlockSpec(memory_space=pl.SMEM)]
 
 
 def test_load_with_dynamic_2nd_minor_index():
-    # We can take any dynamic index on the 2nd minor dimension as long as
-    # the minormost dimsize is vreg lane count.
     m, n = 32, 128
     k = 10
     start = 2
@@ -309,8 +285,6 @@ def test_load_with_dynamic_2nd_minor_index():
 
 
 def test_store_with_dynamic_2nd_minor_index():
-    # We can take any dynamic index on the 2nd minor dimension as long as
-    # the minormost dimsize is vreg lane count.
     m, n = 10, 128
     k = 32
     start = 2
@@ -326,8 +300,6 @@ def test_store_with_dynamic_2nd_minor_index():
 
 
 def test_load_one_row_with_dynamic_2nd_minor_index():
-    # This test triggers strided load. We can take any dynamic index on the
-    # 2nd minor dimension as long as we load one row on the 2nd minor dim.
     b, m, n = 4, 16, 256
     start = 3
 
@@ -342,8 +314,6 @@ def test_load_one_row_with_dynamic_2nd_minor_index():
 
 
 def test_store_one_row_with_dynamic_2nd_minor_index():
-    # This test triggers strided store. We can take any dynamic index on the
-    # 2nd minor dimension as long as we store one row on the 2nd minor dim.
     b, m, n = 4, 16, 256
     start = 3
 
@@ -361,7 +331,6 @@ def test_scalar_load_from_vmem():
     def kernel(x_ref, o_ref, sem_ref):
         o_ref[...] = lumen.zeros(o_ref.shape, dtype=o_ref.dtype)
         scalar_val = x_ref[1, 2]
-        # Use scalar_val in both async_copy and store.
         o_ref[scalar_val] = lumen.ones(o_ref.shape[1:], dtype=o_ref.dtype) * scalar_val
         desc = pl.make_async_copy(o_ref.at[scalar_val], o_ref.at[scalar_val + 1], sem_ref)
         desc.start()
@@ -381,23 +350,15 @@ def test_scalar_load_from_vmem():
     np.testing.assert_array_equal(res, expected)
 
 
-# -- AdvancedIndexerOpsTest ------------------------------------------------
-
-# TODO(ayx): Fix all test cases here
 _ADVANCED_INDEXER_TEST_CASES = [
-    # integer
     ((3, 2), lambda arr, a, b, c, d: arr[2]),
-    # slice
     ((12, 12), lambda arr, a, b, c, d: arr[::4, ::4]),
     ((16, 16), lambda arr, a, b, c, d: arr[1:14:2, 2:13:4]),
     ((8, 2), lambda arr, a, b, c, d: arr[1::3, :]),
-    # array
     ((4, 3), lambda arr, a, b, c, d: arr[a]),
     ((4, 3, 2), lambda arr, a, b, c, d: arr[c, c]),
-    # integer + 1-D array
     ((4, 3), lambda arr, a, b, c, d: arr[2, a]),
     ((4, 3), lambda arr, a, b, c, d: arr[a, 2]),
-    # slice + 1-D array
     ((4, 3), lambda arr, a, b, c, d: arr[a, :]),
     ((4, 3), lambda arr, a, b, c, d: arr[:, a]),
     ((6, 8, 3), lambda arr, a, b, c, d: arr[c, ::3]),
@@ -406,17 +367,11 @@ _ADVANCED_INDEXER_TEST_CASES = [
     ((8, 8, 3), lambda arr, a, b, c, d: arr[::4, a, ::2]),
     ((8, 8, 3, 7), lambda arr, a, b, c, d: arr[b, ::4, a, ::2]),
     ((3, 8, 8, 7), lambda arr, a, b, c, d: arr[b, a, ::4, ::2]),
-    # ((8, 8, 3, 7), lambda arr, a, b, c, d: arr[::4, b, a, ::2]),
     ((16, 3, 6, 2), lambda arr, a, b, c, d: arr[::4, a, 1::2, b]),
     ((8, 8, 3, 6), lambda arr, a, b, c, d: arr[b, ::4, a, a]),
-    # slice + array w/ broadcasting
     ((8, 8, 3, 6), lambda arr, a, b, c, d: arr[b[:, None], ::4, a[None], a[:, None]]),
-    # integer + slice + 1-D array
     ((5, 8, 8, 3), lambda arr, a, b, c, d: arr[2, ::4, ::2, a]),
     ((5, 8, 8, 3), lambda arr, a, b, c, d: arr[2, ::4, a, ::2]),
-    # boolean
-    # ((6, 2), lambda arr, a, b, c, d: arr[d]),
-    # ((8, 6), lambda arr, a, b, c, d: arr[::4, d]),
 ]
 
 
@@ -428,7 +383,6 @@ _ADVANCED_INDEXER_TEST_CASES = [
 def test_advanced_indexer(in_shape, indexing_func):
     pytest.skip("Advanced indexers are not supported on TPU")
 
-    # 4 arrays that are used in test cases of advanced indexing
     a = np.array([1, 1, 1, 1, 1], dtype=np.int32)
     b = np.array([1, 2, 2, 2, 2], dtype=np.int32)
     c = np.array([1, 0, 2, 2, -1, 1], dtype=np.int32)
@@ -437,10 +391,6 @@ def test_advanced_indexer(in_shape, indexing_func):
     x = np.arange(np.prod(in_shape), dtype=np.float32).reshape(in_shape)
     y = indexing_func(x, a, b, c, d)
 
-    # `a_ref`, `b_ref`, `c_ref` and `d_ref` are for testing purposes.
-    # We have them here because we need to have a unified function signature
-    # for all test cases, even if the arrays are actually not used in any
-    # computation.
     def kernel(x_ref, a_ref, b_ref, c_ref, d_ref, o_ref):
         a = a_ref[...]
         b = b_ref[...]

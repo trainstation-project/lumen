@@ -1,17 +1,3 @@
-"""lumen.ops: registering device kernels written in Python.
-
-The tests register against ``lumen::dummy_op``, an op with no built-in
-kernels that only runs when a test calls it (``lumen._C._dummy_op``), so
-they never replace a real op's kernel, such as CUDA's CuTe ``fill_``. A
-registered kernel is a compile hook returning a launcher; :class:`Recorder`
-records what Rust hands each.
-
-The registry is process-wide and permanent, so every test that registers a
-kernel unregisters it again (`lumen.ops.unregister`) in a `finally`, or
-later tests would inherit it. Device cases carry a marker (select them
-with `-m mps`, `-m cuda`) and skip where the device is unavailable.
-"""
-
 import ctypes
 
 import pytest
@@ -19,7 +5,6 @@ import pytest
 import lumen
 from lumen import _C
 
-# Device cases carry a marker, and skip where the device is unavailable.
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
@@ -39,11 +24,6 @@ def device(request):
     """A tensor device the build supports, skipped otherwise."""
     _require(request.param)
     return request.param
-
-
-# ---------------------------------------------------------------------
-# the API surface
-# ---------------------------------------------------------------------
 
 
 def test_ops_is_exported_from_the_package():
@@ -77,7 +57,6 @@ def test_registering_a_non_callable_raises_value_error():
 
 
 def test_registering_for_the_cpu_is_refused():
-    # Every tensor op would go through Python.
     with pytest.raises(RuntimeError, match="CPU"):
         lumen.ops.register(OP, "cpu", lambda dtype, shape, strides, vector_size: None)
 
@@ -99,11 +78,6 @@ def test_unregistering_an_unknown_op_raises_key_error():
 
 def test_unregistering_when_nothing_is_registered_is_false():
     assert lumen.ops.unregister(OP, "mps") is False
-
-
-# ---------------------------------------------------------------------
-# dispatch through a real device
-# ---------------------------------------------------------------------
 
 
 class Recorder:
@@ -132,10 +106,7 @@ def test_the_kernel_compiles_for_the_layout_and_launches_on_the_data(device):
     try:
         t = lumen.zeros([2, 3], device=device)
         _C._dummy_op(t, 2.5)
-        # dummy_op hands over its layout as is: the first dimension has
-        # stride 3, so a thread stores one element at a time.
         assert kernel.compiles == [("float32", (2, 3), (3, 1), 1)]
-        # lumen's CUDA work runs on the legacy default stream, 0.
         assert kernel.launches == [(t.data_ptr(), 2.5, 0)]
     finally:
         lumen.ops.unregister(OP, device)
@@ -164,11 +135,11 @@ def test_a_layout_compiles_once(device):
         t = lumen.zeros([2, 3], device=device)
         _C._dummy_op(t, 1.0)
         _C._dummy_op(t, 2.0)
-        _C._dummy_op(lumen.zeros([2, 3], device=device), 3.0)  # same layout
+        _C._dummy_op(lumen.zeros([2, 3], device=device), 3.0)
         assert len(kernel.compiles) == 1
         assert len(kernel.launches) == 3
-        _C._dummy_op(t.transpose(0, 1), 4.0)  # a new layout
-        _C._dummy_op(lumen.zeros([2, 3], dtype="int64", device=device), 5)  # a new dtype
+        _C._dummy_op(t.transpose(0, 1), 4.0)
+        _C._dummy_op(lumen.zeros([2, 3], dtype="int64", device=device), 5)
         assert kernel.compiles[1:] == [("float32", (3, 2), (1, 3), 1), ("int64", (2, 3), (3, 1), 1)]
     finally:
         lumen.ops.unregister(OP, device)
@@ -180,9 +151,9 @@ def test_the_vector_size_follows_the_data_pointer(device):
     lumen.ops.register(OP, device, kernel)
     try:
         t = lumen.zeros([16], device=device)
-        _C._dummy_op(t, 1.0)  # 16-byte aligned: 4 float32s at once
-        _C._dummy_op(t.narrow(0, 2, 8), 1.0)  # 8 bytes in: 2
-        _C._dummy_op(t.narrow(0, 1, 8), 1.0)  # 4 bytes in: 1
+        _C._dummy_op(t, 1.0)
+        _C._dummy_op(t.narrow(0, 2, 8), 1.0)
+        _C._dummy_op(t.narrow(0, 1, 8), 1.0)
         assert [vector_size for *_, vector_size in kernel.compiles] == [4, 2, 1]
     finally:
         lumen.ops.unregister(OP, device)
@@ -194,7 +165,7 @@ def test_the_kernel_receives_the_window_a_view_covers(device):
     lumen.ops.register(OP, device, kernel)
     try:
         t = lumen.zeros([4, 4], device=device)
-        view = t.select(1, 2)  # a strided view: shape [4], strides [4]
+        view = t.select(1, 2)
         _C._dummy_op(view, 1.0)
         assert kernel.compiles == [("float32", (4,), (4,), 1)]
         assert kernel.launches[0][0] == view.data_ptr() == t.data_ptr() + 2 * 4
@@ -202,7 +173,7 @@ def test_the_kernel_receives_the_window_a_view_covers(device):
         lumen.ops.unregister(OP, device)
 
 
-@pytest.mark.mps  # writes through the address, which only unified memory allows
+@pytest.mark.mps
 @pytest.mark.parametrize("device", [MPS], indirect=True)
 def test_the_launcher_can_write_through_the_address(device):
     def write(dtype, shape, strides, address, value):
@@ -211,7 +182,6 @@ def test_the_launcher_can_write_through_the_address(device):
     lumen.ops.register(OP, device, Recorder(write))
     try:
         t = lumen.zeros([4], device=device)
-        # The host write must follow the zeros' fill, queued on the MPS stream.
         lumen.mps.synchronize()
         _C._dummy_op(t, 3.0)
         assert t.tolist() == [3.0, 3.0, 3.0, 3.0]
@@ -226,8 +196,6 @@ def test_a_raising_compile_propagates(device):
 
     lumen.ops.register(OP, device, boom)
     try:
-        # The op layer turns the Python error into a panic, which pyo3
-        # surfaces as BaseException rather than an OSError subclass.
         with pytest.raises(BaseException, match="compile exploded"):
             _C._dummy_op(lumen.zeros([2], device=device), 1.0)
     finally:
@@ -254,8 +222,6 @@ def test_a_tvm_ffi_launcher_is_called_through_its_c_abi(device):
 
     def compile(dtype, shape, strides, vector_size):
         compiles.append((dtype, shape, strides))
-        # A TVM-FFI function, as the CuTe DSL compiles with --enable-tvm-ffi;
-        # the address and stream arrive as opaque pointers.
         return tvm_ffi.convert(lambda address, value, stream: launches.append((address.value, value, stream.value)))
 
     lumen.ops.register(OP, device, compile)
@@ -281,7 +247,7 @@ def test_a_raising_tvm_ffi_launcher_propagates(device):
     lumen.ops.register(OP, device, lambda dtype, shape, strides, vector_size: tvm_ffi.convert(boom))
     try:
         t = lumen.zeros([2], device=device)
-        for _ in range(2):  # the compiling launch, then a cached one
+        for _ in range(2):
             with pytest.raises(BaseException, match="failed: RuntimeError: ffi exploded$"):
                 _C._dummy_op(t, 1.0)
     finally:
@@ -299,9 +265,7 @@ def test_registering_again_replaces_the_kernel_and_its_launchers(device):
         assert (len(first.launches), len(second.launches)) == (0, 1)
     finally:
         lumen.ops.unregister(OP, device)
-    # One kernel per device: unregistering leaves none.
     assert lumen.ops.unregister(OP, device) is False
-    # A new registration compiles afresh rather than reusing a launcher.
     third = Recorder()
     lumen.ops.register(OP, device, third)
     try:

@@ -12,54 +12,32 @@ use crate::tensor::dtype::{DType, Element, dispatch_dtype};
 use crate::tensor::python::{PyTensor, dtype_name};
 use crate::tensor::scalar::Scalar;
 
-/// Index into [`KERNELS`], a `Copy` stand-in for a Python callable.
-///
-/// The dispatcher stores kernels by value and copies them out, so the
-/// kernel type cannot own a reference. The table keeps the callable alive
-/// and this just names it.
 #[derive(Debug, Clone, Copy)]
 pub struct KernelHandle(usize);
 
-/// Registered Python kernels, by op name. Append-only per name: a slot is
-/// never reused, so a handle taken earlier keeps meaning the same callable.
 static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new());
 
-/// Op names Python kernels may be registered for, with the convention
-/// their callables follow.
-///
-/// A closed set rather than free-form strings: an entry here is a promise
-/// that Rust will actually call kernels of that name, with that signature.
-/// Registering anything else would silently do nothing.
 const OP_SIGNATURES: &[(&str, &str)] = &[
     (op_name!("fill_"), LAUNCHER_SIGNATURE),
     (op_name!("dummy_op"), LAUNCHER_SIGNATURE),
 ];
 
-/// The compile hook's signature, and the launcher's it returns.
 const LAUNCHER_SIGNATURE: &str =
     "(dtype, shape, strides, vector_size) -> launch(address, value, stream)";
 
-/// Launchers a kernel's compile hook returned, by kernel, dtype, layout and
-/// vector size. Never evicted, so a cached TVM-FFI handle stays valid.
 type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>, usize);
 static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Launcher>>> = Mutex::new(None);
 
-/// A cached launcher.
 enum Launcher {
-    /// A TVM-FFI function, called through its C ABI by its handle. `owner`
-    /// is what the compile hook returned, which owns the compiled code.
     TvmFfi {
         handle: usize,
         _owner: Py<PyAny>,
         _function: Py<PyAny>,
     },
-    /// Any other Python callable.
     Python(Py<PyAny>),
 }
 
 impl Launcher {
-    /// The launcher for what a compile hook returned: its TVM-FFI function
-    /// if it is one or wraps one (`__tvm_ffi_object__`), else the callable.
     fn new(py: Python<'_>, launcher: Bound<'_, PyAny>) -> PyResult<Self> {
         let function = if launcher.hasattr("__tvm_ffi_object__")? {
             launcher.call_method0("__tvm_ffi_object__")?
@@ -82,11 +60,8 @@ impl Launcher {
     }
 }
 
-/// lumen's CUDA work runs on the legacy default stream.
 const STREAM: usize = 0;
 
-/// The registry holding op `name`'s Python kernels; `name` is one of
-/// [`OP_SIGNATURES`] (see [`check_op`]).
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
         n if n == core::ops::fill::FILL.name() => &core::ops::fill::FILL_PY,
@@ -95,7 +70,6 @@ fn python_op(name: &str) -> &'static Op<KernelHandle> {
     }
 }
 
-/// The canonical op name for `name`, or an error naming what is supported.
 fn check_op(name: &str) -> PyResult<&'static str> {
     OP_SIGNATURES
         .iter()
@@ -111,13 +85,6 @@ fn check_op(name: &str) -> PyResult<&'static str> {
 }
 
 impl KernelHandle {
-    /// Launch the Python kernel for op `op` over `shape`/`strides` (in
-    /// elements) of `dtype` at `address` on `device`, with `value`,
-    /// compiling it for that layout on its first launch. Returns `false` if
-    /// the handle is not `op`'s kernel.
-    ///
-    /// # Panics
-    /// If the kernel raises, which the op layer cannot recover from.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch(
         self,
@@ -129,12 +96,9 @@ impl KernelHandle {
         address: usize,
         value: Scalar,
     ) -> bool {
-        // The value as the tensor's dtype holds it, as the built-in kernels
-        // convert it.
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
         let vector_size = core::ops::vector_size(shape, strides, dtype.size_of(), address);
         let run = || {
-            // A launcher launches on the current device: make it the tensor's.
             #[cfg(lumen_cuda_linked)]
             if let core::Device::Cuda(index) = device {
                 crate::device::cuda::CUDA.set_device(index);
@@ -155,7 +119,6 @@ impl KernelHandle {
                     .map_err(|e| e.to_string()),
             };
             let launched = match step {
-                // No Python: the C ABI directly.
                 Ok(Step::TvmFfi(handle)) => {
                     core::ops::tvm_ffi::launch(handle, address, value, STREAM).map(|()| true)
                 }
@@ -164,7 +127,6 @@ impl KernelHandle {
             };
             launched.unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
         };
-        // What a CUDA kernel launches is the op's GPU work in a profile.
         #[cfg(lumen_cupti_linked)]
         if let core::Device::Cuda(_) = device {
             return crate::profiler::cupti::correlated(device, run);
@@ -173,8 +135,6 @@ impl KernelHandle {
         run()
     }
 
-    /// Launch through a cached Python launcher, or compile a launcher first;
-    /// a TVM-FFI one is returned for the caller to launch.
     fn launch_python(
         self,
         py: Python<'_>,
@@ -207,7 +167,6 @@ impl KernelHandle {
         let Some(compile) = compile else {
             return Ok(Step::Done(false));
         };
-        // Compiled without holding the cache's lock.
         let (dtype, shape, strides, vector_size) = (key.1, &key.2, &key.3, key.4);
         let compiled = compile.bind(py).call1((
             dtype_name(dtype),
@@ -234,16 +193,11 @@ impl KernelHandle {
     }
 }
 
-/// What [`KernelHandle::launch_python`] did.
 enum Step {
-    /// Launched (or not: `false` if the handle is not the op's kernel).
     Done(bool),
-    /// Found or compiled a TVM-FFI launcher, for the caller to launch.
     TvmFfi(usize),
 }
 
-/// The value as a Python object: a bool, an int, or a float, matching the
-/// three shapes [`Scalar`] has.
 fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;
     match value {
@@ -253,35 +207,21 @@ fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     }
 }
 
-/// The handle for `(op, key)`, if a Python kernel is registered for it.
-/// Used by the op layer's dispatch to decide whether to call one.
 pub(crate) fn handle_for(op: &str, key: DispatchKey) -> Option<KernelHandle> {
     python_op(op).kernel(key)
 }
 
-/// Drop the Python kernel registered for op `name` on `device`, so its
-/// built-in kernel runs again.
 #[pyfunction]
 #[pyo3(signature = (name, device))]
 fn _unregister_kernel(py: Python<'_>, name: &str, device: &Bound<'_, PyAny>) -> PyResult<bool> {
     let name = check_op(name)?;
     let device = match resolve_device(Some(device)) {
-        // Registering refuses unavailable devices, so none has a kernel.
         Err(e) if e.is_instance_of::<PyRuntimeError>(py) => return Ok(false),
         device => device?,
     };
     Ok(python_op(name).unregister(DispatchKey::of(device)))
 }
 
-// ---------------------------------------------------------------------
-// lumen.ops.register
-// ---------------------------------------------------------------------
-
-/// Register `kernel`, a compile hook, as the kernel for op `name` on
-/// `device` (see the module docs).
-///
-/// `name` is a dispatcher op name (e.g. `"lumen::fill_"`). Registering for
-/// the CPU would put every tensor op through Python, so it is refused.
 #[pyfunction]
 #[pyo3(signature = (name, device, kernel))]
 fn _register_kernel(
@@ -312,7 +252,6 @@ fn _register_kernel(
         .map_err(PyRuntimeError::new_err)
 }
 
-/// The ops that accept Python kernels, with their call signatures.
 #[pyfunction]
 fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
     let _ = py;
@@ -322,7 +261,6 @@ fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Run `lumen::dummy_op` on `t` with `value`, for the tests of `lumen.ops`.
 #[pyfunction]
 fn _dummy_op(t: &PyTensor, value: &Bound<'_, PyAny>) -> PyResult<()> {
     core::ops::dummy_op::dummy_op(&t.inner, core::tensor::python::to_scalar(value)?);

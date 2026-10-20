@@ -169,7 +169,7 @@ class record_function:
         self._handle = None
 
     def __enter__(self):
-        from lumen.graph import tracer  # it imports lumen.profiler's package
+        from lumen.graph import tracer
 
         tracer._enter_scope(self.name)
         self._handle = _C._record_function_enter(self.name)

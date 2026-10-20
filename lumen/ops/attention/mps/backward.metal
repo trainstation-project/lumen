@@ -89,7 +89,6 @@ inline void flash_attention_dkdv(device const T *q,
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         ATTN_UNROLL for (uint ic = 0; ic < BQ / 8; ++ic) {
-            // S^T and dP^T, [8 keys x 8 queries].
             simdgroup_matrix<float, 8, 8> st(0), dpt(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> qt;
@@ -234,7 +233,6 @@ inline void flash_attention_dq(device const T *q,
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
-            // S and dP, [8 queries x 8 keys].
             simdgroup_matrix<float, 8, 8> s(0), dp(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> kt;

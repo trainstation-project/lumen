@@ -1,18 +1,3 @@
-"""reduce_sum on TPU, in lumen's Pallas: a sum over an operand's last
-dimension, over the device's memory.
-
-``lumen/ops/reduce/tpu/mod.rs`` writes the spec (the operand's and
-output's dtypes, its dimensions and the blocks); this is the kernel. The
-operand and output are viewed in place, in a TPU's tiles: of two
-dimensions, ``[m, n]`` summed into ``[m]``; of more, ``[lead, h, m, n]``
-(its leading dimensions merged) into ``[lead, h, m]``. One pipeline
-(``emit_pipeline``, its copies double-buffered against compute) runs over
-their blocks, the summed dimension's last: each step sums an operand
-block's rows, in the output's dtype (the sum's accumulation dtype), into a
-VMEM accumulator, and the last writes the output block (one block of the
-summed dimension: the sum itself, no accumulator).
-"""
-
 from lumen import pallas as pl
 from lumen.graph import prims
 from lumen.ops.tpu import pallas
@@ -49,7 +34,6 @@ def program(spec):
 
         def body(xb, ob):
             if nb == 1:
-                # One block of the summed dimension: no accumulator.
                 ob[...] = partial(xb)
                 return
             step, acc = pl.program_id(len(grid) - 1), scratch[0]
@@ -66,5 +50,4 @@ def program(spec):
 
         pl.emit_pipeline(body, grid=grid, in_specs=[x_spec], out_specs=[o_spec])(x, out)
 
-    # The accumulator, for more than one block of the summed dimension.
     return pallas.program(kernel, spec, scratch=[pl.VMEM(o_block, out_dtype)] if nb > 1 else [])

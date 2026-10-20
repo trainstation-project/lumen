@@ -1,7 +1,3 @@
-//! Each fusion's kernel generated as Metal source ([`codegen`]), its
-//! outputs where the graph places them
-//! ([`crate::graph::Graph::placements`]).
-
 use std::collections::HashMap;
 
 use super::concatenates_alone::concatenates_alone;
@@ -11,9 +7,6 @@ use crate::graph::{Primitive, Var};
 use crate::graph_compiler::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Each fusion's kernel generated as Metal source ([`codegen`]), the
-/// fusion named by it (the name its step launches); a kernel generated
-/// once for all the fusions sharing it.
 pub(super) struct Codegen;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
@@ -23,8 +16,6 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
 
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
-        // A concatenate marked in place whose operands' kernels, as fused,
-        // cannot write them there: unmarked, a kernel of its own.
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {
@@ -40,9 +31,6 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
             let kernels = &mut m.kernels;
             m.graph = concatenates_alone(&m.graph, |_| request(kernels, Kernel::Loop(Vec::new())));
         }
-        // Each kernel's outputs where the graph places them (by its
-        // fusion's value, by position): an in-place concatenate's operands
-        // in its result.
         let placements = m.graph.placements();
         let mut views: HashMap<Var, HashMap<usize, (usize, Vec<usize>)>> = HashMap::new();
         for node in &m.graph.nodes {
@@ -75,8 +63,6 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     codegen::attention_kernel(body, &a)
                 }
                 Kernel::AttentionBackward => {
-                    // Its outputs an in-place concatenate's operands
-                    // written in their places in its result.
                     let views = views.remove(&output).unwrap_or_default();
                     let b = attention::backward_of_body_into(body, views)
                         .expect("an attention backward");

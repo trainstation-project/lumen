@@ -8,8 +8,6 @@ pub static WAIT: Op<WaitKernel> = Op::new(op_name!("wait"), kernels);
 fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     match key {
         DispatchKey::Cpu | DispatchKey::Meta => Some(|_| {}),
-        // The programs run on its device's memory so far (they run
-        // asynchronously; reads of it wait for them themselves).
         #[cfg(lumen_tpu_linked)]
         DispatchKey::Tpu => Some(|t| {
             let crate::Device::Tpu(index) = t.device() else {

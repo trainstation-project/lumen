@@ -1,6 +1,3 @@
-"""The part of `lumen._C` that ``lumen/safetensors/python.rs`` defines (see
-``lumen/_C.pyi``); ``lumen.safetensors`` wraps it."""
-
 import os
 from typing import Any, Optional, Sequence, Union
 

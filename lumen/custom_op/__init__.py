@@ -53,7 +53,6 @@ class CustomOp:
             raise RuntimeError(f"{self.name}: a custom op runs in a function lumen.compile compiles")
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        # Its tensors, the operands, in argument order; the rest, constants.
         names, operands = [], []
         for name, value in bound.arguments.items():
             value = tracer._lift(value)
@@ -77,8 +76,6 @@ class CustomOp:
                 raise TypeError("a custom op returns nothing: its results are the arguments it mutates")
 
         mutated = [names.index(name) for name in self.mutates_args]
-        # Each (mutated, read) operand pair that may overlap; arguments not
-        # tensors in this call have no memory to share.
         overlappable = [
             (names.index(out), names.index(i))
             for out, inputs in self.overlappable.items()

@@ -1,9 +1,3 @@
-//! reduce_sum on TPU: the spec of its kernel (`__init__.py` beside this
-//! file, in lumen's Pallas) for a sum over an operand's last dimension, of
-//! two dimensions or more (a row's sum: dot strength reduction's of a
-//! vector·vector dot, `rowsum(dO * O)`): its operand's and output's dtypes,
-//! its dimensions and its blocks.
-
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
@@ -33,7 +27,6 @@ pub(crate) fn encode(
     let failed = |what: &str| format!("reduce_sum on TPU: {what} has no block of whole tiles");
     let rows = |d: DType| Layout::new(d, &[1, 1]).map(|l| l.rows);
     let (m, n) = (x.shape[rank - 2], x.shape[rank - 1]);
-    // Of more dimensions, the one before the last two the output's rows.
     let (h, bh) = match rank {
         2 => (1, 1),
         _ => {
@@ -45,10 +38,6 @@ pub(crate) fn encode(
             )
         }
     };
-    // The summed dimension in blocks of lanes, stepped over into an
-    // accumulator (whole, if none divides it); the rows, whole tiles of the
-    // operand's and the output's (its lanes, or a 1-D output's 1024s), an
-    // operand block at most 2^21 elements (8 MiB of float32).
     let bn = block(n, 128, 512).unwrap_or(n);
     let unit_m = (if rank == 2 { 1024 } else { 128 }).max(rows(x.dtype)?);
     let cap = (1024).min(((1 << 21) / (bh * bn)).max(unit_m));

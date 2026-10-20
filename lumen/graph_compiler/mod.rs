@@ -1,21 +1,3 @@
-//! Graph compilers, one per device: each rewrites a [`Graph`] for its
-//! device's kernels (fusing primitives into generated kernels, XLA-style),
-//! then plans its memory into a [`Plan`]. Devices without one run the
-//! graph's primitives as they are.
-//!
-//! Each compiler is a [`pass`] pipeline (XLA's `HloPassPipeline`): every
-//! device first runs the passes that hold for any, [`passes::cse`] (common
-//! subexpression elimination) and [`passes::simplify`], then its own; the
-//! other device-independent passes ([`passes`]) are in its pipeline too.
-//!
-//! - [`mps`]: dot merging, dot canonicalization, then loop fusion into generated Metal
-//!   kernels, planned with the kernels' scratch.
-//! - [`cpu`]: the host's: the primitives as they are.
-//!
-//! A program with values on the host (`to_host`) runs in [`stages`], each
-//! compiled by its side's compiler.
-
-// Used by the MPS backend (its fusions) and the tracer (`Graph.attentions`).
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
 pub mod config;
@@ -46,24 +28,13 @@ use passes::simplify::Simplify;
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 
-/// How to compile a graph.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The compiler's flags: by default, [`config::config`]'s.
     pub config: CompilerConfig,
-    /// Inputs the caller donates (JAX: `donate_argnums`; see
-    /// [`PlanOptions::donate`]).
     pub donate: Vec<usize>,
-    /// Inputs donated to one output each ([`PlanOptions::donate_into`]).
     pub donate_into: Vec<(usize, usize)>,
-    /// An executable that owns its memory, these inputs its parameters
-    /// ([`PlanOptions::parameters`]).
     pub parameters: Option<Vec<bool>>,
-    /// Parameters not yet placed, which the compiler may place side by
-    /// side in blocks ([`Plan::packed`](crate::graph_compiler::Plan)).
     pub packable: Vec<bool>,
-    /// One-element inputs the kernels may take by value (runtime scalars,
-    /// [`PlanOptions::scalars`]): where every kernel reading one can.
     pub scalars: Vec<bool>,
 }
 
@@ -80,13 +51,10 @@ impl Default for Options {
     }
 }
 
-/// `graph` compiled for `device`: a plan that runs on any device, its
-/// fusions in `device`'s kernels where the device has a compiler.
 pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
     compile_with(graph, device, &Options::default())
 }
 
-/// [`compile`] with `options`.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
@@ -105,7 +73,6 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
     device_compile(&stages::without_transfers(graph), device, options)
 }
 
-/// `graph`, on one device, compiled by `device`'s compiler.
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
         #[cfg(lumen_mps_linked)]
@@ -115,13 +82,10 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
     }
 }
 
-/// The positions `mask` holds.
 fn positions(mask: &[bool]) -> Vec<usize> {
     (0..mask.len()).filter(|&i| mask[i]).collect()
 }
 
-/// Whether `p` computes each element from its operands' elements at the
-/// same index.
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
@@ -144,10 +108,6 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
     )
 }
 
-/// Which of the values `sources` (dots' results) one elementwise value
-/// combines, as an epilogue would (SwiGLU's gate and up, `silu(g) * u`),
-/// through elementwise primitives alone: each source's set, the position
-/// of a source in it, equal for sources combined.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
     fn root(parent: &mut [usize], mut i: usize) -> usize {
@@ -158,7 +118,6 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
         i
     }
     let mut parent: Vec<usize> = (0..sources.len()).collect();
-    // Each value's sources, through elementwise primitives.
     let mut of: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     let mut source = vec![false; graph.types.len()];
     for (k, &v) in sources.iter().enumerate() {
@@ -181,9 +140,6 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
     (0..sources.len()).map(|k| root(&mut parent, k)).collect()
 }
 
-/// Whether value `v` is the same everywhere and known when compiling: a
-/// `full`, perhaps through elementwise and layout primitives of such
-/// values (no input, iota or reduction).
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     use Primitive::*;

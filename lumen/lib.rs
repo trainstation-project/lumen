@@ -1,21 +1,15 @@
-/// The library's name as a literal, for building other compile-time names
-/// with `concat!` (which takes literals, not constants); use
-/// [`LIBRARY_NAME`] otherwise.
 macro_rules! library_name {
     () => {
         "lumen"
     };
 }
 
-/// An op's full name, `"lumen::<name>"`, as a compile-time literal.
 macro_rules! op_name {
     ($name:literal) => {
         concat!(library_name!(), "::", $name)
     };
 }
 
-/// The library's name (exposed to Python as `lumen._C.LIBRARY_NAME`): the
-/// namespace of op names, `lumen::fill_`.
 pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;

@@ -1,25 +1,14 @@
-//! Calling a TVM-FFI function (`apache-tvm-ffi`) from Rust through its C
-//! ABI (`tvm/ffi/c_api.h`), without Python: how a Python kernel compiled
-//! with the CuTe DSL's `--enable-tvm-ffi` launches (see
-//! [`crate::ops::python`]).
-//!
-//! `libtvm_ffi` ships with the `tvm_ffi` Python package, so it is opened at
-//! run time from the path that package reports, not linked at build time.
-
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::OnceLock;
 
 use crate::tensor::scalar::Scalar;
 
-// `TVMFFITypeIndex` values.
 const K_TVM_FFI_NONE: i32 = 0;
 const K_TVM_FFI_INT: i32 = 1;
 const K_TVM_FFI_BOOL: i32 = 2;
 const K_TVM_FFI_FLOAT: i32 = 3;
 const K_TVM_FFI_OPAQUE_PTR: i32 = 4;
 
-/// `TVMFFIAny`: a type index, padding (zero for non-strings), and the value
-/// (an `int64_t`, a `double` or a pointer) as its 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TVMFFIAny {
@@ -46,7 +35,6 @@ impl TVMFFIAny {
     }
 }
 
-/// `TVMFFIByteArray`.
 #[repr(C)]
 struct TVMFFIByteArray {
     data: *const c_char,
@@ -58,14 +46,11 @@ impl TVMFFIByteArray {
         if self.data.is_null() {
             return String::new();
         }
-        // SAFETY: TVM-FFI byte arrays hold `size` bytes at `data`.
         let bytes = unsafe { std::slice::from_raw_parts(self.data.cast::<u8>(), self.size) };
         String::from_utf8_lossy(bytes).into_owned()
     }
 }
 
-/// The start of `TVMFFIErrorCell`, which follows an error object's
-/// 24-byte `TVMFFIObject` header.
 #[repr(C)]
 struct TVMFFIErrorCell {
     kind: TVMFFIByteArray,
@@ -78,7 +63,6 @@ type FunctionCall = unsafe extern "C" fn(*mut c_void, *mut TVMFFIAny, i32, *mut 
 type ErrorMoveFromRaised = unsafe extern "C" fn(*mut *mut c_void);
 type ObjectDecRef = unsafe extern "C" fn(*mut c_void) -> c_int;
 
-/// The C ABI entry points used.
 struct Library {
     function_call: FunctionCall,
     error_move_from_raised: ErrorMoveFromRaised,
@@ -91,19 +75,15 @@ unsafe extern "C" {
     fn dlerror() -> *const c_char;
 }
 
-/// `RTLD_NOW`, the same value on Linux and macOS.
 const RTLD_NOW: c_int = 2;
 
 static LIBRARY: OnceLock<Library> = OnceLock::new();
 
-/// Open `libtvm_ffi` at `path` (`tvm_ffi.libinfo.find_libtvm_ffi()`), once
-/// per process; later calls ignore `path`.
 pub(crate) fn load(path: &str) -> Result<(), String> {
     if LIBRARY.get().is_some() {
         return Ok(());
     }
     let error = || {
-        // SAFETY: `dlerror` returns null or a C string.
         let e = unsafe { dlerror() };
         if e.is_null() {
             "unknown error".to_owned()
@@ -112,14 +92,11 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
         }
     };
     let c_path = CString::new(path).map_err(|e| e.to_string())?;
-    // SAFETY: `c_path` is a C string; the library stays open for the
-    // process, as the `tvm_ffi` package keeps it.
     let lib = unsafe { dlopen(c_path.as_ptr(), RTLD_NOW) };
     if lib.is_null() {
         return Err(format!("cannot open {path}: {}", error()));
     }
     let symbol = |name: &CStr| {
-        // SAFETY: `lib` is open and `name` a C string.
         let ptr = unsafe { dlsym(lib, name.as_ptr()) };
         if ptr.is_null() {
             Err(format!(
@@ -131,7 +108,6 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
             Ok(ptr)
         }
     };
-    // SAFETY: the symbols have these signatures in `tvm/ffi/c_api.h`.
     let library = unsafe {
         Library {
             function_call: std::mem::transmute::<*mut c_void, FunctionCall>(symbol(
@@ -149,12 +125,6 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Call the TVM-FFI function `function` (a `TVMFFIObjectHandle`) as a
-/// launcher: `(address, value, stream)`, the address and stream as opaque
-/// pointers. Errors carry the function's error kind and message.
-///
-/// # Panics
-/// If [`load`] has not succeeded.
 pub(crate) fn launch(
     function: usize,
     address: usize,
@@ -170,8 +140,6 @@ pub(crate) fn launch(
         TVMFFIAny::new(K_TVM_FFI_OPAQUE_PTR, stream as u64),
     ];
     let mut result = TVMFFIAny::new(K_TVM_FFI_NONE, 0);
-    // SAFETY: `function` is a live function handle (its owner is cached for
-    // the process), and the arguments are plain values.
     let status = unsafe {
         (library.function_call)(
             function as *mut c_void,
@@ -184,8 +152,6 @@ pub(crate) fn launch(
         return Ok(());
     }
     let mut error = std::ptr::null_mut();
-    // SAFETY: a failed call leaves its error in TLS, and an error object's
-    // cell follows its header; the reference moved out is released here.
     unsafe {
         (library.error_move_from_raised)(&mut error);
         if error.is_null() {

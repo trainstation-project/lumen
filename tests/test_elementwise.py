@@ -1,9 +1,3 @@
-"""lax's elementwise functions beyond the core (``Primitive::Unary`` and
-``Binary``), the ``lumen.functional`` functions and tensor operators over
-them, and the narrow dtypes: each against numpy on the CPU (the reference,
-computing in float64 and rounding once to the result's dtype). MPS has no
-kernels for these yet: it refuses them, saying so."""
-
 import math
 
 import numpy as np
@@ -39,7 +33,6 @@ def rounded(a, dtype):
     return np.asarray(a, np.float64).astype(dtype).astype(np.float32)
 
 
-# Each float function: its prim, numpy's, and inputs in its domain.
 SPAN = np.concatenate([np.linspace(-3, 3, 61), [0.0, -0.0, 0.5, -0.5, 2.5, -2.5]])
 OPEN = np.linspace(-0.99, 0.99, 45)
 POSITIVE = np.concatenate([np.linspace(0.01, 10, 50), [1.0, 2.0, 1024.0]])
@@ -77,8 +70,6 @@ def test_unary_floats(name, prim, ref, values, dtype):
     x = tensor(values.astype(np.float32), dtype)
     xs = host(x).astype(np.float64)
     expected = rounded(ref(xs), dtype)
-    # numpy's float64 libm and Rust's may differ in the last float64 bit:
-    # an ulp of the dtype at most, at a rounding boundary.
     tol = {"float32": 1e-6, "bfloat16": 2**-8}[dtype]
     np.testing.assert_allclose(run(prim, x), expected, rtol=tol, atol=tol)
 
@@ -119,7 +110,7 @@ def test_unary_integers(dtype):
     """abs, sign, not (bitwise), population_count and clz of integers, in
     the dtype's bits (abs of the minimum wraps, as XLA's)."""
     bits = np.iinfo(dtype).bits
-    x = INTS.astype(dtype)  # wrapped to the dtype, as numpy wraps
+    x = INTS.astype(dtype)
     t = tensor(x)
     np.testing.assert_array_equal(run(prims.abs, t), np.abs(x))
     np.testing.assert_array_equal(run(prims.sign, t), np.sign(x))
@@ -231,9 +222,6 @@ def test_mps_refuses_them(device):
             lumen.compile(f, device=device)(x).wait_()
 
 
-# -- lumen.functional and the tensor operators -------------------------------
-
-
 def test_functional_float_functions():
     """F's float functions: the prims' (F.rint and F.round both round
     halves to even), floor and ceil of integers the integers."""
@@ -341,7 +329,6 @@ def test_functional_layout():
     )
     c = np.arange(20, dtype=np.float32).reshape(4, 5)
     np.testing.assert_allclose(run(lambda p, q: F.einsum("mk,kn->mn", p, q), x, tensor(c)), a @ c, rtol=1e-6)
-    # Batched, its output's indices reordered.
     u = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     v = np.arange(40, dtype=np.float32).reshape(2, 4, 5)
     np.testing.assert_allclose(
@@ -374,9 +361,6 @@ def test_tensor_operators():
     np.testing.assert_allclose(run(lambda p, q: p**q, tensor(np.abs(f)), tensor(g)), np.abs(f) ** g, rtol=1e-6)
 
 
-# -- narrow dtypes on the host ---------------------------------------------
-
-
 NARROW = ["int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2", "float8_e4m3b11fnuz"]
 
 
@@ -398,7 +382,6 @@ def test_narrow_dtypes_on_the_host(dtype):
         lo, hi = (0, 2**bits - 1) if dtype.startswith("u") else (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1)
         t = lumen.Tensor(list(range(lo, hi + 1)), dtype=dtype)
         assert t.tolist() == list(range(lo, hi + 1))
-        # One past its largest wraps to its smallest; a float saturates.
         assert lumen.Tensor([hi + 1], dtype=dtype).tolist() == [lo]
         f = lumen.compile(lambda v: v.to(dtype), device="cpu")(tensor(np.array([hi + 10.5, lo - 10.5], np.float32)))
         assert f.tolist() == [hi, lo]

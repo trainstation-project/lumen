@@ -36,7 +36,6 @@ mod tpu_layout {
 
     #[test]
     fn the_layouts_mosaic_reads() {
-        // As probed on a v6e: what `tpu.reinterpret_cast` views read.
         let attr = |dtype, shape: &[usize]| Layout::new(dtype, shape).unwrap().mosaic();
         assert_eq!(attr(DType::F32, &[16, 256]), "#tpu.tiled<(8,128),[2,1]>");
         assert_eq!(
@@ -93,7 +92,6 @@ mod tpu_layout {
             let host: Vec<u8> = (0..numel * dtype.size_of())
                 .map(|i| match dtype {
                     DType::Bool => (i % 3 == 0) as u8,
-                    // A sub-byte element's value is its byte's low bits.
                     d if d.bits() < 8 => (i * 7 + 1) as u8 & ((1 << d.bits()) - 1),
                     _ => (i * 7 + 1) as u8,
                 })
@@ -108,16 +106,15 @@ mod tpu_layout {
 
     #[test]
     fn a_bfloat16_word_holds_two_rows_of_a_column() {
-        // [16, 128]: element (i, j) is at word (i / 2) * 128 + j, half i % 2.
         let layout = Layout::new(DType::BF16, &[16, 128]).unwrap();
         let host: Vec<u8> = (0..16 * 128u16).flat_map(|v| v.to_le_bytes()).collect();
         let memory = layout.tile(&host);
         let at = |word: usize, half: usize| {
             u16::from_le_bytes([memory[word * 4 + half * 2], memory[word * 4 + half * 2 + 1]])
         };
-        assert_eq!(at(0, 0), 0); // (0, 0)
-        assert_eq!(at(0, 1), 128); // (1, 0)
-        assert_eq!(at(1, 0), 1); // (0, 1)
-        assert_eq!(at(128 + 5, 1), 3 * 128 + 5); // (3, 5)
+        assert_eq!(at(0, 0), 0);
+        assert_eq!(at(0, 1), 128);
+        assert_eq!(at(1, 0), 1);
+        assert_eq!(at(128 + 5, 1), 3 * 128 + 5);
     }
 }

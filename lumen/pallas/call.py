@@ -1,32 +1,7 @@
-"""``pallas_call``: a kernel of lumen's Pallas as an op of a traced program,
-on tensors, as JAX's ``pl.pallas_call`` is an op of a jitted function.
-
-Inside ``lumen.compile``, ``pallas_call(kernel, out_shape, ...)(*xs)``
-records a ``pallas_call`` node (a graph primitive, run on a TPU): its kernel
-is traced later, when the plan first runs it, on the memory the plan placed
-its operands and outputs in. Each operand and output is then an HBM ref of
-its shape and dtype, a view of its rows of the device's memory; the kernel
-sees, as in JAX:
-
-* without ``in_specs``/``out_specs`` and a grid, each copied to VMEM whole
-  (the outputs copied back after);
-* with them, the blocks of a pipeline over ``grid``
-  (``emit_pipeline``), an operand of ``BlockSpec(memory_space=ANY)`` its HBM
-  ref as it is;
-
-then a ref of each of ``scratch_shapes``.
-
-Operands and outputs are viewed in place, in a TPU's tiles
-(``device::tpu::layout``, as lumen keeps a TPU's tensors): any shape, any
-dtype a TPU stores.
-"""
-
 from lumen.graph import prims, tracer
 
 from .pipeline import _NAMES, BoundedSlice
 
-# The kernels of the pallas_calls traced so far, by handle: each a function
-# of a spec (the program's scalars and rows) to its Mosaic.
 _CALLS = []
 
 ANY = "any"
@@ -70,7 +45,6 @@ def pallas_call(
     single = not isinstance(out_shape, (list, tuple))
     outs = [out_shape] if single else list(out_shape)
     grid = (grid,) if isinstance(grid, int) else tuple(grid)
-    # A named grid's axes: (name, size) each.
     names = [a[0] for a in grid] if grid and all(isinstance(a, tuple) for a in grid) else []
     grid = tuple(a[1] for a in grid) if names else grid
     label = f"pallas_call[{name or getattr(kernel, '__name__', 'kernel')}]"
@@ -82,7 +56,6 @@ def pallas_call(
                 f"    * `out_specs` is a tuple of length {len(out_specs)} but `out_shape` is a tuple of length {len(outs)}"
             )
         if not outs:
-            # Nothing it writes is read: no op (JAX's returns no outputs).
             return ()
         args = [tracer._lift(a) for a in args]
         types = [(a.dtype, tuple(a.shape)) for a in args] + [(o.dtype, o.shape) for o in outs]
@@ -123,7 +96,6 @@ def pallas_call(
             prims.bind("fusion_output", first, index=k, dtype=o.dtype, shape=o.shape)
             for k, o in enumerate(outs[1:], 1)
         ]
-        # A tuple for a list too (as JAX: "we normalize out_shape to a tuple").
         return first if single else (first, *rest)
 
     return call
@@ -185,8 +157,6 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         space = None if spec is None else spec.memory_space
         if space == ANY:
             continue
-        # Without a grid, a block of no shape is the operand whole: staged
-        # as it is (one step).
         if (
             space is SMEM
             or (space is VMEM or whole or spec is None or not grid)

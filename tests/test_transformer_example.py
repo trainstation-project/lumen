@@ -1,12 +1,3 @@
-"""The transformer of ``examples/transformer.py`` (copied here: its model,
-loss, training step and AdamW, without the profiler's annotations) checked
-against references: its forward (the logits) against a NumPy
-implementation of the same model, its mixed precision by hand (bfloat16
-rounding where the model casts); its whole training step (a gradient
-accumulation's passes, AdamW's update) on MPS against lumen's CPU backend
-(the reference ops: no fusion, merged dots or flash-attention kernels):
-the same loss, gradients and new weights."""
-
 import numpy as np
 import pytest
 
@@ -203,7 +194,7 @@ def _bf16(a):
 
 
 def _rms_norm(x, w):
-    eps = 2.0**-23  # float32's machine epsilon, F.rms_norm's default
+    eps = 2.0**-23
     return x / np.sqrt(np.mean(x * x, -1, keepdims=True) + eps) * w
 
 
@@ -311,8 +302,6 @@ def test_transformer_train_step_matches_cpu(chunk):
         diff = np.abs(got - want)
         if name.startswith("params."):
             g = cpu["m." + name.removeprefix("params.")]
-            # Clearly not zero: above the gradients' own differences (a few
-            # percent of the largest, bfloat16's rounding through the step).
             clear = np.abs(g) > 1e-1 * np.abs(g).max()
             assert diff[clear].max() <= 1e-5, (name, diff[clear].max())
             assert diff.max() <= 2 * LR * (1 + 1e-3), (name, diff.max())

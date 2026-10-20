@@ -90,7 +90,6 @@ pub(crate) fn compile(
             }
         })
         .collect();
-    // Stages that output nothing do nothing: dropped, the others renumbered.
     let kept: Vec<usize> = (0..count)
         .filter(|&s| !builders[s].outputs.is_empty())
         .collect();
@@ -104,7 +103,6 @@ pub(crate) fn compile(
         }
     };
     let outputs: Vec<Source> = outputs.into_iter().map(renumber).collect();
-    // The last stage reading each input, which alone may donate it.
     let mut last = vec![None; graph.inputs().len()];
     for (index, &s) in kept.iter().enumerate() {
         for source in &builders[s].inputs {
@@ -127,7 +125,6 @@ pub(crate) fn compile(
         b.graph.set_outputs(&values).expect("its values");
         let inputs: Vec<Source> = b.inputs.iter().copied().map(renumber).collect();
         let index = stages.len();
-        // Stage input `j`'s program input, if it is one.
         let whole = |j: usize| match inputs[j] {
             Source::Input(i) => Some(i),
             _ => None,
@@ -164,7 +161,6 @@ pub(crate) fn compile(
                 .collect();
             super::device_compile(&b.graph, device, &stage_options)?
         };
-        // Its packed blocks, the program's.
         let mut blocks = Vec::new();
         for (j, (positions, dimension)) in plan.packed().iter().enumerate() {
             let positions = positions

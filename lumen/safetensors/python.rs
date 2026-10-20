@@ -1,6 +1,3 @@
-//! Bindings for [`crate::safetensors`]; the Python API (`save_file`,
-//! `load_file`, `safe_open`, ...) is in `lumen/safetensors/__init__.py`.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -68,7 +65,6 @@ fn _safetensors_deserialize(
     super::deserialize(data, device).map(wrap).map_err(to_py)
 }
 
-/// `lumen.safetensors.safe_open`: an open file, read a tensor at a time.
 #[pyclass(name = "safe_open", module = "lumen.safetensors")]
 struct PySafeOpen {
     file: Option<SafeTensorsFile>,
@@ -96,26 +92,21 @@ impl PySafeOpen {
         })
     }
 
-    /// The tensors' names, sorted.
     fn keys(&self) -> PyResult<Vec<String>> {
         let mut names = self.offset_keys()?;
         names.sort();
         Ok(names)
     }
 
-    /// The tensors' names, in file order.
     fn offset_keys(&self) -> PyResult<Vec<String>> {
         let tensors = self.file()?.metadata().tensors();
         Ok(tensors.iter().map(|(n, _)| n.clone()).collect())
     }
 
-    /// The file's `__metadata__`, or None.
     fn metadata(&self) -> PyResult<Option<BTreeMap<String, String>>> {
         Ok(self.file()?.metadata().metadata().cloned())
     }
 
-    /// Tensor `name`, on `device` (default: the file's): on `"meta"`, from
-    /// the header alone, nothing read.
     #[pyo3(signature = (name, device = None))]
     fn get_tensor(&self, name: &str, device: Option<&Bound<'_, PyAny>>) -> PyResult<PyTensor> {
         let device = match device {
@@ -126,7 +117,6 @@ impl PySafeOpen {
         Ok(PyTensor::wrap(t))
     }
 
-    /// Every tensor, as `{name: tensor}` in file order.
     fn get_tensors(&self) -> PyResult<Vec<(String, PyTensor)>> {
         self.file()?.tensors(self.device).map(wrap).map_err(to_py)
     }

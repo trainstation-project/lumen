@@ -1,7 +1,3 @@
-"""Automatic differentiation (lumen/autograd), as JAX does it: JVP rules,
-linearize, transpose. Gradients agree with finite differences in float64
-on the CPU, and the MPS compiler runs them as it runs any program."""
-
 import numpy as np
 import pytest
 
@@ -29,7 +25,6 @@ def arrays(*shapes, seed=0):
     return [rng.standard_normal(s) for s in shapes]
 
 
-# Each primitive's rules, through the functional ops written on them.
 CASES = {
     "mul add": (lambda x, y: F.sum(x * y + x * x), [(3, 4), (3, 4)]),
     "sub neg": (lambda x, y: F.sum((x - y) * -(y - x * 2.0)), [(3, 4), (3, 4)]),
@@ -75,7 +70,6 @@ def test_grad_agrees_with_finite_differences(name, argnum):
         return float(lumen.to_numpy(run(*map(lumen.from_numpy, a))))
 
     g = lumen.to_numpy(lumen.compile(lumen.grad(f, argnum))(*map(lumen.from_numpy, xs)))
-    # Through float32, a coarser difference.
     eps, tol = (1e-2, 1e-3) if name == "cast" else (1e-6, 1e-6)
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
 
@@ -308,7 +302,6 @@ class _Affine(lumen.autograd.Function):
 
     @staticmethod
     def jvp(ctx, tx, tw, tb, *, scale, shift):
-        # Tangents of x alone here (None for the others).
         x, w, s = ctx.saved_tensors
         return tx * w * s
 
@@ -327,7 +320,6 @@ def test_function_takes_keyword_arguments():
     np.testing.assert_allclose(lumen.to_numpy(gx), y * s + x * w * s)
     np.testing.assert_allclose(lumen.to_numpy(gw), x * s * x)
     np.testing.assert_allclose(lumen.to_numpy(gb), x * s)
-    # As written, backward's "scale" gradient leaves out shift and b.
     np.testing.assert_allclose(lumen.to_numpy(gs), x * x * w)
     affine = lumen.compile(lambda x, w, s: _Affine.apply(x, w=w, scale=s, shift=1.0))
     out = affine(*map(lumen.from_numpy, (x, w, s)))
@@ -553,14 +545,9 @@ def test_projections_backward_writes_cotangents_side_by_side():
                 plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
                 labels = [s["label"] for s in plan.steps()]
                 assert plan.packed == [([1, 2, 3], 1)]
-                # The forward and x's gradient: dots of the packed block.
                 assert labels.count("3x dot_general") == 2, labels
-                # The cotangents written side by side by the kernel computing
-                # them: the concatenate fused, never a copy of its own.
                 (side_by_side,) = [label for label in labels if "concatenate" in label]
                 assert side_by_side != "concatenate" and "mul" in side_by_side, labels
-                # The weights' gradient one dot as their layout wants it (its
-                # transpose swapped into it, simplify.rs): no transpose copy.
                 assert not any("transpose" in label for label in labels), labels
         finally:
             lumen.config.compiler.reset()

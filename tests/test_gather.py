@@ -1,11 +1,3 @@
-"""Gathers (``prims.gather``, ``weight[ids]``: an embedding's lookup) and
-scatter-adds (``prims.scatter_add``, a gather's gradient): entries along an
-axis at integer indices read when the program runs (MLX's ``take``,
-``scatter_add``). Indices out of the axis here too, so with
-``lumen.config.compiler.safe_kernels`` (each clamped into the axis, as
-XLA's gather; the reference's always): without it, one out of range is the
-program's error."""
-
 import numpy as np
 import pytest
 
@@ -32,7 +24,6 @@ def _tensor(a, device, dtype=None):
     return t if dtype is None else t.to(dtype=dtype)
 
 
-# Repeated indices, and ones outside the axis (clamped).
 IDS = np.array([[3, 0, 3], [1, 9, -2]])
 
 

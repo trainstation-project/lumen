@@ -1,17 +1,8 @@
-//! `dot_general` on TPU: the spec of its kernel (`tpu.py` beside this file,
-//! in lumen's Pallas, which says how it works): the dot's form, its blocks
-//! and dtypes. A dot the kernel cannot run errors here, saying why.
-
 use crate::DType;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::ops::tpu::{Launch, launch};
 
-/// A `dot_general` as `out[b, l] = lhs[b, l] · rhs[b]`: `batch` times
-/// `lead` (the lhs's free dimensions before its last) of `[m, k]` times
-/// `[k, n]` (`[n, k]` if `transposed`). A TPU's tensors are tiled on their
-/// last two dimensions, the others merging freely: the lhs is viewed as
-/// `[batch · lead, m, k]`, the output as `[batch · lead, m, n]`.
 #[derive(Debug, PartialEq)]
 struct Form {
     batch: usize,
@@ -22,10 +13,6 @@ struct Form {
     transposed: bool,
 }
 
-/// `p`'s form on operands of shapes `lhs` and `rhs`: an error unless the
-/// lhs is batch, free then one contracting dimension (a free one at
-/// least), and the rhs batch then its contracting and one free dimension
-/// (either order).
 fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -65,8 +52,6 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     })
 }
 
-/// A block of a dimension of `n`: the whole if at most `cap`, else the
-/// largest multiple of `unit` at most `cap` that divides it.
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     if n <= cap {
         return Some(n);
@@ -77,17 +62,8 @@ pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
         .find(|&b| n.is_multiple_of(b))
 }
 
-/// The VMEM a dot's blocks may take: Mosaic's scoped limit (100 MiB,
-/// `ops/tpu`) less what it allocates itself.
 const VMEM: usize = 88 << 20;
 
-/// The largest blocks (bm, bn, bk) worth taking of operands of `dtype` (k
-/// of `k`), as measured on a v6e (`benchmarks/tpu_matmul.py`): about 87%
-/// of its peak on large dots, XLA's or better. Large blocks feed the
-/// matrix unit more flops per byte read: `bm · bn / (bm + bn)` a byte, and
-/// HBM moves a byte while it does ~800. A k of one block needs no
-/// accumulator (the product is written as it is), which pays at k ≤ 4096;
-/// float32 (full precision: six bfloat16 passes) needs smaller blocks.
 fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     match dtype {
         DType::F32 => (2048, 1024, 1024),
@@ -96,9 +72,6 @@ fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     }
 }
 
-/// The VMEM a dot's blocks take: two of each operand's and the output's
-/// (double-buffered), the float32 accumulator (more than one block of k),
-/// and float32 operands' bfloat16 parts (full precision splits them).
 fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, output: DType) -> usize {
     let operands = bm * bk + bk * bn;
     let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * output.size_of();
@@ -111,7 +84,6 @@ fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, output:
     bytes
 }
 
-/// The rows of a tile of `dtype`: 8 for float32, 16 for bfloat16.
 fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     match dtype {
         DType::F32 => Ok(8),
@@ -143,7 +115,6 @@ pub(crate) fn encode(
             lhs.dtype, rhs.dtype, accum_dtype
         ));
     }
-    // Blocks of whole tiles (or whole dimensions), as large as fit VMEM.
     let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
     let mut blocks;
@@ -159,7 +130,6 @@ pub(crate) fn encode(
         if footprint(bm, bn, bk, f.k / bk, lhs.dtype, out.dtype) <= VMEM {
             break;
         }
-        // Smaller: k's first, then n's, then m's.
         match (cap_m, cap_n, cap_k) {
             (_, _, k) if k > 512 => cap_k = k / 2,
             (_, n, _) if n > 512 => cap_n = n / 2,
@@ -167,8 +137,6 @@ pub(crate) fn encode(
             _ => break,
         }
     }
-    // A few steps at least, so its copies overlap its products: n's
-    // blocks halved (the lhs's block stays, the rhs's stream past it).
     while let (Some(bm), Some(bn), Some(bk)) = blocks {
         let steps = f.batch * f.lead * (f.m / bm) * (f.n / bn) * (f.k / bk);
         if steps >= 4 || cap_n <= 256 || bn < 512 {
@@ -217,7 +185,6 @@ pub(crate) fn encode(
     let rows = [inputs[0], inputs[1], output.cast_const()];
     let launched = Launch {
         module: "lumen.ops.dot_general.tpu",
-        // Its operands', accumulator's and output's dtypes, and blocks.
         kernel: format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, out.dtype),
         spec,
         rows: &rows,

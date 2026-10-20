@@ -12,13 +12,10 @@ use crate::ops::{DispatchKey, Op};
 
 pub type CopyKernel = fn(dst: &Tensor, src: &Tensor);
 
-/// Host-to-device copy, dispatched on the destination's device.
 pub static COPY_H2D: Op<CopyKernel> = Op::new(op_name!("copy_h2d"), h2d_kernels);
 
-/// Device-to-host copy, dispatched on the source's device.
 pub static COPY_D2H: Op<CopyKernel> = Op::new(op_name!("copy_d2h"), d2h_kernels);
 
-/// `copy_h2d`'s static registry.
 fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
     match key {
         DispatchKey::Cpu => Some(cpu::memcpy),
@@ -34,12 +31,10 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Tpu => Some(tpu::copy_h2d),
         #[cfg(not(lumen_tpu_linked))]
         DispatchKey::Tpu => None,
-        // Meta tensors have no data to copy (`Tensor::copy_to`).
         DispatchKey::Meta => None,
     }
 }
 
-/// `copy_d2h`'s static registry.
 fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     match key {
         DispatchKey::Cpu => Some(cpu::memcpy),
@@ -59,18 +54,6 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     }
 }
 
-/// Copy the host tensor `src` into `dst`, on any device.
-///
-/// Like [`Tensor::set`], this writes shared data through a shared
-/// reference; the caller must ensure no data races.
-///
-/// # Panics
-/// If `src` is not on the CPU, the two differ in dtype or size, either is
-/// not contiguous, or they share storage.
-///
-/// Into MPS memory, the copy is in stream order: after the work submitted
-/// so far, with no wait ([`mps::copy_h2d`]). Onto a device, profiled as
-/// `copy_h2d` (`src`'s type in, `dst`'s out).
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);
     if dst.numel() == 0 {
@@ -80,13 +63,6 @@ pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     COPY_H2D.dispatch(dst.device())(dst, src);
 }
 
-/// Copy `src`, on any device, into the host tensor `dst`.
-///
-/// From a device, profiled as `copy_d2h`, the wait for `src`'s value (a
-/// `wait`) inside it.
-///
-/// # Panics
-/// As [`copy_h2d`], with `dst` the one that must be on the CPU.
 pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     check(dst, src, dst);
     if src.numel() == 0 {
@@ -97,8 +73,6 @@ pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     COPY_D2H.dispatch(src.device())(dst, src);
 }
 
-/// A transfer's profiler range, `op`'s name, if it moves data between the
-/// host and `device` (none for a copy between host buffers).
 fn transfer(
     op: &Op<CopyKernel>,
     dst: &Tensor,
@@ -113,9 +87,6 @@ fn transfer(
     Some(guard)
 }
 
-/// What every kernel relies on: `host` is on the CPU, and `dst` and `src`
-/// are distinct contiguous buffers of the same dtype and size, so a kernel
-/// copies `numel * size_of` bytes between their data pointers.
 fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
     assert_eq!(
         host.device(),

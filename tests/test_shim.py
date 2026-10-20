@@ -1,5 +1,3 @@
-"""Tests for the pure-Python shim layer (factories, dtypes, numpy interop)."""
-
 import lumen
 from lumen import Tensor
 
@@ -7,7 +5,7 @@ from lumen import Tensor
 def test_shim_reexports_native_tensor():
     assert lumen._C.__name__ == "lumen._C"
     assert lumen.Tensor is lumen._C.Tensor
-    assert Tensor.__module__ == "lumen"  # reports as lumen.Tensor
+    assert Tensor.__module__ == "lumen"
     assert isinstance(lumen.__version__, str)
 
 
@@ -31,7 +29,6 @@ def test_dtype_constants():
         "uint64",
         "bool",
     }
-    # every advertised dtype actually works
     for dt in lumen.dtypes:
         assert lumen.zeros([2], dtype=dt).dtype == dt
 
@@ -42,7 +39,6 @@ def test_factories():
     assert lumen.ones([2, 2]).tolist() == [[1.0, 1.0], [1.0, 1.0]]
     assert lumen.full([2], 7, dtype=lumen.int32).tolist() == [7, 7]
     assert lumen.arange(4).tolist() == [0.0, 1.0, 2.0, 3.0]
-    # factories accept tuples as shapes
     assert lumen.zeros((2, 2)).shape == [2, 2]
 
 
@@ -58,7 +54,6 @@ def test_numpy_roundtrip():
     assert b.shape == [2, 3]
     assert b.dtype == "float32"
     assert b.tolist() == t.tolist()
-    # A 0-d array stays a scalar.
     s = lumen.from_numpy(np.array(7, dtype=np.int32))
     assert s.shape == [] and s.item() == 7
 

@@ -18,7 +18,6 @@ fn constant(k: &mut Kernel, v: i64) -> usize {
 
 #[test]
 fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
-    // The host-to-TPU copy: host rows to the memory at scalar 0's row.
     let mut k = Kernel::new(1, Some(4), 64);
     let [scalars, host, _, result] = k.params()[..] else {
         unreachable!()
@@ -56,7 +55,6 @@ fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
 
 #[test]
 fn a_loop_accumulates_a_matmul_in_vmem() {
-    // acc = 0; for i in 0..4: if i == 0: acc = 0; acc += x @ y.
     let mut k = Kernel::new(1, None, 64);
     let f32 = |shape: &[usize]| TensorType::new(DType::F32, shape);
     let x = k.alloc(Type::Ref(f32(&[8, 128]), Space::Vmem)).unwrap();
@@ -80,7 +78,6 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
         k.load(y, &[]).unwrap(),
         k.load(acc, &[]).unwrap(),
     );
-    // x @ y.T: y is [n, k].
     let dot = Primitive::DotGeneral {
         lhs_contracting: vec![1],
         rhs_contracting: vec![1],
@@ -181,13 +178,10 @@ fn kernels_refuse_what_tpus_cannot_do() {
     let [scalars, memory, _] = k.params()[..] else {
         unreachable!()
     };
-    // Loads read VMEM whole, or an SMEM element.
     assert!(k.load(memory, &[]).is_err());
     assert!(k.load(scalars, &[]).is_err());
-    // Scratch is VMEM or semaphores.
     let hbm = Type::Ref(TensorType::new(DType::F32, &[8, 128]), Space::Any);
     assert!(k.alloc(hbm).is_err());
-    // A slice stays inside its ref.
     assert!(
         k.slice(
             memory,
@@ -198,7 +192,6 @@ fn kernels_refuse_what_tpus_cannot_do() {
         )
         .is_err()
     );
-    // An unended `If` is not lowered.
     let t = Primitive::Full {
         shape: vec![],
         fill_value: Scalar::Bool(true),

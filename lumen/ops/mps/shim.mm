@@ -168,7 +168,6 @@ int lumen_mps_launch_kernel(const char *name,
         if (groups) {
             [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         } else {
-            // Up to 256 threads a threadgroup, filling x first.
             NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
             NSUInteger x = std::min<NSUInteger>(grid[0], total);
             NSUInteger y = std::min<NSUInteger>(grid[1], total / x);

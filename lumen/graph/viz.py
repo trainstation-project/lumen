@@ -1,17 +1,3 @@
-"""A compiled function's graph as one self-contained HTML page:
-``lumen.compile(fn).dump_graph(path)``. The page shows the fused plan and
-the traced graph as node graphs, and for every node its types, buffers, the
-kernels it launched (with GPU time) and their Metal source, generated
-(fusions) or hand-written (``lumen/ops/<op>/mps/kernels.metal``), the
-module (``record_function`` ranges) it was traced in and the lines of the
-traced program that computed it; a search finds nodes.
-
-From the command line, for a function and inputs of the given types:
-
-    python -m lumen.graph.viz --example attention -o attention.html
-    python -m lumen.graph.viz my_model.py:block --input 'f32[64,128]' --input 'f32[128,128]'
-"""
-
 import argparse
 import datetime
 import html
@@ -51,10 +37,6 @@ def type_text(dtype, shape):
     return f"{SHORT.get(dtype, dtype)}[{','.join(map(str, shape))}]"
 
 
-# ---------------------------------------------------------------------
-# where a primitive kernel's source is: (file under lumen/ops, anchor)
-# ---------------------------------------------------------------------
-
 _SOURCES = [
     (r"^matmul_(small|mid)_", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
@@ -86,11 +68,6 @@ def source_of(kernel):
     return None
 
 
-# ---------------------------------------------------------------------
-# profiling: each plan step's kernels and GPU time
-# ---------------------------------------------------------------------
-
-
 def profile_steps(plan, run, runs, device):
     """For each step of ``plan``, its kernels in launch order as ``[name,
     median GPU us]`` over ``runs`` calls of ``run`` (running it) on
@@ -108,11 +85,7 @@ def profile_steps(plan, run, runs, device):
         if e["kind"] == "gpu":
             by_parent.setdefault(e["parent"], []).append(e)
     nsteps = len(plan.steps())
-    times = [[] for _ in range(nsteps)]  # per step, per run: [(kernel, us), ...]
-    # Each run's steps, in order: its ranges named after their primitives
-    # inside no other op (in their modules' record_function ranges, if
-    # traced in some; lumen's own ops aside: the copies in, ...), the runs
-    # one after another.
+    times = [[] for _ in range(nsteps)]
     by_id = {e["id"]: e for e in events}
 
     def in_op(e):
@@ -128,7 +101,7 @@ def profile_steps(plan, run, runs, device):
         key=lambda e: e["start_us"],
     )
     if nsteps == 0 or len(ranges) % nsteps:
-        ranges = []  # cannot line the ranges up with the steps
+        ranges = []
     for start in range(0, len(ranges), nsteps or 1):
         for i, step in enumerate(ranges[start : start + nsteps]):
             gpu = sorted(by_parent.get(step["id"], []), key=lambda e: e["start_us"])
@@ -143,11 +116,6 @@ def profile_steps(plan, run, runs, device):
             [[name, statistics.median(r[k][1] for r in runs_of_step if len(r) > k)] for k, name in enumerate(kernels)]
         )
     return result
-
-
-# ---------------------------------------------------------------------
-# views: nodes and edges
-# ---------------------------------------------------------------------
 
 
 def _kernel_entries(kernels):
@@ -199,7 +167,7 @@ def plan_view(plan, kernels):
         for src, b in sources:
             edges.append([src, node["id"], b])
         writer[out_buffer] = node["id"]
-        for b, _, _ in step["extra_outputs"]:  # a multi-output fusion's other outputs
+        for b, _, _ in step["extra_outputs"]:
             writer[b] = node["id"]
     for buffer in sorted((b for b in writer if b.startswith("out")), key=lambda b: int(b[3:])):
         src = writer[buffer]
@@ -237,10 +205,6 @@ def graph_view(graph, unfused, kernels):
             "scope": node["scope"],
             "sources": node["sources"],
         }
-        # The unfused plan's steps are the live nodes in graph order (it may
-        # drop dead ones and alias reshapes), plus steps the device's
-        # compiler added (a transpose putting a dot_general's operand in
-        # matmul form): those go with the node after them.
         added = []
         for t in range(s, len(steps)):
             if steps[t]["primitive"] == node["primitive"] and list(steps[t]["output"][1:]) == [dtype, list(shape)]:
@@ -264,11 +228,6 @@ def graph_view(graph, unfused, kernels):
     return {"nodes": nodes, "edges": edges}
 
 
-# ---------------------------------------------------------------------
-# dump
-# ---------------------------------------------------------------------
-
-
 def code_of(views):
     """The text of each file of the traced program the nodes of ``views``
     were traced at (their ``sources``), those it can read."""
@@ -289,8 +248,6 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
     the plan adds), ``plan`` by ``run`` if given (else ``plan.run``).
     ``scalars`` are the graph's runtime scalars (``Plan``'s)."""
     device = device or (str(inputs[0].device) if inputs else "cpu")
-    # The unfused plan for the same device: its steps are the graph's
-    # primitives (after the device's rewrites), each its own kernel.
     host = str(device).split(":")[0] in ("cpu", "meta")
     unfused = Plan(graph) if host else Plan(graph, device, fuse=False, scalars=list(scalars))
     timed = not host
@@ -337,11 +294,6 @@ def write(data, path, json_path=None, fragment=False):
     pathlib.Path(path).write_text(page)
     if json_path:
         pathlib.Path(json_path).write_text(json.dumps(data, indent=1))
-
-
-# ---------------------------------------------------------------------
-# command line
-# ---------------------------------------------------------------------
 
 
 def _examples():

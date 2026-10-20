@@ -1,7 +1,3 @@
-"""The transformations (JAX: ``jax/_src/interpreters/ad.py``): forward
-mode (``jvp``), linearize, transpose (``backward_pass``), and reverse mode
-(``vjp``, ``grad``, ``value_and_grad``)."""
-
 import functools
 
 from lumen.autograd import attention, cross_entropy, dots, rules
@@ -40,8 +36,6 @@ def _jvp_tape(tape, tangents, linearizing=False):
     base = list(tracer._SCOPES[-1])
 
     for name, inputs, params, out in tape:
-        # Linearizing (a backward's), each node's derivative in its ranges'
-        # backward (``attention (backward)``).
         forward = out[0] if name == _FUNCTION else out
         scope = tracer._backward_scope(forward, base) if linearizing else base
         with tracer._scope(scope):
@@ -134,7 +128,6 @@ def _linearize_tape(tape, leaves):
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
     _, lin_tape = _record(_jvp_tape, tape, tangents, True)
-    # Partial evaluation: the nodes depending on a seed are linear.
     linear_vars = set(seeds.values())
     linear = []
     for node in lin_tape:
@@ -167,8 +160,6 @@ def backward_pass(linear, linear_vars, cts):
     graph = tracer.current_graph()
     base = list(tracer._SCOPES[-1])
     for name, inputs, params, out in reversed(linear):
-        # Each linear node transposed in the ranges it was made in (its
-        # forward node's backward), or those open here.
         made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
         with tracer._scope(list(made) if made else base):
             _transpose_node(graph, name, inputs, params, out, linear_vars, cts)

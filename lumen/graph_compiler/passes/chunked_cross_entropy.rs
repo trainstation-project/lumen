@@ -1,23 +1,7 @@
-//! A linear layer's cross entropy (`linear_cross_entropy.rs`'s pattern)
-//! trained a chunk of rows at a time (its gradient recomputing a chunk's
-//! logits, `lumen.config.compiler.fused_linear_cross_entropy_chunk_size`),
-//! computed from those chunks' logits instead: each chunk's logits once,
-//! its losses and gradient one row kernel of them (XMA's fused linear cross
-//! entropy).
-
 use super::linear_cross_entropy::{Found, matched, uses};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// `graph` with each linear cross entropy whose gradient a chunk of rows
-/// at a time recomputes their logits (`lumen/autograd/cross_entropy.py`:
-/// a dot of the chunk's rows of `h`, the forward's) computed from those
-/// chunks' logits: each chunk's losses and log-sum-exp from the logits
-/// its gradient reads, beside it (the rows kernel writing both), the
-/// whole logits never computed. XMA's fused linear cross entropy: the
-/// logits of a chunk computed once, its gradient formed with its loss.
-/// Not where the gradient's `g` reads the losses (waiting for every
-/// chunk's, each chunk's logits would be kept until then).
 fn chunked_cross_entropy(graph: &Graph) -> Graph {
     let (producer, readers) = uses(graph);
     for i in 0..graph.nodes().len() {
@@ -30,13 +14,9 @@ fn chunked_cross_entropy(graph: &Graph) -> Graph {
     graph.clone()
 }
 
-/// `graph` with the linear cross entropy `f` of the dot at node `dot`
-/// computed from its chunks' logits, if its gradient recomputes them (a
-/// dot as `dot` of a slice of rows of `h` a chunk, the chunks its rows).
 fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> Option<Graph> {
     let nodes = graph.nodes();
     let (b, d) = (graph.type_of(f.h).shape[0], graph.type_of(f.h).shape[1]);
-    // The chunks' dots: (node, first row, row past the last), by rows.
     let mut chunks: Vec<(usize, usize, usize)> = (0..nodes.len())
         .filter(|&k| {
             k != dot
@@ -64,8 +44,6 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
     if chunks.is_empty() || covered != Some(b) {
         return None;
     }
-    // The forward's rows, copied for a chunk: the pattern (but the dot)
-    // and its gather's index, `iota(B) * V + target`.
     let mut region: Vec<usize> = f.members.iter().copied().filter(|&k| k != dot).collect();
     let mut stack = vec![nodes[f.pick].inputs[1]];
     while let Some(v) = stack.pop() {
@@ -85,12 +63,9 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
-    // Values waiting for every chunk's rows (the losses, the log-sum-exp,
-    // what reads them), and those computed from a chunk's logits.
     let mut waiting = vec![false; graph.types.len()];
     let mut logits = vec![false; graph.types.len()];
     let mut deferred = Vec::new();
-    // Each chunk's (first row, row past the last, log-sum-exp, losses).
     let mut rows: Vec<(usize, usize, Var, Var)> = Vec::new();
     let emit = |out: &mut Graph, map: &mut [Var], node: &Node| {
         out.set_origin(node);
@@ -103,13 +78,11 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             continue;
         }
         if let Some(&(_, start, end)) = chunks.iter().find(|c| c.0 == k) {
-            // The chunk's logits, the forward's too (its dot's lines).
             out.set_origins(&[node, &nodes[dot]]);
             let ins: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
             map[node.output] = out.apply(node.primitive.clone(), &ins).ok()?;
             out.set_label(map[node.output], node.label);
             logits[node.output] = true;
-            // The chunk's rows of the forward, of its logits.
             out.set_origin(&nodes[f.pick]);
             let target = Primitive::Slice {
                 start_indices: vec![start],
@@ -141,8 +114,6 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             if rows.len() < chunks.len() {
                 continue;
             }
-            // Every chunk's: the losses and log-sum-exp (what reads them
-            // after every chunk's gradient, read after its rows' kernel).
             rows.sort_by_key(|r| r.0);
             out.set_origin(&nodes[f.lse]);
             map[lse] = joined(&mut out, rows.iter().map(|r| r.2).collect())?;
@@ -150,7 +121,6 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             map[loss] = joined(&mut out, rows.iter().map(|r| r.3).collect())?;
             continue;
         }
-        // A chunk's rows of the log-sum-exp or losses: its own.
         if let Primitive::Slice {
             start_indices,
             limit_indices,
@@ -178,7 +148,6 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             .iter()
             .any(|&v| waiting[v] || v == lse || v == loss)
         {
-            // A chunk's gradient waiting for every chunk's losses.
             if logits[node.output] {
                 return None;
             }
@@ -199,8 +168,6 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
     Some(out.prune().0)
 }
 
-/// `values` (chunks' rows, in order) concatenated: at most 16 a
-/// concatenate (a kernel binds few buffers), those concatenated in turn.
 fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
     while values.len() > 1 {
         values = values
@@ -222,8 +189,6 @@ fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
     values.pop()
 }
 
-/// `p` of a chunk of `c` of the `b` rows (each value's first dimension
-/// a multiple of the rows), if it computes each row's from its own.
 fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
     use Primitive::*;
     let rows = |shape: &[usize]| {
@@ -272,7 +237,6 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
     })
 }
 
-/// [`chunked_cross_entropy`] as a pass.
 pub(crate) struct ChunkedCrossEntropy;
 
 impl<M: Module> CompilerPass<M> for ChunkedCrossEntropy {
