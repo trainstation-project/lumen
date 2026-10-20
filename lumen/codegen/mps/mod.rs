@@ -2291,9 +2291,6 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     let mut regions: Vec<Columns> = Vec::new();
     for slice in readers_of(body, dot.output) {
         let (start, limit) = along_last(slice, shape)?;
-        if outputs.contains(&slice.output) {
-            return None;
-        }
         let width = limit - start;
         let pairs: Vec<usize> = shape[..rank - 1]
             .iter()
@@ -2310,6 +2307,7 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
             _ => None,
         };
         let region = match tupled {
+            Some(_) if outputs.contains(&slice.output) => return None,
             Some(r) => {
                 let halves: Vec<(&Node, (usize, usize))> = readers_of(body, r.output)
                     .into_iter()
@@ -2617,6 +2615,13 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
     };
+    let elements = body.type_of(dot.output).numel();
+    let indexed =
+        |v: &Var| [elements, elements / 2, 2 * elements].contains(&body.type_of(*v).numel());
+    assert!(
+        body.outputs().iter().all(indexed),
+        "a contraction's epilogue writes values of its index space: {body}"
+    );
     let out = body.outputs()[0];
     let (t, a) = (
         metal_type(body.type_of(dot.inputs[0]).dtype),

@@ -1336,6 +1336,8 @@ class Projections(lumen.nn.Module):
             p = [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in self.ws]
         else:
             p = [x @ w.t() for w in self.ws]
+        if self.combine == "four":
+            return p[0] + p[1], p[2] * F.sigmoid(p[3]) + p[4] * p[5]
         pairs = [p[0] + p[1], p[2] * F.sigmoid(p[3])]
         return pairs + [-v for v in p[4:]]
 
@@ -1349,8 +1351,16 @@ class Projections(lumen.nn.Module):
         ([64, 64, 32, 32, 16], "pairs", [2, 2, 1], True),
         ([64, 64, 32, 32, 15], "pairs", [2, 2, 1], False),
         ([64, 64, 64, 64], "mixed", [2, 2], True),
+        ([64, 64, 64, 64, 64, 64], "four", [2, 1, 1, 1, 1], False),
     ],
-    ids=["two pairs", "pairs of two sizes", "pairs and a member", "a member of odd width", "mixed precision"],
+    ids=[
+        "two pairs",
+        "pairs of two sizes",
+        "pairs and a member",
+        "a member of odd width",
+        "mixed precision",
+        "a pair and four combined",
+    ],
 )
 def test_pairs_of_one_operand_share_one_interleaved_block(sizes, combine, regions, fused):
     """Dots of one operand, combined in pairs (y = Ax + Bx, z = Cx sigmoid(Dx)),
