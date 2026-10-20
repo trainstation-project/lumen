@@ -181,6 +181,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
                     reads: |_, _| true,
                     views: false,
                     lanes: 128,
+                    columns: 1,
                 },
             })
             .add(SplitDots);

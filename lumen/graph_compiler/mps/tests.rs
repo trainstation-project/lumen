@@ -5,6 +5,7 @@ const MPS: Target = Target {
     reads: super::fusion::fusible,
     views: true,
     lanes: 1,
+    columns: crate::codegen::mps::ROW_COLUMNS,
 };
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;

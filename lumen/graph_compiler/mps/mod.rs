@@ -125,6 +125,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
                 reads: fusion::fusible,
                 views: true,
                 lanes: 1,
+                columns: crate::codegen::mps::ROW_COLUMNS,
             },
         });
     }

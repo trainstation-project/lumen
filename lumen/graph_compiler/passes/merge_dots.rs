@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::codegen::mps::ROW_COLUMNS;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
@@ -10,6 +9,7 @@ pub(crate) struct Target {
     pub(crate) reads: fn(&Graph, &Node) -> bool,
     pub(crate) views: bool,
     pub(crate) lanes: usize,
+    pub(crate) columns: usize,
 }
 
 struct Group {
@@ -184,14 +184,22 @@ pub(crate) fn merge_dots(
     }
     let mut groups: Vec<Group> = groups
         .into_iter()
-        .flat_map(
-            |g| match interleaves(graph, &g, &position, &alone, &reads, donated) {
+        .flat_map(|g| {
+            match interleaves(
+                graph,
+                &g,
+                &position,
+                &alone,
+                &reads,
+                donated,
+                target.columns,
+            ) {
                 Some((order, rest, ..)) if target.views && !rest.is_empty() => {
                     vec![g.subset(&order), g.subset(&rest)]
                 }
                 _ => vec![g],
-            },
-        )
+            }
+        })
         .collect();
     let mut merged = vec![false; nodes.len()];
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
@@ -232,7 +240,7 @@ pub(crate) fn merge_dots(
             }
             if target.views
                 && let Some((order, rest, layout, rewrites)) =
-                    interleaves(graph, g, &position, &alone, &reads, donated)
+                    interleaves(graph, g, &position, &alone, &reads, donated, target.columns)
                 && rest.is_empty()
             {
                 g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
@@ -580,6 +588,7 @@ fn interleaves(
     alone: &[bool],
     reads: &[usize],
     donated: &[bool],
+    columns: usize,
 ) -> Option<(Vec<usize>, Vec<usize>, Layout, Interleaving)> {
     let nodes = graph.nodes();
     let operand = |i: usize| nodes[i].inputs[1 - g.side];
@@ -604,10 +613,10 @@ fn interleaves(
     }
     let width = |m: &Vec<usize>| m.len() * size(g.weights[m[0]]);
     let tiled = |m: &Vec<usize>| {
-        ROW_COLUMNS.is_multiple_of(m.len())
+        columns.is_multiple_of(m.len())
             && m.iter()
                 .all(|&j| size(g.weights[j]) == size(g.weights[m[0]]))
-            && width(m).is_multiple_of(ROW_COLUMNS)
+            && width(m).is_multiple_of(columns)
     };
     let mut groups: Vec<&Vec<usize>> = by_set
         .iter()
