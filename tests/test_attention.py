@@ -114,8 +114,8 @@ def _written(q, k, v):
     b, n, s, h = q.shape
     nkv = k.shape[1]
     k = k.unsqueeze(2).expand(b, nkv, n // nkv, s, h).reshape(b, n, s, h)
-    scores = (q @ k.transpose(-1, -2)) * (1.0 / h**0.5)
-    return F.softmax(scores.float(), -1).to(dtype=q.dtype) @ v
+    scores = F.matmul(q, k.transpose(-1, -2), "float32", q.dtype) * (1.0 / h**0.5)
+    return F.matmul(F.softmax(scores.float(), -1).to(dtype=q.dtype), v, "float32", q.dtype)
 
 
 @pytest.mark.mps
@@ -223,11 +223,20 @@ def test_attention_computes_its_scores_as_traced():
 @pytest.mark.parametrize(
     "f",
     [
-        lambda q, k, v: F.softmax(q.half() @ k.half().transpose(-1, -2), -1).to(dtype=q.dtype) @ v,
-        lambda q, k, v: F.softmax(
-            prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
-        ).to(dtype=q.dtype)
-        @ v,
+        lambda q, k, v: F.matmul(
+            F.softmax(F.matmul(q.half(), k.half().transpose(-1, -2), "float32", "float16"), -1).to(dtype=q.dtype),
+            v,
+            "float32",
+            q.dtype,
+        ),
+        lambda q, k, v: F.matmul(
+            F.softmax(
+                prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
+            ).to(dtype=q.dtype),
+            v,
+            "float32",
+            q.dtype,
+        ),
     ],
     ids=["f16 softmax", "bf16 accumulation"],
 )
@@ -378,7 +387,16 @@ def test_written_attention_backward_is_flash_attention(scale):
     (q, k, v), arrays = tensors("mps", "float32", (2, 40, 32), (2, 40, 32), (2, 40, 32))
 
     def loss(q, k, v):
-        return F.sum(F.tanh(F.softmax((q @ k.transpose(-1, -2)) * scale, -1) @ v))
+        return F.sum(
+            F.tanh(
+                F.matmul(
+                    F.softmax(F.matmul(q, k.transpose(-1, -2), "float32", "float32") * scale, -1),
+                    v,
+                    "float32",
+                    "float32",
+                )
+            )
+        )
 
     grad = lumen.grad(loss, (0, 1, 2))
     labels = steps(grad, q, k, v)

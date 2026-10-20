@@ -328,11 +328,19 @@ def test_functional_layout():
         run(lambda t: F.pad(t, (0, 0, 5, 7), mode="circular"), x), np.pad(a, ((5, 7), (0, 0)), mode="wrap")
     )
     c = np.arange(20, dtype=np.float32).reshape(4, 5)
-    np.testing.assert_allclose(run(lambda p, q: F.einsum("mk,kn->mn", p, q), x, tensor(c)), a @ c, rtol=1e-6)
+    np.testing.assert_allclose(
+        run(lambda p, q: F.einsum("mk,kn->mn", p, q, accum_dtype="float32", output_dtype="float32"), x, tensor(c)),
+        a @ c,
+        rtol=1e-6,
+    )
     u = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     v = np.arange(40, dtype=np.float32).reshape(2, 4, 5)
     np.testing.assert_allclose(
-        run(lambda p, q: F.einsum("bmk,bkn->bnm", p, q), tensor(u), tensor(v)),
+        run(
+            lambda p, q: F.einsum("bmk,bkn->bnm", p, q, accum_dtype="float32", output_dtype="float32"),
+            tensor(u),
+            tensor(v),
+        ),
         np.einsum("bmk,bkn->bnm", u, v),
         rtol=1e-6,
     )

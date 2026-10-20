@@ -1116,7 +1116,7 @@ def test_jnp_einsum_grad_y_pallas():
     y = np.arange(256 * 128, dtype=np.float32).reshape((128, 256))
 
     def kernel(x_ref, y_ref, out_ref):
-        out_ref[...] = F.einsum("mk,mn->kn", x_ref[...], y_ref[...])
+        out_ref[...] = F.einsum("mk,mn->kn", x_ref[...], y_ref[...], accum_dtype="float32", output_dtype="float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((256, 256), "float32"), _tensor(x), _tensor(y))
     np.testing.assert_allclose(out, np.einsum("mk,mn->kn", x, y), rtol=1e-6)

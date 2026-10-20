@@ -12,7 +12,7 @@ class SwiGLU(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
-        g, u = x @ self.w1.t(), x @ self.w3.t()
+        g, u = F.matmul(x, self.w1.t(), "float32", "bfloat16"), F.matmul(x, self.w3.t(), "float32", "bfloat16")
         return g * F.sigmoid(g) * u
 
 

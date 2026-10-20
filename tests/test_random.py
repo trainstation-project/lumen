@@ -197,10 +197,10 @@ def test_errors():
 
 
 def _dropout_read_early_and_late(a, w):
-    h = F.dropout(a @ w, 0.5)
-    b = h @ w
-    e = (b @ w) @ b
-    return F.sum((e @ w) * h, -1)
+    h = F.dropout(F.matmul(a, w, "float32", "float32"), 0.5)
+    b = F.matmul(h, w, "float32", "float32")
+    e = F.matmul(F.matmul(b, w, "float32", "float32"), b, "float32", "float32")
+    return F.sum(F.matmul(e, w, "float32", "float32") * h, -1)
 
 
 @pytest.mark.mps

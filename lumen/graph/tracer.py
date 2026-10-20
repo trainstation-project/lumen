@@ -1134,19 +1134,10 @@ class TracedTensor:
                 leaf.grad = g
 
     def __matmul__(self, other):
-        """F.matmul, accumulating floats in float32 (float64 in float64),
-        its result of the operands' dtype."""
-        from lumen.functional import matmul
-
-        other = _lift(other)
-        if not isinstance(other, TracedTensor):
-            return NotImplemented
-        dtype = _common_dtype("matmul", (self, other))
-        return matmul(self, other, _accum_dtype(dtype), dtype)
+        raise TypeError("@ has no dtypes: use lumen.functional.matmul(x, y, accum_dtype, output_dtype)")
 
     def __rmatmul__(self, other):
-        other = _lift(other)
-        return TracedTensor.__matmul__(other, self) if isinstance(other, TracedTensor) else NotImplemented
+        raise TypeError("@ has no dtypes: use lumen.functional.matmul(x, y, accum_dtype, output_dtype)")
 
     def to(self, *args, dtype=None, device=None, non_blocking=False, copy=False):
         """It converted to ``dtype`` and/or on ``device`` (``Tensor.to``: a

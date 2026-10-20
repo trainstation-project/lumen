@@ -301,13 +301,17 @@ def _examples():
 
     def attention(x, wq, wk, wv, w1, w2):
         """Single-head attention, then an MLP, each with a residual."""
-        q, k, v = x @ wq, x @ wk, x @ wv
-        scores = (q @ k.t()) * (1.0 / q.shape[-1] ** 0.5)
-        x = x + F.softmax(scores, -1) @ v
-        return x + F.relu(x @ w1) @ w2
+        q, k, v = (
+            F.matmul(x, wq, "float32", "float32"),
+            F.matmul(x, wk, "float32", "float32"),
+            F.matmul(x, wv, "float32", "float32"),
+        )
+        scores = F.matmul(q, k.t(), "float32", "float32") * (1.0 / q.shape[-1] ** 0.5)
+        x = x + F.matmul(F.softmax(scores, -1), v, "float32", "float32")
+        return x + F.matmul(F.relu(F.matmul(x, w1, "float32", "float32")), w2, "float32", "float32")
 
     def mlp(x, w1, w2):
-        return F.softmax(F.relu(x @ w1) @ w2, -1)
+        return F.softmax(F.matmul(F.relu(F.matmul(x, w1, "float32", "float32")), w2, "float32", "float32"), -1)
 
     seq, dim, hidden = 128, 256, 1024
     return {

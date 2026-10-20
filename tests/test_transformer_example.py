@@ -42,7 +42,7 @@ class MLP(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        h = F.relu(x @ self.w1.t().bfloat16())
+        h = F.relu(F.matmul(x, self.w1.t().bfloat16(), "float32", "bfloat16"))
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 

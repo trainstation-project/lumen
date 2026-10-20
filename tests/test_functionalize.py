@@ -407,14 +407,14 @@ def test_inplace_code_costs_no_memory():
     workspace (each dead value's memory reused)."""
 
     def inplace(x, w):
-        y = x @ w
+        y = F.matmul(x, w, "float32", "float32")
         y += 1.0
         y *= 2.0
         y.clamp_(max=3.0)
         return F.sum(y)
 
     def out_of_place(x, w):
-        y = x @ w
+        y = F.matmul(x, w, "float32", "float32")
         y = y + 1.0
         y = y * 2.0
         y = F.minimum(y, 3.0)
@@ -434,7 +434,7 @@ def test_view_assignment_updates_its_base_in_place():
     base, the workspace no larger than the base and the part."""
 
     def f(x, w):
-        y = x @ w
+        y = F.matmul(x, w, "float32", "float32")
         y[:, :8] += 1.0
         return F.sum(y)
 

@@ -80,7 +80,11 @@ def op(name, shapes, dtype, steps, top, repeats=16):
         for _ in range(repeats)
         for s in shapes
     ]
-    fns = {"matmul": lambda a, b: a @ b, "matmul_tn": lambda a, b: a.t() @ b, "matmul_nt": lambda a, b: a @ b.t()}
+    fns = {
+        "matmul": lambda a, b: lumen.functional.matmul(a, b, "float32", dtype),
+        "matmul_tn": lambda a, b: lumen.functional.matmul(a.t(), b, "float32", dtype),
+        "matmul_nt": lambda a, b: lumen.functional.matmul(a, b.t(), "float32", dtype),
+    }
     f = lumen.compile(lambda *xs: [fns[name](*xs[k : k + len(shapes)]) for k in range(0, len(xs), len(shapes))])
     return table(gpu_events(lambda: f(*args), steps), top)
 
