@@ -498,28 +498,45 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         node.inputs.iter().for_each(|&v| readers[v].push(i));
     }
     let attention = |p: &Primitive| matches!(p, Primitive::Fusion { name, .. } if name.starts_with("flash_attention"));
-    let folded = |v: Var| {
-        readers[v]
-            .iter()
-            .copied()
-            .find(|&r| matches!(nodes[r].primitive, Primitive::Reshape { .. }))
+    let reshape = |r: usize| matches!(nodes[r].primitive, Primitive::Reshape { .. });
+    let reduce = |r: usize| matches!(nodes[r].primitive, Primitive::ReduceSum { .. });
+    let alone = |v: Var| match readers[v].as_slice() {
+        [r] if !graph.outputs().contains(&v) => Some(*r),
+        _ => None,
     };
-    let mut by_fusion: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes.len()];
+    let chain = |v: Var| {
+        let first = readers[v].iter().copied().find(|&r| reshape(r));
+        let mut chain: Vec<usize> = match alone(v) {
+            Some(r) if reduce(r) || reshape(r) => vec![r],
+            _ => first.into_iter().collect(),
+        };
+        while let Some(&last) = chain.last() {
+            match alone(nodes[last].output) {
+                Some(r) if (reduce(r) || reshape(r)) && alone(v).is_some() => chain.push(r),
+                _ => break,
+            }
+        }
+        chain
+    };
+    let mut by_fusion: Vec<Vec<(usize, Vec<usize>)>> = vec![Vec::new(); nodes.len()];
     let mut skipped = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate() {
-        if attention(&node.primitive) {
-            if let Some(r) = folded(node.output) {
-                by_fusion[i].push((0, r));
-                skipped[r] = true;
+        if !attention(&node.primitive) {
+            continue;
+        }
+        let forward =
+            matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
+        let mut values = vec![(0, node.output)];
+        for &u in readers[node.output].iter().filter(|_| !forward) {
+            if let Primitive::FusionOutput { index, .. } = nodes[u].primitive {
+                values.push((index, nodes[u].output));
             }
-            let forward = matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
-            for &u in readers[node.output].iter().filter(|_| !forward) {
-                if let Primitive::FusionOutput { index, .. } = nodes[u].primitive
-                    && let Some(r) = folded(nodes[u].output)
-                {
-                    by_fusion[i].push((index, r));
-                    skipped[r] = true;
-                }
+        }
+        for (index, v) in values {
+            let chain = chain(v);
+            if !chain.is_empty() {
+                chain.iter().for_each(|&r| skipped[r] = true);
+                by_fusion[i].push((index, chain));
             }
         }
     }
@@ -532,6 +549,12 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     let mut fused_as: Vec<Option<Var>> = vec![None; graph.types.len()];
+    let folded = |f: usize, index: usize| {
+        by_fusion[f]
+            .iter()
+            .find(|(k, _)| *k == index)
+            .map(|(_, c)| c)
+    };
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
         if skipped[i] {
@@ -545,14 +568,24 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
                 _ => map[v],
             })
             .collect();
+        let at = match node.primitive {
+            Primitive::FusionOutput { index, .. } => {
+                Some((graph_producer(graph, node.inputs[0]), index))
+            }
+            _ if attention(&node.primitive) => Some((i, 0)),
+            _ => None,
+        };
+        let chain = at.and_then(|(f, index)| folded(f, index));
         let primitive = match &node.primitive {
             Primitive::Fusion { name, label, body } if !by_fusion[i].is_empty() => {
                 let mut body = body.clone();
                 let mut outputs = body.outputs().to_vec();
-                for &(index, r) in &by_fusion[i] {
-                    outputs[index] = body
-                        .apply(nodes[r].primitive.clone(), &[outputs[index]])
-                        .expect("the output's reshape");
+                for (index, chain) in &by_fusion[i] {
+                    for &r in chain {
+                        outputs[*index] = body
+                            .apply(nodes[r].primitive.clone(), &[outputs[*index]])
+                            .expect("the output's layout");
+                    }
                 }
                 body.set_outputs(&outputs).expect("the body's values");
                 Primitive::Fusion {
@@ -561,42 +594,26 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
                     body,
                 }
             }
-            Primitive::FusionOutput { index, .. }
-                if by_fusion[graph_producer(graph, node.inputs[0])]
-                    .iter()
-                    .any(|&(k, _)| k == *index) =>
-            {
-                let (_, r) = by_fusion[graph_producer(graph, node.inputs[0])]
-                    .iter()
-                    .copied()
-                    .find(|&(k, _)| k == *index)
-                    .expect("its reshape");
-                Primitive::FusionOutput {
-                    index: *index,
-                    ty: graph.type_of(nodes[r].output).clone(),
-                }
-            }
+            Primitive::FusionOutput { index, .. } if chain.is_some() => Primitive::FusionOutput {
+                index: *index,
+                ty: graph
+                    .type_of(nodes[*chain.and_then(|c| c.last()).expect("a chain")].output)
+                    .clone(),
+            },
             p => p.clone(),
         };
         let fused = out.apply(primitive, &inputs).expect("a node of the graph");
         out.set_label(fused, node.label);
         map[node.output] = fused;
         fused_as[node.output] = Some(fused);
-        let at = match node.primitive {
-            Primitive::FusionOutput { index, .. } => {
-                Some((graph_producer(graph, node.inputs[0]), index))
+        if let Some(chain) = chain {
+            map[nodes[*chain.last().expect("a chain")].output] = fused;
+            if chain.len() == 1 && reshape(chain[0]) {
+                let back = Primitive::Reshape {
+                    new_sizes: graph.type_of(node.output).shape.clone(),
+                };
+                map[node.output] = out.apply(back, &[fused]).expect("the output as traced");
             }
-            _ if attention(&node.primitive) => Some((i, 0)),
-            _ => None,
-        };
-        if let Some((f, index)) = at
-            && let Some(&(_, r)) = by_fusion[f].iter().find(|&&(k, _)| k == index)
-        {
-            map[nodes[r].output] = fused;
-            let back = Primitive::Reshape {
-                new_sizes: graph.type_of(node.output).shape.clone(),
-            };
-            map[node.output] = out.apply(back, &[fused]).expect("the output as traced");
         }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();

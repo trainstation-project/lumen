@@ -200,7 +200,7 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
         view("v", &operand(body, &a.v, a.hv), &a.batch, true)?,
         view(
             "the output",
-            &output(body, 0, a.out.clone(), a.hv),
+            &output(body, 0, written(body, &a.out, &a.batch)?.1, a.hv),
             &a.batch,
             true,
         )?,
@@ -251,42 +251,23 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         )?,
         view("delta", &operand(body, &b.delta, 1), &b.batch, false)?,
     ];
-    let outputs: Vec<Var> = body.outputs().to_vec();
-    let at = |base: Var| {
-        let reshaped = |o: Var| {
-            body.nodes().iter().any(|n| {
-                n.output == o
-                    && matches!(n.primitive, Primitive::Reshape { .. })
-                    && n.inputs[0] == base
-            })
-        };
-        outputs
-            .iter()
-            .position(|&o| o == base || reshaped(o))
-            .expect("an output")
-    };
     let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
         (Some(_), None, None) => "dq",
         (None, Some(_), Some(_)) => "dkv",
         _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
     };
-    let written =
-        |name: &str, out: &Option<(usize, Access)>, width: usize| -> Result<String, String> {
-            let (_, acc) = out.as_ref().expect("an output");
-            view(
-                name,
-                &output(body, at(acc.base), acc.clone(), width),
-                &b.batch,
-                true,
-            )
-        };
+    let out = |name: &str, out: &Option<(usize, Access)>, width: usize| -> Result<String, String> {
+        let (_, acc) = out.as_ref().expect("an output");
+        let (k, acc) = written(body, acc, &b.batch)?;
+        view(name, &output(body, k, acc, width), &b.batch, true)
+    };
     let outs = match kind {
-        "dq" => format!("\"dq\": {}", written("dq", &b.dq_out, b.h)?),
+        "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h)?),
         _ => format!(
             "\"dk\": {}, \"dv\": {}, \"group\": {}",
-            written("dk", &b.dk_out, b.h)?,
-            written("dv", &b.dv_out, b.hv)?,
-            group(&b.k, &b.batch)
+            out("dk", &b.dk_out, b.h)?,
+            out("dv", &b.dv_out, b.hv)?,
+            group(&written(body, &b.dk_out.as_ref().expect("dk").1, &b.batch)?.1)
         ),
     };
     let spec = format!(
@@ -313,9 +294,98 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
     Ok((kind, spec))
 }
 
-fn group(k: &Access, batch: &[usize]) -> usize {
-    match (k.batch.last(), batch.last()) {
-        (Some(&(_, div)), Some(&size)) if size.is_multiple_of(div) => div,
-        _ => 1,
+fn group(dk: &Access) -> usize {
+    dk.batch.last().map_or(1, |&(_, div)| div)
+}
+
+fn written(body: &Graph, acc: &Access, batch: &[usize]) -> Result<(usize, Access), String> {
+    let failed = || {
+        Err("flash attention on TPU: an output written through other than reshapes and sums".into())
+    };
+    let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
+    let mut found = None;
+    for (k, &o) in body.outputs().iter().enumerate() {
+        let (mut chain, mut v) = (Vec::new(), o);
+        while v != acc.base {
+            match producer(v) {
+                Some(n)
+                    if matches!(
+                        n.primitive,
+                        Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
+                    ) =>
+                {
+                    chain.push(n);
+                    v = n.inputs[0];
+                }
+                _ => break,
+            }
+        }
+        if v == acc.base {
+            chain.reverse();
+            found = Some((k, chain));
+            break;
+        }
     }
+    let Some((k, chain)) = found else {
+        return failed();
+    };
+    let f = |mut a: usize| {
+        for n in &chain {
+            if let Primitive::ReduceSum { axes, .. } = &n.primitive {
+                let from = &body.type_of(n.inputs[0]).shape;
+                let to = contiguous_strides(&body.type_of(n.output).shape);
+                let mut out = 0;
+                let mut kept = 0;
+                for (d, s) in contiguous_strides(from).iter().enumerate() {
+                    let idx = (a / s) % from[d];
+                    if !axes.contains(&d) {
+                        out += idx * to[kept];
+                        kept += 1;
+                    }
+                }
+                a = out;
+            }
+        }
+        a
+    };
+    let offset = f(acc.offset);
+    let step = |s: usize| {
+        if s == 0 {
+            0
+        } else {
+            f(acc.offset + s) - offset
+        }
+    };
+    let mut dims = Vec::new();
+    for (d, &(stride, div)) in acc.batch.iter().enumerate() {
+        let size = batch[d];
+        let at = |i: usize| f(acc.offset + (i / div) * stride);
+        let period = (1..size).find(|&i| at(i) != at(0)).unwrap_or(size);
+        let scaled = if period < size { at(period) - at(0) } else { 0 };
+        if (0..size).any(|i| at(i) != at(0) + (i / period) * scaled) {
+            return failed();
+        }
+        dims.push((scaled, period));
+    }
+    let mapped = Access {
+        base: body.outputs()[k],
+        offset,
+        batch: dims,
+        row: step(acc.row),
+        col: step(acc.col),
+    };
+    let heads: usize = batch.iter().product();
+    for g in 0..heads {
+        let (mut rest, mut before, mut after) = (g, acc.offset, mapped.offset);
+        for d in (0..batch.len()).rev() {
+            let idx = rest % batch[d];
+            rest /= batch[d];
+            before += (idx / acc.batch[d].1) * acc.batch[d].0;
+            after += (idx / mapped.batch[d].1) * mapped.batch[d].0;
+        }
+        if f(before) != after {
+            return failed();
+        }
+    }
+    Ok((k, mapped))
 }
