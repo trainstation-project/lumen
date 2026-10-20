@@ -1,13 +1,8 @@
-//! Attention as one flash-attention kernel ([`attention::fuse`]): the
-//! scores and probabilities never reach memory.
-
 use super::{Kernel, MpsModule, request};
 use crate::graph::Var;
 use crate::graph_compiler::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Each attention one fusion ([`attention::fuse`]): a flash-attention
-/// kernel.
 pub(super) struct FlashAttention;
 
 impl<'a> CompilerPass<MpsModule<'a>> for FlashAttention {

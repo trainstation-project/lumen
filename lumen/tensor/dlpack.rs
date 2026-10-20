@@ -48,7 +48,6 @@ struct DLTensor {
     ndim: i32,
     dtype: DLDataType,
     shape: *mut i64,
-    /// Null means C-contiguous.
     strides: *mut i64,
     byte_offset: u64,
 }
@@ -163,7 +162,6 @@ struct LumenDLMTensor<T> {
 }
 
 unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
-    // SAFETY: the context is the `LumenDLMTensor` that `to_managed` leaked.
     unsafe {
         drop(Box::from_raw(
             (*arg).manager_ctx().cast::<LumenDLMTensor<T>>(),
@@ -197,7 +195,6 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
         strides,
         tensor: T::new(dl_tensor, deleter::<T>),
     }));
-    // SAFETY: `ctx` is live until the deleter frees it.
     unsafe {
         *(*ctx).tensor.manager_ctx() = ctx.cast();
         &raw mut (*ctx).tensor
@@ -271,8 +268,6 @@ fn dl_dtype(dtype: DType) -> DLDataType {
         DType::I8 | DType::I16 | DType::I32 | DType::I64 => K_DL_INT,
         DType::F16 | DType::F32 | DType::F64 => K_DL_FLOAT,
         DType::BF16 => K_DL_BFLOAT,
-        // DLPack's sub-byte types are packed, and numpy reads no float8:
-        // these are read as their bytes (`lumen.to_numpy`).
         _ => K_DL_UINT,
     };
     DLDataType {
@@ -283,7 +278,6 @@ fn dl_dtype(dtype: DType) -> DLDataType {
 }
 
 pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
-    // SAFETY: `PyCapsule_IsValid` only reads the capsule's name.
     let is = |name: &CStr| unsafe { ffi::PyCapsule_IsValid(capsule.as_ptr(), name.as_ptr()) } != 0;
     if is(DLManagedTensorVersioned::CAPSULE) {
         from_capsule::<DLManagedTensorVersioned>(capsule)
@@ -298,16 +292,11 @@ pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
 }
 
 fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
-    // SAFETY: the caller checked the name, so the pointer is the producer's
-    // managed tensor, live until its deleter runs.
     let managed = unsafe { ffi::PyCapsule_GetPointer(capsule.as_ptr(), T::CAPSULE.as_ptr()) };
     let managed = managed.cast::<T>();
-    let layout = unsafe { &*managed }.check_version().and_then(|()| {
-        // SAFETY: as above.
-        read_layout(unsafe { (*managed).dl_tensor() })
-    })?;
-    // Taken: from here on the managed tensor is ours to free.
-    // SAFETY: the name is a static C string.
+    let layout = unsafe { &*managed }
+        .check_version()
+        .and_then(|()| read_layout(unsafe { (*managed).dl_tensor() }))?;
     if unsafe { ffi::PyCapsule_SetName(capsule.as_ptr(), T::USED.as_ptr()) } != 0 {
         return Err(PyErr::fetch(capsule.py()));
     }
@@ -334,8 +323,6 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
         if ndim == 0 {
             return Ok(Vec::new());
         }
-        // SAFETY: a DLTensor's shape, and its strides when non-null, have
-        // `ndim` entries.
         unsafe { std::slice::from_raw_parts(ptr, ndim) }
             .iter()
             .map(|&d| {
@@ -417,8 +404,6 @@ impl<T: Managed> Allocator for Adopted<T> {
             other => {
                 *buffer = other;
                 drop(buffer);
-                // SAFETY: not the adopted buffer, so one of the device
-                // allocator's, as the caller guarantees.
                 unsafe { self.device.deallocate(ptr, nbytes) }
             }
         }
@@ -431,7 +416,6 @@ fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
         device: allocator_for(layout.device).expect("checked in read_layout"),
         buffer: Mutex::new(Some((data.as_ptr().addr(), Producer(managed)))),
     };
-    // SAFETY: the adopted allocator releases this buffer, and only it.
     let data = unsafe { DataPtr::from_raw_parts(data, layout.nbytes, Arc::new(allocator)) };
     let storage = Storage::from_data_ptr(data, layout.device);
     Tensor::from_storage(

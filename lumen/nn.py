@@ -1,30 +1,3 @@
-"""Modules: models as trees of weights (``lumen/nn/``), after Equinox's
-``eqx.Module``.
-
-A ``Module`` subclass is a frozen dataclass whose fields are its weights
-(tensors), its submodules, lists or tuples of those, runtime scalars
-(floats: ``eps``, read by the compiled function each call, not baked into
-it), or static configuration (anything else: ints, strings, ...). Weights are meta tensors:
-``lumen.compile`` places them on its device when a function taking the
-module compiles, and every function taking it shares that memory::
-
-    import lumen.functional as F
-
-    class MLP(lumen.nn.Module):
-        w1: lumen.Tensor
-        w3: lumen.Tensor
-        w2: lumen.Tensor
-
-        def __call__(self, x):
-            return (F.relu(x @ self.w1) * (x @ self.w3)) @ self.w2
-
-    model = MLP(*(lumen.empty(s, device="meta") for s in shapes))
-    f = lumen.compile(lambda model, x: model(x), device="mps")
-    f(model, lumen.empty([seq, dim], device="meta"))  # compile: place the weights
-    model.load_state_dict(lumen.safetensors.load_file("mlp.safetensors"))
-    y = f(model, x)  # the weights read in place; x copied in
-"""
-
 import dataclasses
 
 from lumen._C import Tensor
@@ -43,8 +16,6 @@ class Module:
     def named_parameters(self):
         """``(path, weight)`` for each weight, recursively, in field order
         (``layers.0.w1``); a tensor in several fields is listed once."""
-        # By tensor, not storage: a compiled function's results share its
-        # workspace's.
         seen = set()
         for path, t in _leaves(self, ""):
             if id(t) not in seen:
@@ -74,7 +45,7 @@ def _leaves(x, path):
     """``(path, tensor)`` for each tensor in ``x`` (a module, a list or
     tuple, or a tensor), recursively: inside a compiled function, its
     traced weights (not its floats, runtime scalars)."""
-    from lumen.graph.tracer import TracedTensor  # it imports this module
+    from lumen.graph.tracer import TracedTensor
 
     prefix = f"{path}." if path else ""
     if isinstance(x, Tensor) or (isinstance(x, TracedTensor) and not x.weak):

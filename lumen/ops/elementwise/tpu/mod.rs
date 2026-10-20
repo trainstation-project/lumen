@@ -1,10 +1,3 @@
-//! Elementwise primitives on TPU: the spec of their kernel (`__init__.py`
-//! beside this file, in lumen's Pallas): its operands' and output's dtypes,
-//! their shape (one), the nodes it applies (a primitive each, by name and
-//! parameters, of the operands and the nodes before) and its blocks. A
-//! `full` and a 0-d value's broadcast are elementwise too: the kernel
-//! computes them at its blocks' shape.
-
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Primitive, UnaryOp};
 use crate::graph_compiler::plan::Step;
@@ -12,7 +5,6 @@ use crate::ops::dot_general::tpu::block;
 use crate::ops::tpu::{Launch, launch};
 use crate::{DType, Scalar};
 
-/// Whether `p` is elementwise: its kernel runs it.
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
     if let BroadcastInDim {
@@ -44,9 +36,6 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
     )
 }
 
-/// `p` as a node of the spec, of the values `args` (the operands, then the
-/// nodes before): its name and parameters as `lumen.graph.prims` takes them
-/// (a shape the kernel's, its blocks').
 fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
         Primitive::Full {
@@ -80,12 +69,7 @@ fn node(p: &Primitive, args: &[usize]) -> String {
     )
 }
 
-/// The blocks of an elementwise kernel over `shape` of `dtypes`: of its
-/// last two dimensions (whole tiles of every dtype's, or the dimension),
-/// or of its elements (one dimension or none); an error if none divides.
 fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
-    // Memory-bound: blocks large enough that a step's copies dwarf its
-    // bookkeeping, small enough for every operand's two in VMEM.
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
     if shape.len() < 2 {
         let n = shape.iter().product::<usize>().max(1);
@@ -117,7 +101,6 @@ pub(crate) fn encode(
     if out.numel() == 0 {
         return Ok(());
     }
-    // Each operand of the output's shape, or 0-d (a broadcast's).
     if step
         .inputs
         .iter()
@@ -146,8 +129,6 @@ pub(crate) fn encode(
         .collect();
     let args: Vec<usize> = (0..step.inputs.len()).collect();
     let blocks = blocks(&out.shape, &dtypes)?;
-    // Its primitive, its operands' dtype where not the output's (a cast's),
-    // the output's, and its blocks.
     let mut kernel = step.primitive.name().to_owned();
     if let Some((_, t)) = step.inputs.first().filter(|(_, t)| t.dtype != out.dtype) {
         kernel += &format!("_{}", t.dtype);

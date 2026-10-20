@@ -15,8 +15,6 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
-/// `g` fused as the MPS compiler fuses it (its normalization diamonds one
-/// row kernel each, `diamonds.rs`).
 fn fuse(g: &Graph) -> Graph {
     let config = CompilerConfig::default();
     fusion::fuse(
@@ -28,8 +26,6 @@ fn fuse(g: &Graph) -> Graph {
     )
 }
 
-/// The fused graph's primitives, after checking it computes exactly what
-/// `g` does (on the reference executor) on `inputs`.
 fn fused_primitives(g: &Graph, inputs: &[Tensor]) -> Vec<&'static str> {
     let fused = fuse(g);
     let expected = reference::run(g, inputs).unwrap();
@@ -41,7 +37,6 @@ fn fused_primitives(g: &Graph, inputs: &[Tensor]) -> Vec<&'static str> {
     names(&fused)
 }
 
-/// The graph's primitives' names, `fusion` for each fusion.
 fn names(g: &Graph) -> Vec<&'static str> {
     let name = |p: &Primitive| match p {
         Fusion { .. } => "fusion",
@@ -56,7 +51,6 @@ fn apply(g: &mut Graph, p: Primitive, inputs: &[Var]) -> Var {
 
 #[test]
 fn fuses_elementwise_and_layout_chains() {
-    // tanh(x * 0.5) + transpose(x), as one kernel.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 4]));
     let half = Full {
@@ -82,7 +76,6 @@ fn fuses_elementwise_and_layout_chains() {
     let y = apply(&mut g, Add, &[t, xt]);
     g.set_outputs(&[y]).unwrap();
     assert_eq!(fused_primitives(&g, &[data(&[4, 4], 1)]), ["fusion"]);
-    // Profiled by its primitives, in graph order.
     assert_eq!(
         fuse(&g).nodes()[0].primitive.name(),
         "mul → tanh → transpose → add"
@@ -92,17 +85,11 @@ fn fuses_elementwise_and_layout_chains() {
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
-    // The first matmul with relu (its max and zero) in its epilogue; the
-    // second with the softmax written out, a chain of two diamonds (its
-    // max, then its sum) over rows of 3, inside one of its tiles: its
-    // kernel normalizes them (`codegen::row_dot`).
     assert_eq!(fused_primitives(&mlp(), &inputs), ["fusion", "fusion"]);
 }
 
 #[test]
 fn only_cheap_values_are_recomputed() {
-    // exp has two users: computed once, not in each (in the first, which
-    // writes it for the other).
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8]));
     let e = apply(&mut g, Exp, &[x]);
@@ -114,7 +101,6 @@ fn only_cheap_values_are_recomputed() {
         ["fusion", "fusion_output", "mul"]
     );
 
-    // add has two users: copied into each.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[8]));
     let c = apply(&mut g, Add, &[x, x]);
@@ -126,7 +112,6 @@ fn only_cheap_values_are_recomputed() {
 
 #[test]
 fn fusions_fit_in_a_kernel() {
-    // A sum of 40 inputs reads more buffers than a kernel binds.
     let mut g = Graph::new();
     let xs: Vec<Var> = (0..40).map(|_| g.input(ty(DType::F32, &[4]))).collect();
     let mut sum = xs[0];
@@ -141,8 +126,6 @@ fn fusions_fit_in_a_kernel() {
     }
 }
 
-/// Broadcasts (with size-1 dimensions), transposes, iota, compares,
-/// selects and converts, fused, on MPS.
 #[test]
 fn fused_kernels_match_reference() {
     if !available() {
@@ -190,7 +173,6 @@ fn fused_kernels_match_reference() {
         let p = apply(&mut g, Lt, &[s, iota]);
         let n = apply(&mut g, Neg, &[s]);
         let mut y = apply(&mut g, Select, &[p, m, n]);
-        // (No bfloat16 logistic: the graph rejects it.)
         if dtype.is_float() && dtype != DType::BF16 {
             y = apply(&mut g, Logistic, &[y]);
         }
@@ -216,7 +198,6 @@ fn fused_kernels_match_reference() {
             &[y],
         );
         g.set_outputs(&[t, i]).unwrap();
-        // logistic, expensive and read twice, is stored: its convert runs alone.
         let expected: &[&str] = if dtype.is_float() && dtype != DType::BF16 {
             &["fusion", "fusion", "cast"]
         } else {
@@ -236,7 +217,6 @@ fn fused_kernels_match_reference() {
 
 #[test]
 fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
-    // Contracting dims (0, 2) of lhs do not collapse: a transpose first.
     let mut g = Graph::new();
     let a = g.input(ty(DType::F32, &[3, 2, 4]));
     let b = g.input(ty(DType::F32, &[4, 5, 3]));
@@ -260,7 +240,6 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     let expected = reference::run(&g, &inputs).unwrap();
     let actual = reference::run(&canonical, &inputs).unwrap();
     assert_eq!(expected[0].to_vec::<f32>(), actual[0].to_vec::<f32>());
-    // A matmul already in form is left alone.
     let mut g = Graph::new();
     let a = g.input(ty(DType::F32, &[4, 8]));
     let b = g.input(ty(DType::F32, &[8, 3]));
@@ -277,9 +256,6 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     assert_eq!(names(&super::canonicalize_dots(&g)), ["dot_general"]);
 }
 
-/// Split reductions and dots out of matmul form need what only the MPS
-/// compiler arranges: their scratch and transposes are planned (no kernel
-/// allocates), and a generic plan run on MPS says so.
 #[test]
 fn mps_plans_hold_kernel_scratch() {
     if !available() {
@@ -304,8 +280,6 @@ fn mps_plans_hold_kernel_scratch() {
     assert!(generic.unwrap_err().contains("compile the graph for MPS"));
 }
 
-/// Slices fuse into the kernel that reads them: a packed weight's matmul,
-/// then its halves gated, read in place.
 #[test]
 fn slices_fuse_into_their_readers() {
     let mut g = Graph::new();
@@ -328,8 +302,6 @@ fn slices_fuse_into_their_readers() {
     }
 }
 
-/// `parts` (host tensors) side by side along `dimension`, by the reference
-/// executor: the block [`Tensor::pack`] places them in.
 fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     let mut g = Graph::new();
     let vars: Vec<Var> = parts
@@ -349,8 +321,6 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
-/// `parts` (of one shape) interleaved along `dimension`: element `j` of the
-/// `i`th at `j * parts.len() + i`, the block `merge_dots` interleaves.
 fn interleaved(parts: &[&Tensor], dimension: usize) -> Tensor {
     let mut g = Graph::new();
     let shape = parts[0].shape().to_vec();
@@ -385,14 +355,6 @@ fn interleaved(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
-/// A loop fusion's transposes that read their operand at a stride are
-/// tiled (XLA's transpose emitter): its kernel reads a tile of each along
-/// the operand's rows into threadgroup memory, then writes the output along
-/// its own. Two transposes of the same dimensions share the tiling, what
-/// their operands are computed from computed as the tile is read; tiles
-/// past the edges, batch dimensions and size-1 ones index as the loop
-/// kernel would. A dimension of fewer than 16 elements, or an innermost
-/// one the transpose keeps, is left to the loop kernel.
 #[test]
 fn transposes_in_fusions_are_tiled() {
     let cases: [(&[usize], &[usize], bool); 6] = [
@@ -412,7 +374,6 @@ fn transposes_in_fusions_are_tiled() {
             let transpose = || Transpose {
                 permutation: permutation.to_vec(),
             };
-            // transpose(x * x) * y + transpose(x), then exp in float32.
             let sq = apply(&mut g, Mul, &[x, x]);
             let t = apply(&mut g, transpose(), &[sq]);
             let m = apply(&mut g, Mul, &[t, y]);
@@ -440,11 +401,9 @@ fn transposes_in_fusions_are_tiled() {
             );
             assert_eq!(source.contains("threadgroup_barrier"), tiled, "{source}");
             if tiled {
-                // Both transposes through tiles.
                 assert!(source.contains("tile1["), "{source}");
             }
             if available() {
-                // Small values: the exp stays in range.
                 let inputs = [values(dtype, shape, 1), values(dtype, &out, 2)];
                 check(&g, &inputs);
             }
@@ -452,11 +411,6 @@ fn transposes_in_fusions_are_tiled() {
     }
 }
 
-/// Reductions are normalized before they take a kernel, as XLA's
-/// reduction passes normalize them: size-1 dimensions dropped and adjacent
-/// reduced (or kept) ones merged, so axes apart only across size-1
-/// dimensions are a row or column reduction, not a grouped one; and a
-/// split one's partials are sized for the normalized view.
 #[test]
 fn reductions_are_normalized() {
     use crate::ops::reduce::mps::scratch_bytes;
@@ -464,9 +418,6 @@ fn reductions_are_normalized() {
         (vec![400, 1, 300], vec![0, 2], "reduce_rows"),
         (vec![4, 1, 64, 1, 300], vec![1, 2, 3, 4], "reduce_rows"),
         (vec![300, 1, 7, 1], vec![0, 1], "reduce_cols"),
-        // Size-1 dimensions alone (a weight's gradient summed over the
-        // batch of 1 it was broadcast to): reducing nothing, a thread an
-        // element, not a threadgroup.
         (vec![300, 1, 7], vec![1], "reduce_cols"),
         (vec![1, 1024, 1024], vec![0], "reduce_cols"),
         (vec![40, 1, 7, 1, 300], vec![0, 1, 4], "reduce_grouped"),
@@ -490,7 +441,6 @@ fn reductions_are_normalized() {
             "{shape:?} {axes:?}: {source}"
         );
     }
-    // Rows split into partials: 4 rows of 50000, as [4, 50000] has.
     let squeezed = scratch_bytes(&ty(DType::F32, &[4, 50_000]), &[1], DType::F32);
     let spread = scratch_bytes(
         &ty(DType::F32, &[4, 1, 500, 1, 100]),
@@ -501,24 +451,15 @@ fn reductions_are_normalized() {
     assert_eq!(spread, squeezed);
 }
 
-/// A hierarchical reduction keeps its accumulation dtype at every level:
-/// each thread's accumulator, the threadgroup's tree, a split reduction's
-/// partials (its scratch, of that dtype) and the second launch over them;
-/// the input's dtype (a 16-bit float's, no float anywhere) or float32
-/// (reduce_sum's accum_dtype: elements widened as read, float throughout).
-/// In row kernels too (an RMS norm's, a softmax's).
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
     use crate::ops::reduce::mps::scratch_bytes;
-    // Whether `source` has the word `word` (not `bfloat`'s).
     let mentions = |source: &str, word: &str| {
         source
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == word)
     };
     for dtype in [DType::F16, DType::BF16] {
-        // Rows and columns split into partials, axes that are not
-        // consecutive (grouped), and rows in one launch.
         for (shape, axes) in [
             (vec![4, 200_000], vec![1]),
             (vec![200_000, 4], vec![0]),
@@ -544,10 +485,8 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let source =
                     codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
                 match accum_dtype {
-                    // Widened as read: the reduction is float throughout.
                     DType::F32 => {
                         let (t, a) = (metal_type(dtype), "float");
-                        // The template accumulating in float, writing float.
                         for part in [
                             format!("<Add, {a}>("),
                             format!("device {a} *out"),
@@ -561,7 +500,6 @@ fn hierarchical_reductions_keep_their_dtype() {
             }
         }
     }
-    // An RMS norm in float16, then a softmax written out of it: row kernels.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F16, &[8, 300]));
     let sq = apply(&mut g, Mul, &[x, x]);
@@ -602,12 +540,6 @@ fn hierarchical_reductions_keep_their_dtype() {
     }
 }
 
-/// Dots of weights computed elementwise (mixed precision's bfloat16 copies,
-/// here scaled too: `cast(w * 0.5)`), the same chain for each, merge into
-/// one dot of the chain of their block, computed once; another reader of
-/// a dot's operand (a backward's dot) reads its part of it, the first
-/// dot's or a later one's (traced after the merged dot). Different
-/// chains do not merge.
 #[test]
 fn dots_of_weights_computed_elementwise_merge() {
     let dot = DotGeneral {
@@ -625,7 +557,6 @@ fn dots_of_weights_computed_elementwise_merge() {
         let mut outs = Vec::new();
         let mut operands = Vec::new();
         for (&w, scale) in ws.iter().zip(scales) {
-            // A scalar broadcast, as `w * scale` traces.
             let fill = Full {
                 shape: vec![],
                 fill_value: Scalar::Float(scale),
@@ -649,7 +580,6 @@ fn dots_of_weights_computed_elementwise_merge() {
             let y = apply(&mut g, dot.clone(), &[x, cast]);
             outs.push(apply(&mut g, Neg, &[y]));
         }
-        // Another reader of the first operand: a dot of it with x^T.
         let xt = apply(
             &mut g,
             Transpose {
@@ -677,7 +607,6 @@ fn dots_of_weights_computed_elementwise_merge() {
     let g = build([0.5; 3]);
     let (merged, packs, _) = merge_dots(&g, &packable, &[]);
     assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
-    // One cast of the block, read by the merged dot and (a part) the other.
     let casts = names(&merged.prune().0)
         .iter()
         .filter(|&&n| n == "cast")
@@ -698,16 +627,10 @@ fn dots_of_weights_computed_elementwise_merge() {
     {
         assert_eq!(f32s(e), f32s(&a));
     }
-    // A different scale for one: not the same chain.
     let (merged, packs, _) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[]);
     assert_eq!(packs, [(vec![1, 3], 0)], "{merged}");
 }
 
-/// Weights the program assigns (donated: an optimizer's) merge only as
-/// contiguous parts of their block: `nn.Linear`'s `[out, in]` weights read
-/// as `x @ w.T`, side by side along their first dimension (PyTorch's fused
-/// QKV block), not `[in, out]` ones read as `x @ w`, whose parts would be
-/// strided.
 #[test]
 fn donated_weights_merge_only_contiguously() {
     let merged = |rhs_contracting: usize, shape: [usize; 2]| {
@@ -736,15 +659,11 @@ fn donated_weights_merge_only_contiguously() {
             merge_dots(&g, &packable, &packable).1,
         )
     };
-    // `x @ w`, w [in, out]: side by side along `out`, each part strided.
     assert_eq!(merged(0, [32, 64]), (vec![(vec![1, 2, 3], 1)], vec![]));
-    // `x @ w.T`, w [out, in]: along `out`, its first dimension, contiguous.
     let along_first = vec![(vec![1, 2, 3], 0)];
     assert_eq!(merged(1, [64, 32]), (along_first.clone(), along_first));
 }
 
-/// Dots sharing an operand merge only if they accumulate in the same
-/// dtype: `x @ w1` in float32 and `x @ w3` in bfloat16 stay two dots.
 #[test]
 fn dots_accumulating_in_other_dtypes_do_not_merge() {
     let dot = |accum_dtype| DotGeneral {
@@ -772,10 +691,8 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
         g.set_outputs(&ys).unwrap();
         merge_dots(&g, &[false, true, true, true], &[])
     };
-    // All in float32: one dot of all three.
     let (merged, packs, _) = dots([DType::F32; 3]);
     assert_eq!(packs, [(vec![1, 2, 3], 1)], "{merged}");
-    // The float32 two merge; the bfloat16 one stays alone.
     let (merged, packs, _) = dots([DType::F32, DType::BF16, DType::F32]);
     assert_eq!(packs, [(vec![1, 3], 1)], "{merged}");
     let accums: Vec<DType> = merged
@@ -789,9 +706,6 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
     assert_eq!(accums, [DType::F32, DType::BF16], "{merged}");
 }
 
-/// Dots sharing `x` [16, 32] whose other operands are packable parameters
-/// become one dot of `x` and a block of them side by side (a new input),
-/// its result sliced back into each: no concatenation.
 #[test]
 fn dots_sharing_an_operand_merge() {
     let matmul = DotGeneral {
@@ -802,7 +716,6 @@ fn dots_sharing_an_operand_merge() {
         accum_dtype: DType::F32,
         output_dtype: DType::F32,
     };
-    // The gated MLP: relu(x @ w1) * (x @ w3) @ w2.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[16, 32]));
     let w1 = g.input(ty(DType::F32, &[32, 64]));
@@ -821,20 +734,12 @@ fn dots_sharing_an_operand_merge() {
     let y = apply(&mut g, matmul.clone(), &[h, w2]);
     g.set_outputs(&[y]).unwrap();
     let dots = |g: &Graph| names(g).iter().filter(|&&n| n == "dot_general").count();
-    // Only parameters merge.
     assert_eq!(dots(&merge_dots(&g, &[false; 4], &[]).0), 3);
     let (merged, packs, interleave) = merge_dots(&g, &[false, true, true, true], &[]);
     assert_eq!(packs, [(vec![1, 2], 1)]);
-    // A gated pair (its two results combined): its block interleaved, w1's
-    // column j its 2j, w3's its 2j + 1.
     assert_eq!(interleave, [2]);
     assert_eq!(dots(&merged), 2, "{merged}");
-    // The gate is the merged dot's epilogue (a gated pair: its pairs'
-    // slices in it, codegen's `PAIRED`, `INTERLEAVED`), then the down
-    // projection.
     assert_eq!(names(&fuse(&merged)), ["fusion", "dot_general"]);
-    // w3 read elsewhere too: a strided part of the block (columns), it
-    // would need a copy there: no merge.
     let mut read_twice = g.clone();
     let w3_again = apply(&mut read_twice, Neg, &[w3]);
     read_twice.set_outputs(&[y, w3_again]).unwrap();
@@ -855,7 +760,6 @@ fn dots_sharing_an_operand_merge() {
         reference::run(&merged, &inputs).unwrap()[0].to_vec::<f32>(),
         expected[0].to_vec::<f32>()
     );
-    // Read on their own (each negated, an output), side by side.
     let mut alone = Graph::new();
     let x = alone.input(ty(DType::F32, &[16, 32]));
     let ws: Vec<Var> = (0..2)
@@ -872,9 +776,6 @@ fn dots_sharing_an_operand_merge() {
     let packed = merge_dots(&alone, &[false, true, true], &[]);
     assert_eq!((packed.1, packed.2), (vec![(vec![1, 2], 1)], vec![1]));
 
-    // Shared rhs (lhs side by side, rows); a dot reading another's result
-    // does not merge. One of a parameter something else reads too does: a
-    // contiguous part of the block (rows), it is read there in place.
     let mut g = Graph::new();
     let w = g.input(ty(DType::F32, &[32, 32]));
     let xs: Vec<Var> = [4, 6, 4]
@@ -911,11 +812,6 @@ fn dots_sharing_an_operand_merge() {
     }
 }
 
-/// A gated pair's block interleaved only where nothing else needs its
-/// weights side by side: `nn.Linear`'s `[out, in]` weights (rows, each a
-/// contiguous part of a side-by-side block, so they merge regardless), side
-/// by side if one is read elsewhere too, if a concatenate of them is (a
-/// backward's), or if the program assigns them (a training step's).
 #[test]
 fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() {
     let linear = DotGeneral {
@@ -926,7 +822,6 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         accum_dtype: DType::F32,
         output_dtype: DType::F32,
     };
-    // x @ w1^T * x @ w3^T, and `extra` of the weights' too.
     let build = |extra: &dyn Fn(&mut Graph, Var, Var) -> Option<Var>| {
         let mut g = Graph::new();
         let x = g.input(ty(DType::F32, &[16, 32]));
@@ -946,13 +841,9 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         (packs, interleave)
     };
     let rows = vec![(vec![1, 2], 0)];
-    // Alone: interleaved.
     assert_eq!(pack(&build(&|_, _, _| None), &[]), (rows.clone(), vec![2]));
-    // w3 read elsewhere too (negated, an output): side by side.
     let read = build(&|g, _, w3| Some(apply(g, Neg, &[w3])));
     assert_eq!(pack(&read, &[]), (rows.clone(), vec![1]));
-    // A concatenate of them (a backward's block of the weights): side by
-    // side, the concatenate the block.
     let concatenated = build(&|g, w1, w3| {
         let block = Concatenate {
             dimension: 0,
@@ -963,17 +854,12 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
     let (merged, packs, interleave) = merge_dots(&concatenated, &packable, &[]);
     assert_eq!((packs, interleave), (rows.clone(), vec![1]));
     assert!(!names(&merged).contains(&"concatenate"), "{merged}");
-    // Assigned (donated: an optimizer's update written over them): side by
-    // side.
     assert_eq!(
         pack(&build(&|_, _, _| None), &[false, true, true]),
         (rows, vec![1])
     );
 }
 
-/// The gated MLP compiled to own its memory on MPS: its weights meta
-/// parameters, `w1` and `w3` placed side by side in one block the merged
-/// dot reads; the data copied into their places; `x` copied in each run.
 #[test]
 fn owned_plans_read_packed_parameters() {
     if !available() {
@@ -1003,15 +889,12 @@ fn owned_plans_read_packed_parameters() {
     };
     let plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
     assert_eq!(plan.packed, [(vec![1, 2], 1)]);
-    // A gated pair: interleaved.
     assert_eq!(plan.interleaved, [2]);
     let meta = || Tensor::zeros(&[32, 64], Device::Meta(0));
     let (m1, m3) = (meta(), meta());
     let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0))
         .unwrap()
         .unwrap();
-    // Placed again the same way: the same block; otherwise (another order,
-    // or side by side), not.
     let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0)).unwrap();
     assert!(again.is_some_and(|b| b.shares_storage_with(&block)));
     for (members, interleave) in [([&m3, &m1], 2), ([&m1, &m3], 1)] {
@@ -1051,10 +934,6 @@ fn owned_plans_read_packed_parameters() {
     }
 }
 
-/// A float dot's epilogue (XLA's GEMM epilogue fusion): the elementwise
-/// primitives after it (a bias added, relu), fused into its kernel,
-/// applied as it writes each output; its value also an output, the kernel
-/// writes it too (XLA's GELU_AUX); not with `contraction_epilogues` off.
 #[test]
 fn dots_fuse_their_epilogue() {
     let build = |read_twice: bool| {
@@ -1123,8 +1002,6 @@ fn dots_fuse_their_epilogue() {
     }
 }
 
-/// Slices read only by dots are views of the sliced value, read in place
-/// at its strides; one the matmul cannot read in its form stays a copy.
 #[test]
 fn dots_read_slices_in_place() {
     let dot = |lc: usize, rc: usize| DotGeneral {
@@ -1150,9 +1027,8 @@ fn dots_read_slices_in_place() {
     let h = apply(&mut g, dot(1, 0), &[x, w]);
     let q = apply(&mut g, slice(vec![0, 0], vec![16, 32]), &[h]);
     let v = apply(&mut g, slice(vec![0, 64], vec![16, 96]), &[h]);
-    let y = apply(&mut g, dot(1, 0), &[q, b]); // lhs at row stride 96
-    let z = apply(&mut g, dot(1, 0), &[a, v]); // rhs at row stride 96
-    // Free dimensions [2, 2] of [2, 3]: not one strided dimension.
+    let y = apply(&mut g, dot(1, 0), &[q, b]);
+    let z = apply(&mut g, dot(1, 0), &[a, v]);
     let s = apply(&mut g, slice(vec![0, 0, 0], vec![2, 2, 8]), &[x3]);
     let u = apply(&mut g, dot(2, 0), &[s, c]);
     g.set_outputs(&[y, z, u]).unwrap();
@@ -1196,9 +1072,6 @@ fn dots_read_slices_in_place() {
     }
 }
 
-/// A reduction fuses the primitives computing its input, in each of its
-/// layouts (rows, split rows, columns, other axes), for sums and maxima of
-/// several dtypes, and an elementwise primitive after it (its epilogue).
 #[test]
 fn reductions_fuse_their_inputs() {
     for (shape, axes) in [
@@ -1213,7 +1086,6 @@ fn reductions_fuse_their_inputs() {
                 let mut g = Graph::new();
                 let x = g.input(ty(dtype, &shape));
                 let y = g.input(ty(dtype, &shape));
-                // A product, so the reduction reads two inputs, then `neg`.
                 let p = apply(&mut g, Mul, &[x, y]);
                 let n = apply(&mut g, Neg, &[p]);
                 let r = match sum {
@@ -1226,12 +1098,9 @@ fn reductions_fuse_their_inputs() {
                 let r = apply(&mut g, r, &[n]);
                 let out = apply(&mut g, Neg, &[r]);
                 g.set_outputs(&[out]).unwrap();
-                // The last `neg` is the reduction's epilogue: one kernel.
                 let fused = fuse(&g);
                 assert_eq!(names(&fused), ["fusion"], "{fused}");
                 if available() {
-                    // A float16 sum accumulates in float16: on values it
-                    // sums exactly in any order.
                     let count: usize = axes.iter().map(|&d| shape[d]).product();
                     let inputs = match dtype {
                         DType::F16 if sum => {
@@ -1240,7 +1109,6 @@ fn reductions_fuse_their_inputs() {
                         }
                         _ => [values(dtype, &shape, 1), values(dtype, &shape, 2)],
                     };
-                    // Sums of many float32s: their accumulation error.
                     let slack = if dtype == DType::F32 && sum { 1.0 } else { 0.0 };
                     check_within(&g, &inputs, slack);
                 }
@@ -1249,10 +1117,6 @@ fn reductions_fuse_their_inputs() {
     }
 }
 
-/// `F.sum(x.float()).bfloat16()` and a mean (`/ n`) cast back: one fusion,
-/// the reduction in float32 and the division and cast its epilogue. One
-/// launch applies it as it writes; a split reduction's partials stay
-/// float32, its second launch (the fusion's `_final` kernel) applying it.
 #[test]
 fn reductions_apply_their_epilogue() {
     for (shape, axes, split) in [
@@ -1316,9 +1180,6 @@ fn reductions_apply_their_epilogue() {
     }
 }
 
-/// A SiLU after a reduction, `s * logistic(s)`, reading its value twice
-/// (as after a split-K dot's sum): the reduction's epilogue, one fusion;
-/// split, applied by its second launch.
 #[test]
 fn reductions_apply_an_epilogue_reading_them_twice() {
     for (shape, split) in [(vec![64, 300], false), (vec![4, 200_000], true)] {
@@ -1341,17 +1202,12 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
         let source = codegen::kernel(body, &[], &CompilerConfig::default(), &Default::default()).1;
         assert_eq!(source.contains("_final("), split, "{source}");
         if available() {
-            // The sum's float accumulation error: of `shape[1]` values of
-            // up to 2.
             let slack = shape[1] as f64 * 2.0 * f64::from(f32::EPSILON);
             check_within(&g, &[values(DType::F32, &shape, 1)], slack);
         }
     }
 }
 
-/// A softmax written out, its values read by its two reductions and its
-/// division (the scaled input, the exp): a chain of diamonds, one row
-/// kernel, nothing stored between them.
 #[test]
 fn softmax_written_out_is_one_row_kernel() {
     let mut g = Graph::new();
@@ -1392,9 +1248,6 @@ fn softmax_written_out_is_one_row_kernel() {
     );
     let y = apply(&mut g, Div, &[e, z]);
     g.set_outputs(&[y]).unwrap();
-    // A softmax written out: a chain of two diamonds (the max, then the sum
-    // of the exp the division reads too), with the scale: one row kernel,
-    // both reductions inside.
     let fused = fused_primitives(&g, &[data(&[4, 16], 1)]);
     assert_eq!(fused, ["fusion"]);
     let fused = fuse(&g);
@@ -1407,10 +1260,6 @@ fn softmax_written_out_is_one_row_kernel() {
     }
 }
 
-/// An expensive value read by two fusions is computed in the first, which
-/// writes it as another output (producer-consumer multi-output fusion):
-/// a reduction, in each layout, or a loop fusion; the later reader reads
-/// it. Not when a reader comes before the fusion that would compute it.
 #[test]
 fn multi_output_fusion() {
     for (shape, axes) in [
@@ -1442,7 +1291,6 @@ fn multi_output_fusion() {
         }
     }
 
-    // A loop fusion hosting it.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[64]));
     let e = apply(&mut g, Exp, &[x]);
@@ -1457,7 +1305,6 @@ fn multi_output_fusion() {
         check(&g, &[values(DType::F32, &[64], 1)]);
     }
 
-    // A reader before the would-be host: the exp is stored on its own.
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
     let e = apply(&mut g, Exp, &[x]);
@@ -1478,21 +1325,12 @@ fn multi_output_fusion() {
         &[t],
     );
     g.set_outputs(&[first, second]).unwrap();
-    // The max hosts it; the sum reads its transpose.
     let fused = fused_primitives(&g, &[data(&[4, 8], 1)]);
     assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
 }
 
-/// An RMS norm written as its primitives (the weight's multiply and each
-/// other multiply in either order) is one fusion, a row kernel with its
-/// reduction inside; not when its values are read elsewhere, when it
-/// divides by anything but the size of the last dimension, or reduces
-/// another.
 #[test]
 fn rms_norms_are_one_row_kernel() {
-    // x * (1 / sqrt(sum(x * x, last) / n + eps)) [* w], with `flip` putting each
-    // multiply's operands the other way round, `n` the divisor, and `axis`
-    // the dimension reduced.
     let build = |weighted: bool, flip: bool, n: f64, axis: usize, leak: bool| {
         let mut g = Graph::new();
         let x = g.input(ty(DType::F32, &[8, 300]));
@@ -1554,8 +1392,6 @@ fn rms_norms_are_one_row_kernel() {
         g.set_outputs(&outputs).unwrap();
         g
     };
-    // One fusion (a row kernel, its reduction inside), checked against the
-    // unfused graph (the reference) by fused_primitives.
     let inputs = [data(&[8, 300], 1), data(&[300], 2)];
     let rewritten = |g: &Graph| fused_primitives(g, &inputs) == ["fusion"];
     for weighted in [false, true] {
@@ -1575,7 +1411,6 @@ fn rms_norms_are_one_row_kernel() {
         !rewritten(&build(true, false, 300.0, 1, true)),
         "a read intermediate"
     );
-    // Any divisor (a sum's scale, not a mean's) is a diamond too.
     assert!(
         rewritten(&build(true, false, 299.0, 1, false)),
         "not a mean"
@@ -1586,8 +1421,6 @@ fn rms_norms_are_one_row_kernel() {
     );
 }
 
-/// An RMS norm without epsilon, written as a division
-/// (`x / sqrt(mean(x * x))`), is one fusion too.
 #[test]
 fn rms_norms_without_epsilon_are_one_row_kernel() {
     let mut g = Graph::new();
@@ -1634,8 +1467,6 @@ fn rms_norms_without_epsilon_are_one_row_kernel() {
     }
 }
 
-/// A fused division by a fused `sqrt` stays a division by a square root,
-/// as traced (no `rsqrt`, which skips the square root's rounding).
 #[test]
 fn division_by_sqrt_is_as_traced() {
     let mut g = Graph::new();
@@ -1660,7 +1491,6 @@ fn division_by_sqrt_is_as_traced() {
         );
     }
 
-    // Through a broadcast: x / broadcast(sqrt(m)), m [4, 1].
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
     let m = g.input(ty(DType::F32, &[4, 1]));
@@ -1687,8 +1517,6 @@ fn division_by_sqrt_is_as_traced() {
     }
 }
 
-/// The primitives computing an RMS norm's input (a residual add) fuse into
-/// its row kernel too; its weight, computed, is a kernel of its own.
 #[test]
 fn rms_norm_row_kernels_fuse_their_input() {
     let mut g = Graph::new();
@@ -1761,11 +1589,6 @@ fn rms_norm_row_kernels_fuse_their_input() {
     }
 }
 
-/// Dots whose epilogues meet (`relu(x @ w1) * (x @ w2) + (x @ w3)`): each
-/// node joins one dot's epilogue alone, the last dot's it reads (`relu`
-/// the first's, `*` the second's, `+` the third's), the other dots' values
-/// its inputs, so no fusion computes two dots, nor waits for a later one;
-/// as the reference computes it.
 #[test]
 fn dots_epilogues_do_not_overlap() {
     let mut g = Graph::new();
@@ -1803,9 +1626,6 @@ fn dots_epilogues_do_not_overlap() {
     assert_eq!(names, ["fusion", "fusion", "fusion"], "{names:?}");
 }
 
-/// A dot with no free dimension on either side (a dot product per batch
-/// index, attention's backward `D`) is a product and a sum, not a matmul:
-/// as the reference computes the dot (XLA's DotStrengthReduction).
 #[test]
 fn vector_dots_are_reduced() {
     let mut g = Graph::new();
@@ -1833,11 +1653,6 @@ fn vector_dots_are_reduced() {
     }
 }
 
-/// A dot launching few threadgroups and of a long contraction is split
-/// along it (XLA's SplitKRewriter): one dot of the chunks' partials (the
-/// operands reshaped: a new batch dimension), summed in float32, then cast
-/// to the dot's dtype; atomically (one fusion) only where its partials
-/// would cost more than its operands; one of many tiles is not.
 #[test]
 fn skinny_dots_split_their_contraction() {
     let build = |m: usize, n: usize, k: usize, dtype: DType| {
@@ -1856,7 +1671,6 @@ fn skinny_dots_split_their_contraction() {
         g.set_outputs(&[d]).unwrap();
         g
     };
-    // 8 threadgroups (of 32 x 32 tiles): 8 chunks of 512 (at most 8).
     let g = build(4, 256, 4096, DType::F32);
     let split = super::split_k::split_k(&g, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
@@ -1869,24 +1683,16 @@ fn skinny_dots_split_their_contraction() {
     let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
-    // The partials added in another order: within float32's rounding of a
-    // sum of 4096 products of up to 4.
     let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
     for (w, g) in want.iter().zip(&got) {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
-    // Rounded to bfloat16 once, after the sum.
     let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
-    // Atomic adds allowed, its partials (8 x 4 x 256) cheaper than its
-    // operands: in order still. A larger output (4 x 352 x 352 float32
-    // partials, written and read back, against 352 x 2048 and 2048 x 352
-    // bfloat16 operands): the dot and the sum one fusion (its kernel adds
-    // the chunks' products to the output), rounded after.
     let split = super::split_k::split_k(&g, true);
     assert_eq!(split.nodes().len(), 4, "{split}");
     let g = build(352, 352, 2048, DType::BF16);
@@ -1901,8 +1707,6 @@ fn skinny_dots_split_their_contraction() {
         unreachable!("a fusion")
     };
     assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
-    // Many tiles, a contraction no power of two divides, or a short one
-    // (shorter than 2048): as it is.
     for g in [
         build(1024, 1024, 4096, DType::F32),
         build(4, 256, 2049, DType::F32),
@@ -1913,10 +1717,6 @@ fn skinny_dots_split_their_contraction() {
     }
 }
 
-/// A matrix-vector dot (a decode step's `x @ W`, `x @ W^T`, the vector's
-/// free dimension of size 1, or batched) is the vector broadcast into the
-/// matrix's layout, a product and a sum over the contracted dimensions,
-/// agreeing with the dot.
 #[test]
 fn matrix_vector_dots_are_reduced() {
     let dot = |lc: usize, rc: usize, batch: bool| DotGeneral {
@@ -1927,7 +1727,6 @@ fn matrix_vector_dots_are_reduced() {
         accum_dtype: DType::F32,
         output_dtype: DType::F32,
     };
-    // The lhs's and rhs's shapes, the dot, its primitives once reduced.
     type Case = (
         &'static [usize],
         &'static [usize],
@@ -1935,7 +1734,6 @@ fn matrix_vector_dots_are_reduced() {
         &'static [&'static str],
     );
     let cases: [Case; 4] = [
-        // x [1, K] @ W [K, N]: a sum over W's rows.
         (
             &[1, 64],
             &[64, 48],
@@ -1948,7 +1746,6 @@ fn matrix_vector_dots_are_reduced() {
                 "reshape",
             ],
         ),
-        // x [1, K] @ W[N, K]^T.
         (
             &[1, 64],
             &[48, 64],
@@ -1961,14 +1758,12 @@ fn matrix_vector_dots_are_reduced() {
                 "reshape",
             ],
         ),
-        // W [N, K] @ x [K]: the vector the rhs.
         (
             &[48, 64],
             &[64],
             dot(1, 0, false),
             &["broadcast_in_dim", "mul", "reduce_sum"],
         ),
-        // Batched: x [B, 1, K] @ W [B, K, N].
         (
             &[3, 1, 64],
             &[3, 64, 48],

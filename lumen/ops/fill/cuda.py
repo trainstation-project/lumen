@@ -54,8 +54,6 @@ class _FillCUDAKernel:
         self.shape = (vector_size, (shape[0] // vector_size, *shape[1:]))
         self.strides = (1, (vector_size * strides[0], *strides[1:]))
         self.num_vectors = math.prod(self.shape[1])
-        # Persistent: no more blocks than the GPU runs at once, each looping
-        # over the vectors a grid apart.
         self.NUM_BLOCKS = min(math.ceil(self.num_vectors / BLOCK_SIZE), _resident_threads() // BLOCK_SIZE)
 
     @cute.kernel

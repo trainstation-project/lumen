@@ -1,17 +1,3 @@
-//! CUDA device timing with CUPTI's activity API, as PyTorch's profiler does
-//! through kineto: while a session times CUDA, the driver itself records
-//! each kernel's, memset's and copy's GPU start and end into buffers CUPTI
-//! hands back,
-//! so nothing is added to the stream and a launch costs only a correlation
-//! push and pop. Compiled only when build.rs finds `libcupti` (cfg
-//! `lumen_cupti_linked`).
-//!
-//! Records are tied to the op that launched them like kineto does: each
-//! launch pushes an external correlation id, and CUPTI emits a record
-//! mapping it to the launch's own correlation id, which its kernel, memset
-//! or copy record carries. Python kernels (CUDA's CuTe `fill_`) launch
-//! under one too (`ops::python`). They are read when the session stops ([`stop`]).
-
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -27,7 +13,6 @@ mod ffi {
     pub type BufferRequested = unsafe extern "C" fn(*mut *mut u8, *mut usize, *mut usize);
     pub type BufferCompleted = unsafe extern "C" fn(*mut c_void, u32, *mut u8, usize, usize);
 
-    // `CUptiResult` (0 is success) and the enums are 32-bit.
     #[link(name = "cupti")]
     unsafe extern "C" {
         pub fn cuptiActivityEnable(kind: u32) -> i32;
@@ -47,23 +32,16 @@ mod ffi {
         pub fn cuptiGetTimestamp(timestamp: *mut u64) -> i32;
     }
 
-    // `CUpti_ActivityKind`.
     pub const KIND_MEMCPY: u32 = 1;
     pub const KIND_MEMSET: u32 = 2;
     pub const KIND_RUNTIME: u32 = 4;
     pub const KIND_DRIVER: u32 = 5;
     pub const KIND_CONCURRENT_KERNEL: u32 = 10;
     pub const KIND_EXTERNAL_CORRELATION: u32 = 39;
-    // `CUpti_ExternalCorrelationKind`.
     pub const EXTERNAL_CUSTOM0: u32 = 3;
-    // `CUPTI_ACTIVITY_FLAG_FLUSH_FORCED`.
     pub const FLUSH_FORCED: u32 = 1;
 }
 
-/// The activities recorded while a session times CUDA. CUPTI emits an
-/// external correlation record only for an API call it records, so the
-/// runtime (`cudaMemcpy`) and driver (`cuLaunchKernel`) APIs are recorded
-/// too (kineto enables them as well); their records are dropped.
 const KINDS: [u32; 6] = [
     ffi::KIND_CONCURRENT_KERNEL,
     ffi::KIND_MEMCPY,
@@ -73,10 +51,7 @@ const KINDS: [u32; 6] = [
     ffi::KIND_EXTERNAL_CORRELATION,
 ];
 
-/// What is kept of a CUPTI activity record.
 enum Record {
-    /// A kernel, memset or copy: its name, GPU times (CUPTI ns), device and
-    /// correlation id.
     Work {
         name: String,
         start: u64,
@@ -84,17 +59,13 @@ enum Record {
         device: u32,
         correlation: u32,
     },
-    /// Which launch (correlation id) ran under one of our external ids.
-    External { id: u64, correlation: u32 },
+    External {
+        id: u64,
+        correlation: u32,
+    },
 }
 
 impl Record {
-    /// Read the fields used from a record CUPTI returned. `CUpti_ActivityMemset4`
-    /// and `CUpti_ActivityMemcpy6` (and their earlier versions) share the
-    /// offsets of start, end, deviceId and correlationId; the copy kind is
-    /// the memcpy record's fifth byte. `CUpti_ActivityKernel4` and later
-    /// share a prefix with start, end, deviceId, correlationId and the name,
-    /// a string CUPTI owns, so it is copied here.
     unsafe fn read(record: *const u8) -> Option<Record> {
         let at = |offset: usize| unsafe { record.add(offset) };
         let u32_at = |offset| unsafe { at(offset).cast::<u32>().read_unaligned() };
@@ -123,7 +94,6 @@ impl Record {
                 device: u32_at(32),
                 correlation: u32_at(44),
             }),
-            // `CUpti_ActivityExternalCorrelation`.
             ffi::KIND_EXTERNAL_CORRELATION if u32_at(4) == ffi::EXTERNAL_CUSTOM0 => {
                 Some(Record::External {
                     id: u64_at(8),
@@ -134,7 +104,6 @@ impl Record {
         }
     }
 
-    /// The profiler's name for a memset or copy (as lumen named them).
     fn name(kind: u32, copy_kind: u8) -> &'static str {
         match (kind, copy_kind) {
             (ffi::KIND_MEMSET, _) => "Memset",
@@ -146,12 +115,9 @@ impl Record {
     }
 }
 
-/// Records CUPTI has handed back.
 static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
-/// External id -> the op that launched under it.
 static CONTEXTS: Mutex<Option<HashMap<u64, GpuContext>>> = Mutex::new(None);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-/// The running session's clock pair: (CUPTI ns, profiler ns).
 static CLOCK: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 const BUFFER: Layout = match Layout::from_size_align(1 << 20, 8) {
@@ -167,7 +133,7 @@ unsafe extern "C" fn buffer_requested(buffer: *mut *mut u8, size: *mut usize, ma
         } else {
             BUFFER.size()
         };
-        *max = 0; // as many records as fit
+        *max = 0;
     }
 }
 
@@ -193,7 +159,6 @@ unsafe extern "C" fn buffer_completed(
     unsafe { std::alloc::dealloc(buffer, BUFFER) };
 }
 
-/// Start recording CUDA activity (a session with the CUDA activity starts).
 pub(crate) fn start() {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
@@ -207,8 +172,6 @@ pub(crate) fn start() {
     *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = Some((cupti_ns, super::now_ns()));
 }
 
-/// Run `work`, which launches CUDA work on `device`, tagged with the
-/// current op when the profiler times the device.
 pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
     let Some(context) = super::gpu_context(device) else {
         return work();
@@ -226,8 +189,6 @@ pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Wait for CUDA work, stop recording, and add what ran to the session (the
-/// session stops; PyTorch's profiler also synchronizes CUDA on exit).
 pub(crate) fn stop() {
     let Some((cupti_ns, profiler_ns)) = CLOCK.lock().unwrap_or_else(|e| e.into_inner()).take()
     else {

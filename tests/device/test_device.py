@@ -40,7 +40,6 @@ def test_repr():
 
 def test_equality_and_hash():
     assert lumen.device("cuda:0") == lumen.device("cuda", 0)
-    # like torch, "cuda" (current device) and "cuda:0" are distinct values
     assert lumen.device("cuda") != lumen.device("cuda:0")
     assert lumen.device("cpu") != lumen.device("mps")
     assert len({lumen.device("cuda:0"), lumen.device("cuda", 0), lumen.device("cpu")}) == 2
@@ -92,7 +91,7 @@ def test_module_and_name():
 def test_is_available():
     """Each device type's module (``lumen.cuda``, PyTorch's ``torch.cuda``):
     available where it can hold tensors in this build."""
-    import lumen.cuda  # importable as modules too
+    import lumen.cuda
 
     assert lumen.cpu.device_count() == lumen.meta.device_count() == 1
     with pytest.raises(ValueError, match="not a cuda device"):

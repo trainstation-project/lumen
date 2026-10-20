@@ -55,7 +55,6 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
         )
 
     if nkv != n:
-        # Each key and value head, for its group of query heads.
         g = n // nkv
         k = k.unsqueeze(3).expand(b, sk, nkv, g, h).reshape(b, sk, n, h)
         v = v.unsqueeze(3).expand(b, sk, nkv, g, hv).reshape(b, sk, n, hv)
@@ -64,7 +63,6 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
     if scale is None:
         scale = 1.0 / math.sqrt(h)
 
-    # [B, N, Sq, Sk], in the accumulation dtype.
     s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
     s = s * scale
 
@@ -74,7 +72,6 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
 
     p = dropout(softmax(s, -1).to(q.dtype), dropout_p)
-    # [B, N, Sq, Hv], then [B, Sq, N, Hv].
     o = prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
 
     return o.permute(0, 2, 1, 3)

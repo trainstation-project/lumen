@@ -27,7 +27,7 @@ def bias_relu_(y: lumen.Tensor, b: lumen.Tensor) -> None:
 @lumen.compile
 def layer(x, w, b):
     y = x @ w
-    bias_relu_(y, b)  # y's new value from here on
+    bias_relu_(y, b)
     return F.sum(y, -1)
 
 

@@ -1,9 +1,3 @@
-"""Metal kernels of your own in lumen's MPS stream: compiled from source
-and launched over tensors' memory (``lumen.custom_op.MetalKernel``, ``launch``), or
-encoded into the stream's open command buffer (``lumen.Stream("mps")``'s
-``command_buffer``, ``buffer``); in a custom op (``lumen.custom_op``), in order with a
-compiled function's steps, with no wait."""
-
 import ctypes
 import sys
 
@@ -60,7 +54,6 @@ def test_launch_runs_a_kernel_in_the_stream(kernels):
     out = _mps(np.zeros(512), np.int32)
     iota.launch([out], threadgroups=(2,))
     assert lumen.to_numpy(out).tolist() == list(range(512))
-    # TWO's axpy (zeroing) is another kernel of the name: axpy is still AXPY's.
     zero = MetalKernel(TWO, "axpy")
     axpy.launch([x, y.narrow(0, 1, 4)], [np.float32(1.0)], grid=(4,))
     assert lumen.to_numpy(y).tolist() == [1, 1, 4, 7, 10]
@@ -85,7 +78,6 @@ def test_compile_and_launch_errors(kernels):
         axpy.launch([lumen.zeros([1]), x], [np.float32(1)], grid=(1,))
     with pytest.raises(ValueError, match="MTLBuffer"):
         lumen.Stream("mps").buffer(lumen.zeros([1]))
-    # Only an MPS stream runs Metal kernels.
     with pytest.raises(ValueError, match="runs no Metal kernels"):
         lumen.Stream("cpu").command_buffer()
 
@@ -124,7 +116,6 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
     assert names == ["mul", "axpy", "mul → exp → mul"], names
 
 
-# The Objective-C runtime, to drive Metal objects by pointer without PyObjC.
 _objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
 _objc.sel_registerName.restype = ctypes.c_void_p
 _objc.sel_registerName.argtypes = [ctypes.c_char_p]

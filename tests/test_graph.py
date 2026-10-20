@@ -1,6 +1,3 @@
-"""Compiled execution: tracing with lumen.compile, the torch-like API on
-traced tensors, and the strict primitives (lumen/graph/)."""
-
 import dataclasses
 import re
 import warnings
@@ -27,11 +24,6 @@ def rand(*shape, dtype=np.float32, seed=0):
     return np.random.default_rng(seed).standard_normal(shape).astype(dtype)
 
 
-# ---------------------------------------------------------------------
-# tracing
-# ---------------------------------------------------------------------
-
-
 def test_graph_text():
     graph = lumen.make_graph(lambda x: F.sum(F.exp(x), -1))(lumen.zeros([2, 3]))
     assert str(graph) == (
@@ -54,13 +46,10 @@ def test_traces_once_per_signature():
     f(lumen.ones([2]), 2.0)
     assert len(traces) == 1
     assert lumen.to_numpy(f(lumen.ones([3]), 2.0)).tolist() == [2.0] * 3
-    # A float is a runtime scalar: another value, the same plan.
     assert lumen.to_numpy(f(lumen.ones([3]), 3.0)).tolist() == [3.0] * 3
     assert len(traces) == 2
-    # Weakly typed: it takes the tensor's dtype.
     assert f(lumen.ones([3], dtype="float64"), 3.0).dtype == "float64"
     assert len(traces) == 3
-    # An int is static, part of the key.
     f(lumen.ones([3]), 2)
     f(lumen.ones([3]), 3)
     assert len(traces) == 5
@@ -76,7 +65,7 @@ def test_ops_need_a_trace():
     with pytest.raises(RuntimeError, match="while tracing"):
         prims.full((2,), 1.0, "float32")
     with pytest.raises(TypeError):
-        lumen.tensor([1.0]) + 1  # eager tensors have no ops
+        lumen.tensor([1.0]) + 1
 
 
 def test_data_dependent_control_flow_is_rejected():
@@ -101,13 +90,8 @@ def test_factories_record_primitives_while_tracing():
     out = run(f, x)
     assert out.dtype == np.float32
     assert out.tolist() == [[3.0, 4.0, 5.0]] * 2
-    assert run(lambda: lumen.full([2], True)).tolist() == [True, True]  # no tensor inputs: on the CPU
-    assert isinstance(lumen.ones([2]), lumen.Tensor)  # eager outside a trace
-
-
-# ---------------------------------------------------------------------
-# primitives are strict
-# ---------------------------------------------------------------------
+    assert run(lambda: lumen.full([2], True)).tolist() == [True, True]
+    assert isinstance(lumen.ones([2]), lumen.Tensor)
 
 
 def test_prims_do_not_broadcast_or_promote():
@@ -132,24 +116,16 @@ def test_prims_compose():
     np.testing.assert_array_equal(run(f, lumen.from_numpy(x)), np.where(x < m, x + np.arange(3, dtype=np.float32), m))
 
 
-# ---------------------------------------------------------------------
-# the torch-like API
-# ---------------------------------------------------------------------
-
-
 def test_no_implicit_dtype_changes():
     i, f = lumen.tensor([1, 2]), lumen.tensor([1.0, 2.0])
     half = lumen.tensor([1.0], dtype="float16")
-    # Python scalars take the tensor's dtype.
     assert run(lambda i: i * 2, i).dtype == np.int64
     assert run(lambda f: f * 2, f).dtype == np.float32
     assert run(lambda h: h + 2.5, half).dtype == np.float16
     assert run(lambda b: b == True, lumen.tensor([True, False])).tolist() == [True, False]  # noqa: E712
-    # Sums stay in the tensor's dtype (integers wrap): convert for another.
     u8 = lumen.tensor([200, 100], dtype="uint8")
     assert run(lambda x: F.sum(x), u8).tolist() == 44
     assert run(lambda x: F.sum(x.long()), u8).tolist() == 300
-    # Explicit conversions are how dtypes change.
     assert run(lambda i: F.exp(i.float()), i).dtype == np.float32
     assert run(lambda i, f: i.to(f.dtype) + f, i, f).tolist() == [2.0, 4.0]
     assert run(lambda i: F.softmax(i.float(), 0), i).dtype == np.float32
@@ -285,7 +261,6 @@ def test_mps_kernels_match_cpu(dtype):
 
     def block(x, wq, wk, w1):
         scores = (x @ wq) @ (x @ wk).t() * 0.25
-        # Softmax in float32 (bfloat16 has no exp on MPS).
         h = x + F.softmax(scores.float(), -1).to(dtype=x.dtype) @ x
         return F.mean(F.relu(h @ w1), -1), F.amax(h, 0), F.sum(F.where(h > 0, h, -h))
 
@@ -303,9 +278,6 @@ def test_mps_kernels_match_cpu(dtype):
 def test_plan():
     graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
     plan = lumen.graph_compiler.Plan(graph)
-    # exp writes the output's memory, add and tanh write over it in place
-    # (each operand dies there); the workspace holds the broadcast 1 (1 KiB)
-    # and the 0-d constant; the reshape costs nothing.
     assert "reshape" not in str(plan)
     assert plan.workspace_bytes == 1024 + 4, plan
     x = rand(16, 16)
@@ -335,10 +307,8 @@ def test_mps_plan_steps_and_profiled_kernels():
         pytest.skip(str(e))
     from lumen.profiler import ProfilerActivity, profile
 
-    # Rows long enough for a threadgroup each.
     graph = lumen.make_graph(lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1))(x)
     plan = lumen.graph_compiler.Plan(graph, "mps")
-    # One step: the reduction fused with the ops computing its input.
     (step,) = plan.steps()
     fusion = step["fusion"]
     assert fusion["kernel"] in fusion["source"] and "tanh" in fusion["body"] and "reduce_sum" in fusion["body"]
@@ -388,31 +358,23 @@ def test_dump_graph(tmp_path):
         "broadcast_in_dim",
         "max",
     ]
-    # Each node's line of the program, its file's text with it: the
-    # lambda's, here.
     lines = {tuple(src) for n in data["views"]["traced"]["nodes"] if n["kind"] == "node" for src in n["sources"]}
     ((file, line),) = lines
     assert file == __file__ and "F.relu(x @ w)" in data["code"][file].splitlines()[line - 1]
     assert {tuple(src) for n in data["views"]["fused"]["nodes"] for src in n.get("sources", [])} == lines
-    # Another signature, traced for the dump.
     data = f.dump_graph(
         tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16")
     )
     assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
 
 
-# ---------------------------------------------------------------------
-# specs and making tensors by running functions (JAX's design)
-# ---------------------------------------------------------------------
-
-
 def test_meta_tensors_have_no_data():
     x = lumen.empty([2, 3], device="meta")
     assert (x.device, x.shape, x.dtype) == ("meta:0", [2, 3], "float32")
     assert repr(x) == "Tensor(shape=[2, 3], dtype=f32, device=meta)"
-    assert lumen.ones([2, 3], device="meta").device == "meta:0"  # nothing filled
-    assert lumen.tensor([1.0, 2.0]).to("meta").shape == [2]  # data dropped
-    assert x.transpose(0, 1).contiguous().shape == [3, 2]  # views, no copies
+    assert lumen.ones([2, 3], device="meta").device == "meta:0"
+    assert lumen.tensor([1.0, 2.0]).to("meta").shape == [2]
+    assert x.transpose(0, 1).contiguous().shape == [3, 2]
     for read in (x.tolist, lambda: x.to("cpu"), lambda: x[0, 0], lambda: lumen.to_numpy(x), x.__dlpack__):
         with pytest.raises(RuntimeError, match="no data"):
             read()
@@ -424,8 +386,6 @@ def test_tracing_and_running_on_meta_tensors():
 
     x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
     assert "dot_general" in str(lumen.make_graph(f)(x, w))
-    # A compiled function runs nothing on meta tensors: meta results, of
-    # the types real ones would have (shape inference).
     y, s = lumen.compile(f)(x, w)
     assert (y.device, y.shape, s.shape) == ("meta:0", [8, 16], [8])
     assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
@@ -441,8 +401,7 @@ def test_compiled_init_runs_once_per_call(tmp_path):
     make = lumen.compile(init)
     a = make().clone()
     b = make()
-    assert calls == [1]  # traced once; each call runs the plan
-    # Results are views of the function's workspace, which each call reuses.
+    assert calls == [1]
     assert a.tolist() == b.tolist() == [[0.5, 1.5, 2.5]] * 2 and b.shares_storage_with(make())
     data = make.dump_graph(tmp_path / "init.html")
     assert data["inputs"] == [] and data["device"] == "cpu:0"
@@ -458,23 +417,14 @@ def test_compiled_init_on_device(tmp_path):
     w, i = make()
     assert (w.device, i.device) == ("mps:0", "mps:0")
     assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
-    # Tensor arguments with data are copied in, from any device.
     assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
-    # Profiled on the device it creates tensors on.
     data = make.dump_graph(tmp_path / "init.html")
     assert data["device"] == "mps:0" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
-    # Meta tensors trace a dump with no data; it is profiled on `device`.
     f = lumen.compile(lambda x, w: x @ w)
     meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
     data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
     assert data["device"] == "mps:0" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
     assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
-
-
-# ---------------------------------------------------------------------
-# memory: parameters, the workspace and planned scratch (XLA buffer
-# assignment)
-# ---------------------------------------------------------------------
 
 
 class Affine(lumen.nn.Module):
@@ -535,7 +485,6 @@ def test_module_weights_are_placed_once_and_shared(device):
     h = (x @ values["layers.0.w"] + values["layers.0.b"]) * 0.5
     expected = (h @ values["layers.1.w"] + values["layers.0.b"]) * 0.5
     np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-5, atol=1e-5)
-    # Another function reads the same memory; a new copy_ reaches it.
     g = lumen.compile(lambda layer, x: layer(x), device=device)
     first = model.layers[0]
     np.testing.assert_allclose(lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2, rtol=1e-5, atol=1e-5)
@@ -543,12 +492,10 @@ def test_module_weights_are_placed_once_and_shared(device):
     np.testing.assert_allclose(
         lumen.to_numpy(g(first, lumen.from_numpy(x))), h * 2 + x.sum(-1, keepdims=True), rtol=1e-5, atol=1e-4
     )
-    # Another model of the same structure reuses the plan, with its weights.
     other = Affine(meta(4, 4), meta(4))
     g(other, meta(2, 4))
     other.load_state_dict({"w": lumen.from_numpy(np.eye(4, dtype=np.float32)), "b": lumen.zeros([4])})
     np.testing.assert_allclose(lumen.to_numpy(g(other, lumen.from_numpy(x))), x, rtol=1e-6)
-    # Closing over a tensor is an error; a module's weights must be meta.
     with pytest.raises(TypeError, match="cannot close over a tensor"):
         lumen.compile(lambda x: x @ first.w, device=device)(lumen.from_numpy(x))
     with pytest.raises(TypeError, match="whole meta tensors"):
@@ -560,7 +507,7 @@ def test_results_are_views_of_the_workspace():
     a = f(lumen.ones([3]))
     assert a.tolist() == [2.0] * 3
     b = f(lumen.full([3], 5.0))
-    assert a.shares_storage_with(b) and a.tolist() == [10.0] * 3  # overwritten
+    assert a.shares_storage_with(b) and a.tolist() == [10.0] * 3
     assert not a.clone().shares_storage_with(b)
 
 
@@ -570,23 +517,16 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    # A contraction out of matmul form: a transpose step, then the matmul.
     dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype, a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
     steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
-    # A split reduction's partials are scratch in the workspace.
     graph = lumen.make_graph(lambda x: F.sum(x, -1))(lumen.zeros([4, 50_000]))
     plan = lumen.graph_compiler.Plan(graph, "mps")
     offset, size = plan.steps()[0]["scratch"]
     assert size > 0 and plan.workspace_bytes >= offset + size
     x = lumen.ones([4, 50_000], device="mps")
     assert plan.run([x])[0].tolist() == [50_000.0] * 4
-
-
-# ---------------------------------------------------------------------
-# indexing and splitting (prims.slice)
-# ---------------------------------------------------------------------
 
 
 def test_indexing_and_splitting_follow_numpy():
@@ -694,12 +634,10 @@ def test_dots_sharing_an_operand_merge(device):
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
         assert plan.interleaved == [2]
-        # Each weight a stride-2 view of the block: its columns every other.
         w1, w3 = model.w1._placed("mps"), model.w3._placed("mps")
         assert (list(w1.strides), list(w3.strides)) == ([128, 2], [128, 2])
         assert w3.storage_offset - w1.storage_offset == 1
         assert len(steps) == 1 and "concatenate" not in steps
-        # Named for the dots it computes, in the plan and the profiler.
         assert plan.steps()[0]["label"] == "2x dot_general → max → mul"
         from lumen.profiler import ProfilerActivity, profile
 
@@ -744,13 +682,10 @@ def test_attention_projections_merge_into_one_matmul():
     expected = (s / s.sum(-1, keepdims=True)) @ v
     np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-4, atol=1e-4)
     graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
-    # The attention one kernel (flash attention) reading q, k and v where
-    # the merged matmul writes them.
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     merged, attention = plan.steps()
     assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
     assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
-    # As traced: its matmuls read q, k and v as strided views.
     lumen.config.compiler.flash_attention = False
     try:
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
@@ -758,8 +693,6 @@ def test_attention_projections_merge_into_one_matmul():
         lumen.config.compiler.reset()
     steps = plan.steps()
     assert plan.packed == [([1, 2, 3], 1)]
-    # The scores' softmax in their matmul's kernel (rows of 16 inside one
-    # tile).
     dots = [s["label"] for s in steps if s["label"].startswith(("3x dot_general", "dot_general"))]
     assert len(dots) == 3 and dots[0] == "3x dot_general" and dots[2] == "dot_general", dots
     assert dots[1].startswith("dot_general → reduce_max") and dots[1].endswith("div"), dots
@@ -803,8 +736,6 @@ def test_trained_attention_reads_merged_projections_in_place():
     for s in attention:
         assert merged in [b for b, *_ in s["inputs"]], (s["label"], s["inputs"])
     assert not [label for label in labels if label.startswith("slice")], labels
-    # Not a gated pair's backward (q, k and v are three: no two of their
-    # gradients' dots merged, which would copy two of the block's weights).
     assert not [label for label in labels if "concatenate" in label], labels
 
 
@@ -916,7 +847,6 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
                 else:
                     assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
                     assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
-                    # Its lines of the program: both matmuls'.
                     (merged,) = [s for s in steps if s["label"].startswith("2x")]
                     code = open(__file__).read().splitlines()
                     traced = "\n".join(code[line - 1] for file, line in merged["sources"] if file == __file__)
@@ -962,7 +892,6 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    # m apart from 2h: no two of its values alike in size.
     m, d, h = 384, 64, 256
     values = {
         "w0": rand(d, d) / 8,
@@ -992,10 +921,6 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
         graph = lumen.make_graph(step)(model, meta(m, d))
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
-    # The forward: the pair's epilogue (writing h [m, h], and the halves the
-    # backward reads, no kernel of its own slicing them); the weights'
-    # gradients: one dot ([2h, d], named as the two it computes); the
-    # input's gradient: one dot of the block (K = 2h), written as x's.
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
     assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [2 * h, d]]), labels
     forward = [s for s in merged if s["output"][2] == [m, h]]
@@ -1084,10 +1009,7 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
-    # The weights' gradients one dot of [dg | du] and x ([2h, d]).
     assert any(s["primitive"] == "dot_general" and s["output"][2] == [2 * h, d] for s in steps), labels
-    # No transpose: the projection's (autodiff's) gradient one float32 dot
-    # too, its transpose read as the dot's dimensions.
     assert not any("transpose" in label for label in labels), labels
 
 
@@ -1149,7 +1071,6 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
             f(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
             grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
-        # Its kernels profiled (as compiled for these flags).
         with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
             f(model, lumen.from_numpy(x))
         model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
@@ -1161,33 +1082,26 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
     labels = [s["label"] for s in steps]
     merged = [s for s in steps if s["label"].startswith("3x dot_general")]
-    # The forward ([m, 3d]), the weights' gradients ([3d, d]) and the
-    # input's ([m, d], of [m, 3d] and the block).
     assert sorted(s["output"][2] for s in merged) == sorted([[m, 3 * d], [3 * d, d], [m, d]]), labels
     (dx,) = [s for s in merged if s["output"][2] == [m, d]]
     assert [i[2] for i in dx["inputs"]] == [[m, 3 * d], [3 * d, d]], labels
     assert "concatenate" not in labels, labels
     backward = [s for s in steps if s["label"].startswith("flash_attention_backward")]
     assert all(s["output"][1:] == ("bfloat16", [m, d]) for s in backward), labels
-    # Each writing in one buffer, which the dots read: profiled at its
-    # strides, a row of it 3d elements.
     written = [e for e in prof.events() if e["name"].startswith("flash_attention_backward")]
     if deterministic:
         assert len(backward) == 2, labels
         assert backward[0]["output"][0] == backward[1]["output"][0] == dx["inputs"][0][0], steps
         assert [e["output_strides"] for e in written] == [[[3 * d, 1]] * 2, [[3 * d, 1]]], written
-        # The dots right after them: nothing copies, casts or lays out.
         at = labels.index(backward[-1]["label"])
         assert all(label.startswith("3x dot_general") for label in labels[at + 1 : at + 3]), labels
         assert not any("concatenate" in label or "transpose" in label for label in labels), labels
     else:
-        # dK and dV in place, dQ in float32 ([batch, heads, seq, d / heads]).
         (step,) = backward
         assert step["output"][0] == dx["inputs"][0][0], steps
         (event,) = written
         assert event["output_strides"][:2] == [[3 * d, 1]] * 2, event
         assert event["outputs"][2][0] == "float32", event
-        # Then dQ cast and laid out into its place.
         at = labels.index(step["label"])
         cast = steps[at + 1]
         assert "cast" in cast["label"] and cast["output"] == (dx["inputs"][0][0], "bfloat16", [m, d]), steps
@@ -1277,7 +1191,6 @@ def test_projections_of_several_inputs_each_read_one_block(module):
         pytest.skip(str(e))
 
     def f(model, x1, x2):
-        # Read by fusible primitives (not outputs as they are), so they merge.
         return [F.relu(v) for v in [*model(x1), *model(x2)]]
 
     model = module(meta(64, 64), meta(64, 64), meta(64, 64))
@@ -1286,7 +1199,7 @@ def test_projections_of_several_inputs_each_read_one_block(module):
     labels = [s["label"] for s in steps]
     assert labels.count("3x dot_general") == 2, labels
     blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
-    assert len(blocks) == 3, blocks  # the two inputs, and one block (or its copy)
+    assert len(blocks) == 3, blocks
     values = rand(64, 64), rand(64, 64, seed=1), rand(64, 64, seed=2)
     xs = [lumen.from_numpy(rand(32, 64, seed=k)).to("mps") for k in (3, 4)]
     got = []
@@ -1394,7 +1307,6 @@ def test_gated_pairs_backward_is_interleaved():
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
     labels = [s["label"] for s in plan.steps()]
-    # The cotangents the epilogue of the dot of their gradient: one kernel.
     (cotangents,) = [label for label in labels if label.endswith("concatenate")]
     assert cotangents.startswith("dot_general → "), labels
     assert labels.count("2x dot_general") == 2, labels
@@ -1491,7 +1403,7 @@ def test_packed_weights_are_read_in_place_elsewhere():
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         out = run(alone, lumen.from_numpy(x))
     np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
-    assert "lumen::to_vec" not in {e["name"] for e in prof.events()}  # no host copy of w1
+    assert "lumen::to_vec" not in {e["name"] for e in prof.events()}
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -1566,7 +1478,6 @@ def test_rms_norm(device):
         steps = lambda f: [
             s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
         ]  # noqa: E731
-        # One kernel each: a fusion with its reduction inside (a row kernel).
         for g in (f, by_hand):
             (label,) = steps(g)
             assert "reduce_sum" in label and "sqrt" in label, label
@@ -1600,8 +1511,6 @@ def test_sqrt(device):
         source = step["fusion"]["source"]
         assert step["label"].endswith("div") and "rsqrt(" not in source
         assert "Sqrt::apply" in source and "Div::apply" in source
-        # A division by the sqrt of a row's sum (a diamond: one row kernel)
-        # stays a sqrt, once a row, and a division.
         f = lambda a: a / F.sqrt(F.sum(a, -1, keepdim=True))  # noqa: E731
         (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(t), "mps").steps()
         source = step["fusion"]["source"]
@@ -1640,8 +1549,6 @@ def test_float_fields_are_runtime_scalars(device):
         expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
     assert len(traces) == 1
-    # One plan, compiled once: each run reads eps from the host, a kernel
-    # argument on MPS (no copy to the device, no new plan).
     graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
     plan = lumen.graph_compiler.Plan(graph, device, parameters=[2], scalars=[1])
     workspace = lumen.Tensor.empty([plan.workspace_bytes], "uint8", device)
@@ -1654,7 +1561,7 @@ def test_float_fields_are_runtime_scalars(device):
     (step,) = [s for s in plan.steps() if ("s1", "float32", []) in s["inputs"]]
     if device == "mps":
         assert len(plan.steps()) == 1
-        assert "constant float &in1" in step["fusion"]["source"]  # eps, by value
+        assert "constant float &in1" in step["fusion"]["source"]
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -1674,7 +1581,6 @@ def test_programs_run_in_their_dtypes(device):
         if device == "cpu":
             assert lumen.compile(f)(x).dtype == "bfloat16"
             continue
-        # (Refused compiling for MPS, as a device's errors are.)
         with pytest.raises(RuntimeError, match="convert to float32"):
             lumen.compile(f)(x)
     out = lumen.compile(lambda a: F.exp(a.float()))(x)
@@ -1684,8 +1590,6 @@ def test_programs_run_in_their_dtypes(device):
     w = lumen.from_numpy(rand(8, 3, seed=1)).to(device).to(dtype="bfloat16")
     dot = lambda a, b, d, o: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d, o)  # noqa: E731
     a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
-    # Accumulated in float32, written in float32, or rounded once to the
-    # operands' bfloat16.
     wide = lumen.compile(lambda a, b: dot(a, b, "float32", "float32"))(x, w)
     assert wide.dtype == "float32"
     np.testing.assert_allclose(lumen.to_numpy(wide), a @ b, rtol=1e-6, atol=1e-6)
@@ -1695,13 +1599,9 @@ def test_programs_run_in_their_dtypes(device):
     assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
     with pytest.raises(ValueError, match="output_dtype"):
         lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
-    # `@` accumulates floats in float32, its result of the inputs' dtype.
     graph = lumen.make_graph(lambda a, b: a @ b)(x, w)
     assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
     assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
-    # Sum and mean follow their input's dtype: bfloat16 sums in bfloat16; a
-    # float32 sum is written as one (F.sum(x.float())), its cast back the
-    # reduction's epilogue.
     graph = lumen.make_graph(lambda a: F.sum(a, -1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]
     assert "accum_dtype=bf16" in str(graph)
@@ -1784,7 +1684,6 @@ def test_split_reduction_converts_its_input_once():
         lumen.mps.synchronize()
     first, last = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert first["kernel"] == step["fusion"]["kernel"]
-    # The second reads the float32 partials with the plain float32 kernel.
     assert last["kernel"] == "reduce_sum_rows_f32"
     assert last["inputs"] == first["outputs"] and last["inputs"][0][0] == "float32"
     np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))
@@ -1930,8 +1829,6 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
     if rows_read == "its own":
         assert [s["output"][2] for s in steps] == [[n, vocab]], labels
     else:
-        # The row kernel, then the mean (and ``g``, a row each), then the
-        # gradient.
         assert [s["output"][2] for s in steps] == [[n], [n], [n, vocab]], labels
         assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[2]["label"], labels
     xr = x.astype(np.float64)
@@ -2102,8 +1999,6 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
     labels = [s["label"] for s in steps]
     baseline = lumen.graph_compiler.Plan(lumen.make_graph(trained(unfused))(H, W, T, C), "mps")
     if len(sizes) == 1:
-        # The unfused program's steps, and the chunks' `h` gradient's
-        # (zeros, a chunk's rows written in).
         chunked = [label for label in labels if label not in ("full", "dynamic_update_slice")]
         assert sorted(chunked) == sorted(s["label"] for s in baseline.steps()), labels
     else:
@@ -2111,9 +2006,6 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
         assert ("linear_cross_entropy" in labels) == (reduce == "squared"), labels
         if reduce == "squared":
             sizes = []
-        # Each chunk: its logits (a matmul), then its losses and gradient;
-        # one kernel where a row of logits fits a matmul tile (the logits
-        # never in memory).
         logits = [s["output"][2][0] for s in steps if s["label"] == "dot_general" and s["output"][2][1:] == [vocab]]
         rows = [
             s
@@ -2250,7 +2142,6 @@ def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
     backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
     assert len(backward) == 1, [s["label"] for s in steps]
     assert len(backward[0]["extra_outputs"]) == sums
-    # The blocks' sums, each summed by one launch (unsplit: few blocks).
     final = [s for s in steps if s["primitive"] == "reduce_sum"]
     assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
     got = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
@@ -2274,7 +2165,6 @@ def test_ops_are_functions():
     for name in ["reshape", "permute", "transpose", "t", "unsqueeze", "flatten", "split", "to", "float", "__add__"]:
         assert hasattr(lumen.graph.TracedTensor, name), name
     assert lumen.functional is F
-    # Operators and functions record the same primitives.
     a = lumen.zeros([2, 3])
     by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
     by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t(), "float32", "float32"))(a)
@@ -2384,8 +2274,6 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
         unfused = flatten(lumen.compile(f)(*args))
     finally:
         lumen.config.compiler.reset()
-    # The residual stream (no reduction) exactly; the normalized rows' next
-    # matmul, of wide rows, within their bfloat16 rounding.
     for k, (got, want) in enumerate(zip(fused, unfused)):
         if wide and k == 0:
             np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * np.abs(want).max())
@@ -2507,7 +2395,6 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     labels = lambda f: [
         s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     ]  # noqa: E731
-    # The rounding then widening is what the precision check warns of.
     with pytest.warns(UserWarning, match="casts it back"):
         assert labels(lambda x, w, r: (x @ w).float() + r) == [
             "dot_general → cast(float32 -> bfloat16)",
@@ -2557,7 +2444,6 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     try:
         (dot,) = dots(rounded, x, w)
         assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
-        # Its lines: the matmul's and the cast's.
         (step,) = lumen.graph_compiler.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
         code = [open(f).read().splitlines()[line - 1].strip() for f, line in step["sources"]]
         assert sorted(code) == ["return y.bfloat16()", 'y = F.matmul(x, w, "float32", "float32")'], code
@@ -2593,8 +2479,6 @@ def test_matmul_epilogue_reads_the_rounded_output():
     accum = lumen.compile(lambda x, w: _silu(prims.dot_general(x, w, dims, "float32", "float32")).to(dtype=x.dtype))(
         x, w
     )
-    # As traced: the bf16 product, then silu in float32 (numpy, from the
-    # unfused plan's matmul).
     h = lumen.to_numpy(lumen.compile(lambda x, w: (x @ w).float())(x, w)).astype(np.float64)
     rounded, accum = (lumen.to_numpy(t.to(dtype="float32")) for t in (rounded, accum))
     np.testing.assert_allclose(rounded, h / (1 + np.exp(-h)), rtol=1e-2, atol=1e-2)
@@ -2661,7 +2545,6 @@ def test_matmul_epilogue_reads_packed_weights_in_place():
         relu(_Relu(w1), xt)
     ops = [e for e in prof.events() if e["kind"] == "op"]
     assert any(e["name"].startswith("dot_general →") for e in ops)
-    # (x, copied into the workspace, is made contiguous; the weight never.)
     copied = [e["inputs"] for e in ops if e["name"] == "lumen::contiguous"]
     assert [("float32", [32, 48])] not in copied, copied
 
@@ -2707,7 +2590,6 @@ def test_rounding_a_contraction_then_widening_it_warns():
         s = (x @ x.t()) * 0.5
         return s.float()
 
-    # At the line computing the matmul, naming the cast's.
     with pytest.warns(UserWarning, match=rf"cast at {re.escape(__file__)}:\d+") as record:
         lumen.make_graph(scores)(x)
     (w,) = record
@@ -2748,7 +2630,6 @@ def test_copy_into_a_weight_is_written_back():
     x = np.array([1.0, 2.0, 3.0], np.float32)
     for k in range(1, 4):
         assert float(lumen.to_numpy(step(counter, lumen.from_numpy(x)))) == k
-    # w = x * (1 + 2 + 3), read back by a function returning it.
     np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda c: c.w * 1.0)(counter)), 6 * x)
     with pytest.raises(TypeError, match="copy_"):
         lumen.make_graph(lambda c: c.w.copy_(c.n))(counter)
@@ -2775,7 +2656,6 @@ def test_copy_into_a_modules_float_is_written_back():
     for k in range(1, 4):
         step(steps)
         assert steps.t == k
-    # w = 1 + 2 + 3.
     np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda s: s.w * 1.0)(steps)), [6.0, 6.0])
 
     def assign_tuple(s):
@@ -2870,8 +2750,6 @@ def test_cpu_inside_a_compiled_function(device):
     assert y.device == x.device == f"{device}:0"
     assert half.dtype == "float16"
     assert [h.tolist(), total.tolist(), half.tolist()] == [[2.0, 4.0], [8.0], [1.0, 2.0]]
-    # On the CPU, ``x.to(device="cpu")`` and ``x.cpu()`` are ``x``: adding
-    # to one adds to all.
     expected = [1.5, 2.5] if device == "cpu" else [1.0, 2.0]
     assert added.tolist() == [1.5, 2.5] and moved.tolist() == x.tolist() == expected
 

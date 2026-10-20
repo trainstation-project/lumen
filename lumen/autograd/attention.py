@@ -1,15 +1,3 @@
-"""Attention's derivative, FlashAttention-2's: the pass before autodiff that
-finds the attentions a traced program computes (however written: the
-compiler's matcher, ``lumen/graph_compiler/attention.rs``) and makes each one node
-of the tape, its backward recomputing the probabilities from each query's
-log-sum-exp rather than reading them (MLX's ``ScaledDotProductAttentionVJP``).
-
-The MPS compiler then runs the forward as one flash-attention kernel
-(writing the log-sum-exp too) and the backward as two (dK and dV, dQ). With
-``lumen.config.compiler.flash_attention`` off, nothing is replaced: the
-gradient is autodiff of the primitives as traced.
-"""
-
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.graph import prims, tracer
@@ -59,11 +47,7 @@ class _Attention(Function):
 
     @staticmethod
     def backward(ctx, do):
-        # FlashAttention-2's, on the scores transposed, S^T = K Q^T
-        # [batch..., Sk, Sq] (a row a key, as dV = P^T dO and dK = dS^T Q
-        # read them): not the forward's Q K^T, so recomputed, never its
-        # [Sq, Sk] values read back.
-        from lumen import functional as F  # it imports this module's package
+        from lumen import functional as F
 
         q, k, v, o = ctx.saved_tensors
         lse = ctx.saved_named_tensors["lse"]
@@ -74,7 +58,6 @@ class _Attention(Function):
         qf, kf, vf = _free(q.ndim, lb1, lc1), _free(k.ndim, rb1, rc1), _free(v.ndim, rb2, rc2)
         batch, sq, sk = list(o.shape[:nb]), o.shape[nb], k.shape[kf]
         every = tuple(range(nb))
-        # S^T, through the forward's roundings and scale; its causal mask.
         st = prims.dot_general(k, q, ((rc1, lc1), (rb1, lb1)), accum, p1["output_dtype"])
         scale = 1.0
         for step in ctx.chain[1:]:
@@ -87,35 +70,27 @@ class _Attention(Function):
             keys = prims.iota("int64", st.shape, nb)
             queries = prims.iota("int64", st.shape, nb + 1)
             st = F.where(F.le(keys, queries + ctx.causal), st, float("-inf"))
-        # P^T, from each query's log-sum-exp; D = rowsum(dO * O), per query.
         per_query = list(range(nb + 2))
         lse = prims.broadcast_in_dim(prims.reshape(lse, batch + [1, sq]), batch + [sk, sq], per_query)
         pt = prims.exp(prims.sub(st, lse))
         g = do if do.dtype == dtype else prims.cast(do, dtype)
-        # A dot over the value head, accumulated in float32 (dO has O's
-        # dtype): no rounded value widened.
         rows = tuple(range(nb + 1))
         d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum, accum)
         d = prims.broadcast_in_dim(prims.reshape(d, batch + [1, sq]), batch + [sk, sq], per_query)
-        # dP^T = V dO^T (dropped, as the forward's probabilities); dS^T =
-        # P^T (dP^T - D) * scale.
         dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum, accum)
         if ctx.dropout is not None:
             swap = list(range(nb)) + [nb + 1, nb]
             dropped, keep = prims.transpose(_value(ctx.dropout["mask"]), swap), ctx.dropout["scale"]
             dpt = F.where(dropped, 0.0, dpt * keep)
         ds = prims.mul(prims.mul(pt, prims.sub(dpt, d)), prims.full(pt.shape, scale, accum))
-        # dV reads P^T dropped.
         if ctx.dropout is not None:
             pt = F.where(dropped, 0.0, pt * keep)
         ds, pt = (t if dtype == accum else prims.cast(t, dtype) for t in (ds, pt))
-        # [batch..., Sk, Hv], [batch..., Sk, H], [batch..., Sq, H], in float32.
         dv = prims.dot_general(pt, g, (((nb + 1,), (nb,)), (every, every)), accum, accum)
         dk = prims.dot_general(ds, q, (((nb + 1,), (qf,)), (every, lb1)), accum, accum)
         dq = prims.dot_general(ds, k, (((nb,), (kf,)), (every, rb1)), accum, accum)
 
         def operand(grad, x, batch_dims, row, col):
-            # Back to the operand's dimensions, in its dtype.
             order = {d: i for i, d in enumerate(batch_dims)} | {row: nb, col: nb + 1}
             perm = [order[d] for d in range(x.ndim)]
             grad = grad if perm == list(range(x.ndim)) else prims.transpose(grad, perm)

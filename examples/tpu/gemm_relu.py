@@ -1,24 +1,3 @@
-"""A GEMM then a relu on a TPU: ``relu(x @ w)`` compiled for ``tpu:0``.
-
-The plan's steps each run as one of lumen's TPU kernels (its own Pallas,
-lowered to Mosaic, no XLA graph): the dot (``lumen/ops/dot_general``),
-then the relu's ``max`` against a 0 (``full``, its broadcast and the
-``max``, elementwise kernels: ``lumen/ops/elementwise/tpu``). There is no
-fusion on TPU yet, so each is its own launch.
-
-The result is checked against numpy, a few calls are profiled (their host
-time per call printed), and a Chrome trace, ``tpu_gemm_relu_trace.json``,
-is written (open it in Perfetto or ``chrome://tracing``): each call's
-steps on the CPU timeline, and their programs' runs on the "TPU 0" row,
-timed by libtpu's own profiler (``ProfilerActivity.TPU``), each named as
-its step (its kernel and, with ``record_shapes``, its operands' and
-output's types in its ``args``, as MPS kernels'). TPU programs run
-asynchronously: a step's host time is its launch, its TPU time the
-program's run.
-
-Run on a TPU VM: ``python examples/tpu/gemm_relu.py``.
-"""
-
 import numpy as np
 
 import lumen
@@ -47,7 +26,6 @@ def host(t):
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 
-# Against numpy, in float32 on the operands the TPU got.
 expected = np.maximum(host(x) @ host(w), 0)
 error = np.abs(host(y) - expected).max() / np.abs(expected).max()
 print(f"relu(x @ w), {M}x{K} @ {K}x{N} bfloat16 on {y.device}: max error {error:.1e} of the largest output")
@@ -59,7 +37,6 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.TPU], record_sha
         for k in range(PROFILED_CALLS):
             with record_function(f"gemm_relu {k}"):
                 y = gemm_relu(x, w)
-        # So the range ends with the calls' programs.
         lumen.tpu.synchronize()
 
 (r,) = [e for e in prof.events() if e["kind"] == "user_range" and e["name"] == "gemm_relu calls"]

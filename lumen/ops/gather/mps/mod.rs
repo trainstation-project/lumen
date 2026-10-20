@@ -3,12 +3,8 @@ use crate::graph_compiler::plan::Step;
 use crate::ops::mps::{Grid, launch, u64_arg};
 use crate::{DType, Tensor};
 
-/// Threads a grid row takes: past it, rows (Metal grids are 32-bit a
-/// dimension).
 const ROW: usize = 1 << 20;
 
-/// The most indices a scatter_add's rows by its updates (n * m) for a
-/// thread an element, each scanning all m indices.
 const SCAN: usize = 1 << 16;
 
 pub(crate) fn encode(

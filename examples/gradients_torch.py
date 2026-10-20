@@ -1,9 +1,3 @@
-"""A training step, the torch way: ``opt.zero_grad()``, ``loss.backward()``,
-``opt.step()`` (AdamW, ``examples/optim.py``).
-
-Run: ``python examples/gradients_torch.py [cpu|mps]``.
-"""
-
 import sys
 
 import numpy as np

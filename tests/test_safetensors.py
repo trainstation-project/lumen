@@ -1,6 +1,3 @@
-"""Safetensors files (lumen/safetensors/): the Python API, as in
-safetensors.torch. The format itself is tested in lumen/safetensors/tests.rs."""
-
 import numpy as np
 import pytest
 
@@ -41,7 +38,6 @@ def assert_same(expected, actual):
 def test_bytes_round_trip():
     ts = tensors()
     assert_same(ts, load(save(ts)))
-    # The reference implementation's bytes for one float32 tensor.
     data = save({"attn.0": lumen.tensor([[[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]])})
     assert data[:8] == (64).to_bytes(8, "little")
     assert data[8:72] == b'{"attn.0":{"dtype":"F32","shape":[1,2,3],"data_offsets":[0,24]}}'
@@ -54,16 +50,16 @@ def test_files_and_safe_open(tmp_path):
     assert_same(ts, load_file(path))
     with safe_open(path) as f:
         assert f.keys() == sorted(DTYPES)
-        assert f.offset_keys()[0] in ("float64", "int64", "uint64")  # the widest first
+        assert f.offset_keys()[0] in ("float64", "int64", "uint64")
         assert f.metadata() == {"format": "lumen"}
         assert f.get_tensor("float32").tolist() == [[0.0, 1.0, 2.0], [3.0, 4.0, 0.0]]
-        meta = f.get_tensor("bfloat16", device="meta")  # the header only
+        meta = f.get_tensor("bfloat16", device="meta")
         assert (meta.device, meta.shape, meta.dtype) == ("meta:0", [2, 3], "bfloat16")
         with pytest.raises(KeyError, match="missing"):
             f.get_tensor("missing")
     with pytest.raises(ValueError, match="closed"):
         f.keys()
-    assert [p.name for p in tmp_path.iterdir()] == ["model.safetensors"]  # no temporary file left
+    assert [p.name for p in tmp_path.iterdir()] == ["model.safetensors"]
 
 
 @pytest.mark.parametrize("device", [MPS])
@@ -73,7 +69,7 @@ def test_load_onto_device(tmp_path, device):
     except RuntimeError as e:
         pytest.skip(str(e))
     path = tmp_path / "model.safetensors"
-    save_file(on_device, path)  # tensors on the device save as their elements
+    save_file(on_device, path)
     loaded = load_file(path, device=device)
     assert all(t.device == f"{device}:0" for t in loaded.values())
     assert_same(tensors(), loaded)

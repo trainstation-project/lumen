@@ -518,7 +518,6 @@ impl PyTensor {
         let options = TensorOptions::new()
             .dtype(self.inner.dtype())
             .device(self.inner.device());
-        // SAFETY: the copy below writes every element.
         let t = unsafe { Tensor::empty(self.inner.shape(), options) };
         t.copy_(&self.inner).map_err(PyValueError::new_err)?;
         Ok(Self::wrap(t))

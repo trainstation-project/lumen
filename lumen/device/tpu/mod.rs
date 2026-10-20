@@ -1,11 +1,3 @@
-//! Google TPUs, through libtpu's PJRT C API (`pjrt.c`, which loads libtpu at
-//! run time: `TPU_LIBRARY_PATH`, else the loader's search). One PJRT client
-//! for the process, created on first use; its addressable devices are
-//! `tpu:0`, `tpu:1`, ... It compiles and runs the programs of
-//! `lumen/ops/tpu`. Built with the `tpu` feature on Linux
-//! (`cfg(lumen_tpu_linked)`); without it, or without libtpu or TPUs, there
-//! are none.
-
 use super::DeviceBackend;
 
 pub mod layout;
@@ -45,28 +37,22 @@ pub(crate) mod ffi {
     }
 }
 
-/// Why the last TPU call failed (or no TPU was found).
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn error() -> String {
-    // SAFETY: the shim's NUL-terminated message buffer.
     unsafe { std::ffi::CStr::from_ptr(ffi::lumen_tpu_error()) }
         .to_string_lossy()
         .into_owned()
 }
 
-/// Device `index`'s memory in use and its limit, in bytes.
 #[cfg(all(test, lumen_tpu_linked))]
 pub(crate) fn memory(index: usize) -> Result<(usize, usize), String> {
     let (mut in_use, mut limit) = (0, 0);
-    // SAFETY: two writable counts.
     match unsafe { ffi::lumen_tpu_memory(index as i32, &mut in_use, &mut limit) } {
         0 => Ok((in_use.max(0) as usize, limit.max(0) as usize)),
         _ => Err(error()),
     }
 }
 
-/// Held by each test of a TPU: some measure its memory, which the others
-/// would change.
 #[cfg(all(test, lumen_tpu_linked))]
 pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -81,7 +67,6 @@ impl DeviceBackend for Tpu {
     fn device_count(&self) -> usize {
         #[cfg(lumen_tpu_linked)]
         {
-            // SAFETY: no arguments; loads libtpu once.
             unsafe { ffi::lumen_tpu_device_count() }.max(0) as usize
         }
         #[cfg(not(lumen_tpu_linked))]

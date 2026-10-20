@@ -1,7 +1,3 @@
-"""Ported from jax/tests/pallas/pallas_test.py (JAX, Apache 2.0): ApiErrorTest,
-PallasCallInputOutputAliasingTest, PallasCallNamedGridTest, PallasCallAutodifferentiationTest,
-PallasOutOfBoundsInterpretTest, PallasCheckifyTest, PallasHiJaxTest, PallasDeviceIdTest."""
-
 import functools
 import re
 
@@ -34,12 +30,9 @@ def run(call, *args):
     return [host(o) for o in out] if isinstance(out, (list, tuple)) else host(out)
 
 
-# -- ApiErrorTest -------------------------------------------------------------
-
-
 def test_pallas_call_kernel_args_mismatch():
     a = np.arange(256, dtype=np.int32)
-    f = pl.pallas_call(lambda x_ref: None, out_shape=like(a))  # Missing o_ref
+    f = pl.pallas_call(lambda x_ref: None, out_shape=like(a))
     with pytest.raises(Exception, match="takes 1 positional argument but 2 were given"):
         run(f, a)
 
@@ -48,7 +41,6 @@ def test_pallas_call_kernel_args_mismatch():
 def test_pallas_call_error_kernel_returns_something(returns):
     a = np.arange(256, dtype=np.int32)
 
-    # The kernel should not return anything
     def my_kernel(x_ref, o1_ref, o2_ref):
         return returns
 
@@ -62,7 +54,7 @@ def test_pallas_call_error_kernel_returns_something(returns):
 
 def test_pallas_call_kernel_with_no_signature_returns_something():
     a = np.arange(256, dtype=np.int32)
-    f = pl.pallas_call(lambda *args: 0, out_shape=like(a))  # Returns 0
+    f = pl.pallas_call(lambda *args: 0, out_shape=like(a))
     with pytest.raises(
         Exception,
         match="The kernel function .* at .*test_pallas_api.py:.* should return None",
@@ -289,7 +281,6 @@ def test_pallas_error_for_ref_to_jax():
     y = rng.standard_normal((k, n), dtype=np.float32)
     with pytest.raises(
         Exception,
-        # (JAX names its primitive, dot_general; lumen its function, matmul.)
         match=r"Attempting to pass a Ref.*float32\[8,32\].* to a primitive: matmul -- did you forget to unpack"
         r" \(\[...\]\) the ref?",
     ):
@@ -306,11 +297,7 @@ def test_pallas_error_for_writing_ref_to_ref():
         run(kernel, x)
 
 
-# -- PallasCallInputOutputAliasingTest ----------------------------------------
-
-
 def test_vector_input_output_aliasing():
-    # Input needs to be big so it doesn't fit in VMEM
     size = 1024
     x = np.ones((32, size, size), np.float32)
     expected = x + 1
@@ -327,8 +314,6 @@ def test_vector_input_output_aliasing():
         input_output_aliases={0: 0},
     )
     np.testing.assert_array_equal(run(f, x), expected)
-    # JAX also donates x (jax.jit donate_argnums) and checks XLA's memory analysis: the whole input aliased, no
-    # temporaries. Not ported: XLA-specific.
 
 
 def test_scalar_input_output_aliasing():
@@ -348,7 +333,6 @@ def test_scalar_input_output_aliasing():
         input_output_aliases={0: 0},
     )
     np.testing.assert_array_equal(run(f, x), expected)
-    # JAX also checks the donated input is deleted ("Array has been deleted"): jax.jit donation, not ported.
 
 
 def test_mixed_scalar_vector_input_output_aliasing():
@@ -374,10 +358,6 @@ def test_mixed_scalar_vector_input_output_aliasing():
     o_scalar, o_vector = run(f, x_scalar, x_vector)
     np.testing.assert_array_equal(o_scalar, expected_scalar)
     np.testing.assert_array_equal(o_vector, expected_vector)
-    # JAX also checks the donated inputs are deleted ("Array has been deleted"): jax.jit donation, not ported.
-
-
-# -- PallasCallNamedGridTest --------------------------------------------------
 
 
 def test_named_grid():
@@ -429,8 +409,6 @@ def test_can_query_named_grid_size_in_kernel_via_psum():
 
 def test_can_query_named_dynamic_grid_size_in_kernel_via_psum():
     pytest.skip("Not supported.")
-    # A named grid whose size is a traced value (jax.jit argument), its size queried in the kernel by
-    # lax.axis_size.
 
 
 def test_can_query_named_grid_program_id_in_kernel_via_axis_index():
@@ -451,12 +429,7 @@ def test_can_query_named_grid_program_id_in_kernel_via_axis_index():
 
 def test_vmap_named_grid():
     pytest.skip("vmap of pallas_call: not meaningful for lumen")
-    # jax.vmap of a pallas_call over a named grid (("tile", 1),) doubling a (2, 1, 128) input.
 
-
-# -- PallasCallAutodifferentiationTest ----------------------------------------
-# JAX skips these on TPU ("On TPU the test works only in interpret mode"); lumen has no autodiff of
-# pallas_call, nor an interpret mode.
 
 AD_TEST_CASES = [
     ("square", lambda x: x * x),
@@ -478,89 +451,61 @@ AD_IMPLS = [impl for _, impl in AD_TEST_CASES]
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_jvp(impl):
     pytest.skip("On TPU the test works only in interpret mode")
-    # jax.jvp of a pallas_call computing impl on a scalar matches jax.jvp of impl; check_grads (fwd, order 2).
 
 
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_pallas_around_grad(impl):
     pytest.skip("On TPU the test works only in interpret mode")
-    # A kernel computing jax.grad(impl) of a scalar matches jax.grad(impl).
 
 
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_jvp_slice(impl):
     pytest.skip("On TPU the test works only in interpret mode")
-    # jax.jvp of a pallas_call writing zeros and impl of x[:2] (ref gathers by jnp.arange) into a (4,) output.
 
 
 def test_custom_jvp_call():
     pytest.skip("On TPU the test works only in interpret mode")
-    # A jax.custom_jvp softmax inside a kernel on a (16, 32) input matches jax.nn.softmax.
-
-
-# -- PallasOutOfBoundsInterpretTest -------------------------------------------
 
 
 def test_interpret_mode_out_of_bounds_access():
     pytest.skip("interpret mode: not meaningful for lumen")
-    # In interpret mode, blocks past an array's edge (a (32, 33) @ (33, 32) matmul in 32x32 blocks) read NaN: an
-    # unmasked matmul is all NaN, a masked one exact.
-
-
-# -- PallasCheckifyTest -------------------------------------------------------
 
 
 def test_basic_runtime_assert():
     pytest.skip("Cannot recover from halt.")
-    # checkify.check(False, ...) in a kernel with jax_pallas_enable_debug_checks halts the TPU, logging the message.
 
 
 def test_runtime_assert_is_noop_when_not_enabled():
     pytest.skip("checkify: not meaningful for lumen")
-    # pl.debug_check(False, ...) in a copy kernel is a no-op with jax_pallas_enable_debug_checks off.
-
-
-# -- PallasHiJaxTest ----------------------------------------------------------
 
 
 def test_pass_weird_tuple_into_pallas_call():
     pytest.skip("hijax: not meaningful for lumen")
-    # A hijax type (a pair of arrays) passed into and returned from a pallas_call, lowered to its two arrays.
 
 
 def test_pass_sliced_array_into_pallas_call():
     pytest.skip("hijax: not meaningful for lumen")
-    # A hijax SlicedArray (an array and an SMEM index) whose block spec is lowered to one for each part.
 
 
 def test_pass_hi_type_with_aliasing():
     pytest.skip("hijax: not meaningful for lumen")
-    # A hijax SlicedArray aliased from input to output (input_output_aliases={0: 0}).
-
-
-# -- PallasDeviceIdTest -------------------------------------------------------
 
 
 def test_mixed_str_and_tuple_keys_in_device_id():
     pytest.skip("device_id (multi-device): not meaningful for lumen")
-    # canonicalize_device_id of {("x", "y"): 3, "core": 1} and its mesh coordinates.
 
 
 def test_core_barrier_x64():
     pytest.skip("device_id (multi-device): not meaningful for lumen")
-    # pltpu.core_barrier across a 2-core TensorCoreMesh in interpret mode with x64.
 
 
 def test_core_barrier_multi_axis_grid_lowering():
     pytest.skip("device_id (multi-device): not meaningful for lumen")
-    # pltpu.core_barrier in a pallas_call over grid (("core", 2), ("i", 2)) lowers.
 
 
 def test_interpret_non_core_grid_axis_in_device_id_rejected():
     pytest.skip("device_id (multi-device): not meaningful for lumen")
-    # A semaphore_signal with device_id naming a non-core grid axis is rejected in interpret mode.
 
 
 def test_canonicalize_device_id_duplicate_axis_key():
     pytest.skip("device_id (multi-device): not meaningful for lumen")
-    # canonicalize_device_id({"x": 0, ("x",): 1}) raises ValueError.

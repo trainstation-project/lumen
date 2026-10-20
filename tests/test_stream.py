@@ -1,5 +1,3 @@
-"""Device streams: ``lumen.Stream``, every device's, and its ``synchronize``."""
-
 import pytest
 
 import lumen
@@ -26,9 +24,6 @@ def test_the_stream_is_the_only_api():
     """``lumen.Stream`` is the stream API (no per-device stream
     functions)."""
     assert lumen.stream.__all__ == ["Stream"]
-    # torch.Stream's API: streams equal by device and stream, wait_stream
-    # (nothing to wait for on a device's one stream); an external stream
-    # (stream_id) is CUDA's alone.
     cpu = lumen.Stream("cpu")
     assert cpu == lumen.Stream("cpu:0") and hash(cpu) == hash(lumen.Stream()) and cpu != lumen.Stream("meta")
     cpu.wait_stream(lumen.Stream("cpu"))
@@ -54,7 +49,7 @@ def test_mps_synchronize_waits_for_queued_work():
     except RuntimeError as e:
         pytest.skip(str(e))
     for i in range(100):
-        t.fill_(float(i))  # queued, not waited on
+        t.fill_(float(i))
     lumen.mps.synchronize()
     assert t[0] == 99.0 and t[(1 << 20) - 1] == 99.0
 
@@ -146,10 +141,10 @@ def test_mps_input_copies_run_in_order():
     values = [np.full(4096, float(k), np.float32) for k in range(1, 6)]
     host = [lumen.from_numpy(v) for v in values]
     on_mps = lumen.compile(lambda x: x * 1.0, device="mps")(lumen.from_numpy(values[4]))
-    heavy()  # the GPU busy: the copies below wait in the stream
+    heavy()
     for x in host[:4]:
         step(model, x)
-    host[3].fill_(1000.0)  # after its call returned: not what it read
+    host[3].fill_(1000.0)
     total = step(model, on_mps)
     assert total.item() == 4096 * (1 + 2 + 3 + 4 + 5)
 

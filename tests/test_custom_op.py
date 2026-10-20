@@ -1,9 +1,3 @@
-"""Custom ops (``lumen.custom_op``, PyTorch's ``torch.library.custom_op``):
-a function ``lumen.compile`` calls, opaque to it, returning nothing and
-mutating the arguments it names in ``mutates_args``: each reads its new
-value after the call (a view of it too; a weight or argument, written back);
-its memory, where nothing reads the old value after, else a copy."""
-
 import numpy as np
 import pytest
 
@@ -21,7 +15,6 @@ def _array(t):
 
 
 def _assign(t, values):
-    # Write `values` into tensor `t` (a view of the plan's memory).
     t.copy_(lumen.from_numpy(np.asarray(values, np.float32)))
 
 
@@ -132,7 +125,6 @@ def test_mutated_views_reach_their_bases(device):
     f(m, lumen.empty([4], device="meta"))
     m.load_state_dict({"w": lumen.from_numpy(np.zeros((2, 2), np.float32))})
     out = f(m, _tensor([0, 1, 2, 3], device))
-    # w0, y[1:3] = [0, 0], [1, 2] -> [11, 12], [10, 10] -> [20, 20], [21, 22]
     assert _array(out).tolist() == [0, 21, 22, 3]
     assert _array(m.w._placed(device)).tolist() == [[20, 20], [0, 0]]
 
@@ -245,13 +237,12 @@ def test_custom_op_errors():
         )
 
 
-# The data pointers of each call's x and out.
 POINTERS = []
 
 
 def _square(x, out):
     POINTERS.append((x.data_ptr(), out.data_ptr()))
-    values = _array(x)  # every element of x read before out is written
+    values = _array(x)
     _assign(out, values * values)
 
 
@@ -279,7 +270,7 @@ def test_overlappable_operand_memory_is_the_compilers_choice(device):
             x = a + 1.0
             out = a * 0.0
             op(x, out)
-            return out * 1.0, a * 0.0  # out's old value, a * 0, read after
+            return out * 1.0, a * 0.0
 
         return f
 
@@ -289,8 +280,6 @@ def test_overlappable_operand_memory_is_the_compilers_choice(device):
     plain = _plan(using(SQUARE_PLAIN), [4])
     written, x, out = _square_call(plain)
     assert written not in (x, out), plain
-    # Planned with the caller's memory for its inputs and outputs: x in the
-    # output's memory (out's, overlapped); undeclared, x needs its own too.
     meta = [lumen.empty([1024], device="meta")]
     workspace = [
         lumen.graph_compiler.Plan(lumen.make_graph(using(op))(*meta), "cpu").workspace_bytes

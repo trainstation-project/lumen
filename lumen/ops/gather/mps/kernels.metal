@@ -67,8 +67,7 @@
             uint block = uint(min(ulong(SCAN_BLOCK), m - t0));                                  \
             device const T *u = updates + (o * m + t0) * inner + r;                             \
             if (inner % 32 == 0) {                                                              \
-                /* A SIMD group's elements one row k: its lanes test 32 */                      \
-                /* indices at once, then add the matches in order. */                           \
+                                                                                                \
                 for (uint t = 0; live && t < block; t += 32) {                                  \
                     bool hit = t + lane < block && rows[t + lane] == k;                         \
                     uint bits = uint(static_cast<simd_vote::vote_t>(simd_ballot(hit)));         \

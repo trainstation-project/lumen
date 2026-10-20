@@ -457,7 +457,6 @@ mod tpu {
             };
         }
 
-        /// The bytes at `ptr` (of device 0's shared allocator), read back.
         fn read(ptr: NonNull<u8>, nbytes: usize) -> Vec<u8> {
             let mut bytes = vec![0; nbytes];
             copy_to_host(0, ptr, &mut bytes).unwrap();
@@ -485,8 +484,6 @@ mod tpu {
             let allocator = TpuAllocator::new(0, capacity);
             let a = allocator.allocate(1000);
             let b = allocator.allocate(1000);
-            // Offsets from the region's base, aligned; the region in the
-            // device's memory once reserved.
             assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
             assert!(memory(0).unwrap().0 >= before + capacity);
             unsafe {
@@ -504,8 +501,6 @@ mod tpu {
             let allocator = allocator_for(Device::Tpu(0)).unwrap();
             let a = allocator.allocate(4096);
             let b = allocator.allocate(300);
-            // Each read, aligned or not (staged for the TPU's DMA), the
-            // same bytes of the region: those at its offset.
             let whole = read(a, 4096);
             assert_eq!(read(a, 4096), whole);
             let inside = NonNull::new(a.as_ptr().wrapping_add(100)).unwrap();
@@ -533,7 +528,6 @@ mod tpu {
             let options = TensorOptions::new()
                 .dtype(DType::F32)
                 .device(Device::Tpu(0));
-            // SAFETY: only its bytes, whatever they are, are compared.
             let t = unsafe { Tensor::empty(&[64, 3], options) };
             let host = t.to(Device::Cpu(0));
             assert_eq!(host.shape(), &[64, 3]);

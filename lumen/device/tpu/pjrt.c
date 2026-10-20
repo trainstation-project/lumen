@@ -1,14 +1,3 @@
-// libtpu's PJRT C API (`pjrt_c_api.h`, vendored from XLA), loaded at run
-// time: the process's one PJRT client, its TPU devices, the device memory
-// the TPU allocator reserves and reads (lumen/allocator/tpu.rs), and the
-// programs that write it (lumen/ops/tpu): compiled once, each run on the
-// memory as a donated argument.
-//
-// libtpu is found at `TPU_LIBRARY_PATH` (as JAX and torch_xla find it), else
-// by the loader's search for `libtpu.so`. Its PJRT API may be older than this
-// header: each function is used only if the plugin's table has it, and each
-// argument struct carries this header's size, which a plugin accepts if it is
-// at least its own.
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -30,11 +19,8 @@ static pthread_once_t once = PTHREAD_ONCE_INIT;
 
 void lumen_tpu_free(void *buffer);
 
-// Whether the plugin's function table has `field` (an older plugin's is
-// shorter).
 #define HAS(field) (offsetof(PJRT_Api, field) + sizeof(api->field) <= api->struct_size && api->field)
 
-// Records `e`'s message (prefixed by `what`) and frees it: whether it is one.
 static int failed(PJRT_Error *e, const char *what) {
     if (!e) {
         return 0;
@@ -47,7 +33,6 @@ static int failed(PJRT_Error *e, const char *what) {
     return 1;
 }
 
-// Waits for `event` (none: done) and frees it: whether it failed.
 static int awaited(PJRT_Event *event, const char *what) {
     if (!event) {
         return 0;
@@ -59,8 +44,6 @@ static int awaited(PJRT_Event *event, const char *what) {
     return bad;
 }
 
-// Loads libtpu and creates the client, once; on failure `error` says why and
-// there are no devices.
 static void initialize(void) {
     const char *path = getenv("TPU_LIBRARY_PATH");
     if (!path || !*path) {
@@ -122,15 +105,8 @@ const char *lumen_tpu_error(void) {
     return error;
 }
 
-// The bytes of a row of TPU memory: 128 u32s. A `u32[rows, 1, 128]` buffer
-// is tiled in rows, (1, 128), so a TPU stores it byte for byte as the host
-// does (a u8 buffer's bytes are packed in tiles), and a program can address
-// it at any row.
 #define ROW 512
 
-// `nbytes` (a multiple of `ROW`) of device `index`'s memory: a
-// `u32[nbytes / ROW, 1, 128]` buffer. Its handle, and the runtime's address
-// of its memory in `*address`; none (and `error`) if it cannot be reserved.
 void *lumen_tpu_alloc(int index, size_t nbytes, uintptr_t *address) {
     if (lumen_tpu_device_count() <= index || index < 0) {
         snprintf(error, sizeof error, "no TPU device %d", index);
@@ -164,13 +140,8 @@ void lumen_tpu_free(void *buffer) {
     failed(api->PJRT_Buffer_Destroy(&destroy), "freeing TPU memory");
 }
 
-// The DMA alignment of a raw copy's host memory and offset.
 #define DMA 32
 
-// Copies `nbytes` at `offset` of `buffer` (an `lumen_tpu_alloc`'s, of
-// `size` bytes) to `dst`, waiting for it: through host memory aligned for the
-// TPU's DMA, the copy's range widened to aligned bounds inside the buffer.
-// Whether it failed (`error` says why).
 int lumen_tpu_read(void *buffer, size_t size, size_t offset, void *dst, size_t nbytes) {
     if (nbytes == 0) {
         return 0;
@@ -199,9 +170,6 @@ int lumen_tpu_read(void *buffer, size_t size, size_t offset, void *dst, size_t n
     return bad;
 }
 
-// `code` (`size` bytes of StableHLO) compiled for device `index` (a
-// portable executable, run on a device of the caller's, costs twice as much
-// to launch); none (and `error`) if it does not compile.
 void *lumen_tpu_compile(const char *code, size_t size, int index) {
     if (lumen_tpu_device_count() <= index || index < 0) {
         snprintf(error, sizeof error, "no TPU device %d", index);
@@ -222,10 +190,6 @@ void *lumen_tpu_compile(const char *code, size_t size, int index) {
                             .code_size = size,
                             .format = "mlir",
                             .format_size = 4};
-    // A CompileOptionsProto: executable_build_options (3) of one replica (4),
-    // one partition (5) and a device_assignment (9, a DeviceAssignmentProto)
-    // of one replica (1) and computation (2) on the device's id (3:
-    // replica_device_ids 1, a varint).
     char id_bytes[10];
     size_t id_size = 0;
     for (uint64_t v = (uint64_t)id.id; id_size == 0 || v; v >>= 7) {
@@ -255,8 +219,6 @@ void *lumen_tpu_compile(const char *code, size_t size, int index) {
     return compile.executable;
 }
 
-// A `type` buffer of `dims` on device `index`, `data` copied into it: none
-// (and `error`) if it cannot be made.
 static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, const int64_t *dims, size_t num_dims) {
     PJRT_Client_BufferFromHostBuffer_Args create = {
         .struct_size = PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE,
@@ -275,9 +237,6 @@ static PJRT_Buffer *upload(int index, const void *data, PJRT_Buffer_Type type, c
     return create.buffer;
 }
 
-// Programs' scalars, uploaded once for each device and values: a launch
-// reuses them (programs only read them; PJRT keeps a buffer while queued
-// programs use it), so it neither copies them nor waits for the copy.
 #define SCALARS 1024
 #define CACHED 256
 static struct {
@@ -289,9 +248,6 @@ static struct {
 static size_t next_scalar_buffer;
 static pthread_mutex_t scalars_lock = PTHREAD_MUTEX_INITIALIZER;
 
-// Device `index`'s buffer of the `count` i32 `scalars` (NULL if it failed):
-// cached, the oldest replaced; if too many to cache, `*owned` (the caller's
-// to free).
 static PJRT_Buffer *scalars_buffer(int index, const int32_t *scalars, size_t count, int *owned) {
     int64_t length = (int64_t)count;
     *owned = count > SCALARS;
@@ -320,12 +276,6 @@ static PJRT_Buffer *scalars_buffer(int index, const int32_t *scalars, size_t cou
     return buffer;
 }
 
-// Runs `executable` (an `lumen_tpu_compile`'s) on device `index`, enqueued
-// after what reads or writes `*region` (an `lumen_tpu_alloc`'s) before.
-// Its arguments: `count` i32 `scalars`; if `nbytes` (a multiple of `ROW`),
-// `host`'s bytes as a `u32[nbytes / ROW, 1, 128]`; then the region,
-// donated: the program's one result, which `*region` becomes (the same
-// memory). Whether it failed (`error` says why).
 int lumen_tpu_run(void *executable,
                   int index,
                   const int32_t *scalars,
@@ -363,22 +313,17 @@ int lumen_tpu_run(void *executable,
                                                   .num_args = num_args,
                                                   .output_lists = &results};
     int bad = failed(api->PJRT_LoadedExecutable_Execute(&execute), "running a TPU program");
-    // The scalars (uncached) and host bytes are the runtime's until the
-    // program has run.
     for (size_t i = owned ? 0 : 1; i + 1 < num_args; i++) {
         lumen_tpu_free(args[i]);
     }
     if (bad) {
         return 1;
     }
-    // The donated region, now the result's.
     lumen_tpu_free(*region);
     *region = result;
     return 0;
 }
 
-// Waits for `buffer` (a region: what the programs run so far on it write).
-// Whether it failed (`error` says why).
 int lumen_tpu_wait(void *buffer) {
     PJRT_Buffer_ReadyEvent_Args ready = {.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE,
                                          .buffer = (PJRT_Buffer *)buffer};
@@ -386,7 +331,6 @@ int lumen_tpu_wait(void *buffer) {
            awaited(ready.event, "waiting for a TPU program");
 }
 
-// Device `index`'s memory in use and its limit, in bytes: whether it failed.
 int lumen_tpu_memory(int index, int64_t *in_use, int64_t *limit) {
     if (lumen_tpu_device_count() <= index || index < 0 || !HAS(PJRT_Device_MemoryStats)) {
         snprintf(error, sizeof error, "no memory statistics for TPU device %d", index);
@@ -402,14 +346,6 @@ int lumen_tpu_memory(int index, int64_t *in_use, int64_t *limit) {
     return 0;
 }
 
-// ------------------------------- Profiling -----------------------------------
-
-// libtpu's profiler (PJRT's profiler extension, `profiler_c_api.h`, vendored
-// from XLA: what JAX's profiler runs), one session at a time: what the TPUs
-// run while it does, serialized as an XSpace (`tsl/profiler/protobuf/
-// xplane.proto`).
-
-// `pjrt_c_api_profiler_extension.h`'s one struct.
 typedef struct {
     PJRT_Extension_Base base;
     PLUGIN_Profiler_Api *profiler_api;
@@ -418,7 +354,6 @@ typedef struct {
 
 static PLUGIN_Profiler *profiler;
 
-// Records `e`'s message (prefixed by `what`) and frees it: whether it is one.
 static int profiler_failed(const PLUGIN_Profiler_Api *p, PLUGIN_Profiler_Error *e, const char *what) {
     if (!e) {
         return 0;
@@ -433,7 +368,6 @@ static int profiler_failed(const PLUGIN_Profiler_Api *p, PLUGIN_Profiler_Error *
     return 1;
 }
 
-// The plugin's profiler, if it has one (`error` says why not).
 static const PLUGIN_Profiler_Api *profiler_api(void) {
     if (!lumen_tpu_device_count()) {
         return NULL;
@@ -447,8 +381,6 @@ static const PLUGIN_Profiler_Api *profiler_api(void) {
     return NULL;
 }
 
-// Starts a profiling session (the plugin's default options): whether it
-// failed (`error` says why).
 int lumen_tpu_profiler_start(void) {
     const PLUGIN_Profiler_Api *p = profiler_api();
     if (!p) {
@@ -463,15 +395,12 @@ int lumen_tpu_profiler_start(void) {
     return profiler_failed(p, p->start(&start), "starting the TPU profiler");
 }
 
-// Stops the session, its XSpace's `*size` bytes at `*data` (the profiler's,
-// until `lumen_tpu_profiler_free`): whether it failed (`error` says why).
 int lumen_tpu_profiler_stop(const uint8_t **data, size_t *size) {
     const PLUGIN_Profiler_Api *p = profiler_api();
     PLUGIN_Profiler_Stop_Args stop = {.struct_size = PLUGIN_Profiler_Stop_Args_STRUCT_SIZE, .profiler = profiler};
     if (profiler_failed(p, p->stop(&stop), "stopping the TPU profiler")) {
         return 1;
     }
-    // One call: it serializes into a buffer of its own (one byte longer).
     PLUGIN_Profiler_CollectData_Args collect = {.struct_size = PLUGIN_Profiler_CollectData_Args_STRUCT_SIZE,
                                                 .profiler = profiler};
     if (profiler_failed(p, p->collect_data(&collect), "collecting the TPU profile")) {
@@ -482,7 +411,6 @@ int lumen_tpu_profiler_stop(const uint8_t **data, size_t *size) {
     return 0;
 }
 
-// Frees the session (and its XSpace).
 void lumen_tpu_profiler_free(void) {
     const PLUGIN_Profiler_Api *p = profiler_api();
     PLUGIN_Profiler_Destroy_Args destroy = {.struct_size = PLUGIN_Profiler_Destroy_Args_STRUCT_SIZE,

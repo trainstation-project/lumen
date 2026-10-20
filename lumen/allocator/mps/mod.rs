@@ -22,7 +22,6 @@ fn malloc(nbytes: usize) -> NonNull<u8> {
         .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
 }
 
-/// SAFETY: `ptr` is a `malloc` of ours, not yet freed.
 #[cfg(lumen_mps_linked)]
 unsafe fn free(ptr: NonNull<u8>) {
     unsafe { ffi::lumen_mps_free(ptr.as_ptr()) }
@@ -45,7 +44,6 @@ impl MpsAllocator {
 #[cfg(lumen_mps_linked)]
 impl Allocator for MpsAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        // Submitted MPS work keeps its tensors alive until the GPU has run it.
         self.region
             .take(nbytes, malloc, crate::stream::mps::synchronize)
     }
@@ -59,7 +57,6 @@ impl Allocator for MpsAllocator {
 impl Drop for MpsAllocator {
     fn drop(&mut self) {
         if let Some(base) = self.region.base() {
-            // SAFETY: our buffer, which nothing points into any more.
             unsafe { free(base) }
         }
     }

@@ -29,7 +29,7 @@ def test_static_allocator_bytes_requires_a_non_negative_int():
 
 def test_unknown_settings_are_rejected():
     with pytest.raises(AttributeError):
-        lumen.config.memory_caching = False  # the setting no longer exists
+        lumen.config.memory_caching = False
 
 
 def test_config_is_a_single_shared_instance():

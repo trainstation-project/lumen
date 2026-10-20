@@ -1,6 +1,3 @@
-"""lumen.config.compiler: the graph compilers' flags (the allocators'
-settings: tests/allocator/test_allocator.py)."""
-
 import numpy as np
 import pytest
 
@@ -39,7 +36,6 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.safe_kernels is False and compiler.dump_to is None
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
-    # Every instance reads and writes the same flags.
     compiler.online_softmax, compiler.row_cache = False, 4
     assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
     compiler.reset()
@@ -211,7 +207,6 @@ def test_split_k_agrees(compiler, dtype):
     compiler.reset()
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, big, big) == ["dot_general"]
-    # A larger output: atomically (in bfloat16, its partials in float32).
     a, b = (rng.standard_normal(s).astype(np.float32) for s in ((352, 2048), (2048, 352)))
     x, w = (lumen.from_numpy(t).to("mps").to(dtype="bfloat16") for t in (a, b))
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
@@ -284,7 +279,6 @@ def test_online_softmax_agrees(compiler, n):
     online, online_kernel = run()
     compiler.online_softmax = False
     exact, exact_kernel = run()
-    # Compiled again: another kernel (its name is its source's hash).
     assert online_kernel != exact_kernel
     e = np.exp(x - x.max(-1, keepdims=True))
     np.testing.assert_allclose(exact, e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7)

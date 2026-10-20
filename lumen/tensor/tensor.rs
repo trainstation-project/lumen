@@ -13,8 +13,6 @@ fn device_of(options: &TensorOptions) -> Device {
     options.device_opt().unwrap_or(Device::Cpu(0))
 }
 
-/// The bytes a `dtype` tensor of `shape` takes on `device`: its elements',
-/// or on a TPU its tiles' (`device::tpu::layout`).
 fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => {
@@ -34,7 +32,6 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    /// A contiguous tensor over `storage` (offset 0).
     pub(super) fn wrap(storage: Arc<Storage>, dtype: DType, shape: &[usize]) -> Self {
         Tensor {
             storage,
@@ -261,9 +258,6 @@ impl Tensor {
             self.shape,
             self.numel()
         );
-        // A TPU's tensor is in tiles of its shape's: another shape whose
-        // tiles differ is a copy (through the host: there is no TPU kernel
-        // for it outside a compiled program).
         if let Device::Tpu(_) = self.device()
             && !crate::device::tpu::layout::same(&self.ty(), &TensorType::new(self.dtype, shape))
         {
@@ -354,11 +348,9 @@ impl Tensor {
             return recorded(op, self.clone());
         }
         if self.device() == Device::Meta(0) {
-            // SAFETY: meta storage holds no data.
             return recorded(op, unsafe { self.empty_like() });
         }
         let values = self.to_vec::<T>();
-        // SAFETY: the write below covers every element.
         let t = unsafe { self.empty_like() };
         t.write(&values);
         recorded(op, t)
@@ -394,8 +386,6 @@ impl Tensor {
         if device != Device::Cpu(0) && self.device() != Device::Cpu(0) {
             return self.copy_to(Device::Cpu(0)).copy_to(device);
         }
-        // A TPU keeps a tensor in its shape's tiles (`device::tpu::layout`):
-        // copied in its own shape, contiguous, not as the span it covers.
         if let (Device::Tpu(_), _) | (_, Device::Tpu(_)) = (device, self.device()) {
             assert!(
                 self.device() == Device::Cpu(0) || self.is_contiguous(),
@@ -403,7 +393,6 @@ impl Tensor {
             );
             let src = dispatch_dtype!(self.dtype, T => self.contiguous::<T>());
             let options = TensorOptions::new().dtype(self.dtype).device(device);
-            // SAFETY: the copy below writes every element.
             let out = unsafe { Self::empty(&self.shape, options) };
             match device {
                 Device::Cpu(_) => copy_d2h(&out, &src),
@@ -412,8 +401,6 @@ impl Tensor {
             return out;
         }
         let span = self.span();
-        // SAFETY: the copy below covers every element of the span (none, on
-        // the meta device).
         let options = TensorOptions::new().dtype(self.dtype).device(device);
         let out = unsafe { Self::empty(&span.shape, options) };
         match device {
@@ -450,14 +437,11 @@ impl Tensor {
         let base = host.storage.data_ptr().cast_const().cast::<T>();
         for_each_index(&self.shape, |idx| {
             let off = host.offset + flat_offset(&idx, &host.strides);
-            // SAFETY: CPU storage is host memory, and the element is in
-            // bounds of it and was written as a `T`.
             out.push(unsafe { base.add(off).read_unaligned() });
         });
         out
     }
 
-    /// The storage range this view can touch, as a flat contiguous view.
     pub(crate) fn span(&self) -> Self {
         let len = if self.numel() == 0 {
             0
@@ -581,8 +565,6 @@ impl Tensor {
         let mut k = 0;
         for_each_index(&self.shape, |idx| {
             let at = flat_offset(&idx, &self.strides) * size;
-            // SAFETY: the element is in bounds of the view's storage (host
-            // accessible), and of the host tensor's `numel` elements.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     host.data_ptr().add(k * size),

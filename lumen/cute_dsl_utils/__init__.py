@@ -1,7 +1,3 @@
-# **************************************************
-# Copyright (c) 2026, Mayank Mishra
-# **************************************************
-
 from .activations import sigmoid, tanh
 from .constants import get_cute_dtype
 from .elementwise import ElementwiseCUDAKernel, get_compiled_elementwise_cuda_kernel

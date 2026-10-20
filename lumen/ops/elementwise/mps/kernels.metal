@@ -1,8 +1,4 @@
-// Each (op, dtype) is its own kernel, named after the primitive (add_f32,
-// lt_i64, exp_bf16, convert_i32_f16, ...), applying the op's functor (in
-// lumen/ops/mps/kernels.metal), so the op is fixed at compile time.
 
-// `U` is the result's element type: T, or bool for comparisons.
 template <typename Op, typename T, typename U>
 inline void binary(device const T *a, device const T *b, device U *out, uint i) {
     out[i] = Op::apply(a[i], b[i]);
@@ -64,7 +60,6 @@ FOR_MATH_FLOAT(FLOATING)
 #define CONVERT_FROM(NAME, S) FOR_ALL_WITH(CONVERT, NAME, S)
 FOR_ALL(CONVERT_FROM)
 
-// Dtype-agnostic, by element size.
 #define SELECT(NAME, E)                                              \
     kernel void select_##NAME(device const bool *pred [[buffer(0)]], \
                               device const E *a [[buffer(1)]],       \

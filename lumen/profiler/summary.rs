@@ -1,35 +1,23 @@
-//! A finished session's events, aggregated like PyTorch's
-//! `prof.key_averages()` (`torch/autograd/profiler_util.py`).
-
 use std::collections::HashMap;
 
 use super::{Event, EventKind, ProfilerConfig};
 use crate::device::Device;
 
-/// Everything a session recorded.
 #[derive(Debug, Clone)]
 pub struct Profile {
     events: Vec<Event>,
     config: ProfilerConfig,
 }
 
-/// Per-name totals across a profile (PyTorch: `FunctionEventAvg`). Times
-/// are nanoseconds; "total" includes nested ops, "self" excludes them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventAvg {
     pub name: String,
-    /// Whether the row is device work (a copy or fill) rather than an op
-    /// or range that issued it.
     pub is_device_event: bool,
     pub count: u64,
     pub cpu_time_total: u64,
     pub self_cpu_time_total: u64,
-    /// Device work issued inside (total) or directly by (self) this op; for
-    /// a GPU event's own row, its duration.
     pub device_time_total: u64,
     pub self_device_time_total: u64,
-    /// Bytes allocated minus freed on the CPU / on devices, inside (total)
-    /// or directly by (self) this op.
     pub cpu_memory_usage: i64,
     pub self_cpu_memory_usage: i64,
     pub device_memory_usage: i64,
@@ -46,8 +34,6 @@ impl EventAvg {
     }
 }
 
-/// The column [`Profile::table`] sorts by, descending (PyTorch's `sort_by`
-/// strings; see [`SortBy::parse`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
     CpuTimeTotal,
@@ -62,8 +48,6 @@ pub enum SortBy {
 }
 
 impl SortBy {
-    /// Parse a PyTorch `sort_by` name; `cuda_*` spellings mean the device
-    /// columns, whichever the device is.
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "cpu_time_total" => SortBy::CpuTimeTotal,
@@ -94,7 +78,6 @@ impl SortBy {
     }
 }
 
-/// What one op or range accounts for, before grouping by name.
 #[derive(Default, Clone, Copy)]
 struct Totals {
     child_cpu: u64,
@@ -111,7 +94,6 @@ impl Profile {
         Profile { events, config }
     }
 
-    /// Every recorded event, ordered by start time.
     pub fn events(&self) -> &[Event] {
         &self.events
     }
@@ -120,7 +102,6 @@ impl Profile {
         &self.config
     }
 
-    /// Only the events recorded on `thread`, e.g. to ignore other threads.
     pub fn for_thread(&self, thread: u64) -> Profile {
         Profile {
             events: self
@@ -133,8 +114,6 @@ impl Profile {
         }
     }
 
-    /// Totals per op/range, attributing children, device work and memory to
-    /// their parents and ancestors.
     fn totals(&self) -> HashMap<u64, Totals> {
         let ranges: HashMap<u64, &Event> = self
             .events
@@ -164,7 +143,6 @@ impl Profile {
                 }
                 EventKind::Memory => direct.self_device_mem += event.bytes,
             }
-            // Device work and memory also count toward every ancestor.
             let (device, cpu_mem, device_mem) = match event.kind {
                 EventKind::Gpu => (event.duration_ns(), 0, 0),
                 EventKind::Memory if event.device == Device::Cpu(0) => (0, event.bytes, 0),
@@ -183,10 +161,6 @@ impl Profile {
         totals
     }
 
-    /// Per-name totals, in first-seen order (PyTorch: `key_averages()`).
-    /// GPU events get rows of their own, but one named as the op that
-    /// issued it (an MPS or TPU step's run) is that op's row's device time
-    /// alone; memory events only count toward the ops they happened in.
     pub fn key_averages(&self) -> Vec<EventAvg> {
         let totals = self.totals();
         let names: HashMap<u64, &str> = self
@@ -235,8 +209,6 @@ impl Profile {
             .collect()
     }
 
-    /// The device column name: `CUDA`, `MPS`, `TPU`, or `DEVICE` when
-    /// more than one ran.
     fn device_name(&self) -> &'static str {
         let (mut cuda, mut mps, mut tpu) = (false, false, false);
         for e in &self.events {
@@ -257,17 +229,12 @@ impl Profile {
         }
     }
 
-    /// A PyTorch-style summary table of [`key_averages`](Self::key_averages),
-    /// sorted by `sort_by` (descending) and cut to `row_limit` rows (PyTorch:
-    /// `prof.key_averages().table(sort_by=..., row_limit=...)`).
     pub fn table(&self, sort_by: Option<SortBy>, row_limit: Option<usize>) -> String {
         let mut rows = self.key_averages();
         if let Some(sort_by) = sort_by {
             rows.sort_by_key(|r| std::cmp::Reverse(sort_by.key(r)));
         }
         let total_self_cpu: u64 = rows.iter().map(|r| r.self_cpu_time_total).sum();
-        // Like PyTorch, the device total (and each row's share of it) sums
-        // the device work once: not again in the ops that issued it.
         let total_self_device: u64 = self
             .events
             .iter()
@@ -279,7 +246,6 @@ impl Profile {
         }
         let has_device_time = total_self_device > 0;
         let has_memory = self.config.profile_memory;
-        // Like PyTorch, device memory columns only when there is device memory.
         let has_device_memory = has_memory
             && self
                 .events
@@ -349,8 +315,6 @@ impl Profile {
             })
             .collect();
 
-        // Column widths: the name column fits the longest name (up to 55,
-        // like PyTorch); the rest fit their header and values.
         let widths: Vec<usize> = (0..headers.len())
             .map(|c| {
                 let widest = body
@@ -410,13 +374,10 @@ impl Profile {
         out
     }
 
-    /// The session as a Chrome trace (Perfetto / `chrome://tracing`), in
-    /// PyTorch's layout (PyTorch: `prof.export_chrome_trace`).
     pub fn chrome_trace(&self) -> String {
         super::chrome::trace(&self.events)
     }
 
-    /// Write [`chrome_trace`](Self::chrome_trace) to `path`.
     pub fn export_chrome_trace(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         std::fs::write(path, self.chrome_trace())
     }
@@ -439,7 +400,6 @@ fn percent(part: u64, whole: u64) -> String {
     }
 }
 
-/// Like PyTorch's `_format_time`: microseconds, milliseconds or seconds.
 pub(crate) fn format_time(ns: u64) -> String {
     let us = ns as f64 / 1000.0;
     if us >= 1e6 {
@@ -451,7 +411,6 @@ pub(crate) fn format_time(ns: u64) -> String {
     }
 }
 
-/// Like PyTorch's `_format_memory`: b, Kb, Mb or Gb (1024-based).
 pub(crate) fn format_memory(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;

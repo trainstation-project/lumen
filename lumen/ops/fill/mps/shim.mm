@@ -9,10 +9,9 @@ id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset);
 struct Pipelines {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> u8 = nil, u16 = nil, u32 = nil, u64 = nil;
-    id<MTLComputePipelineState> s8 = nil, s16 = nil, s32 = nil, s64 = nil; // strided
+    id<MTLComputePipelineState> s8 = nil, s16 = nil, s32 = nil, s64 = nil;
 };
 
-// Compiled once, on first use.
 static const Pipelines &pipelines(void) {
     static Pipelines p;
     static dispatch_once_t once;
@@ -65,9 +64,6 @@ int lumen_mps_fill(void *ptr,
         return elem_size == 1 ? b1 : elem_size == 2 ? b2 : elem_size == 4 ? b4 : elem_size == 8 ? b8 : nil;
     };
     id<MTLComputePipelineState> pso = strided ? pick(p.s8, p.s16, p.s32, p.s64) : pick(p.u8, p.u16, p.u32, p.u64);
-    // Thread indices are 32-bit; the strided kernels index one element per
-    // thread, so they cap out there. Contiguous kernels loop with a grid
-    // stride and only need the count to fit in 64 bits.
     if (pso == nil || count == 0 || (strided && count > UINT32_MAX)) {
         return -2;
     }
@@ -81,8 +77,6 @@ int lumen_mps_fill(void *ptr,
         if (encoder == nil) {
             return -2;
         }
-        // Bound at offset 0, with the start in elements (blocks are element
-        // aligned in their segment).
         uint64_t start = offset / elem_size;
         uint64_t n = count;
         NSUInteger width = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
@@ -91,9 +85,6 @@ int lumen_mps_fill(void *ptr,
         [encoder setBytes:pattern length:elem_size atIndex:1];
         [encoder setBytes:&start length:sizeof(start) atIndex:2];
         if (strided) {
-            // 2D dispatch (PyTorch: fill_mps_kernel's strided branch): y indexes
-            // dim 0, x walks the inner dims, so threads consecutive in x write
-            // consecutive addresses in the innermost dimension.
             uint32_t dims = static_cast<uint32_t>(ndim);
             [encoder setBytes:sizes length:ndim * sizeof(size_t) atIndex:3];
             [encoder setBytes:strides length:ndim * sizeof(size_t) atIndex:4];
@@ -103,9 +94,6 @@ int lumen_mps_fill(void *ptr,
             NSUInteger x = std::min<NSUInteger>(std::max<NSUInteger>(inner, 1), width);
             [encoder dispatchThreads:MTLSizeMake(inner, dim0, 1) threadsPerThreadgroup:MTLSizeMake(x, 1, 1)];
         } else {
-            // The contiguous kernels need the element count for the tail loop,
-            // and loop with a grid stride over vectorized stores, so the grid is
-            // a few waves rather than one thread per element.
             [encoder setBytes:&n length:sizeof(n) atIndex:3];
             NSUInteger waves = 32;
             NSUInteger grid_threads = std::min<NSUInteger>(width * waves, ((count + width - 1) / width) * width);

@@ -1,19 +1,3 @@
-"""The ops, as functions: ``import lumen.functional as F`` (PyTorch's
-``torch`` and ``torch.nn.functional`` functions, by the same names).
-
-Each records primitives (``lumen.graph.prims``) into the graph being traced
-by ``lumen.compile``, so each takes traced tensors (and Python scalars).
-Tensors keep only their operators (``+ - * / @ == < []``, ``-x``), their
-layout (``reshape``, ``permute``, ``transpose``, ...) and dtype casts
-(``to``, ``float``, ...); every other op is here.
-
-No op changes a dtype the program does not ask for: operands share a dtype
-(a Python scalar takes its tensor operand's, and must be of its kind),
-floating-point functions take floating-point tensors, and sums and means
-reduce in their input's dtype. Convert first with ``.to(dtype)``
-(``F.sum(x.float())``).
-"""
-
 import builtins
 import math
 
@@ -39,7 +23,6 @@ from lumen.graph.tracer import (
 )
 
 __all__ = [
-    # arithmetic and comparison
     "add",
     "sub",
     "mul",
@@ -54,27 +37,21 @@ __all__ = [
     "maximum",
     "minimum",
     "where",
-    # elementwise functions
     "exp",
     "log",
     "sqrt",
     "tanh",
     "sigmoid",
     "relu",
-    # random
     "dropout",
-    # reductions
     "sum",
     "mean",
     "amax",
     "max",
-    # scans
     "cumsum",
-    # normalizations
     "softmax",
     "log_softmax",
     "rms_norm",
-    # contractions
     "matmul",
     "sin",
     "cos",
@@ -123,11 +100,6 @@ __all__ = [
     "gather",
     "einsum",
 ]
-
-
-# ---------------------------------------------------------------------
-# arithmetic and comparison
-# ---------------------------------------------------------------------
 
 
 def add(input, other):
@@ -191,7 +163,6 @@ def where(condition, input, other):
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
     if not isinstance(input, TracedTensor) and not isinstance(other, TracedTensor):
-        # Two Python scalars: of their kind's default dtype (torch's).
         kind = "bool" if isinstance(input, bool) and isinstance(other, bool) else None
         ints = builtins.all(isinstance(v, int) for v in (input, other))
         dtype = kind or ("int64" if ints else "float32")
@@ -200,11 +171,6 @@ def where(condition, input, other):
     input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
     shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
     return prims.select(*(_broadcast_to(t, shape) for t in (condition, input, other)))
-
-
-# ---------------------------------------------------------------------
-# elementwise functions
-# ---------------------------------------------------------------------
 
 
 def exp(input):
@@ -258,11 +224,6 @@ def _dropped(shape, p):
     return bits < prims.full(tuple(shape), builtins.round(p * 2**32), "uint32")
 
 
-# ---------------------------------------------------------------------
-# reductions
-# ---------------------------------------------------------------------
-
-
 def _keep(input, out, dims, keepdim):
     """Reduction ``out`` of ``input`` over ``dims``, with them kept (as
     size 1) if ``keepdim``."""
@@ -308,11 +269,6 @@ def max(input, other=None):
     raise NotImplementedError("max(input, dim) returns indices, which lumen does not support yet; use amax")
 
 
-# ---------------------------------------------------------------------
-# scans
-# ---------------------------------------------------------------------
-
-
 def cumsum(input, dim, dtype=None):
     """The cumulative sum along ``dim`` (``torch.cumsum``), accumulated in
     ``dtype``, the result's: the tensor's if None (integers wrap), or
@@ -324,11 +280,6 @@ def cumsum(input, dim, dtype=None):
     if dtype != x.dtype and not widened:
         x = x.to(dtype=dtype)
     return prims.cumsum(x, _dim(dim, x.ndim), False, dtype)
-
-
-# ---------------------------------------------------------------------
-# normalizations
-# ---------------------------------------------------------------------
 
 
 def softmax(input, dim):
@@ -367,8 +318,6 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
     if eps is None:
         eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
 
-    # Normalized in the accumulation dtype (float32 for narrower floats),
-    # then cast back and scaled by the weight in x's dtype.
     h = x.to(_accum_dtype(x.dtype))
     y = (h / sqrt(mean(h * h, -1, keepdim=True) + eps)).to(x.dtype)
 
@@ -376,11 +325,6 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
         y = y * weight
 
     return y
-
-
-# ---------------------------------------------------------------------
-# contractions
-# ---------------------------------------------------------------------
 
 
 def matmul(input, other, accum_dtype, output_dtype):
@@ -398,9 +342,6 @@ def matmul(input, other, accum_dtype, output_dtype):
     if input.ndim == 0 or other.ndim == 0:
         raise RuntimeError("both arguments to matmul need to be at least 1D")
 
-    # A batch of rows times a matrix (``x @ w``, a weight): the batch folded
-    # into the rows, one matmul reading the matrix in place (torch's fold),
-    # not the matrix broadcast over the batch.
     if input.ndim > 2 and other.ndim == 2:
         k = input.shape[-1]
         rows = input.reshape(math.prod(input.shape[:-1]), k)
@@ -424,9 +365,6 @@ def matmul(input, other, accum_dtype, output_dtype):
         out = out.squeeze(-1)
 
     return out
-
-
-# -- elementwise functions beyond the core ones ---------------------------
 
 
 def _float_fn(prim, name):
@@ -465,7 +403,6 @@ def _integral_fn(prim, name):
 
 floor = _integral_fn(prims.floor, "floor")
 ceil = _integral_fn(prims.ceil, "ceil")
-# To the nearest integer, ties to even (``torch.round``, ``numpy.rint``).
 round = _float_fn(prims.round, "round")
 rint = _float_fn(prims.round, "rint")
 log1p = _float_fn(prims.log1p, "log1p")
@@ -549,9 +486,6 @@ def clamp(input, min=None, max=None):
     return out
 
 
-# -- reductions -------------------------------------------------------------
-
-
 def _flip(input):
     """An order-reversing bijection of ``input``'s values: its negation, or
     its bitwise not (unsigned integers, bools)."""
@@ -609,9 +543,6 @@ def argmin(input, dim=None, keepdim=False):
     return _arg(input, dim, keepdim, amin)
 
 
-# -- layout -------------------------------------------------------------------
-
-
 def cat(tensors, dim=0):
     """``tensors`` one after another along ``dim`` (``torch.cat``)."""
     tensors = [_lift(t) for t in tensors]
@@ -648,7 +579,6 @@ def diagonal(input, offset=0, dim1=0, dim2=1):
     cols = prims.iota("int32", input.shape, 1)
     on = prims.eq(prims.add(rows, prims.full(input.shape, offset, "int32")), cols)
     picked = prims.select(on, input, prims.full(input.shape, 0, input.dtype))
-    # Each column's (offset >= 0) or row's one element.
     if offset >= 0:
         line = prims.reduce_sum(picked, (0,), input.dtype)
         return prims.slice(line, (offset,), (offset + length,))
@@ -670,8 +600,6 @@ def pad(input, pad, mode="constant", value=0):
             side = lambda k: prims.full(tuple(k if j == d else s for j, s in enumerate(out.shape)), value, out.dtype)
             parts = ([side(before)] if before > 0 else []) + [out] + ([side(after)] if after > 0 else [])
         elif mode == "circular" and (before > n or after > n):
-            # Wider than the dimension (numpy's "wrap"): it repeated, then
-            # the window.
             k = -(-before // n)
             repeated = prims.concatenate([out] * (k + 1 + -(-after // n)), d)
             out = repeated.narrow(d, k * n - before, n + before + after)

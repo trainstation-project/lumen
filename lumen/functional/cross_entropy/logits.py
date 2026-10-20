@@ -17,7 +17,6 @@ class _CrossEntropy(Function):
         m = amax(x, -1, keepdim=True)
         lse = m.reshape(*target.shape) + log(sum(exp(x - m), -1))
         ctx.save_for_backward(x, target, lse)
-        # Each row's logit at its class: element row * n + class of the rows.
         rows, n = math.prod(target.shape), x.shape[-1]
         at = prims.iota(target.dtype, [rows], 0) * n + target.reshape(rows)
         return lse - prims.gather(x.reshape(rows * n), at, 0).reshape(*target.shape)

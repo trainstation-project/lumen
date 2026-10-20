@@ -1,11 +1,3 @@
-"""Ported from jax/tests/pallas/ops_test.py (JAX, Apache 2.0): OpsTest methods 1-35.
-
-``test_weak_dtype`` through ``test_dot_general_non_front_batch_dims``, as
-kernels of lumen's Pallas on a TPU. Reference values are numpy's (ml_dtypes'
-for the dtypes numpy lacks, scipy's for ``erf_inv``). JAX's hypothesis tests
-draw a fixed sample of their strategies' examples from a seeded generator.
-"""
-
 import itertools
 import math
 
@@ -19,10 +11,8 @@ from lumen.graph import prims
 
 pytestmark = pytest.mark.tpu
 
-# The examples each hypothesis test draws (JAX: up to 50).
 _EXAMPLES = 10
 
-# jtu's default tolerances, by dtype.
 _TOL = {
     "bool": 0,
     "int8": 0,
@@ -127,10 +117,6 @@ def _dot_general(x, y, dimension_numbers):
     return np.einsum(spec, x.astype(np.float64), y.astype(np.float64)).astype(np.float32)
 
 
-# ---------------------------------------------------------------------
-# dtypes and casts
-# ---------------------------------------------------------------------
-
 _DTYPES_32BIT = (
     "float32",
     "int32",
@@ -227,12 +213,6 @@ def _clz(x):
     return np.array([bits - int(v).bit_length() for v in u.ravel()], x.dtype).reshape(x.shape)
 
 
-# ---------------------------------------------------------------------
-# tables
-# ---------------------------------------------------------------------
-
-# (name, the kernel's op, numpy's, valid dtypes), each drawn on shapes of rank
-# 2-3, sizes 2..64.
 UNARY_FUNCTIONS = [
     ("neg", lambda x: -x, np.negative, ["float32", "int32"]),
     ("not", lambda x: pl.bitwise_not(x), np.invert, ["int32"]),
@@ -255,7 +235,6 @@ UNARY_FUNCTIONS = [
     ("rint", lambda x: F.rint(x), np.rint, ["float32"]),
 ]
 
-# ([(name, the kernel's op, numpy's)], dtypes)
 ELEMENTWISE_OPS = [
     (
         [
@@ -317,7 +296,6 @@ ELEMENTWISE_CASES = [
     for (name, fn, ref), dtype in itertools.product(ops, dtypes)
 ]
 
-# b/370578663: not lowered on TPU.
 _NOT_ON_TPU = ("acos", "acosh", "asin", "asinh", "atan", "atanh", "cbrt", "cosh", "expm1", "sinh")
 
 
@@ -354,11 +332,6 @@ COMPARE_PARAMS = [
 
 def _scalar_dtype(v):
     return np.int32 if isinstance(v, int) else np.float32
-
-
-# ---------------------------------------------------------------------
-# tests
-# ---------------------------------------------------------------------
 
 
 def _srl(x, y):
@@ -400,8 +373,6 @@ def test_scalar_compare(params):
     def kernel(x_ref, y_ref, o_ref):
         x = x_ref[0, 0]
         y = y_ref[0, 0]
-        # int32 scalars: JAX's weak-typed 1 and 0 (lumen's Python ints are
-        # torch's int64).
         one = lumen.ones((), dtype="int32")
         zero = lumen.zeros((), dtype="int32")
         o_ref[0, 0] = F.where(x == y, one, zero)
@@ -448,7 +419,6 @@ def test_array_compare(params):
         o_ref[4] = F.where(x > y, one, zero)
         o_ref[5] = F.where(x >= y, one, zero)
 
-    # Widen out our params to (8, 128) arrays.
     x, y = params
     x = np.full([8, 128], x, _scalar_dtype(x))
     y = np.full([8, 128], y, _scalar_dtype(y))
@@ -481,10 +451,8 @@ def test_array_compare(params):
 )
 def test_reduce_boolean(input_type, reduction_op, expected_result):
     def kernel(x_ref, ones_ref, o_ref):
-        # Convert float to bool with a comparison.
         bool_x = x_ref[...] == ones_ref[...]
         reduced_as_bool = reduction_op(bool_x, dim=(0, 1), keepdim=True)
-        # Convert bool to float with a select.
         float_value = F.where(reduced_as_bool, 1.0, 0.0)
         o_ref[0, 0] = float_value[0, 0]
 
@@ -576,7 +544,6 @@ def _select_n_args(rng, *, max_cases, min_rank, max_rank, min_size_exp, max_size
         min_size_exp=min_size_exp,
         max_size_exp=max_size_exp,
         valid_dtypes=["int32", "float32"],
-        # Max 4K bytes. Helps avoid slow input generation.
         max_bytes=2**12,
     )
     pred_shape = [(), shape][rng.integers(2)]
@@ -589,7 +556,6 @@ def _select_n_args(rng, *, max_cases, min_rank, max_rank, min_size_exp, max_size
     return pred, *cases
 
 
-# TODO(sharadmv): test rank < 2, size < 2
 @pytest.mark.parametrize("example", range(_EXAMPLES))
 def test_select_n(example):
     pred, *cases = _select_n_args(np.random.default_rng(example), max_cases=5, min_rank=2, max_rank=4, min_size_exp=1)
@@ -630,12 +596,9 @@ def test_select_n_multi_case(n_cases, pred_dtype):
 
 @pytest.mark.parametrize("name, func, ref, valid_dtypes", [pytest.param(*f, id=f[0]) for f in UNARY_FUNCTIONS])
 def test_unary_primitives(name, func, ref, valid_dtypes):
-    # We want exact equality here to match how JAX lowers to XLA
     tol = 0.0
     if name in ("exp2", "log2"):
         tol = 1e-6
-    # TODO(b/538128436): Remove this logistic branch once mosaic TPU has a
-    # tpu.logistic op.
     elif name in ("logistic", "sigmoid", "silu"):
         tol = 1e-6
 
@@ -651,8 +614,6 @@ def test_unary_primitives(name, func, ref, valid_dtypes):
         out = _run(kernel, pl.ShapeDtypeStruct(shape, dtype), _tensor(x))
         with np.errstate(all="ignore"):
             expected = ref(x)
-        # JAX's reference is XLA on the same TPU (its own approximations);
-        # numpy's libm differs by an ulp or two.
         ulps = {"float32": 2e-6, "bfloat16": 1.6e-2}.get(dtype, 0.0)
         np.testing.assert_allclose(out, expected, atol=max(tol, ulps), rtol=max(tol, ulps))
 
@@ -673,10 +634,6 @@ def test_cast_from_32bit(from_dtype, to_dtype):
 
     shape = (8, 128)
     if to_dtype in {"int2", "uint2"}:
-        # Make sure #rows is a least the packing factor of int2.
-        # TODO: b/343490729 - XLA convert(f32[16, 128]) fails on v5p.
-        # TODO: b/459440496 - Support more shapes for int2. The number of rows is
-        # required to be an even multiple of 128.
         shape = (128, 128)
 
     def kernel(x_ref, y_ref):
@@ -689,7 +646,6 @@ def test_cast_from_32bit(from_dtype, to_dtype):
     y_dtype = "int32" if to_dtype == "bool" else to_dtype
     for example in range(_EXAMPLES):
         x = _random_bits(np.random.default_rng(example), shape, from_dtype)
-        # XLA does not specify the float->int conversion result for NaNs.
         if from_dtype == "float32" and _is_int(to_dtype):
             x = np.where(np.isnan(x), np.float32(0), x)
         try:
@@ -716,9 +672,6 @@ def _from_bits(bits, from_dtype):
     return bits.view(_np_dtype(from_dtype))
 
 
-# Types narrower than 32-bit have few values so we test them exhaustively.
-# We also take one more pass with random data just to ensure that we don't
-# miss bugs that would be hidden due to exhaustive enumeration being in order.
 @pytest.mark.parametrize("randomize", [False, True])
 @pytest.mark.parametrize("to_dtype", _DTYPES)
 @pytest.mark.parametrize("from_dtype", _DTYPES_SUB_32BIT)
@@ -731,15 +684,10 @@ def test_cast_from_sub_32bit(from_dtype, to_dtype, randomize):
         pytest.skip("TODO(b/343490729): XLA compare(s2, s2) yields wrong results")
     if not randomize:
         if from_dtype in {"int2", "uint2"}:
-            # TODO(b/343490729): XLA doesn't work well with int2.
-            # iota 1D is unsupported, and XLA tends to select an unsupported
-            # layout too when passing constants created in numpy. Thankfully,
-            # there is randomize=True for the test coverage.
             pytest.skip("XLA tends to select an unsupported layout for int2")
         if to_dtype in {"int2", "uint2"}:
             pytest.skip("TODO(b/401624977): Mask on int2 is not yet supported in Mosaic")
 
-    # TODO(sharadmv,apaszke): add support for the following casts
     if from_dtype == "bool" and to_dtype in {"int16", "int8", "int4", "uint16", "uint8", "uint4", "int2", "uint2"}:
         pytest.skip("Not supported: cannot extend to sub-32 bit types")
 
@@ -757,7 +705,6 @@ def test_cast_from_sub_32bit(from_dtype, to_dtype, randomize):
             x = np.random.default_rng(234).integers(0, 1, size=(16, 16)).astype(np.int32) != 0
         else:
             x = np.tile(np.asarray([[False, True], [True, False]], dtype="bool"), (8, 8))
-    # XLA does not specify the float->int conversion result for NaNs.
     if not _is_int(from_dtype) and from_dtype != "bool":
         x = np.where(np.isnan(x.astype(np.float32)), x.dtype.type(0), x).astype(x.dtype)
     if from_dtype == "bool":
@@ -885,7 +832,6 @@ def test_sign(dtype, value):
     np.testing.assert_array_equal(out.astype(np.float32), expected.astype(np.float32))
 
 
-# TODO(twsung): Add more types once lowering is implemented.
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 def test_add_constant(dtype):
     shape = (256, 256)
@@ -908,8 +854,6 @@ def test_erf_inv(value, accurate):
     x = np.full((8, 128), value, dtype=np.float32)
     out = _run(kernel, pl.ShapeDtypeStruct((8, 128), "float32"), _tensor(x))
     expected = special.erfinv(x)
-    # JAX compares with XLA's erf_inv on the TPU (its log1p); scipy's is
-    # exact, the polynomial a few ulps from it.
     np.testing.assert_allclose(out, expected, rtol=4e-6)
 
 
@@ -919,7 +863,6 @@ IS_FINITE_TEST_VALUES = [-0.2, float("inf"), -float("inf"), float("nan"), 0.0, 1
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_is_finite(dtype):
     if dtype != "float32":
-        # The original test worked only fp32@TPU. Have no way to test TPU with other types.
         pytest.skip("Not tested on TPU, todo for the respective team")
 
     size = len(IS_FINITE_TEST_VALUES)
@@ -970,7 +913,6 @@ def test_reduce_precision(dtype, exponent_bits, mantissa_bits):
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_is_finite_scalar(dtype):
     if dtype != "float32":
-        # The original test worked only fp32@TPU. Have no way to test TPU with other types.
         pytest.skip("Not tested on TPU, todo for the respective team")
 
     size = len(IS_FINITE_TEST_VALUES)
@@ -996,14 +938,12 @@ def test_elementwise_array(name, fn, ref, dtype):
         pytest.skip("64-bit types require x64_enabled")
     if dtype == "float16":
         pytest.skip("float16 is not supported on TPU")
-    # TODO(b/370578663): implement these lowerings on TPU
     if name in _NOT_ON_TPU:
         pytest.skip(f"{name} not implemented on TPU")
 
     def kernel(x_ref, o_ref):
         o_ref[:] = fn(x_ref[...])
 
-    # create an array with shape (8, 128)
     if name in ("exp", "exp2") and dtype == "bfloat16":
         x = np.array([0.42, 1.26] * (8 * 128 // 2), np.float32).reshape(8, 128)
         rtol = 2e-3
@@ -1023,7 +963,6 @@ def test_elementwise_scalar(name, fn, ref, dtype):
         pytest.skip("16-bit types are not supported on TPU")
     if name == "population_count":
         pytest.skip("Scalar population count on TPU is only supported in interpret mode")
-    # TODO(b/370578663): implement these lowerings on TPU
     if name in _NOT_ON_TPU:
         pytest.skip(f"{name} not implemented on TPU")
 
@@ -1043,7 +982,6 @@ def test_elementwise_scalar(name, fn, ref, dtype):
 
 
 def test_abs_weak_type():
-    # see https://github.com/jax-ml/jax/issues/23191
     def kernel(x_ref, o_ref):
         o_ref[...] = F.abs(x_ref[...])
 
@@ -1076,7 +1014,6 @@ def test_integer_pow(y):
 
     x = np.array([1, 2, 3, 4]).astype(np.float32) / 10
     out = _run(kernel, pl.ShapeDtypeStruct((4,), "float32"), _tensor(x))
-    # lax.integer_pow's float32: by squaring, then the reciprocal.
     acc, base, n = np.ones_like(x), x, abs(y)
     while n:
         if n & 1:
@@ -1106,7 +1043,6 @@ def test_nextafter(dtype, x, y):
     x = np.full((4,), x, dtype=dtype)
     y = np.full((4,), y, dtype=dtype)
     out = _run(kernel, pl.ShapeDtypeStruct((4,), dtype), _tensor(x), _tensor(y))
-    # `nextafter` requires exact equality
     np.testing.assert_array_equal(out, np.nextafter(x, y))
 
 
@@ -1180,12 +1116,9 @@ def test_jnp_einsum_grad_y_pallas():
     y = np.arange(256 * 128, dtype=np.float32).reshape((128, 256))
 
     def kernel(x_ref, y_ref, out_ref):
-        # grad_y side of grouped matmul
         out_ref[...] = F.einsum("mk,mn->kn", x_ref[...], y_ref[...])
 
     out = _run(kernel, pl.ShapeDtypeStruct((256, 256), "float32"), _tensor(x), _tensor(y))
-    # JAX compares with jnp.einsum on the TPU (summing in the same order);
-    # numpy's sums in another, to float32's rounding.
     np.testing.assert_allclose(out, np.einsum("mk,mn->kn", x, y), rtol=1e-6)
 
 
@@ -1205,42 +1138,28 @@ def test_dot_dims_batched_simple_dot_general(dtype):
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((11, 16, 128), "float32"), _tensor(x, dtype), _tensor(y, dtype))
-    # float32: numpy sums in another order than the TPU (JAX's reference).
     np.testing.assert_allclose(out, _dot_general(x, y, numbers), rtol=5e-3 if dtype == "bfloat16" else 1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize(
     "shapes_and_dims_numbers",
     [
-        # leading lhs non contracting dims.
         ((8, 8, 256), (256, 128), ([2], [0])),
         ((3, 4, 128), (256, 128), ([2], [1])),
-        # trailing lhs non contracting dims.
         ((256, 8, 128), (256, 128), ([0], [0])),
         ((128, 8, 128), (256, 128), ([0], [1])),
-        # leading rhs non contracting dims.
         ((8, 128), (8, 128, 128), ([1], [2])),
         ((128, 8), (8, 128, 128), ([0], [2])),
-        # trailing rhs non contracting dims.
         ((8, 128), (128, 8, 128), ([1], [0])),
         ((128, 8), (128, 8, 128), ([0], [0])),
-        # leading lhs and rhs non contracting dims.
         ((8, 8, 128), (8, 128, 128), ([2], [2])),
-        # leading lhs and trailing rhs non contracting dims.
         ((8, 8, 128), (128, 8, 128), ([2], [0])),
-        # trailing lhs and leading rhs non contracting dims.
         ((32, 8, 128), (8, 128, 32), ([0], [2])),
-        # trailing lhs and trailing rhs non contracting dims.
         ((8, 8, 128), (8, 8, 128), ([0], [0])),
-        # non-contiguous lhs non contracting dims and leading rhs non contracting dims.
         ((2, 128, 128), (2, 128, 128), ([1], [2])),
-        # non-contiguous lhs non contracting dims and trailing rhs non contracting dims.
         ((2, 128, 128), (128, 2, 128), ([1], [0])),
-        # leading lhs non contracting dims and non-contiguous rhs non contracting dims.
         ((2, 128, 128), (2, 128, 128), ([2], [1])),
-        # trailing lhs non contracting dims and non-contiguous rhs non contracting dims.
         ((128, 2, 128), (2, 128, 128), ([0], [1])),
-        # non-contiguous lhs and rhs non contracting dims.
         ((2, 128, 128), (2, 128, 128), ([1], [1])),
     ],
 )
@@ -1251,8 +1170,6 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
         x_shape = (batch_size,) + x_shape
         y_shape = (batch_size,) + y_shape
 
-        # Batch size is always the first dimension so we need to offset
-        # dims_numbers by 1.
         def offset_by_one(x):
             return [a + 1 for a in x]
 
@@ -1264,15 +1181,12 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
     x = rng.standard_normal(x_shape).astype(np.float32)
     y = rng.standard_normal(y_shape).astype(np.float32)
 
-    # Just infer shape from numpy.
     expected = _dot_general(x, y, dims_numbers)
 
     def kernel(x_ref, y_ref, out_ref):
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))
-    # JAX compares with XLA's dot on the TPU (summing in the same order);
-    # numpy's sums in another, to float32's rounding.
     np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
 
 
@@ -1292,7 +1206,6 @@ def test_dot_general_non_front_batch_dims(shapes_and_dims_numbers):
     x = rng.standard_normal(x_shape).astype(np.float32)
     y = rng.standard_normal(y_shape).astype(np.float32)
 
-    # Just infer shape from numpy.
     expected = _dot_general(x, y, dims_numbers)
 
     def kernel(x_ref, y_ref, out_ref):

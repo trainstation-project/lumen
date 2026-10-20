@@ -12,10 +12,6 @@ fn infer(p: Primitive, args: &[TensorType]) -> Result<TensorType, String> {
     p.infer(&args.iter().collect::<Vec<_>>())
 }
 
-// ---------------------------------------------------------------------
-// shape and dtype rules
-// ---------------------------------------------------------------------
-
 #[test]
 fn elementwise_is_strict() {
     let x = ty(DType::F32, &[2, 3]);
@@ -24,11 +20,9 @@ fn elementwise_is_strict() {
         infer(Lt, &[x.clone(), x.clone()]).unwrap().dtype,
         DType::Bool
     );
-    // No implicit broadcasting or promotion.
     assert!(infer(Add, &[x.clone(), ty(DType::F32, &[3])]).is_err());
     assert!(infer(Add, &[x.clone(), ty(DType::F16, &[2, 3])]).is_err());
     assert!(infer(Exp, &[ty(DType::I32, &[2])]).is_err());
-    // bfloat16 math is a graph's (a device without it refuses it: MPS).
     for p in [Exp, Log, Sqrt, Tanh, Logistic] {
         assert!(infer(p, &[ty(DType::BF16, &[2])]).is_ok());
     }
@@ -99,8 +93,6 @@ fn reduce_drops_axes() {
     assert_eq!(infer(sum, std::slice::from_ref(&x)).unwrap().shape, [3]);
     assert!(infer(ReduceMax { axes: vec![3] }, std::slice::from_ref(&x)).is_err());
     assert!(infer(ReduceMax { axes: vec![1, 1] }, &[x]).is_err());
-    // A sum accumulates in its accum_dtype, its result's: the operand's,
-    // or float32 (int32) for narrower floats (integers).
     let sum = |accum_dtype| ReduceSum {
         axes: vec![0],
         accum_dtype,
@@ -123,7 +115,6 @@ fn reduce_drops_axes() {
 
 #[test]
 fn dot_general_shape() {
-    // Batched matmul: [b, m, k] x [b, k, n] -> [b, m, n].
     let p = DotGeneral {
         lhs_contracting: vec![2],
         rhs_contracting: vec![1],
@@ -148,8 +139,6 @@ fn dot_general_accumulates_in_accum_dtype() {
         output_dtype,
     };
     let operands = |d| [ty(d, &[2, 3]), ty(d, &[3, 4])];
-    // It accumulates in the operands' dtype, or float32 for narrower
-    // floats, and outputs the operands' dtype or the accumulation's.
     for (d, accum, output) in [
         (DType::F32, DType::F32, DType::F32),
         (DType::BF16, DType::BF16, DType::BF16),
@@ -157,7 +146,6 @@ fn dot_general_accumulates_in_accum_dtype() {
         (DType::BF16, DType::F32, DType::F32),
         (DType::F16, DType::F32, DType::F16),
         (DType::I32, DType::I32, DType::I32),
-        // Narrower integers in int32 (the TPU's matrix unit's int8 dots).
         (DType::I8, DType::I32, DType::I32),
         (DType::I8, DType::I32, DType::I8),
     ] {
@@ -177,7 +165,6 @@ fn dot_general_accumulates_in_accum_dtype() {
         let e = infer(dot(accum, output), &operands(d)).unwrap_err();
         assert!(e.contains(word), "{e}");
     }
-    // Two float dtypes (a TPU's bfloat16 by float8); not an integer's.
     let mixed = |l, r| [ty(l, &[2, 3]), ty(r, &[3, 4])];
     let f8 = DType::F8E4M3B11FNUZ;
     assert_eq!(
@@ -193,9 +180,6 @@ fn dot_general_accumulates_in_accum_dtype() {
         dot(DType::F32, DType::BF16).to_string(),
         "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=bf16]"
     );
-    // Each product and partial sum rounded to accum_dtype, the result to
-    // output_dtype once: bfloat16 holds 1 + 2^-8 as 1 (each 2^-8 added is
-    // lost); float32 adds both, 1 + 2^-7, which bfloat16 holds too.
     let b = |v: f32| bf16::from_f32(v);
     let x =
         Tensor::from_slice(&[b(1.0), b(1.0 / 256.0), b(1.0 / 256.0)], DType::BF16).reshape(&[1, 3]);
@@ -256,11 +240,6 @@ fn display_is_jaxpr_like() {
     assert!(g.apply(Neg, &[7]).is_err());
 }
 
-// ---------------------------------------------------------------------
-// reference executor
-// ---------------------------------------------------------------------
-
-/// Run a one-node graph of `p` on `inputs`.
 fn run(p: Primitive, inputs: &[Tensor]) -> Tensor {
     let mut g = Graph::new();
     let vars: Vec<_> = inputs
@@ -392,7 +371,6 @@ fn bit_ops_follow_xla() {
     use crate::graph::UnaryOp::{Clz, Not, PopulationCount};
     let i = |v: &[i32]| Tensor::from_slice(v, DType::I32);
     let x = i(&[-8, 5, 1, -1]);
-    // Shifts by the width or more: 0, or the sign's.
     let by = i(&[1, 2, 32, 40]);
     assert_eq!(
         run(Binary(ShiftLeft), &[x.clone(), by.clone()]).to_vec::<i32>(),
@@ -406,7 +384,6 @@ fn bit_ops_follow_xla() {
         run(Binary(ShiftRightLogical), &[x.clone(), by]).to_vec::<i32>(),
         [0x7FFF_FFFC, 1, 0, 0]
     );
-    // The remainder has the dividend's sign.
     let d = i(&[3, -3, 1, 2]);
     assert_eq!(
         run(Binary(Rem), &[x.clone(), d.clone()]).to_vec::<i32>(),
@@ -434,7 +411,6 @@ fn float_functions_follow_xla() {
     use crate::graph::BinaryOp::Nextafter;
     use crate::graph::UnaryOp::*;
     let f = |v: &[f32]| Tensor::from_slice(v, DType::F32);
-    // Ties to even; sign keeps zero and NaN.
     assert_eq!(
         run(Unary(RoundEven), &[f(&[0.5, 1.5, -2.5])]).to_vec::<f32>(),
         [0.0, 2.0, -2.0]
@@ -442,7 +418,6 @@ fn float_functions_follow_xla() {
     let s = run(Unary(Sign), &[f(&[-3.0, 0.0, 2.0, f32::NAN])]).to_vec::<f32>();
     assert_eq!(s[..3], [-1.0, 0.0, 1.0]);
     assert!(s[3].is_nan());
-    // nextafter on float32's bits, from zero the smallest of the target's sign.
     let n = run(
         Binary(Nextafter),
         &[f(&[1.0, 0.0, 0.0]), f(&[2.0, -1.0, 1.0])],
@@ -456,7 +431,6 @@ fn float_functions_follow_xla() {
             f32::from_bits(1)
         ]
     );
-    // reduce_precision to bfloat16's: ties to even, as a cast does.
     let r = ReducePrecision {
         exponent_bits: 8,
         mantissa_bits: 7,

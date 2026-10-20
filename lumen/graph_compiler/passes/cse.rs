@@ -1,19 +1,10 @@
-//! Common subexpression elimination (XLA: `HloCSE`): a node applying the
-//! same primitive, parameters included, to the same values as an earlier
-//! one is that node's value, computed once. Commutative primitives match
-//! with their operands in either order. Graphs are pure, so this never
-//! changes a result.
-
 use std::collections::HashMap;
 
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// Earlier nodes by primitive name and operands (sorted for commutative
-/// primitives): their primitives, to compare parameters, and values.
 type Seen = HashMap<(&'static str, Vec<Var>), Vec<(Primitive, Var)>>;
 
-/// `graph` with each repeated computation replaced by its first.
 pub(crate) fn cse(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -24,7 +15,6 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
     for node in graph.nodes() {
         out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        // A custom op's function is opaque: each call made, as written.
         if let Primitive::CustomCall { .. } = node.primitive {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
@@ -57,7 +47,6 @@ fn commutative(p: &Primitive) -> bool {
     matches!(p, Add | Mul | Max | Eq)
 }
 
-/// [`cse`] as a pass.
 pub(crate) struct Cse;
 
 impl<M: Module> CompilerPass<M> for Cse {

@@ -1,7 +1,3 @@
-"""Attention: F.flash_attention ([B, S, N, H], grouped-query,
-causal), and the MPS compiler running attention, however written, as one
-flash-attention kernel (lumen/graph_compiler/mps/attention.rs, attention.metal)."""
-
 import warnings
 
 import numpy as np
@@ -37,7 +33,6 @@ def tensors(device, dtype, *shapes, seed=0):
         ts = [lumen.from_numpy(a).to(device).to(dtype=dtype) for a in arrays]
     except RuntimeError as e:
         pytest.skip(str(e))
-    # The values as rounded to `dtype`, for the reference.
     return ts, [lumen.to_numpy(t.to(dtype="float32")) for t in ts]
 
 
@@ -47,9 +42,6 @@ def steps(f, *args):
 
 TOL = {"float32": 2e-6, "float16": 2e-3, "bfloat16": 2e-2}
 
-# (B, Sq, Sk, N, Nkv, H, Hv), causal: plain, ragged sizes, grouped-query,
-# causal, decoding (one and few queries), head sizes that differ, and a
-# key length past one block.
 CASES = [
     ((2, 100, 100, 4, 4, 64, 64), False),
     ((1, 130, 77, 2, 2, 32, 32), False),
@@ -60,7 +52,6 @@ CASES = [
 ]
 
 
-# The CPU (the reference executor, as traced) on smaller ones.
 CPU_CASES = [
     ((2, 9, 9, 4, 2, 8, 8), True),
     ((1, 6, 11, 2, 2, 16, 8), False),
@@ -196,7 +187,6 @@ def test_attention_epilogues_fuse(f, sq):
     agreeing with the CPU and with the unfused plan."""
     shapes = [(1, sq, 4, 32), (1, 96, 4, 32), (1, 96, 4, 32), (sq, 128), (128,)]
     ts, arrays = tensors("mps", "float32", *shapes)
-    # Profiled as the attention and its epilogue: flash_attention → reshape → ...
     (label,) = steps(f, *ts)
     assert label.startswith("flash_attention → reshape → "), label
     got = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
@@ -233,9 +223,7 @@ def test_attention_computes_its_scores_as_traced():
 @pytest.mark.parametrize(
     "f",
     [
-        # The softmax in f16.
         lambda q, k, v: F.softmax(q.half() @ k.half().transpose(-1, -2), -1).to(dtype=q.dtype) @ v,
-        # The scores accumulated in bf16.
         lambda q, k, v: F.softmax(
             prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
         ).to(dtype=q.dtype)
@@ -250,9 +238,6 @@ def test_attention_the_kernel_cannot_compute_as_traced_runs_as_traced(f):
     assert "flash_attention" not in _sources(f, *m)
 
 
-# Smaller (the CPU's gradient is the reference): grouped-query and causal,
-# a query past the key block, few queries (decoding), head sizes that
-# differ, the backward kernels' largest head.
 BACKWARD_CASES = [
     ((1, 40, 40, 4, 2, 32, 32), True),
     ((1, 70, 20, 2, 2, 16, 16), False),
@@ -334,7 +319,6 @@ def test_attention_dropout_is_in_its_kernels(case, attention, dtype, determinist
     lumen.config.compiler.deterministic = deterministic
     try:
         labels = steps(step, q, k, v, w)
-        # The forward's label has its epilogue's primitives after it.
         kernels = [label.split(" → ")[0] for label in labels]
         for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic)]:
             assert kernel in kernels, labels
@@ -398,7 +382,6 @@ def test_written_attention_backward_is_flash_attention(scale):
 
     grad = lumen.grad(loss, (0, 1, 2))
     labels = steps(grad, q, k, v)
-    # The forward's label has its epilogue's primitives after it.
     kernels = [label.split(" → ")[0] for label in labels]
     for kernel in ["flash_attention", *backward_kernels(32, 32, "float32")]:
         assert kernel in kernels, labels

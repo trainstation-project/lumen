@@ -1,36 +1,3 @@
-"""Training a 2-layer transformer, the torch way: ``opt.zero_grad()``,
-``loss.backward()``, ``opt.step()`` (AdamW, ``examples/optim.py``), the
-whole step one compiled function.
-
-The task: continue arithmetic sequences mod ``VOCAB`` (``a, a + d, a + 2d,
-...``, a random start and step each), predicting each next token. The
-step is not given: a token's successor depends on the one before it, so
-the model has to attend back (causal attention, ``F.flash_attention``,
-which the MPS compiler runs as one kernel, its dropout drawn inside it).
-
-Mixed precision, by hand: the weights (AdamW's master copies), the
-residual stream, the norms and the loss are float32; each matmul's inputs
-are cast to bfloat16 where it reads them (``.bfloat16()``), accumulated in
-float32, its result float32 where float32 reads it (a residual, the
-logits) and bfloat16 where bfloat16 does (q, k, v, the MLP's hidden
-layer).
-
-Deterministic (``lumen.config.compiler.deterministic``): the kernels that
-would add in no fixed order (atomically: a split-K matmul's chunks, flash
-attention's dQ) sum in a fixed one, so a run's results are the same bits
-each time.
-
-After training, a few more steps run under the profiler (``lumen.profiler``,
-as ``torch.profiler``): its table of ops and kernels by MPS time, and a
-Chrome trace, ``transformer_trace.json`` (open it in Perfetto or
-``chrome://tracing``): each step a ``train step`` range, its kernels on the
-MPS timeline. Then the training step's graph and plan as a page,
-``transformer_graph.html`` (``dump_graph``): the traced graph, the fused
-and unfused plans, each kernel profiled.
-
-Run on MPS: ``python examples/transformer.py``.
-"""
-
 import numpy as np
 from optim import AdamW
 
@@ -40,11 +7,9 @@ from lumen.profiler import ProfilerActivity, profile, record_function
 
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
 BATCH, STEPS, DROPOUT = 32, 300, 0
-# Gradient accumulation: each step's microbatches, a backward pass each.
 ACCUM = 1
 PROFILED_STEPS = 10
 
-# Before compiling: a plan is compiled for the flags set when it is.
 lumen.config.compiler.deterministic = True
 lumen.config.compiler.split_k = False
 lumen.config.compiler.fuse = True
@@ -82,16 +47,13 @@ class _MLP(lumen.autograd.Function):
         h = h.bfloat16()
         dy = dy.bfloat16()
 
-        # y = h @ wd.t(), in bfloat16.
         dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
         dwd = F.matmul(dy.t(), h, "float32", "float32")
 
-        # h = sigmoid(g) * u; sigmoid' = sigmoid * (1 - sigmoid).
         du = (dh.float() * g_sig_f32).bfloat16()
         dg_sig = dh * u_f32
         dg = (dg_sig.float() * g_sig_f32 * (1 - g_sig_f32)).bfloat16()
 
-        # g = x @ wg.t(), u = x @ wu.t(), in bfloat16.
         dx = F.matmul(dg, wg.bfloat16(), "float32", "float32")
         dx_ = F.matmul(du, wu.bfloat16(), "float32", "float32")
         dx = dx + dx_
@@ -129,10 +91,6 @@ class Attention(lumen.nn.Module):
     @lumen.profiler.record_function("attention")
     def __call__(self, x, batch, dropout_p):
         tokens, dim = x.shape
-        # [batch, seq, heads, head dim], as flash attention takes them.
-        # x @ w.t() (``nn.Linear``'s), one dot of the three: their weights
-        # one [3 * dim, dim] block (PyTorch's fused QKV weight), each a
-        # contiguous part of it the optimizer updates in place.
         q, k, v = (
             F.matmul(x.bfloat16(), w.t().bfloat16(), accum_dtype="float32", output_dtype="bfloat16").reshape(
                 batch, tokens // batch, HEADS, dim // HEADS
@@ -147,8 +105,6 @@ class Attention(lumen.nn.Module):
         x = F.softmax(x, dim=-1).to("bfloat16")
         x = F.matmul(x, v, accum_dtype="float32", output_dtype="bfloat16")
 
-        # x = F.flash_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
-        # float32, as the residual it is added to.
         x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "float32")
         return x
 
@@ -164,14 +120,11 @@ class MLP(lumen.nn.Module):
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
         return _MLP.apply(x, self.wg, self.wu, self.wd)
-        # g = F.relu(x @ self.wg.t().bfloat16())
-        # u = x @ self.wu.t().bfloat16()
         g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         g = F.sigmoid(g)
         u = F.matmul(x, self.wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         h = g * u
         h = h.bfloat16()
-        # float32, as the residual it is added to.
         return F.matmul(h, self.wd.t().bfloat16(), "float32", "bfloat16")
 
 
@@ -274,8 +227,6 @@ model = Transformer(
 )
 opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 
-# Compile from the shapes (placing the weights and the optimizer's moments
-# on the device), then load the initial weights.
 train_step = lumen.compile(train_step, device="mps")
 ids_meta = meta(BATCH, SEQ, dtype="int64")
 train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int64")] * 2)
@@ -284,7 +235,6 @@ rng = np.random.default_rng(0)
 
 
 def init(name, shape):
-    # Norm scales one; matrices normal, scaled by 1 / sqrt(fan in).
     if len(shape) == 1:
         return np.ones(shape, np.float32)
     return (rng.standard_normal(shape) / np.sqrt(shape[1])).astype(np.float32)
@@ -312,16 +262,9 @@ def microbatches():
 
 for step in range(STEPS + 1):
     loss = train_step(model, opt, *microbatches())
-    # if step % 50 == 0:
-    # print(f"step {step:3d}  loss {loss.item():.4f}")
 
-# Accuracy on new sequences, past the first two tokens (the step is known
-# only from the second on), without dropout.
 x, _, targets = batch()
 
-# Profile a few more steps (their batches built first, so the trace holds
-# the steps alone), each in its own range; synchronize so the last step's
-# kernels are in it.
 batches = [microbatches() for _ in range(PROFILED_STEPS)]
 lumen.mps.synchronize()
 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
@@ -333,7 +276,5 @@ print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=20))
 prof.export_chrome_trace("transformer_trace.json")
 print("wrote transformer_trace.json")
 
-# The training step's graph and plan, profiled on new tensors of its
-# types (the model's weights untouched).
 train_step.dump_graph("transformer_graph.html")
 print("wrote transformer_graph.html")

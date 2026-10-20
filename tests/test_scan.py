@@ -1,8 +1,3 @@
-"""Scans: ``F.cumsum`` (``torch.cumsum``) and the ``cumsum`` primitive
-(``lax.cumsum``: along an axis, either way, accumulated in its own dtype),
-its gradient (the cotangent summed the other way), and its MPS kernels
-(``lumen/ops/scan/mps``) against the reference."""
-
 import numpy as np
 import pytest
 
@@ -12,8 +7,6 @@ from lumen import prims
 
 DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
 
-# (shape, axis): a row a threadgroup, a column a thread; too few of them to
-# fill the GPU (split into chunks); short rows; an empty axis.
 CASES = [((4, 1000), 1), ((1, 70000), 1), ((3000, 3), 0), ((3, 50, 7), 1), ((8, 3), -1), ((5, 0, 3), 1)]
 
 

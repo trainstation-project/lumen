@@ -71,7 +71,7 @@ fn events_from_an_earlier_session_are_dropped() {
     let guard = record_function("straddles");
     stop().unwrap();
     start(cpu()).unwrap();
-    drop(guard); // ends during the second session, but began in the first
+    drop(guard);
     let p = stop().unwrap().for_thread(thread_id());
     assert!(named(&p, "straddles").is_empty());
 }
@@ -103,7 +103,7 @@ fn guards_dropped_out_of_order_are_tolerated() {
         let a = record_function("a");
         let b = record_function("b");
         drop(a);
-        let c = record_function("c"); // `b` is still open: it is c's parent
+        let c = record_function("c");
         drop(b);
         drop(c);
     });
@@ -121,7 +121,6 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
     assert_eq!(zeros.kind, EventKind::Op);
     assert_eq!(one(&p, "lumen::empty").parent, Some(zeros.id));
     assert!(named(&p, "lumen::zero_").is_empty());
-    // select = narrow + squeeze_dim
     let select = one(&p, "lumen::select");
     assert_eq!(one(&p, "lumen::narrow").parent, Some(select.id));
     let fill = one(&p, "lumen::fill_");
@@ -238,7 +237,7 @@ fn events_on_other_threads_carry_their_own_thread_id() {
 #[test]
 fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     let p = profile(with_memory(), || {
-        drop(Tensor::zeros(&[2, 3], DType::F32)); // 24 bytes
+        drop(Tensor::zeros(&[2, 3], DType::F32));
     });
     let memory = named(&p, "[memory]");
     assert_eq!(memory.len(), 2);
@@ -327,7 +326,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
         let _op = record_function("op");
         let t = now_ns();
         record_gpu("Memcpy HtoD", Device::Cuda(0), t, t + 1000);
-        record_gpu("Memcpy HtoD", Device::Mps(0), t, t + 1000); // MPS not enabled
+        record_gpu("Memcpy HtoD", Device::Mps(0), t, t + 1000);
     });
     let gpu = named(&p, "Memcpy HtoD");
     assert_eq!(gpu.len(), 1);
@@ -361,7 +360,6 @@ fn device_work_is_attributed_to_the_issuing_op() {
 #[test]
 fn device_work_needs_its_activity() {
     let p = profile(cpu(), || {
-        // Checked inside the session: outside it, another test's may run.
         assert!(!device_enabled(Device::Cuda(0)));
         let t = now_ns();
         record_gpu("Memset", Device::Cuda(0), t, t + 10);
@@ -528,7 +526,6 @@ fn host_kernels_are_apart_from_their_dispatch() {
         ),
         format!("\"pid\":{host},\"tid\":0,\"args\":{{\"name\":\"CPU\"}}"),
         format!("\"pid\":{dispatch},\"tid\":0,\"args\":{{\"name\":\"CPU dispatch\"}}"),
-        // Last: after the dispatch (no device here).
         format!("\"pid\":{host},\"tid\":0,\"args\":{{\"sort_index\":1}}"),
     ] {
         assert!(trace.contains(&needle), "missing {needle} in\n{trace}");
@@ -612,7 +609,7 @@ mod mps {
         let t = Tensor::zeros(&[1 << 24], on_mps(DType::F32));
         let p = profile(config, || {
             for _ in 0..8 {
-                t.zero_(); // Metal fills of one tensor, not waited on
+                t.zero_();
                 t.fill_(2.0f32);
             }
         });
@@ -663,7 +660,7 @@ mod mps {
         let p = profile(config, || {
             t.transpose(0, 1).narrow(1, 0, 32).zero_();
         });
-        let fill = one(&p, "Fill"); // the strided kernel
+        let fill = one(&p, "Fill");
         assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
     }
 
@@ -698,8 +695,8 @@ mod cuda {
             .dtype(DType::F32)
             .device(Device::Cuda(0));
         let p = profile(config, || {
-            let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], on_gpu); // HtoD
-            assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0]); // DtoH
+            let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], on_gpu);
+            assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0]);
         });
         let htod = one(&p, "Memcpy HtoD");
         within(htod, one(&p, "lumen::from_slice"), 1_000_000);

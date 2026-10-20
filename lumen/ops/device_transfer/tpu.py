@@ -1,7 +1,3 @@
-"""The host-to-TPU copy, in lumen's Pallas: the host's bytes (an argument of
-the program, whole rows) copied to the destination's rows. See
-``lumen/ops/device_transfer/tpu.rs``."""
-
 from lumen import pallas as pl
 from lumen.ops.tpu import pallas
 

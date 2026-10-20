@@ -45,7 +45,6 @@ mod dtype {
                 assert_eq!(t.get::<$t>(&[0]), a);
                 t.set(&[1], a);
                 assert_eq!(t.to_vec::<$t>(), vec![a, a]);
-                // nbytes = numel * itemsize
                 let m = Tensor::zeros(&[2, 3], $dtype);
                 assert_eq!(m.dtype(), $dtype);
                 assert_eq!(m.to_vec::<$t>(), vec![<$t as Element>::ZERO; 6]);
@@ -90,8 +89,6 @@ mod dtype {
 
     #[test]
     fn views_work_for_every_dtype() {
-        // Views are dtype-agnostic (they only move metadata), but check one
-        // non-trivial element size to be sure offsets are in *elements*.
         let t = Tensor::arange(6, DType::F64).reshape(&[2, 3]);
         let row = t.select(0, 1);
         assert_eq!(row.storage_offset(), 3);
@@ -124,7 +121,6 @@ mod options {
 
     #[test]
     fn full_infers_dtype_from_the_fill_value() {
-        // torch.full((2,), 7).dtype == int64; True -> bool; 1.5 -> float32
         let i = Tensor::full(&[2], 7, TensorOptions::new());
         assert_eq!(i.dtype(), DType::I64);
         assert_eq!(i.to_vec::<i64>(), vec![7, 7]);
@@ -162,7 +158,6 @@ mod options {
 
     #[test]
     fn arange_infers_dtype_from_end() {
-        // torch.arange(4).dtype == int64; torch.arange(2.5) == [0., 1., 2.]
         let i = Tensor::arange(4, TensorOptions::new());
         assert_eq!(i.dtype(), DType::I64);
         assert_eq!(i.to_vec::<i64>(), vec![0, 1, 2, 3]);
@@ -202,7 +197,7 @@ mod fill {
     fn fill_converts_the_value_to_the_dtype() {
         let i = Tensor::zeros(&[3], DType::I32);
         assert_eq!(i.fill_(2.9).to_vec::<i32>(), vec![2; 3]);
-        assert_eq!(i.fill_(-1).to_vec::<i32>(), vec![-1; 3]); // all-0xFF bytes: memset
+        assert_eq!(i.fill_(-1).to_vec::<i32>(), vec![-1; 3]);
         let b = Tensor::zeros(&[2], DType::Bool);
         assert_eq!(b.fill_(true).to_vec::<bool>(), vec![true, true]);
         let h = Tensor::zeros(&[2], DType::F16);
@@ -216,8 +211,8 @@ mod fill {
     #[test]
     fn fill_writes_through_views_only() {
         let t = Tensor::arange(12, DType::F32).reshape(&[3, 4]);
-        t.select(0, 1).fill_(-1.0); // contiguous row
-        t.select(1, 2).zero_(); // strided column
+        t.select(0, 1).fill_(-1.0);
+        t.select(1, 2).zero_();
         assert_eq!(
             t.to_vec::<f32>(),
             vec![
@@ -254,7 +249,6 @@ mod fill {
 }
 
 mod storage_semantics {
-    //! Tests pinning down the PyTorch/JAX-style storage semantics.
 
     use crate::{DType, Tensor};
 
@@ -284,7 +278,6 @@ mod storage_semantics {
 
     #[test]
     fn mutation_through_one_view_is_visible_through_aliases() {
-        // PyTorch semantics: `b = a.view(2, 3); b[0, 1] = 99` changes `a`.
         let t = Tensor::arange(6, DType::F32);
         let m = t.reshape(&[2, 3]);
         m.set(&[0, 1], 99.0f32);
@@ -308,7 +301,6 @@ mod storage_semantics {
         assert_eq!(row0.shape(), &[3]);
         assert_eq!(row0.to_vec::<f32>(), vec![0.0, 1.0, 2.0]);
         assert_eq!(row1.to_vec::<f32>(), vec![3.0, 4.0, 5.0]);
-        // Row views alias the matrix storage.
         assert!(row0.shares_storage_with(&t));
     }
 
@@ -321,7 +313,6 @@ mod storage_semantics {
         assert!(!tt.is_contiguous());
         assert!(tt.shares_storage_with(&t));
         assert_eq!(tt.get::<f32>(&[2, 1]), 5.0);
-        // Logical contents are the transpose.
         assert_eq!(tt.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
     }
 
@@ -350,7 +341,6 @@ mod storage_semantics {
         let v = t.narrow(0, 1, 2);
         let id = t.storage_id();
         drop(t);
-        // Storage outlives the original tensor while a view is alive.
         assert_eq!(v.storage_id(), id);
         assert_eq!(v.to_vec::<f32>(), vec![1.0, 2.0]);
     }
@@ -406,7 +396,7 @@ mod device_kernels {
     #[test]
     fn to_same_device_is_a_no_op_copy() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
-        let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
+        let view = t.narrow(1, 1, 2);
         let same = view.to(Device::Cpu(0));
         assert!(same.shares_storage_with(&view));
         assert_eq!(same.storage_offset(), view.storage_offset());
@@ -416,7 +406,7 @@ mod device_kernels {
     #[test]
     fn to_a_different_device_copies_only_the_view_and_keeps_its_layout() {
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
-        let view = t.narrow(1, 1, 2); // [[1, 2], [4, 5]], offset 1, strides [3, 1]
+        let view = t.narrow(1, 1, 2);
         assert_eq!(view.storage_offset(), 1);
         assert!(view.to(Device::Cpu(0)).shares_storage_with(&view));
         assert_eq!(view.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
@@ -445,7 +435,7 @@ mod device_kernels {
     #[test]
     fn byte_pattern_fills_leave_other_elements_alone() {
         let t = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-        t.select(0, 1).zero_(); // contiguous: elements 3..6
+        t.select(0, 1).zero_();
         assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
     }
 
@@ -465,7 +455,7 @@ mod device_kernels {
     #[test]
     fn strided_fill_leaves_skipped_elements_alone() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
-        t.select(1, 1).fill_(0); // column 1: storage elements 1 and 4
+        t.select(1, 1).fill_(0);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
     }
 
@@ -478,7 +468,6 @@ mod device_kernels {
         );
         assert_eq!(t.storage().nbytes(), 6 * 4);
         assert_eq!(t.fill_(3).to_vec::<i32>(), vec![3; 6]);
-        // Defaults: float32 on the CPU.
         let d = unsafe { Tensor::empty(&[1], TensorOptions::new()) };
         assert_eq!((d.dtype(), d.device()), (DType::F32, Device::Cpu(0)));
     }
@@ -512,7 +501,6 @@ mod mps {
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
-        // Views share the Metal buffer.
         let col = t.select(1, 1);
         assert!(col.shares_storage_with(&t));
         assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
@@ -550,16 +538,15 @@ mod mps {
         require_mps!();
         use crate::tensor::dtype::f16;
         let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps(0));
-        let n = 3000; // several threadgroups
-        let halves = crate::Tensor::full(&[n], 1.5, on_mps(DType::F16)); // fill_u16
+        let n = 3000;
+        let halves = crate::Tensor::full(&[n], 1.5, on_mps(DType::F16));
         assert_eq!(halves.to_vec::<f16>(), vec![f16::from_f32(1.5); n]);
-        let floats = crate::Tensor::ones(&[n], on_mps(DType::F32)); // fill_u32
+        let floats = crate::Tensor::ones(&[n], on_mps(DType::F32));
         assert_eq!(floats.to_vec::<f32>(), vec![1.0; n]);
-        let doubles = crate::Tensor::full(&[n], -2.25, on_mps(DType::F64)); // fill_u64
+        let doubles = crate::Tensor::full(&[n], -2.25, on_mps(DType::F64));
         assert_eq!(doubles.to_vec::<f64>(), vec![-2.25; n]);
         let longs = crate::Tensor::full(&[n], i64::MIN + 7, on_mps(DType::I64));
         assert_eq!(longs.to_vec::<i64>(), vec![i64::MIN + 7; n]);
-        // A contiguous sub-range at an offset: only the view's elements change.
         let t = crate::Tensor::zeros(&[4, 5], on_mps(DType::F32));
         t.select(0, 2).fill_(9.5);
         let mut expected = vec![0.0; 20];
@@ -574,8 +561,8 @@ mod mps {
             .dtype(DType::F32)
             .device(Device::Mps(0));
         let t = crate::Tensor::arange(12, opts).reshape(&[3, 4]);
-        t.select(0, 1).zero_(); // contiguous: the dense Metal kernel at an offset
-        t.select(1, 3).fill_(2.5); // strided: the strided Metal kernel
+        t.select(0, 1).zero_();
+        t.select(1, 3).fill_(2.5);
         assert_eq!(
             t.to_vec::<f32>(),
             vec![0.0, 1.0, 2.0, 2.5, 0.0, 0.0, 0.0, 2.5, 8.0, 9.0, 10.0, 2.5]
@@ -617,7 +604,6 @@ mod mps {
         require_mps!();
         use crate::tensor::dtype::f16;
         let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps(0));
-        // A strided view of a permuted 3-D block, for each element size.
         let view = |t: &crate::Tensor| t.permute(&[2, 0, 1]).narrow(0, 1, 2).narrow(2, 0, 3);
         let expected = |fill: f64| -> Vec<f64> {
             let base = crate::Tensor::zeros(&[4, 3, 5], TensorOptions::new().dtype(DType::F64));
@@ -636,7 +622,7 @@ mod mps {
             .collect();
         assert_eq!(halves.to_vec::<f16>(), want);
         let floats = crate::Tensor::ones(&[4, 3, 5], on_mps(DType::F32));
-        view(&floats).zero_(); // strided zeros
+        view(&floats).zero_();
         let want: Vec<f32> = expected(-1.0).iter().map(|&x| (x + 1.0) as f32).collect();
         assert_eq!(floats.to_vec::<f32>(), want);
         let doubles = crate::Tensor::zeros(&[4, 3, 5], on_mps(DType::F64));
@@ -645,7 +631,7 @@ mod mps {
     }
 }
 
-#[cfg(lumen_cuda_linked)] // needs cudart and a GPU
+#[cfg(lumen_cuda_linked)]
 mod cuda {
     use crate::device::cuda;
     use crate::{DType, Device, Tensor, TensorOptions};
@@ -671,7 +657,6 @@ mod cuda {
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
-        // Views share the device buffer.
         let col = t.select(1, 1);
         assert!(col.shares_storage_with(&t));
         assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
@@ -708,7 +693,6 @@ mod cuda {
 }
 
 mod meta {
-    //! The meta device: tensors with a shape, dtype and strides but no data.
 
     use crate::{DType, Device, Tensor, TensorOptions};
 
@@ -716,10 +700,6 @@ mod meta {
         TensorOptions::new().dtype(dtype).device(Device::Meta(0))
     }
 
-    /// Parameters packed into one block interleaved (`Tensor::pack`'s
-    /// `interleave`, `merge_dots`' gated pairs): each a stride-K view of it,
-    /// element `j` of the `i`th at `j K + i`; members of one size, as many as
-    /// K, or an error.
     #[test]
     fn parameters_pack_interleaved() {
         let options = || TensorOptions::new().device(Device::Meta(0));
@@ -747,7 +727,6 @@ mod meta {
                 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0
             ]
         );
-        // Members of different sizes, or not K of them: an error.
         let c = Tensor::zeros(&[2, 4], options());
         assert!(
             Tensor::pack(
@@ -850,11 +829,9 @@ mod to_dtype {
 #[test]
 fn half_floats_round_to_nearest_once() {
     use crate::tensor::dtype::{to_bf16, to_f16};
-    // Just above a halfway point (its sticky bit the float32's last): up.
     let above = f64::from(f32::from_bits(0x3f80_8001));
     assert_eq!(to_bf16(above).to_bits(), 0x3f81);
     assert_eq!(to_bf16(-28.312_508_f32 as f64).to_f32(), -28.375);
-    // Halfway: to even, either way.
     assert_eq!(
         to_bf16(f64::from(f32::from_bits(0x3f80_8000))).to_bits(),
         0x3f80
@@ -863,13 +840,11 @@ fn half_floats_round_to_nearest_once() {
         to_bf16(f64::from(f32::from_bits(0x3f81_8000))).to_bits(),
         0x3f82
     );
-    // float16: 1 + 2^-11 (halfway) + 2^-40 (beyond float32) is above it.
     assert_eq!(
         to_f16(1.0 + 2f64.powi(-11) + 2f64.powi(-40)).to_bits(),
         0x3c01
     );
     assert_eq!(to_f16(1.0 + 2f64.powi(-11)).to_bits(), 0x3c00);
-    // Exact, signed zeros, the extremes.
     assert_eq!(to_bf16(1.5).to_f32(), 1.5);
     assert_eq!(to_bf16(-1e-300).to_bits(), 0x8000);
     assert!(to_bf16(f64::INFINITY).is_infinite());
@@ -879,7 +854,6 @@ fn half_floats_round_to_nearest_once() {
 #[test]
 fn narrow_dtypes_are_ml_dtypes_bytes() {
     use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2, i2, i4, u4};
-    // As ml_dtypes 0.6 stores them.
     let values = [-1.5, 448.0, 1000.0, f64::NAN, f64::INFINITY, -0.0];
     let bytes = |f: fn(f64) -> u8| values.map(f);
     assert_eq!(
@@ -898,7 +872,6 @@ fn narrow_dtypes_are_ml_dtypes_bytes() {
     assert_eq!([-1.0, -2.0, 1.0].map(|x| i2::from_f64(x).0), [3, 2, 1]);
     assert_eq!(i4(8).to_f64(), -8.0);
     assert_eq!(u4(15).to_f64(), 15.0);
-    // Every float8 is its byte again (but NaNs, of one byte each).
     for b in 0..=255u8 {
         for (to, from) in [
             (
@@ -915,7 +888,6 @@ fn narrow_dtypes_are_ml_dtypes_bytes() {
             }
         }
     }
-    // Halfway between 1 and 1.125 (e4m3): to even.
     assert_eq!(f8e4m3fn::from_f64(1.0625).to_f64(), 1.0);
     assert_eq!(f8e4m3fn::from_f64(1.1875).to_f64(), 1.25);
 }

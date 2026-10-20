@@ -4,14 +4,9 @@ use crate::ops::mps::{Grid, launch, u32_arg, u64_arg};
 use crate::ops::reduce::mps::kernel_dtype;
 use crate::{DType, Tensor};
 
-/// Rows of more elements take a threadgroup; shorter ones, a thread.
 const ROW_THREADS: usize = 64;
-/// Rows are split into chunks while fewer than this many threadgroups would
-/// scan them, each chunk of at least `ROW_CHUNK` elements.
 const ROW_GROUPS: usize = 256;
 const ROW_CHUNK: usize = 4096;
-/// Lines a thread each: split while fewer than this many threads would scan
-/// them, each chunk of at least `LINE_CHUNK` elements.
 const LINE_THREADS: usize = 16384;
 const LINE_CHUNK: usize = 64;
 

@@ -1,13 +1,3 @@
-"""TPU matmul throughput: ``a @ b`` compiled for the TPU (lumen's
-``dot_general`` kernel), by shape and dtype, in TFLOP/s.
-
-    python benchmarks/tpu_matmul.py [--dtype bfloat16] [--shapes 4096x4096x4096 ...] [--seconds S]
-
-Each shape is ``m x k x n``; a call's time is the mean of as many calls as
-take ``--seconds`` (after a quarter of that warming up), waited for once at
-the end.
-"""
-
 import argparse
 import time
 
@@ -32,7 +22,6 @@ def tflops(m, k, n, dtype, seconds):
     a = lumen.from_numpy(rng.standard_normal((m, k), dtype=np.float32)).to(dtype=dtype).to("tpu")
     b = lumen.from_numpy(rng.standard_normal((k, n), dtype=np.float32)).to(dtype=dtype).to("tpu")
     f = lumen.compile(lambda a, b: a @ b, device="tpu")
-    # Warmed up, then as many calls as take about `seconds`.
     start = time.perf_counter()
     while time.perf_counter() - start < seconds / 4:
         f(a, b).wait_()

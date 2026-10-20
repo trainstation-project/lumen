@@ -8,7 +8,6 @@ use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar, Tensor};
 
 unsafe extern "C" {
-    // In mps.mm.
     fn lumen_mps_launch_kernel(
         name: *const c_char,
         buffers: *const *const u8,

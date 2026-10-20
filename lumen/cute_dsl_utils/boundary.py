@@ -1,7 +1,3 @@
-# **************************************************
-# Copyright (c) 2026, Mayank Mishra
-# **************************************************
-
 import cutlass.cute as cute
 from cutlass import Boolean, range_constexpr
 

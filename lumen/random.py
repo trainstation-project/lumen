@@ -1,22 +1,3 @@
-"""``lumen.random``: random numbers, modeled on PyTorch's default generator
-(``torch.manual_seed``, ``torch.rand``, ``torch.randn``) and drawn as
-``torch.compile`` draws them: from a counter-based generator (Philox4x32-10,
-the ``random_bits`` primitive), each number computed from a seed and its
-position in one stream, so it fuses into whatever reads it (dropout's mask
-is computed where it is applied, forward and backward, never stored).
-
-The generator is a seed and an offset into that stream. A compiled
-function drawing numbers takes them as a hidden input; each draw in it
-reads its own run of the stream, after the previous draw's, and each call
-moves the offset past every number the function drew, so the next call
-draws new ones. ``manual_seed`` restarts the stream: the same seed, the
-same numbers, call for call.
-
-Draws run inside a function passed to ``lumen.compile``, as every lumen op.
-``get_rng_state`` and ``set_rng_state`` save and restore the generator
-between calls (a checkpoint's), and ``fork_rng`` draws without moving it.
-"""
-
 import contextlib
 
 from lumen.graph import prims, tracer
@@ -32,7 +13,6 @@ __all__ = [
     "set_rng_state",
 ]
 
-# The global generator: the seed, and the stream's next unread position.
 _seed = 0
 _offset = 0
 
@@ -244,7 +224,6 @@ def randint(*args, size=None, dtype="int64", device=None):
     _check_fits(low, high - 1, dtype)
     bits = _bits(size).to(dtype="uint64")
     if span > 1 << 32:
-        # A second draw's bits below the first's: 64 bits.
         bits = bits * prims.full(size, 1 << 32, "uint64") + _bits(size).to(dtype="uint64")
     span_t = prims.full(size, span, "uint64")
     r = bits - prims.div(bits, span_t) * span_t

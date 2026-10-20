@@ -9,11 +9,6 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
-// ---------------------------------------------------------------------
-// plans
-// ---------------------------------------------------------------------
-
-/// Values in `[-2, 2)` from a fixed-seed LCG, so tests are deterministic.
 pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
     let mut state = seed;
     let values: Vec<f32> = (0..shape.iter().product::<usize>())
@@ -27,7 +22,6 @@ pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
     Tensor::from_slice(&values, DType::F32).reshape(shape)
 }
 
-/// `plan.run` agrees exactly with `reference::run`.
 fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
     let plan = Plan::compile(g);
     let expected = reference::run(g, inputs).unwrap();
@@ -40,7 +34,6 @@ fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
     plan
 }
 
-/// The MLP block from run_graph.py: matmul, relu, matmul, softmax.
 pub(crate) fn mlp() -> Graph {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
@@ -106,7 +99,6 @@ pub(crate) fn mlp() -> Graph {
 fn plan_matches_reference() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
     let plan = check_against_reference(&mlp(), &inputs);
-    // Reshapes alias their operands: no step.
     assert!(
         plan.steps()
             .iter()
@@ -117,10 +109,6 @@ fn plan_matches_reference() {
 
 #[test]
 fn plan_reuses_workspace() {
-    // x → tanh → tanh → ... (10 times): each tanh writes over its operand,
-    // which dies there (in place, XLA's CanShareOperandBufferWithUser), all
-    // in the output's memory (the first from x, the input): no workspace,
-    // not nine intermediates (nor two, reused).
     let mut g = Graph::new();
     let mut v = g.input(ty(DType::F32, &[256]));
     for _ in 0..10 {
@@ -131,10 +119,6 @@ fn plan_reuses_workspace() {
     assert_eq!(plan.workspace_bytes(), 0, "{plan}");
 }
 
-/// The steps run in the order of whichever schedule needs the least
-/// workspace (XLA's memory scheduler): here, three values each reduced as
-/// soon as it is computed, one alive at a time, not all three computed
-/// first as traced.
 #[test]
 fn plan_schedules_steps_to_shrink_the_workspace() {
     let mut g = Graph::new();
@@ -155,23 +139,15 @@ fn plan_schedules_steps_to_shrink_the_workspace() {
     let total = g.apply(Add, &[total, sums[2]]).unwrap();
     g.set_outputs(&[total]).unwrap();
     let plan = check_against_reference(&g, &[data(&[1024], 4)]);
-    // One value of 4 KiB at a time (and the sums), not three.
     assert!(plan.workspace_bytes() < 2 * 4096, "{plan}");
     let ops: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(&ops[..2], ["exp", "reduce_sum"], "{plan}");
 }
 
-/// With a memory limit, a value read early and late is computed again for
-/// its late reader rather than kept alive (XLA's rematerialization): here
-/// `h = exp(x)`, read by `tanh` and at the end, alive with `tanh(h)` (the
-/// rest is computed in place, in the output); its copy, computed at the
-/// end, is not. Nothing is recomputed without a limit, nor when the plan
-/// fits.
 #[test]
 #[cfg_attr(miri, ignore = "128 KiB values, too slow for Miri")]
 fn plan_rematerializes_under_a_memory_limit() {
     let mut g = Graph::new();
-    // Of 128 KiB each: at least XLA's smallest value to recompute.
     const N: usize = 32 << 10;
     let x = g.input(ty(DType::F32, &[N]));
     let h = g.apply(Exp, &[x]).unwrap();
@@ -198,15 +174,12 @@ fn plan_rematerializes_under_a_memory_limit() {
         (plan.workspace_bytes(), exps)
     };
     let (kept, exps) = plan(None);
-    // h and tanh(h) in the workspace; the rest in place, in the output.
     assert_eq!((kept, exps), (2 * 4 * N, 2));
     assert_eq!(plan(Some(kept)), (kept, 2));
     let (recomputed, exps) = plan(Some(1));
-    // h dies at tanh: it and its copy are never alive together.
     assert_eq!((recomputed, exps), (4 * N, 3));
 }
 
-/// Philox4x32-10 gives Random123's known answers (`kat_vectors`).
 #[test]
 fn philox_matches_random123() {
     use crate::ops::reference::philox4x32;
@@ -232,10 +205,6 @@ fn philox_matches_random123() {
     }
 }
 
-/// random_bits' element `i` is Philox's at counter `start + offset + i`
-/// (its operand's position, the primitive's): a draw is a run of one stream,
-/// so draws at offsets apart by a draw's size never overlap, and one
-/// starting inside another repeats its numbers.
 #[test]
 fn random_bits_are_a_counter_stream() {
     use crate::ops::reference::philox_bits;
@@ -273,17 +242,11 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     let flat = g.apply(Reshape { new_sizes: vec![6] }, &[e]).unwrap();
     g.set_outputs(&[e, flat, x]).unwrap();
     let plan = check_against_reference(&g, &[data(&[2, 3], 5)]);
-    // exp into out0, then copies of it (reshaped) into out1 and of the
-    // input into out2; the log is dropped.
     let ops: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(ops, ["exp", "reshape", "reshape"]);
     assert_eq!(plan.workspace_bytes(), 0);
 }
 
-/// A plan that owns its memory: the outputs in the workspace (one that is
-/// a parameter the parameter, one that is an argument a copy of it), the
-/// inputs read where they are, an argument as a parameter is (not copied
-/// in); each run overwrites the outputs, views of the workspace.
 #[test]
 fn owned_plans_place_outputs_in_the_workspace_and_read_inputs_in_place() {
     let mut g = Graph::new();
@@ -312,14 +275,11 @@ fn owned_plans_place_outputs_in_the_workspace_and_read_inputs_in_place() {
     };
     let second = run(&[0.0, 1.0, 0.0, 1.0]);
     assert_eq!(second[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]);
-    assert_eq!(first[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]); // overwritten
+    assert_eq!(first[0].to_vec::<f32>(), [0.0, 2.0, 0.0, 2.0]);
     let small = Tensor::zeros(&[plan.workspace_bytes() - 1], DType::U8);
     assert!(plan.run_in(&small, &[w.clone(), w.clone()]).is_err());
 }
 
-/// An argument read in place that is a parameter's memory too, where the
-/// plan writes the parameter's new value (donated): copied first, so the
-/// steps reading the argument after that write read its old value.
 #[test]
 fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
     let mut g = Graph::new();
@@ -337,19 +297,13 @@ fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
     let plan = Plan::compile_with(&g, &options);
     let workspace = Tensor::zeros(&[plan.workspace_bytes()], DType::U8);
     let w = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], DType::F32);
-    // x is w: z = x * 2w + x, from w's old value.
     let out = plan.run_in(&workspace, &[w.clone(), w.clone()]).unwrap();
     assert_eq!(out[0].to_vec::<f32>(), [3.0, 10.0, 21.0, 36.0]);
 }
 
-/// XLA's CanShareOperandBufferWithUser: a step writes over an operand of its
-/// type that dies there, if it reads it at the element it writes
-/// (elementwise); never one read later, a transpose's (other elements), a
-/// cast's to another dtype (other bytes), nor the caller's input.
 #[test]
 fn steps_write_over_operands_that_die_there() {
     let ty = |shape: &[usize]| TensorType::new(DType::F32, shape);
-    // The buffer `step` (by primitive name) writes, and those it reads.
     let at = |plan: &Plan, name: &str| {
         let step = plan
             .steps()
@@ -375,15 +329,12 @@ fn steps_write_over_operands_that_die_there() {
         g
     };
     let input = [data(&[3, 3], 1)];
-    // tanh over exp's value, which dies there: in place.
     let plan = check_against_reference(&build(Tanh, false), &input);
     let (out, ins) = at(&plan, "tanh");
     assert_eq!(ins, [out], "{plan}");
-    // exp's value read after: tanh writes new memory.
     let plan = check_against_reference(&build(Tanh, true), &input);
     let (out, ins) = at(&plan, "tanh");
     assert_ne!(ins, [out], "{plan}");
-    // A transpose reads other elements; a cast to bf16 other bytes.
     let transpose = Transpose {
         permutation: vec![1, 0],
     };
@@ -405,7 +356,6 @@ fn steps_write_over_operands_that_die_there() {
     let plan = Plan::compile(&g);
     let (out, ins) = at(&plan, "cast");
     assert_ne!(ins, [out], "{plan}");
-    // The caller's input: exp writes the output's memory, never x's.
     let (out, ins) = at(&plan, "exp");
     assert_eq!(
         (ins, out),
@@ -414,7 +364,6 @@ fn steps_write_over_operands_that_die_there() {
     );
 }
 
-/// A plan of `g` donating its first input, and the output's buffer.
 fn donating(g: &Graph) -> (Plan, Buffer) {
     let options = super::PlanOptions {
         scratch: None,
@@ -438,7 +387,6 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
 #[test]
 fn donated_inputs_hold_outputs_written_in_place() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
-    // exp(x) + x: the add reads x at the element it writes.
     let mut g = Graph::new();
     let x = g.input(ty.clone());
     let e = g.apply(Exp, &[x]).unwrap();
@@ -452,7 +400,6 @@ fn donated_inputs_hold_outputs_written_in_place() {
     assert!(result[0].shares_storage_with(&input));
     assert_eq!(result[0].to_vec::<f32>(), expected[0].to_vec::<f32>());
 
-    // A transpose reads other elements: it cannot overwrite its operand.
     let mut g = Graph::new();
     let x = g.input(TensorType::new(DType::F32, &[3, 3]));
     let t = g
@@ -466,8 +413,6 @@ fn donated_inputs_hold_outputs_written_in_place() {
     g.set_outputs(&[t]).unwrap();
     assert_eq!(donating(&g).1, Buffer::Output(0));
 
-    // exp(x) is written before x is read again: it takes new memory, and
-    // x * 2, the last reader, takes x's.
     let mut g = Graph::new();
     let x = g.input(ty.clone());
     let e = g.apply(Exp, &[x]).unwrap();
@@ -505,19 +450,14 @@ fn donated_inputs_hold_outputs_written_in_place() {
     assert_eq!(outputs, [Buffer::Output(0), Buffer::Input(0)], "{plan}");
 }
 
-/// An input donated to one output (`donate_into`) holds that output alone:
-/// another of its type, which could take its memory (the input's last
-/// reader), takes new memory; without the pairing it would take the input's.
 #[test]
 fn inputs_donated_into_an_output_hold_it_alone() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
-    // new = exp(w), then later = w * w (w's last reader); new is w's.
     let mut g = Graph::new();
     let w = g.input(ty.clone());
     let new = g.apply(Exp, &[w]).unwrap();
     let later = g.apply(Mul, &[w, w]).unwrap();
     g.set_outputs(&[later, new]).unwrap();
-    // Where each output is written: the step writing it's buffer.
     let at = |options: &super::PlanOptions| {
         let plan = Plan::compile_with(&g, options);
         let written: Vec<Buffer> = plan.steps().iter().map(|s| s.output.0).collect();
@@ -533,7 +473,6 @@ fn inputs_donated_into_an_output_hold_it_alone() {
         ..Default::default()
     });
     assert!(!written.contains(&Buffer::Input(0)), "{plan}");
-    // new written before w's last read: it cannot take w's memory either.
     let input = data(&[2, 3], 1);
     let expected = reference::run(&g, std::slice::from_ref(&input)).unwrap();
     let result = plan.run(std::slice::from_ref(&input)).unwrap();
@@ -542,13 +481,9 @@ fn inputs_donated_into_an_output_hold_it_alone() {
     }
 }
 
-/// A donated input packed in a block (`PlanOptions::blocks`: a weight a
-/// merged dot reads as part of its block) takes its new value only once no
-/// step reads the block either: the block's readers read its old value.
 #[test]
 fn donated_inputs_in_a_block_wait_for_its_readers() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
-    // new = exp(w), w's new value; later = b * b, b the block holding w.
     let mut g = Graph::new();
     let w = g.input(ty.clone());
     let b = g.input(TensorType::new(DType::F32, &[4, 3]));
@@ -565,13 +500,11 @@ fn donated_inputs_in_a_block_wait_for_its_readers() {
             },
         )
     };
-    // Alone, w takes its new value: nothing reads it after exp.
     let alone = plan(Vec::new());
     assert!(
         alone.steps().iter().any(|s| s.output.0 == Buffer::Input(0)),
         "{alone}"
     );
-    // In b: only if each step reading b comes before the one writing it.
     let packed = plan(vec![(1, vec![0])]);
     let steps = packed.steps();
     let writes = steps.iter().position(|s| s.output.0 == Buffer::Input(0));
@@ -581,15 +514,9 @@ fn donated_inputs_in_a_block_wait_for_its_readers() {
     if let (Some(w), Some(r)) = (writes, reads_block) {
         assert!(r < w, "{packed}");
     }
-    // Here b is read after exp: w's new value takes new memory.
     assert_eq!(writes, None, "{packed}");
 }
 
-/// A custom op's mutated operand (`CustomCall`, its function opaque) is its
-/// output's memory where nothing reads it after the call, in place; read
-/// after, the output has memory of its own (the operand copied there when it
-/// runs). A second mutated operand's output, a fusion output of the call,
-/// likewise.
 #[test]
 fn custom_calls_mutate_in_place_where_they_can() {
     let ty = TensorType::new(DType::F32, &[4]);
@@ -642,9 +569,6 @@ fn custom_calls_mutate_in_place_where_they_can() {
     assert!(written.iter().zip(&operands).all(|(w, o)| w != o), "{plan}");
 }
 
-/// A concatenate computed in place (its `in_place`): no step of its own, each
-/// operand's step writing in its result's memory, alive from the first
-/// of them to the last step reading the result.
 #[test]
 fn in_place_concatenates_are_written_by_their_operands_steps() {
     let mut g = Graph::new();
@@ -670,8 +594,6 @@ fn in_place_concatenates_are_written_by_their_operands_steps() {
     };
     assert_eq!(exp.output.0, neg.output.0, "{plan}");
     assert_eq!(mul.inputs[0].0, exp.output.0, "{plan}");
-    // Each operand's place in the result (the graph's, which the steps
-    // write at): the second's 3 columns after the first's.
     let placements = g.placements();
     let at = |v: usize| {
         placements[v]
@@ -727,7 +649,6 @@ fn kernel_scratch_is_placed_in_the_workspace() {
     let reduce = &plan.steps()[1];
     let (offset, bytes) = reduce.scratch.expect("the reduction's scratch");
     assert_eq!(bytes, 100);
-    // Clear of the exp's result, which the reduction reads.
     let Buffer::Workspace(e_at) = reduce.inputs[0].0 else {
         panic!("{plan}")
     };
@@ -756,7 +677,6 @@ fn plans_run_on_meta_tensors_compute_nothing() {
         (out.device(), out.shape(), out.dtype()),
         (crate::Device::Meta(0), &[4, 3][..], DType::F32)
     );
-    // Inputs must be on the device asked for.
     assert!(
         Plan::compile(&g)
             .run_on(&inputs, crate::Device::Cpu(0))
@@ -764,8 +684,6 @@ fn plans_run_on_meta_tensors_compute_nothing() {
     );
 }
 
-/// Plans on MPS, whose steps are Metal kernels, against the reference
-/// executor, for every primitive and dtype (MPS has no float64).
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps {
     use super::Primitive::*;
@@ -795,8 +713,6 @@ pub(crate) mod mps {
         crate::device::mps::MPS.is_available()
     }
 
-    /// `shape` of `dtype` from a fixed seed: floats in [-4, 4), integers in
-    /// [-100, 100) (wrapped for unsigned dtypes), bools alternating.
     pub(crate) fn values(dtype: DType, shape: &[usize], seed: u64) -> Tensor {
         let x = data(shape, seed).to_vec::<f32>();
         dispatch_dtype!(dtype, T => {
@@ -814,11 +730,6 @@ pub(crate) mod mps {
         })
     }
 
-    /// Values of 16-bit float `dtype` that sum exactly in it in any order:
-    /// -1, 0 or 1, one element in `period` nonzero (a sum of up to 128 of
-    /// them a sum of about 128 at most: integers both 16-bit floats hold).
-    /// They accumulate in their dtype, so another order than the
-    /// reference's rounds differently; on these, no order rounds.
     pub(crate) fn exact_values(dtype: DType, shape: &[usize], seed: u64, period: usize) -> Tensor {
         let x = data(shape, seed).to_vec::<f32>();
         let v: Vec<f64> = x
@@ -839,16 +750,10 @@ pub(crate) mod mps {
         dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
     }
 
-    /// The graph compiled for MPS (fused, `crate::graph_compiler::mps`) agrees
-    /// with the reference on the CPU: exactly for integers and bools, within
-    /// the dtype's rounding for floats (Metal's math functions and the
-    /// reference's, in double, differ in the last place).
     pub(crate) fn check(g: &Graph, inputs: &[Tensor]) {
         check_within(g, inputs, 0.0);
     }
 
-    /// [`check`], allowing floats a further `slack` of absolute error: the
-    /// float accumulation error of a large sum.
     pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
@@ -871,8 +776,6 @@ pub(crate) mod mps {
         }
     }
 
-    /// `exp(x - max) / sum(exp(x - max))` over the last dimension of `x`, of
-    /// `dtype` and `shape`, as `softmax` traces it.
     fn written_softmax(dtype: DType, shape: &[usize]) -> Graph {
         let mut g = Graph::new();
         let x = g.input(ty(dtype, shape));
@@ -896,7 +799,6 @@ pub(crate) mod mps {
         g
     }
 
-    /// Check the one-node graph `p` on inputs of `types`.
     fn check_node(p: Primitive, types: &[TensorType]) {
         check_node_within(p, types, 0.0);
     }
@@ -906,7 +808,6 @@ pub(crate) mod mps {
         let vars: Vec<_> = types.iter().map(|ty| g.input(ty.clone())).collect();
         let out = g.apply(p.clone(), &vars).unwrap();
         g.set_outputs(&[out]).unwrap();
-        // A 16-bit float sum or dot: on values it sums exactly.
         let count: Option<usize> = match &p {
             ReduceSum { axes, .. } => Some(axes.iter().map(|&d| types[0].shape[d]).product()),
             DotGeneral {
@@ -935,8 +836,6 @@ pub(crate) mod mps {
         TensorType::new(dtype, shape)
     }
 
-    /// Check constant `p` (`full` or `iota`), with an input of its type so
-    /// the plan runs on MPS: outputs the constant and `max(constant, x)`.
     fn check_constant(p: Primitive) {
         let out = p.infer(&[]).unwrap();
         let mut g = Graph::new();
@@ -966,7 +865,6 @@ pub(crate) mod mps {
                 check_node(p, &two);
             }
             check_node(Neg, std::slice::from_ref(&x));
-            // No bfloat16 kernels for these (the MPS compiler refuses them).
             if dtype.is_float() && dtype != DType::BF16 {
                 for p in [Exp, Log, Sqrt, Tanh, Logistic] {
                     check_node(p, std::slice::from_ref(&x));
@@ -995,7 +893,6 @@ pub(crate) mod mps {
                 check_node(Cast { new_dtype: to }, &[ty(from, &[64])]);
             }
         }
-        // Saturation and NaN.
         let f = Tensor::from_slice(&[300.0f32, -1e10, f32::NAN, 2.9], DType::F32);
         for to in [DType::I8, DType::U8, DType::I32, DType::U64, DType::Bool] {
             let mut g = Graph::new();
@@ -1006,15 +903,12 @@ pub(crate) mod mps {
         }
     }
 
-    /// 16-bit float dots accumulating in float32, written in their dtype or
-    /// float32 (`matmul_<dtype>_f32_<output>`), large and small tiles.
     #[test]
     fn widened_contractions() {
         if !available() {
             return;
         }
         for dtype in [DType::F16, DType::BF16] {
-            // Written in the operands' dtype, and in float32.
             for ((m, k, n), output_dtype) in [(37, 45, 29), (300, 70, 200)]
                 .into_iter()
                 .flat_map(|s| [(s, dtype), (s, DType::F32)])
@@ -1037,11 +931,6 @@ pub(crate) mod mps {
         if !available() {
             return;
         }
-        // Rows and columns, split into chunks and not, a middle axis, and
-        // axes that are not consecutive (a threadgroup per output). Then
-        // the same with size-1 dimensions, which normalization drops: axes
-        // apart across them (rows, columns, split), axes still apart
-        // (grouped), and size-1 axes alone (nothing reduced).
         let cases: [(&[usize], Vec<usize>); 13] = [
             (&[3, 50_000], vec![1]),
             (&[50_000, 3], vec![0]),
@@ -1070,9 +959,6 @@ pub(crate) mod mps {
                 let x = ty(dtype, shape);
                 check_node(ReduceMax { axes: axes.clone() }, std::slice::from_ref(&x));
                 if dtype != DType::Bool {
-                    // float32 accumulation error: about 1e-7 of the sum of
-                    // |x|, at most 4 an element (16-bit floats sum exactly
-                    // representable values, check_node_within).
                     let count: usize = axes.iter().map(|&d| shape[d]).product();
                     let slack = 1e-6 * 4.0 * count as f64;
                     let sum = ReduceSum {
@@ -1080,7 +966,6 @@ pub(crate) mod mps {
                         accum_dtype: dtype,
                     };
                     check_node_within(sum, std::slice::from_ref(&x), slack);
-                    // 16-bit floats accumulated in float32: on any values.
                     if matches!(dtype, DType::F16 | DType::BF16) {
                         let wide = ReduceSum {
                             axes: axes.clone(),
@@ -1115,7 +1000,6 @@ pub(crate) mod mps {
             if dtype == DType::Bool {
                 continue;
             }
-            // [b, m, k] x [b, k, n] and a contraction over two dimensions.
             let batched = DotGeneral {
                 lhs_contracting: vec![2],
                 rhs_contracting: vec![1],
@@ -1134,8 +1018,6 @@ pub(crate) mod mps {
                 output_dtype: dtype,
             };
             check_node(two, &[ty(dtype, &[3, 2, 4]), ty(dtype, &[4, 5, 3])]);
-            // The tiled kernel: sizes that are not multiples of its tiles,
-            // transposed operands, and two batch dimensions.
             let dot = |lc: usize, rc: usize, batch: Vec<usize>| DotGeneral {
                 lhs_contracting: vec![lc],
                 rhs_contracting: vec![rc],
@@ -1160,8 +1042,6 @@ pub(crate) mod mps {
                 dot(3, 2, vec![0, 1]),
                 &[ty(dtype, &[2, 3, 5, 7]), ty(dtype, &[2, 3, 7, 4])],
             );
-            // Enough output tiles for the floats' large-tile kernel, with
-            // edges in both dimensions.
             if dtype.is_float() {
                 check_node(
                     dot(1, 0, vec![]),
@@ -1186,8 +1066,6 @@ pub(crate) mod mps {
                 permutation: vec![2, 0, 1],
             };
             check_node(t, &[ty(dtype, &[2, 3, 4])]);
-            // Tiled (block swaps, sizes that are not multiples of the tile)
-            // and gathered (other permutations) transposes.
             for (shape, permutation) in [
                 (vec![3, 37, 45], vec![0, 2, 1]),
                 (vec![70, 33], vec![1, 0]),
@@ -1208,16 +1086,12 @@ pub(crate) mod mps {
                 };
                 check_node(slice, &[ty(dtype, &[4, 5, 6])]);
             }
-            // A softmax written out over the last dimension (one row
-            // kernel): rows shorter and longer than a threadgroup, one
-            // element, none.
             if matches!(dtype, DType::F16 | DType::F32) {
                 for shape in [vec![4, 7], vec![3, 1000], vec![2, 3, 1], vec![0, 5]] {
                     let g = written_softmax(dtype, &shape);
                     check(&g, &[values(dtype, &shape, 1)]);
                 }
             }
-            // Each dimension, operands of different sizes (one empty).
             for dimension in 0..3 {
                 let shape = |n| {
                     let mut shape = vec![3, 4, 5];
@@ -1255,7 +1129,6 @@ pub(crate) mod mps {
                 };
                 check_constant(iota);
             }
-            // Outputs that alias an input are copied (a reshape step).
             let mut g = Graph::new();
             let x = g.input(ty(dtype, &[2, 3]));
             let flat = g.apply(Reshape { new_sizes: vec![6] }, &[x]).unwrap();
@@ -1273,11 +1146,6 @@ pub(crate) mod mps {
         check(&mlp(), &inputs);
     }
 
-    /// cumsum on MPS agrees with the reference, along each kind of axis
-    /// (a row a threadgroup, a column or short row a thread; lines too few
-    /// to fill the GPU split into chunks, scanned in three launches), either
-    /// way: exactly for integers (wrapping), to float32 rounding for floats
-    /// (half and bfloat accumulated in float32).
     #[test]
     fn cumsum_runs_on_mps() {
         if !available() {
@@ -1308,7 +1176,6 @@ pub(crate) mod mps {
                     };
                     let y = g.apply(scan, &[x]).unwrap();
                     g.set_outputs(&[y]).unwrap();
-                    // Float rounding of a sum of `n` values of up to 2.
                     let slack = shape[axis] as f64 * 2.0 * f64::from(f32::EPSILON);
                     check_within(&g, &[values(dtype, shape, 1)], slack);
                 }
@@ -1316,12 +1183,6 @@ pub(crate) mod mps {
         }
     }
 
-    /// random_bits on MPS agrees with the reference, bit for bit: alone
-    /// (its own kernel, the seed and start read from buffers) and fused into
-    /// what reads it (a uniform float, a comparison: dropout's), the seed
-    /// and start read from buffers or taken by value (runtime scalars, as
-    /// compiled functions pass them), through a counter crossing 2^32 (the
-    /// carry into its high word), at the start plus the primitive's offset.
     #[test]
     fn random_bits_run_on_mps() {
         if !available() {
@@ -1376,10 +1237,6 @@ pub(crate) mod mps {
         }
     }
 
-    /// dynamic_slice and dynamic_update_slice on MPS agree with the
-    /// reference for every dtype and int32 or int64 indices, starts inside
-    /// and clamped (past the end, negative); dynamic_update_slice in place
-    /// (its operand donated) and copying.
     #[test]
     fn dynamic_slices_run_on_mps() {
         if !available() {
@@ -1411,7 +1268,6 @@ pub(crate) mod mps {
                 }
             }
         }
-        // In place: its operand donated.
         let mut g = Graph::new();
         let x = g.input(ty(DType::F32, &[4, 6]));
         let u = g.input(ty(DType::F32, &[1, 6]));

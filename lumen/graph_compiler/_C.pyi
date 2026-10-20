@@ -1,6 +1,3 @@
-"""The part of `lumen._C` that ``lumen/graph_compiler/python.rs`` defines
-(see ``lumen/_C.pyi``)."""
-
 from typing import Any, Optional, Sequence
 
 from lumen._C import DeviceLike

@@ -16,7 +16,6 @@ fn neural_engine_pid() -> u64 {
     (2 << 32) + u64::from(std::process::id())
 }
 
-/// TPU `i`'s timeline, apart from the CPU's and CUDA devices'.
 fn tpu_pid(i: usize) -> u64 {
     (3 << 32) + i as u64
 }
@@ -35,7 +34,6 @@ fn device_type(device: Device) -> (i32, i64) {
         Device::Cpu(_) => (0, -1),
         Device::Cuda(i) => (1, i as i64),
         Device::Mps(_) => (13, 0),
-        // PyTorch's XLA, as its traces of TPUs say.
         Device::Tpu(i) => (9, i as i64),
         Device::Meta(_) => (9, 0),
     }
@@ -101,7 +99,6 @@ fn types_args(e: &Event) -> String {
             let (dims, dtypes) = types_json(types);
             let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
         }
-        // PyTorch's key for them.
         if !strides.is_empty() {
             let strides: Vec<String> = strides
                 .iter()
@@ -129,8 +126,6 @@ pub(crate) fn trace(events: &[Event]) -> String {
     let mut neural_engine = false;
     for e in events {
         match e.kind {
-            // A Core ML step's (`compiler::mps::ane`): on the Neural Engine's own
-            // timeline.
             EventKind::HostKernel if e.name.starts_with("coreml") => {
                 neural_engine = true;
                 out.push(format!(
@@ -155,7 +150,6 @@ pub(crate) fn trace(events: &[Event]) -> String {
                     us(e.duration_ns()),
                     types_args(e),
                 ));
-                // Flow arrow from the dispatching op to its run.
                 if let Some(op) = e.parent.and_then(|p| events.iter().find(|o| o.id == p)) {
                     out.push(format!(
                         "{{\"ph\":\"s\",\"id\":{correlation},\"pid\":{cpu_pid},\"tid\":{},\"ts\":{},\"cat\":\"ac2g\",\"name\":\"ac2g\"}}",
@@ -220,7 +214,6 @@ pub(crate) fn trace(events: &[Event]) -> String {
                     device_type(e.device).1,
                     types_args(e),
                 ));
-                // Flow arrow from the issuing op to its GPU work.
                 if let Some(op) = e.parent.and_then(|p| events.iter().find(|o| o.id == p)) {
                     out.push(format!(
                         "{{\"ph\":\"s\",\"id\":{correlation},\"pid\":{cpu_pid},\"tid\":{},\"ts\":{},\"cat\":\"ac2g\",\"name\":\"ac2g\"}}",
@@ -282,7 +275,6 @@ pub(crate) fn trace(events: &[Event]) -> String {
             neural_engine_pid(),
         ));
     }
-    // In order: the dispatch, the devices, the Neural Engine, the CPU last.
     let mut order = vec![cpu_pid];
     order.extend(devices.iter().map(|&d| pid(d)));
     order.extend(neural_engine.then(neural_engine_pid));

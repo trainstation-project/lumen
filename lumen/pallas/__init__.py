@@ -1,31 +1,3 @@
-"""lumen's Pallas: TPU kernels written as Pallas kernels are, without JAX.
-
-A kernel is a Python function of refs (buffers: HBM, VMEM, SMEM, DMA
-semaphores), traced by lumen's tracer into a ``lumen._C.Kernel`` and
-lowered to Mosaic in Rust (``lumen/pallas/mosaic.rs``)::
-
-    from lumen import pallas as pl
-
-    def body(x, y, o, acc):
-        @pl.when(pl.program_id(2) == 0)
-        def _():
-            acc[...] = lumen.zeros(acc.shape)
-        acc[...] += pl.dot(x[...], y[...])
-
-    pl.emit_pipeline(body, grid=(mb, nb, kb),
-                     in_specs=[pl.BlockSpec((bm, bk), lambda i, j, k: (i, k)), ...],
-                     out_specs=[...])(x_hbm, y_hbm, o_hbm)
-
-Values in a kernel are lumen's traced tensors: lumen's ops (``@``,
-``lumen.functional``, ``.to(dtype)``, indexing, ``lumen.zeros``) work on
-them, lowered as Pallas lowers ``jax.numpy``'s. The API follows Pallas's
-(``jax.experimental.pallas`` and its ``tpu``), whose design this ports
-(Apache 2.0): ``ds``, ``program_id``, ``num_programs``, ``when``,
-``fori_loop``, ``BlockSpec``, ``emit_pipeline``, ``async_copy``,
-``make_async_copy``, ``VMEM``, ``SemaphoreType``, ``bitcast``,
-``multiple_of`` and the TPU's bit ops.
-"""
-
 from lumen._C import Kernel
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
@@ -124,7 +96,6 @@ class ds:
     def __init__(self, start, size=None, stride=None):
         if size is None:
             start, size = 0, start
-        # A stride of 0: one element, broadcast.
         self.start, self.size, self.stride = start, size, 1 if stride is None else stride
 
 
@@ -243,7 +214,6 @@ class Ref:
             else:
                 start, size, squeeze, stride = i, 1, True, 1
             if stride != 1:
-                # Whole in the window, its elements picked by the access.
                 strides.append((start, size, stride))
                 start, size = 0, n
             elif not squeeze:
@@ -299,8 +269,6 @@ class Ref:
 
     def __getitem__(self, index):
         if self.space == "vmem" and self.dtype != "bool":
-            # As Pallas: a load at the window's starts, its elements
-            # squeezed after.
             access = self._access(index)
             starts = [_i32(a).var for a, _, _, _ in access]
             sizes = [k for _, k, _, _ in access]
@@ -318,8 +286,6 @@ class Ref:
             sizes, strides = [k for _, k, _ in strided], [s for _, _, s in strided]
             return TracedTensor(self.kernel, self.kernel.load_strided(window.var, starts, sizes, strides))
         if self.ndim and not window.ndim:
-            # An element: its window of ones loaded, then its value (as
-            # Pallas: Mosaic loads vectors).
             window, _ = self._strided(index, squeezing=False)
             return TracedTensor(self.kernel, self.kernel.load(window.var)).reshape(())
         return TracedTensor(self.kernel, self.kernel.load(window.var))
@@ -501,7 +467,6 @@ def scan(f, init, xs=None, length=None):
         length = xs_leaves[0].shape[0]
 
     def body(_, carry):
-        # Pallas checks the outputs first: an element of each of `xs`, then.
         x = rebuild([prims.full(v.shape[1:], 0, v.dtype) for v in xs_leaves])
         carry, ys = f(carry, x)
         ys_leaves, _ = _flatten(ys)

@@ -1,9 +1,3 @@
-"""A training step, the JAX way: ``lumen.value_and_grad``, then AdamW's step
-on its gradients (``examples/optim.py``).
-
-Run: ``python examples/gradients_jax.py [cpu|mps]``.
-"""
-
 import sys
 
 import numpy as np

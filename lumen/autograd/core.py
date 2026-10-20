@@ -1,19 +1,9 @@
-"""The rules autodiff is made of (JAX: ``jax/_src/interpreters/ad.py``):
-a JVP rule per primitive, a transpose rule per linear one, and what they
-are written with."""
-
 import functools
 
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 
-# Keyed by primitive, its ``prims`` function (JAX: by ``Primitive``).
-# primitive -> rule(primals, tangents, out, **params): the tangent of
-# `out` (None: zero), given the operands' (None: zero).
 primitive_jvps = {}
-# primitive -> rule(ct, *operands, **params) for a linear primitive: the
-# cotangent of each operand (None for one it is not linear in), given
-# its output's, its linear operands UndefinedPrimal.
 primitive_transposes = {}
 
 

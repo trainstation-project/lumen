@@ -39,7 +39,6 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
 
 fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
     let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
-    // A multi-output fusion's other outputs, by its value.
     let mut extra: Vec<Vec<Values>> = vec![Vec::new(); graph.types.len()];
     for (&var, values) in graph.inputs().iter().zip(inputs) {
         env[var] = Some(values);
@@ -86,7 +85,6 @@ fn from_scalars(scalars: impl Iterator<Item = Scalar>, dtype: DType) -> Values {
             scalars
                 .map(|s| match s {
                     Scalar::Bool(b) => b as i128,
-                    // u64 comes back as the i64 with the same bits.
                     Scalar::Int(i) => wrap(i as i128, dtype),
                     Scalar::Float(_) => unreachable!("integer dtype"),
                 })
@@ -108,7 +106,6 @@ pub(crate) unsafe fn eval_raw(
         .map(|(&ptr, ty)| {
             dispatch_dtype!(ty.dtype, T => {
                 let ptr = ptr.cast::<T>();
-                // SAFETY: the caller guarantees `numel` initialized elements.
                 let scalars = (0..ty.numel()).map(|i| unsafe { ptr.add(i).read_unaligned() }.to_scalar());
                 from_scalars(scalars, ty.dtype)
             })
@@ -149,7 +146,6 @@ fn wrap(x: i128, dtype: DType) -> i128 {
         I16 => x as i16 as i128,
         I32 => x as i32 as i128,
         I64 => x as i64 as i128,
-        // The low bits, as `ml_dtypes` and XLA wrap.
         I2 | I4 => {
             let shift = 128 - dtype.bits();
             (x << shift) >> shift
@@ -184,7 +180,6 @@ fn saturate(x: f64, dtype: DType) -> i128 {
         I16 => x as i16 as i128,
         I32 => x as i32 as i128,
         I64 => x as i64 as i128,
-        // Clamped to its range (NaN to 0), as XLA converts.
         I2 | I4 => (x as i128).clamp(-(1 << (dtype.bits() - 1)), (1 << (dtype.bits() - 1)) - 1),
         U2 | U4 => (x as i128).clamp(0, (1 << dtype.bits()) - 1),
         _ => unreachable!("{dtype} is not an integer dtype"),
@@ -209,7 +204,6 @@ fn fmin(x: f64, y: f64) -> f64 {
     }
 }
 
-/// An integer dtype's bits.
 fn bits(dtype: DType) -> u32 {
     match dtype {
         DType::Bool => 1,
@@ -217,7 +211,6 @@ fn bits(dtype: DType) -> u32 {
     }
 }
 
-/// `x` (of an integer dtype of `w` bits) as its bits read as signed.
 fn signed_bits(x: i128, w: u32) -> i128 {
     let bits = unsigned_bits(x, w) as i128;
     if w > 0 && bits >= 1 << (w - 1) {
@@ -227,12 +220,10 @@ fn signed_bits(x: i128, w: u32) -> i128 {
     }
 }
 
-/// `x` (of an integer dtype of `w` bits) as its unsigned bits.
 fn unsigned_bits(x: i128, w: u32) -> u128 {
     (x as u128) & ((1u128 << w) - 1)
 }
 
-/// `lax.erf_inv`, as XLA computes it in float32 (Giles' approximation).
 fn erf_inv(x: f64) -> f64 {
     if x.abs() == 1.0 {
         return x * f64::INFINITY;
@@ -272,9 +263,6 @@ fn erf_inv(x: f64) -> f64 {
     p * x
 }
 
-/// `x` rounded to a float of `exponent_bits` and `mantissa_bits`
-/// (`lax.reduce_precision`, XLA's algorithm on its float64 bits: it is
-/// exact in them).
 fn reduce_precision(x: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
     if x.is_nan() {
         return x;
@@ -298,7 +286,6 @@ fn reduce_precision(x: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
     f64::from_bits(b)
 }
 
-/// The float of `dtype` after `x` towards `y` (`lax.nextafter`).
 fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
     if x.is_nan() || y.is_nan() {
         return f64::NAN;
@@ -306,7 +293,6 @@ fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
     if x == y {
         return y;
     }
-    // The next of a float `bits` wide, its bits: away from or towards zero.
     let step = |bits: u64, sign: u64, up: bool| -> u64 {
         match bits & !sign {
             0 => (if y > x { 0 } else { sign }) | 1,
@@ -394,7 +380,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     Add => a + b,
                     Sub => a - b,
                     Mul => a.wrapping_mul(b),
-                    // Integer division by zero gives -1 (all ones), as in XLA.
                     Div if b == 0 => -1,
                     Div => a / b,
                     Max => a.max(b),
@@ -479,7 +464,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                             mantissa_bits,
                         } => reduce_precision(a, *exponent_bits, *mantissa_bits),
                         U::Abs => a.abs(),
-                        // Zero (signed) and NaN as they are.
                         U::Sign if a == 0.0 || a.is_nan() => a,
                         U::Sign => a.signum(),
                         _ => unreachable!("{} of a float", op.name()),
@@ -499,15 +483,12 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     .iter()
                     .zip(y)
                     .map(|(&a, &b)| match op {
-                        // By zero: the dividend, as XLA's.
                         B::Rem if b == 0 => a,
                         B::Rem => a % b,
                         B::Min => a.min(b),
                         B::And => wrap(a & b, dtype),
                         B::Or => wrap(a | b, dtype),
                         B::Xor => wrap(a ^ b, dtype),
-                        // An arithmetic shift extends the bits' sign, of
-                        // unsigned dtypes too (XLA's: their bits as signed).
                         _ if b < 0 || b >= i128::from(w) => match op {
                             B::ShiftRightArithmetic if signed_bits(a, w) < 0 => wrap(-1, dtype),
                             _ => 0,
@@ -518,7 +499,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                         _ => unreachable!("{} of integers", op.name()),
                     })
                     .collect()),
-                // A float's power of integers.
                 (Float(x), Int(y)) => Float(
                     x.iter()
                         .zip(y)
@@ -576,8 +556,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ReduceSum { .. } => Int(vec![0]),
                 _ => lowest(dtype),
             };
-            // The result index of each operand element: its index with the
-            // reduced axes dropped.
             let mut target = Vec::with_capacity(x.numel());
             if x.numel() > 0 {
                 for_each_index(&x.shape, |idx| {
@@ -600,7 +578,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 }
                 (Float(v), Float(init)) => {
                     let mut acc = vec![init[0]; out.numel()];
-                    // Accumulated in the dtype, rounding each step.
                     for (&t, &a) in target.iter().zip(v) {
                         acc[t] = if sum {
                             round(acc[t] + a, dtype)
@@ -618,7 +595,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
         }
         PallasCall { label, .. } => panic!("{label}: a lumen.pallas kernel runs on a TPU"),
         DynamicSlice { slice_sizes } => {
-            // Each output element's operand index: its own, from the starts.
             let x = types[0];
             let starts = starts(x, &args[1..], slice_sizes);
             let mut at = Vec::with_capacity(out.numel());
@@ -652,7 +628,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             let x = types[0];
             let picked = taken(args[1], x.shape[*axis]);
             gather(args[0], out, |idx| {
-                // The index at this output element (the indices of its shape).
                 let k = picked[ravel(idx.iter().copied(), &out.shape)];
                 let at = idx
                     .iter()
@@ -823,8 +798,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 (Float(x), Float(y)) => Float(
                     terms
                         .iter()
-                        // In the accumulation dtype, each product and sum
-                        // rounded to it; the result to output_dtype, once.
                         .map(|t| {
                             let acc = t.iter().fold(0.0, |acc, &(i, j)| {
                                 round(acc + round(x[i] * y[j], *accum_dtype), *accum_dtype)
@@ -948,7 +921,6 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let sum: f64 = logits.iter().map(|&x| (x - max).exp()).sum();
                 let class = target[i].clamp(0, v as i128 - 1) as usize;
-                // The loss from the log-sum-exp as rounded, as the kernel's.
                 let l = round(max + sum.ln(), DType::F32);
                 loss.push(round(l - logits[class], DType::F32));
                 lse.push(l);

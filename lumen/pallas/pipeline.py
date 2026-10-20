@@ -1,36 +1,9 @@
-"""``emit_pipeline``: a kernel's loop over a grid of blocks, each operand's
-block copied between HBM and VMEM double-buffered against the body's
-compute. Ported from Pallas (``jax/_src/pallas/mosaic/pipeline.py``,
-``_emit_pipeline`` and ``BufferedRef``; Apache 2.0), its default schedule:
-two VMEM slots an operand, no lookahead, one core.
-
-The grid is one loop of ``prod(grid)`` steps carrying its index (an
-odometer, the last dimension fastest), the previous step's, and each
-operand's slot counters (a slot is a counter's parity). At each step:
-
-* each input starts copying its *next* block into its other slot, unless
-  the next block is the one it has (an unchanged block is not copied
-  again), then waits for its current block if it changed (or on the first
-  step);
-* the body runs on the inputs' current slots and the outputs' current
-  slots;
-* each output starts writing its block back when its next block differs
-  (or on the last step) and waits for the write-back before it; an output
-  whose block does not change between steps keeps its slot, so the body
-  can accumulate in it.
-
-Inside the body, ``program_id(d)`` is the step's index along dimension
-``d`` and ``num_programs(d)`` the grid's size.
-"""
-
 import math
 
 from lumen.graph import prims
 from lumen.graph.tracer import TracedTensor
 from lumen.tensor import Tensor
 
-# The pipelines being traced, innermost last: each step's index and the
-# grid.
 _GRID = []
 
 
@@ -48,8 +21,6 @@ def num_programs(axis):
     return _GRID[-1][1][axis]
 
 
-# The names of the axes of the pallas_call grids being traced (a named
-# grid's, ``grid=(("i", 2), ...)``), innermost last.
 _NAMES = []
 
 
@@ -106,9 +77,6 @@ class BlockSpec:
     def __init__(self, block_shape=None, index_map=None, *, memory_space=None):
         self.block_shape = None if block_shape is None else tuple(block_shape)
         self.index_map, self.memory_space = index_map, memory_space
-
-
-# Scalar logic of Python values (decided as traced) and traced ones.
 
 
 def _scalar(x, dtype):
@@ -228,7 +196,6 @@ class _Buffered:
                 f"Block shape for {label} (= {tuple(block)}) must have the same number of dimensions as the "
                 f"array shape {tuple(ref.shape)}."
             )
-        # Its index map's errors next (JAX's order): traced, as JAX does.
         self.block(tuple(prims.full((), 0, "int32") for _ in grid), traced=True)
         for d in block:
             if isinstance(d, BoundedSlice):
@@ -238,9 +205,6 @@ class _Buffered:
         if any(e is not None and e.padding[0] for e in self.elements):
             raise NotImplementedError("Element blocks padded below their operand are not supported yet")
         _check_block(label, self.sizes, ref.shape, ref.dtype)
-        # Its blocks past its end (an Element's padding, a last block
-        # partly out): the operand viewed that much larger, its tiles'
-        # padding; past its tiles, each copy clipped to it (``clip``).
         high = [e.padding[1] if e is not None else 0 for e in self.elements]
         whole = [
             n + h if e is not None else max(n, -(-n // size) * size)
@@ -252,8 +216,6 @@ class _Buffered:
                 self.ref = _padded(ref, whole)
             except NotImplementedError:
                 self.clip = [n != w for n, w in zip(ref.shape, whole)]
-        # One dimension of whole 1-D tiles: its two slots one after another
-        # (Mosaic slices packed tiles whole).
         self.flat = len(self.sizes) == 1 and self.sizes[0] % (128 * (32 // _bits(ref.dtype))) == 0
         slots = (2 * self.sizes[0],) if self.flat else (2, *self.sizes)
         self.window = pl.scratch(pl.VMEM(slots, ref.dtype))
@@ -268,8 +230,6 @@ class _Buffered:
         try:
             block = self.spec.index_map(*indices)
         except TypeError:
-            # Of traced indices, an array it closes over is read at them: a
-            # constant JAX's trace would capture.
             cells = getattr(self.spec.index_map, "__closure__", None) or ()
             arrays = [
                 c.cell_contents
@@ -313,7 +273,6 @@ class _Buffered:
                 hbm.append(pl.ds(start, inside))
                 part.append(pl.ds(0, inside))
                 continue
-            # An element offset, or a multiple of the block.
             hbm.append(pl.ds(start if element is not None else pl.multiple_of(start, size), size))
             part.append(slice(None))
         src, dst = self.ref.at[tuple(hbm)], window
@@ -358,7 +317,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
         outs = [_Buffered(r, s, n, grid) for r, s, n in zip(refs[len(in_specs) :], out_specs, names[len(in_specs) :])]
         start = [0] * len(grid)
 
-        # Each input's first block, into slot 0.
         for b in ins:
             window, sem = b.slot(_scalar(0, "int32"))
             b.copy(b.block(start), window, sem).start()
@@ -368,7 +326,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
             first, last = s == 0, s == steps - 1
             following = _next(index, grid)
 
-            # Prefetch each input's next block, if another.
             in_counters = [list(c) for c in in_counters]
             for b, c in zip(ins, in_counters):
                 fetch = _and(_any_ne(b.block(index), b.block(following)), s < steps - 1)
@@ -379,7 +336,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
                     b.copy(b.block(following), window, sem).start()
 
                 c[0] = _bump(c[0], fetch)
-            # Wait for each input's current block, if it changed.
             for b, c in zip(ins, in_counters):
                 changed = _or(_any_ne(b.block(index), b.block(previous)), first)
                 window, sem = b.slot(c[1])
@@ -398,7 +354,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
             out_counters = [list(c) for c in out_counters]
             for b, c in zip(outs, out_counters):
-                # Write the block back once it is done: its next differs.
                 done = _or(_any_ne(b.block(index), b.block(following)), last)
                 window, sem = b.slot(c[0])
 
@@ -407,7 +362,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
                     b.copy(b.block(index), window, sem, to_hbm=True).start()
 
                 c[0] = _bump(c[0], done)
-                # Wait for the write-back before this one.
                 written = _and(_any_ne(b.block(index), b.block(previous)), _not(first))
                 window, sem = b.slot(c[1])
 
@@ -428,7 +382,6 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
             [[zero, zero] for _ in outs],
         )
         _, final, _, out_counters = pl.fori_loop(0, steps, step, init)
-        # Wait for each output's last write-back.
         for b, c in zip(outs, out_counters):
             window, sem = b.slot(c[1])
             b.copy(b.block(final), window, sem, to_hbm=True).wait()

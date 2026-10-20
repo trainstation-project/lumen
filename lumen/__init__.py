@@ -53,7 +53,6 @@ __all__ = [
     "profiler",
     "random",
     "safetensors",
-    # dtypes
     "float16",
     "bfloat16",
     "float32",
@@ -69,14 +68,12 @@ __all__ = [
     "bool",
     "dtypes",
     "default_dtype",
-    # factories
     "tensor",
     "empty",
     "zeros",
     "ones",
     "full",
     "arange",
-    # random numbers
     "manual_seed",
     "initial_seed",
     "rand",
@@ -84,11 +81,9 @@ __all__ = [
     "randn",
     "get_rng_state",
     "set_rng_state",
-    # numpy interop
     "to_numpy",
     "from_numpy",
     "from_dlpack",
-    # compiled execution
     "compile",
     "grad",
     "jvp",

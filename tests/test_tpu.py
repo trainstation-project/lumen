@@ -1,6 +1,3 @@
-"""Programs on a TPU: copies to and from it, and compiled dots, their kernels
-lumen's Pallas kernels (``lumen/ops/*/tpu.py``)."""
-
 import numpy as np
 import pytest
 
@@ -15,8 +12,6 @@ def floats(t):
 
 @pytest.mark.parametrize("shape", [[1], [128], [129], [10, 100]])
 def test_copies_round_trip_without_touching_their_neighbours(shape):
-    # Sizes of a row (512 bytes), less and more: each copy writes its own
-    # rows, padding included, and nothing past them.
     rng = np.random.default_rng(0)
     hosts = [rng.standard_normal(shape, dtype=np.float32) for _ in range(3)]
     devices = [lumen.from_numpy(h).to("tpu") for h in hosts]
@@ -45,11 +40,11 @@ def check(f, lhs, rhs, dtype, tol, transposed=False):
 @pytest.mark.parametrize(
     "lhs, rhs",
     [
-        ([256, 512], [512, 384]),  # one block
-        ([64, 1024], [1024, 128]),  # K in two blocks
-        ([1, 256], [256, 256]),  # one row
-        ([2, 3, 256], [256, 128]),  # the lhs's free dimensions one M
-        ([2, 64, 256], [2, 256, 384]),  # a batch
+        ([256, 512], [512, 384]),
+        ([64, 1024], [1024, 128]),
+        ([1, 256], [256, 256]),
+        ([2, 3, 256], [256, 128]),
+        ([2, 64, 256], [2, 256, 384]),
     ],
 )
 def test_float32_dots_run_on_the_matrix_unit(lhs, rhs):
@@ -66,7 +61,7 @@ def test_a_transposed_rhs():
     "lhs, rhs",
     [
         ([128, 512], [512, 512]),
-        ([2048, 1024], [1024, 2048]),  # blocks of 1024
+        ([2048, 1024], [1024, 2048]),
         ([2, 16, 256], [2, 256, 256]),
     ],
 )
@@ -137,12 +132,10 @@ def test_the_profiler_times_each_tpu_program():
     ops = {e["id"]: e for e in events if e["kind"] == "op"}
     for run in runs:
         assert run["device"] == "tpu:1"
-        # Its op's types, as an MPS kernel's.
         assert run["outputs"] == [("float32", [256, 512])]
         assert run["duration_us"] > 0
         assert ops[run["parent"]]["name"] == run["name"]
     assert runs[0]["end_us"] <= runs[1]["start_us"]
-    # Each run once: in its op's row, as its device time.
     (row,) = [r for r in prof.key_averages() if r.key == "exp"]
     assert row.count == 1 and row.self_device_time_total == pytest.approx(runs[0]["duration_us"], rel=1e-3)
 

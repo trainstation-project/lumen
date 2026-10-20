@@ -1,12 +1,3 @@
-"""Ported from jax/tests/pallas/ops_test.py (JAX, Apache 2.0): OpsTest's
-methods from test_dot_general_multiple_non_contracting_dims_with_transposes
-to test_delay, OpsInterpretTest.test_debug_print and PallasPrimitivesTest.
-
-lumen's Pallas on a TPU (a v6e: JAX's skips for older TPUs are left out).
-Values in kernels are lumen's traced tensors: jnp/lax ops map to lumen's
-(``F.*``, operators, ``.permute``, ``.to``), Pallas's to ``pl.*``.
-"""
-
 import itertools
 import math
 import operator
@@ -73,18 +64,12 @@ def np_dot_general(x, y, dimension_numbers):
     return np.einsum(spec, x.astype(np.float64), y.astype(np.float64)).astype(np.float32)
 
 
-# -- dot_general -----------------------------------------------------------
-
-
 @pytest.mark.parametrize("batch_size", [None, 1, 2])
 @pytest.mark.parametrize(
     "shapes_and_dims_numbers",
     [
-        # Case with LHS already being a transpose
         ((4, 3, 2, 6), (4, 6), ([2], [1]), (2, 1, 3, 0), None),
-        # Case with RHS already being a transpose
         ((3, 4, 2, 6), (6, 4), ([1], [0]), None, (1, 0)),
-        # Case with both LHS and RHS already being transposes
         ((3, 2, 6, 4), (4, 6), ([2], [1]), (0, 1, 3, 2), (1, 0)),
     ],
     ids=["lhs_transposed", "rhs_transposed", "both_transposed"],
@@ -99,8 +84,6 @@ def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, s
         x_perm = tuple([0] + [i + 1 for i in x_perm_unbatched]) if x_perm_unbatched is not None else None
         y_perm = tuple([0] + [i + 1 for i in y_perm_unbatched]) if y_perm_unbatched is not None else None
 
-        # Batch size is always the first dimension so we need to offset
-        # dims_numbers by 1.
         def offset_by_one(x):
             return [a + 1 for a in x]
 
@@ -133,7 +116,7 @@ def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, s
 
 @pytest.mark.parametrize("batch_size", [None, 1, 2])
 @pytest.mark.parametrize("lhs_non_contracting_shape", [(8,), (8, 128)])
-@pytest.mark.parametrize("rhs_is_array", [True, False])  # [K] or [1, K].
+@pytest.mark.parametrize("rhs_is_array", [True, False])
 @pytest.mark.parametrize("dtype", ["float32"])
 def test_matrix_array_like_dot_general(batch_size, lhs_non_contracting_shape, rhs_is_array, dtype):
     contracting_shape = 128
@@ -148,7 +131,6 @@ def test_matrix_array_like_dot_general(batch_size, lhs_non_contracting_shape, rh
     dims_numbers = (([len(lhs_shape) - 1], [len(rhs_shape) - 1]), (batch_dim, batch_dim))
     expected = np_dot_general(lhs, rhs, dims_numbers)
 
-    # JAX passes precision=HIGHEST: lumen's float32 dots are full float32.
     def kernel(lhs_ref, rhs_ref, out_ref):
         out_ref[...] = pl.dot_general(
             lhs_ref[...], rhs_ref[...], dimension_numbers=dims_numbers, preferred_element_type="float32"
@@ -187,14 +169,9 @@ def test_dot_general_with_1d_lhs(batch_size, transpose_rhs, dtype):
     np.testing.assert_allclose(host(run(call, tpu(lhs, dtype), tpu(rhs, dtype))), expected, atol=5e-6, rtol=5e-4)
 
 
-# -- elementwise -----------------------------------------------------------
-
-
 @pytest.mark.parametrize("dtype, out_dtype", [("int32", "float32"), ("float32", "float32"), ("bfloat16", "bfloat16")])
 def test_true_divide(dtype, out_dtype):
     def kernel(x_ref, y_ref, o_ref):
-        # jnp.true_divide converts integers to float32 first; lumen asks
-        # for that conversion.
         x, y = x_ref[...], y_ref[...]
         if dtype == "int32":
             x, y = x.to("float32"), y.to("float32")
@@ -223,7 +200,6 @@ def test_f16_true_divide_unsupported():
         run(call, x, y)
 
 
-# (name, lumen op, numpy op), dtypes: OpsTest.BINARY_OPS.
 BINARY_OPS = [
     ([("floor_divide", operator.floordiv, np.floor_divide)], ["int32", "uint32"]),
     (
@@ -311,9 +287,6 @@ def test_iota(shape_and_dimension, dtype):
     np.testing.assert_allclose(expected, host(run(call)))
 
 
-# -- shapes ----------------------------------------------------------------
-
-
 @pytest.mark.parametrize("in_shape, out_shape", [((2, 4), (8,)), ((2, 4), (8, 1)), ((2, 4), (1, 8)), ((64,), (32, 2))])
 def test_reshape(in_shape, out_shape):
     pytest.skip("Not supported on TPU")
@@ -362,9 +335,6 @@ def test_reshape_noop_or_singleton_dims(in_shape, out_shape):
 
 
 def test_reshape_to_scalar():
-    # Test reshapes from (1, 1) to ().
-    # Because TPUs distinguish between VREGs/SREGs this tests an implicit
-    # copy from VREG -> SREG that must be inserted by Pallas.
     def f(x_ref, o_ref):
         o_ref[...] = lumen.zeros(o_ref.shape, dtype=o_ref.dtype)
         array_val = x_ref[1:2, 0:1]
@@ -388,7 +358,6 @@ def test_num_programs():
 
     grid_sizes = [4, 2, 5, 3]
     for grid_size in grid_sizes:
-        # The loop also checks that the programs are not incorrectly cached.
         call = pl.pallas_call(
             kernel,
             out_specs=pl.BlockSpec((max(grid_sizes),), idx_map, memory_space=smem_on_tpu()),
@@ -430,7 +399,7 @@ def test_where_broadcasting():
     [
         ((), (2,), ()),
         ((1,), (2,), (0,)),
-        ((1, 128), (8, 128), (0, 1)),  # row broadcasting
+        ((1, 128), (8, 128), (0, 1)),
         ((), (2, 2), ()),
     ],
     ids=str,
@@ -443,8 +412,6 @@ def test_broadcast_in_dim(shape_spec, dtype):
     else:
         in_specs = [pl.BlockSpec()]
 
-    # lax.broadcast_in_dim(x, out_shape, dims): these dims are the trailing
-    # ones, lumen's (and numpy's) broadcast_to.
     def f(x_ref, o_ref):
         x = x_ref[...]
         o_ref[...] = x.broadcast_to(out_shape)
@@ -455,9 +422,6 @@ def test_broadcast_in_dim(shape_spec, dtype):
         x = np.arange(math.prod(in_shape), dtype=np.int32).reshape(in_shape).astype(dtype)
     call = pl.pallas_call(f, in_specs=in_specs, out_shape=pl.ShapeDtypeStruct(out_shape, dtype))
     np.testing.assert_array_equal(host(run(call, tpu(x))), np.broadcast_to(x, out_shape))
-
-
-# -- dots ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -505,7 +469,6 @@ def test_dot(lhs_and_rhs_shape, dtype, trans_x, trans_y):
     if dtype == "float16":
         pytest.skip("float16 type is not supported on TPU")
 
-    # jnp.einsum("mk,kn->mn" (km/nk if transposed), preferred_element_type=float32).
     def dot(x_ref, y_ref, o_ref):
         x = x_ref[:, :]
         y = y_ref[:, :]
@@ -518,15 +481,11 @@ def test_dot(lhs_and_rhs_shape, dtype, trans_x, trans_y):
     y = tpu(rng.standard_normal(rhs_shape, dtype=np.float32), dtype)
     call = pl.pallas_call(dot, out_shape=pl.ShapeDtypeStruct(out_shape, dtype))
     out = run(call, x, y)
-    # Pallas always accumulates in FP32, so we are explicit about
-    # preferred_element_type here.
     a, b = host(x), host(y)
     expected = rounded((a.T if trans_x else a) @ (b.T if trans_y else b), dtype)
     np.testing.assert_allclose(host(out).astype(np.float32), expected.astype(np.float32), atol=0.1, rtol=0.05)
 
 
-# The ranges of jnp.iinfo(dtype): random.randint does not support int4, so
-# both are drawn as int8.
 _IINFO = {"int8": (-128, 127), "int4": (-8, 7)}
 
 
@@ -552,7 +511,6 @@ def test_itof_dot_canonicalization(dtype, trans_x, trans_y):
     np.testing.assert_allclose(
         host(out).astype(np.int32),
         expected,
-        # s4->f8 introduces more error than s8->bf16.
         atol=3 if dtype == "int4" else 0,
         rtol=0.05 if dtype == "int4" else 0,
     )
@@ -613,11 +571,7 @@ def test_dot_general_multiple_contracting_dims(shapes_and_dim_nums):
     np.testing.assert_allclose(host(run(call, tpu(lhs), tpu(rhs))), expected, atol=1e-5, rtol=1e-5)
 
 
-# -- loads, stores, swaps --------------------------------------------------
-
-
 def test_strided_load():
-    # Reproducer from https://github.com/jax-ml/jax/issues/20895.
     def kernel(x_ref, o_ref):
         o_ref[...] = x_ref[::4]
 
@@ -641,7 +595,6 @@ def test_broadcasted_load_store():
 
 
 def test_swap():
-    # TODO: skipped due to https://github.com/jax-ml/jax/issues/24023
     pytest.skip("On TPU this is only supported in interpret mode")
 
     m, n = 16, 32
@@ -683,7 +636,6 @@ def test_masked_swap():
 
 
 def test_masked_oob_swap_slice():
-    # Unsupported dynamic slice load.
     pytest.skip("Not supported on TPU")
 
     m, n = 32, 16
@@ -706,7 +658,6 @@ def test_masked_oob_swap_slice():
     mask = indices < m
     out = run(call, tpu(x), tpu(y), tpu(mask), tpu(np.array(slice_start)))
 
-    # the unjittable masked indexing equivalent
     unmasked_idx = indices[mask]
     x_new = x.copy()
     x_new[mask] = y[unmasked_idx]
@@ -714,9 +665,6 @@ def test_masked_oob_swap_slice():
     y_new[unmasked_idx] = x[mask]
     np.testing.assert_array_equal(host(out[0]), x_new)
     np.testing.assert_array_equal(host(out[1]), y_new)
-
-
-# -- reductions ------------------------------------------------------------
 
 
 def test_reduce_only_dim():
@@ -732,10 +680,7 @@ def test_reduce_only_dim():
     np.testing.assert_allclose(host(run(call, tpu(x))), np.sum(x, axis=-1), atol=1e-2, rtol=1e-2)
 
 
-# (name, lumen op, numpy op).
 _REDUCE_OPS = [
-    # jnp.sum: narrower floats summed in float32 (lumen's F.sum, in the
-    # tensor's dtype, asks for that).
     ("add", lambda x, axis: F.sum(x.float() if x.dtype == "bfloat16" else x, axis).to(x.dtype), np.sum),
     ("max", lambda x, axis: F.amax(x, axis), np.max),
     ("min", lambda x, axis: F.amin(x, axis), np.min),
@@ -771,7 +716,6 @@ def test_array_reduce(op_name, op, np_op, dtype, axis):
             return rng.permutation(np.arange(m * n, dtype=dtype)).reshape(m, n)
         return rounded(rng.standard_normal((m, n), dtype=np.float32), dtype)
 
-    # JAX's argmin/argmax return its default int, int32.
     out_dtype = "int32" if op_name in ("argmax", "argmin") else dtype
     out_shape = pl.ShapeDtypeStruct(np_op(make_x(), axis=axis).shape, out_dtype)
     grid = tuple(a for i, a in enumerate((m, n)) if i != axis)
@@ -824,15 +768,13 @@ def test_triu(k, dtype):
     np.testing.assert_array_equal(host(out), np.triu(host(x), k=k))
 
 
-# -- bitcasts --------------------------------------------------------------
-
 _BITS = {"float16": 16, "int16": 16, "uint16": 16, "bfloat16": 16, "float32": 32, "int32": 32, "uint32": 32}
 
 
 @pytest.mark.parametrize(
     "in_dtype, out_dtype",
     [
-        ("float16", "float16"),  # Noop
+        ("float16", "float16"),
         ("int16", "bfloat16"),
         ("int16", "float16"),
         ("uint16", "float16"),
@@ -871,9 +813,6 @@ def test_bitcast_convert_type_scalar():
     np.testing.assert_array_equal(host(run(call, tpu(x))), x.view(np.float32))
 
 
-# -- layout ops ------------------------------------------------------------
-
-
 @pytest.mark.parametrize("array_shapes", [(4, 128), (10, 100), (8, 128), (17, 257)], ids=str)
 @pytest.mark.parametrize(
     "padding", [((5, 8), (0, 0)), ((0, 0), (5, 100)), ((1, 1), (1, 1)), ((0, 0), (0, 0))], ids=str
@@ -881,12 +820,9 @@ def test_bitcast_convert_type_scalar():
 @pytest.mark.parametrize("pad_type", ["constant", "wrap"])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_arbitrary_padding_jnp_pad(array_shapes, padding, pad_type, dtype):
-    # JAX accepts failures only on TPUs older than v4.
     x = tpu(np.arange(np.prod(array_shapes), dtype=np.float32).reshape(array_shapes), dtype)
     expected = np.pad(host(x), padding, mode=pad_type)
 
-    # jnp.pad(x, padding, mode): torch's F.pad takes the padding last
-    # dimension first, flat, and calls "wrap" "circular".
     flat = tuple(p for pair in reversed(padding) for p in pair)
     mode = {"constant": "constant", "wrap": "circular"}[pad_type]
 
@@ -953,7 +889,6 @@ def test_transpose(shape_and_axes):
     np.testing.assert_array_equal(host(run(call, tpu(x))), expected)
 
 
-# JAX draws batch_size with hypothesis (integers(1, 16)): each here.
 @pytest.mark.parametrize("batch_size", range(1, 17))
 def test_8bit_gather(batch_size):
     dtype = "int8"
@@ -963,10 +898,6 @@ def test_8bit_gather(batch_size):
     data = np.random.default_rng(1234).integers(0, 32, (32 * batch_size, 128), dtype=np.int8)
     lut = np.random.default_rng(1234).integers(-128, 127, (32, 128), dtype=np.int8)
 
-    # lax.gather(lut, data[..., None], offset_dims=(), start_index_map=(0,),
-    # operand_batching_dims=(1,), start_indices_batching_dims=(1,),
-    # collapsed_slice_dims=(0,), slice_sizes=(1, 1)): lut[data[i, j], j],
-    # torch's gather along dimension 0.
     def kernel(data_ref, lut_ref, output_ref):
         data_chunk = data_ref[...]
         lut_chunk = lut_ref[...]
@@ -985,8 +916,6 @@ def test_8bit_gather(batch_size):
 
 
 def test_delay():
-    # This is mostly to test that the kernel compiles. It's difficult to
-    # test the exact timing of the delay.
     def kernel(x_ref, o_ref):
         pl.delay(100_000)
         o_ref[...] = x_ref[...]
@@ -996,16 +925,9 @@ def test_delay():
     np.testing.assert_array_equal(host(result), x)
 
 
-# -- OpsInterpretTest ------------------------------------------------------
-
-
 def test_debug_print():
     pytest.skip("interpret mode")
 
-
-# -- PallasPrimitivesTest --------------------------------------------------
-# Each checks how a jaxpr pretty-prints a load, store or swap of a
-# (4, 3, 6) int32 ref at an index.
 
 _PRETTY_INDICES = [
     lambda: (pl.dslice(0, 4), slice(None), slice(None)),

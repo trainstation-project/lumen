@@ -1,7 +1,3 @@
-// Core ML programs (lumen/graph_compiler/mps/ane/mod.rs): a model specification
-// (an ML Program) compiled at runtime (MLModel compileModelAtURL:, no Xcode
-// tools) and loaded for the CPU and the Neural Engine; where Core ML places
-// each operation (MLComputePlan); predictions over the plan's buffers.
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
@@ -43,8 +39,6 @@ NSString *device_name(id<MLComputeDeviceProtocol> device) {
     return @"cpu";
 }
 
-// Each operation's outputs and preferred device but the constants', as
-// "output\toperation\tdevice" lines.
 NSString *devices_of(NSURL *compiled, MLModelConfiguration *config) {
     __block NSMutableString *lines = [NSMutableString string];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
@@ -105,7 +99,6 @@ extern "C" void *lumen_coreml_compile(const uint8_t *spec, size_t len, char **er
         program->model = model;
         program->compiled = compiled;
         program->devices = devices_of(compiled, config);
-        // The model's features in their order: in0, in1, ...; out0, ...
         NSMutableArray<NSString *> *inputs = [NSMutableArray array], *outputs = [NSMutableArray array];
         for (NSUInteger k = 0; k < model.modelDescription.inputDescriptionsByName.count; ++k) {
             [inputs addObject:[NSString stringWithFormat:@"in%lu", (unsigned long)k]];
@@ -121,9 +114,6 @@ extern "C" void *lumen_coreml_compile(const uint8_t *spec, size_t len, char **er
 
 extern "C" char *lumen_coreml_devices(void *handle) { return copy_string(static_cast<Program *>(handle)->devices); }
 
-// An array over `data` (read and written in place, not copied): `rank`
-// dimensions of `shape`, `strides` (elements) apart, or contiguous if
-// `strides` is null.
 static MLMultiArray *wrap(
     void *data, int32_t dtype, size_t rank, const int64_t *shape, const int64_t *strides, NSError **err) {
     NSMutableArray<NSNumber *> *dims = [NSMutableArray array], *steps = [NSMutableArray array];
@@ -141,10 +131,6 @@ static MLMultiArray *wrap(
                                                error:err];
 }
 
-// The program run on the caller's buffers (shared MTLBuffers' memory): its
-// inputs read in place, at their strides; its outputs (contiguous) written
-// in place as output backings, or copied there where Core ML wrote its
-// own.
 extern "C" int32_t lumen_coreml_predict(void *handle,
                                         size_t n_in,
                                         const uint8_t *const *in_data,
@@ -199,8 +185,6 @@ extern "C" int32_t lumen_coreml_predict(void *handle,
                 set_error(error, [NSString stringWithFormat:@"output %zu is not of the program's type", k]);
                 return 1;
             }
-            // Elsewhere (Core ML's own: its strides may pad rows): its
-            // elements copied, row-major.
             const size_t size = element_size(out_dtypes[k]), rank = array.shape.count, count = array.count;
             std::vector<size_t> shape(rank), strides(rank);
             for (size_t d = 0; d < rank; ++d) {
@@ -228,11 +212,6 @@ extern "C" int32_t lumen_coreml_predict(void *handle,
     }
 }
 
-// The event ordering Core ML steps with the MPS stream (made with the first
-// signal encoded, on the stream's device): the GPU signals a value once the
-// work before a step is done, the step's prediction (on another thread)
-// waits for it, then signals the next value, which the GPU work after the
-// step waits for. Nothing blocks the host.
 static id<MTLSharedEvent> event = nil;
 static MTLSharedEventListener *listener = nil;
 
@@ -246,22 +225,16 @@ static id<MTLSharedEvent> event_for(id<MTLDevice> device) {
     return event;
 }
 
-// Encode into `command_buffer` (the stream's open MTLCommandBuffer) the GPU
-// signalling `value` once the work before it is done.
 extern "C" void lumen_coreml_encode_signal(void *command_buffer, uint64_t value) {
     id<MTLCommandBuffer> commands = (__bridge id<MTLCommandBuffer>)command_buffer;
     [commands encodeSignalEvent:event_for(commands.device) value:value];
 }
 
-// Encode into `command_buffer` the GPU waiting for `value` before the work
-// after it.
 extern "C" void lumen_coreml_encode_wait(void *command_buffer, uint64_t value) {
     id<MTLCommandBuffer> commands = (__bridge id<MTLCommandBuffer>)command_buffer;
     [commands encodeWaitForEvent:event_for(commands.device) value:value];
 }
 
-// Block the calling thread until the event reaches `value` (a signal
-// encoded before).
 extern "C" void lumen_coreml_host_wait(uint64_t value) {
     if (event.signaledValue >= value) {
         return;
@@ -275,7 +248,6 @@ extern "C" void lumen_coreml_host_wait(uint64_t value) {
     dispatch_semaphore_wait(reached, DISPATCH_TIME_FOREVER);
 }
 
-// Signal `value` from the host.
 extern "C" void lumen_coreml_host_signal(uint64_t value) { event.signaledValue = value; }
 
 extern "C" void lumen_coreml_free(void *handle) {

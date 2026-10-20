@@ -1,11 +1,3 @@
-"""The primitive ops, as strict functions on traced tensors (JAX:
-``jax.lax``). Each records one node in the graph being traced; its shape
-and dtype rules are checked in Rust (``lumen/graph/primitive.rs``) and a
-violation raises ``ValueError``. Operands of elementwise primitives must
-already share a shape and dtype: broadcasting is the torch-like layer's job
-(``lumen/graph/tracer.py``), and neither layer converts dtypes implicitly.
-"""
-
 from lumen.graph import tracer
 
 __all__ = [
@@ -91,7 +83,6 @@ def bind(name, *operands, **params):
     operands = [tracer._lift(x) for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
-            # An operand that says why it is not one (a kernel's ref).
             if hasattr(x, "_not_an_operand"):
                 raise TypeError(x._not_an_operand(name))
             raise TypeError(f"{name}: operands must be traced tensors of the current trace, got {x!r}")
@@ -99,7 +90,6 @@ def bind(name, *operands, **params):
     var = graph.apply(name, inputs, params)
     tracer._record(name, inputs, params, var)
     out = tracer.TracedTensor(graph, var)
-    # On the host if copied there, or computed from host values there.
     if name == "to_host" or (name != "to_device" and any(tracer._device_type(x.device) == "cpu" for x in operands)):
         out.device = "cpu:0"
     return out
@@ -340,9 +330,6 @@ def linear_cross_entropy(h, w, target):
 def iota(dtype, shape, dimension):
     """The index along ``dimension`` (``lax.broadcasted_iota``)."""
     return bind("iota", dtype=dtype, shape=tuple(shape), dimension=dimension)
-
-
-# Elementwise functions beyond the core ones (``lax``'s of their names).
 
 
 def sin(x):

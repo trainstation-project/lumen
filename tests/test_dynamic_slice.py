@@ -1,10 +1,3 @@
-"""Dynamic slices (``lax.dynamic_slice``, ``lax.dynamic_update_slice``):
-blocks at start indices read when the program runs, clamped so the block is
-inside, their gradients, and a dynamic_update_slice written in place
-(``graph_compiler/plan.rs``): into its operand's memory where nothing reads the
-operand after it, a donated input's or a weight assigned with ``copy_``
-too (a KV cache), copying only where something does."""
-
 import numpy as np
 import pytest
 
@@ -121,18 +114,14 @@ def test_dynamic_update_slice_in_place():
     donated input; where something does, its operand is copied first."""
     f32, i32 = "float32", "int32"
     shapes = (([4, 6], f32), ([1, 6], f32), ([], i32))
-    # x * 2 computed into the output, then updated there.
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x * 2.0, u, (i, 0)), *shapes)
     assert "out0:f32[4,6] = dynamic_update_slice out0 " in plan, plan
-    # x * 2 read later: copied, kept.
     plan = _plan(lambda x, u, i: (prims.dynamic_update_slice(x * 2.0, u, (i, 0)), x * 2.0 + 1.0), *shapes)
     assert not _in_place(plan), plan
-    # A reshape of x * 2 (another name for its memory) read later: copied.
     plan = _plan(
         lambda x, u, i: (lambda e: (prims.dynamic_update_slice(e, u, (i, 0)), e.reshape(24) * 3.0))(x * 2.0), *shapes
     )
     assert not _in_place(plan), plan
-    # An input: in place only donated.
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x, u, (i, 0)), *shapes)
     assert "out0:f32[4,6] = dynamic_update_slice in0 " in plan, plan
     plan = _plan(lambda x, u, i: prims.dynamic_update_slice(x, u, (i, 0)), *shapes, donate=[0])

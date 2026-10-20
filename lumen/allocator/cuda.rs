@@ -28,7 +28,6 @@ mod ffi {
 
 #[cfg(lumen_cuda_linked)]
 fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
-    // c10 sets the device context before every allocation.
     CUDA.set_device(index);
     let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
@@ -78,7 +77,6 @@ impl Allocator for CudaAllocator {
 impl Drop for CudaAllocator {
     fn drop(&mut self) {
         if let Some(base) = self.region.base() {
-            // SAFETY: our allocation, which nothing points into any more.
             unsafe { free(self.index, base) }
         }
     }

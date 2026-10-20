@@ -1,6 +1,3 @@
-"""Ported from jax/tests/pallas/pallas_test.py (JAX, Apache 2.0): PallasTest (as PallasTPUTest runs it),
-PallasCallTest, PallasCallDCETest, PallasCallElementIndexingTest, PallasCallBoundedSliceIndexingTest."""
-
 import math
 
 import numpy as np
@@ -36,11 +33,6 @@ def run(f, *arrays):
     return to_numpy(out)
 
 
-# ---------------------------------------------------------------------
-# PallasTest (PallasTPUTest)
-# ---------------------------------------------------------------------
-
-
 def test_add_one():
     x = np.ones((128,), floatx)
 
@@ -53,7 +45,6 @@ def test_add_one():
 
 def test_add_one_1d():
     pytest.skip("On TPU the test works only in interpret mode")
-    # A (8 * 128,) array plus one, in blocks of (128,) over a grid of 8.
     num_steps = 8
     x = np.ones((num_steps * 128,), floatx)
 
@@ -144,7 +135,6 @@ def test_out_shape_is_list():
     result = run(
         lambda a: pl.pallas_call(lambda x_ref, o1_ref: None, out_shape=[pl.ShapeDtypeStruct(a.shape, "int32")])(a), a
     )
-    # JAX: "TODO(necula): we normalize out_shape to a tuple, we shouldn't."
     assert isinstance(result, tuple)
 
 
@@ -202,7 +192,6 @@ def test_block_spec_no_index_map():
 
 def test_store_reshaped_ref():
     pytest.skip("Requires TPU sublane tiling (tested in tpu_pallas_test.py)")
-    # Stores a (4, 3) ref through its (2, 6) reshape.
     shape1, shape2 = (4, 3), (2, 6)
 
     def kernel(x_ref, o_ref):
@@ -211,11 +200,6 @@ def test_store_reshaped_ref():
     x = np.arange(12, dtype=np.float32).reshape(shape1)
     y = run(lambda x: pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(shape1, "float32"))(x), x)
     np.testing.assert_array_equal(y, x)
-
-
-# ---------------------------------------------------------------------
-# PallasCallTest
-# ---------------------------------------------------------------------
 
 
 def matmul_block_spec(x, y, *, bm, bn, bk):
@@ -246,7 +230,6 @@ def matmul_block_spec(x, y, *, bm, bn, bk):
 
 def test_block_spec_with_padding():
     pytest.skip("On TPU the test works only in interpret mode")
-    # Program ids written in blocks of an int32 (8,) or (3,) output, the last block padded.
 
     def f(*, shape, block_shape):
         def kernel(o1_ref):
@@ -262,13 +245,10 @@ def test_block_spec_with_padding():
             )()
         )
 
-    # No padding
     pids = f(shape=(8,), block_shape=(2,))
     np.testing.assert_array_equal(pids, np.array([0, 0, 1, 1, 2, 2, 3, 3], dtype=np.int32))
-    # Pad the last block
     pids = f(shape=(8,), block_shape=(3,))
     np.testing.assert_array_equal(pids, np.array([0, 0, 0, 1, 1, 1, 2, 2], dtype=np.int32))
-    # Works even if the shape is smaller than 1 block
     pids = f(shape=(3,), block_shape=(8,))
     np.testing.assert_array_equal(pids, np.array([0, 0, 0], dtype=np.int32))
 
@@ -276,12 +256,10 @@ def test_block_spec_with_padding():
 @pytest.mark.parametrize("dtype_name", ["int32", "float32"])
 def test_block_spec_padding_is_nan(dtype_name):
     pytest.skip("Only applicable for the interpret mode")
-    # Interpret mode pads a block past its operand with NaN (int32: its minimum).
 
 
 def test_block_spec_mapped_dimension():
     pytest.skip("On TPU the test works only in interpret mode")
-    # Two rows of a (2, 4) operand, each a (None, 4) block (squeezed to (4,)), added.
 
     def add_vectors(x_ref, y_ref, o_ref):
         o_ref[:] = x_ref[:] + y_ref[:]
@@ -338,14 +316,12 @@ def test_block_spec_mapped_dimension():
         ((16, 128), (4, 128), "int32"),
         ((16, 128), (2, 128), "int32"),
         ((16, 128), (8, 64), "int32"),
-        # Blocks larger than the number of lands and sublanes.
         ((9, 128), (9, 64), "int32"),
         ((9, 128), (9, 128), "int32"),
         ((18, 128), (9, 128), "int32"),
         ((8, 129), (8, 129), "int32"),
         ((9, 129), (8, 129), "int32"),
         ((9, 129), (9, 129), "int32"),
-        # Tiling of small arrays
         ((1, 128), (4, 128), "int32"),
         ((2, 128), (4, 128), "int32"),
         ((3, 128), (4, 128), "int32"),
@@ -353,7 +329,6 @@ def test_block_spec_mapped_dimension():
     ],
 )
 def test_block_spec_valid_block_shapes(shape, block_shape, dtype):
-    # (JAX skips 4 of these on TPU v3 or older, "TPU v3 or older requires at least 128*packing*2 block size".)
     rank = len(shape)
     assert rank == len(block_shape)
 
@@ -400,8 +375,6 @@ def test_block_spec_valid_block_shapes(shape, block_shape, dtype):
 
 
 def test_const_args():
-    # See https://github.com/jax-ml/jax/issues/21557.
-    # to_store will be hoisted as a constant. Choose distinct shapes from in/outs.
     to_store = np.arange(128, dtype=np.float32).reshape((1, 128))
     x = np.arange(16 * 128, dtype=np.float32).reshape((16, 128))
 
@@ -445,7 +418,6 @@ def test_matmul_block_spec(m, n, k, dtype, bm, bn, bk):
 
 def test_unused_ref():
     pytest.skip("On TPU the test works only in interpret mode")
-    # A kernel ignoring its operand, storing ones through a gather-style index of its output.
     m, n = 16, 32
 
     def dummy(_, o_ref):
@@ -458,7 +430,6 @@ def test_unused_ref():
 
 def test_using_pallas_slice():
     pytest.skip("On TPU the test works only in interpret mode")
-    # The first 4 rows of a (32, 4) operand, copied through static slices of the refs.
     m, n = 32, 4
 
     def slice_kernel(x_ref, y_ref):
@@ -471,7 +442,6 @@ def test_using_pallas_slice():
 
 def test_pallas_trace_cache():
     pytest.skip("On TPU the test works only in interpret mode")
-    # jax.jit of two calls of one pallas_call traces its kernel once.
 
 
 def test_pallas_call_under_disable_jit():
@@ -481,7 +451,6 @@ def test_pallas_call_under_disable_jit():
     x = np.arange(8, dtype=np.float32)
     result = run(lambda x: pl.pallas_call(add_one, out_shape=pl.ShapeDtypeStruct((8,), "float32"))(x), x)
     np.testing.assert_array_equal(result, x + 1.0)
-    # JAX then runs it again under jax.disable_jit(): lumen always runs inside lumen.compile.
 
 
 @pytest.mark.parametrize(
@@ -509,7 +478,6 @@ def test_pallas_call_under_disable_jit():
 )
 def test_dot_precision(dtype, precision):
     pytest.skip("`DotAlgorithmPreset` only supported on GPU.")
-    # jnp.dot of (32, 16) and (16, 64) at each precision / dot algorithm, against a HIGHEST-precision dot.
 
 
 @pytest.mark.parametrize("dtype", ["int8", "uint8"])
@@ -531,24 +499,20 @@ def test_integer_dot(dtype):
 
 def test_dot_with_vector():
     pytest.skip("jnp.dot is only restricted to 2D on GPU in non-interpret mode.")
-    # A (32, 64) by (64,) jnp.dot in a kernel raises "must be 2D" on GPU.
 
 
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_subbyte_load(dtype):
     pytest.skip("`[u]int4` loads only supported on GPU.")
-    # A [u]int4 operand loaded and cast to int8.
 
 
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_subbyte_load_non_contiguous(dtype):
     pytest.skip("`[u]int4` loads only supported on GPU.")
-    # Every third element of a [u]int4 operand (x_ref[::3]) loaded and cast to int8.
 
 
 @pytest.mark.parametrize("transpose", [True, False])
 def test_float8_e4m3b11fnuz_dot(transpose):
-    # (JAX skips this on TPU 7x: "Unsupported type for matmul.")
     rng = np.random.default_rng(0)
     x = lumen.from_numpy(rng.standard_normal((2048, 1024), dtype=np.float32)).to(dtype="bfloat16").to("tpu")
     y = lumen.from_numpy(rng.standard_normal((1024, 1024), dtype=np.float32)).to(dtype="float8_e4m3b11fnuz").to("tpu")
@@ -594,31 +558,17 @@ def test_split(shape, num_parts, axis):
         np.testing.assert_allclose(o, e)
 
 
-# ---------------------------------------------------------------------
-# PallasCallDCETest
-# ---------------------------------------------------------------------
-
-
 def test_dce_unused_outputs():
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
-    # A pallas_call whose output is unused is removed by pe.dce_jaxpr; a used one is kept.
 
 
 def test_dce_has_side_effects():
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
-    # An unused pallas_call is kept by pe.dce_jaxpr iff pltpu.CompilerParams(has_side_effects=...) says it has
-    # side effects (True, SideEffectType.SIDE_EFFECTING).
 
 
 @pytest.mark.parametrize("read_ref", [False, True])
 def test_dce_closed_over_ref(read_ref):
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
-    # A pallas_call writing a closed-over jax.new_ref is kept by pe.dce_jaxpr iff the ref is read after it.
-
-
-# ---------------------------------------------------------------------
-# PallasCallElementIndexingTest
-# ---------------------------------------------------------------------
 
 
 def test_block_spec_element():
@@ -636,17 +586,14 @@ def test_block_spec_element():
             )()
         )
 
-    # No padding
     pids = show_program_ids(shape=(16, 128), block_shape=(pl.Element(8), pl.Element(128)), grid=(2,))
     expected_pids = np.array([[0] * 128] * 8 + [[1] * 128] * 8, dtype=np.int32)
     np.testing.assert_array_equal(pids, expected_pids)
 
-    # Only high padding
     pids = show_program_ids(shape=(14, 128), block_shape=(pl.Element(8, (0, 2)), pl.Element(128, (0, 0))), grid=(2,))
     expected_pids = np.array([[0] * 128] * 8 + [[1] * 128] * 6, dtype=np.int32)
     np.testing.assert_array_equal(pids, expected_pids)
 
-    # Both low and high padding
     pytest.skip("TODO: low padding not supported yet")
     pids = show_program_ids(shape=(11, 128), block_shape=(pl.Element(8, (3, 2)), pl.Element(128, (0, 0))), grid=(2,))
     expected_pids = np.array([[0] * 128] * 5 + [[1] * 128] * 6, dtype=np.int32)
@@ -656,7 +603,6 @@ def test_block_spec_element():
 @pytest.mark.parametrize("dtype_name", ["int32", "float32"])
 def test_block_spec_element_padding_is_nan(dtype_name):
     pytest.skip("Only applicable for the interpret mode")
-    # Interpret mode pads an Element block (low 1, high 2) past its operand with NaN (int32: its minimum).
 
 
 def test_element_indexing():
@@ -704,11 +650,6 @@ def test_unblocked_indexing_with_padding():
         x,
     )
     np.testing.assert_array_equal(y, x)
-
-
-# ---------------------------------------------------------------------
-# PallasCallBoundedSliceIndexingTest
-# ---------------------------------------------------------------------
 
 
 def test_block_spec_bounded_slice_static():

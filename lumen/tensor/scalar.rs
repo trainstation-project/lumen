@@ -1,7 +1,3 @@
-//! A dtype-erased number (PyTorch: `c10::Scalar`), used where the factory
-//! API takes a value whose dtype is decided at runtime: `full`'s fill value
-//! and `arange`'s end.
-
 use super::dtype::{DType, bf16, f16};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -12,9 +8,6 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    /// The dtype a factory infers from this scalar when none is given
-    /// (PyTorch: `torch.full((1,), 7)` is int64, `True` is bool, and a
-    /// float is the default dtype, float32).
     pub fn inferred_dtype(self) -> DType {
         match self {
             Scalar::Bool(_) => DType::Bool,

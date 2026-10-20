@@ -1,6 +1,3 @@
-"""The part of `lumen._C` that ``lumen/ops/python.rs`` defines (see
-``lumen/_C.pyi``)."""
-
 from typing import Any
 
 from lumen._C import DeviceLike

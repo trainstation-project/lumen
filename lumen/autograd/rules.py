@@ -1,6 +1,3 @@
-"""Each primitive's JVP rule and, for a linear one, its transpose rule
-(JAX: ``jax/_src/lax/lax.py``)."""
-
 from lumen.autograd.core import (
     UndefinedPrimal,
     _full,
@@ -44,8 +41,6 @@ def _widened(v, dtype):
         return None if x is None or y is None else prims.add(x, y)
     if name == "dot_general" and p["accum_dtype"] == dtype and p["output_dtype"] != dtype:
         return _dot(_value(ins[0]), _value(ins[1]), _dot_dims(p), p, dtype)
-    # A sum of such dots kept in their accumulator, rounded once (a chunked
-    # gradient's: `lumen/autograd/cross_entropy.py`).
     if name == "cast" and _value(ins[0]).dtype == dtype:
         return _value(ins[0])
     return None
@@ -63,10 +58,7 @@ def _cast_transpose(ct, x, new_dtype):
 
 deflinear(prims.cast, _cast_transpose)
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
-# A wait passes its cotangent through (PyTorch: wait_tensor's backward).
 deflinear(prims.wait, lambda ct, x: [ct])
-# A copy to the host takes its cotangent back to the device, and the other
-# way (torch's .cpu() and .to(device)).
 deflinear(prims.to_host, lambda ct, x: [prims.to_device(ct)])
 deflinear(prims.to_device, lambda ct, x: [prims.to_host(ct)])
 
@@ -89,8 +81,6 @@ deflinear(prims.reduce_sum, _reduce_sum_transpose)
 
 
 def _cumsum_transpose(ct, x, axis, reverse, accum_dtype):
-    # Each element reaches the outputs after it (before it, reversed): the
-    # cotangent summed the other way, in its dtype, then x's.
     ct = prims.cumsum(ct, axis, not reverse, ct.dtype)
     return [prims.cast(ct, x.dtype) if ct.dtype != x.dtype else ct]
 
@@ -99,7 +89,6 @@ deflinear(prims.cumsum, _cumsum_transpose)
 
 
 def _broadcast_in_dim_transpose(ct, x, shape, broadcast_dimensions):
-    # Summed over the dimensions it adds and those it stretches from 1.
     dims = broadcast_dimensions
     stretched = [dims[i] for i, n in enumerate(x.shape) if n == 1 and shape[dims[i]] != 1]
     axes = sorted([d for d in range(len(shape)) if d not in dims] + stretched)
@@ -113,7 +102,6 @@ deflinear(prims.broadcast_in_dim, _broadcast_in_dim_transpose)
 
 
 def _slice_transpose(ct, x, start_indices, limit_indices):
-    # Padded with zeros, one dimension at a time.
     for d, (start, limit) in enumerate(zip(start_indices, limit_indices)):
         parts = []
         for size in (start, x.shape[d] - limit):
@@ -167,8 +155,6 @@ primitive_jvps[prims.select] = _select_jvp
 primitive_transposes[prims.select] = _select_transpose
 
 
-# Dynamic slices: linear in the operand (and update), their start indices
-# (integers) fixed.
 def _dynamic_slice_jvp(primals, tangents, out, slice_sizes):
     x, *indices = primals
     if tangents[0] is None:
@@ -177,7 +163,6 @@ def _dynamic_slice_jvp(primals, tangents, out, slice_sizes):
 
 
 def _dynamic_slice_transpose(ct, x, *indices, slice_sizes):
-    # The block's cotangent where it was read, zeros elsewhere.
     return [prims.dynamic_update_slice(_full(x, 0), ct, indices), *[None] * len(indices)]
 
 
@@ -191,8 +176,6 @@ def _dynamic_update_slice_jvp(primals, tangents, out):
 
 
 def _dynamic_update_slice_transpose(ct, x, update, *indices):
-    # The operand's cotangent but where the update overwrote it; the
-    # update's, the block it was written to.
     return [
         prims.dynamic_update_slice(ct, _full(update, 0), indices) if isinstance(x, UndefinedPrimal) else None,
         prims.dynamic_slice(ct, indices, update.shape) if isinstance(update, UndefinedPrimal) else None,
@@ -200,8 +183,6 @@ def _dynamic_update_slice_transpose(ct, x, update, *indices):
     ]
 
 
-# Gathers: linear in the operand (and a scatter's updates), the indices
-# (integers) fixed.
 def _gather_jvp(primals, tangents, out, axis):
     if tangents[0] is None:
         return None
@@ -209,8 +190,6 @@ def _gather_jvp(primals, tangents, out, axis):
 
 
 def _gather_transpose(ct, x, indices, axis):
-    # Each entry's cotangent where it was read, summed over its reads (as
-    # MLX's): in float32 or wider, then x's dtype.
     accum = tracer._accum_dtype(x.dtype)
     ct = ct if ct.dtype == accum else prims.cast(ct, accum)
     out = prims.scatter_add(prims.full(x.shape, 0, accum), indices, ct, axis)
@@ -227,7 +206,6 @@ def _scatter_add_jvp(primals, tangents, out, axis):
 
 
 def _scatter_add_transpose(ct, x, indices, updates, axis):
-    # The operand's cotangent as it is; each update's, its entry's.
     return [
         ct if isinstance(x, UndefinedPrimal) else None,
         None,
@@ -242,8 +220,6 @@ def _take_along_axis_jvp(primals, tangents, out, axis):
 
 
 def _take_along_axis_transpose(ct, x, indices, axis):
-    # Each entry's cotangent where it was read, summed (as a gather's): at
-    # its flat position in x, Σ position · stride.
     dtype = "int64" if indices.dtype in ("int64", "uint64") else "int32"
     flat, stride = None, 1
     for d in reversed(range(len(x.shape))):
@@ -272,7 +248,6 @@ primitive_transposes[prims.dynamic_slice] = _dynamic_slice_transpose
 primitive_jvps[prims.dynamic_update_slice] = _dynamic_update_slice_jvp
 primitive_transposes[prims.dynamic_update_slice] = _dynamic_update_slice_transpose
 
-# Bilinear: linear in each operand, the other fixed.
 defjvp(prims.mul, lambda t, out, x, y: prims.mul(t, y), lambda t, out, x, y: prims.mul(x, t))
 
 
@@ -283,7 +258,6 @@ def _mul_transpose(ct, x, y):
 
 
 primitive_transposes[prims.mul] = _mul_transpose
-# d(x / y) = dx / y - dy * (out / y): linear in the numerator.
 defjvp(
     prims.div, lambda t, out, x, y: prims.div(t, y), lambda t, out, x, y: prims.mul(t, prims.neg(prims.div(out, y)))
 )
@@ -307,7 +281,6 @@ defjvp(prims.logistic, lambda t, out, x: prims.mul(t, prims.mul(out, prims.sub(_
 
 
 def _reduce_max_jvp(t, out, x, axes):
-    # Shared equally by the elements equal to the max.
     kept = [d for d in range(x.ndim) if d not in axes]
     where = prims.cast(prims.eq(x, prims.broadcast_in_dim(out, x.shape, kept)), x.dtype)
     count = prims.reduce_sum(where, axes, x.dtype)
@@ -354,7 +327,6 @@ def _dot_transpose_lhs(ct, x, y, dims, params, swap_ans=False):
     order = sorted(range(len(y_contract)), key=lambda i: y_contract[i])
     unsorted = list(x_batch) + x_kept + [x_contract[i] for i in order]
     out_axes = sorted(range(len(unsorted)), key=unsorted.__getitem__)
-    # In the operands' dtype (a wider cotangent cast to it).
     ct = prims.cast(ct, y.dtype) if ct.dtype != y.dtype else ct
     x_bar = _dot(ct, y, ((ans_y, y_kept), (ans_batch, y_batch)), params, x.dtype)
     return x_bar if out_axes == list(range(len(out_axes))) else prims.transpose(x_bar, out_axes)

@@ -1,10 +1,3 @@
-//! A [`Kernel`] lowered to Mosaic: MLIR in the `tpu` dialect (with `arith`,
-//! `math`, `vector`, `memref`, `scf`), written in the form libtpu
-//! deserializes: every op generic and named `stable_mosaic.<dialect>.<op>`,
-//! the module carrying `stable_mosaic.version` (JAX's
-//! `jaxlib/mosaic/serde.cc`). The rules are Pallas's
-//! (`jax/_src/pallas/mosaic/lowering.py`).
-
 use std::fmt::Write;
 
 use super::{Block, Kernel, Node, Op, Space, Type, Var};
@@ -12,7 +5,6 @@ use crate::graph::{Primitive, TensorType};
 use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2};
 use crate::{DType, Scalar};
 
-/// The Mosaic serialization version written: libtpu reads it and older ones.
 const VERSION: u32 = 17;
 
 const FAST: &str = "fastmath = #arith.fastmath<none>";
@@ -38,7 +30,6 @@ fn element(dtype: DType) -> &'static str {
     }
 }
 
-/// The bits of `dtype`'s elements in memory (bool's an int32's).
 fn stored_bits(dtype: DType) -> usize {
     match dtype {
         DType::Bool => 32,
@@ -57,7 +48,6 @@ fn dims(shape: &[usize]) -> String {
     shape.iter().map(|d| format!("{d}x")).collect()
 }
 
-/// A value's type: a scalar, or a vector.
 fn value_type(t: &TensorType) -> String {
     match t.shape.is_empty() {
         true => element(t.dtype).to_string(),
@@ -65,7 +55,6 @@ fn value_type(t: &TensorType) -> String {
     }
 }
 
-/// A buffer's element: its dtype's, but bool's int32 (as Mosaic stores it).
 fn stored(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool => "i32",
@@ -105,8 +94,6 @@ fn type_name(ty: &Type) -> String {
     }
 }
 
-/// `v` as an attribute of `dtype`'s element: an integer wrapped to its
-/// width, a float exact (decimal to 17 digits, hex bits if not finite).
 fn literal(v: &Scalar, dtype: DType) -> String {
     let bits = dtype.bits();
     match (dtype.is_float(), v) {
@@ -132,23 +119,19 @@ fn literal(v: &Scalar, dtype: DType) -> String {
                 Scalar::Int(i) => *i,
                 other => other.to_f64() as i64,
             };
-            // Two's complement in `bits`, signed: MLIR's integers are.
             let shift = 64 - bits;
             ((x << shift) >> shift).to_string()
         }
     }
 }
 
-/// Operands of names and types, borrowed.
 fn refs(ins: &[(String, String)]) -> Vec<(&str, String)> {
     ins.iter().map(|(n, t)| (n.as_str(), t.clone())).collect()
 }
 
-/// Writes a kernel's ops.
 struct Emitter<'a> {
     kernel: &'a Kernel,
     names: Vec<String>,
-    /// Each view's memory and element offset in it (names).
     views: std::collections::HashMap<Var, (String, String)>,
     temps: usize,
     out: String,
@@ -171,8 +154,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// `name` of `operands` (names, types) with `attrs`, of results of
-    /// `results` (types): their names.
     fn op(
         &mut self,
         name: &str,
@@ -210,7 +191,6 @@ impl Emitter<'_> {
         names
     }
 
-    /// A one-result op on values.
     fn unary(
         &mut self,
         name: &str,
@@ -306,8 +286,6 @@ impl Emitter<'_> {
                     _ => unreachable!("a view"),
                 };
                 let (memory, base) = self.views[&node.inputs[0]].clone();
-                // Its first element: its operand's, plus each start in tiles
-                // times that dimension's stride, in tiles of elements.
                 let rank = starts.len();
                 let first = rank - tiled.tile.len().min(rank);
                 let tile_elems: usize = tiled.tile.iter().product();
@@ -377,8 +355,6 @@ impl Emitter<'_> {
                 }
             }
             Op::View => {
-                // At its row's first element, in elements of its dtype as
-                // stored (a word multiple: a row is 512 bytes).
                 let Type::View(t, _) = self.ty(node.outputs[0]) else {
                     unreachable!("a view's type")
                 };
@@ -409,7 +385,6 @@ impl Emitter<'_> {
                     let mut operands = refs(&ins);
                     operands.extend((0..rank).map(|_| (zero.as_str(), "index".to_string())));
                     match dtype {
-                        // Stored as int32: nonzero.
                         DType::Bool => {
                             let words = TensorType::new(DType::I32, &t.shape);
                             let w = self.op("vector.load", &operands, "", &[value_type(&words)]).remove(0);
@@ -422,7 +397,6 @@ impl Emitter<'_> {
                     }
                 }
                 _ => {
-                    // An SMEM element, at its indices.
                     let dtype = self.value(node.outputs[0]).dtype;
                     let mut operands = vec![(ins[0].0.clone(), ins[0].1.clone())];
                     for (i, _) in &ins[1..] {
@@ -430,7 +404,6 @@ impl Emitter<'_> {
                         operands.push((i[0].clone(), "index".into()));
                     }
                     match dtype {
-                        // Stored as int32: nonzero.
                         DType::Bool => {
                             let word = TensorType::new(DType::I32, &[]);
                             let w = self.op("memref.load", &refs(&operands), "", &["i32".into()]).remove(0);
@@ -443,7 +416,6 @@ impl Emitter<'_> {
                 }
             },
             Op::Store if matches!(self.ty(node.inputs[0]), Type::Ref(_, Space::Smem)) => {
-                // An SMEM element, at its indices (a bool as int32).
                 let value = match self.value(node.inputs[1]).dtype {
                     DType::Bool => {
                         let b = (ins[1].0.clone(), TensorType::new(DType::Bool, &[]));
@@ -464,7 +436,6 @@ impl Emitter<'_> {
                     unreachable!("checked when built")
                 };
                 let (rank, shape, dtype) = (t.shape.len(), t.shape.clone(), t.dtype);
-                // A bool, stored as int32.
                 let value = match dtype {
                     DType::Bool => {
                         let words = TensorType::new(DType::I32, &shape);
@@ -492,8 +463,6 @@ impl Emitter<'_> {
                     let i = self.op("arith.index_cast", &[(i, "i32".into())], "", &["index".into()]);
                     operands.push((i[0].clone(), "index".into()));
                 }
-                // Of unit strides: a vector load or store at the starts, as
-                // Pallas (no slice of the ref, which Mosaic wants whole tiles of).
                 let unit = strides.iter().all(|&s| s == 1);
                 let rank = strides.len();
                 let (name, attrs) = match (node.outputs.is_empty(), unit) {
@@ -529,7 +498,6 @@ impl Emitter<'_> {
                 let _ = writeln!(self.out, "{pad}{assign}\"stable_mosaic.scf.if\"({}) ({{", ins[0].0);
                 self.region(then, "scf.yield", None)?;
                 let _ = writeln!(self.out, "{pad}}}, {{");
-                // No else: its region empty.
                 if let Some(otherwise) = otherwise {
                     self.region(otherwise, "scf.yield", None)?;
                 }
@@ -600,7 +568,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// `p` on `args` (names and types), of result type `out`: its name.
     fn primitive(
         &mut self,
         p: &Primitive,
@@ -612,7 +579,6 @@ impl Emitter<'_> {
             return Ok(self.constant(fill_value, out));
         }
         if let Iota { dimension, .. } = p {
-            // `tpu.iota`, of two dimensions at least: a vector's as `[1, n]`.
             let (shape, dimension) = match out.shape.len() {
                 1 => (vec![1, out.shape[0]], 1),
                 _ => (out.shape.clone(), *dimension),
@@ -652,7 +618,6 @@ impl Emitter<'_> {
                 };
                 self.unary(&format!("arith.{name}"), &[a, &args[1]], attrs, out)
             }
-            // Bools by logic, as Pallas: eq is not xor, lt is not x and y.
             Eq | Lt if a.1.dtype == DType::Bool => {
                 let b = &args[1];
                 let t = a.1.clone();
@@ -697,7 +662,6 @@ impl Emitter<'_> {
                 self.unary(name, &[a], FAST, out)
             }
             Logistic => {
-                // 1 / (1 + exp(-x)).
                 let neg = (self.unary("arith.negf", &[a], FAST, out), out.clone());
                 let exp = (self.unary("math.exp", &[&neg], FAST, out), out.clone());
                 let one = (self.constant(&Scalar::Float(1.0), out), out.clone());
@@ -708,8 +672,6 @@ impl Emitter<'_> {
                 self.unary("arith.divf", &[&one, &sum], FAST, out)
             }
             Cast { new_dtype } => self.cast(a, *new_dtype)?,
-            // Of bool vectors (which Mosaic does not select between), by
-            // logic: `c & t | !c & f`.
             Select if out.dtype == DType::Bool && !out.shape.is_empty() => {
                 let ones = self.splat(Scalar::Bool(true), out);
                 let not_a = self.apply("arith.xori", &[a, &ones], "", out);
@@ -718,8 +680,6 @@ impl Emitter<'_> {
                 self.unary("arith.ori", &[&t, &f], "", out)
             }
             Select => self.unary("arith.select", &[a, &args[1], &args[2]], "", out),
-            // As Pallas: of indices of the operand's shape, along one of its
-            // last two dimensions (`tpu.dynamic_gather`).
             TakeAlongAxis { axis } => {
                 let rank = a.1.shape.len();
                 if args[1].1.shape != a.1.shape || axis + 2 < rank {
@@ -728,7 +688,6 @@ impl Emitter<'_> {
                             .into(),
                     );
                 }
-                // Mosaic's indices are as wide as the operand's elements.
                 let bits = a.1.dtype.bits();
                 let index = match bits {
                     8 => DType::I8,
@@ -766,7 +725,6 @@ impl Emitter<'_> {
                 if a.1.shape.is_empty() {
                     return Ok(self.unary("vector.broadcast", &[a], "", out));
                 }
-                // The operand's dimensions where they go, 1 elsewhere.
                 let mut expanded = vec![1; shape.len()];
                 for (&d, &n) in broadcast_dimensions.iter().zip(&a.1.shape) {
                     expanded[d] = n;
@@ -787,7 +745,6 @@ impl Emitter<'_> {
                 (false, false) => self.unary("vector.shape_cast", &[a], "", out),
                 _ => self.extract(a, out),
             },
-            // Of bools (which Mosaic does not reduce): through int32.
             ReduceMax { .. } if a.1.dtype == DType::Bool => {
                 let words = TensorType::new(DType::I32, &a.1.shape);
                 let w = (self.unary("arith.extui", &[a], "", &words), words);
@@ -797,8 +754,6 @@ impl Emitter<'_> {
                 self.unary("arith.cmpi", &[&r, &zero], "predicate = 1 : i64", out)
             }
             ReduceSum { axes, .. } | ReduceMax { axes } if out.shape.is_empty() => {
-                // As Pallas: over every dimension of the operand given a
-                // leading one, then its one element.
                 let mut shape = vec![1];
                 shape.extend(&a.1.shape);
                 let lifted = TensorType::new(a.1.dtype, &shape);
@@ -854,17 +809,11 @@ impl Emitter<'_> {
                 output_dtype,
             } => {
                 let b = &args[1];
-                // libtpu 0.0.48's Mosaic aborts the process on these (as
-                // under JAX): an error, then.
                 if lhs_contracting.len() > 1 {
                     return Err(
                         "a dot of more than one contracting dimension is not lowered".into(),
                     );
                 }
-                // Mosaic's dimension numbers: the operands' contracting and
-                // free dimensions, the result's dimensions as (operand,
-                // dimension) pairs (the batch, the lhs's free, the rhs's
-                // free), and the batch dimensions.
                 let free = |rank: usize, contracting: &[usize], batch: &[usize]| -> Vec<usize> {
                     (0..rank)
                         .filter(|d| !contracting.contains(d) && !batch.contains(d))
@@ -965,8 +914,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// The names of `k` results of an op written next: its assignment and
-    /// each result's name.
     fn results(&mut self, k: usize) -> (String, Vec<String>) {
         let n = self.temps;
         self.temps += 1;
@@ -980,7 +927,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The result types of an op: one, or a parenthesized list.
     fn signature(&self, types: &[String]) -> String {
         match types.len() {
             1 => types[0].clone(),
@@ -988,8 +934,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// A region of `block`: its arguments `args` (if any), its nodes, then
-    /// `terminator` of its results.
     fn region(
         &mut self,
         block: &Block,
@@ -1019,19 +963,16 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A vector of one element's element (`vector.extract`).
     fn extract(&mut self, a: &(String, TensorType), out: &TensorType) -> String {
         let zeros = vec!["0"; a.1.shape.len()].join(", ");
         let attrs = format!("static_position = array<i64: {zeros}>");
         self.unary("vector.extract", &[a], &attrs, out)
     }
 
-    /// A constant of `ty` (a value's type) of `v`, named.
     fn splat(&mut self, v: Scalar, ty: &TensorType) -> (String, TensorType) {
         (self.constant(&v, ty), ty.clone())
     }
 
-    /// `name` of operands `args`, of type `out`, named.
     fn apply(
         &mut self,
         name: &str,
@@ -1042,8 +983,6 @@ impl Emitter<'_> {
         (self.unary(name, args, attrs, out), out.clone())
     }
 
-    /// A comparison of `a` and `b` by `predicate` (`arith.cmpf`'s for floats,
-    /// `arith.cmpi`'s for integers), a bool.
     fn compare(
         &mut self,
         a: &(String, TensorType),
@@ -1067,8 +1006,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Whether `x`'s elements are NaN: not equal to themselves (Mosaic has
-    /// no `uno`).
     fn is_nan(&mut self, x: &(String, TensorType)) -> (String, TensorType) {
         let eq = self.compare(x, x, 1);
         let ones = self.splat(Scalar::Bool(true), &eq.1);
@@ -1085,8 +1022,6 @@ impl Emitter<'_> {
         self.apply("arith.select", &[c, t, f], "", &out)
     }
 
-    /// An elementwise function of one operand ([`UnaryOp`]), as Pallas
-    /// lowers it.
     fn unary_op(
         &mut self,
         op: crate::graph::UnaryOp,
@@ -1133,7 +1068,6 @@ impl Emitter<'_> {
                 self.unary("arith.xori", &[a, &ones], "", out)
             }
             U::Sign => {
-                // 1 above zero, -1 below, else itself (zero, NaN).
                 let (zero, one, minus) = match float {
                     true => (Scalar::Float(0.0), Scalar::Float(1.0), Scalar::Float(-1.0)),
                     false => (Scalar::Int(0), Scalar::Int(1), Scalar::Int(-1)),
@@ -1167,8 +1101,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// An elementwise function of two operands ([`BinaryOp`]), as Pallas
-    /// lowers it.
     fn binary_op(
         &mut self,
         op: crate::graph::BinaryOp,
@@ -1178,7 +1110,6 @@ impl Emitter<'_> {
     ) -> Result<String, String> {
         use crate::graph::BinaryOp as B;
         let (float, uns) = (a.1.dtype.is_float(), unsigned(a.1.dtype));
-        // A float's power of integers: of them as floats, as Pallas.
         if matches!(op, B::Pow) && b.1.dtype.is_int() {
             let to = if unsigned(b.1.dtype) {
                 "arith.uitofp"
@@ -1207,14 +1138,12 @@ impl Emitter<'_> {
         Ok(self.unary(name, &[a, b], attrs, out))
     }
 
-    /// `lax.erf_inv` (float32): XLA's polynomial, `±inf` at `±1`.
     fn erf_inv(&mut self, x: &(String, TensorType)) -> Result<String, String> {
         let t = x.1.clone();
         if t.dtype != DType::F32 {
             return Err("erf_inv runs in TPU kernels on float32".into());
         }
         let c = |e: &mut Self, v: f64| e.splat(Scalar::Float(v), &t);
-        // `-log1p(x · -x)`, as Pallas.
         let neg = self.apply("arith.negf", &[x], FAST, &t);
         let square = self.apply("arith.mulf", &[x, &neg], FAST, &t);
         let log = self.apply("math.log1p", &[&square], FAST, &t);
@@ -1275,8 +1204,6 @@ impl Emitter<'_> {
         Ok(self.select(&edge, &infinite, &px).0)
     }
 
-    /// `lax.reduce_precision` (float32, or narrower floats through it): XLA's
-    /// algorithm on its bits.
     fn reduce_precision(
         &mut self,
         x: &(String, TensorType),
@@ -1328,7 +1255,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// `lax.nextafter`: the float after `x` towards `y`, on their bits.
     fn nextafter(
         &mut self,
         x: &(String, TensorType),
@@ -1348,7 +1274,6 @@ impl Emitter<'_> {
         let up = self.apply("arith.addi", &[&xb, &one], OVERFLOW, &it);
         let down = self.apply("arith.subi", &[&xb, &one], OVERFLOW, &it);
         let zero = self.splat(Scalar::Float(0.0), &t);
-        // Away from zero (one bit more) if `y` is further out than `x`.
         let towards_up = self.compare(x, y, 4);
         let positive = self.compare(x, &zero, 2);
         let away = self.apply(
@@ -1358,7 +1283,6 @@ impl Emitter<'_> {
             &positive.1.clone(),
         );
         let next = self.select(&away, &down, &up);
-        // From zero: the smallest of `y`'s sign.
         let sign_bit = int(self, -(1i64 << (width - 1)) | 1);
         let tiny_neg = sign_bit;
         let below = self.compare(y, &zero, 4);
@@ -1375,13 +1299,10 @@ impl Emitter<'_> {
         Ok(self.select(&nan, &quiet, &next).0)
     }
 
-    /// `a` converted to `dtype` (`convert_element_type`).
     fn cast(&mut self, a: &(String, TensorType), dtype: DType) -> Result<String, String> {
         let from = a.1.dtype;
         let out = TensorType::new(dtype, &a.1.shape);
         let (bits_in, bits_out) = (from.bits(), dtype.bits());
-        // As Pallas: a bool to a float through int32; to a bool from 32
-        // bits (narrower operands widened first).
         if from == DType::Bool && dtype.is_float() {
             let wide = TensorType::new(DType::I32, &a.1.shape);
             let w = (self.unary("arith.extui", &[a], "", &wide), wide);
@@ -1401,7 +1322,6 @@ impl Emitter<'_> {
             _ if dtype == DType::Bool => {
                 let zero = (self.constant(&Scalar::Int(0), &a.1), a.1.clone());
                 return Ok(match from.is_float() {
-                    // Not equal to zero (NaN too): Mosaic has no `une`.
                     true => {
                         let eq = self.apply(
                             "arith.cmpf",
@@ -1415,7 +1335,6 @@ impl Emitter<'_> {
                     false => self.unary("arith.cmpi", &[a, &zero], "predicate = 1 : i64", &out),
                 });
             }
-            // Of one width (float8s): through float32, as Pallas.
             (true, true) if bits_out == bits_in => {
                 let wide = TensorType::new(DType::F32, &a.1.shape);
                 let w = (self.unary("arith.extf", &[a], "", &wide), wide);
@@ -1427,7 +1346,6 @@ impl Emitter<'_> {
             (false, true) => "arith.sitofp",
             (true, false) if unsigned(dtype) => "arith.fptoui",
             (true, false) => "arith.fptosi",
-            // Integers of one width: the same bits.
             (false, false) if bits_out == bits_in && from != DType::Bool => return Ok(a.0.clone()),
             (false, false) if bits_out > bits_in || from == DType::Bool => match unsigned(from) {
                 true => "arith.extui",
@@ -1439,7 +1357,6 @@ impl Emitter<'_> {
     }
 }
 
-/// `kernel` as a Mosaic module, its function named `name`.
 pub fn lower(kernel: &Kernel, name: &str) -> Result<String, String> {
     if !kernel.is_closed() {
         return Err("a kernel's `If` or `For` was not ended".into());

@@ -30,7 +30,6 @@ fn matmul() -> Primitive {
 
 #[test]
 fn repeated_computations_run_once() {
-    // relu(x @ w) * (x @ w), with the matmul written twice.
     let mut g = Graph::new();
     let x = g.input(ty(&[4, 8]));
     let w = g.input(ty(&[8, 16]));
@@ -95,7 +94,6 @@ fn different_parameters_or_order_are_kept() {
     assert_eq!(names(&cse(&g)), names(&g));
 }
 
-/// The reference's outputs of `g` and of `g` simplified: equal, exactly.
 fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
     let want = reference::run(g, inputs).unwrap();
     let got = reference::run(simplified, inputs).unwrap();
@@ -245,7 +243,6 @@ fn casts_move_past_layout_primitives() {
         apply(g, cast(DType::F32), &[b])
     };
     let inputs = [data(&[2, 3], 1)];
-    // Widening, then a reshape: the reshape first.
     let mut g = Graph::new();
     let w = widened(&mut g);
     let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[w]);
@@ -253,7 +250,6 @@ fn casts_move_past_layout_primitives() {
     let moved = super::passes::simplify::simplify_with(&g, true);
     assert_eq!(names(&moved), ["cast", "reshape", "cast"], "{moved}");
     same_values(&g, &moved, &inputs);
-    // A transpose and a slice, then narrowing: the cast first.
     let mut g = Graph::new();
     let y = g.input(ty(&[2, 3]));
     let t = Transpose {
@@ -276,7 +272,6 @@ fn casts_move_past_layout_primitives() {
         "{moved}"
     );
     same_values(&g, &moved, &inputs);
-    // A concatenate with a constant: moved if it is exact in bfloat16.
     for (value, want) in [
         (1.0, vec!["cast", "full", "concatenate", "cast"]),
         (0.1, vec!["cast", "cast", "full", "concatenate"]),
@@ -366,7 +361,6 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
 
 #[test]
 fn programs_without_host_values_are_one_plan() {
-    // The copy of a device value back to the device is the value.
     let mut g = Graph::new();
     let x = g.input(ty(&[2]));
     let d = apply(&mut g, ToDevice, &[x]);
@@ -436,7 +430,6 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
         .add(Negate)
         .run(&mut module)
         .unwrap();
-    // cse, then the negation after it.
     assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()

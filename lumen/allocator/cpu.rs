@@ -22,7 +22,6 @@ impl CpuAllocator {
 
 impl Allocator for CpuAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        // 64-byte alignment to keep SIMD loads happy.
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
         if nbytes == 0 {
             return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
@@ -62,8 +61,6 @@ impl Allocator for CpuAllocator {
             crate::profiler::report_memory(Device::Cpu(0), addr, -(nbytes as i64), total, total);
         }
 
-        // SAFETY: the caller passes a live block of ours, allocated with
-        // this layout.
         unsafe { alloc::dealloc(ptr.as_ptr(), Layout::from_size_align_unchecked(nbytes, 64)) }
     }
 }

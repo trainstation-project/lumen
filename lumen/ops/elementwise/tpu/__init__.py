@@ -1,21 +1,3 @@
-"""Elementwise primitives on TPU, in lumen's Pallas: nodes of one shape's
-operands over the device's memory.
-
-``lumen/ops/elementwise/tpu/mod.rs`` writes the spec (the operands' and output's
-dtypes, their shape, the nodes and the blocks); this is the kernel. The
-operands and output are viewed in place, in a TPU's tiles: as
-``[lead, m, n]`` (their leading dimensions merged) or, of one dimension,
-as ``[elements]``. One pipeline (``emit_pipeline``, its copies
-double-buffered against compute) runs over their blocks: each step loads
-every operand's block, applies the nodes (lumen's primitives, which the
-kernel lowers as Pallas does) and stores the last one's value as the
-output's block. A 0-d operand (a broadcast's) is copied to VMEM once,
-before the pipeline, and read at every step as a ``(1,)`` (Mosaic extracts
-no narrow scalars), which its broadcast broadcasts; a ``full`` or a
-broadcast computes the blocks' shape. A 0-d program has no pipeline: its
-operands copied in, its value computed (a ``(1,)``) and copied out.
-"""
-
 import math
 
 from lumen import pallas as pl
@@ -44,7 +26,6 @@ def program(spec):
 
     scalar = not shape
 
-    # A 0-d value is a (1,) in the kernel.
     shape_of = (1,) if scalar else block_shape
 
     def apply(values):
@@ -66,8 +47,6 @@ def program(spec):
             c.start()
             c.wait()
 
-        # A 0-d value staged as `pallas_call` stages a scalar: a (1,) in
-        # VMEM (the same bytes).
         piped, scalars = [], {}
         for i, dtype in enumerate(dtypes):
             if not (broadcast[i] or scalar):

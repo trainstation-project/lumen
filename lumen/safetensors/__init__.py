@@ -1,19 +1,3 @@
-"""Tensors to and from safetensors files (``lumen/safetensors/``), with the
-API of ``safetensors.torch``::
-
-    from lumen.safetensors import save_file, load_file, safe_open
-
-    save_file({"w": w, "b": b}, "model.safetensors", metadata={"format": "lumen"})
-    tensors = load_file("model.safetensors", device="mps")
-    with safe_open("model.safetensors", device="mps") as f:
-        w = f.get_tensor("w")
-
-Files are byte-for-byte those of the reference implementation (Rust port
-in ``lumen/safetensors/mod.rs``). Loading reads each tensor's bytes straight
-into its storage (on the CPU, or on MPS, whose memory the host shares).
-A file of a dtype lumen does not have (float8, ...) raises ``ValueError``.
-"""
-
 import os
 
 from lumen._C import Tensor, _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open

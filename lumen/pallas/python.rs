@@ -1,8 +1,3 @@
-//! `lumen._C.Kernel`: bindings for [`Kernel`], which `lumen/pallas` builds as
-//! a kernel's Python body runs. Its values are traced tensors of the
-//! kernel (it answers the tracer as a graph does: `apply`, `type_of`,
-//! `_set_source`, `_set_scope`); its refs are `lumen.pallas.Ref`s.
-
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -22,8 +17,6 @@ fn err(e: String) -> PyErr {
 
 #[pymethods]
 impl PyKernel {
-    /// A kernel taking `scalars` i32s, `host_rows` rows of host bytes (if
-    /// any) and the device's `rows` rows of memory.
     #[new]
     #[pyo3(signature = (scalars, rows, host_rows = None))]
     fn new(scalars: usize, rows: usize, host_rows: Option<usize>) -> Self {
@@ -32,25 +25,19 @@ impl PyKernel {
         }
     }
 
-    /// The parameters' refs: the scalars, the host rows (if any), the
-    /// memory as read and as written.
     fn params(&self) -> Vec<Var> {
         self.inner.params().to_vec()
     }
 
-    /// A VMEM scratch buffer of `dtype` and `shape`.
     fn vmem(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
         let ty = Type::Ref(TensorType::new(parse_dtype(dtype)?, &shape), Space::Vmem);
         self.inner.alloc(ty).map_err(err)
     }
 
-    /// An array of DMA semaphores of `shape` (`[]`: one).
     fn semaphores(&mut self, shape: Vec<usize>) -> PyResult<Var> {
         self.inner.alloc(Type::Semaphore(shape)).map_err(err)
     }
 
-    /// The value `name(inputs..., **params)`: a graph primitive, as
-    /// `Graph.apply`.
     #[pyo3(signature = (name, inputs, params = None))]
     fn apply(
         &mut self,
@@ -67,9 +54,6 @@ impl PyKernel {
         self.inner.apply(primitive, &inputs).map_err(err)
     }
 
-    /// The value of a TPU's own op `name` (`bitcast` to `dtype`,
-    /// `shift_left`, `shift_right_logical`, `and`, `or`, `multiple_of`
-    /// `multiple`).
     #[pyo3(signature = (name, inputs, dtype = None, multiple = None))]
     fn bits(
         &mut self,
@@ -90,7 +74,6 @@ impl PyKernel {
         self.inner.bits(op, &inputs).map_err(err)
     }
 
-    /// A value's `(dtype, shape)`.
     fn type_of(&self, var: Var) -> PyResult<(&'static str, Vec<usize>)> {
         match self.ty(var)? {
             Type::Value(t) => Ok((dtype_name(t.dtype), t.shape.clone())),
@@ -98,8 +81,6 @@ impl PyKernel {
         }
     }
 
-    /// A ref's `(dtype, shape, space)`; a semaphore array's
-    /// `("semaphore", shape, "semaphore")`.
     fn ref_type(&self, var: Var) -> PyResult<(&'static str, Vec<usize>, &'static str)> {
         match self.ty(var)? {
             Type::Ref(t, space) => {
@@ -129,8 +110,6 @@ impl PyKernel {
             .map_err(err)
     }
 
-    /// A `dtype` tensor of `shape` in `memory` at int32 row `row`, in its
-    /// TPU layout (a ref of HBM).
     fn view(&mut self, memory: Var, row: Var, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
         let ty = TensorType::new(parse_dtype(dtype)?, &shape);
         self.inner.view(memory, row, ty).map_err(err)
@@ -180,7 +159,6 @@ impl PyKernel {
             .map_err(err)
     }
 
-    /// An SMEM scratch buffer of `dtype` and `shape`.
     fn smem(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
         let ty = Type::Ref(TensorType::new(parse_dtype(dtype)?, &shape), Space::Smem);
         self.inner.alloc(ty).map_err(err)
@@ -227,12 +205,10 @@ impl PyKernel {
         self.inner.end_for(&results).map_err(err)
     }
 
-    /// The kernel as Mosaic, its function named `name`.
     fn lower(&self, name: &str) -> PyResult<String> {
         super::mosaic::lower(&self.inner, name).map_err(err)
     }
 
-    // The tracer's: a kernel keeps no source lines or ranges.
     fn _set_source(&mut self, _var: Var, _file: String, _line: u32) {}
 
     fn _set_scope(&mut self, _ranges: Vec<(String, u64)>) {}

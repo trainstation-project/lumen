@@ -42,7 +42,7 @@ def test_unavailable_cuda_raises_runtime_error():
         t = lumen.zeros([1], device="cuda:0")
     except RuntimeError as e:
         assert "not available" in str(e)
-    else:  # a machine with CUDA
+    else:
         assert t.device == "cuda:0"
 
 
@@ -85,11 +85,11 @@ def test_fill_and_zero_in_place(device):
     if device != "cpu":
         _require(device)
     t = lumen.arange(6, device=device).reshape([2, 3])
-    assert t.fill_(1.5) is t  # returns the tensor itself, like torch
+    assert t.fill_(1.5) is t
     assert t.tolist() == [[1.5] * 3] * 2
-    t[1].zero_()  # a view: writes through to t
+    t[1].zero_()
     assert t.tolist() == [[1.5] * 3, [0.0] * 3]
-    t.transpose(0, 1)[0].fill_(-1)  # strided view (column 0)
+    t.transpose(0, 1)[0].fill_(-1)
     assert t.tolist() == [[-1.0, 1.5, 1.5], [-1.0, 0.0, 0.0]]
     with pytest.raises(TypeError):
         t.fill_("x")
@@ -97,9 +97,6 @@ def test_fill_and_zero_in_place(device):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_fill_strided_higher_rank(device):
-    # The strided kernels decode the inner dims per thread; exercise 3-D and
-    # 4-D views (permuted, so non-contiguous on every axis but one) rather
-    # than only the 2-D transpose above.
     _require(device)
     for shape, perm, value in [
         ([2, 3, 4], [2, 0, 1], -1.5),
@@ -122,8 +119,6 @@ def test_fill_strided_higher_rank(device):
                     yield x
 
         assert list(flatten(flat)) == [value] * n
-    # Permuted views cover one contiguous block, which MPS fills as such;
-    # a narrowed one does not, and its fill must leave the rest alone.
     t = lumen.zeros([4, 5, 6], device=device)
     t.narrow(2, 1, 3).permute([2, 0, 1]).fill_(2.0)
     rows = t.to("cpu").tolist()
@@ -139,7 +134,7 @@ def test_cuda_fill_launches_on_the_tensors_device():
         pytest.skip("needs two CUDA devices")
     for device, other in (("cuda:0", "cuda:1"), ("cuda:1", "cuda:0")):
         t = lumen.zeros([1 << 16], device=device)
-        lumen.cuda.synchronize(f"cuda:{other}")  # makes `other` the current device
+        lumen.cuda.synchronize(f"cuda:{other}")
         t.fill_(5.0)
         assert t.tolist() == [5.0] * (1 << 16)
 

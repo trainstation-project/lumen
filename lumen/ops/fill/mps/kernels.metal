@@ -2,8 +2,6 @@
 
 using namespace metal;
 
-// Fill `count` contiguous elements from `start`: grid-stride stores of V (T
-// repeated), then thread 0 stores the tail that does not fill a V.
 template <typename T, typename V>
 inline void fill(device T *buf, T value, ulong start, ulong count, uint i, uint nthreads) {
     constexpr uint vec = sizeof(V) / sizeof(T);
@@ -20,9 +18,6 @@ inline void fill(device T *buf, T value, ulong start, ulong count, uint i, uint 
     }
 }
 
-// Fill one element of a strided view: y indexes dim 0, x walks the inner
-// dims, so threads consecutive in x write consecutive addresses in the
-// innermost dimension.
 template <typename T>
 inline void fill_strided(
     device T *buf, T value, ulong start, constant ulong *sizes, constant ulong *strides, uint ndim, uint2 tid) {
@@ -35,7 +30,6 @@ inline void fill_strided(
     buf[start + offset] = value;
 }
 
-// Dtype-agnostic, by element width: fill_<name> and fill_strided_<name>.
 #define FILL(NAME, T, V)                                                     \
     kernel void fill_##NAME(device T *buf [[buffer(0)]],                     \
                             constant T &value [[buffer(1)]],                 \

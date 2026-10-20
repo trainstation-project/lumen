@@ -1,16 +1,3 @@
-"""Dots sharing an operand, differentiated as one: the pass before autodiff
-that makes the dots ``x @ w1``, ``x @ w2``, ... (one ``x``, weights side by
-side: a block the MPS compiler packs and runs them as one dot of, XLA's
-``DotMerger``) one node of the tape, the derivative of the dot that runs,
-``x @ [w1 | w2 | ...]``: its backward one dot for ``x``'s gradient,
-``[g1 | g2 | ...] @ [w1 | w2 | ...]^T``, and one for the weights',
-``x^T @ [g1 | g2 | ...]``, sliced into each's. The cotangents side by side
-are a ``concatenate`` the compiler fuses into the kernels writing them; the
-weights side by side, the block they are placed in.
-
-With ``lumen.config.compiler.merge_dots`` off, nothing is merged.
-"""
-
 from lumen.autograd.core import UndefinedPrimal, _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.autograd.rules import _dot_dims, _dot_general_transpose
@@ -46,7 +33,6 @@ def substitute(tape, leaves):
         key = (inputs[0], tuple(sorted(params.items())), dtype, rest)
         groups.setdefault(key, []).append(k)
     for ks in groups.values():
-        # Distinct weights, two or more.
         ks = [k for i, k in enumerate(ks) if tape[k][1][1] not in {tape[j][1][1] for j in ks[:i]}]
         if len(ks) < 2:
             continue
@@ -61,7 +47,6 @@ def substitute(tape, leaves):
             tuple(tape[k][3] for k in ks),
         )
         tape = [node if i == ks[0] else e for i, e in enumerate(tape) if i not in ks[1:]]
-        # Positions after a removed entry moved: regroup on the new tape.
         return substitute(tape, leaves)
     return tape
 
@@ -76,8 +61,6 @@ class _MergedDot(Function):
         p, x, ws = ctx.params, ctx.x, ctx.ws
         (_, rc), (_, rb) = _dot_dims(p)
         (dim,) = _free(ws[0].ndim, rc, rb)
-        # The weights and the cotangents side by side: each weight's free
-        # dimension, each result's last.
         w = prims.concatenate(ws, dim)
         g = prims.concatenate(list(grads), grads[0].ndim - 1)
         dx = _dot_general_transpose(g, UndefinedPrimal(x.shape, x.dtype), w, **p)[0]

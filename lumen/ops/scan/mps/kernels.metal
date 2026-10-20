@@ -1,16 +1,4 @@
-// cumsum, the inclusive cumulative sum along an axis: the operand viewed as
-// [a, n, b], each of its a x b lines of n elements scanned (lumen/ops/scan/
-// mps/mod.rs), from its end if `reverse`. It accumulates in A, the
-// output's type (cumsum's accum_dtype): the input's, or float for half and
-// bfloat, each element widened as read. Integers wrap. Each output is
-// computed in a fixed order: deterministic.
-//
-// Compiled after lumen/ops/mps/kernels.metal, which build.rs puts first
-// in the one Metal source the kernels share.
 
-// x from `delta` lanes below in the SIMD group (lane - delta), as its
-// bits: Metal shuffles 32-bit and narrower values, a 64-bit one as two
-// halves.
 template <typename A> inline A shuffle_up(A x, ushort delta) {
     if constexpr (sizeof(A) == 8) {
         return as_type<A>(simd_shuffle_up(as_type<uint2>(x), delta));
@@ -23,8 +11,6 @@ template <typename A> inline A shuffle_up(A x, ushort delta) {
     }
 }
 
-// The inclusive sum of x over the SIMD group's lanes up to `lane`
-// (Hillis-Steele: log2(32) steps, each adding the value `d` lanes below).
 template <typename A> inline A simd_inclusive_sum(A x, ushort lane) {
     for (ushort d = 1; d < 32; d *= 2) {
         A below = shuffle_up(x, d);
@@ -35,23 +21,10 @@ template <typename A> inline A simd_inclusive_sum(A x, ushort lane) {
     return x;
 }
 
-// A line too long to scan in one pass is split into `chunks` chunks of
-// `chunk` elements (in scan order), scanned in three launches, each in a
-// fixed order: the first sums each chunk into `partials` ([lines, chunks],
-// of A); the second scans those in place (`cumsum_lines` of A, a line of
-// chunks each); the third scans each chunk from the sum of those before it.
-
-// The sum of the chunks before `c` of line `line`: the scanned partials'.
 template <typename A> inline A carried(device const A *partials, uint chunks, ulong line, uint c) {
     return c > 0 ? partials[line * chunks + c - 1] : A(0);
 }
 
-// A row's (b = 1) scan-order elements [start, end) a threadgroup of 256
-// threads, from `carry`, in blocks of 256 x SCAN_READS elements carried
-// from one to the next: each thread sums its SCAN_READS consecutive
-// elements; the thread totals' exclusive prefix (a SIMD-group scan, then
-// one of the SIMD groups' totals in `totals`, 16 A) is added to its running
-// sums, written if WRITE. The sum of them all.
 #define SCAN_READS 4
 template <bool WRITE, typename T, typename A>
 inline A cumsum_rows(device const T *in,
@@ -66,7 +39,6 @@ inline A cumsum_rows(device const T *in,
                      ushort lane,
                      threadgroup A *totals) {
     for (ulong base = start; base < end; base += 256 * SCAN_READS) {
-        // This thread's elements, in scan order, and their running sums.
         A sums[SCAN_READS];
         A sum = A(0);
         for (uint r = 0; r < SCAN_READS; ++r) {
@@ -107,9 +79,6 @@ inline A cumsum_rows(device const T *in,
     return carry;
 }
 
-// A line's scan-order elements [start, end) a thread, in order, from
-// `carry`, written if WRITE: neighbouring threads take neighbouring
-// columns. The sum of them all.
 template <bool WRITE, typename T, typename A>
 inline A cumsum_lines(
     device const T *in, device A *out, ulong n, bool reverse, uint b, uint line, ulong start, ulong end, A carry) {
@@ -124,7 +93,6 @@ inline A cumsum_lines(
     return carry;
 }
 
-// Row `group.y`'s chunk `group.x`; line `i % lines`'s chunk `i / lines`.
 #define CUMSUM(NAME, T, A)                                                                                        \
     kernel void cumsum_rows_##NAME(device const T *in [[buffer(0)]],                                              \
                                    device A *out [[buffer(1)]],                                                   \

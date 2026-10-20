@@ -1,12 +1,3 @@
-"""Tensors: dtype constants, factory functions and NumPy interop over the
-native ``lumen._C.Tensor`` (bindings in ``lumen/tensor/python.rs``).
-
-Everything here is re-exported at the top level (``lumen.zeros``, ...).
-Note that ``lumen.tensor`` itself is the factory function, as in PyTorch;
-import this package's names from ``lumen`` (or ``from lumen.tensor import
-...``).
-"""
-
 import builtins
 
 from lumen._C import Tensor
@@ -15,7 +6,6 @@ from lumen.tensor.dlpack import from_dlpack
 
 __all__ = [
     "Tensor",
-    # dtypes
     "float16",
     "bfloat16",
     "float32",
@@ -31,22 +21,17 @@ __all__ = [
     "bool",
     "dtypes",
     "default_dtype",
-    # factories
     "tensor",
     "empty",
     "zeros",
     "ones",
     "full",
     "arange",
-    # numpy interop
     "to_numpy",
     "from_numpy",
     "from_dlpack",
 ]
 
-# ---------------------------------------------------------------------
-# dtype constants (PyTorch: torch.float32, ...)
-# ---------------------------------------------------------------------
 
 float16 = "float16"
 bfloat16 = "bfloat16"
@@ -60,7 +45,7 @@ uint8 = "uint8"
 uint16 = "uint16"
 uint32 = "uint32"
 uint64 = "uint64"
-bool = "bool"  # shadows the builtin within this namespace, like torch.bool
+bool = "bool"
 
 dtypes = (
     float16,
@@ -78,27 +63,12 @@ dtypes = (
     bool,
 )
 
-#: dtype used when none is given and none can be inferred (PyTorch:
-#: torch.get_default_dtype() == float32)
 default_dtype = float32
-
-
-# ---------------------------------------------------------------------
-# factory functions (PyTorch: torch.zeros(...), torch.tensor(...), ...)
-# ---------------------------------------------------------------------
-
-# `device` is a string ("cpu", "mps", "cuda:0") or a `lumen.device`;
-# None means the CPU, as in PyTorch.
-#
-# Inside a function traced by `lumen.compile`, zeros/ones/full/arange
-# record a `full` or `iota` primitive instead of allocating (as
-# `torch.compile` does with `torch.zeros`). Graph values have no device,
-# so `device` is ignored there: results land on the inputs' device.
 
 
 def _prims():
     """`lumen.prims` while a function is being traced, else None."""
-    from lumen.graph import prims, tracer  # lazily: lumen.graph imports this package
+    from lumen.graph import prims, tracer
 
     return prims if tracer._TRACES else None
 
@@ -130,7 +100,6 @@ def ones(shape, dtype=None, device=None):
 def full(shape, value, dtype=None, device=None):
     if prims := _prims():
         if getattr(value, "shape", None) == ():
-            # A traced scalar, broadcast (converted to ``dtype``).
             value = value if dtype in (None, value.dtype) else prims.cast(value, dtype)
             return prims.broadcast_in_dim(value, shape, ())
         inferred = "bool" if isinstance(value, builtins.bool) else "int64" if isinstance(value, int) else default_dtype
@@ -144,13 +113,6 @@ def arange(n, dtype=None, device=None):
     return Tensor.arange(n, dtype, device)
 
 
-# ---------------------------------------------------------------------
-# NumPy interop
-# ---------------------------------------------------------------------
-
-
-# Dtypes numpy has through ml_dtypes alone (each element a byte), copied
-# through Python numbers.
 _ML_DTYPES = ("int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2", "float8_e4m3b11fnuz")
 
 
@@ -168,7 +130,6 @@ def to_numpy(t):
         return np.asarray(t.tolist(), dtype=getattr(ml_dtypes, t.dtype))
     host = t.cpu()
     array = np.from_dlpack(host)
-    # A host tensor is its own memory: copy it, so the array is the caller's.
     return array.copy() if host.storage_id == t.storage_id else array
 
 
@@ -176,7 +137,6 @@ def from_numpy(a):
     """Copy a numpy array into a lumen.Tensor."""
     import numpy as np
 
-    # (ascontiguousarray makes a 0-d array 1-d: its own shape kept.)
     shape = np.shape(a)
     a = np.ascontiguousarray(a)
     values = a.ravel()
@@ -192,7 +152,7 @@ def _tensor__array__(self, dtype=None, copy=None):
     return arr
 
 
-try:  # native classes are heap types, so this usually sticks; harmless if not
+try:
     Tensor.__array__ = _tensor__array__
     Tensor.__dlpack__ = dlpack.__dlpack__
     Tensor.__dlpack_device__ = dlpack.__dlpack_device__

@@ -1,16 +1,7 @@
-//! Rewrites each `take_along_axis` as a gather of its operand's elements:
-//! `x[..., indices[..., i, ...], ...]` is `x` flattened at each element's
-//! flat position, `Σ_d position_d · stride_d` (the indices along the axis,
-//! each other dimension's iota). For a device whose kernels gather along
-//! one axis only (the MPS's); a TPU kernel gathers along an axis itself
-//! (`tpu.dynamic_gather`).
-
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
-/// `graph` with each `take_along_axis` a [`Primitive::Gather`] of its
-/// operand flattened: its positions int64 if the indices are, else int32.
 pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -83,7 +74,6 @@ pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
     out
 }
 
-/// [`take_along_axis`] as a pass.
 pub(crate) struct TakeAlongAxis;
 
 impl<M: Module> CompilerPass<M> for TakeAlongAxis {

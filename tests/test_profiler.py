@@ -1,5 +1,3 @@
-"""lumen.profiler, checked against torch.profiler's API and outputs."""
-
 import json
 
 import pytest
@@ -49,8 +47,6 @@ def test_key_averages_rows_and_table():
     zeros = rows["lumen::zeros"]
     assert zeros.count == 3
     assert zeros.cpu_time_total >= zeros.self_cpu_time_total >= 0
-    # Each result is freed after the op returns, outside any op, so zeros is
-    # charged only the allocations (as in PyTorch).
     assert zeros.cpu_memory_usage == 3 * 1024
     assert rows["lumen::empty"].self_cpu_memory_usage == 3 * 1024
     table = prof.key_averages().table(sort_by="cpu_time_total", row_limit=5)
@@ -91,7 +87,7 @@ def test_plans_record_their_steps_types():
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         f(x, y)
     by_name = {e["name"]: e for e in prof.events()}
-    assert "lumen::plan" not in by_name  # each step its own range
+    assert "lumen::plan" not in by_name
     assert by_name["mul"]["inputs"] == [("int32", [2, 3])] * 2 and by_name["mul"]["outputs"] == [("int32", [2, 3])]
     assert by_name["reduce_sum"]["outputs"] == [("int32", [2])]
 
@@ -140,8 +136,6 @@ def test_unknown_activity_names_are_rejected():
         profile(activities=["npu"])
 
 
-# ---------------- devices ----------------
-
 MPS = pytest.param(ProfilerActivity.MPS, marks=pytest.mark.mps)
 CUDA = pytest.param(ProfilerActivity.CUDA, marks=pytest.mark.cuda)
 
@@ -153,15 +147,13 @@ def test_device_fills_are_timed_on_the_gpu(activity):
     with profile(activities=[ProfilerActivity.CPU, activity], profile_memory=True) as prof:
         lumen.zeros([1 << 16], device=activity.value)
     gpu = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
-    # MPS fills with its Fill compute kernel, as PyTorch does; CUDA with the
-    # CuTe DSL kernel, whose name the DSL generates.
     assert len(gpu) == 1
     if activity == ProfilerActivity.MPS:
         assert gpu[0]["name"] == "Fill"
     assert gpu[0]["device"].startswith(activity.value)
     zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
     assert gpu[0]["parent"] == zeros["id"]
-    name = activity.name  # "MPS" / "CUDA"
+    name = activity.name
     table = prof.key_averages().table(sort_by="self_device_time_total")
     assert f"Self {name}" in table and f"{name} Mem" in table
     trace = json.loads(_trace(prof))
@@ -227,8 +219,6 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
         if device == "mps":
             lumen.mps.synchronize()
     ops = {e["name"]: e for e in prof.events() if e["kind"] == "op"}
-    # The dot (its result rounded to bfloat16: the cast to float32 not in
-    # its epilogue, on MPS either).
     (dot,) = [e for n, e in ops.items() if n.startswith("dot_general")]
     assert dot["inputs"] == [("bfloat16", [4, 8]), ("bfloat16", [8, 16])]
     assert dot["accum"] == ["float32"] and dot["outputs"] == [("bfloat16", [4, 16])]
@@ -370,16 +360,14 @@ def test_kernels_queued_far_ahead_are_each_timed():
     except RuntimeError as e:
         pytest.skip(str(e))
     model.load_state_dict({"w": lumen.from_numpy(np.full((1024, 1024), 1 / 1024, np.float32))})
-    # Matmuls slow enough that the host queues far ahead of the GPU.
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-        for _ in range(40):  # ~40 command buffers of 32 kernels, queued without waiting
+        for _ in range(40):
             f(model, 1.0)
         lumen.mps.synchronize()
     kernels = sorted((e for e in prof.events() if e["kind"] == "gpu"), key=lambda e: e["start_us"])
     assert len(kernels) >= 40 * 33
     times = collections.Counter((e["start_us"], e["duration_us"]) for e in kernels)
     assert max(times.values()) == 1
-    # Each its own duration, not its command buffer's (32 kernels' span).
     spans = sorted(e["duration_us"] for e in kernels)
     assert spans[-1] < 10 * spans[len(spans) // 2]
 
@@ -481,8 +469,6 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
     ranges = [(e["name"], parent(e)) for e in events if e["kind"] == "user_range"]
     assert ranges == [("outer", None), ("inner", "outer")] * 2, ranges
     steps = {e["name"]: parent(e) for e in events if e["kind"] == "op" and not e["name"].startswith("lumen::")}
-    # On MPS the sum, exp and add one kernel, in the sum's range; on the
-    # CPU each its own step, the add outside the range.
     want = (
         {"reduce_sum → exp → add": "outer"}
         if device == "mps"
@@ -510,7 +496,6 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
         for _ in range(2):
             with record_function("layer"):
                 x = x @ w
-        # Its gradient reads the last layer's value: both layers' forward run.
         return F.sum(x * x)
 
     try:
