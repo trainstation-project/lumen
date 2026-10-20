@@ -123,6 +123,13 @@ impl Epilogue {
         }
         let (mut widths, mut nodes) = (Vec::new(), Vec::new());
         let mut readers: HashMap<Var, usize> = HashMap::new();
+        let split = body.nodes()[1..]
+            .iter()
+            .any(|n| matches!(n.primitive, Primitive::Slice { .. }) && n.inputs[0] == dot.output);
+        if !split {
+            widths.push(*body.type_of(dot.output).shape.last().expect("a matrix"));
+            member.insert(dot.output, 0);
+        }
         for node in &body.nodes()[1..] {
             if let Primitive::Slice {
                 start_indices,
@@ -146,10 +153,6 @@ impl Epilogue {
                     readers.entry(v).or_insert(p);
                 }
             }
-        }
-        if widths.is_empty() {
-            widths.push(*body.type_of(dot.output).shape.last().expect("a matrix"));
-            member.insert(dot.output, 0);
         }
         Epilogue {
             widths,

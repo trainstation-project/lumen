@@ -218,7 +218,7 @@ def tpu(a, dtype="float32"):
         (
             lambda x, w, r: ((x @ w) * 2.0 + r).to(dtype="bfloat16"),
             lambda x, w, r: (x @ w) * 2 + r,
-            ["dot_general → mul → add → convert_element_type"],
+            ["dot_general → mul → add → cast"],
         ),
         (
             lambda x, w, r: (x @ w, lumen.functional.exp(x @ w) - r),
