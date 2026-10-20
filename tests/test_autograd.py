@@ -438,20 +438,9 @@ def test_attention_read_elsewhere_keeps_autodiff():
 
 
 class _QKV(lumen.nn.Module):
-    """Three projections of ``x``, each read on its own (its own sum): they
-    merge (three combined in one value would not, ``merge_dots``)."""
-
     wq: lumen.Tensor
     wk: lumen.Tensor
     wv: lumen.Tensor
-
-    def __call__(self, x):
-        return F.sum(F.relu(x @ self.wq)) + F.sum(F.tanh(x @ self.wk)) + F.sum(F.exp(x @ self.wv))
-
-
-class _Combined(_QKV):
-    """The three projections combined in one value: K = 3 does not divide
-    a SIMD block's 8 columns, so they stay apart."""
 
     def __call__(self, x):
         return F.sum(F.relu(x @ self.wq) * (x @ self.wk) + (x @ self.wv))
@@ -496,15 +485,6 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device):
     for a, b in zip(gw, gw_):
         np.testing.assert_array_equal(a, b)
     np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)
-
-
-def test_three_dots_combined_in_one_value_are_differentiated_apart():
-    """x @ wq, x @ wk, x @ wv combined in one elementwise value (K = 3, not
-    dividing a SIMD block's 8 columns): not merged before autodiff either,
-    no concatenate of their weights or cotangents."""
-    model = _Combined(*(lumen.empty([32, 16], device="meta") for _ in range(3)))
-    graph = str(lumen.make_graph(_qkv_step)(model, lumen.empty([8, 32], device="meta")))
-    assert "concatenate" not in graph, graph
 
 
 @pytest.mark.mps

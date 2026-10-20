@@ -8,11 +8,6 @@ side: a block the MPS compiler packs and runs them as one dot of, XLA's
 are a ``concatenate`` the compiler fuses into the kernels writing them; the
 weights side by side, the block they are placed in.
 
-As the MPS compiler merges (``graph_compiler/mps/merge_dots.rs``): the dots
-whose results an elementwise value combines (K of them: SwiGLU's gate and
-up) one group if K divides a SIMD block's 8 columns, else left apart; the
-others, each read on its own, one group.
-
 With ``lumen.config.compiler.merge_dots`` off, nothing is merged.
 """
 
@@ -50,7 +45,7 @@ def substitute(tape, leaves):
         rest = tuple(n if d != free[0] else None for d, n in enumerate(shape))
         key = (inputs[0], tuple(sorted(params.items())), dtype, rest)
         groups.setdefault(key, []).append(k)
-    for ks in (part for ks in groups.values() for part in _split_by_epilogue(graph, tape, ks)):
+    for ks in groups.values():
         # Distinct weights, two or more.
         ks = [k for i, k in enumerate(ks) if tape[k][1][1] not in {tape[j][1][1] for j in ks[:i]}]
         if len(ks) < 2:
@@ -69,25 +64,6 @@ def substitute(tape, leaves):
         # Positions after a removed entry moved: regroup on the new tape.
         return substitute(tape, leaves)
     return tape
-
-
-# The columns of a SIMD group's accumulator block, as merge_dots.rs's
-# `SIMD_BLOCK`: K combined values in one block only if K divides it.
-_SIMD_BLOCK = 8
-
-
-def _split_by_epilogue(graph, tape, ks):
-    """The dots at tape positions ``ks`` (sharing an operand) split as
-    ``merge_dots.rs``'s ``split_by_epilogue``: each set an elementwise
-    value combines (K of them) its own if K divides ``_SIMD_BLOCK``, else
-    none; the others, each read on its own, together."""
-    sets = graph.combined([tape[k][3] for k in ks])
-    members = {}
-    for k, s in zip(ks, sets):
-        members.setdefault(s, []).append(k)
-    alone = [m[0] for m in members.values() if len(m) == 1]
-    parts = [m for m in members.values() if len(m) > 1 and _SIMD_BLOCK % len(m) == 0]
-    return parts + ([alone] if len(alone) > 1 else [])
 
 
 class _MergedDot(Function):

@@ -18,7 +18,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode`, `fusion_scratch_bytes`. |
-| `merge_dots.rs` | Pass `merge_dots` (`MergeDots`): dots sharing an operand become one dot over a packed block of parameters (XLA `DotMerger`). Split by how their results are read (`split_by_epilogue`, `graph_compiler::combined`): K whose results one elementwise value combines (SwiGLU's gate and up) merge as their own group only if K divides a SIMD block's 8 columns, else stay apart; the others merge together. `lumen/autograd/dots.py` merges before autodiff by the same rule. |
+| `merge_dots.rs` | Pass `merge_dots` (`MergeDots`): dots sharing an operand become one dot over a packed block of parameters (XLA `DotMerger`). |
 | `flash_attention.rs` | Pass `flash_attention`: each matched attention one fusion (`attention::fuse`), `Kernel::Attention`. |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
