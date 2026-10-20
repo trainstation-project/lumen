@@ -4,12 +4,15 @@ use super::pass::{CompilerPass, Module, Pipeline};
 use super::passes::dot_strength::DotStrength;
 use super::passes::fold_dot_reshapes::FoldDotReshapes;
 use super::passes::merge_dots::{Blocks, MergeDots, Packs, Target};
+use super::passes::merge_dots_backward::MergeDotsBackward;
 use super::passes::simplify::Simplify;
 use super::plan::DeviceLayout;
 use super::{Options, positions};
 use crate::graph::{Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::{Plan, PlanOptions};
+
+const LANES: usize = 128;
 
 const LAYOUT: DeviceLayout = DeviceLayout {
     bytes: |t| {
@@ -46,44 +49,78 @@ impl Blocks for TpuModule<'_> {
     }
 }
 
-fn columns(graph: &Graph, dot: &Node) -> Option<Vec<(usize, Var)>> {
-    if !matches!(dot.primitive, Primitive::DotGeneral { .. })
-        || graph.outputs().contains(&dot.output)
-    {
+fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
+    if graph.outputs().contains(&dot.output) {
         return None;
     }
     let shape = &graph.type_of(dot.output).shape;
-    let last = shape.len() - 1;
-    let mut parts: Vec<(usize, usize, Var)> = Vec::new();
-    for node in graph
+    let readers: Vec<&Node> = graph
         .nodes()
         .iter()
         .filter(|n| n.inputs.contains(&dot.output))
-    {
-        let Primitive::Slice {
-            start_indices,
-            limit_indices,
-            ..
-        } = &node.primitive
-        else {
-            return None;
-        };
-        let whole = (0..last).all(|d| start_indices[d] == 0 && limit_indices[d] == shape[d]);
-        if !whole {
-            return None;
+        .collect();
+    let along = |axis: usize| {
+        let mut parts: Vec<(usize, usize, Var)> = Vec::new();
+        for node in &readers {
+            let Primitive::Slice {
+                start_indices,
+                limit_indices,
+                ..
+            } = &node.primitive
+            else {
+                return None;
+            };
+            let whole = (0..shape.len())
+                .filter(|&d| d != axis)
+                .all(|d| start_indices[d] == 0 && limit_indices[d] == shape[d]);
+            if !whole {
+                return None;
+            }
+            parts.push((start_indices[axis], limit_indices[axis], node.output));
         }
-        parts.push((start_indices[last], limit_indices[last], node.output));
-    }
-    parts.sort_unstable();
-    let covers = parts.len() > 1
-        && parts.first().is_some_and(|p| p.0 == 0)
-        && parts.windows(2).all(|w| w[0].1 == w[1].0)
-        && parts.last().is_some_and(|p| p.1 == shape[last]);
-    covers.then(|| parts.into_iter().map(|(a, b, v)| (b - a, v)).collect())
+        parts.sort_unstable();
+        let covers = parts.len() > 1
+            && parts.first().is_some_and(|p| p.0 == 0)
+            && parts.windows(2).all(|w| w[0].1 == w[1].0)
+            && parts.last().is_some_and(|p| p.1 == shape[axis])
+            && parts
+                .iter()
+                .all(|p| p.0.is_multiple_of(LANES) && p.1.is_multiple_of(LANES));
+        covers.then(|| {
+            (
+                axis,
+                parts.into_iter().map(|(a, b, v)| (b - a, v)).collect(),
+            )
+        })
+    };
+    along(shape.len() - 1).or_else(|| along(shape.len() - 2))
+}
+
+fn stacked(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    users: &[Vec<usize>],
+    dot: &Node,
+) -> Option<usize> {
+    let lhs = dot.inputs[0];
+    let k = producer[lhs]?;
+    let Primitive::Concatenate { dimension, .. } = graph.nodes()[k].primitive else {
+        return None;
+    };
+    let rank = graph.type_of(lhs).shape.len();
+    let fits = users[lhs].len() == 1
+        && !graph.outputs().contains(&lhs)
+        && dimension + 2 >= rank
+        && graph.nodes()[k]
+            .inputs
+            .iter()
+            .all(|&v| graph.type_of(v).shape[dimension].is_multiple_of(LANES));
+    fits.then_some(k)
 }
 
 struct Fused {
-    parts: Option<Vec<(usize, Var)>>,
+    parts: Option<(usize, Vec<(usize, Var)>)>,
+    stack: Option<usize>,
     inside: Vec<usize>,
     extras: Vec<Var>,
     outputs: Vec<Var>,
@@ -105,9 +142,10 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             continue;
         }
         let before = |v: Var| producer[v].is_none_or(|p| p < d);
-        let parts = columns(graph, dot);
+        let parts = split(graph, dot);
+        let stack = stacked(graph, &producer, &users, dot);
         let mut member: HashMap<Var, usize> = match &parts {
-            Some(parts) => parts
+            Some((_, parts)) => parts
                 .iter()
                 .enumerate()
                 .map(|(k, &(_, v))| (v, k))
@@ -115,7 +153,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             None => HashMap::from([(dot.output, 0)]),
         };
         let shape_of = |p: usize| match &parts {
-            Some(parts) => &graph.type_of(parts[p].1).shape,
+            Some((_, parts)) => &graph.type_of(parts[p].1).shape,
             None => &graph.type_of(dot.output).shape,
         };
         let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
@@ -130,6 +168,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
                 .filter_map(|v| member.get(v))
                 .copied()
                 .collect();
+            of.sort_unstable();
             of.dedup();
             let [p] = of[..] else {
                 continue;
@@ -200,7 +239,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
                 }
             }
         }
-        if parts.is_none() && absorbed.is_empty() {
+        if parts.is_none() && stack.is_none() && absorbed.is_empty() {
             continue;
         }
         inside.sort_unstable();
@@ -217,6 +256,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         }
         found[d] = Some(Fused {
             parts,
+            stack,
             inside,
             extras,
             outputs,
@@ -235,6 +275,9 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
     }
     let mut skipped = vec![false; nodes.len()];
     for f in found.iter().flatten() {
+        if let Some(k) = f.stack {
+            skipped[k] = true;
+        }
         f.inside
             .iter()
             .filter(|&&k| {
@@ -261,20 +304,36 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         };
         let mut body = Graph::new();
         let mut within: HashMap<Var, Var> = HashMap::new();
-        for &v in node.inputs.iter().chain(&f.extras) {
+        let reads: Vec<Var> = match f.stack {
+            Some(k) => nodes[k]
+                .inputs
+                .iter()
+                .chain(&node.inputs[1..])
+                .copied()
+                .collect(),
+            None => node.inputs.clone(),
+        };
+        for &v in reads.iter().chain(&f.extras) {
             within.insert(v, body.input(graph.type_of(v).clone()));
+        }
+        if let Some(k) = f.stack {
+            let parts: Vec<Var> = nodes[k].inputs.iter().map(|v| within[v]).collect();
+            let v = body
+                .apply(nodes[k].primitive.clone(), &parts)
+                .expect("the stacked operands");
+            within.insert(nodes[k].output, v);
         }
         let operands: Vec<Var> = node.inputs.iter().map(|v| within[v]).collect();
         let dot = body
             .apply(node.primitive.clone(), &operands)
             .expect("the dot's operands");
         within.insert(node.output, dot);
-        if let Some(parts) = &f.parts {
+        if let Some((axis, parts)) = &f.parts {
             let shape = body.type_of(dot).shape.clone();
             let mut start = 0;
             for &(width, v) in parts {
                 let (mut starts, mut limits) = (vec![0; shape.len()], shape.clone());
-                (starts[shape.len() - 1], limits[shape.len() - 1]) = (start, start + width);
+                (starts[*axis], limits[*axis]) = (start, start + width);
                 let slice = Primitive::Slice {
                     start_indices: starts,
                     limit_indices: limits,
@@ -298,9 +357,10 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         }
         let outputs: Vec<Var> = f.outputs.iter().map(|v| within[v]).collect();
         body.set_outputs(&outputs).expect("the body's values");
-        let mut label = match &f.parts {
-            Some(parts) => format!("{}x dot_general", parts.len()),
-            None => "dot_general".into(),
+        let mut label = match (&f.parts, f.stack) {
+            (Some((_, parts)), _) => format!("{}x dot_general", parts.len()),
+            (None, Some(k)) => format!("{}x dot_general", nodes[k].inputs.len()),
+            (None, None) => "dot_general".into(),
         };
         for name in names {
             label += &format!(" → {name}");
@@ -361,11 +421,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(Simplify { matched: true })
         .add(DotStrength { matrices: false });
     if options.config.merge_dots {
-        pipeline.add(MergeDots {
+        pipeline.add(MergeDotsBackward).add(MergeDots {
             target: Target {
                 reads: |_, _| true,
                 views: false,
-                lanes: 128,
+                lanes: LANES,
                 columns: 1,
             },
         });
