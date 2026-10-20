@@ -329,8 +329,8 @@ def test_projections_backward_merges_into_two_dots():
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[2, 3, 4], packable=[2, 3, 4])
     assert plan.packed == [([2, 3, 4], 0)]
     labels = [s["label"] for s in plan.steps()]
-    dots = [label for label in labels if "dot_general" in label]
-    assert dots == ["3x dot_general → mul", "3x dot_general", "dot_general"], labels
+    [label for label in labels if "dot_general" in label]
+    assert labels == ["3x dot_general" + " → mul" * 5, "3x dot_general", "dot_general"], labels
     assert not any("concatenate" in label for label in labels), labels
     rng = np.random.default_rng(0)
     ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(3)]
