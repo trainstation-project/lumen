@@ -193,9 +193,11 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
     rng = np.random.default_rng(0)
     values = [lumen.from_numpy(rng.standard_normal([h, d], dtype=np.float32)).to(dtype=dtype) for h in sizes]
     model = make()
+    f = lumen.compile(lambda model, x: model(x), device="tpu")
+    f(model, meta(m, d))
     model.load_state_dict({f"ws.{k}": v for k, v in enumerate(values)})
     x = lumen.from_numpy(rng.standard_normal([m, d], dtype=np.float32)).to(dtype=dtype).to("tpu")
-    ys = lumen.compile(lambda model, x: model(x))(model, x)
+    ys = f(model, x)
     for y, w in zip(ys, values):
         expected = -(floats(x) @ floats(w).T)
         assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
