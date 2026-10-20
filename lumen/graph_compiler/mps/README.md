@@ -18,7 +18,6 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode`, `fusion_scratch_bytes`. |
-| `merge_dots.rs` | Pass `merge_dots` (`MergeDots`): dots sharing an operand become one dot over a packed block of parameters (XLA `DotMerger`). A gated pair (two results one elementwise value combines, `graph_compiler::combined`) of unassigned weights gets an **interleaved** block (`MpsModule::interleaved`, `Plan::interleaved`; column j of each weight its 2j and 2j + 1), its results its pairs' slices, its kernel `PAIRED` + `INTERLEAVED`; otherwise side by side. |
 | `flash_attention.rs` | Pass `flash_attention`: each matched attention one fusion (`attention::fuse`), `Kernel::Attention`. |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
@@ -55,7 +54,7 @@ of any module). The order is load-bearing; the comments in
 | 0 | `take_along_axis` | always | `../passes/take_along_axis.rs` | Gathers along an axis (`F.gather`) as gathers of the operand's flat positions, which the MPS's kernels (and the cross-entropy patterns) read. |
 | 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
 | 2 | `merge_dots_backward` | `fuse && merge_dots && contraction_epilogues` | `../passes/merge_dots_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
-| 3 | `merge_dots` | `fuse && merge_dots` | `merge_dots.rs` | Merge dots over packable parameters into blocks; fills `MpsModule::packed`. |
+| 3 | `merge_dots` | `fuse && merge_dots` | `../passes/merge_dots.rs` | Merge dots over packable parameters into blocks (`Target`: `fusion::fusible` readers, views, 8 columns); fills `MpsModule::packed`. |
 | 4 | `flash_attention` | `fuse && flash_attention` | `flash_attention.rs` | Attention → one flash-attention fusion (before dots are put in matmul form). |
 | 5 | `flash_attention_backward` | `fuse && flash_attention` | `flash_attention_backward.rs` | Attention backward → flash-attention backward fusion(s). |
 | 6 | `linear_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/linear_cross_entropy.rs` | CE of unshared logits → `LinearCrossEntropy`. |
