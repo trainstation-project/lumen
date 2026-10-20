@@ -117,8 +117,12 @@ fn block(n: usize) -> usize {
 
 #[cfg(lumen_tpu_linked)]
 fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
+    let module = match kind {
+        "forward" => "lumen.ops.attention.tpu.forward",
+        _ => "lumen.ops.attention.tpu.backward",
+    };
     let launched = Launch {
-        module: "lumen.ops.attention.tpu",
+        module,
         kernel: format!("flash_attention_{kind}"),
         spec,
         rows,

@@ -137,7 +137,6 @@ pub(crate) fn body_of(
 pub(crate) fn fuse_backward(
     graph: &Graph,
     together: impl Fn(&Backward) -> bool,
-    accept: impl Fn(&Graph) -> bool,
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
@@ -179,10 +178,7 @@ pub(crate) fn fuse_backward(
             _ => vec![vec![dv, dk], vec![dq]],
         };
         for outs in groups {
-            let outputs: Vec<Var> = outs.iter().map(|&o| nodes[o].output).collect();
-            if let Some(at) = read_after(&outs)
-                && accept(&body_of(graph, &m.producer, &outputs, &bases))
-            {
+            if let Some(at) = read_after(&outs) {
                 fusions.push((at, outs, bases.clone()));
             }
         }
@@ -287,7 +283,6 @@ pub(crate) fn fuse(
     graph: &Graph,
     epilogues: bool,
     scalars: &[Var],
-    accept: impl Fn(&Graph) -> bool,
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
@@ -314,26 +309,6 @@ pub(crate) fn fuse(
         .filter(|(a, _, end, _, _)| {
             a.lse
                 .is_none_or(|n| m.readers[graph.nodes()[n].output].iter().all(|r| r > end))
-        })
-        .filter(|(a, chain, _, leaves, kept)| {
-            let nodes = graph.nodes();
-            let end = chain.last().copied().unwrap_or(a.root);
-            let mut bases: Vec<Var> = Vec::new();
-            for &b in [a.q.base, a.k.base, a.v.base].iter().chain(leaves) {
-                if !bases.contains(&b) {
-                    bases.push(b);
-                }
-            }
-            if let Some(d) = &a.dropout {
-                bases.extend([d.seed, d.start]);
-            }
-            let raw = kept.then_some(nodes[a.root].output);
-            let lse = a.lse.map(|n| nodes[n].output);
-            let outputs: Vec<Var> = std::iter::once(nodes[end].output)
-                .chain(raw)
-                .chain(lse)
-                .collect();
-            accept(&body_of(graph, &m.producer, &outputs, &bases))
         })
         .collect();
     if found.is_empty() {

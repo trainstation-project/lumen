@@ -491,6 +491,21 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 }
 
+fn attentions(graph: &Graph) -> Result<(), String> {
+    for node in graph.nodes() {
+        if let Primitive::Fusion { name, body, .. } = &node.primitive {
+            match name.as_str() {
+                "flash_attention" => crate::ops::attention::tpu::forward(body).map(drop)?,
+                "flash_attention_backward" => {
+                    crate::ops::attention::tpu::backward(body).map(drop)?
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 struct FlashAttention;
 
 impl CompilerPass<TpuModule<'_>> for FlashAttention {
@@ -499,14 +514,8 @@ impl CompilerPass<TpuModule<'_>> for FlashAttention {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph = attention::fuse(
-            &m.graph,
-            false,
-            &[],
-            |body| crate::ops::attention::tpu::forward(body).is_ok(),
-            |_| "flash_attention".into(),
-        );
-        Ok(())
+        m.graph = attention::fuse(&m.graph, false, &[], |_| "flash_attention".into());
+        attentions(&m.graph)
     }
 }
 
@@ -518,13 +527,9 @@ impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph = attention::fuse_backward(
-            &m.graph,
-            |_| false,
-            |body| crate::ops::attention::tpu::backward(body).is_ok(),
-            |_| "flash_attention_backward".into(),
-        );
-        Ok(())
+        m.graph =
+            attention::fuse_backward(&m.graph, |_| false, |_| "flash_attention_backward".into());
+        attentions(&m.graph)
     }
 }
 
