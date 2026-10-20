@@ -136,7 +136,7 @@ impl PyPlan {
     }
 
     #[getter]
-    fn interleaved(&self) -> Vec<usize> {
+    fn interleaved(&self) -> Vec<Vec<usize>> {
         self.inner.interleaved().to_vec()
     }
 

@@ -70,7 +70,7 @@ struct MpsModule<'a> {
     graph: Graph,
     options: &'a Options,
     packed: Vec<(Vec<usize>, usize)>,
-    interleaved: Vec<usize>,
+    interleaved: Vec<Vec<usize>>,
     rows: Vec<diamonds::Row>,
     scalars: Vec<usize>,
     kernels: Vec<Kernel>,

@@ -130,7 +130,7 @@ pub struct Plan {
     steps: Vec<Step>,
     workspace_bytes: usize,
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
-    pub(crate) interleaved: Vec<usize>,
+    pub(crate) interleaved: Vec<Vec<usize>>,
     pub(crate) staged: Option<Box<Staged>>,
 }
 
@@ -568,7 +568,7 @@ impl Plan {
         steps: Vec<Step>,
         workspace_bytes: usize,
         packed: Vec<(Vec<usize>, usize)>,
-        interleaved: Vec<usize>,
+        interleaved: Vec<Vec<usize>>,
     ) -> Plan {
         Plan {
             aliases: vec![None; outputs.len()],
@@ -661,7 +661,7 @@ impl Plan {
         &self.packed
     }
 
-    pub fn interleaved(&self) -> &[usize] {
+    pub fn interleaved(&self) -> &[Vec<usize>] {
         &self.interleaved
     }
 

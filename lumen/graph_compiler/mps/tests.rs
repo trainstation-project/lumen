@@ -737,7 +737,7 @@ fn dots_sharing_an_operand_merge() {
     assert_eq!(dots(&merge_dots(&g, &[false; 4], &[]).0), 3);
     let (merged, packs, interleave) = merge_dots(&g, &[false, true, true, true], &[]);
     assert_eq!(packs, [(vec![1, 2], 1)]);
-    assert_eq!(interleave, [2]);
+    assert_eq!(interleave, [vec![2]]);
     assert_eq!(dots(&merged), 2, "{merged}");
     assert_eq!(names(&fuse(&merged)), ["fusion", "dot_general"]);
     let mut read_twice = g.clone();
@@ -774,7 +774,10 @@ fn dots_sharing_an_operand_merge() {
         .collect();
     alone.set_outputs(&outs).unwrap();
     let packed = merge_dots(&alone, &[false, true, true], &[]);
-    assert_eq!((packed.1, packed.2), (vec![(vec![1, 2], 1)], vec![1]));
+    assert_eq!(
+        (packed.1, packed.2),
+        (vec![(vec![1, 2], 1)], vec![vec![1, 1]])
+    );
 
     let mut g = Graph::new();
     let w = g.input(ty(DType::F32, &[32, 32]));
@@ -841,9 +844,12 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         (packs, interleave)
     };
     let rows = vec![(vec![1, 2], 0)];
-    assert_eq!(pack(&build(&|_, _, _| None), &[]), (rows.clone(), vec![2]));
+    assert_eq!(
+        pack(&build(&|_, _, _| None), &[]),
+        (rows.clone(), vec![vec![2]])
+    );
     let read = build(&|g, _, w3| Some(apply(g, Neg, &[w3])));
-    assert_eq!(pack(&read, &[]), (rows.clone(), vec![1]));
+    assert_eq!(pack(&read, &[]), (rows.clone(), vec![vec![1, 1]]));
     let concatenated = build(&|g, w1, w3| {
         let block = Concatenate {
             dimension: 0,
@@ -852,11 +858,11 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         Some(apply(g, block, &[w1, w3]))
     });
     let (merged, packs, interleave) = merge_dots(&concatenated, &packable, &[]);
-    assert_eq!((packs, interleave), (rows.clone(), vec![1]));
+    assert_eq!((packs, interleave), (rows.clone(), vec![vec![1, 1]]));
     assert!(!names(&merged).contains(&"concatenate"), "{merged}");
     assert_eq!(
         pack(&build(&|_, _, _| None), &[false, true, true]),
-        (rows, vec![1])
+        (rows, vec![vec![1, 1]])
     );
 }
 
@@ -889,17 +895,17 @@ fn owned_plans_read_packed_parameters() {
     };
     let plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
     assert_eq!(plan.packed, [(vec![1, 2], 1)]);
-    assert_eq!(plan.interleaved, [2]);
+    assert_eq!(plan.interleaved, [vec![2]]);
     let meta = || Tensor::zeros(&[32, 64], Device::Meta(0));
     let (m1, m3) = (meta(), meta());
-    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0))
+    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, &[2], Device::Mps(0))
         .unwrap()
         .unwrap();
-    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0)).unwrap();
+    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, &[2], Device::Mps(0)).unwrap();
     assert!(again.is_some_and(|b| b.shares_storage_with(&block)));
-    for (members, interleave) in [([&m3, &m1], 2), ([&m1, &m3], 1)] {
+    for (members, regions) in [([&m3, &m1], vec![2]), ([&m1, &m3], vec![1, 1])] {
         let members: Vec<Tensor> = members.iter().map(|&m| m.clone()).collect();
-        let packed = Tensor::pack(&members, 1, interleave, Device::Mps(0));
+        let packed = Tensor::pack(&members, 1, &regions, Device::Mps(0));
         assert!(packed.unwrap().is_none());
     }
     let inputs = [data(&[16, 32], 1), data(&[32, 64], 2), data(&[32, 64], 3)];

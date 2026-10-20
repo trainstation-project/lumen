@@ -417,8 +417,8 @@ def compile(fn, device=None):
 
         def inputs_for(plan):
             blocks = []
-            for (positions, dimension), interleave in zip(plan.packed, plan.interleaved):
-                block = _pack([inputs[i] for i in positions], dimension, target, interleave)
+            for (positions, dimension), regions in zip(plan.packed, plan.interleaved):
+                block = _pack([inputs[i] for i in positions], dimension, target, regions)
                 if block is None:
                     return None
                 blocks.append(block)

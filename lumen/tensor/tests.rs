@@ -703,11 +703,10 @@ mod meta {
     #[test]
     fn parameters_pack_interleaved() {
         let options = || TensorOptions::new().device(Device::Meta(0));
-        let (a, b) = (
-            Tensor::zeros(&[2, 3], options()),
-            Tensor::zeros(&[2, 3], options()),
-        );
-        let block = Tensor::pack(&[a.clone(), b.clone()], 1, 2, Device::Cpu(0))
+        let meta = |n: usize| Tensor::zeros(&[2, n], options());
+        let cpu = |v: &[f32], n: usize| Tensor::from_slice(v, DType::F32).reshape(&[2, n]);
+        let (a, b) = (meta(3), meta(3));
+        let block = Tensor::pack(&[a.clone(), b.clone()], 1, &[2], Device::Cpu(0))
             .unwrap()
             .unwrap();
         assert_eq!(block.shape(), [2, 6]);
@@ -717,9 +716,8 @@ mod meta {
         );
         assert_eq!((pa.strides(), pb.strides()), (&[6, 2][..], &[6, 2][..]));
         assert_eq!((pa.storage_offset(), pb.storage_offset()), (0, 1));
-        let cpu = |v: &[f32]| Tensor::from_slice(v, DType::F32).reshape(&[2, 3]);
-        pa.copy_(&cpu(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])).unwrap();
-        pb.copy_(&cpu(&[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]))
+        pa.copy_(&cpu(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3)).unwrap();
+        pb.copy_(&cpu(&[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0], 3))
             .unwrap();
         assert_eq!(
             block.to_vec::<f32>(),
@@ -727,18 +725,35 @@ mod meta {
                 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0
             ]
         );
-        let c = Tensor::zeros(&[2, 4], options());
-        assert!(
-            Tensor::pack(
-                &[Tensor::zeros(&[2, 3], options()), c],
-                1,
-                2,
-                Device::Cpu(0)
-            )
-            .is_err()
+        let members = [meta(2), meta(2), meta(1), meta(1), meta(2)];
+        let block = Tensor::pack(&members, 1, &[2, 2, 1], Device::Cpu(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.shape(), [2, 8]);
+        let values = [
+            [10.0, 11.0, 12.0, 13.0],
+            [20.0, 21.0, 22.0, 23.0],
+            [30.0, 31.0, 0.0, 0.0],
+            [40.0, 41.0, 0.0, 0.0],
+            [50.0, 51.0, 52.0, 53.0],
+        ];
+        for (m, v) in members.iter().zip(&values) {
+            let n = m.shape()[1];
+            m.placed(Device::Cpu(0))
+                .unwrap()
+                .copy_(&cpu(&v[..2 * n], n))
+                .unwrap();
+        }
+        assert_eq!(
+            block.to_vec::<f32>(),
+            [
+                10.0, 20.0, 11.0, 21.0, 30.0, 40.0, 50.0, 51.0, 12.0, 22.0, 13.0, 23.0, 31.0, 41.0,
+                52.0, 53.0
+            ]
         );
-        let three: Vec<Tensor> = (0..3).map(|_| Tensor::zeros(&[2, 3], options())).collect();
-        assert!(Tensor::pack(&three, 1, 2, Device::Cpu(0)).is_err());
+        assert!(Tensor::pack(&[meta(3), meta(4)], 1, &[2], Device::Cpu(0)).is_err());
+        let three: Vec<Tensor> = (0..3).map(|_| meta(3)).collect();
+        assert!(Tensor::pack(&three, 1, &[2], Device::Cpu(0)).is_err());
     }
 
     #[test]

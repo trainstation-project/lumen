@@ -272,6 +272,107 @@ pub(super) fn fuse(
                 && (to.dtype.size_of() > from.dtype.size_of()) == grows
                 && to.dtype.size_of() != from.dtype.size_of()
         };
+        if let Some(regions) = super::codegen::gemm_regions(graph, node) {
+            let index_of = |v: Var| producer[v].expect("a node's value");
+            let mut sets: Vec<Vec<usize>> = regions
+                .iter()
+                .map(|c| {
+                    let mut set = Vec::new();
+                    for v in c.members() {
+                        let mut k = index_of(v);
+                        loop {
+                            if !set.contains(&k) {
+                                set.push(k);
+                            }
+                            match producer[nodes[k].inputs[0]] {
+                                Some(p) if p != i => k = p,
+                                _ => break,
+                            }
+                        }
+                    }
+                    set.sort_unstable();
+                    set
+                })
+                .collect();
+            let mut region_of: Vec<Option<usize>> = vec![None; n];
+            for (r, set) in sets.iter().enumerate() {
+                for &k in set {
+                    region_of[nodes[k].output] = Some(r);
+                }
+            }
+            let mut depends = vec![false; n];
+            depends[node.output] = true;
+            for (u, un) in nodes.iter().enumerate().skip(i + 1) {
+                depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
+                if !live[u] || region_of[un.output].is_some() {
+                    continue;
+                }
+                let mut of: Vec<usize> = un.inputs.iter().filter_map(|&v| region_of[v]).collect();
+                of.sort_unstable();
+                of.dedup();
+                let [r] = of.as_slice() else {
+                    continue;
+                };
+                let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
+                let steps =
+                    elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+                let reads = un
+                    .inputs
+                    .iter()
+                    .all(|&v| region_of[v] == Some(*r) || (!depends[v] && earlier(v)));
+                if fusible[u] && steps && reads && !in_row(u) && !claimed[u] {
+                    sets[*r].push(u);
+                    region_of[un.output] = Some(*r);
+                }
+            }
+            let ends: Option<Vec<usize>> = regions
+                .iter()
+                .zip(&sets)
+                .map(|(c, set)| {
+                    let outside: Vec<usize> = set
+                        .iter()
+                        .copied()
+                        .filter(|&k| {
+                            let v = nodes[k].output;
+                            is_output[v] || users[v].iter().any(|w| !set.contains(w))
+                        })
+                        .collect();
+                    match outside.as_slice() {
+                        [end]
+                            if graph.type_of(nodes[*end].output).numel()
+                                == graph.type_of(node.output).numel()
+                                    / graph
+                                        .type_of(node.output)
+                                        .shape
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(1)
+                                    * c.size() =>
+                        {
+                            Some(*end)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            if let Some(ends) = ends.filter(|e| e.len() - 1 <= MAX_AUX) {
+                let main = *ends.iter().max().expect("regions");
+                (dot_end[i], dot_of[main]) = (Some(main), Some(i));
+                claimed[i] = true;
+                for set in &sets {
+                    for &k in set {
+                        claimed[k] = true;
+                        if k != main {
+                            in_epilogue[k] = true;
+                        }
+                    }
+                }
+                for &end in ends.iter().filter(|&&e| e != main) {
+                    dot_aux[end] = Some(main);
+                }
+                continue;
+            }
+        }
         let pair: Option<[usize; 2]> = super::codegen::gemm_pair(graph, node)
             .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
         let mut taken = vec![i];

@@ -288,6 +288,20 @@ impl Tensor {
         recorded(op, t)
     }
 
+    pub(crate) fn stepped(&self, dim: usize, start: usize, len: usize, step: usize) -> Self {
+        assert!(dim < self.ndim(), "dim {dim} out of range");
+        assert!(
+            len == 0 || start + (len - 1) * step < self.shape[dim],
+            "stepped({dim}, {start}, {len}, {step}) out of bounds for size {}",
+            self.shape[dim]
+        );
+        let mut t = self.clone();
+        t.offset += start * self.strides[dim];
+        t.shape[dim] = len;
+        t.strides[dim] *= step;
+        t
+    }
+
     pub fn select(&self, dim: usize, index: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("select"), || vec![self.ty()]);
         recorded(op, self.narrow(dim, index, 1).squeeze_dim(dim))

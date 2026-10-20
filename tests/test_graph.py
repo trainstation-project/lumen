@@ -633,7 +633,7 @@ def test_dots_sharing_an_operand_merge(device):
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
-        assert plan.interleaved == [2]
+        assert plan.interleaved == [[2]]
         w1, w3 = model.w1._placed("mps"), model.w3._placed("mps")
         assert (list(w1.strides), list(w3.strides)) == ([128, 2], [128, 2])
         assert w3.storage_offset - w1.storage_offset == 1
@@ -1242,7 +1242,7 @@ def test_gated_pairs_weights_are_interleaved():
         pytest.skip(str(e))
     graph = lumen.make_graph(lambda m, x: m(x))(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2])
-    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
     assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
 
     def step(model, x):
@@ -1254,7 +1254,7 @@ def test_gated_pairs_weights_are_interleaved():
 
     graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
-    assert all(k == 1 for k in plan.interleaved), plan.interleaved
+    assert all(k == 1 for regions in plan.interleaved for k in regions), plan.interleaved
     values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
     x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
     got = []
@@ -1305,7 +1305,7 @@ def test_gated_pairs_backward_is_interleaved():
     make = lambda: GatedMLP2(meta(h, d), meta(h, d), meta(d, h))
     graph = lumen.make_graph(step)(make(), meta(m, d))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
-    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
     labels = [s["label"] for s in plan.steps()]
     (cotangents,) = [label for label in labels if label.endswith("concatenate")]
     assert cotangents.startswith("dot_general → "), labels
@@ -1325,6 +1325,97 @@ def test_gated_pairs_backward_is_interleaved():
         lumen.config.compiler.reset()
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5)
+
+
+class Projections(lumen.nn.Module):
+    ws: list
+    groups: list
+    mixed: bool = False
+
+    def __call__(self, x):
+        if self.mixed:
+            p = [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in self.ws]
+        else:
+            p = [x @ w.t() for w in self.ws]
+        out, k = [], 0
+        for g in self.groups:
+            q, k = p[k : k + g], k + g
+            v = -q[0]
+            for r in q[1:]:
+                v = v * F.sigmoid(r) + r
+            out.append(v)
+        return out
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize(
+    "sizes, groups, mixed, interleaved, steps",
+    [
+        ([64, 64, 64, 64], [2, 2], False, [[2, 2]], 1),
+        ([64, 64, 32, 32], [2, 2], False, [[2, 2]], 1),
+        ([64, 64, 32, 32, 16], [2, 2, 1], False, [[2, 2, 1]], 1),
+        ([64, 64, 32, 32, 15], [2, 2, 1], False, [[2, 2]], 2),
+        ([64, 64, 64, 64], [2, 2], True, [[2, 2]], 1),
+        ([64, 64, 64, 64, 64, 64], [2, 4], False, [[4, 2]], 1),
+        ([32] * 4, [4], False, [[4]], 1),
+        ([32] * 8, [4, 4], False, [[4, 4]], 1),
+        ([16] * 8, [8], False, [[8]], 1),
+        ([8] * 8 + [16] * 4 + [32] * 2, [8, 4, 2], False, [[8, 4, 2]], 1),
+        ([64, 64, 64, 64, 64], [3, 2], False, [[1, 1, 1], [2]], 3),
+    ],
+    ids=[
+        "two pairs",
+        "pairs of two sizes",
+        "pairs and a member",
+        "a member of odd width",
+        "mixed precision",
+        "a pair and four combined",
+        "four",
+        "two fours",
+        "eight",
+        "eight four two",
+        "three apart",
+    ],
+)
+def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, interleaved, steps):
+    """Dots of one operand, combined in groups of K dividing the 8-column
+    tile (``K`` values interleaved: SwiGLU's gate and up for K = 2) and any
+    read alone: one block, each group a region of its own interleaved, each
+    lone one a region as it is (``plan.interleaved``); one matmul whose
+    epilogue computes each group's value from the lane's row. Groups of K
+    not dividing the tile, or of a width not, merge apart into a block of
+    their own, their epilogues not fused. The values the unmerged
+    program's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    d, m = 32, 16
+    n = len(sizes)
+    make = lambda: Projections([meta(h, d) for h in sizes], groups, mixed)
+    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(m, d))
+    params = list(range(1, n + 1))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+    assert plan.interleaved == interleaved, plan.packed
+    labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
+    assert len(labels) == steps, labels
+    for regions in interleaved:
+        assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels
+    values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k, h in enumerate(sizes)}
+    x = lumen.from_numpy(rand(m, d, seed=9)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = make()
+            f = lumen.compile(lambda model, x: model(x), device="mps")
+            f(model, meta(m, d))
+            model.load_state_dict(values)
+            got.append([lumen.to_numpy(t) for t in f(model, x)])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.mps
