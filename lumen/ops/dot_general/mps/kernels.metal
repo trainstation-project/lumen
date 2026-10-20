@@ -217,12 +217,18 @@ inline void matmul_sg_impl(device const T *lhs,
     if constexpr (TILE) {
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
     } else if constexpr (PAIRED && REGIONS) {
+        const uint pair = frag_col(lane) / 2;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
                 const thread vec<A, 2> &f = frag(c[i][j]);
+                vec<O, 2> row[4];
+                row[pair] = vec<O, 2>(f);
+                row[pair ^ 1] = vec<O, 2>(simd_shuffle_xor(f, 1));
+                row[pair ^ 2] = vec<O, 2>(simd_shuffle_xor(f, 8));
+                row[pair ^ 3] = vec<O, 2>(simd_shuffle_xor(f, 9));
                 ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
                 if (m < M && n < N) {
-                    epi.store(m, n, O(f[0]), O(f[1]));
+                    epi.store(m, n, row);
                 }
             }
         }

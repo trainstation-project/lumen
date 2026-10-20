@@ -1329,29 +1329,39 @@ def test_gated_pairs_backward_is_interleaved():
 
 class Projections(lumen.nn.Module):
     ws: list
-    combine: str = "pairs"
+    groups: list
+    mixed: bool = False
 
     def __call__(self, x):
-        if self.combine == "mixed":
+        if self.mixed:
             p = [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in self.ws]
         else:
             p = [x @ w.t() for w in self.ws]
-        if self.combine == "four":
-            return p[0] + p[1], p[2] * F.sigmoid(p[3]) + p[4] * p[5]
-        pairs = [p[0] + p[1], p[2] * F.sigmoid(p[3])]
-        return pairs + [-v for v in p[4:]]
+        out, k = [], 0
+        for g in self.groups:
+            q, k = p[k : k + g], k + g
+            v = -q[0]
+            for r in q[1:]:
+                v = v * F.sigmoid(r) + r
+            out.append(v)
+        return out
 
 
 @pytest.mark.mps
 @pytest.mark.parametrize(
-    "sizes, combine, regions, fused",
+    "sizes, groups, mixed, interleaved, steps",
     [
-        ([64, 64, 64, 64], "pairs", [2, 2], True),
-        ([64, 64, 32, 32], "pairs", [2, 2], True),
-        ([64, 64, 32, 32, 16], "pairs", [2, 2, 1], True),
-        ([64, 64, 32, 32, 15], "pairs", [2, 2, 1], False),
-        ([64, 64, 64, 64], "mixed", [2, 2], True),
-        ([64, 64, 64, 64, 64, 64], "four", [2, 1, 1, 1, 1], False),
+        ([64, 64, 64, 64], [2, 2], False, [[2, 2]], 1),
+        ([64, 64, 32, 32], [2, 2], False, [[2, 2]], 1),
+        ([64, 64, 32, 32, 16], [2, 2, 1], False, [[2, 2, 1]], 1),
+        ([64, 64, 32, 32, 15], [2, 2, 1], False, [[2, 2]], 2),
+        ([64, 64, 64, 64], [2, 2], True, [[2, 2]], 1),
+        ([64, 64, 64, 64, 64, 64], [2, 4], False, [[4, 2]], 1),
+        ([32] * 4, [4], False, [[4]], 1),
+        ([32] * 8, [4, 4], False, [[4, 4]], 1),
+        ([16] * 8, [8], False, [[8]], 1),
+        ([8] * 8 + [16] * 4 + [32] * 2, [8, 4, 2], False, [[8, 4, 2]], 1),
+        ([64, 64, 64, 64, 64], [3, 2], False, [[1, 1, 1], [2]], 3),
     ],
     ids=[
         "two pairs",
@@ -1360,29 +1370,37 @@ class Projections(lumen.nn.Module):
         "a member of odd width",
         "mixed precision",
         "a pair and four combined",
+        "four",
+        "two fours",
+        "eight",
+        "eight four two",
+        "three apart",
     ],
 )
-def test_pairs_of_one_operand_share_one_interleaved_block(sizes, combine, regions, fused):
-    """Dots of one operand, combined in pairs (y = Ax + Bx, z = Cx sigmoid(Dx)),
-    and any read alone: one block, each pair a region of its own interleaved,
-    each lone one a region as it is (``plan.interleaved``); one matmul whose
-    epilogue computes each pair's value and each lone one's from the lane's
-    registers, unless a region's width is odd (its lanes would straddle
-    regions). The values the unmerged program's."""
+def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, interleaved, steps):
+    """Dots of one operand, combined in groups of K dividing the 8-column
+    tile (``K`` values interleaved: SwiGLU's gate and up for K = 2) and any
+    read alone: one block, each group a region of its own interleaved, each
+    lone one a region as it is (``plan.interleaved``); one matmul whose
+    epilogue computes each group's value from the lane's row. Groups of K
+    not dividing the tile, or of a width not, merge apart into a block of
+    their own, their epilogues not fused. The values the unmerged
+    program's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
     d, m = 32, 16
     n = len(sizes)
-    make = lambda: Projections([meta(h, d) for h in sizes], combine)
+    make = lambda: Projections([meta(h, d) for h in sizes], groups, mixed)
     graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(m, d))
     params = list(range(1, n + 1))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
-    assert (plan.packed, plan.interleaved) == ([(params, 0)], [regions])
-    steps = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
-    assert (len(steps) == 1) == fused, steps
-    assert steps[0].startswith(f"{n}x dot_general"), steps
+    assert plan.interleaved == interleaved, plan.packed
+    labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
+    assert len(labels) == steps, labels
+    for regions in interleaved:
+        assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels
     values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k, h in enumerate(sizes)}
     x = lumen.from_numpy(rand(m, d, seed=9)).to("mps")
     got = []

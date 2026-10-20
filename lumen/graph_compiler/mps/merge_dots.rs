@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use super::MpsModule;
 use super::fusion::{elementwise, fusible};
+use crate::codegen::mps::ROW_COLUMNS;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::combined;
@@ -166,6 +167,17 @@ pub(super) fn merge_dots(
             )),
         }
     }
+    let mut groups: Vec<Group> = groups
+        .into_iter()
+        .flat_map(
+            |g| match interleaves(graph, &g, &position, &alone, &reads, donated) {
+                Some((order, rest, ..)) if !rest.is_empty() => {
+                    vec![g.subset(&order), g.subset(&rest)]
+                }
+                _ => vec![g],
+            },
+        )
+        .collect();
     let mut merged = vec![false; nodes.len()];
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut packed = vec![false; graph.types.len()];
@@ -203,8 +215,9 @@ pub(super) fn merge_dots(
                 merged[i] = true;
                 packed[weight(side, i)] = true;
             }
-            if let Some((order, layout, rewrites)) =
+            if let Some((order, rest, layout, rewrites)) =
                 interleaves(graph, g, &position, &alone, &reads, donated)
+                && rest.is_empty()
             {
                 g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
                 g.weights = order.iter().map(|&j| g.weights[j]).collect();
@@ -409,6 +422,21 @@ pub(super) fn merge_dots(
     (out, packs, interleaved)
 }
 
+impl Group {
+    fn subset(&self, members: &[usize]) -> Group {
+        Group {
+            shared: self.shared,
+            side: self.side,
+            primitive: self.primitive.clone(),
+            other: self.other.clone(),
+            dimension: self.dimension,
+            chain: self.chain.clone(),
+            nodes: members.iter().map(|&k| self.nodes[k]).collect(),
+            weights: members.iter().map(|&k| self.weights[k]).collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Layout {
     regions: Vec<usize>,
@@ -536,7 +564,7 @@ fn interleaves(
     alone: &[bool],
     reads: &[usize],
     donated: &[bool],
-) -> Option<(Vec<usize>, Layout, Interleaving)> {
+) -> Option<(Vec<usize>, Vec<usize>, Layout, Interleaving)> {
     let nodes = graph.nodes();
     let operand = |i: usize| nodes[i].inputs[1 - g.side];
     let size = |w: Var| graph.type_of(w).shape[g.dimension];
@@ -558,16 +586,34 @@ fn interleaves(
             None => by_set.push((set, vec![j])),
         }
     }
-    let pair = |m: &Vec<usize>| m.len() == 2 && size(g.weights[m[0]]) == size(g.weights[m[1]]);
-    let pairs: Vec<&Vec<usize>> = by_set.iter().map(|(_, m)| m).filter(|m| pair(m)).collect();
-    if pairs.is_empty() {
+    let width = |m: &Vec<usize>| m.len() * size(g.weights[m[0]]);
+    let tiled = |m: &Vec<usize>| {
+        ROW_COLUMNS.is_multiple_of(m.len())
+            && m.iter()
+                .all(|&j| size(g.weights[j]) == size(g.weights[m[0]]))
+            && width(m).is_multiple_of(ROW_COLUMNS)
+    };
+    let mut groups: Vec<&Vec<usize>> = by_set
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| m.len() > 1 && tiled(m))
+        .collect();
+    if groups.is_empty() {
         return None;
     }
-    let mut order: Vec<usize> = pairs.iter().flat_map(|m| m.iter().copied()).collect();
-    let singles: Vec<usize> = (0..g.nodes.len()).filter(|j| !order.contains(j)).collect();
-    order.extend(&singles);
-    let mut regions = vec![2; pairs.len()];
-    regions.extend(vec![1; singles.len()]);
+    groups.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    let singles: Vec<&Vec<usize>> = by_set
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| m.len() == 1 && tiled(m))
+        .collect();
+    let order: Vec<usize> = groups
+        .iter()
+        .chain(&singles)
+        .flat_map(|m| m.iter().copied())
+        .collect();
+    let rest: Vec<usize> = (0..g.nodes.len()).filter(|j| !order.contains(j)).collect();
+    let regions: Vec<usize> = groups.iter().chain(&singles).map(|m| m.len()).collect();
     let weights: Vec<Var> = order.iter().map(|&j| g.weights[j]).collect();
     let layout = Layout {
         regions,
@@ -575,7 +621,7 @@ fn interleaves(
     };
     let operands: Vec<Var> = order.iter().map(|&j| operand(g.nodes[j])).collect();
     let rewrites = backward(graph, g.dimension, &weights, &operands, &layout)?;
-    Some((order, layout, rewrites))
+    Some((order, rest, layout, rewrites))
 }
 
 fn backward(

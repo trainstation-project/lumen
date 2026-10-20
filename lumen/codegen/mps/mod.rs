@@ -2232,8 +2232,10 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
+pub(crate) const ROW_COLUMNS: usize = 8;
+
 pub(crate) enum Region<'a> {
-    Pair(&'a Node, &'a Node),
+    Group(Vec<&'a Node>),
     Plain(&'a Node),
 }
 
@@ -2245,17 +2247,21 @@ pub(crate) struct Columns<'a> {
 
 impl Columns<'_> {
     pub(crate) fn members(&self) -> Vec<Var> {
-        match self.region {
-            Region::Pair(a, b) => vec![a.output, b.output],
+        match &self.region {
+            Region::Group(members) => members.iter().map(|m| m.output).collect(),
             Region::Plain(s) => vec![s.output],
         }
     }
 
-    pub(crate) fn size(&self) -> usize {
-        match self.region {
-            Region::Pair(..) => self.width / 2,
-            Region::Plain(_) => self.width,
+    pub(crate) fn k(&self) -> usize {
+        match &self.region {
+            Region::Group(members) => members.len(),
+            Region::Plain(_) => 1,
         }
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.width / self.k()
     }
 }
 
@@ -2288,45 +2294,53 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
             .then(|| (start_indices[of.len() - 1], limit_indices[of.len() - 1])),
         _ => None,
     };
+    let group = |tupling: &'a Node, width: usize| -> Option<Region<'a>> {
+        let Primitive::Reshape { new_sizes: tuples } = &tupling.primitive else {
+            return None;
+        };
+        let k = *tuples.last()?;
+        let fits = tuples.len() == rank + 1
+            && tuples[..rank - 1] == shape[..rank - 1]
+            && tuples[rank - 1] * k == width
+            && matches!(k, 2 | 4 | 8)
+            && !outputs.contains(&tupling.output);
+        if !fits {
+            return None;
+        }
+        let mut members: Vec<Option<&Node>> = vec![None; k];
+        for member in readers_of(body, tupling.output) {
+            let (first, last) = along_last(member, tuples)?;
+            if last != first + 1 || members[first].is_some() || outputs.contains(&member.output) {
+                return None;
+            }
+            members[first] = Some(member);
+        }
+        Some(Region::Group(
+            members.into_iter().collect::<Option<Vec<_>>>()?,
+        ))
+    };
     let mut regions: Vec<Columns> = Vec::new();
-    for slice in readers_of(body, dot.output) {
-        let (start, limit) = along_last(slice, shape)?;
-        let width = limit - start;
-        let pairs: Vec<usize> = shape[..rank - 1]
-            .iter()
-            .copied()
-            .chain([width / 2, 2])
-            .collect();
-        let tupled = match readers_of(body, slice.output).as_slice() {
-            [r] if width % 2 == 0
-                && matches!(&r.primitive, Primitive::Reshape { new_sizes } if *new_sizes == pairs)
-                && !outputs.contains(&r.output) =>
-            {
-                Some(*r)
-            }
-            _ => None,
-        };
-        let region = match tupled {
-            Some(_) if outputs.contains(&slice.output) => return None,
-            Some(r) => {
-                let halves: Vec<(&Node, (usize, usize))> = readers_of(body, r.output)
-                    .into_iter()
-                    .filter_map(|h| along_last(h, &pairs).map(|range| (h, range)))
-                    .collect();
-                match halves.as_slice() {
-                    [(a, (0, 1)), (b, (1, 2))] | [(b, (1, 2)), (a, (0, 1))]
-                        if readers_of(body, r.output).len() == 2
-                            && !outputs.contains(&a.output)
-                            && !outputs.contains(&b.output) =>
-                    {
-                        Region::Pair(a, b)
+    for top in readers_of(body, dot.output) {
+        let (start, width, region) = match &top.primitive {
+            Primitive::Reshape { .. } => (0, n, group(top, n)?),
+            _ => {
+                let (start, limit) = along_last(top, shape)?;
+                let width = limit - start;
+                let region = match readers_of(body, top.output).as_slice() {
+                    [r] if matches!(r.primitive, Primitive::Reshape { .. }) => {
+                        if outputs.contains(&top.output) {
+                            return None;
+                        }
+                        group(r, width)?
                     }
-                    _ => return None,
-                }
+                    _ => Region::Plain(top),
+                };
+                (start, width, region)
             }
-            None if width % 2 == 0 => Region::Plain(slice),
-            None => return None,
         };
+        if width % ROW_COLUMNS != 0 {
+            return None;
+        }
         regions.push(Columns {
             offset: start,
             width,
@@ -2339,8 +2353,9 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
             .windows(2)
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
-    let paired = regions.iter().any(|c| matches!(c.region, Region::Pair(..)));
-    (covers && paired && regions.len() > 1).then_some(regions)
+    let grouped = regions.iter().any(|c| c.k() > 1);
+    let one_pair = regions.len() == 1 && regions[0].k() == 2;
+    (covers && grouped && !one_pair).then_some(regions)
 }
 
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
@@ -2521,41 +2536,45 @@ fn gemm_regions_kernel(
             0 => "out0".to_string(),
             k => format!("out{k}"),
         };
-        let (offset, size, limit) = (c.offset, c.size(), c.offset + c.width);
-        let element = |locals: &[(Var, &str)], index: &str| {
+        let (offset, size, limit, k) = (c.offset, c.size(), c.offset + c.width, c.k());
+        let element = |locals: &[(Var, String)], index: &str| {
             let mut e = Emitter::new(body, by_value);
-            for &(v, name) in locals {
-                e.invariant[v] = true;
-                e.row_locals.insert(v, name.into());
+            let mut declared = String::new();
+            for (t, (v, read)) in locals.iter().enumerate() {
+                e.invariant[*v] = true;
+                e.row_locals.insert(*v, format!("r{t}"));
+                write!(declared, "{o} r{t} = {read}; ").unwrap();
             }
             let value = e.value(outputs[end], "j".into());
             format!(
-                "{{ uint j = uint({index}); {}{}{target}[j] = {value}; }}",
+                "{{ uint j = uint({index}); {declared}{}{}{target}[j] = {value}; }}",
                 e.hoisted, e.lines
             )
         };
-        let branch = match c.region {
-            Region::Pair(first, second) => element(
-                &[(first.output, "r1"), (second.output, "r2")],
-                &format!("m * {size} + (n - {offset}) / 2"),
-            ),
+        let read = |column: &str| format!("row[({column}) / 2][({column}) % 2]");
+        let branch = match &c.region {
+            Region::Group(members) => {
+                let locals: Vec<(Var, String)> = members
+                    .iter()
+                    .enumerate()
+                    .map(|(t, m)| (m.output, read(&format!("c + {t}"))))
+                    .collect();
+                let one = element(&locals, &format!("m * {size} + (n - {offset}) / {k}"));
+                format!("if (c % {k} == 0) {one}")
+            }
             Region::Plain(slice) => {
                 let first = element(
-                    &[(slice.output, "r1")],
+                    &[(slice.output, read("c"))],
                     &format!("m * {size} + (n - {offset})"),
                 );
                 let second = element(
-                    &[(slice.output, "r2")],
+                    &[(slice.output, read("c + 1"))],
                     &format!("m * {size} + (n - {offset}) + 1"),
                 );
                 format!("{first} {second}")
             }
         };
-        writeln!(
-            store,
-            "        if (n < {limit}) {{ {o} r1 = a, r2 = b; (void)r1; (void)r2; {branch} return; }}"
-        )
-        .unwrap();
+        writeln!(store, "        if (n < {limit}) {{ {branch} return; }}").unwrap();
     }
     let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
@@ -2584,7 +2603,8 @@ fn gemm_regions_kernel(
     let mut source = formatdoc!(
         "
         struct NAME_epi {{
-            {fields}inline void store(ulong m, ulong n, {o} a, {o} b) const {{
+            {fields}inline void store(ulong m, ulong n, thread const vec<{o}, 2> *row) const {{
+                uint c = uint(n % {ROW_COLUMNS});
         {store}    }}
         }};
         "
