@@ -308,7 +308,7 @@ pub(crate) fn encode(
         .collect();
     let values = match e.nodes.is_empty() {
         true => 0,
-        false => 4 * (e.nodes.len() + 1),
+        false => 4,
     };
     let streamed: usize = streams.iter().map(|d| d.size_of()).sum::<usize>() + values;
     let mut unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(value, "the output")?);
