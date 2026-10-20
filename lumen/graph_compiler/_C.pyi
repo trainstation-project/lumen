@@ -44,10 +44,11 @@ class Plan:
         of these parameter inputs side by side along a dimension."""
 
     @property
-    def interleaved(self) -> list[int]:
-        """Each of ``packed``'s blocks' interleaving: 1, its parameters side
-        by side; K, interleaved along the dimension (element ``j`` of the
-        ``i``-th parameter at ``j K + i``: SwiGLU's gate and up)."""
+    def interleaved(self) -> list[list[int]]:
+        """Each of ``packed``'s blocks' regions, in order along its
+        dimension: K consecutive parameters interleaved (element ``j`` of the
+        ``i``-th at ``j K + i``: SwiGLU's gate and up), 1 a parameter as it
+        is."""
 
     def run_in(self, workspace: Tensor, inputs: Sequence[Tensor]) -> list[Tensor]:
         """Run in ``workspace`` (uint8, at least ``workspace_bytes``): inputs

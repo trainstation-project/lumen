@@ -30,7 +30,7 @@ pub(super) fn merge_dots(
     graph: &Graph,
     packable: &[bool],
     donated: &[bool],
-) -> (Graph, Packs, Vec<usize>) {
+) -> (Graph, Packs, Vec<Vec<usize>>) {
     let nodes = graph.nodes();
     let is_packable = |v: Var| {
         let i = graph.inputs().iter().position(|&i| i == v);
@@ -170,7 +170,7 @@ pub(super) fn merge_dots(
     let mut first_of: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut packed = vec![false; graph.types.len()];
     let mut reuses: Vec<Option<usize>> = vec![None; groups.len()];
-    let mut interleave: Vec<usize> = vec![1; groups.len()];
+    let mut layouts: Vec<Option<Layout>> = vec![None; groups.len()];
     let mut cotangents: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut pairs_of: Vec<Option<(usize, usize, usize)>> = vec![None; nodes.len()];
     let weight =
@@ -193,7 +193,7 @@ pub(super) fn merge_dots(
             groups[k].nodes.iter().for_each(|&i| merged[i] = true);
             first_of[groups[k].nodes[0]] = Some(k);
             reuses[k] = Some(e);
-            interleave[k] = interleave[e];
+            layouts[k] = layouts[e].clone();
             continue;
         }
         let g = &mut groups[k];
@@ -203,22 +203,26 @@ pub(super) fn merge_dots(
                 merged[i] = true;
                 packed[weight(side, i)] = true;
             }
-            first_of[g.nodes[0]] = Some(k);
-            if let Some(rewrites) = interleaves(graph, g, &position, &alone, &reads, donated) {
-                interleave[k] = g.nodes.len();
+            if let Some((order, layout, rewrites)) =
+                interleaves(graph, g, &position, &alone, &reads, donated)
+            {
+                g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
+                g.weights = order.iter().map(|&j| g.weights[j]).collect();
+                layouts[k] = Some(layout);
                 for &c in &rewrites.cotangents {
-                    cotangents[c] = Some(interleave[k]);
+                    cotangents[c] = Some(k);
                 }
                 for &(s, j, axis) in &rewrites.slices {
-                    pairs_of[s] = Some((j, interleave[k], axis));
+                    pairs_of[s] = Some((k, j, axis));
                 }
             }
+            first_of[g.nodes[0]] = Some(k);
         }
     }
 
     let mut packs = Vec::new();
     let mut interleaved = Vec::new();
-    let mut tupled: HashMap<(Var, usize), Var> = HashMap::new();
+    let mut tupled: HashMap<(Var, usize, usize), Var> = HashMap::new();
     let mut blocks: Vec<(Vec<Var>, usize, Var)> = Vec::new();
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -261,7 +265,11 @@ pub(super) fn merge_dots(
                         others.iter().filter_map(|&v| position[v]).collect(),
                         g.dimension,
                     ));
-                    interleaved.push(interleave[k]);
+                    interleaved.push(
+                        layouts[k]
+                            .as_ref()
+                            .map_or(vec![1; g.nodes.len()], |l| l.regions.clone()),
+                    );
                     let block = out.input(block);
                     blocks.push((others.clone(), g.dimension, block));
                     let mut value = block;
@@ -293,7 +301,7 @@ pub(super) fn merge_dots(
                 g.dimension,
                 value,
             ));
-            if interleave[k] == 1 && !g.chain.is_empty() {
+            if layouts[k].is_none() && !g.chain.is_empty() {
                 let shape = out.type_of(value).shape.clone();
                 let mut start = 0;
                 for &m in &g.nodes {
@@ -327,17 +335,12 @@ pub(super) fn merge_dots(
                 }
             };
             let shape = out.type_of(result).shape.clone();
-            if interleave[k] > 1 {
+            if let Some(layout) = &layouts[k] {
                 for (j, &m) in g.nodes.iter().enumerate() {
                     out.set_origin(&nodes[m]);
                     let member = &graph.type_of(nodes[m].output).shape;
-                    map[nodes[m].output] = pairs(
-                        &mut out,
-                        &mut tupled,
-                        result,
-                        (dimension, interleave[k], j),
-                        member,
-                    );
+                    map[nodes[m].output] =
+                        member_of(&mut out, &mut tupled, result, dimension, layout, j, member);
                 }
                 continue;
             }
@@ -361,44 +364,27 @@ pub(super) fn merge_dots(
             continue;
         }
         if let (
-            Some(kk),
+            Some(k),
             Primitive::Concatenate {
                 dimension: axis, ..
             },
         ) = (cotangents[i], &node.primitive)
         {
-            let shape = graph.type_of(node.output).shape.clone();
-            let tuples: Vec<Var> = node
-                .inputs
-                .iter()
-                .map(|&v| {
-                    let mut one = graph.type_of(v).shape.clone();
-                    one.insert(axis + 1, 1);
-                    let reshape = Primitive::Reshape { new_sizes: one };
-                    out.apply(reshape, &[map[v]]).expect("the same elements")
-                })
-                .collect();
-            let tuples = out
-                .apply(
-                    Primitive::Concatenate {
-                        dimension: axis + 1,
-                        in_place: false,
-                    },
-                    &tuples,
-                )
-                .expect("parts of one shape");
-            debug_assert_eq!(out.type_of(tuples).shape[axis + 1], kk);
-            let back = Primitive::Reshape { new_sizes: shape };
-            map[node.output] = out.apply(back, &[tuples]).expect("the same elements");
+            let layout = layouts[k].as_ref().expect("an interleaved group");
+            let parts: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+            map[node.output] = arrange(&mut out, &parts, *axis, layout);
             continue;
         }
-        if let Some((j, kk, axis)) = pairs_of[i] {
+        if let Some((k, j, axis)) = pairs_of[i] {
+            let layout = layouts[k].as_ref().expect("an interleaved group");
             let shape = &graph.type_of(node.output).shape;
-            map[node.output] = pairs(
+            map[node.output] = member_of(
                 &mut out,
                 &mut tupled,
                 map[node.inputs[0]],
-                (axis, kk, j),
+                axis,
+                layout,
+                j,
                 shape,
             );
             continue;
@@ -423,23 +409,64 @@ pub(super) fn merge_dots(
     (out, packs, interleaved)
 }
 
-fn pairs(
+#[derive(Clone, Debug)]
+struct Layout {
+    regions: Vec<usize>,
+    sizes: Vec<usize>,
+}
+
+impl Layout {
+    fn region_of(&self, j: usize) -> (usize, usize, usize) {
+        let (mut member, mut offset) = (0, 0);
+        for &k in &self.regions {
+            if j < member + k {
+                return (offset, k, j - member);
+            }
+            offset += k * self.sizes[member];
+            member += k;
+        }
+        unreachable!("a member of the layout")
+    }
+}
+
+fn member_of(
     out: &mut Graph,
-    tupled: &mut HashMap<(Var, usize), Var>,
+    cache: &mut HashMap<(Var, usize, usize), Var>,
     value: Var,
-    (axis, k, j): (usize, usize, usize),
+    axis: usize,
+    layout: &Layout,
+    j: usize,
     shape: &[usize],
 ) -> Var {
-    let mut tuples = out.type_of(value).shape.clone();
-    tuples.splice(axis..=axis, [tuples[axis] / k, k]);
-    let reshaped = *tupled.entry((value, axis)).or_insert_with(|| {
+    let (offset, k, within) = layout.region_of(j);
+    let n = layout.sizes[j];
+    let full = out.type_of(value).shape.clone();
+    let region = match layout.regions.len() {
+        1 => value,
+        _ => *cache.entry((value, axis, offset)).or_insert_with(|| {
+            let (mut starts, mut limits) = (vec![0; full.len()], full.clone());
+            (starts[axis], limits[axis]) = (offset, offset + k * n);
+            let slice = Primitive::Slice {
+                start_indices: starts,
+                limit_indices: limits,
+                view: false,
+            };
+            out.apply(slice, &[value]).expect("within the value")
+        }),
+    };
+    if k == 1 {
+        return region;
+    }
+    let mut tuples = out.type_of(region).shape.clone();
+    tuples.splice(axis..=axis, [n, k]);
+    let reshaped = *cache.entry((region, axis, usize::MAX)).or_insert_with(|| {
         let reshape = Primitive::Reshape {
             new_sizes: tuples.clone(),
         };
-        out.apply(reshape, &[value]).expect("the same elements")
+        out.apply(reshape, &[region]).expect("the same elements")
     });
     let (mut starts, mut limits) = (vec![0; tuples.len()], tuples);
-    (starts[axis + 1], limits[axis + 1]) = (j, j + 1);
+    (starts[axis + 1], limits[axis + 1]) = (within, within + 1);
     let slice = Primitive::Slice {
         start_indices: starts,
         limit_indices: limits,
@@ -450,6 +477,50 @@ fn pairs(
         new_sizes: shape.to_vec(),
     };
     out.apply(back, &[one]).expect("the member's elements")
+}
+
+fn arrange(out: &mut Graph, parts: &[Var], axis: usize, layout: &Layout) -> Var {
+    let mut regions = Vec::new();
+    let mut member = 0;
+    for &k in &layout.regions {
+        let group = &parts[member..member + k];
+        member += k;
+        if k == 1 {
+            regions.push(group[0]);
+            continue;
+        }
+        let tuples: Vec<Var> = group
+            .iter()
+            .map(|&v| {
+                let mut one = out.type_of(v).shape.clone();
+                one.insert(axis + 1, 1);
+                let reshape = Primitive::Reshape { new_sizes: one };
+                out.apply(reshape, &[v]).expect("the same elements")
+            })
+            .collect();
+        let concatenated = Primitive::Concatenate {
+            dimension: axis + 1,
+            in_place: false,
+        };
+        let tuples = out
+            .apply(concatenated, &tuples)
+            .expect("parts of one shape");
+        let mut shape = out.type_of(group[0]).shape.clone();
+        shape[axis] *= k;
+        let back = Primitive::Reshape { new_sizes: shape };
+        regions.push(out.apply(back, &[tuples]).expect("the same elements"));
+    }
+    match regions.as_slice() {
+        [one] => *one,
+        _ => {
+            let concatenated = Primitive::Concatenate {
+                dimension: axis,
+                in_place: false,
+            };
+            out.apply(concatenated, &regions)
+                .expect("regions of one shape but the axis")
+        }
+    }
 }
 
 #[derive(Default)]
@@ -465,33 +536,57 @@ fn interleaves(
     alone: &[bool],
     reads: &[usize],
     donated: &[bool],
-) -> Option<Interleaving> {
+) -> Option<(Vec<usize>, Layout, Interleaving)> {
     let nodes = graph.nodes();
-    let operands: Vec<Var> = g
-        .nodes
-        .iter()
-        .map(|&i| nodes[i].inputs[1 - g.side])
-        .collect();
-    let results: Vec<Var> = g.nodes.iter().map(|&i| nodes[i].output).collect();
+    let operand = |i: usize| nodes[i].inputs[1 - g.side];
     let size = |w: Var| graph.type_of(w).shape[g.dimension];
-    let sets = combined(graph, &results);
-    let fits = g.nodes.len() == 2
-        && g.side == 0
-        && sets.iter().all(|&s| s == sets[0])
+    let fits = g.side == 0
         && g.weights.iter().all(|&w| {
             let i = position[w].expect("a packable input");
-            alone[w] && donated.get(i) != Some(&true) && size(w) == size(g.weights[0])
+            alone[w] && donated.get(i) != Some(&true)
         })
-        && operands.iter().all(|&v| reads[v] == 1);
-    match fits {
-        true => backward(graph, g, &operands),
-        false => None,
+        && g.nodes.iter().all(|&i| reads[operand(i)] == 1);
+    if !fits {
+        return None;
     }
+    let results: Vec<Var> = g.nodes.iter().map(|&i| nodes[i].output).collect();
+    let sets = combined(graph, &results);
+    let mut by_set: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (j, &set) in sets.iter().enumerate() {
+        match by_set.iter_mut().find(|(s, _)| *s == set) {
+            Some((_, members)) => members.push(j),
+            None => by_set.push((set, vec![j])),
+        }
+    }
+    let pair = |m: &Vec<usize>| m.len() == 2 && size(g.weights[m[0]]) == size(g.weights[m[1]]);
+    let pairs: Vec<&Vec<usize>> = by_set.iter().map(|(_, m)| m).filter(|m| pair(m)).collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut order: Vec<usize> = pairs.iter().flat_map(|m| m.iter().copied()).collect();
+    let singles: Vec<usize> = (0..g.nodes.len()).filter(|j| !order.contains(j)).collect();
+    order.extend(&singles);
+    let mut regions = vec![2; pairs.len()];
+    regions.extend(vec![1; singles.len()]);
+    let weights: Vec<Var> = order.iter().map(|&j| g.weights[j]).collect();
+    let layout = Layout {
+        regions,
+        sizes: weights.iter().map(|&w| size(w)).collect(),
+    };
+    let operands: Vec<Var> = order.iter().map(|&j| operand(g.nodes[j])).collect();
+    let rewrites = backward(graph, g.dimension, &weights, &operands, &layout)?;
+    Some((order, layout, rewrites))
 }
 
-fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> {
+fn backward(
+    graph: &Graph,
+    dimension: usize,
+    weights: &[Var],
+    operands: &[Var],
+    layout: &Layout,
+) -> Option<Interleaving> {
     let nodes = graph.nodes();
-    let k = g.nodes.len();
+    let k = weights.len();
     let outputs = graph.outputs();
     let readers = |v: Var| {
         nodes
@@ -500,18 +595,19 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
             .filter(move |(_, n)| n.inputs.contains(&v))
     };
     let produced = |v: Var| nodes.iter().position(|n| n.output == v);
-    let concatenate_of_k = |n: &Node, axis: usize| {
+    let concatenate_of_parts = |n: &Node, axis: usize| {
         matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == axis)
             && n.inputs.len() == k
             && n.inputs
                 .iter()
-                .all(|&v| graph.type_of(v).shape[axis] == graph.type_of(n.inputs[0]).shape[axis])
+                .zip(&layout.sizes)
+                .all(|(&v, &size)| graph.type_of(v).shape[axis] == size)
     };
     let mut found = Interleaving::default();
     let mut contractions = Vec::new();
     for b in nodes.iter().filter(|n| {
-        matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == g.dimension)
-            && (n.inputs == g.weights || n.inputs == operands)
+        matches!(n.primitive, Primitive::Concatenate { dimension: d, .. } if d == dimension)
+            && (n.inputs == weights || n.inputs == operands)
     }) {
         if outputs.contains(&b.output) {
             return None;
@@ -525,9 +621,9 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
                 contracting(&reader.primitive, side),
                 contracting(&reader.primitive, 1 - side),
             );
-            let c = mine.iter().position(|&d| d == g.dimension)?;
+            let c = mine.iter().position(|&d| d == dimension)?;
             let cotangent = &nodes[produced(reader.inputs[1 - side])?];
-            if !concatenate_of_k(cotangent, theirs[c]) {
+            if !concatenate_of_parts(cotangent, theirs[c]) {
                 return None;
             }
             let at = produced(cotangent.output)?;
@@ -537,6 +633,15 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
             contractions.push(r);
         }
     }
+    let offsets: Vec<usize> = layout
+        .sizes
+        .iter()
+        .scan(0, |start, &n| {
+            let at = *start;
+            *start += n;
+            Some(at)
+        })
+        .collect();
     for &at in &found.cotangents {
         let cotangent = &nodes[at];
         let Primitive::Concatenate {
@@ -568,7 +673,6 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
             };
             let result_axis = lhs_batch.len() + before + pos;
             let result = graph.type_of(reader.output);
-            let n = result.shape[result_axis] / k;
             if outputs.contains(&reader.output) {
                 return None;
             }
@@ -583,11 +687,12 @@ fn backward(graph: &Graph, g: &Group, operands: &[Var]) -> Option<Interleaving> 
                     return None;
                 };
                 let whole = |d: usize| start_indices[d] == 0 && limit_indices[d] == result.shape[d];
-                let j = start_indices[result_axis] / n.max(1);
-                let part = start_indices[result_axis] == j * n
-                    && limit_indices[result_axis] == (j + 1) * n
+                let j = offsets
+                    .iter()
+                    .position(|&o| o == start_indices[result_axis])?;
+                let part = limit_indices[result_axis] == offsets[j] + layout.sizes[j]
                     && (0..result.shape.len()).all(|d| d == result_axis || whole(d));
-                if !part || j >= k || members[j] {
+                if !part || members[j] {
                     return None;
                 }
                 members[j] = true;

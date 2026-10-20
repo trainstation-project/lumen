@@ -46,20 +46,11 @@ impl Tensor {
     pub fn pack(
         members: &[Tensor],
         dimension: usize,
-        interleave: usize,
+        regions: &[usize],
         device: Device,
     ) -> Result<Option<Tensor>, String> {
-        if interleave > 1
-            && (members.len() != interleave
-                || members
-                    .iter()
-                    .any(|m| m.shape()[dimension] != members[0].shape()[dimension]))
-        {
-            return Err(format!(
-                "interleaved by {interleave}: {interleave} members of one size, got {}",
-                members.len()
-            ));
-        }
+        let sizes: Vec<usize> = members.iter().map(|m| m.shape()[dimension]).collect();
+        check_regions(&sizes, regions)?;
         let mut ids: Vec<usize> = members.iter().map(Tensor::storage_id).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -74,25 +65,19 @@ impl Tensor {
             else {
                 return Ok(None);
             };
-            let mut start = 0;
-            for (k, (m, p)) in members.iter().zip(&placed).enumerate() {
-                let n = m.shape()[dimension];
-                if start + n > block.shape()[dimension] {
-                    return Ok(None);
-                }
-                let expected = member(block, dimension, interleave, start, n, k);
-                let same = p.as_ref().is_some_and(|p| {
-                    p.tensor.shares_storage_with(block)
-                        && p.tensor.storage_offset() == expected.storage_offset()
-                        && p.tensor.shape() == expected.shape()
-                        && p.tensor.strides() == expected.strides()
-                });
-                if !same {
-                    return Ok(None);
-                }
-                start += n;
+            if sizes.iter().sum::<usize>() != block.shape()[dimension] {
+                return Ok(None);
             }
-            return Ok((start == block.shape()[dimension]).then(|| block.clone()));
+            let expected = views(block, dimension, regions, &sizes);
+            let same = placed.iter().zip(&expected).all(|(p, e)| {
+                p.as_ref().is_some_and(|p| {
+                    p.tensor.shares_storage_with(block)
+                        && p.tensor.storage_offset() == e.storage_offset()
+                        && p.tensor.shape() == e.shape()
+                        && p.tensor.strides() == e.strides()
+                })
+            });
+            return Ok(same.then(|| block.clone()));
         }
         let types: Vec<TensorType> = members
             .iter()
@@ -105,15 +90,15 @@ impl Tensor {
         .infer(&types.iter().collect::<Vec<_>>())?;
         let options = TensorOptions::new().dtype(ty.dtype).device(device);
         let block = Tensor::zeros(&ty.shape, options);
-        let mut start = 0;
-        for (k, m) in members.iter().enumerate() {
-            let n = m.shape()[dimension];
+        for (m, view) in members
+            .iter()
+            .zip(views(&block, dimension, regions, &sizes))
+        {
             m.place(Placement {
                 device,
-                tensor: member(&block, dimension, interleave, start, n, k),
+                tensor: view,
                 block: Some(block.clone()),
             });
-            start += n;
         }
         Ok(Some(block))
     }
@@ -156,20 +141,35 @@ impl Tensor {
     }
 }
 
-fn member(
-    block: &Tensor,
-    dimension: usize,
-    interleave: usize,
-    start: usize,
-    n: usize,
-    k: usize,
-) -> Tensor {
-    match interleave {
-        1 => block.narrow(dimension, start, n),
-        _ => {
-            let mut shape = block.shape().to_vec();
-            shape.splice(dimension..=dimension, [n, interleave]);
-            block.reshape(&shape).select(dimension + 1, k)
-        }
+fn check_regions(sizes: &[usize], regions: &[usize]) -> Result<(), String> {
+    if regions.contains(&0) || regions.iter().sum::<usize>() != sizes.len() {
+        return Err(format!(
+            "regions {regions:?} do not partition {} members",
+            sizes.len()
+        ));
     }
+    let mut start = 0;
+    for &k in regions {
+        if sizes[start..start + k].iter().any(|&n| n != sizes[start]) {
+            return Err(format!(
+                "interleaved by {k}: members of one size, got {:?}",
+                &sizes[start..start + k]
+            ));
+        }
+        start += k;
+    }
+    Ok(())
+}
+
+fn views(block: &Tensor, dimension: usize, regions: &[usize], sizes: &[usize]) -> Vec<Tensor> {
+    let (mut out, mut member, mut start) = (Vec::new(), 0, 0);
+    for &k in regions {
+        let n = sizes[member];
+        for j in 0..k {
+            out.push(block.stepped(dimension, start + j, n, k));
+        }
+        member += k;
+        start += k * n;
+    }
+    out
 }

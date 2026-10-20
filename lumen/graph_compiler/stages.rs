@@ -169,7 +169,7 @@ pub(crate) fn compile(
                 .collect();
             blocks.push(packed.len());
             packed.push((positions, *dimension));
-            interleaved.push(plan.interleaved()[j]);
+            interleaved.push(plan.interleaved()[j].clone());
             block_types.push(plan.input_types()[inputs.len() + j].clone());
         }
         steps.extend(plan.steps().iter().cloned());

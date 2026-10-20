@@ -2232,6 +2232,119 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
+pub(crate) enum Region<'a> {
+    Pair(&'a Node, &'a Node),
+    Plain(&'a Node),
+}
+
+pub(crate) struct Columns<'a> {
+    pub(crate) offset: usize,
+    pub(crate) width: usize,
+    pub(crate) region: Region<'a>,
+}
+
+impl Columns<'_> {
+    pub(crate) fn members(&self) -> Vec<Var> {
+        match self.region {
+            Region::Pair(a, b) => vec![a.output, b.output],
+            Region::Plain(s) => vec![s.output],
+        }
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        match self.region {
+            Region::Pair(..) => self.width / 2,
+            Region::Plain(_) => self.width,
+        }
+    }
+}
+
+pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Columns<'a>>> {
+    let Primitive::DotGeneral {
+        lhs_batch,
+        rhs_contracting,
+        ..
+    } = &dot.primitive
+    else {
+        return None;
+    };
+    let shape = &body.type_of(dot.output).shape;
+    let rhs_rank = body.type_of(dot.inputs[1]).shape.len();
+    let (rank, n) = (shape.len(), *shape.last()?);
+    let outputs = body.outputs();
+    if !lhs_batch.is_empty()
+        || rhs_rank != rhs_contracting.len() + 1
+        || outputs.contains(&dot.output)
+    {
+        return None;
+    }
+    let along_last = |node: &Node, of: &[usize]| match &node.primitive {
+        Primitive::Slice {
+            start_indices,
+            limit_indices,
+            ..
+        } => (0..of.len() - 1)
+            .all(|d| start_indices[d] == 0 && limit_indices[d] == of[d])
+            .then(|| (start_indices[of.len() - 1], limit_indices[of.len() - 1])),
+        _ => None,
+    };
+    let mut regions: Vec<Columns> = Vec::new();
+    for slice in readers_of(body, dot.output) {
+        let (start, limit) = along_last(slice, shape)?;
+        if outputs.contains(&slice.output) {
+            return None;
+        }
+        let width = limit - start;
+        let pairs: Vec<usize> = shape[..rank - 1]
+            .iter()
+            .copied()
+            .chain([width / 2, 2])
+            .collect();
+        let tupled = match readers_of(body, slice.output).as_slice() {
+            [r] if width % 2 == 0
+                && matches!(&r.primitive, Primitive::Reshape { new_sizes } if *new_sizes == pairs)
+                && !outputs.contains(&r.output) =>
+            {
+                Some(*r)
+            }
+            _ => None,
+        };
+        let region = match tupled {
+            Some(r) => {
+                let halves: Vec<(&Node, (usize, usize))> = readers_of(body, r.output)
+                    .into_iter()
+                    .filter_map(|h| along_last(h, &pairs).map(|range| (h, range)))
+                    .collect();
+                match halves.as_slice() {
+                    [(a, (0, 1)), (b, (1, 2))] | [(b, (1, 2)), (a, (0, 1))]
+                        if readers_of(body, r.output).len() == 2
+                            && !outputs.contains(&a.output)
+                            && !outputs.contains(&b.output) =>
+                    {
+                        Region::Pair(a, b)
+                    }
+                    _ => return None,
+                }
+            }
+            None if width % 2 == 0 => Region::Plain(slice),
+            None => return None,
+        };
+        regions.push(Columns {
+            offset: start,
+            width,
+            region,
+        });
+    }
+    regions.sort_by_key(|c| c.offset);
+    let covers = regions.first().is_some_and(|c| c.offset == 0)
+        && regions
+            .windows(2)
+            .all(|w| w[0].offset + w[0].width == w[1].offset)
+        && regions.last().is_some_and(|c| c.offset + c.width == n);
+    let paired = regions.iter().any(|c| matches!(c.region, Region::Pair(..)));
+    (covers && paired && regions.len() > 1).then_some(regions)
+}
+
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
     let Primitive::DotGeneral {
         lhs_batch,
@@ -2249,6 +2362,9 @@ pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'
     }
     if let Some(pair) = gemm_interleaved(body, dot) {
         return Some(pair);
+    }
+    if gemm_regions(body, dot).is_some() {
+        return None;
     }
     let readers = readers_of(body, dot.output);
     let half = |node: &&Node, start: usize| match &node.primitive {
@@ -2353,7 +2469,151 @@ fn gemm_expanded_interleaved(body: &Graph, dot: &Node) -> bool {
             .is_some_and(|n| matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == rank))
 }
 
+fn region_ends(body: &Graph, regions: &[Columns]) -> Vec<usize> {
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let reaches = |from: Var, to: &[Var]| {
+        let mut stack = vec![from];
+        let mut seen = Vec::new();
+        while let Some(v) = stack.pop() {
+            if to.contains(&v) {
+                return true;
+            }
+            if seen.contains(&v) {
+                continue;
+            }
+            seen.push(v);
+            if let Some(n) = producer.get(&v) {
+                stack.extend(&n.inputs);
+            }
+        }
+        false
+    };
+    regions
+        .iter()
+        .map(|c| {
+            let members = c.members();
+            body.outputs()
+                .iter()
+                .position(|&v| reaches(v, &members))
+                .expect("each region's value an output")
+        })
+        .collect()
+}
+
+fn gemm_regions_kernel(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    regions: &[Columns],
+) -> (String, String) {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
+        unreachable!("a dot")
+    };
+    let outputs = body.outputs();
+    let (t, a, o) = (
+        metal_type(body.type_of(dot.inputs[0]).dtype),
+        metal_type(accum_dtype),
+        metal_type(body.type_of(dot.output).dtype),
+    );
+    let w = metal_type(body.type_of(outputs[0]).dtype);
+    let ends = region_ends(body, regions);
+    let mut store = String::new();
+    for (c, &end) in regions.iter().zip(&ends) {
+        let target = match end {
+            0 => "out0".to_string(),
+            k => format!("out{k}"),
+        };
+        let (offset, size, limit) = (c.offset, c.size(), c.offset + c.width);
+        let element = |locals: &[(Var, &str)], index: &str| {
+            let mut e = Emitter::new(body, by_value);
+            for &(v, name) in locals {
+                e.invariant[v] = true;
+                e.row_locals.insert(v, name.into());
+            }
+            let value = e.value(outputs[end], "j".into());
+            format!(
+                "{{ uint j = uint({index}); {}{}{target}[j] = {value}; }}",
+                e.hoisted, e.lines
+            )
+        };
+        let branch = match c.region {
+            Region::Pair(first, second) => element(
+                &[(first.output, "r1"), (second.output, "r2")],
+                &format!("m * {size} + (n - {offset}) / 2"),
+            ),
+            Region::Plain(slice) => {
+                let first = element(
+                    &[(slice.output, "r1")],
+                    &format!("m * {size} + (n - {offset})"),
+                );
+                let second = element(
+                    &[(slice.output, "r2")],
+                    &format!("m * {size} + (n - {offset}) + 1"),
+                );
+                format!("{first} {second}")
+            }
+        };
+        writeln!(
+            store,
+            "        if (n < {limit}) {{ {o} r1 = a, r2 = b; (void)r1; (void)r2; {branch} return; }}"
+        )
+        .unwrap();
+    }
+    let (mut fields, mut members) = (String::new(), Vec::new());
+    for (k, &v) in body.inputs().iter().enumerate() {
+        let vt = metal_type(body.type_of(v).dtype);
+        match by_value.get(k) == Some(&true) {
+            true => writeln!(fields, "    {vt} in{k};").unwrap(),
+            false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
+        }
+        members.push(format!("in{k}"));
+    }
+    for (k, &v) in outputs[1..].iter().enumerate() {
+        let vt = metal_type(body.type_of(v).dtype);
+        writeln!(fields, "    device {vt} *out{};", k + 1).unwrap();
+        members.push(format!("out{}", k + 1));
+    }
+    writeln!(fields, "    device {w} *out0;").unwrap();
+    members.push("out".into());
+    let operand = |v: Var| {
+        let k = body.inputs().iter().position(|&i| i == v);
+        format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
+    };
+    let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
+    let (params, first) = io_params(body, by_value, w, &[]);
+    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
+    let members = members.join(", ");
+    let mut source = formatdoc!(
+        "
+        struct NAME_epi {{
+            {fields}inline void store(ulong m, ulong n, {o} a, {o} b) const {{
+        {store}    }}
+        }};
+        "
+    );
+    for (suffix, bm, bn, bk) in [
+        ("", 128, 64, "SG_BK"),
+        ("_mid", 64, 64, "SG_BK"),
+        ("_small", 32, 32, "SMALL_BK"),
+    ] {
+        writedoc!(
+            source,
+            "
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
+                threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+            }}
+            "
+        )
+        .unwrap();
+    }
+    named(source)
+}
+
 fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) {
+    if let Some(regions) = gemm_regions(body, dot) {
+        return gemm_regions_kernel(body, by_value, dot, &regions);
+    }
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
     };

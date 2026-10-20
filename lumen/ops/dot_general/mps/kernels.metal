@@ -146,7 +146,8 @@ template <typename T,
           bool PAIRED = false,
           bool EXPANDED = false,
           bool TILE = false,
-          bool INTERLEAVED = false>
+          bool INTERLEAVED = false,
+          bool REGIONS = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -215,6 +216,16 @@ inline void matmul_sg_impl(device const T *lhs,
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
     if constexpr (TILE) {
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
+    } else if constexpr (PAIRED && REGIONS) {
+        UNROLL for (uint i = 0; i < FM; ++i) {
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                const thread vec<A, 2> &f = frag(c[i][j]);
+                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
+                if (m < M && n < N) {
+                    epi.store(m, n, O(f[0]), O(f[1]));
+                }
+            }
+        }
     } else if constexpr (PAIRED) {
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
