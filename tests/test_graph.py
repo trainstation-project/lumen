@@ -134,7 +134,7 @@ def test_no_implicit_dtype_changes():
         (lambda h, f: F.maximum(h, f), (half, lumen.tensor([0.0])), "dtypes float16 and float32"),
         (lambda f, h: F.where(f > 0, f, h), (lumen.tensor([1.0]), half), "dtypes float16 and float32"),
         (
-            lambda h, f: h @ f,
+            lambda h, f: F.matmul(h, f, "float32", "float16"),
             (lumen.zeros([2, 2], dtype="float16"), lumen.zeros([2, 2])),
             "dtypes float16 and float32",
         ),
@@ -158,13 +158,21 @@ def test_broadcasting():
         lumen.compile(lambda a, b: a + b)(lumen.zeros([2]), lumen.zeros([3]))
 
 
+def test_a_matmul_names_its_dtypes():
+    x = lumen.empty([2, 3], device="meta")
+    with pytest.raises(TypeError, match="@ has no dtypes"):
+        lumen.make_graph(lambda x: x @ x.t())(x)
+    with pytest.raises(TypeError, match="accum_dtype"):
+        lumen.make_graph(lambda x: F.einsum("mk,nk->mn", x, x))(x)
+
+
 @pytest.mark.parametrize(
     "a_shape, b_shape",
     [((3,), (3,)), ((2, 3), (3,)), ((3,), (3, 4)), ((2, 3), (3, 4)), ((5, 2, 3), (3, 4)), ((1, 2, 3), (4, 3, 2))],
 )
 def test_matmul(a_shape, b_shape):
     a, b = rand(*a_shape), rand(*b_shape, seed=1)
-    out = run(lambda a, b: a @ b, lumen.from_numpy(a), lumen.from_numpy(b))
+    out = run(lambda a, b: F.matmul(a, b, "float32", a.dtype), lumen.from_numpy(a), lumen.from_numpy(b))
     np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
 
 
@@ -174,9 +182,9 @@ def test_matmul_folds_a_batch_times_a_matrix():
     broadcast over the batch (a copy); its gradient one matmul too, not a
     sum of the batch's."""
     m = lambda *s: lumen.empty(list(s), device="meta")  # noqa: E731
-    g = lumen.make_graph(lambda x, w: x @ w)(m(2, 3, 4), m(4, 5))
+    g = lumen.make_graph(lambda x, w: F.matmul(x, w, "float32", x.dtype))(m(2, 3, 4), m(4, 5))
     assert "broadcast_in_dim" not in str(g) and "f32[6,5] = dot_general" in str(g), g
-    grad = lumen.make_graph(lumen.grad(lambda x, w: F.sum(x @ w), 1))(m(2, 3, 4), m(4, 5))
+    grad = lumen.make_graph(lumen.grad(lambda x, w: F.sum(F.matmul(x, w, "float32", x.dtype)), 1))(m(2, 3, 4), m(4, 5))
     assert str(grad).count("dot_general") == 1 and "reduce_sum" not in str(grad), grad
 
 
@@ -245,7 +253,7 @@ def test_results_on_input_device(device):
         x = lumen.tensor([[1.0, 2.0], [3.0, 4.0]], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    y = lumen.compile(lambda x: x @ x + 1)(x)
+    y = lumen.compile(lambda x: F.matmul(x, x, "float32", x.dtype) + 1)(x)
     assert y.device == str(x.device)
     assert lumen.to_numpy(y).tolist() == [[8.0, 11.0], [16.0, 23.0]]
 
@@ -260,9 +268,12 @@ def test_mps_kernels_match_cpu(dtype):
         pytest.skip(str(e))
 
     def block(x, wq, wk, w1):
-        scores = (x @ wq) @ (x @ wk).t() * 0.25
-        h = x + F.softmax(scores.float(), -1).to(dtype=x.dtype) @ x
-        return F.mean(F.relu(h @ w1), -1), F.amax(h, 0), F.sum(F.where(h > 0, h, -h))
+        scores = (
+            F.matmul(F.matmul(x, wq, "float32", x.dtype), F.matmul(x, wk, "float32", x.dtype).t(), "float32", x.dtype)
+            * 0.25
+        )
+        h = x + F.matmul(F.softmax(scores.float(), -1).to(dtype=x.dtype), x, "float32", x.dtype)
+        return F.mean(F.relu(F.matmul(h, w1, "float32", x.dtype)), -1), F.amax(h, 0), F.sum(F.where(h > 0, h, -h))
 
     arrays = [rand(8, 16, seed=1), rand(16, 16, seed=2), rand(16, 16, seed=3), rand(16, 32, seed=4)]
     cpu = [lumen.from_numpy(a) for a in arrays]
@@ -344,7 +355,7 @@ def test_short_rows_reduce_several_a_threadgroup(n):
 
 
 def test_dump_graph(tmp_path):
-    f = lumen.compile(lambda x, w: F.relu(x @ w))
+    f = lumen.compile(lambda x, w: F.relu(F.matmul(x, w, "float32", x.dtype)))
     with pytest.raises(RuntimeError, match="call <lambda> first"):
         f.dump_graph(tmp_path / "none.html")
     f(lumen.zeros([2, 3]), lumen.zeros([3, 4]))
@@ -360,7 +371,7 @@ def test_dump_graph(tmp_path):
     ]
     lines = {tuple(src) for n in data["views"]["traced"]["nodes"] if n["kind"] == "node" for src in n["sources"]}
     ((file, line),) = lines
-    assert file == __file__ and "F.relu(x @ w)" in data["code"][file].splitlines()[line - 1]
+    assert file == __file__ and "F.relu(F.matmul(x, w" in data["code"][file].splitlines()[line - 1]
     assert {tuple(src) for n in data["views"]["fused"]["nodes"] for src in n.get("sources", [])} == lines
     data = f.dump_graph(
         tmp_path / "f16.html", lumen.zeros([5, 3], dtype="float16"), lumen.zeros([3, 4], dtype="float16")
@@ -382,7 +393,7 @@ def test_meta_tensors_have_no_data():
 
 def test_tracing_and_running_on_meta_tensors():
     def f(x, w):
-        return F.relu(x @ w), F.sum(x, -1)
+        return F.relu(F.matmul(x, w, "float32", x.dtype)), F.sum(x, -1)
 
     x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
     assert "dot_general" in str(lumen.make_graph(f)(x, w))
@@ -420,7 +431,7 @@ def test_compiled_init_on_device(tmp_path):
     assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
     data = make.dump_graph(tmp_path / "init.html")
     assert data["device"] == "mps:0" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
-    f = lumen.compile(lambda x, w: x @ w)
+    f = lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype))
     meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
     data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
     assert data["device"] == "mps:0" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
@@ -432,7 +443,7 @@ class Affine(lumen.nn.Module):
     b: lumen.Tensor
 
     def __call__(self, x):
-        return x @ self.w + self.b
+        return F.matmul(x, self.w, "float32", x.dtype) + self.b
 
 
 class Stack(lumen.nn.Module):
@@ -497,7 +508,7 @@ def test_module_weights_are_placed_once_and_shared(device):
     other.load_state_dict({"w": lumen.from_numpy(np.eye(4, dtype=np.float32)), "b": lumen.zeros([4])})
     np.testing.assert_allclose(lumen.to_numpy(g(other, lumen.from_numpy(x))), x, rtol=1e-6)
     with pytest.raises(TypeError, match="cannot close over a tensor"):
-        lumen.compile(lambda x: x @ first.w, device=device)(lumen.from_numpy(x))
+        lumen.compile(lambda x: F.matmul(x, first.w, "float32", x.dtype), device=device)(lumen.from_numpy(x))
     with pytest.raises(TypeError, match="whole meta tensors"):
         g(Affine(lumen.zeros([4, 4]), lumen.zeros([4])), lumen.from_numpy(x))
 
@@ -576,7 +587,7 @@ def test_packed_weights_are_one_matmul(device):
         pytest.skip(str(e))
 
     def gated(x, w13):
-        gate, up = (x @ w13).chunk(2, -1)
+        gate, up = F.matmul(x, w13, "float32", x.dtype).chunk(2, -1)
         return F.relu(gate) * up
 
     out = lumen.to_numpy(lumen.compile(gated)(*args))
@@ -608,7 +619,7 @@ class Gated(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
-        return F.relu(x @ self.w1) * (x @ self.w3)
+        return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS])
@@ -656,8 +667,12 @@ class Attention(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
-        q, k, v = x @ self.wq, x @ self.wk, x @ self.wv
-        return F.softmax(q @ k.t(), -1) @ v
+        q, k, v = (
+            F.matmul(x, self.wq, "float32", x.dtype),
+            F.matmul(x, self.wk, "float32", x.dtype),
+            F.matmul(x, self.wv, "float32", x.dtype),
+        )
+        return F.matmul(F.softmax(F.matmul(q, k.t(), "float32", x.dtype), -1), v, "float32", x.dtype)
 
 
 @pytest.mark.mps
@@ -711,7 +726,7 @@ class Heads(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
-        q, k, v = ((x @ w.t()).reshape(2, 32, 4, 16) for w in (self.wq, self.wk, self.wv))
+        q, k, v = (F.matmul(x, w.t(), "float32", x.dtype).reshape(2, 32, 4, 16) for w in (self.wq, self.wk, self.wv))
         return F.flash_attention(q, k, v, is_causal=True).reshape(64, 64)
 
 
@@ -748,7 +763,7 @@ class QKV(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
-        return [x @ w.t() for w in (self.wq, self.wk, self.wv)]
+        return [F.matmul(x, w.t(), "float32", x.dtype) for w in (self.wq, self.wk, self.wv)]
 
 
 class MixedQKV(QKV):
@@ -804,7 +819,7 @@ class SwiGLU(lumen.nn.Module):
             u = F.matmul(x.bfloat16(), self.w3.t().bfloat16(), "float32", "float32")
             z = (g * F.sigmoid(g) * u).bfloat16().float()
         else:
-            g, u = x @ self.w1.t(), x @ self.w3.t()
+            g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w3.t(), "float32", x.dtype)
             z = g * F.sigmoid(g) * u
         return (z, g) if gate else z
 
@@ -873,7 +888,9 @@ class GatedMLP(lumen.nn.Module):
             u = F.matmul(x, self.wu.t().bfloat16(), "float32", "float32")
             h = (g * F.sigmoid(g) * u).bfloat16()
         else:
-            h = F.relu(x @ self.wg.t().bfloat16()) * (x @ self.wu.t().bfloat16())
+            h = F.relu(F.matmul(x, self.wg.t().bfloat16(), "float32", "bfloat16")) * F.matmul(
+                x, self.wu.t().bfloat16(), "float32", "bfloat16"
+            )
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 
@@ -1225,7 +1242,7 @@ class GatedPair(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        g, u = x @ self.w1.t(), x @ self.w2.t()
+        g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
         return g * F.sigmoid(g) * u
 
 
@@ -1279,8 +1296,8 @@ class GatedMLP2(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
-        g, u = x @ self.w1.t(), x @ self.w2.t()
-        return (g * F.sigmoid(g) * u) @ self.w3.t()
+        g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
+        return F.matmul(g * F.sigmoid(g) * u, self.w3.t(), "float32", x.dtype)
 
 
 @pytest.mark.mps
@@ -1336,7 +1353,7 @@ class Projections(lumen.nn.Module):
         if self.mixed:
             p = [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in self.ws]
         else:
-            p = [x @ w.t() for w in self.ws]
+            p = [F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
         out, k = [], 0
         for g in self.groups:
             q, k = p[k : k + g], k + g
@@ -1470,7 +1487,7 @@ class Linear(lumen.nn.Module):
     w: lumen.Tensor
 
     def __call__(self, x):
-        return x @ self.w
+        return F.matmul(x, self.w, "float32", x.dtype)
 
 
 @pytest.mark.mps
@@ -1690,9 +1707,9 @@ def test_programs_run_in_their_dtypes(device):
     assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
     with pytest.raises(ValueError, match="output_dtype"):
         lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
-    graph = lumen.make_graph(lambda a, b: a @ b)(x, w)
+    graph = lumen.make_graph(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w)
     assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
-    assert lumen.compile(lambda a, b: a @ b)(x, w).dtype == "bfloat16"
+    assert lumen.compile(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w).dtype == "bfloat16"
     graph = lumen.make_graph(lambda a: F.sum(a, -1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]
     assert "accum_dtype=bf16" in str(graph)
@@ -2257,7 +2274,7 @@ def test_ops_are_functions():
         assert hasattr(lumen.graph.TracedTensor, name), name
     assert lumen.functional is F
     a = lumen.zeros([2, 3])
-    by_operator = lumen.make_graph(lambda x: (x + 1) * x @ x.t())(a)
+    by_operator = lumen.make_graph(lambda x: F.matmul((x + 1) * x, x.t(), "float32", x.dtype))(a)
     by_function = lumen.make_graph(lambda x: F.matmul(F.mul(F.add(x, 1), x), x.t(), "float32", "float32"))(a)
     assert str(by_operator) == str(by_function)
 
@@ -2267,22 +2284,22 @@ class _ScaledMatmul(lumen.nn.Module):
     s: float
 
     def __call__(self, x):
-        return (x @ self.w) * self.s
+        return F.matmul(x, self.w, "float32", x.dtype) * self.s
 
 
 @pytest.mark.mps
 @pytest.mark.parametrize(
     "f, shapes, dtype",
     [
-        (lambda x, w, y: F.relu(x @ w + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
-        (lambda x, w, y: x @ w + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
-        (lambda x, w, y: x @ w + y, [(3, 40, 24), (24, 56), (3, 40, 56)], "float32"),
+        (lambda x, w, y: F.relu(F.matmul(x, w, "float32", x.dtype) + y[0]), [(64, 96), (96, 80), (2, 80)], "float32"),
+        (lambda x, w, y: F.matmul(x, w, "float32", x.dtype) + y, [(3, 40, 24), (3, 24, 56), (3, 40, 56)], "float32"),
+        (lambda x, w, y: F.matmul(x, w, "float32", x.dtype) + y, [(3, 40, 24), (24, 56), (3, 40, 56)], "float32"),
         (
             lambda x, w, y: F.relu(F.matmul(x, w, "float32", "float32")).bfloat16(),
             [(64, 96), (96, 80), (64, 80)],
             "bfloat16",
         ),
-        (lambda x, w, y: x @ w * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
+        (lambda x, w, y: F.matmul(x, w, "float32", x.dtype) * F.exp(y), [(64, 32), (32, 48), (64, 48)], "float16"),
         (
             lambda x, w, y: _silu(F.matmul(x, w, "float32", "float32")).to(dtype=x.dtype),
             [(64, 96), (96, 80), (64, 80)],
@@ -2487,12 +2504,12 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
         s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     ]  # noqa: E731
     with pytest.warns(UserWarning, match="casts it back"):
-        assert labels(lambda x, w, r: (x @ w).float() + r) == [
+        assert labels(lambda x, w, r: F.matmul(x, w, "float32", x.dtype).float() + r) == [
             "dot_general → cast(float32 -> bfloat16)",
             "cast(bfloat16 -> float32) → add",
         ]
     with pytest.warns(UserWarning, match="casts it back"):
-        assert labels(lambda x, w, r: ((x @ w) + 1.0).float() + r) == [
+        assert labels(lambda x, w, r: (F.matmul(x, w, "float32", x.dtype) + 1.0).float() + r) == [
             "dot_general → cast(float32 -> bfloat16) → add",
             "cast(bfloat16 -> float32) → add",
         ]
@@ -2566,11 +2583,11 @@ def test_matmul_epilogue_reads_the_rounded_output():
     except RuntimeError as e:
         pytest.skip(str(e))
     dims = (((1,), (0,)), ((), ()))
-    rounded = lumen.compile(lambda x, w: _silu((x @ w).float()).to(dtype=x.dtype))(x, w)
+    rounded = lumen.compile(lambda x, w: _silu(F.matmul(x, w, "float32", x.dtype).float()).to(dtype=x.dtype))(x, w)
     accum = lumen.compile(lambda x, w: _silu(prims.dot_general(x, w, dims, "float32", "float32")).to(dtype=x.dtype))(
         x, w
     )
-    h = lumen.to_numpy(lumen.compile(lambda x, w: (x @ w).float())(x, w)).astype(np.float64)
+    h = lumen.to_numpy(lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype).float())(x, w)).astype(np.float64)
     rounded, accum = (lumen.to_numpy(t.to(dtype="float32")) for t in (rounded, accum))
     np.testing.assert_allclose(rounded, h / (1 + np.exp(-h)), rtol=1e-2, atol=1e-2)
     assert not np.array_equal(rounded, accum)
@@ -2602,14 +2619,14 @@ class _Gated(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
-        return F.relu(x @ self.w1) * (x @ self.w3)
+        return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
 class _Relu(lumen.nn.Module):
     w1: lumen.Tensor
 
     def __call__(self, x):
-        return F.relu(x @ self.w1)
+        return F.relu(F.matmul(x, self.w1, "float32", x.dtype))
 
 
 @pytest.mark.mps
@@ -2659,7 +2676,9 @@ def test_matmul_takes_accum_and_output_dtypes():
     infers them (float32 accumulation, the inputs' dtype)."""
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
     y = lumen.empty([8, 3], dtype="bfloat16", device="meta")
-    assert "accum_dtype=f32 output_dtype=bf16" in str(lumen.make_graph(lambda x, y: x @ y)(x, y))
+    assert "accum_dtype=f32 output_dtype=bf16" in str(
+        lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", x.dtype))(x, y)
+    )
     g = lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", "float32"))(x, y)
     assert "accum_dtype=f32 output_dtype=f32" in str(g)
     g = lumen.make_graph(lambda x, y: F.matmul(x, y, "bfloat16", "bfloat16"))(x, y)
@@ -2678,7 +2697,7 @@ def test_rounding_a_contraction_then_widening_it_warns():
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
 
     def scores(x):
-        s = (x @ x.t()) * 0.5
+        s = F.matmul(x, x.t(), "float32", x.dtype) * 0.5
         return s.float()
 
     with pytest.warns(UserWarning, match=rf"cast at {re.escape(__file__)}:\d+") as record:
@@ -2689,14 +2708,14 @@ def test_rounding_a_contraction_then_widening_it_warns():
         UserWarning,
         match=r"dot_general\(bf16\[4,8\], bf16\[8,4\]\) -> bf16\[4,4\] accumulates in f32 but outputs bf16, then dot_general → mul → cast\(bfloat16 -> float32\)",
     ):
-        lumen.make_graph(lambda x: ((x @ x.t()) * 0.5).float())(x)
+        lumen.make_graph(lambda x: (F.matmul(x, x.t(), "float32", x.dtype) * 0.5).float())(x)
     with pytest.warns(UserWarning, match="output_dtype=f32"):
-        lumen.compile(lambda x: F.softmax((x @ x.t()).float(), -1))(x)
+        lumen.compile(lambda x: F.softmax(F.matmul(x, x.t(), "float32", x.dtype).float(), -1))(x)
     q = lumen.empty([1, 4, 2, 8], dtype="bfloat16", device="meta")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         lumen.make_graph(lambda x: F.matmul(x, x.t(), "float32", "float32") * 0.5)(x)
-        lumen.make_graph(lambda x: F.relu(x @ x.t()))(x)
+        lumen.make_graph(lambda x: F.relu(F.matmul(x, x.t(), "float32", x.dtype)))(x)
         lumen.make_graph(lambda q: F.flash_attention(q, q, q))(q)
 
 
@@ -2762,7 +2781,7 @@ class _ReluMLP(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        return F.relu(x @ self.w1) @ self.w2
+        return F.matmul(F.relu(F.matmul(x, self.w1, "float32", x.dtype)), self.w2, "float32", x.dtype)
 
 
 @pytest.mark.mps

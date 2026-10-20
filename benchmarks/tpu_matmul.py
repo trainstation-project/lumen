@@ -21,7 +21,7 @@ def tflops(m, k, n, dtype, seconds):
     rng = np.random.default_rng(0)
     a = lumen.from_numpy(rng.standard_normal((m, k), dtype=np.float32)).to(dtype=dtype).to("tpu")
     b = lumen.from_numpy(rng.standard_normal((k, n), dtype=np.float32)).to(dtype=dtype).to("tpu")
-    f = lumen.compile(lambda a, b: a @ b, device="tpu")
+    f = lumen.compile(lambda a, b: lumen.functional.matmul(a, b, "float32", dtype), device="tpu")
     start = time.perf_counter()
     while time.perf_counter() - start < seconds / 4:
         f(a, b).wait_()

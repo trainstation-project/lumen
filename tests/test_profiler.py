@@ -211,7 +211,7 @@ def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     except RuntimeError as e:
         pytest.skip(str(e))
     b = lumen.ones([8, 16], device=device).to(dtype="bfloat16")
-    f = lumen.compile(lambda a, b: (F.sum((a @ b).float(), -1), F.amax(a, -1), a * 2.0))
+    f = lumen.compile(lambda a, b: (F.sum(F.matmul(a, b, "float32", "bfloat16").float(), -1), F.amax(a, -1), a * 2.0))
     f(a, b)
     activities = [ProfilerActivity.CPU] + ([ProfilerActivity.MPS] if device == "mps" else [])
     with profile(activities=activities, record_shapes=True) as prof:
@@ -249,7 +249,7 @@ def test_steps_record_their_strides(tmp_path):
     except RuntimeError as e:
         pytest.skip(str(e))
     b = lumen.ones([4, 16], device="mps")
-    f = lumen.compile(lambda a, b: (a[:, 2:6] @ b) * 2.0)
+    f = lumen.compile(lambda a, b: F.matmul(a[:, 2:6], b, "float32", "float32") * 2.0)
     f(a, b)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
         f(a, b)
@@ -351,7 +351,7 @@ def test_kernels_queued_far_ahead_are_each_timed():
     def chain(m, s):
         x = m.w * s
         for _ in range(32):
-            x = F.relu(x @ m.w) * 0.05
+            x = F.relu(F.matmul(x, m.w, "float32", "float32")) * 0.05
         return F.sum(x)
 
     f = lumen.compile(chain, device="mps")
@@ -380,7 +380,7 @@ def test_host_waits_are_profiled():
     (``lumen::copy_d2h``), spanning the run's kernels."""
     import numpy as np
 
-    f = lumen.compile(lambda x: F.sum(F.exp(x @ x)), device="mps")
+    f = lumen.compile(lambda x: F.sum(F.exp(F.matmul(x, x, "float32", "float32"))), device="mps")
     x = lumen.from_numpy(np.ones((256, 256), np.float32) / 256)
     try:
         f(x)
@@ -409,7 +409,7 @@ def test_device_transfers_are_profiled():
     kernel), its ``lumen::wait`` inside it. Each the moved type in and out."""
     import numpy as np
 
-    f = lumen.compile(lambda x: F.exp(x @ x), device="mps")
+    f = lumen.compile(lambda x: F.exp(F.matmul(x, x, "float32", "float32")), device="mps")
     x = lumen.from_numpy(np.ones((64, 64), np.float32) / 64)
     try:
         f(x)
@@ -443,7 +443,7 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
 
     @record_function("inner")
     def inner(x, w):
-        return x @ w
+        return F.matmul(x, w, "float32", "float32")
 
     def f(x, w):
         with record_function("outer"):
@@ -495,7 +495,7 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
     def f(x, w):
         for _ in range(2):
             with record_function("layer"):
-                x = x @ w
+                x = F.matmul(x, w, "float32", "float32")
         return F.sum(x * x)
 
     try:
@@ -524,7 +524,7 @@ def test_record_function_holds_its_ops_gradients_as_backward(device):
     def f(x, w):
         with record_function("outer"):
             with record_function("inner"):
-                y = x @ w
+                y = F.matmul(x, w, "float32", "float32")
             z = F.exp(F.sum(y, -1))
         return F.sum(z)
 

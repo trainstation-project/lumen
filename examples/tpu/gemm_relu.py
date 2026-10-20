@@ -15,7 +15,7 @@ w = lumen.from_numpy(b).to(dtype="bfloat16").to("tpu:0")
 
 @lumen.compile
 def gemm_relu(x, w):
-    return F.relu(x @ w)
+    return F.relu(F.matmul(x, w, "float32", "bfloat16"))
 
 
 y = gemm_relu(x, w)

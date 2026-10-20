@@ -108,10 +108,10 @@ def test_compiler_flags_change_what_compiles(compiler):
 
 
 def _read_early_and_late(a, w):
-    h = a @ w
-    b = h @ w
-    e = (b @ w) @ b
-    return F.sum((e @ w) * h, -1)
+    h = F.matmul(a, w, "float32", "float32")
+    b = F.matmul(h, w, "float32", "float32")
+    e = F.matmul(F.matmul(b, w, "float32", "float32"), b, "float32", "float32")
+    return F.sum(F.matmul(e, w, "float32", "float32") * h, -1)
 
 
 @pytest.mark.mps
@@ -189,7 +189,7 @@ def test_split_k_agrees(compiler, dtype):
         x, w = (lumen.from_numpy(t).to("mps").to(dtype=dtype) for t in (a, b))
     except RuntimeError as e:
         pytest.skip(str(e))
-    f = lambda x, w: x @ w  # noqa: E731
+    f = lambda x, w: F.matmul(x, w, "float32", x.dtype)  # noqa: E731
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
     cast = "cast(float32 -> bfloat16)"
     rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]

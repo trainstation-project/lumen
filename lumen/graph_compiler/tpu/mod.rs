@@ -8,7 +8,7 @@ use super::passes::merge_dots_backward::MergeDotsBackward;
 use super::passes::simplify::Simplify;
 use super::plan::DeviceLayout;
 use super::{Options, positions};
-use crate::graph::{Graph, Node, Primitive, Var, intern};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::{Plan, PlanOptions};
 
@@ -371,18 +371,22 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
                 .expect("the epilogue's operands");
             within.insert(nodes[k].output, v);
             if skipped[k] {
-                names.push(nodes[k].primitive.name());
+                names.push(graph.label(&nodes[k]));
             }
         }
         let outputs: Vec<Var> = f.outputs.iter().map(|v| within[v]).collect();
         body.set_outputs(&outputs).expect("the body's values");
-        let mut label = match (&f.parts, f.stack) {
-            (Some((_, parts)), _) => format!("{}x dot_general", parts.len()),
-            (None, Some(k)) => format!("{}x dot_general", nodes[k].inputs.len()),
-            (None, None) => "dot_general".into(),
+        let members = match (&f.parts, f.stack) {
+            (Some((_, parts)), _) => parts.len(),
+            (None, Some(k)) => nodes[k].inputs.len(),
+            (None, None) => 1,
+        };
+        let mut label = match members > 1 && node.label.is_none() {
+            true => format!("{members}x {}", graph.label(node)),
+            false => graph.label(node).to_string(),
         };
         for name in names {
-            label += &format!(" → {name}");
+            label += &format!("{FUSION_SEPARATOR}{name}");
         }
         let inputs: Vec<Var> = reads.iter().chain(&f.extras).map(|&v| map[v]).collect();
         let fused = out

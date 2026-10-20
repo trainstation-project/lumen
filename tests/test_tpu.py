@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import lumen
+import lumen.functional as F
 
 pytestmark = pytest.mark.tpu
 
@@ -48,13 +49,15 @@ def check(f, lhs, rhs, dtype, tol, transposed=False):
     ],
 )
 def test_float32_dots_run_on_the_matrix_unit(lhs, rhs):
-    y = check(lambda x, w: x @ w, lhs, rhs, "float32", 1e-5)
+    y = check(lambda x, w: F.matmul(x, w, "float32", x.dtype), lhs, rhs, "float32", 1e-5)
     assert y.dtype == "float32"
 
 
 def test_a_transposed_rhs():
-    check(lambda x, w: x @ w.t(), [64, 256], [384, 256], "float32", 1e-5, transposed=True)
-    check(lambda x, w: x @ w.t(), [8, 1024], [512, 1024], "bfloat16", 1e-2, transposed=True)
+    check(lambda x, w: F.matmul(x, w.t(), "float32", x.dtype), [64, 256], [384, 256], "float32", 1e-5, transposed=True)
+    check(
+        lambda x, w: F.matmul(x, w.t(), "float32", x.dtype), [8, 1024], [512, 1024], "bfloat16", 1e-2, transposed=True
+    )
 
 
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
@@ -62,7 +65,7 @@ def test_a_transposed_rhs():
 def test_a_transposed_lhs(g, x, dtype, tol):
     rng = np.random.default_rng(0)
     a, b = (tpu(rng.standard_normal(s, dtype=np.float32), dtype) for s in (g, x))
-    y = lumen.compile(lambda a, b: a.t() @ b)(a, b)
+    y = lumen.compile(lambda a, b: F.matmul(a.t(), b, "float32", a.dtype))(a, b)
     expected = floats(a).T @ floats(b)
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
 
@@ -76,7 +79,7 @@ def test_a_transposed_lhs(g, x, dtype, tol):
     ],
 )
 def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
-    y = check(lambda x, w: x @ w, lhs, rhs, "bfloat16", 1e-2)
+    y = check(lambda x, w: F.matmul(x, w, "float32", x.dtype), lhs, rhs, "bfloat16", 1e-2)
     assert y.dtype == "bfloat16"
 
 
@@ -87,14 +90,14 @@ def test_a_bfloat16_dot_with_a_float32_output():
 
 
 def test_small_dots_take_their_dimensions_whole():
-    check(lambda x, w: x @ w, [4, 8], [8, 16], "float32", 1e-5)
-    check(lambda x, w: x @ w, [3, 100], [100, 30], "bfloat16", 1e-2)
+    check(lambda x, w: F.matmul(x, w, "float32", x.dtype), [4, 8], [8, 16], "float32", 1e-5)
+    check(lambda x, w: F.matmul(x, w, "float32", x.dtype), [3, 100], [100, 30], "bfloat16", 1e-2)
 
 
 def test_a_dot_the_kernel_cannot_run_says_why():
     x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
     with pytest.raises(ValueError, match="accumulating in float32"):
-        lumen.compile(lambda x, w: x @ w)(x, w)
+        lumen.compile(lambda x, w: F.matmul(x, w, "int32", "int32"))(x, w)
 
 
 @pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
@@ -158,7 +161,9 @@ def test_a_dot_of_two_vectors_runs_as_a_product_and_a_sum(dtype):
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal([2, 8, 1024, 128], dtype=np.float32) for _ in range(2))
     x, y = (lumen.from_numpy(t).to(dtype=dtype).to("tpu") for t in (a, b))
-    out = lumen.compile(lambda x, y: lumen.functional.einsum("bhsd,bhsd->bhs", x, y))(x, y)
+    out = lumen.compile(
+        lambda x, y: lumen.functional.einsum("bhsd,bhsd->bhs", x, y, accum_dtype="float32", output_dtype=x.dtype)
+    )(x, y)
     assert out.device == "tpu:0" and list(out.shape) == [2, 8, 1024]
     expected = (floats(x) * floats(y)).sum(-1)
     assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
@@ -185,7 +190,7 @@ class Projections(lumen.nn.Module):
     ws: list
 
     def __call__(self, x):
-        return [-(x @ w.t()) for w in self.ws]
+        return [-F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
 
 
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)], ids=["float32", "bfloat16"])
@@ -199,7 +204,8 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
     assert plan.packed == [(params, 0)]
     labels = [s["label"] for s in plan.steps()]
-    assert labels == [f"{len(sizes)}x dot_general" + " → neg" * len(sizes)], labels
+    rounded = "" if dtype == "float32" else " → cast(float32 -> bfloat16)"
+    assert labels == [f"{len(sizes)}x dot_general" + rounded + " → neg" * len(sizes)], labels
     rng = np.random.default_rng(0)
     values = [lumen.from_numpy(rng.standard_normal([h, d], dtype=np.float32)).to(dtype=dtype) for h in sizes]
     model = make()
@@ -221,17 +227,20 @@ def tpu(a, dtype="float32"):
     "f, expected, labels",
     [
         (
-            lambda x, w, r: lumen.functional.relu(x @ w),
+            lambda x, w, r: lumen.functional.relu(F.matmul(x, w, "float32", x.dtype)),
             lambda x, w, r: np.maximum(x @ w, 0),
             ["dot_general → max"],
         ),
         (
-            lambda x, w, r: ((x @ w) * 2.0 + r).to(dtype="bfloat16"),
+            lambda x, w, r: (F.matmul(x, w, "float32", x.dtype) * 2.0 + r).to(dtype="bfloat16"),
             lambda x, w, r: (x @ w) * 2 + r,
-            ["dot_general → mul → add → cast"],
+            ["dot_general → mul → add → cast(float32 -> bfloat16)"],
         ),
         (
-            lambda x, w, r: (x @ w, lumen.functional.exp(x @ w) - r),
+            lambda x, w, r: (
+                F.matmul(x, w, "float32", x.dtype),
+                lumen.functional.exp(F.matmul(x, w, "float32", x.dtype)) - r,
+            ),
             lambda x, w, r: (x @ w, np.exp(x @ w) - r),
             ["dot_general → exp → sub"],
         ),
@@ -257,7 +266,7 @@ class GatedPair(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        g, u = x @ self.w1.t(), x @ self.w2.t()
+        g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
         return g * lumen.functional.sigmoid(g) * u
 
 
@@ -265,7 +274,7 @@ class Product(lumen.nn.Module):
     ws: list
 
     def __call__(self, x):
-        q, k, v = (x @ w.t() for w in self.ws)
+        q, k, v = (F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws)
         return q * k * v
 
 
@@ -295,7 +304,10 @@ def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, 
     params = list(range(1, n + 1))
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
     assert plan.packed == [(params, 0)]
-    assert [s["label"] for s in plan.steps()] == steps
+    rounded = "" if dtype == "float32" else " → cast(float32 -> bfloat16)"
+    assert [s["label"] for s in plan.steps()] == [
+        label.replace("dot_general", "dot_general" + rounded) for label in steps
+    ]
     rng = np.random.default_rng(0)
     ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(n)]
     x = rng.standard_normal([m, d], dtype=np.float32)
@@ -313,7 +325,7 @@ class QKV(lumen.nn.Module):
     ws: list
 
     def __call__(self, x):
-        return [x @ w.t() for w in self.ws]
+        return [F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
 
 
 def test_projections_backward_merges_into_two_dots():
@@ -353,8 +365,8 @@ class SwiGLU(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        g, u = x @ self.w1.t(), x @ self.w3.t()
-        return (g * lumen.functional.sigmoid(g) * u) @ self.w2.t()
+        g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w3.t(), "float32", x.dtype)
+        return F.matmul(g * lumen.functional.sigmoid(g) * u, self.w2.t(), "float32", x.dtype)
 
 
 def test_a_swiglu_backward_merges_its_gate_and_up():

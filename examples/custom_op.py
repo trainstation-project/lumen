@@ -26,7 +26,7 @@ def bias_relu_(y: lumen.Tensor, b: lumen.Tensor) -> None:
 
 @lumen.compile
 def layer(x, w, b):
-    y = x @ w
+    y = F.matmul(x, w, "float32", "float32")
     bias_relu_(y, b)
     return F.sum(y, -1)
 

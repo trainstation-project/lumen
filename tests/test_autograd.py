@@ -33,8 +33,8 @@ CASES = {
     "tanh sigmoid": (lambda x, y: F.sum(F.tanh(x) * F.sigmoid(y)), [(5,), (5,)]),
     "relu maximum": (lambda x, y: F.sum(F.relu(x) * y + F.maximum(x, y)), [(3, 4), (3, 4)]),
     "where": (lambda x, y: F.sum(F.where(F.lt(x, y), x * y, x * 3.0)), [(3, 4), (3, 4)]),
-    "matmul": (lambda x, y: F.sum(F.tanh(x @ y)), [(3, 4), (4, 5)]),
-    "batched matmul": (lambda x, y: F.sum(F.tanh(x @ y)), [(2, 3, 4), (4, 5)]),
+    "matmul": (lambda x, y: F.sum(F.tanh(F.matmul(x, y, x.dtype, x.dtype))), [(3, 4), (4, 5)]),
+    "batched matmul": (lambda x, y: F.sum(F.tanh(F.matmul(x, y, x.dtype, x.dtype))), [(2, 3, 4), (4, 5)]),
     "dot_general": (
         lambda x, y: F.sum(F.tanh(prims.dot_general(x, y, (((2, 0), (2, 1)), ((1,), (0,))), "float64", "float64"))),
         [(4, 2, 3), (2, 4, 3, 5)],
@@ -155,7 +155,7 @@ class _MLP(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        return F.sum(F.relu(x @ self.w1) @ self.w2)
+        return F.sum(F.matmul(F.relu(F.matmul(x, self.w1, "float32", "float32")), self.w2, "float32", "float32"))
 
 
 def test_grad_of_a_module_is_a_module():
@@ -380,7 +380,7 @@ def _written_attention(q, k, v):
     """Attention written out ([B, S, N, H] in and out), as a model might."""
     q, k, v = (t.transpose(1, 2) for t in (q, k, v))
     s = F.matmul(q, k.transpose(-1, -2), "float32", "float32") * 0.125
-    return (F.softmax(s, -1) @ v).transpose(1, 2)
+    return F.matmul(F.softmax(s, -1), v, "float32", "float32").transpose(1, 2)
 
 
 @pytest.mark.parametrize(
@@ -424,7 +424,7 @@ def test_attention_read_elsewhere_keeps_autodiff():
     def loss(q):
         s = F.matmul(q.transpose(1, 2), q.transpose(1, 2).transpose(-1, -2), "float32", "float32")
         p = F.softmax(s, -1)
-        return F.sum(p @ q.transpose(1, 2)) + F.sum(p)
+        return F.sum(F.matmul(p, q.transpose(1, 2), "float32", "float32")) + F.sum(p)
 
     assert "log" not in str(lumen.make_graph(lumen.grad(loss))(q))
 
@@ -435,7 +435,10 @@ class _QKV(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
-        return F.sum(F.relu(x @ self.wq) * (x @ self.wk) + (x @ self.wv))
+        return F.sum(
+            F.relu(F.matmul(x, self.wq, "float32", "float32")) * F.matmul(x, self.wk, "float32", "float32")
+            + F.matmul(x, self.wv, "float32", "float32")
+        )
 
 
 def _qkv_step(m, x):
@@ -505,7 +508,10 @@ class _Projections(lumen.nn.Module):
 
     def __call__(self, x):
         s, d = x.shape
-        q, k, v = ((x @ w).reshape(s, self.heads, d // self.heads) for w in (self.wq, self.wk, self.wv))
+        q, k, v = (
+            F.matmul(x, w, "float32", "float32").reshape(s, self.heads, d // self.heads)
+            for w in (self.wq, self.wk, self.wv)
+        )
         return F.sum(F.tanh(q) * F.sigmoid(k) * v)
 
 

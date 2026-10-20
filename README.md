@@ -13,7 +13,7 @@ import lumen.functional as F
 
 @lumen.compile
 def layer(x, w):
-    return F.relu(x @ w)
+    return F.relu(F.matmul(x, w, "float32", "float32"))
 
 x, w = (lumen.from_numpy(np.ones(s, np.float32)).to("mps") for s in ((4, 8), (8, 16)))
 y = layer(x, w)  # traced and planned on the first call per input signature, then run

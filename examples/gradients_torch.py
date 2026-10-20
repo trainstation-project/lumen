@@ -14,7 +14,7 @@ class MLP(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
-        return F.relu(x @ self.w1) @ self.w2
+        return F.matmul(F.relu(F.matmul(x, self.w1, "float32", "float32")), self.w2, "float32", "float32")
 
 
 def train_step(model, opt, x, y):

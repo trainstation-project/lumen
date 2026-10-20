@@ -80,7 +80,7 @@ def _mps_heavy():
 
     def heavy(m, x):
         for _ in range(16):
-            x = F.relu(x @ m.w) * 0.03
+            x = F.relu(F.matmul(x, m.w, "float32", "float32")) * 0.03
         return F.sum(x)
 
     f = lumen.compile(heavy, device="mps")

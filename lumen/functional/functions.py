@@ -330,9 +330,8 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
 def matmul(input, other, accum_dtype, output_dtype):
     """``input @ other`` with torch's rules: 1-d operands are vectors, and
     the dimensions before the last two are batch dimensions, broadcast. It
-    accumulates in ``accum_dtype``, its result of ``output_dtype``. ``@``
-    infers them: floats accumulate in float32 (float64 in float64), the
-    result of the inputs' dtype."""
+    accumulates in ``accum_dtype``, its result of ``output_dtype``: both
+    the caller's (``@`` has none, and raises)."""
 
     input = _lift(input)
     other = _lift(other)
@@ -621,9 +620,10 @@ def gather(input, dim, index):
     return prims.take_along_axis(input, index, _dim(dim, input.ndim))
 
 
-def einsum(equation, *operands):
+def einsum(equation, *operands, accum_dtype, output_dtype):
     """A contraction of two operands (``torch.einsum``): no index repeated
-    within one, the output's indices the inputs' batch and free ones."""
+    within one, the output's indices the inputs' batch and free ones,
+    accumulated in ``accum_dtype``, its result of ``output_dtype``."""
     inputs, output = equation.replace(" ", "").split("->")
     a, b = inputs.split(",")
     x, y = (_lift(t) for t in operands)
@@ -633,6 +633,6 @@ def einsum(equation, *operands):
         ([a.index(c) for c in contracting], [b.index(c) for c in contracting]),
         ([a.index(c) for c in batch], [b.index(c) for c in batch]),
     )
-    out = prims.dot_general(x, y, numbers, _accum_dtype(x.dtype), x.dtype)
+    out = prims.dot_general(x, y, numbers, accum_dtype, output_dtype)
     order = batch + [c for c in a if c not in b] + [c for c in b if c not in a]
     return out.permute(tuple(order.index(c) for c in output)) if order != list(output) else out

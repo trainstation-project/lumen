@@ -4,7 +4,8 @@ The ops as functions: `import lumen.functional as F`, named after PyTorch's
 `torch` / `torch.nn.functional`. Every function records primitives
 (`lumen.graph.prims`) into the graph being traced by `lumen.compile`, so it
 takes traced tensors and Python scalars; nothing here runs eagerly. A traced
-tensor itself only has operators (`+ - * / @ == < []`, `-x`), layout methods
+tensor itself only has operators (`+ - * / == < []`, `-x`; `@` raises: a
+matmul names its dtypes), layout methods
 and dtype casts (`lumen/graph/tracer.py`); everything else lives here.
 Patterns like softmax, RMS norm, cross entropy and attention are traced as
 plain primitives and recognized by the MPS graph compiler, which fuses them
@@ -28,10 +29,11 @@ into its own kernels.
   operand's and must be of its kind); float functions require float tensors;
   `sum`/`mean` reduce in the input's dtype. Convert explicitly
   (`F.sum(x.float())`).
-* `matmul(input, other, accum_dtype, output_dtype)` takes both dtypes
-  explicitly; `@` infers them (floats accumulate in float32, float64 in
-  float64, result in the inputs' dtype). An `[..., K] @ [K, N]` matmul folds
-  the batch into rows rather than broadcasting the weight.
+* `matmul(input, other, accum_dtype, output_dtype)` and
+  `einsum(equation, x, y, accum_dtype=..., output_dtype=...)` take both
+  dtypes from the caller: nothing infers them (`@` on traced tensors
+  raises). A `[..., K] · [K, N]` matmul folds the batch into rows rather
+  than broadcasting the weight.
 * `cumsum` accumulates in its result dtype; a float16/bfloat16 input with
   `dtype="float32"` is widened by the kernel, any other dtype change casts
   first.
