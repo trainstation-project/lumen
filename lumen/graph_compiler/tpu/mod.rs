@@ -636,8 +636,7 @@ impl CompilerPass<TpuModule<'_>> for FlashAttention {
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph = attention::fuse(&m.graph, false, &[], |_| "flash_attention".into());
-        m.graph = reshaped_outputs(&m.graph);
-        attentions(&m.graph)
+        Ok(())
     }
 }
 
