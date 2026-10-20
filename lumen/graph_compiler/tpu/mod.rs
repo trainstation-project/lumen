@@ -376,10 +376,14 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         }
         let outputs: Vec<Var> = f.outputs.iter().map(|v| within[v]).collect();
         body.set_outputs(&outputs).expect("the body's values");
-        let mut label = match (&f.parts, f.stack) {
-            (Some((_, parts)), _) => format!("{}x {}", parts.len(), graph.label(node)),
-            (None, Some(k)) => format!("{}x {}", nodes[k].inputs.len(), graph.label(node)),
-            (None, None) => graph.label(node).to_string(),
+        let members = match (&f.parts, f.stack) {
+            (Some((_, parts)), _) => parts.len(),
+            (None, Some(k)) => nodes[k].inputs.len(),
+            (None, None) => 1,
+        };
+        let mut label = match members > 1 && node.label.is_none() {
+            true => format!("{members}x {}", graph.label(node)),
+            false => graph.label(node).to_string(),
         };
         for name in names {
             label += &format!("{FUSION_SEPARATOR}{name}");
