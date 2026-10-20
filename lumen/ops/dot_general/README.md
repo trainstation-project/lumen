@@ -30,8 +30,7 @@ accumulating in float32; the output float32 or bfloat16.
   blocks' copies double-buffered against compute): each step multiplies an
   lhs and rhs block on the matrix unit into a float32 accumulator (VMEM,
   zeroed at the first k step) and the last k step writes the output
-  block, through the kernel's `epilogue` (a float32 block's function, not
-  used yet), in the output's dtype. One block of k needs no accumulator: the
+  block, rounded to the dot's dtype, then through its epilogue (below). One block of k needs no accumulator: the
   product is written as it is. One product a step: Mosaic unrolls it over
   the block's matrix-unit tiles, so a second copy of it costs dearly.
 * **Blocks** (`tpu.rs`, `caps`): as large as feed the matrix unit (a step
@@ -55,15 +54,22 @@ accumulating in float32; the output float32 or bfloat16.
   (`tpu.reinterpret_cast`), with no packing or reshuffling of words.
 * float32 operands multiply in full float32 (`contract_precision<fp32>`),
   not the matrix unit's single bfloat16 pass.
-* **Merged dots** (`merge_dots`, then `split_dots` in
-  `graph_compiler/tpu/mod.rs`): a dot whose columns are read as slices
-  covering it is a `Fusion` of the dot and its slices, run by this kernel
-  with an output per slice (the spec's `outputs`: their widths). `bn`
-  divides every width; output `p`'s block index is the grid's `j` less its
-  first block, clamped to its blocks, and only steps within its columns
-  write it, so the pipeline copies each of its blocks out once. On a v6e,
-  bfloat16 q/k/v projections (`x [4096, 2048]`, 2048 + 512 + 512 outputs)
-  take 136 µs merged, 161 µs as three dots.
+* **Fusions** (`fuse_dots` in `graph_compiler/tpu/mod.rs`): a dot, its
+  column slices if merged (`merge_dots`), and the elementwise nodes after
+  it that read one member's values (and otherwise constants, 0-d values or
+  values of the member's shape computed before the dot) are one `Fusion`.
+  `tpu.rs` (`Epilogue::of`) writes its spec: `widths` (the members' column
+  ranges), `inputs` (the other operands: 0-d ones copied once, the rest
+  read a block at a time at the member's columns), `nodes` (as the
+  elementwise kernel's, computed by its `computed`) and `outputs` (a value
+  and its member each). `bn` divides every width; an output's block index
+  is the grid's `j` less its member's first block, clamped to its blocks,
+  and only steps within its columns compute and write it, so the pipeline
+  copies each of its blocks out once. On a v6e (bfloat16): relu of a
+  4096³ dot 185 µs fused, 281 µs as two kernels; a residual add 194 µs
+  (256); `y * sigmoid(1.702 y)` in float32 198 µs (724); q/k/v
+  projections (`x [4096, 2048]`, 2048 + 512 + 512 outputs) 136 µs merged,
+  161 µs as three dots.
 
 ## Subfolders
 

@@ -189,7 +189,7 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
     assert plan.packed == [(params, 0)]
     labels = [s["label"] for s in plan.steps()]
-    assert labels == [f"{len(sizes)}x dot_general"] + ["neg"] * len(sizes), labels
+    assert labels == [f"{len(sizes)}x dot_general" + " → neg" * len(sizes)], labels
     rng = np.random.default_rng(0)
     values = [lumen.from_numpy(rng.standard_normal([h, d], dtype=np.float32)).to(dtype=dtype) for h in sizes]
     model = make()
@@ -201,3 +201,70 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
     for y, w in zip(ys, values):
         expected = -(floats(x) @ floats(w).T)
         assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
+
+
+def tpu(a, dtype="float32"):
+    return lumen.from_numpy(a).to(dtype=dtype).to("tpu")
+
+
+@pytest.mark.parametrize(
+    "f, expected, labels",
+    [
+        (
+            lambda x, w, r: lumen.functional.relu(x @ w),
+            lambda x, w, r: np.maximum(x @ w, 0),
+            ["dot_general → max"],
+        ),
+        (
+            lambda x, w, r: ((x @ w) * 2.0 + r).to(dtype="bfloat16"),
+            lambda x, w, r: (x @ w) * 2 + r,
+            ["dot_general → mul → add → cast"],
+        ),
+        (
+            lambda x, w, r: (x @ w, lumen.functional.exp(x @ w) - r),
+            lambda x, w, r: (x @ w, np.exp(x @ w) - r),
+            ["dot_general → exp → sub"],
+        ),
+    ],
+    ids=["relu", "residual and cast", "the dot's value read too"],
+)
+def test_a_dots_elementwise_consumers_are_its_epilogue(f, expected, labels):
+    rng = np.random.default_rng(0)
+    a, b = rng.standard_normal([256, 512], dtype=np.float32), rng.standard_normal([512, 384], dtype=np.float32) / 16
+    c = rng.standard_normal([256, 384], dtype=np.float32)
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+    graph = lumen.make_graph(f)(meta(256, 512), meta(512, 384), meta(256, 384))
+    plan = lumen.graph_compiler.Plan(graph, "tpu")
+    assert [s["label"] for s in plan.steps() if not s["label"].startswith(("full", "broadcast"))] == labels
+    got = lumen.compile(f)(tpu(a), tpu(b), tpu(c))
+    want = expected(a, b, c)
+    for g, e in zip(got if isinstance(got, tuple) else [got], want if isinstance(want, tuple) else [want]):
+        np.testing.assert_allclose(floats(g), e, rtol=1e-2, atol=1e-2 * np.abs(e).max())
+
+
+class GatedPair(lumen.nn.Module):
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w2.t()
+        return g * lumen.functional.sigmoid(g) * u
+
+
+def test_merged_members_epilogues_are_their_own():
+    d, h, m = 256, 512, 64
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+    graph = lumen.make_graph(lambda model, x: model(x))(GatedPair(meta(h, d), meta(h, d)), meta(m, d))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[1, 2], packable=[1, 2])
+    assert plan.packed == [([1, 2], 0)]
+    labels = [s["label"] for s in plan.steps()]
+    assert labels == ["2x dot_general → logistic → mul", "mul"], labels
+    rng = np.random.default_rng(0)
+    w1, w2 = (rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(2))
+    x = rng.standard_normal([m, d], dtype=np.float32)
+    model = GatedPair(meta(h, d), meta(h, d))
+    f = lumen.compile(lambda model, x: model(x), device="tpu")
+    f(model, meta(m, d))
+    model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
+    g, u = x @ w1.T, x @ w2.T
+    np.testing.assert_allclose(floats(f(model, tpu(x))), g / (1 + np.exp(-g)) * u, rtol=1e-4, atol=1e-4)

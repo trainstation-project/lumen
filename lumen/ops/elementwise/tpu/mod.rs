@@ -38,7 +38,7 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
     )
 }
 
-fn node(p: &Primitive, args: &[usize]) -> String {
+pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
         Primitive::Full {
             fill_value, dtype, ..

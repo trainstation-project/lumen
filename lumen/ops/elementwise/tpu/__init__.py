@@ -5,6 +5,23 @@ from lumen.graph import prims
 from lumen.ops.tpu import pallas
 
 
+def computed(nodes, values, shape):
+    """``values`` and each of ``nodes``' after them, on blocks of ``shape``."""
+    values = list(values)
+    for node in nodes:
+        args = [values[i] for i in node["args"]]
+        params = node["params"]
+        if node["name"] == "full":
+            params = {**params, "shape": shape}
+        if node["name"] == "broadcast_in_dim":
+            if tuple(args[0].shape) == tuple(shape):
+                values.append(args[0])
+                continue
+            params = {"shape": shape, "broadcast_dimensions": (len(shape) - 1,)}
+        values.append(prims.bind(node["name"], *args, **params))
+    return values
+
+
 def program(spec):
     """The kernel of ``spec``: ``shape``, ``inputs`` (the operands' dtypes),
     ``broadcast`` (whether each operand is 0-d, the output not), ``nodes``
@@ -29,17 +46,7 @@ def program(spec):
     shape_of = (1,) if scalar else block_shape
 
     def apply(values):
-        """The last node's value, of the operands' ``values``."""
-        values = list(values)
-        for node in spec["nodes"]:
-            args = [values[i] for i in node["args"]]
-            params = node["params"]
-            if node["name"] == "full":
-                params = {**params, "shape": shape_of}
-            if node["name"] == "broadcast_in_dim":
-                params = {"shape": shape_of, "broadcast_dimensions": (len(shape_of) - 1,)}
-            values.append(prims.bind(node["name"], *args, **params))
-        return values[-1]
+        return computed(spec["nodes"], values, shape_of)[-1]
 
     def kernel(rows, memory, result):
         def copy(src, dst):
