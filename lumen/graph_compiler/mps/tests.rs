@@ -349,6 +349,42 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// `parts` (of one shape) interleaved along `dimension`: element `j` of the
+/// `i`th at `j * parts.len() + i`, the block `merge_dots` interleaves.
+fn interleaved(parts: &[&Tensor], dimension: usize) -> Tensor {
+    let mut g = Graph::new();
+    let shape = parts[0].shape().to_vec();
+    let mut one = shape.clone();
+    one.insert(dimension + 1, 1);
+    let ones: Vec<Var> = parts
+        .iter()
+        .map(|t| {
+            let v = g.input(ty(t.dtype(), t.shape()));
+            apply(
+                &mut g,
+                Reshape {
+                    new_sizes: one.clone(),
+                },
+                &[v],
+            )
+        })
+        .collect();
+    let tuples = apply(
+        &mut g,
+        Concatenate {
+            dimension: dimension + 1,
+            in_place: false,
+        },
+        &ones,
+    );
+    let mut flat = shape;
+    flat[dimension] *= parts.len();
+    let out = apply(&mut g, Reshape { new_sizes: flat }, &[tuples]);
+    g.set_outputs(&[out]).unwrap();
+    let parts: Vec<Tensor> = parts.iter().map(|&t| t.clone()).collect();
+    reference::run(&g, &parts).unwrap().remove(0)
+}
+
 /// A loop fusion's transposes that read their operand at a stride are
 /// tiled (XLA's transpose emitter): its kernel reads a tile of each along
 /// the operand's rows into threadgroup memory, then writes the output along
@@ -639,7 +675,7 @@ fn dots_of_weights_computed_elementwise_merge() {
     };
     let packable = [false, true, true, true];
     let g = build([0.5; 3]);
-    let (merged, packs) = merge_dots(&g, &packable, &[]);
+    let (merged, packs, _) = merge_dots(&g, &packable, &[]);
     assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
     // One cast of the block, read by the merged dot and (a part) the other.
     let casts = names(&merged.prune().0)
@@ -663,7 +699,7 @@ fn dots_of_weights_computed_elementwise_merge() {
         assert_eq!(f32s(e), f32s(&a));
     }
     // A different scale for one: not the same chain.
-    let (merged, packs) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[]);
+    let (merged, packs, _) = merge_dots(&build([0.5, 0.25, 0.5]), &packable, &[]);
     assert_eq!(packs, [(vec![1, 3], 0)], "{merged}");
 }
 
@@ -737,10 +773,10 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
         merge_dots(&g, &[false, true, true, true], &[])
     };
     // All in float32: one dot of all three.
-    let (merged, packs) = dots([DType::F32; 3]);
+    let (merged, packs, _) = dots([DType::F32; 3]);
     assert_eq!(packs, [(vec![1, 2, 3], 1)], "{merged}");
     // The float32 two merge; the bfloat16 one stays alone.
-    let (merged, packs) = dots([DType::F32, DType::BF16, DType::F32]);
+    let (merged, packs, _) = dots([DType::F32, DType::BF16, DType::F32]);
     assert_eq!(packs, [(vec![1, 3], 1)], "{merged}");
     let accums: Vec<DType> = merged
         .nodes()
@@ -787,11 +823,15 @@ fn dots_sharing_an_operand_merge() {
     let dots = |g: &Graph| names(g).iter().filter(|&&n| n == "dot_general").count();
     // Only parameters merge.
     assert_eq!(dots(&merge_dots(&g, &[false; 4], &[]).0), 3);
-    let (merged, packs) = merge_dots(&g, &[false, true, true, true], &[]);
+    let (merged, packs, interleave) = merge_dots(&g, &[false, true, true, true], &[]);
     assert_eq!(packs, [(vec![1, 2], 1)]);
+    // A gated pair (its two results combined): its block interleaved, w1's
+    // column j its 2j, w3's its 2j + 1.
+    assert_eq!(interleave, [2]);
     assert_eq!(dots(&merged), 2, "{merged}");
-    // The gate is the merged dot's epilogue (a gated pair: its halves'
-    // slices in it, codegen's `PAIRED`), then the down projection.
+    // The gate is the merged dot's epilogue (a gated pair: its pairs'
+    // slices in it, codegen's `PAIRED`, `INTERLEAVED`), then the down
+    // projection.
     assert_eq!(names(&fuse(&merged)), ["fusion", "dot_general"]);
     // w3 read elsewhere too: a strided part of the block (columns), it
     // would need a copy there: no merge.
@@ -809,12 +849,28 @@ fn dots_sharing_an_operand_merge() {
         data(&[32, 64], 3),
         data(&[64, 32], 4),
     ];
-    inputs.push(block(&[&inputs[1], &inputs[2]], 1));
+    inputs.push(interleaved(&[&inputs[1], &inputs[2]], 1));
     let expected = reference::run(&g, &inputs[..4]).unwrap();
     assert_eq!(
         reference::run(&merged, &inputs).unwrap()[0].to_vec::<f32>(),
         expected[0].to_vec::<f32>()
     );
+    // Read on their own (each negated, an output), side by side.
+    let mut alone = Graph::new();
+    let x = alone.input(ty(DType::F32, &[16, 32]));
+    let ws: Vec<Var> = (0..2)
+        .map(|_| alone.input(ty(DType::F32, &[32, 64])))
+        .collect();
+    let outs: Vec<Var> = ws
+        .iter()
+        .map(|&w| {
+            let y = apply(&mut alone, matmul.clone(), &[x, w]);
+            apply(&mut alone, Neg, &[y])
+        })
+        .collect();
+    alone.set_outputs(&outs).unwrap();
+    let packed = merge_dots(&alone, &[false, true, true], &[]);
+    assert_eq!((packed.1, packed.2), (vec![(vec![1, 2], 1)], vec![1]));
 
     // Shared rhs (lhs side by side, rows); a dot reading another's result
     // does not merge. One of a parameter something else reads too does: a
@@ -834,7 +890,7 @@ fn dots_sharing_an_operand_merge() {
     let twice = apply(&mut g, matmul.clone(), &[xs[1], w]);
     outs.extend([apply(&mut g, Neg, &[dependent]), twice]);
     g.set_outputs(&outs).unwrap();
-    let (merged, packs) = merge_dots(&g, &[true; 4], &[]);
+    let (merged, packs, _) = merge_dots(&g, &[true; 4], &[]);
     assert_eq!(packs, [(vec![1, 2, 3], 0)]);
     assert_eq!(dots(&merged), 3, "{merged}");
     let mut inputs: Vec<Tensor> = [vec![32, 32], vec![4, 32], vec![6, 32], vec![4, 32]]
@@ -887,19 +943,22 @@ fn owned_plans_read_packed_parameters() {
     };
     let plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
     assert_eq!(plan.packed, [(vec![1, 2], 1)]);
+    // A gated pair: interleaved.
+    assert_eq!(plan.interleaved, [2]);
     let meta = || Tensor::zeros(&[32, 64], Device::Meta(0));
     let (m1, m3) = (meta(), meta());
-    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps(0))
+    let block = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0))
         .unwrap()
         .unwrap();
-    // Placed again the same way: the same block; alone, not.
-    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, Device::Mps(0)).unwrap();
+    // Placed again the same way: the same block; otherwise (another order,
+    // or side by side), not.
+    let again = Tensor::pack(&[m1.clone(), m3.clone()], 1, 2, Device::Mps(0)).unwrap();
     assert!(again.is_some_and(|b| b.shares_storage_with(&block)));
-    assert!(
-        Tensor::pack(&[m3.clone(), m1.clone()], 1, Device::Mps(0))
-            .unwrap()
-            .is_none()
-    );
+    for (members, interleave) in [([&m3, &m1], 2), ([&m1, &m3], 1)] {
+        let members: Vec<Tensor> = members.iter().map(|&m| m.clone()).collect();
+        let packed = Tensor::pack(&members, 1, interleave, Device::Mps(0));
+        assert!(packed.unwrap().is_none());
+    }
     let inputs = [data(&[16, 32], 1), data(&[32, 64], 2), data(&[32, 64], 3)];
     let (p1, p3) = (
         m1.placed(Device::Mps(0)).unwrap(),

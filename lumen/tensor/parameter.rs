@@ -43,11 +43,29 @@ impl Tensor {
         Ok(tensor)
     }
 
+    /// `members` (parameters) placed in one block on `device`, side by side
+    /// along `dimension` (`interleave` 1), or interleaved along it by
+    /// `interleave` (members of one size: element `j` of member `i` at `j *
+    /// interleave + i`, `merge_dots`' interleaved block): each member a view
+    /// of the block. The block they are placed in already, if so (`None` if
+    /// they are placed otherwise).
     pub fn pack(
         members: &[Tensor],
         dimension: usize,
+        interleave: usize,
         device: Device,
     ) -> Result<Option<Tensor>, String> {
+        if interleave > 1
+            && (members.len() != interleave
+                || members
+                    .iter()
+                    .any(|m| m.shape()[dimension] != members[0].shape()[dimension]))
+        {
+            return Err(format!(
+                "interleaved by {interleave}: {interleave} members of one size, got {}",
+                members.len()
+            ));
+        }
         let mut ids: Vec<usize> = members.iter().map(Tensor::storage_id).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -63,12 +81,12 @@ impl Tensor {
                 return Ok(None);
             };
             let mut start = 0;
-            for (m, p) in members.iter().zip(&placed) {
+            for (k, (m, p)) in members.iter().zip(&placed).enumerate() {
                 let n = m.shape()[dimension];
                 if start + n > block.shape()[dimension] {
                     return Ok(None);
                 }
-                let expected = block.narrow(dimension, start, n);
+                let expected = member(block, dimension, interleave, start, n, k);
                 let same = p.as_ref().is_some_and(|p| {
                     p.tensor.shares_storage_with(block)
                         && p.tensor.storage_offset() == expected.storage_offset()
@@ -94,11 +112,11 @@ impl Tensor {
         let options = TensorOptions::new().dtype(ty.dtype).device(device);
         let block = Tensor::zeros(&ty.shape, options);
         let mut start = 0;
-        for m in members {
+        for (k, m) in members.iter().enumerate() {
             let n = m.shape()[dimension];
             m.place(Placement {
                 device,
-                tensor: block.narrow(dimension, start, n),
+                tensor: member(&block, dimension, interleave, start, n, k),
                 block: Some(block.clone()),
             });
             start += n;
@@ -142,5 +160,26 @@ impl Tensor {
         placed
             .unwrap_or_else(PoisonError::into_inner)
             .push(placement);
+    }
+}
+
+/// Member `k` of `block`, of `n` along `dimension`: side by side, at
+/// `start` (`interleave` 1); or interleaved, its elements every
+/// `interleave`th from `k`.
+fn member(
+    block: &Tensor,
+    dimension: usize,
+    interleave: usize,
+    start: usize,
+    n: usize,
+    k: usize,
+) -> Tensor {
+    match interleave {
+        1 => block.narrow(dimension, start, n),
+        _ => {
+            let mut shape = block.shape().to_vec();
+            shape.splice(dimension..=dimension, [n, interleave]);
+            block.reshape(&shape).select(dimension + 1, k)
+        }
     }
 }

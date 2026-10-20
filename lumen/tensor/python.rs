@@ -653,13 +653,20 @@ impl PyTensor {
 }
 
 #[pyfunction]
+#[pyo3(signature = (members, dimension, device, interleave = 1))]
 fn _pack(
     members: Vec<PyRef<'_, PyTensor>>,
     dimension: usize,
     device: &Bound<'_, PyAny>,
+    interleave: usize,
 ) -> PyResult<Option<PyTensor>> {
     let members: Vec<Tensor> = members.iter().map(|t| t.inner.clone()).collect();
-    let block = Tensor::pack(&members, dimension, resolve_device(Some(device))?);
+    let block = Tensor::pack(
+        &members,
+        dimension,
+        interleave,
+        resolve_device(Some(device))?,
+    );
     Ok(block.map_err(PyValueError::new_err)?.map(PyTensor::wrap))
 }
 

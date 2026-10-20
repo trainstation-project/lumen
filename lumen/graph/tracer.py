@@ -491,8 +491,8 @@ def compile(fn, device=None):
             # The weights in their blocks, if they are placed so (or not
             # yet placed), else None.
             blocks = []
-            for positions, dimension in plan.packed:
-                block = _pack([inputs[i] for i in positions], dimension, target)
+            for (positions, dimension), interleave in zip(plan.packed, plan.interleaved):
+                block = _pack([inputs[i] for i in positions], dimension, target, interleave)
                 if block is None:
                     return None
                 blocks.append(block)

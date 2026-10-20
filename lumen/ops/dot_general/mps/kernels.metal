@@ -152,7 +152,10 @@ inline void matmul_wide_impl(device const T *lhs,
 // chunks' in no fixed order. With PAIRED (a gated pair's: two dots of one operand merged, their rhs blocks [W1 | W2]
 // side by side, N = 2H, combined elementwise, as SwiGLU's silu(x W1) * (x W2)), the tile's columns are the two
 // halves' interleaved: column 2j is column j of the block, 2j + 1 column H + j (each thread loads its column so), so a
-// lane holds both of a pair, and writes out[m, j] = epi(first, second, its flat index), out of H columns. With
+// lane holds both of a pair (its two elements of an 8x8 block, adjacent columns), and writes out[m, j] = epi(first,
+// second, its flat index), out of H columns, from its registers. With INTERLEAVED too, the rhs is interleaved in
+// memory (W1's column j its 2j, W2's its 2j + 1: merge_dots' interleaved block), each thread loading its column as
+// it is. With
 // EXPANDED (a gated pair's backward: its two cotangents from the dot's value, side by side), epi returns a Pair, its
 // first written at out[m, n], its second at out[m, N + n], out of 2N columns. With TILE, nothing is written: the
 // accumulators (FM x FN 8x8 matrices of SIMD group (sy, sx)) are handed to epi.tile, which reduces them (a linear
@@ -177,7 +180,8 @@ template <typename T,
           bool ATOMIC = false,
           bool PAIRED = false,
           bool EXPANDED = false,
-          bool TILE = false>
+          bool TILE = false,
+          bool INTERLEAVED = false>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -199,8 +203,9 @@ inline void matmul_sg_impl(device const T *lhs,
     // column bc of tile rows br + RB t.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
-    // Its rhs column (PAIRED: the halves' interleaved).
-    const ulong cn = PAIRED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
+    // Its rhs column (PAIRED: the halves' interleaved; INTERLEAVED, a
+    // pair's whose rhs is interleaved in memory: as it is).
+    const ulong cn = PAIRED && !INTERLEAVED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
@@ -254,19 +259,18 @@ inline void matmul_sg_impl(device const T *lhs,
     if constexpr (TILE) {
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
     } else if constexpr (PAIRED) {
-        // A lane a pair: of row lane / 4, columns 2 (lane % 4) and the next.
+        // A lane a pair, from its own registers (no staging): its two
+        // elements of each 8x8 block are adjacent columns (`frag_col` is
+        // even), a gate and its up (the columns interleaved).
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
-                simdgroup_store(c[i][j], stage, 8);
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                const uint e = (lane / 4) * 8 + 2 * (lane % 4);
-                ulong m = m0 + (sy * FM + i) * 8 + lane / 4, n = n0 + (sx * FN + j) * 8 + 2 * (lane % 4);
+                const thread vec<A, 2> &f = frag(c[i][j]);
+                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
                 if (m < M && n < N) {
-                    o[m * H + n / 2] = epi(O(stage[e]), O(stage[e + 1]), group.z * M * H + m * H + n / 2);
+                    o[m * H + n / 2] = epi(O(f[0]), O(f[1]), group.z * M * H + m * H + n / 2);
                 }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     } else {

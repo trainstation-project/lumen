@@ -115,6 +115,7 @@ pub(crate) fn compile(
     }
     let (mut stages, mut steps, mut packed, mut block_types) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut interleaved = Vec::new();
     let mut workspace_bytes = 0;
     for &s in &kept {
         let b = &mut builders[s];
@@ -172,6 +173,7 @@ pub(crate) fn compile(
                 .collect();
             blocks.push(packed.len());
             packed.push((positions, *dimension));
+            interleaved.push(plan.interleaved()[j]);
             block_types.push(plan.input_types()[inputs.len() + j].clone());
         }
         steps.extend(plan.steps().iter().cloned());
@@ -206,6 +208,7 @@ pub(crate) fn compile(
         steps,
         workspace_bytes,
         packed,
+        interleaved,
     )))
 }
 

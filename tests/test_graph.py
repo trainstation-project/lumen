@@ -1298,6 +1298,60 @@ def test_projections_of_several_inputs_each_read_one_block(module):
         np.testing.assert_array_equal(merged, alone)
 
 
+class GatedPair(lumen.nn.Module):
+    """SwiGLU's gate and up projections, ``nn.Linear``'s ``[out, in]``
+    weights: ``silu(x W1^T) * (x W2^T)``."""
+
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w2.t()
+        return g * F.sigmoid(g) * u
+
+
+@pytest.mark.mps
+def test_gated_pairs_weights_are_interleaved():
+    """Inference: a gated pair's two weights packed into one block
+    interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
+    pair one kernel (its products' pairs adjacent in a lane), the values as
+    unmerged. A training step (its weights assigned) keeps them side by
+    side."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    graph = lumen.make_graph(lambda m, x: m(x))(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+
+    def step(model, x):
+        loss = F.sum(model(x))
+        loss.backward()
+        for w in (model.w1, model.w2):
+            w.copy_(w - 0.1 * w.grad)
+        return loss
+
+    graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
+    assert all(k == 1 for k in plan.interleaved), plan.interleaved
+    values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
+    x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = GatedPair(meta(64, 32), meta(64, 32))
+            f = lumen.compile(lambda m, x: m(x), device="mps")
+            f(model, meta(16, 32))
+            model.load_state_dict(values)
+            got.append(lumen.to_numpy(f(model, x)))
+    finally:
+        lumen.config.compiler.reset()
+    np.testing.assert_allclose(got[0], got[1], rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.mps
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_trained_projections_merge_into_one_matmul(module):

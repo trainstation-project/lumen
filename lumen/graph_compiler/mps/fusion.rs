@@ -786,13 +786,36 @@ pub(super) fn fuse(
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
                 // A gated pair's halves are not computed (its kernel holds
-                // them interleaved): not in its label.
+                // them interleaved): not in its label; nor, its block
+                // interleaved, the reshapes and slices taking its pairs
+                // apart (`merge_dots`).
+                let of_dot = |v: Var, layout: &dyn Fn(&Primitive) -> bool| {
+                    producer[v].is_some_and(|d| members.contains(&d) && layout(&nodes[d].primitive))
+                };
+                let dot = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
+                let pairs = |p: &Primitive| matches!(p, Primitive::Reshape { .. });
                 let half = |m: &&usize| {
-                    matches!(nodes[**m].primitive, Primitive::Slice { .. })
-                        && producer[nodes[**m].inputs[0]].is_some_and(|d| {
-                            members.contains(&d)
-                                && matches!(nodes[d].primitive, Primitive::DotGeneral { .. })
-                        })
+                    let node = &nodes[**m];
+                    let input = node.inputs.first().copied();
+                    match node.primitive {
+                        Primitive::Slice { .. } => input.is_some_and(|v| {
+                            of_dot(v, &dot)
+                                || producer[v].is_some_and(|r| {
+                                    pairs(&nodes[r].primitive) && of_dot(nodes[r].inputs[0], &dot)
+                                })
+                        }),
+                        Primitive::Reshape { .. } => input.is_some_and(|v| {
+                            of_dot(v, &dot)
+                                || producer[v].is_some_and(|s| {
+                                    matches!(nodes[s].primitive, Primitive::Slice { .. })
+                                        && producer[nodes[s].inputs[0]].is_some_and(|r| {
+                                            pairs(&nodes[r].primitive)
+                                                && of_dot(nodes[r].inputs[0], &dot)
+                                        })
+                                })
+                        }),
+                        _ => false,
+                    }
                 };
                 let mut shown: Vec<usize> = members.iter().filter(|m| !half(m)).copied().collect();
                 // A contraction's first (its write-out cast with it), then

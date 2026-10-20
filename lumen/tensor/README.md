@@ -22,7 +22,7 @@ and runs it through `graph_compiler::compile`.
 | `dtype.rs` | `DType` (Bool, U8–U64, I8–I64, F16, BF16, F32, F64, and JAX's narrow I2/I4/U2/U4, F8E4M3FN, F8E5M2, F8E4M3B11FNUZ), the `Element` trait for the Rust element types (`half::f16`/`bf16` re-exported; the narrow ones a byte each, as `ml_dtypes` keeps them: `i4`, `f8e4m3fn`, ...), and the `dispatch_dtype!` macro. |
 | `scalar.rs` | `Scalar { Bool, Int, Float }` (`c10::Scalar`): `full`'s value and `arange`'s end; `inferred_dtype` (bool / int64 / float32). |
 | `tensor_options.rs` | `TensorOptions` (dtype + device builder) and `DEFAULT_DTYPE = F32`. |
-| `parameter.rs` | Weights as meta tensors: `is_parameter`, `placed(device)`, `pack(members, dimension, device)`, `version` / `mark_written`, `copy_into_placements`. |
+| `parameter.rs` | Weights as meta tensors: `is_parameter`, `placed(device)`, `pack(members, dimension, interleave, device)` (side by side, or interleaved: element j of the i-th at `j * interleave + i`), `version` / `mark_written`, `copy_into_placements`. |
 | `dlpack.rs` | DLPack export (legacy and versioned capsules) and import (`python` feature). |
 | `python.rs` | The `lumen._C.Tensor` pyclass (`PyTensor`), dtype-string parsing, nested-list construction, `_pack`, `_to_dlpack*`, `_from_dlpack`. |
 | `__init__.py` | Python package: dtype constants (strings like `"float32"`), `default_dtype`, factories (`tensor`, `empty`, `zeros`, `ones`, `full`, `arange`), `to_numpy` / `from_numpy`; attaches `__array__` / `__dlpack__` to `Tensor`. All re-exported at `lumen.*`. |

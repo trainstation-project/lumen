@@ -91,6 +91,8 @@ struct MpsModule<'a> {
     /// The parameter blocks dot merging added ([`merge_dots`]), after the
     /// graph's inputs.
     packed: Vec<(Vec<usize>, usize)>,
+    /// Each block's interleaving (1: its parameters side by side).
+    interleaved: Vec<usize>,
     /// The normalization diamonds' rows, by node: valid until the graph
     /// next changes (the loop fusion reading them).
     rows: Vec<diamonds::Row>,
@@ -234,6 +236,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         graph: graph.clone(),
         options,
         packed: Vec::new(),
+        interleaved: Vec::new(),
         rows: Vec::new(),
         scalars: super::positions(&options.scalars),
         kernels: Vec::new(),
@@ -244,6 +247,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let MpsModule {
         graph: fused,
         packed,
+        interleaved,
         scalars,
         ..
     } = module;
@@ -307,6 +311,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         }
     }
     plan.packed = packed;
+    plan.interleaved = interleaved;
     Ok(plan)
 }
 
