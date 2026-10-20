@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::attention;
 use super::pass::{CompilerPass, Module, Pipeline};
 use super::passes::dot_strength::DotStrength;
 use super::passes::fold_dot_reshapes::FoldDotReshapes;
@@ -490,6 +491,43 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 }
 
+struct FlashAttention;
+
+impl CompilerPass<TpuModule<'_>> for FlashAttention {
+    fn name(&self) -> &'static str {
+        "flash_attention"
+    }
+
+    fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
+        m.graph = attention::fuse(
+            &m.graph,
+            false,
+            &[],
+            |body| crate::ops::attention::tpu::forward(body).is_ok(),
+            |_| "flash_attention".into(),
+        );
+        Ok(())
+    }
+}
+
+struct FlashAttentionBackward;
+
+impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
+    fn name(&self) -> &'static str {
+        "flash_attention_backward"
+    }
+
+    fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
+        m.graph = attention::fuse_backward(
+            &m.graph,
+            |_| false,
+            |body| crate::ops::attention::tpu::backward(body).is_ok(),
+            |_| "flash_attention_backward".into(),
+        );
+        Ok(())
+    }
+}
+
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let mut module = TpuModule {
         graph: graph.clone(),
@@ -500,6 +538,9 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut pipeline = Pipeline::new("tpu");
     if options.config.merge_dots {
         pipeline.add(MergeDotsBackward);
+    }
+    if options.config.flash_attention {
+        pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
     pipeline
         .add(FoldDotReshapes)

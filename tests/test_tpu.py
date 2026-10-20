@@ -398,3 +398,51 @@ def test_a_swiglu_backward_merges_its_gate_and_up():
     dg, du = dh * u * (s + g * s * (1 - s)), dh * g * s
     for a, b in zip(got, [dg.T @ x, du.T @ x, dy.T @ (g * s * u), dg @ w1 + du @ w3]):
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
+
+
+def _attention_reference(q, k, v, causal):
+    b, s, n, h = q.shape
+    group = n // k.shape[2]
+    k, v = np.repeat(k, group, axis=2), np.repeat(v, group, axis=2)
+    scores = np.einsum("bqnh,bknh->bnqk", q, k) / np.sqrt(h)
+    if causal:
+        scores = np.where(np.triu(np.ones((s, s), bool), 1), -np.inf, scores)
+    p = np.exp(scores - scores.max(-1, keepdims=True))
+    p /= p.sum(-1, keepdims=True)
+    return np.einsum("bnqk,bknh->bqnh", p, v)
+
+
+@pytest.mark.parametrize("causal", [False, True], ids=["full", "causal"])
+@pytest.mark.parametrize("n, nkv", [(4, 4), (4, 2)], ids=["mha", "gqa"])
+def test_flash_attention_is_one_kernel_each_way(causal, n, nkv):
+    b, s, h = 2, 256, 128
+    rng = np.random.default_rng(0)
+    q, g = (rng.standard_normal([b, s, n * h], dtype=np.float32) for _ in range(2))
+    k, v = (rng.standard_normal([b, s, nkv * h], dtype=np.float32) for _ in range(2))
+
+    def attention(q, k, v):
+        heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
+        return F.flash_attention(*heads, is_causal=causal).reshape(b, s, n * h)
+
+    def step(q, k, v, g):
+        o = attention(q, k, v)
+        o.backward(g)
+        return o, q.grad, k.grad, v.grad
+
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+    graph = lumen.make_graph(step)(meta(b, s, n * h), meta(b, s, nkv * h), meta(b, s, nkv * h), meta(b, s, n * h))
+    labels = [st["label"] for st in lumen.graph_compiler.Plan(graph, "tpu").steps()]
+    assert labels.count("flash_attention") == 1, labels
+    assert sum(label.startswith("flash_attention_backward") for label in labels) == 2, labels
+    o, dq, dk, dv = (floats(t) for t in lumen.compile(step)(*(tpu(t) for t in (q, k, v, g))))
+    heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
+    np.testing.assert_allclose(o, _attention_reference(*heads, causal).reshape(b, s, n * h), rtol=2e-4, atol=2e-4)
+    eps = 1e-3
+    for x, got in ((0, dq), (1, dk), (2, dv)):
+        args = [t.copy() for t in (q, k, v)]
+        direction = rng.standard_normal(args[x].shape).astype(np.float32)
+        args[x] = args[x] + eps * direction
+        hi = (_attention_reference(*[t.reshape(b, s, -1, h) for t in args], causal).reshape(b, s, n * h) * g).sum()
+        args[x] = args[x] - 2 * eps * direction
+        lo = (_attention_reference(*[t.reshape(b, s, -1, h) for t in args], causal).reshape(b, s, n * h) * g).sum()
+        np.testing.assert_allclose((got * direction).sum(), (hi - lo) / (2 * eps), rtol=2e-2)

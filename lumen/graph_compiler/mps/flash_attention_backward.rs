@@ -15,6 +15,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for FlashAttentionBackward {
         m.graph = attention::fuse_backward(
             &m.graph,
             |b| !deterministic && codegen::backward_block_with_dq(b).is_some(),
+            |_| true,
             |_| request(kernels, Kernel::AttentionBackward),
         );
         Ok(())

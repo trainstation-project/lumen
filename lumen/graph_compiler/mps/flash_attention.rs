@@ -14,9 +14,13 @@ impl<'a> CompilerPass<MpsModule<'a>> for FlashAttention {
         let scalars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
         let epilogues = m.options.config.contraction_epilogues;
         let kernels = &mut m.kernels;
-        m.graph = attention::fuse(&m.graph, epilogues, &scalars, |_| {
-            request(kernels, Kernel::Attention)
-        });
+        m.graph = attention::fuse(
+            &m.graph,
+            epilogues,
+            &scalars,
+            |_| true,
+            |_| request(kernels, Kernel::Attention),
+        );
         Ok(())
     }
 }

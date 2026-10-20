@@ -283,6 +283,9 @@ pub(crate) fn encode(
     output: *mut u8,
 ) -> Result<(), String> {
     match step.primitive {
+        Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
+            super::attention::tpu::encode(index, step, inputs, output)
+        }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
         }
