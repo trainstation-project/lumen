@@ -57,14 +57,6 @@ def test_a_transposed_rhs():
     check(lambda x, w: x @ w.t(), [8, 1024], [512, 1024], "bfloat16", 1e-2, transposed=True)
 
 
-@pytest.mark.parametrize(
-    "lhs, rhs",
-    [
-        ([128, 512], [512, 512]),
-        ([2048, 1024], [1024, 2048]),
-        ([2, 16, 256], [2, 256, 256]),
-    ],
-)
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
 @pytest.mark.parametrize("g, x", [([128, 256], [128, 512]), ([4096, 1024], [4096, 2048])])
 def test_a_transposed_lhs(g, x, dtype, tol):
@@ -75,6 +67,14 @@ def test_a_transposed_lhs(g, x, dtype, tol):
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
 
 
+@pytest.mark.parametrize(
+    "lhs, rhs",
+    [
+        ([128, 512], [512, 512]),
+        ([2048, 1024], [1024, 2048]),
+        ([2, 16, 256], [2, 256, 256]),
+    ],
+)
 def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
     y = check(lambda x, w: x @ w, lhs, rhs, "bfloat16", 1e-2)
     assert y.dtype == "bfloat16"
