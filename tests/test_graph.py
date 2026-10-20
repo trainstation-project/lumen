@@ -674,9 +674,10 @@ class Gated(lumen.nn.Module):
 @pytest.mark.parametrize("device", ["cpu", MPS])
 def test_dots_sharing_an_operand_merge(device):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
-    x and a block holding w1 and w3 side by side (XLA's DotMerger, with the
-    weights placed together instead of concatenated), the gate its epilogue
-    (a gated pair: one kernel)."""
+    x and a block holding w1 and w3 interleaved (XLA's DotMerger, with the
+    weights placed together instead of concatenated; a gated pair's columns
+    interleaved, w1's j its 2j, w3's its 2j + 1), the gate its epilogue (a
+    gated pair: one kernel)."""
     x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
     model = Gated(meta(32, 64), meta(32, 64))
     f = lumen.compile(lambda model, x: model(x), device=device)
@@ -692,6 +693,11 @@ def test_dots_sharing_an_operand_merge(device):
     steps = [s["primitive"] for s in plan.steps()]
     if device == "mps":
         assert plan.packed == [([1, 2], 1)] and model.w1._placed("mps").shares_storage_with(model.w3._placed("mps"))
+        assert plan.interleaved == [2]
+        # Each weight a stride-2 view of the block: its columns every other.
+        w1, w3 = model.w1._placed("mps"), model.w3._placed("mps")
+        assert (list(w1.strides), list(w3.strides)) == ([128, 2], [128, 2])
+        assert w3.storage_offset - w1.storage_offset == 1
         assert len(steps) == 1 and "concatenate" not in steps
         # Named for the dots it computes, in the plan and the profiler.
         assert plan.steps()[0]["label"] == "2x dot_general → max → mul"
