@@ -20,9 +20,14 @@ struct Operand {
     width: usize,
 }
 
-fn view(op: &Operand, batch: &[usize], matrix: bool) -> Result<String, String> {
+fn view(name: &str, op: &Operand, batch: &[usize], matrix: bool) -> Result<String, String> {
     let shape = &op.ty.shape;
-    let failed = |why: &str| Err(format!("flash attention on TPU: {why}"));
+    let failed = |why: &str| {
+        Err(format!(
+            "flash attention on TPU: {name}, read from {} (offset {}, rows {} apart, columns {} apart): {why}",
+            op.ty, op.acc.offset, op.acc.row, op.acc.col
+        ))
+    };
     if shape.len() < 2 {
         return failed("an operand of fewer than two dimensions");
     }
@@ -192,17 +197,22 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
     let a = attention::of_body(body).ok_or("flash attention on TPU: no attention in its body")?;
     unsupported(a.dropout.is_some(), a.dtype)?;
     let views = [
-        view(&operand(body, &a.q, a.h), &a.batch, true)?,
-        view(&operand(body, &a.k, a.h), &a.batch, true)?,
-        view(&operand(body, &a.v, a.hv), &a.batch, true)?,
-        view(&output(body, 0, a.out.clone(), a.hv), &a.batch, true)?,
+        view("q", &operand(body, &a.q, a.h), &a.batch, true)?,
+        view("k", &operand(body, &a.k, a.h), &a.batch, true)?,
+        view("v", &operand(body, &a.v, a.hv), &a.batch, true)?,
+        view(
+            "the output",
+            &output(body, 0, a.out.clone(), a.hv),
+            &a.batch,
+            true,
+        )?,
     ];
     let lse = match a.lse {
         Some(_) => {
             let k = body.outputs().len() - 1;
             let ty = body.type_of(body.outputs()[k]).clone();
             let acc = per_head(&ty, &a.batch);
-            view(&output(body, k, acc, 1), &a.batch, false)?
+            view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, false)?
         }
         None => "null".into(),
     };
@@ -231,12 +241,17 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         .ok_or("flash attention backward on TPU: no attention backward in its body")?;
     unsupported(b.dropout.is_some(), b.dtype)?;
     let ins = [
-        view(&operand(body, &b.q, b.h), &b.batch, true)?,
-        view(&operand(body, &b.k, b.h), &b.batch, true)?,
-        view(&operand(body, &b.v, b.hv), &b.batch, true)?,
-        view(&operand(body, &b.d_o, b.hv), &b.batch, true)?,
-        view(&operand(body, &b.lse, 1), &b.batch, false)?,
-        view(&operand(body, &b.delta, 1), &b.batch, false)?,
+        view("q", &operand(body, &b.q, b.h), &b.batch, true)?,
+        view("k", &operand(body, &b.k, b.h), &b.batch, true)?,
+        view("v", &operand(body, &b.v, b.hv), &b.batch, true)?,
+        view("dO", &operand(body, &b.d_o, b.hv), &b.batch, true)?,
+        view(
+            "the log-sum-exp",
+            &operand(body, &b.lse, 1),
+            &b.batch,
+            false,
+        )?,
+        view("delta", &operand(body, &b.delta, 1), &b.batch, false)?,
     ];
     let outputs: Vec<Var> = body.outputs().to_vec();
     let at = |k: usize| outputs.iter().position(|&o| o == k).expect("an output");
@@ -245,20 +260,22 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         (None, Some(_), Some(_)) => "dkv",
         _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
     };
-    let written = |out: &Option<(usize, Access)>, width: usize| -> Result<String, String> {
-        let (_, acc) = out.as_ref().expect("an output");
-        view(
-            &output(body, at(acc.base), acc.clone(), width),
-            &b.batch,
-            true,
-        )
-    };
+    let written =
+        |name: &str, out: &Option<(usize, Access)>, width: usize| -> Result<String, String> {
+            let (_, acc) = out.as_ref().expect("an output");
+            view(
+                name,
+                &output(body, at(acc.base), acc.clone(), width),
+                &b.batch,
+                true,
+            )
+        };
     let outs = match kind {
-        "dq" => format!("\"dq\": {}", written(&b.dq_out, b.h)?),
+        "dq" => format!("\"dq\": {}", written("dq", &b.dq_out, b.h)?),
         _ => format!(
             "\"dk\": {}, \"dv\": {}, \"group\": {}",
-            written(&b.dk_out, b.h)?,
-            written(&b.dv_out, b.hv)?,
+            written("dk", &b.dk_out, b.h)?,
+            written("dv", &b.dv_out, b.hv)?,
             group(&b.k, &b.batch)
         ),
     };
