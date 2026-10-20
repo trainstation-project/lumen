@@ -498,13 +498,11 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         node.inputs.iter().for_each(|&v| readers[v].push(i));
     }
     let attention = |p: &Primitive| matches!(p, Primitive::Fusion { name, .. } if name.starts_with("flash_attention"));
-    let folded = |v: Var| match readers[v].as_slice() {
-        [r] if matches!(nodes[*r].primitive, Primitive::Reshape { .. })
-            && !graph.outputs().contains(&v) =>
-        {
-            Some(*r)
-        }
-        _ => None,
+    let folded = |v: Var| {
+        readers[v]
+            .iter()
+            .copied()
+            .find(|&r| matches!(nodes[r].primitive, Primitive::Reshape { .. }))
     };
     let mut by_fusion: Vec<Vec<(usize, usize)>> = vec![Vec::new(); nodes.len()];
     let mut skipped = vec![false; nodes.len()];
@@ -535,7 +533,6 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
         if skipped[i] {
-            map[node.output] = map[node.inputs[0]];
             continue;
         }
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
@@ -572,8 +569,25 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
             }
             p => p.clone(),
         };
-        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
-        out.set_label(map[node.output], node.label);
+        let fused = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(fused, node.label);
+        map[node.output] = fused;
+        let at = match node.primitive {
+            Primitive::FusionOutput { index, .. } => {
+                Some((graph_producer(graph, node.inputs[0]), index))
+            }
+            _ if attention(&node.primitive) => Some((i, 0)),
+            _ => None,
+        };
+        if let Some((f, index)) = at
+            && let Some(&(_, r)) = by_fusion[f].iter().find(|&&(k, _)| k == index)
+        {
+            map[nodes[r].output] = fused;
+            let back = Primitive::Reshape {
+                new_sizes: graph.type_of(node.output).shape.clone(),
+            };
+            map[node.output] = out.apply(back, &[fused]).expect("the output as traced");
+        }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
