@@ -387,11 +387,20 @@ pub(super) fn fuse(
             }
             // A gated pair's backward: its two cotangents, each of the dot's
             // shape, concatenated along its last dimension (`gated_backward`),
-            // the epilogue's end (codegen's expanding epilogue).
+            // or interleaved (each given a last dimension of one, concatenated
+            // along it: `merge_dots`' interleaved block's), the epilogue's
+            // end (codegen's expanding epilogue).
             let shape = &graph.type_of(node.output).shape;
-            let expands = matches!(un.primitive, Primitive::Concatenate { dimension, .. } if dimension + 1 == shape.len())
-                && un.inputs.len() == 2
-                && un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+            let tupled: Vec<usize> = shape.iter().copied().chain([1]).collect();
+            let expands = match un.primitive {
+                Primitive::Concatenate { dimension, .. } if dimension + 1 == shape.len() => {
+                    un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
+                }
+                Primitive::Concatenate { dimension, .. } if dimension == shape.len() => {
+                    un.inputs.iter().all(|&v| graph.type_of(v).shape == tupled)
+                }
+                _ => false,
+            } && un.inputs.len() == 2
                 && pair.is_none();
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })

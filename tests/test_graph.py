@@ -1358,6 +1358,63 @@ def test_gated_pairs_weights_are_interleaved():
     np.testing.assert_allclose(got[0], got[1], rtol=1e-5, atol=1e-6)
 
 
+class GatedMLP2(lumen.nn.Module):
+    """A gated pair, then its down projection (``nn.Linear``'s weights)."""
+
+    w1: lumen.Tensor
+    w2: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w2.t()
+        return (g * F.sigmoid(g) * u) @ self.w3.t()
+
+
+@pytest.mark.mps
+def test_gated_pairs_backward_is_interleaved():
+    """Gradients of a gated MLP: the pair's block interleaved through its
+    backward too (``merge_dots``): its cotangents ``[dg | du]`` interleaved,
+    written side by side by the down projection's gradient's epilogue (one
+    kernel, ``EXPANDED``), x's gradient one dot of them and the block, the
+    weights' one dot, each weight's its pairs. The gradients the unmerged
+    program's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    h, d, m = 64, 32, 16
+
+    def step(model, x):
+        loss = F.sum(model(x))
+        loss.backward()
+        return loss, x.grad, model.w1.grad, model.w2.grad, model.w3.grad
+
+    make = lambda: GatedMLP2(meta(h, d), meta(h, d), meta(d, h))
+    graph = lumen.make_graph(step)(make(), meta(m, d))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [2])
+    labels = [s["label"] for s in plan.steps()]
+    # The cotangents the epilogue of the dot of their gradient: one kernel.
+    (cotangents,) = [label for label in labels if label.endswith("concatenate")]
+    assert cotangents.startswith("dot_general → "), labels
+    assert labels.count("2x dot_general") == 2, labels
+    values = {"w1": rand(h, d, seed=1) / 4, "w2": rand(h, d, seed=2) / 4, "w3": rand(d, h, seed=3) / 4}
+    x = lumen.from_numpy(rand(m, d, seed=4)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = make()
+            f = lumen.compile(step, device="mps")
+            f(model, meta(m, d))
+            model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
+            got.append([lumen.to_numpy(t) for t in f(model, x)])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.mps
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_trained_projections_merge_into_one_matmul(module):

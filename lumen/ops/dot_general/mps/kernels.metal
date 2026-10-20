@@ -157,7 +157,8 @@ inline void matmul_wide_impl(device const T *lhs,
 // memory (W1's column j its 2j, W2's its 2j + 1: merge_dots' interleaved block), each thread loading its column as
 // it is. With
 // EXPANDED (a gated pair's backward: its two cotangents from the dot's value, side by side), epi returns a Pair, its
-// first written at out[m, n], its second at out[m, N + n], out of 2N columns. With TILE, nothing is written: the
+// first written at out[m, n], its second at out[m, N + n], out of 2N columns (INTERLEAVED: at out[m, 2n] and
+// out[m, 2n + 1], merge_dots' interleaved block's). With TILE, nothing is written: the
 // accumulators (FM x FN 8x8 matrices of SIMD group (sy, sx)) are handed to epi.tile, which reduces them (a linear
 // cross entropy's rows of logits, lce_partials).
 template <typename T> struct Pair {
@@ -288,8 +289,10 @@ inline void matmul_sg_impl(device const T *lhs,
                         } else if constexpr (EXPANDED) {
                             device Out *row = out + group.z * M * 2 * N + m * 2 * N;
                             Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
-                            row[n] = both.first;
-                            row[N + n] = both.second;
+                            // INTERLEAVED: the pair side by side (merge_dots'
+                            // interleaved block's cotangents).
+                            row[INTERLEAVED ? 2 * n : n] = both.first;
+                            row[INTERLEAVED ? 2 * n + 1 : N + n] = both.second;
                         } else {
                             o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
                         }

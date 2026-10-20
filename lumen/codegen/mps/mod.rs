@@ -2696,22 +2696,42 @@ pub(crate) fn gemm_interleaved<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a N
 
 /// A gated pair's backward's cotangents (`gemm_kernel`'s `EXPANDED`): the
 /// two values of `dot`'s shape its fusion's output concatenates along its
-/// last dimension, side by side, each computed at the dot's index.
+/// last dimension, side by side, each computed at the dot's index; or
+/// interleaved ([`gemm_expanded_interleaved`]).
 pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
     let out = body.outputs()[0];
     let node = body.nodes().iter().find(|n| n.output == out)?;
     let shape = &body.type_of(dot.output).shape;
+    let tupled: Vec<usize> = shape.iter().copied().chain([1]).collect();
     match (&node.primitive, node.inputs.as_slice()) {
         (Primitive::Concatenate { dimension, .. }, &[a, b])
-            if *dimension + 1 == shape.len()
-                && body.type_of(a).shape == *shape
-                && body.type_of(b).shape == *shape
-                && gemm_pair(body, dot).is_none() =>
+            if gemm_pair(body, dot).is_none()
+                && ((*dimension + 1 == shape.len()
+                    && body.type_of(a).shape == *shape
+                    && body.type_of(b).shape == *shape)
+                    || (*dimension == shape.len()
+                        && body.type_of(a).shape == tupled
+                        && body.type_of(b).shape == tupled)) =>
         {
             Some([a, b])
         }
         _ => None,
     }
+}
+
+/// Whether a gated pair's backward's cotangents are interleaved (each given
+/// a last dimension of one and concatenated along it: `merge_dots`'
+/// interleaved block's), its kernel writing each pair side by side
+/// (`EXPANDED`, `INTERLEAVED`).
+fn gemm_expanded_interleaved(body: &Graph, dot: &Node) -> bool {
+    let out = body.outputs()[0];
+    let rank = body.type_of(dot.output).shape.len();
+    gemm_expanded(body, dot).is_some()
+        && body
+            .nodes()
+            .iter()
+            .find(|n| n.output == out)
+            .is_some_and(|n| matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == rank))
 }
 
 /// The kernel of a contraction with its epilogue: the matmul template
@@ -2798,6 +2818,10 @@ fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) 
             "NAME_epi, false, true, false, false, true",
         ),
         (Some(_), _) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
+        (_, Some(_)) if gemm_expanded_interleaved(body, dot) => (
+            format!("{o} r"),
+            "NAME_epi, false, false, true, false, true",
+        ),
         (_, Some(_)) => (format!("{o} r"), "NAME_epi, false, false, true"),
         _ => (format!("{o} r"), "NAME_epi"),
     };
