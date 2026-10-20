@@ -15,6 +15,7 @@ struct Form {
     n: usize,
     k: usize,
     transposed: bool,
+    lhs_transposed: bool,
 }
 
 fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
@@ -34,9 +35,11 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     if !(run(lhs_batch, 0) && run(rhs_batch, 0)) {
         return Err("dot_general on TPU: the operands' batch dimensions must lead them".into());
     }
-    if *lhs_contracting != [lhs.len() - 1] || lhs.len() < nb + 2 {
+    let lhs_transposed = lhs.len() == nb + 2 && *lhs_contracting == [nb];
+    if (*lhs_contracting != [lhs.len() - 1] && !lhs_transposed) || lhs.len() < nb + 2 {
         return Err(
-            "dot_general on TPU: the lhs must be batch, free then one contracting dimension".into(),
+            "dot_general on TPU: the lhs must be batch, free then one contracting dimension, or batch, contracting then free"
+                .into(),
         );
     }
     if rhs.len() != nb + 2 || rhs_contracting.len() != 1 {
@@ -49,10 +52,15 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     Ok(Form {
         batch: product(&lhs[..nb]),
         lead: product(&lhs[nb..lhs.len() - 2]),
-        m: lhs[lhs.len() - 2],
+        m: lhs[if lhs_transposed {
+            nb + 1
+        } else {
+            lhs.len() - 2
+        }],
         n: rhs[if transposed { nb } else { nb + 1 }],
-        k: lhs[lhs.len() - 1],
+        k: lhs[if lhs_transposed { nb } else { lhs.len() - 1 }],
         transposed,
+        lhs_transposed,
     })
 }
 
@@ -235,7 +243,7 @@ pub(crate) fn encode(
     let mut blocks;
     loop {
         blocks = (
-            block(f.m, unit_m, cap_m),
+            block(f.m, if f.lhs_transposed { 128 } else { unit_m }, cap_m),
             block(unit_n, 128, cap_n),
             block(f.k, 128, cap_k),
         );
@@ -296,7 +304,7 @@ pub(crate) fn encode(
         .map(|(v, p, d)| format!("[{v}, {p}, \"{}\"]", d.full_name()))
         .collect();
     let spec = format!(
-        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \
+        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
          \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         f.batch,
@@ -305,6 +313,7 @@ pub(crate) fn encode(
         f.n,
         f.k,
         f.transposed,
+        f.lhs_transposed,
         lhs.dtype.full_name(),
         value.full_name(),
         e.widths,

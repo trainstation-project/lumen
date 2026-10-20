@@ -6,7 +6,7 @@ from lumen.ops.tpu import pallas
 
 def program(spec):
     """The dot of ``spec``: ``batch``, ``lead``, ``m``, ``n``, ``k``,
-    ``transposed`` (a ``[n, k]`` rhs), the ``operands`` and ``value`` (its
+    ``transposed`` (a ``[n, k]`` rhs), ``lhs_transposed`` (a ``[k, m]`` lhs), the ``operands`` and ``value`` (its
     result's) dtypes, ``blocks`` (bm, bn, bk), ``widths`` (its members:
     column ranges, in order), ``inputs`` (its epilogue's other operands,
     each ``[dtype, 0-d, member]``), ``nodes`` (its epilogue, as the
@@ -15,7 +15,7 @@ def program(spec):
     are the rows of the lhs, the rhs, the inputs and the outputs."""
     batch, lead, m, n, k = spec["batch"], spec["lead"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
-    t = spec["transposed"]
+    t, tl = spec["transposed"], spec["lhs_transposed"]
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
     widths, inputs, nodes, outputs = spec["widths"], spec["inputs"], spec["nodes"], spec["outputs"]
@@ -29,6 +29,12 @@ def program(spec):
         if isinstance(b, int):
             return b // lead
         return prims.div(b, prims.full((), lead, "int32"))
+
+    def product(xb, yb):
+        if not tl:
+            return pl.dot(xb[...], yb[...], trans_b=t)
+        numbers = (([0], [1 if t else 0]), ([], []))
+        return pl.dot_general(xb[...], yb[...], numbers, preferred_element_type="float32")
 
     def needed(indices):
         """The values ``indices`` are computed from, and they."""
@@ -48,7 +54,7 @@ def program(spec):
             c.start()
             c.wait()
 
-        x = pallas.view(memory, rows[0], (batch * lead, m, k), dtype)
+        x = pallas.view(memory, rows[0], (batch * lead, k, m) if tl else (batch * lead, m, k), dtype)
         y = pallas.view(memory, rows[1], (batch, n, k) if t else (batch, k, n), dtype)
         scalars = {}
         for i, (d, scalar, _) in enumerate(inputs):
@@ -63,7 +69,10 @@ def program(spec):
         outs = [
             pallas.view(result, rows[base + o], (batch * lead, m, widths[p]), d) for o, (_, p, d) in enumerate(outputs)
         ]
-        x_spec = pl.BlockSpec((None, bm, bk), lambda b, i, j, s: (b, i, s))
+        if tl:
+            x_spec = pl.BlockSpec((None, bk, bm), lambda b, i, j, s: (b, s, i))
+        else:
+            x_spec = pl.BlockSpec((None, bm, bk), lambda b, i, j, s: (b, i, s))
         if t:
             y_spec = pl.BlockSpec((None, bn, bk), lambda b, i, j, s: (rhs_batch(b), j, s))
         else:
@@ -115,7 +124,7 @@ def program(spec):
         def body(xb, yb, *rest):
             blocks, obs = rest[: len(blocked)], rest[len(blocked) :]
             if kb == 1:
-                finish(pl.dot(xb[...], yb[...], trans_b=t), blocks, obs)
+                finish(product(xb, yb), blocks, obs)
                 return
             step, acc = pl.program_id(3), scratch[0]
 
@@ -123,7 +132,7 @@ def program(spec):
             def _():
                 acc[...] = 0.0
 
-            acc[...] += pl.dot(xb[...], yb[...], trans_b=t)
+            acc[...] += product(xb, yb)
 
             @pl.when(step == kb - 1)
             def _():

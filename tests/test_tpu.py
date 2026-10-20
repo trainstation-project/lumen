@@ -65,6 +65,16 @@ def test_a_transposed_rhs():
         ([2, 16, 256], [2, 256, 256]),
     ],
 )
+@pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
+@pytest.mark.parametrize("g, x", [([128, 256], [128, 512]), ([4096, 1024], [4096, 2048])])
+def test_a_transposed_lhs(g, x, dtype, tol):
+    rng = np.random.default_rng(0)
+    a, b = (tpu(rng.standard_normal(s, dtype=np.float32), dtype) for s in (g, x))
+    y = lumen.compile(lambda a, b: a.t() @ b)(a, b)
+    expected = floats(a).T @ floats(b)
+    assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
+
+
 def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
     y = check(lambda x, w: x @ w, lhs, rhs, "bfloat16", 1e-2)
     assert y.dtype == "bfloat16"
