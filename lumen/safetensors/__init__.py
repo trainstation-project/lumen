@@ -1,6 +1,7 @@
 import os
 
-from lumen._C import Tensor, _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open
+from lumen.safetensors._C import _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open
+from lumen.tensor._C import Tensor
 
 __all__ = ["save", "save_file", "load", "load_file", "safe_open"]
 

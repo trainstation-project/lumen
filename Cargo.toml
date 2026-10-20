@@ -18,7 +18,7 @@ mps = []
 # (lumen/device/tpu). Off by default; build.rs compiles its shim only on
 # Linux, so this is a no-op elsewhere.
 tpu = []
-# Python bindings (`lumen._C`, lumen/python.rs). Built by maturin (see
+# Python bindings (`lumen._native`, lumen/python.rs). Built by maturin (see
 # pyproject.toml); plain `cargo test` leaves it off, since pyo3 would then
 # link test binaries against libpython.
 python = ["dep:pyo3"]

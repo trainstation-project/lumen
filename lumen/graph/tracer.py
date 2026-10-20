@@ -9,8 +9,11 @@ import sys
 import warnings
 
 from lumen import nn
-from lumen._C import Graph, Plan, Tensor, _pack, config
+from lumen.allocator._C import config
 from lumen.graph import prims
+from lumen.graph._C import Graph
+from lumen.graph_compiler._C import Plan
+from lumen.tensor._C import Tensor, _pack
 
 __all__ = [
     "TracedTensor",

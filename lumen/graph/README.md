@@ -15,7 +15,7 @@ bindings, the Python tracer that builds graphs (`TracedTensor`,
 | `mod.rs` | `Graph`, `Node`, `Var`, `TensorType`, `View`, `Range`/`Scope`/`Lines`; `apply`, `prune`, `placements`, `slot`, `label`, `precision_warnings`; `intern*` helpers; jaxpr-style `Display`. |
 | `primitive.rs` | The `Primitive` enum, `name()`, `infer()` (type checking), `accum_dtypes()`, `Display`; `FUSION_SEPARATOR`, `NEURAL_ENGINE`. |
 | `custom.rs` | The hook through which a `CustomCall` step calls its (Python) function by handle. |
-| `python.rs` | `lumen._C.Graph` bindings (build by primitive name + params dict, `nodes()`, `attentions()`, `run()` on the reference executor), `_register_custom_op`, `FUSION_SEPARATOR`. |
+| `python.rs` | `lumen.graph._C.Graph` bindings (build by primitive name + params dict, `nodes()`, `attentions()`, `run()` on the reference executor), `_register_custom_op`, `FUSION_SEPARATOR`. |
 | `_C.pyi` | Type stub for `python.rs`. |
 | `__init__.py` | Re-exports `Graph`, `TracedTensor`, `compile`, `make_graph`, `prims` (tracer imported before `prims`). |
 | `tracer.py` | Tracing: `TracedTensor` (torch-like methods), `compile`, `make_graph`, trace-global state (scopes, sources, tapes, RNG), and `tracing` (a trace of one's own, of a graph or anything answering as one: a `lumen.pallas` kernel). |

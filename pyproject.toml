@@ -28,10 +28,11 @@ dev = ["pre-commit"]
 
 [tool.maturin]
 # Mixed Rust/Python project in one folder: the crate, built with the
-# `python` feature, is installed as the native submodule `lumen._C`; the
-# Python files in ./lumen re-export it. The Rust and Objective-C++ sources
+# `python` feature, is installed as the native submodule `lumen._native`,
+# which registers each folder's bindings as `lumen.<folder>._C`; the Python
+# files in ./lumen re-export them. The Rust and Objective-C++ sources
 # that share the folder stay out of the wheel.
-module-name = "lumen._C"
+module-name = "lumen._native"
 python-source = "."
 features = ["python"]
 exclude = ["lumen/**/*.rs", "lumen/**/*.mm"]
@@ -40,6 +41,11 @@ exclude = ["lumen/**/*.rs", "lumen/**/*.mm"]
 # Agree with black (.pre-commit-config.yaml), so the two hooks settle.
 profile = "black"
 line_length = 119
+
+[tool.pyright]
+# The `lumen.<folder>._C` modules are created at runtime by the native
+# `lumen._native`, so only their `_C.pyi` stubs exist on disk.
+reportMissingModuleSource = false
 
 [tool.pytest.ini_options]
 # Device test cases; see tests/device/test_tensor_devices.py and the Makefile.

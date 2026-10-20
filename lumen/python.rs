@@ -1,19 +1,30 @@
 use pyo3::prelude::*;
 
+type Register = fn(&Bound<'_, PyModule>) -> PyResult<()>;
+
+const PACKAGES: [(&str, Register); 11] = [
+    ("device", crate::device::python::register),
+    ("tensor", crate::tensor::python::register),
+    ("allocator", crate::allocator::python::register),
+    ("graph_compiler", crate::graph_compiler::python::register),
+    ("profiler", crate::profiler::python::register),
+    ("stream", crate::stream::python::register),
+    ("ops", crate::ops::python::register),
+    ("custom_op", crate::custom_op::python::register),
+    ("graph", crate::graph::python::register),
+    ("pallas", crate::pallas::python::register),
+    ("safetensors", crate::safetensors::python::register),
+];
+
 #[pymodule]
-#[pyo3(name = "_C")]
+#[pyo3(name = "_native")]
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    crate::device::python::register(m)?;
-    crate::tensor::python::register(m)?;
-    crate::allocator::python::register(m)?;
-    crate::graph_compiler::python::register(m)?;
-    crate::profiler::python::register(m)?;
-    crate::stream::python::register(m)?;
-    crate::ops::python::register(m)?;
-    crate::custom_op::python::register(m)?;
-    crate::graph::python::register(m)?;
-    crate::pallas::python::register(m)?;
-    crate::safetensors::python::register(m)?;
+    let modules = m.py().import("sys")?.getattr("modules")?;
+    for (package, register) in PACKAGES {
+        let sub = PyModule::new(m.py(), &format!("{}.{package}._C", crate::LIBRARY_NAME))?;
+        register(&sub)?;
+        modules.set_item(sub.name()?, &sub)?;
+    }
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LIBRARY_NAME", crate::LIBRARY_NAME)?;
     Ok(())

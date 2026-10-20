@@ -21,7 +21,7 @@ When no session is running, every hook is one relaxed atomic load.
 | `chrome.rs` | Chrome trace JSON writer (`trace`), with PyTorch's categories and arg keys. |
 | `cupti.rs` | CUDA device timing through CUPTI's activity API; compiled only with `cfg(lumen_cupti_linked)`. |
 | `tpu.rs` | TPU device timing through libtpu's own profiler (PJRT's profiler extension), its XSpace read by a small protobuf reader; compiled only with `cfg(lumen_tpu_linked)`. |
-| `python.rs` | `lumen._C` bindings: `_profiler_start/_stop/_enabled/_cuda_timing`, `_record_function_enter`, `_RecordFunction`, `_Profile`. |
+| `python.rs` | `lumen.profiler._C` bindings: `_profiler_start/_stop/_enabled/_cuda_timing`, `_record_function_enter`, `_RecordFunction`, `_Profile`. |
 | `__init__.py` | The `lumen.profiler` Python API (see below). |
 | `_C.pyi` | Type stubs for `python.rs`. |
 | `tests.rs` | Rust tests: session exclusivity, nesting, shapes, memory attribution, table/sort/format, Chrome layout, Metal and CUDA timing (hardware-gated). |

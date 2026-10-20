@@ -1,3 +1,3 @@
-from lumen._C import Stream
+from lumen.stream._C import Stream
 
 __all__ = ["Stream"]

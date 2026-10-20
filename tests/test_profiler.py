@@ -4,6 +4,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
+from lumen.graph._C import FUSION_SEPARATOR
 from lumen.profiler import ProfilerActivity, profile, record_function
 
 
@@ -296,7 +297,7 @@ def test_launches_are_named_after_what_they_compute():
     cast back of ``x.float().sum()``) converts and sums into partials in
     its first launch, sums those and casts in its second. One launch is
     the step's."""
-    sep = lumen._C.FUSION_SEPARATOR
+    sep = FUSION_SEPARATOR
     try:
         x = lumen.ones([1024, 1024], device="mps").to(dtype="bfloat16")
     except RuntimeError as e:

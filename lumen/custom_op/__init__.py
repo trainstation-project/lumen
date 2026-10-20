@@ -1,8 +1,9 @@
 import functools
 import inspect
 
-from lumen._C import MetalKernel, _register_custom_op
+from lumen.custom_op._C import MetalKernel
 from lumen.graph import prims, tracer
+from lumen.graph._C import _register_custom_op
 from lumen.graph.tracer import TracedTensor
 
 __all__ = ["CustomOp", "MetalKernel", "custom_op"]

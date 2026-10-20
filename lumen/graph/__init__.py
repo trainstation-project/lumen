@@ -1,4 +1,4 @@
-from lumen._C import Graph
+from lumen.graph._C import Graph
 
 # isort: off
 from lumen.graph.tracer import TracedTensor, compile, make_graph

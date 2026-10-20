@@ -1,6 +1,6 @@
-from lumen._C import Kernel
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
+from lumen.pallas._C import Kernel
 
 from .call import ANY, ShapeDtypeStruct, pallas_call, program
 from .pipeline import (

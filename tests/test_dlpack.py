@@ -4,7 +4,7 @@ import gc
 import pytest
 
 import lumen
-from lumen import _C
+from lumen.tensor import _C
 
 np = pytest.importorskip("numpy")
 

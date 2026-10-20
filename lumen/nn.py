@@ -1,6 +1,6 @@
 import dataclasses
 
-from lumen._C import Tensor
+from lumen.tensor._C import Tensor
 
 __all__ = ["Module"]
 

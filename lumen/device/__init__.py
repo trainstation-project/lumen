@@ -1,3 +1,3 @@
-from lumen._C import device
+from lumen.device._C import device
 
 __all__ = ["device"]

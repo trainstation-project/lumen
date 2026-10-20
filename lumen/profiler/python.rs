@@ -57,7 +57,7 @@ fn enabled() -> bool {
     super::is_enabled()
 }
 
-#[pyclass(name = "_RecordFunction", module = "lumen._C")]
+#[pyclass(name = "_RecordFunction", module = "lumen.profiler._C")]
 struct PyRecordFunction {
     guard: Option<RecordGuard>,
 }
@@ -77,7 +77,7 @@ fn record_function_enter(name: String) -> PyRecordFunction {
     }
 }
 
-#[pyclass(name = "_Profile", module = "lumen._C")]
+#[pyclass(name = "_Profile", module = "lumen.profiler._C")]
 struct PyProfile {
     inner: Profile,
 }

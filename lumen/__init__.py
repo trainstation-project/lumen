@@ -1,8 +1,21 @@
-from lumen import autograd, custom_op, functional, graph, graph_compiler, nn, ops, profiler, random, safetensors
-from lumen._C import __version__, cpu, cuda, meta, mps, tpu
+from lumen import (
+    _native,
+    autograd,
+    custom_op,
+    functional,
+    graph,
+    graph_compiler,
+    nn,
+    ops,
+    profiler,
+    random,
+    safetensors,
+)
+from lumen._native import __version__
 from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
 from lumen.device import device
+from lumen.device._C import cpu, cuda, meta, mps, tpu
 from lumen.functional import cat
 from lumen.graph import compile, make_graph, prims
 from lumen.random import get_rng_state, initial_seed, manual_seed, rand, randint, randn, set_rng_state

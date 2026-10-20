@@ -1,7 +1,7 @@
 import enum
 import functools
 
-from lumen import _C
+from lumen.profiler import _C
 
 __all__ = [
     "ProfilerActivity",

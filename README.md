@@ -45,8 +45,9 @@ Kernels                lumen/ops/reference.rs (CPU reference: what each
 ```
 
 The Rust crate (`lumen/lib.rs`) is built with maturin into the native module
-`lumen._C`; the Python files in `lumen/` sit in the same folders as the Rust
-they wrap and re-export it.
+`lumen._native`, which registers each folder's bindings as `lumen.<folder>._C`;
+the Python files in `lumen/` sit in the same folders as the Rust they wrap and
+re-export them.
 
 ## Repository map
 
@@ -58,7 +59,7 @@ they wrap and re-export it.
 | [`benchmarks/`](benchmarks/README.md) | Per-kernel GPU timing of the transformer example's training step. |
 | [`.github/workflows/`](.github/workflows/README.md) | CI: rustfmt, clang-format, clippy, tests, Miri. |
 | `build.rs` | Detects the CUDA toolkit (sets `cfg(lumen_cuda_linked)`) and compiles the Metal shim on macOS (`cfg(lumen_mps_linked)`). |
-| `Cargo.toml` / `pyproject.toml` | Crate (features `mps` default, `cuda`, `python`) and maturin wheel (`lumen._C`, extras `cuda`, `dev`). |
+| `Cargo.toml` / `pyproject.toml` | Crate (features `mps` default, `cuda`, `python`) and maturin wheel (`lumen._native`, extras `cuda`, `dev`). |
 | `Makefile` | Every build/check target; CI calls these. |
 | `AGENTS.md` | Instructions for coding agents. |
 | `.clang-format`, `.pre-commit-config.yaml` | C++/Metal style; Python hooks (autoflake, isort, black at 119 columns). |
