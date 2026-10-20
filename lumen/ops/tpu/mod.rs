@@ -293,6 +293,7 @@ pub(crate) fn encode(
             super::elementwise::tpu::encode(index, step, inputs, output)
         }
         Primitive::ReduceSum { .. } => super::reduce::tpu::encode(index, step, inputs, output),
+        Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
         Primitive::PallasCall { kernel, .. } => {
             let n = step.inputs.len();
             let rows: Vec<*const u8> = inputs[..n]
