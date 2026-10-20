@@ -96,14 +96,14 @@ fn footprint(
     bn: usize,
     bk: usize,
     kb: usize,
-    parts: usize,
+    (parts, members): (usize, usize),
     operand: DType,
     streamed: usize,
 ) -> usize {
-    let operands = parts * bm * bk + bk * bn;
+    let operands = parts * bm * bk + members * bk * bn;
     let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * streamed;
     if kb > 1 || parts > 1 {
-        bytes += bm * bn * 4;
+        bytes += members * bm * bn * 4;
     }
     if operand == DType::F32 {
         bytes += operands * 4;
@@ -124,6 +124,7 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
 struct Epilogue {
     lhs: Vec<usize>,
     lhs_axis: usize,
+    together: bool,
     rows: bool,
     widths: Vec<usize>,
     inputs: Vec<(DType, bool, usize)>,
@@ -155,16 +156,17 @@ impl Epilogue {
         };
         let first = lhs.len().max(1) + 1;
         let extras = &body.inputs()[first..];
-        let mut value: HashMap<Var, usize> = HashMap::from([(dot.output, 0)]);
-        let mut member: HashMap<Var, usize> = HashMap::new();
-        for (k, &v) in extras.iter().enumerate() {
-            value.insert(v, 1 + k);
-        }
         let shape = &body.type_of(dot.output).shape;
         let slices: Vec<&Node> = all[at + 1..]
             .iter()
             .filter(|n| matches!(n.primitive, Primitive::Slice { .. }) && n.inputs[0] == dot.output)
             .collect();
+        let results = slices.len().max(1);
+        let mut value: HashMap<Var, usize> = HashMap::from([(dot.output, 0)]);
+        let mut member: HashMap<Var, usize> = HashMap::new();
+        for (k, &v) in extras.iter().enumerate() {
+            value.insert(v, results + k);
+        }
         let axis = slices
             .first()
             .map_or(shape.len() - 1, |n| match &n.primitive {
@@ -179,6 +181,7 @@ impl Epilogue {
             });
         let (mut widths, mut nodes) = (Vec::new(), Vec::new());
         let mut readers: HashMap<Var, usize> = HashMap::new();
+        let mut together = false;
         if slices.is_empty() {
             widths.push(shape[axis]);
             member.insert(dot.output, 0);
@@ -191,17 +194,27 @@ impl Epilogue {
             } = &node.primitive
                 && node.inputs[0] == dot.output
             {
-                value.insert(node.output, 0);
+                value.insert(node.output, widths.len());
                 member.insert(node.output, widths.len());
                 widths.push(limit_indices[axis] - start_indices[axis]);
                 continue;
             }
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
             nodes.push(super::super::elementwise::tpu::node(&node.primitive, &args));
-            value.insert(node.output, 1 + extras.len() + nodes.len() - 1);
-            if let Some(&p) = node.inputs.iter().find_map(|v| member.get(v)) {
+            value.insert(node.output, results + extras.len() + nodes.len() - 1);
+            let mut of: Vec<usize> = node
+                .inputs
+                .iter()
+                .filter_map(|v| member.get(v))
+                .copied()
+                .collect();
+            of.sort_unstable();
+            of.dedup();
+            together |= of.len() > 1;
+            if let Some(&p) = of.first() {
                 member.insert(node.output, p);
                 for &v in &node.inputs {
+                    together |= readers.get(&v).is_some_and(|&q| q != p) && extras.contains(&v);
                     readers.entry(v).or_insert(p);
                 }
             }
@@ -209,6 +222,7 @@ impl Epilogue {
         let epilogue = Epilogue {
             lhs,
             lhs_axis,
+            together,
             rows: axis + 2 == shape.len(),
             widths,
             inputs: extras
@@ -236,6 +250,7 @@ impl Epilogue {
         Epilogue {
             lhs: Vec::new(),
             lhs_axis: 0,
+            together: false,
             rows: false,
             widths: vec![n],
             inputs: Vec::new(),
@@ -338,7 +353,10 @@ pub(crate) fn encode(
             bn,
             bk,
             f.k / bk,
-            e.lhs.len().max(1),
+            (
+                e.lhs.len().max(1),
+                if e.together { e.widths.len() } else { 1 },
+            ),
             lhs.dtype,
             streamed,
         ) <= VMEM
@@ -400,7 +418,7 @@ pub(crate) fn encode(
         })
         .collect();
     let spec = format!(
-        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"split_rows\": {}, \
+        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"together\": {}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
          \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         f.batch,
@@ -411,6 +429,7 @@ pub(crate) fn encode(
         f.transposed,
         f.lhs_transposed,
         e.lhs,
+        e.together,
         e.rows,
         lhs.dtype.full_name(),
         value.full_name(),

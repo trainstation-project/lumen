@@ -261,23 +261,52 @@ class GatedPair(lumen.nn.Module):
         return g * lumen.functional.sigmoid(g) * u
 
 
-def test_merged_members_epilogues_are_their_own():
+class Product(lumen.nn.Module):
+    ws: list
+
+    def __call__(self, x):
+        q, k, v = (x @ w.t() for w in self.ws)
+        return q * k * v
+
+
+@pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("bfloat16", 2e-2)], ids=["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "make, steps, expected",
+    [
+        (
+            lambda meta, h, d: GatedPair(meta(h, d), meta(h, d)),
+            ["2x dot_general → logistic → mul → mul"],
+            lambda x, ws: (lambda g, u: g / (1 + np.exp(-g)) * u)(x @ ws[0].T, x @ ws[1].T),
+        ),
+        (
+            lambda meta, h, d: Product([meta(h, d) for _ in range(3)]),
+            ["3x dot_general → mul → mul"],
+            lambda x, ws: (x @ ws[0].T) * (x @ ws[1].T) * (x @ ws[2].T),
+        ),
+    ],
+    ids=["swiglu", "three"],
+)
+def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, tol):
     d, h, m = 256, 512, 64
-    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
-    graph = lumen.make_graph(lambda model, x: model(x))(GatedPair(meta(h, d), meta(h, d)), meta(m, d))
-    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[1, 2], packable=[1, 2])
-    assert plan.packed == [([1, 2], 0)]
-    labels = [s["label"] for s in plan.steps()]
-    assert labels == ["2x dot_general → logistic → mul", "mul"], labels
+    meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
+    model = make(meta, h, d)
+    n = len(list(model.named_parameters()))
+    graph = lumen.make_graph(lambda model, x: model(x))(model, meta(m, d))
+    params = list(range(1, n + 1))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
+    assert plan.packed == [(params, 0)]
+    assert [s["label"] for s in plan.steps()] == steps
     rng = np.random.default_rng(0)
-    w1, w2 = (rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(2))
+    ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(n)]
     x = rng.standard_normal([m, d], dtype=np.float32)
-    model = GatedPair(meta(h, d), meta(h, d))
     f = lumen.compile(lambda model, x: model(x), device="tpu")
     f(model, meta(m, d))
-    model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
-    g, u = x @ w1.T, x @ w2.T
-    np.testing.assert_allclose(floats(f(model, tpu(x))), g / (1 + np.exp(-g)) * u, rtol=1e-4, atol=1e-4)
+    names = [name for name, _ in model.named_parameters()]
+    model.load_state_dict({name: lumen.from_numpy(w).to(dtype=dtype) for name, w in zip(names, ws)})
+    xd = tpu(x, dtype)
+    wd = [floats(lumen.from_numpy(w).to(dtype=dtype)) for w in ws]
+    want = expected(floats(xd), wd)
+    np.testing.assert_allclose(floats(f(model, xd)), want, rtol=tol, atol=tol * np.abs(want).max())
 
 
 class QKV(lumen.nn.Module):
@@ -300,8 +329,8 @@ def test_projections_backward_merges_into_two_dots():
     plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[2, 3, 4], packable=[2, 3, 4])
     assert plan.packed == [([2, 3, 4], 0)]
     labels = [s["label"] for s in plan.steps()]
-    dots = [label for label in labels if "dot_general" in label]
-    assert dots == ["3x dot_general → mul", "3x dot_general", "dot_general"], labels
+    [label for label in labels if "dot_general" in label]
+    assert labels == ["3x dot_general" + " → mul" * 5, "3x dot_general", "dot_general"], labels
     assert not any("concatenate" in label for label in labels), labels
     rng = np.random.default_rng(0)
     ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(3)]
@@ -315,4 +344,45 @@ def test_projections_backward_merges_into_two_dots():
     dq, dk, dv = g * k * v, g * q * v, g * q * k
     expected = [dq.T @ x, dk.T @ x, dv.T @ x, dq @ ws[0] + dk @ ws[1] + dv @ ws[2]]
     for a, b in zip(got, expected):
+        np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
+
+
+class SwiGLU(lumen.nn.Module):
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+    w2: lumen.Tensor
+
+    def __call__(self, x):
+        g, u = x @ self.w1.t(), x @ self.w3.t()
+        return (g * lumen.functional.sigmoid(g) * u) @ self.w2.t()
+
+
+def test_a_swiglu_backward_merges_its_gate_and_up():
+    d, h, m = 256, 512, 128
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+
+    def step(model, x, dy):
+        model(x).backward(dy)
+        return [model.w1.grad, model.w3.grad, model.w2.grad, x.grad]
+
+    make = lambda: SwiGLU(meta(h, d), meta(h, d), meta(d, h))
+    graph = lumen.make_graph(step)(make(), meta(m, d), meta(m, d))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[2, 3, 4], packable=[2, 3, 4])
+    assert plan.packed == [([2, 3], 0)]
+    labels = [s["label"] for s in plan.steps()]
+    assert len(labels) == 5 and labels[0].startswith("2x dot_general →") and "2x dot_general" in labels, labels
+    assert not any("concatenate" in label for label in labels), labels
+    rng = np.random.default_rng(0)
+    w1, w3, w2 = (rng.standard_normal(s, dtype=np.float32) / 16 for s in ([h, d], [h, d], [d, h]))
+    x, dy = (rng.standard_normal([m, d], dtype=np.float32) for _ in range(2))
+    model = make()
+    f = lumen.compile(step, device="tpu")
+    f(model, meta(m, d), meta(m, d))
+    model.load_state_dict({"w1": lumen.from_numpy(w1), "w3": lumen.from_numpy(w3), "w2": lumen.from_numpy(w2)})
+    got = [floats(t) for t in f(model, tpu(x), tpu(dy))]
+    g, u = x @ w1.T, x @ w3.T
+    s = 1 / (1 + np.exp(-g))
+    dh = dy @ w2
+    dg, du = dh * u * (s + g * s * (1 - s)), dh * g * s
+    for a, b in zip(got, [dg.T @ x, du.T @ x, dy.T @ (g * s * u), dg @ w1 + du @ w3]):
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
