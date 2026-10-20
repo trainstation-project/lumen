@@ -16,15 +16,17 @@ def program(spec):
     elementwise kernel's, its values the result, the inputs, then the
     nodes) and ``outputs`` (each ``[value, member, dtype, n, start]``:
     written at columns ``start`` on of a buffer ``n`` wide, or, ``n`` 0, a
-    buffer of its own). Its scalars
-    are the rows of the lhs's parts, the rhs, the inputs and the outputs."""
+    buffer of its own). With ``together``, members of one width, each step
+    computes every member's block at its columns, from a stream of the rhs's
+    blocks each, so the epilogue reads them all. Its scalars are the rows
+    of the lhs's parts, the rhs, the inputs and the outputs."""
     batch, lead, m, n, k = spec["batch"], spec["lead"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
     t, tl = spec["transposed"], spec["lhs_transposed"]
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
     widths, inputs, nodes, outputs = spec["widths"], spec["inputs"], spec["nodes"], spec["outputs"]
-    rows_split, lhs_k = spec["split_rows"], spec["lhs_k"]
+    rows_split, lhs_k, together = spec["split_rows"], spec["lhs_k"], spec["together"]
     parts = spec["lhs"] or [k if lhs_k else m]
     unit = bm if rows_split else bn
     starts = [sum(widths[:p]) // unit for p in range(len(widths))]
@@ -34,6 +36,10 @@ def program(spec):
     part_counts = [w // part_unit for w in parts]
     blocked = [i for i, (_, scalar, _) in enumerate(inputs) if not scalar]
     split = len(parts) > 1
+    results = len(widths)
+    streams = results if together else 1
+    if together:
+        nb = widths[0] // bn
 
     def rhs_batch(b):
         if lead == 1:
@@ -59,7 +65,7 @@ def program(spec):
 
     def needed(indices):
         """The values ``indices`` are computed from, and they."""
-        first = 1 + len(inputs)
+        first = results + len(inputs)
         stack, seen = list(indices), set()
         while stack:
             v = stack.pop()
@@ -112,10 +118,18 @@ def program(spec):
             return pl.BlockSpec((None, bk, bm) if tl else (None, bm, bk), index)
 
         x_specs = [lhs_spec(p) for p in range(len(parts))]
-        if t:
-            y_spec = pl.BlockSpec((None, bn, bk), lambda b, i, j, s: (rhs_batch(b), j, s))
-        else:
-            y_spec = pl.BlockSpec((None, bk, bn), lambda b, i, j, s: (rhs_batch(b), s, j))
+
+        def rhs_spec(p):
+            at = starts[p] if together else 0
+
+            def index(b, i, j, s):
+                if at:
+                    j = j + at if isinstance(j, int) else prims.add(j, prims.full((), at, "int32"))
+                return (rhs_batch(b), j, s) if t else (rhs_batch(b), s, j)
+
+            return pl.BlockSpec((None, bn, bk) if t else (None, bk, bn), index)
+
+        y_specs = [rhs_spec(p) for p in range(streams)]
 
         def member_spec(p, at=0):
             start, count = starts[p], counts[p]
@@ -123,7 +137,7 @@ def program(spec):
             def index(b, i, j, s):
                 if rows_split:
                     return b, clamp(i, start, count), j
-                column = clamp(j, start, count)
+                column = j if together else clamp(j, start, count)
                 if at and isinstance(column, int):
                     column += at // bn
                 elif at:
@@ -135,15 +149,15 @@ def program(spec):
         e_specs = [member_spec(inputs[i][2]) for i in blocked]
         o_specs = [member_spec(p, at) for _, p, _, _, at in outputs]
 
-        def finish(acc, blocks, obs):
-            result = acc.to(value)
-            members = sorted({o[1] for o in outputs})
+        def finish(accs, blocks, obs):
+            products = [a.to(value) for a in accs] * (results // len(accs))
+            members = [0] if together else sorted({o[1] for o in outputs})
             for p in members:
-                written = [o for o, out in enumerate(outputs) if out[1] == p]
+                written = [o for o, out in enumerate(outputs) if together or out[1] == p]
 
                 def store(written=written):
                     wanted = needed([outputs[o][0] for o in written])
-                    values = [result] + [
+                    values = products + [
                         read[i] if i in read else blocks[blocked.index(i)][...] for i in range(len(inputs))
                     ]
                     first = len(values)
@@ -165,34 +179,37 @@ def program(spec):
                 pl.when(within(at, starts[p], counts[p]))(store)
 
         def body(*refs):
-            xbs, yb = refs[: len(parts)], refs[len(parts)]
-            rest = refs[len(parts) + 1 :]
+            xbs, ybs = refs[: len(parts)], refs[len(parts) : len(parts) + streams]
+            rest = refs[len(parts) + streams :]
             blocks, obs = rest[: len(blocked)], rest[len(blocked) :]
             if kb == 1 and not split:
-                finish(product(xbs[0], yb), blocks, obs)
+                finish([product(xbs[0], yb) for yb in ybs], blocks, obs)
                 return
-            step, acc = pl.program_id(3), scratch[0]
+            step = pl.program_id(3)
 
             @pl.when(step == 0)
             def _():
-                acc[...] = 0.0
+                for acc in scratch:
+                    acc[...] = 0.0
 
             if not split:
-                acc[...] += product(xbs[0], yb)
+                for acc, yb in zip(scratch, ybs):
+                    acc[...] += product(xbs[0], yb)
             for p, xb in enumerate(xbs if split else []):
                 at = pl.program_id(3 if lhs_k else 1)
 
                 @pl.when(within(at, part_starts[p], part_counts[p]))
                 def _(xb=xb):
-                    acc[...] += product(xb, yb)
+                    scratch[0][...] += product(xb, ybs[0])
 
             @pl.when(step == kb - 1)
             def _():
-                finish(acc[...], blocks, obs)
+                finish([acc[...] for acc in scratch], blocks, obs)
 
         grid = (batch * lead, mb, nb, kb)
-        in_specs = x_specs + [y_spec] + e_specs
-        pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=o_specs)(*xs, y, *extra, *outs)
+        in_specs = x_specs + y_specs + e_specs
+        pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=o_specs)(*xs, *[y] * streams, *extra, *outs)
 
     accumulated = kb > 1 or split
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if accumulated else [])
+    scratch = [pl.VMEM((bm, bn), "float32") for _ in range(streams)] if accumulated else []
+    return pallas.program(kernel, spec, scratch=scratch)

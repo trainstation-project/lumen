@@ -261,23 +261,52 @@ class GatedPair(lumen.nn.Module):
         return g * lumen.functional.sigmoid(g) * u
 
 
-def test_merged_members_epilogues_are_their_own():
+class Product(lumen.nn.Module):
+    ws: list
+
+    def __call__(self, x):
+        q, k, v = (x @ w.t() for w in self.ws)
+        return q * k * v
+
+
+@pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("bfloat16", 2e-2)], ids=["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "make, steps, expected",
+    [
+        (
+            lambda meta, h, d: GatedPair(meta(h, d), meta(h, d)),
+            ["2x dot_general → logistic → mul → mul"],
+            lambda x, ws: (lambda g, u: g / (1 + np.exp(-g)) * u)(x @ ws[0].T, x @ ws[1].T),
+        ),
+        (
+            lambda meta, h, d: Product([meta(h, d) for _ in range(3)]),
+            ["3x dot_general → mul → mul"],
+            lambda x, ws: (x @ ws[0].T) * (x @ ws[1].T) * (x @ ws[2].T),
+        ),
+    ],
+    ids=["swiglu", "three"],
+)
+def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, tol):
     d, h, m = 256, 512, 64
-    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
-    graph = lumen.make_graph(lambda model, x: model(x))(GatedPair(meta(h, d), meta(h, d)), meta(m, d))
-    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[1, 2], packable=[1, 2])
-    assert plan.packed == [([1, 2], 0)]
-    labels = [s["label"] for s in plan.steps()]
-    assert labels == ["2x dot_general → logistic → mul", "mul"], labels
+    meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
+    model = make(meta, h, d)
+    n = len(list(model.named_parameters()))
+    graph = lumen.make_graph(lambda model, x: model(x))(model, meta(m, d))
+    params = list(range(1, n + 1))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=params, packable=params)
+    assert plan.packed == [(params, 0)]
+    assert [s["label"] for s in plan.steps()] == steps
     rng = np.random.default_rng(0)
-    w1, w2 = (rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(2))
+    ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(n)]
     x = rng.standard_normal([m, d], dtype=np.float32)
-    model = GatedPair(meta(h, d), meta(h, d))
     f = lumen.compile(lambda model, x: model(x), device="tpu")
     f(model, meta(m, d))
-    model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
-    g, u = x @ w1.T, x @ w2.T
-    np.testing.assert_allclose(floats(f(model, tpu(x))), g / (1 + np.exp(-g)) * u, rtol=1e-4, atol=1e-4)
+    names = [name for name, _ in model.named_parameters()]
+    model.load_state_dict({name: lumen.from_numpy(w).to(dtype=dtype) for name, w in zip(names, ws)})
+    xd = tpu(x, dtype)
+    wd = [floats(lumen.from_numpy(w).to(dtype=dtype)) for w in ws]
+    want = expected(floats(xd), wd)
+    np.testing.assert_allclose(floats(f(model, xd)), want, rtol=tol, atol=tol * np.abs(want).max())
 
 
 class QKV(lumen.nn.Module):

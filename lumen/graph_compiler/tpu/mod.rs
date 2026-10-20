@@ -14,6 +14,8 @@ use crate::graph_compiler::{Plan, PlanOptions};
 
 const LANES: usize = 128;
 
+const MAX_TOGETHER: usize = 4;
+
 const LAYOUT: DeviceLayout = DeviceLayout {
     bytes: |t| {
         crate::device::tpu::layout::bytes(t.dtype, &t.shape)
@@ -163,6 +165,11 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             Some((_, parts)) => &graph.type_of(parts[p].1).shape,
             None => &graph.type_of(dot.output).shape,
         };
+        let together = parts.as_ref().is_some_and(|(axis, parts)| {
+            *axis + 1 == graph.type_of(dot.output).shape.len()
+                && parts.len() <= MAX_TOGETHER
+                && parts.iter().all(|&(w, _)| w == parts[0].0)
+        });
         let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
         let mut read_by: HashMap<Var, usize> = HashMap::new();
         for (u, un) in nodes.iter().enumerate().skip(d + 1) {
@@ -177,9 +184,12 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
                 .collect();
             of.sort_unstable();
             of.dedup();
-            let [p] = of[..] else {
+            let Some(&p) = of.first() else {
                 continue;
             };
+            if of.len() > 1 && !together {
+                continue;
+            }
             if graph.type_of(un.output).shape != *shape_of(p) {
                 continue;
             }
@@ -224,7 +234,9 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
                 }
             }
             let shared = operands.iter().any(|v| {
-                !graph.type_of(*v).shape.is_empty() && read_by.get(v).is_some_and(|&q| q != p)
+                !together
+                    && !graph.type_of(*v).shape.is_empty()
+                    && read_by.get(v).is_some_and(|&q| q != p)
             });
             if !fits || shared {
                 continue;
