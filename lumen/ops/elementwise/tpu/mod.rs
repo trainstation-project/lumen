@@ -93,6 +93,19 @@ fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     ])
 }
 
+pub(crate) fn gcd(a: usize, b: usize) -> usize {
+    match b {
+        0 => a,
+        _ => gcd(b, a % b),
+    }
+}
+
+pub(crate) fn window(step: &Step, k: usize) -> Option<(usize, usize)> {
+    let view = step.output_views.get(k)?.as_ref()?;
+    let rank = view.strides.len();
+    (rank >= 2).then(|| (view.strides[rank - 2], view.offset % view.strides[rank - 2]))
+}
+
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -130,7 +143,13 @@ pub(crate) fn encode(
         .map(|(_, t)| format!("\"{}\"", t.dtype.full_name()))
         .collect();
     let args: Vec<usize> = (0..step.inputs.len()).collect();
-    let blocks = blocks(&out.shape, &dtypes)?;
+    let window = window(step, 0);
+    let mut blocks = blocks(&out.shape, &dtypes)?;
+    if let Some((_, start)) = window {
+        let n = *out.shape.last().expect("a matrix");
+        blocks[1] = block(gcd(n, start), 128, 2048)
+            .ok_or("elementwise on TPU: a window of no whole columns' block")?;
+    }
     let mut kernel = step.primitive.name().to_owned();
     if let Some((_, t)) = step.inputs.first().filter(|(_, t)| t.dtype != out.dtype) {
         kernel += &format!("_{}", t.dtype);
@@ -138,12 +157,13 @@ pub(crate) fn encode(
     let shown: Vec<String> = blocks.iter().map(usize::to_string).collect();
     kernel += &format!("_{}_{}", out.dtype, shown.join("x"));
     let spec = format!(
-        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}",
+        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}, \"window\": {}",
         out.shape,
         names.join(", "),
         node(&step.primitive, &args),
         out.dtype.full_name(),
         blocks,
+        window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
     );
     let rows: Vec<*const u8> = inputs
         .iter()

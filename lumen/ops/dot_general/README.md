@@ -23,7 +23,9 @@ evaluates it with `ops/reference.rs`.
 ([`../tpu/`](../tpu/README.md) lowers and runs it). The lhs must be batch,
 free then contracting dimensions; the rhs batch, then contracting and free
 dimensions (`[K, N]`) or free and contracting (`[N, K]`, `transposed`);
-anything else errors. Operands are float32 or bfloat16 (one dtype),
+the lhs may also be batch, contracting then free (`[K, M]`,
+`lhs_transposed`: a weight's gradient `dyᵀ x`, multiplied by Mosaic's
+dot_general contracting the lhs's first dimension); anything else errors. Operands are float32 or bfloat16 (one dtype),
 accumulating in float32; the output float32 or bfloat16.
 
 * **Pipeline** over `(batch, M/bm, N/bn, K/bk)` (`pl.emit_pipeline`, the
@@ -55,21 +57,36 @@ accumulating in float32; the output float32 or bfloat16.
 * float32 operands multiply in full float32 (`contract_precision<fp32>`),
   not the matrix unit's single bfloat16 pass.
 * **Fusions** (`fuse_dots` in `graph_compiler/tpu/mod.rs`): a dot, its
-  column slices if merged (`merge_dots`), and the elementwise nodes after
+  slices if merged (`merge_dots`: members of its columns; a merged weight
+  gradient's: of its rows, `split_rows`), and the elementwise nodes after
   it that read one member's values (and otherwise constants, 0-d values or
   values of the member's shape computed before the dot) are one `Fusion`.
-  `tpu.rs` (`Epilogue::of`) writes its spec: `widths` (the members' column
-  ranges), `inputs` (the other operands: 0-d ones copied once, the rest
-  read a block at a time at the member's columns), `nodes` (as the
-  elementwise kernel's, computed by its `computed`) and `outputs` (a value
-  and its member each). `bn` divides every width; an output's block index
-  is the grid's `j` less its member's first block, clamped to its blocks,
-  and only steps within its columns compute and write it, so the pipeline
-  copies each of its blocks out once. On a v6e (bfloat16): relu of a
-  4096³ dot 185 µs fused, 281 µs as two kernels; a residual add 194 µs
-  (256); `y * sigmoid(1.702 y)` in float32 198 µs (724); q/k/v
-  projections (`x [4096, 2048]`, 2048 + 512 + 512 outputs) 136 µs merged,
-  161 µs as three dots.
+  A concatenate its lhs is, read only by dots, that no kernel writes in
+  place, is the fusion's too: its parts are buffers of their own the
+  kernel reads side by side along k or m (`lhs`, `lhs_k`). `tpu.rs`
+  (`Epilogue::of`) writes the spec: `widths` (the members), `inputs` (the
+  other operands: 0-d ones copied once, the rest read a block at a time at
+  the member's blocks), `nodes` (as the elementwise kernel's, computed by
+  its `computed`) and `outputs` (a value, its member, and the buffer it is
+  written into: its own, or columns of a wider one, its step's output
+  view). Blocks divide every member, part and column offset; a member's
+  or part's block index is the grid's less its first block, clamped to its
+  blocks, and only steps within it read or write it, so the pipeline
+  copies each of its blocks once.
+* **In-place concatenates** (`place_concats` in `graph_compiler/tpu`): a
+  concatenate along the last dimension of values only it reads, each
+  written by a dot's fusion or an elementwise kernel, has no step: each
+  kernel writes at its columns of the concatenate's buffer. A merged
+  backward's cotangents (`merge_dots_backward`) are so one buffer, which
+  x's gradient's dot and the weights' gradients' dot read whole.
+* On a v6e (bfloat16): relu of a 4096³ dot 185 µs fused, 281 µs as two
+  kernels; a residual add 194 µs (256); `y * sigmoid(1.702 y)` in float32
+  198 µs (724); q/k/v projections (`x [4096, 2048]`, 2048 + 512 + 512
+  outputs) 136 µs merged, 161 µs as three dots; their backward (three
+  2048 × 2048 weights, `x [4096, 2048]`) 323 µs in two dots, 380 µs in
+  six. Reading the cotangents as three buffers instead of one costs the
+  weights' gradients' dot (303 µs, 158 µs from one buffer): their three
+  lhs streams' VMEM shrinks its blocks.
 
 ## Subfolders
 

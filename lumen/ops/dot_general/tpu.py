@@ -6,22 +6,34 @@ from lumen.ops.tpu import pallas
 
 def program(spec):
     """The dot of ``spec``: ``batch``, ``lead``, ``m``, ``n``, ``k``,
-    ``transposed`` (a ``[n, k]`` rhs), the ``operands`` and ``value`` (its
-    result's) dtypes, ``blocks`` (bm, bn, bk), ``widths`` (its members:
-    column ranges, in order), ``inputs`` (its epilogue's other operands,
+    ``transposed`` (a ``[n, k]`` rhs), ``lhs_transposed`` (a ``[k, m]``
+    lhs), ``lhs`` (the sizes of the lhs's parts, buffers of their own side
+    by side along k if ``lhs_k``, else m; none: one buffer), the
+    ``operands`` and ``value`` (its result's) dtypes, ``blocks`` (bm, bn,
+    bk), ``widths`` (its members: ranges of its rows if ``split_rows``, else of
+    its columns, in order), ``inputs`` (its epilogue's other operands,
     each ``[dtype, 0-d, member]``), ``nodes`` (its epilogue, as the
     elementwise kernel's, its values the result, the inputs, then the
-    nodes) and ``outputs`` (each ``[value, member, dtype]``). Its scalars
-    are the rows of the lhs, the rhs, the inputs and the outputs."""
+    nodes) and ``outputs`` (each ``[value, member, dtype, n, start]``:
+    written at columns ``start`` on of a buffer ``n`` wide, or, ``n`` 0, a
+    buffer of its own). Its scalars
+    are the rows of the lhs's parts, the rhs, the inputs and the outputs."""
     batch, lead, m, n, k = spec["batch"], spec["lead"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
-    t = spec["transposed"]
+    t, tl = spec["transposed"], spec["lhs_transposed"]
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
     widths, inputs, nodes, outputs = spec["widths"], spec["inputs"], spec["nodes"], spec["outputs"]
-    starts = [sum(widths[:p]) // bn for p in range(len(widths))]
-    counts = [w // bn for w in widths]
+    rows_split, lhs_k = spec["split_rows"], spec["lhs_k"]
+    parts = spec["lhs"] or [k if lhs_k else m]
+    unit = bm if rows_split else bn
+    starts = [sum(widths[:p]) // unit for p in range(len(widths))]
+    counts = [w // unit for w in widths]
+    part_unit = bk if lhs_k else bm
+    part_starts = [sum(parts[:p]) // part_unit for p in range(len(parts))]
+    part_counts = [w // part_unit for w in parts]
     blocked = [i for i, (_, scalar, _) in enumerate(inputs) if not scalar]
+    split = len(parts) > 1
 
     def rhs_batch(b):
         if lead == 1:
@@ -29,6 +41,21 @@ def program(spec):
         if isinstance(b, int):
             return b // lead
         return prims.div(b, prims.full((), lead, "int32"))
+
+    def clamp(x, start, count):
+        if isinstance(x, int):
+            return min(max(x - start, 0), count - 1)
+        shifted = prims.max(prims.sub(x, prims.full((), start, "int32")), prims.full((), 0, "int32"))
+        return prims.neg(prims.max(prims.neg(shifted), prims.full((), 1 - count, "int32")))
+
+    def within(x, start, count):
+        return (x >= start) & (x < start + count)
+
+    def product(xb, yb):
+        if not tl:
+            return pl.dot(xb[...], yb[...], trans_b=t)
+        numbers = (([0], [1 if t else 0]), ([], []))
+        return pl.dot_general(xb[...], yb[...], numbers, preferred_element_type="float32")
 
     def needed(indices):
         """The values ``indices`` are computed from, and they."""
@@ -48,46 +75,71 @@ def program(spec):
             c.start()
             c.wait()
 
-        x = pallas.view(memory, rows[0], (batch * lead, m, k), dtype)
-        y = pallas.view(memory, rows[1], (batch, n, k) if t else (batch, k, n), dtype)
+        def lhs_shape(size):
+            free, contracting = (m, size) if lhs_k else (size, k)
+            return (batch * lead, contracting, free) if tl else (batch * lead, free, contracting)
+
+        xs = [pallas.view(memory, rows[p], lhs_shape(size), dtype) for p, size in enumerate(parts)]
+        r = len(parts)
+        y = pallas.view(memory, rows[r], (batch, n, k) if t else (batch, k, n), dtype)
         scalars = {}
         for i, (d, scalar, _) in enumerate(inputs):
             if scalar:
                 scalars[i] = pl.scratch(pl.VMEM((1,), d))
-                copy(pallas.view(memory, rows[2 + i], (), d), scalars[i])
+                copy(pallas.view(memory, rows[r + 1 + i], (), d), scalars[i])
         read = {i: s[...] for i, s in scalars.items()}
-        extra = [
-            pallas.view(memory, rows[2 + i], (batch * lead, m, widths[inputs[i][2]]), inputs[i][0]) for i in blocked
-        ]
-        base = 2 + len(inputs)
+
+        def member_shape(p):
+            return (batch * lead, widths[p], n) if rows_split else (batch * lead, m, widths[p])
+
+        extra = [pallas.view(memory, rows[r + 1 + i], member_shape(inputs[i][2]), inputs[i][0]) for i in blocked]
+        base = r + 1 + len(inputs)
         outs = [
-            pallas.view(result, rows[base + o], (batch * lead, m, widths[p]), d) for o, (_, p, d) in enumerate(outputs)
+            pallas.view(result, rows[base + o], (batch * lead, m, whole) if whole else member_shape(p), d)
+            for o, (_, p, d, whole, _) in enumerate(outputs)
         ]
-        x_spec = pl.BlockSpec((None, bm, bk), lambda b, i, j, s: (b, i, s))
+
+        def lhs_spec(p):
+            start, count = part_starts[p], part_counts[p]
+
+            def index(b, i, j, s):
+                if split and lhs_k:
+                    s = clamp(s, start, count)
+                elif split:
+                    i = clamp(i, start, count)
+                return (b, s, i) if tl else (b, i, s)
+
+            return pl.BlockSpec((None, bk, bm) if tl else (None, bm, bk), index)
+
+        x_specs = [lhs_spec(p) for p in range(len(parts))]
         if t:
             y_spec = pl.BlockSpec((None, bn, bk), lambda b, i, j, s: (rhs_batch(b), j, s))
         else:
             y_spec = pl.BlockSpec((None, bk, bn), lambda b, i, j, s: (rhs_batch(b), s, j))
 
-        def column(p):
+        def member_spec(p, at=0):
             start, count = starts[p], counts[p]
 
             def index(b, i, j, s):
-                if isinstance(j, int):
-                    return b, i, min(max(j - start, 0), count - 1)
-                shifted = prims.max(prims.sub(j, prims.full((), start, "int32")), prims.full((), 0, "int32"))
-                return b, i, prims.neg(prims.max(prims.neg(shifted), prims.full((), 1 - count, "int32")))
+                if rows_split:
+                    return b, clamp(i, start, count), j
+                column = clamp(j, start, count)
+                if at and isinstance(column, int):
+                    column += at // bn
+                elif at:
+                    column = prims.add(column, prims.full((), at // bn, "int32"))
+                return b, i, column
 
             return pl.BlockSpec((None, bm, bn), index)
 
-        e_specs = [column(inputs[i][2]) for i in blocked]
-        o_specs = [column(p) for _, p, _ in outputs]
+        e_specs = [member_spec(inputs[i][2]) for i in blocked]
+        o_specs = [member_spec(p, at) for _, p, _, _, at in outputs]
 
         def finish(acc, blocks, obs):
             result = acc.to(value)
-            members = sorted({p for _, p, _ in outputs})
+            members = sorted({o[1] for o in outputs})
             for p in members:
-                written = [o for o, (_, q, _) in enumerate(outputs) if q == p]
+                written = [o for o, out in enumerate(outputs) if out[1] == p]
 
                 def store(written=written):
                     wanted = needed([outputs[o][0] for o in written])
@@ -109,13 +161,15 @@ def program(spec):
                 if len(members) == 1:
                     store()
                     continue
-                j = pl.program_id(2)
-                pl.when((j >= starts[p]) & (j < starts[p] + counts[p]))(store)
+                at = pl.program_id(1 if rows_split else 2)
+                pl.when(within(at, starts[p], counts[p]))(store)
 
-        def body(xb, yb, *rest):
+        def body(*refs):
+            xbs, yb = refs[: len(parts)], refs[len(parts)]
+            rest = refs[len(parts) + 1 :]
             blocks, obs = rest[: len(blocked)], rest[len(blocked) :]
-            if kb == 1:
-                finish(pl.dot(xb[...], yb[...], trans_b=t), blocks, obs)
+            if kb == 1 and not split:
+                finish(product(xbs[0], yb), blocks, obs)
                 return
             step, acc = pl.program_id(3), scratch[0]
 
@@ -123,13 +177,22 @@ def program(spec):
             def _():
                 acc[...] = 0.0
 
-            acc[...] += pl.dot(xb[...], yb[...], trans_b=t)
+            if not split:
+                acc[...] += product(xbs[0], yb)
+            for p, xb in enumerate(xbs if split else []):
+                at = pl.program_id(3 if lhs_k else 1)
+
+                @pl.when(within(at, part_starts[p], part_counts[p]))
+                def _(xb=xb):
+                    acc[...] += product(xb, yb)
 
             @pl.when(step == kb - 1)
             def _():
                 finish(acc[...], blocks, obs)
 
         grid = (batch * lead, mb, nb, kb)
-        pl.emit_pipeline(body, grid=grid, in_specs=[x_spec, y_spec] + e_specs, out_specs=o_specs)(x, y, *extra, *outs)
+        in_specs = x_specs + [y_spec] + e_specs
+        pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=o_specs)(*xs, y, *extra, *outs)
 
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if kb > 1 else [])
+    accumulated = kb > 1 or split
+    return pallas.program(kernel, spec, scratch=[pl.VMEM((bm, bn), "float32")] if accumulated else [])

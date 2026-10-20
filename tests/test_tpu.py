@@ -57,6 +57,16 @@ def test_a_transposed_rhs():
     check(lambda x, w: x @ w.t(), [8, 1024], [512, 1024], "bfloat16", 1e-2, transposed=True)
 
 
+@pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
+@pytest.mark.parametrize("g, x", [([128, 256], [128, 512]), ([4096, 1024], [4096, 2048])])
+def test_a_transposed_lhs(g, x, dtype, tol):
+    rng = np.random.default_rng(0)
+    a, b = (tpu(rng.standard_normal(s, dtype=np.float32), dtype) for s in (g, x))
+    y = lumen.compile(lambda a, b: a.t() @ b)(a, b)
+    expected = floats(a).T @ floats(b)
+    assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
+
+
 @pytest.mark.parametrize(
     "lhs, rhs",
     [
@@ -268,3 +278,41 @@ def test_merged_members_epilogues_are_their_own():
     model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
     g, u = x @ w1.T, x @ w2.T
     np.testing.assert_allclose(floats(f(model, tpu(x))), g / (1 + np.exp(-g)) * u, rtol=1e-4, atol=1e-4)
+
+
+class QKV(lumen.nn.Module):
+    ws: list
+
+    def __call__(self, x):
+        return [x @ w.t() for w in self.ws]
+
+
+def test_projections_backward_merges_into_two_dots():
+    d, h, m = 256, 256, 128
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+
+    def step(model, x, g):
+        q, k, v = model(x)
+        (q * k * v).backward(g)
+        return [w.grad for w in model.ws] + [x.grad]
+
+    graph = lumen.make_graph(step)(QKV([meta(h, d) for _ in range(3)]), meta(m, d), meta(m, h))
+    plan = lumen.graph_compiler.Plan(graph, "tpu", parameters=[2, 3, 4], packable=[2, 3, 4])
+    assert plan.packed == [([2, 3, 4], 0)]
+    labels = [s["label"] for s in plan.steps()]
+    dots = [label for label in labels if "dot_general" in label]
+    assert dots == ["3x dot_general → mul", "3x dot_general", "dot_general"], labels
+    assert not any("concatenate" in label for label in labels), labels
+    rng = np.random.default_rng(0)
+    ws = [rng.standard_normal([h, d], dtype=np.float32) / 16 for _ in range(3)]
+    x, g = rng.standard_normal([m, d], dtype=np.float32), rng.standard_normal([m, h], dtype=np.float32)
+    model = QKV([meta(h, d) for _ in range(3)])
+    f = lumen.compile(step, device="tpu")
+    f(model, meta(m, d), meta(m, h))
+    model.load_state_dict({f"ws.{i}": lumen.from_numpy(w) for i, w in enumerate(ws)})
+    got = [floats(t) for t in f(model, tpu(x), tpu(g))]
+    q, k, v = (x @ w.T for w in ws)
+    dq, dk, dv = g * k * v, g * q * v, g * q * k
+    expected = [dq.T @ x, dk.T @ x, dv.T @ x, dq @ ws[0] + dk @ ws[1] + dv @ ws[2]]
+    for a, b in zip(got, expected):
+        np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())

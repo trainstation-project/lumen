@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
-use crate::graph::{Graph, Var};
+use crate::graph::{Graph, Node, Var};
 use crate::graph_compiler::plan::Step;
 use crate::ops::tpu::{Launch, launch};
 
@@ -15,6 +15,7 @@ struct Form {
     n: usize,
     k: usize,
     transposed: bool,
+    lhs_transposed: bool,
 }
 
 fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
@@ -34,9 +35,11 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     if !(run(lhs_batch, 0) && run(rhs_batch, 0)) {
         return Err("dot_general on TPU: the operands' batch dimensions must lead them".into());
     }
-    if *lhs_contracting != [lhs.len() - 1] || lhs.len() < nb + 2 {
+    let lhs_transposed = lhs.len() == nb + 2 && *lhs_contracting == [nb];
+    if (*lhs_contracting != [lhs.len() - 1] && !lhs_transposed) || lhs.len() < nb + 2 {
         return Err(
-            "dot_general on TPU: the lhs must be batch, free then one contracting dimension".into(),
+            "dot_general on TPU: the lhs must be batch, free then one contracting dimension, or batch, contracting then free"
+                .into(),
         );
     }
     if rhs.len() != nb + 2 || rhs_contracting.len() != 1 {
@@ -49,10 +52,15 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     Ok(Form {
         batch: product(&lhs[..nb]),
         lead: product(&lhs[nb..lhs.len() - 2]),
-        m: lhs[lhs.len() - 2],
+        m: lhs[if lhs_transposed {
+            nb + 1
+        } else {
+            lhs.len() - 2
+        }],
         n: rhs[if transposed { nb } else { nb + 1 }],
-        k: lhs[lhs.len() - 1],
+        k: lhs[if lhs_transposed { nb } else { lhs.len() - 1 }],
         transposed,
+        lhs_transposed,
     })
 }
 
@@ -83,10 +91,18 @@ fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     }
 }
 
-fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, streamed: usize) -> usize {
-    let operands = bm * bk + bk * bn;
+fn footprint(
+    bm: usize,
+    bn: usize,
+    bk: usize,
+    kb: usize,
+    parts: usize,
+    operand: DType,
+    streamed: usize,
+) -> usize {
+    let operands = parts * bm * bk + bk * bn;
     let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * streamed;
-    if kb > 1 {
+    if kb > 1 || parts > 1 {
         bytes += bm * bn * 4;
     }
     if operand == DType::F32 {
@@ -106,6 +122,9 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
 }
 
 struct Epilogue {
+    lhs: Vec<usize>,
+    lhs_axis: usize,
+    rows: bool,
     widths: Vec<usize>,
     inputs: Vec<(DType, bool, usize)>,
     nodes: Vec<String>,
@@ -113,24 +132,58 @@ struct Epilogue {
 }
 
 impl Epilogue {
-    fn of(body: &Graph) -> Epilogue {
-        let dot = &body.nodes()[0];
-        let extras = &body.inputs()[2..];
+    fn of(body: &Graph) -> (Epilogue, &Node) {
+        let all = body.nodes();
+        let at = all
+            .iter()
+            .position(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+            .expect("a dot");
+        let dot = &all[at];
+        let (lhs, lhs_axis) = match all[..at].iter().find(|n| n.output == dot.inputs[0]) {
+            Some(Node {
+                primitive: Primitive::Concatenate { dimension, .. },
+                inputs,
+                ..
+            }) => (
+                inputs
+                    .iter()
+                    .map(|&v| body.type_of(v).shape[*dimension])
+                    .collect(),
+                *dimension,
+            ),
+            _ => (Vec::new(), 0),
+        };
+        let first = lhs.len().max(1) + 1;
+        let extras = &body.inputs()[first..];
         let mut value: HashMap<Var, usize> = HashMap::from([(dot.output, 0)]);
         let mut member: HashMap<Var, usize> = HashMap::new();
         for (k, &v) in extras.iter().enumerate() {
             value.insert(v, 1 + k);
         }
+        let shape = &body.type_of(dot.output).shape;
+        let slices: Vec<&Node> = all[at + 1..]
+            .iter()
+            .filter(|n| matches!(n.primitive, Primitive::Slice { .. }) && n.inputs[0] == dot.output)
+            .collect();
+        let axis = slices
+            .first()
+            .map_or(shape.len() - 1, |n| match &n.primitive {
+                Primitive::Slice {
+                    start_indices,
+                    limit_indices,
+                    ..
+                } => (0..shape.len())
+                    .find(|&d| limit_indices[d] - start_indices[d] != shape[d])
+                    .unwrap_or(shape.len() - 1),
+                _ => unreachable!("a slice"),
+            });
         let (mut widths, mut nodes) = (Vec::new(), Vec::new());
         let mut readers: HashMap<Var, usize> = HashMap::new();
-        let split = body.nodes()[1..]
-            .iter()
-            .any(|n| matches!(n.primitive, Primitive::Slice { .. }) && n.inputs[0] == dot.output);
-        if !split {
-            widths.push(*body.type_of(dot.output).shape.last().expect("a matrix"));
+        if slices.is_empty() {
+            widths.push(shape[axis]);
             member.insert(dot.output, 0);
         }
-        for node in &body.nodes()[1..] {
+        for node in &all[at + 1..] {
             if let Primitive::Slice {
                 start_indices,
                 limit_indices,
@@ -138,10 +191,9 @@ impl Epilogue {
             } = &node.primitive
                 && node.inputs[0] == dot.output
             {
-                let last = start_indices.len() - 1;
                 value.insert(node.output, 0);
                 member.insert(node.output, widths.len());
-                widths.push(limit_indices[last] - start_indices[last]);
+                widths.push(limit_indices[axis] - start_indices[axis]);
                 continue;
             }
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
@@ -154,7 +206,10 @@ impl Epilogue {
                 }
             }
         }
-        Epilogue {
+        let epilogue = Epilogue {
+            lhs,
+            lhs_axis,
+            rows: axis + 2 == shape.len(),
             widths,
             inputs: extras
                 .iter()
@@ -173,11 +228,15 @@ impl Epilogue {
                 .iter()
                 .map(|v| (value[v], member[v], body.type_of(*v).dtype))
                 .collect(),
-        }
+        };
+        (epilogue, dot)
     }
 
     fn plain(n: usize, output: DType) -> Epilogue {
         Epilogue {
+            lhs: Vec::new(),
+            lhs_axis: 0,
+            rows: false,
             widths: vec![n],
             inputs: Vec::new(),
             nodes: Vec::new(),
@@ -192,28 +251,56 @@ pub(crate) fn encode(
     inputs: &[*const u8],
     output: *mut u8,
 ) -> Result<(), String> {
-    let (lhs, rhs) = (&step.inputs[0].1, &step.inputs[1].1);
     let out = &step.output.1;
     if out.numel() == 0 {
         return Ok(());
     }
-    let (dot, value, epilogue) = match &step.primitive {
+    let (dot, lhs, rhs, value, epilogue) = match &step.primitive {
         Primitive::Fusion { body, .. } => {
-            let d = &body.nodes()[0];
+            let (e, d) = Epilogue::of(body);
+            let ty = |v: Var| body.type_of(v).clone();
             (
-                &d.primitive,
-                body.type_of(d.output).dtype,
-                Some(Epilogue::of(body)),
+                d.primitive.clone(),
+                ty(d.inputs[0]),
+                ty(d.inputs[1]),
+                ty(d.output).dtype,
+                Some(e),
             )
         }
-        p => (p, out.dtype, None),
+        p => (
+            p.clone(),
+            step.inputs[0].1.clone(),
+            step.inputs[1].1.clone(),
+            out.dtype,
+            None,
+        ),
     };
-    let Primitive::DotGeneral { accum_dtype, .. } = *dot else {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot else {
         unreachable!("a dot_general step")
     };
-    let f = form(dot, &lhs.shape, &rhs.shape)?;
+    let f = form(&dot, &lhs.shape, &rhs.shape)?;
     let e = epilogue.unwrap_or_else(|| Epilogue::plain(f.n, out.dtype));
-    let unit_n = e.widths.iter().fold(f.n, |g, &w| gcd(g, w));
+    let lhs_k = !e.lhs.is_empty()
+        && e.lhs_axis
+            == match f.lhs_transposed {
+                true => lhs.shape.len() - 2,
+                false => lhs.shape.len() - 1,
+            };
+    let lhs_m = !e.lhs.is_empty() && !lhs_k;
+    let gcd_of = |n: usize, parts: &[usize], on: bool| match on {
+        true => parts.iter().fold(n, |g, &w| gcd(g, w)),
+        false => n,
+    };
+    let windows: Vec<Option<(usize, usize)>> = (0..e.outputs.len())
+        .map(|o| super::super::elementwise::tpu::window(step, o))
+        .collect();
+    if e.rows && windows.iter().any(Option::is_some) {
+        return Err("dot_general on TPU: members of rows written into a wider buffer".into());
+    }
+    let starts: Vec<usize> = windows.iter().flatten().map(|w| w.1).collect();
+    let unit_n = gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true);
+    let whole_m = gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m);
+    let whole_k = gcd_of(f.k, &e.lhs, lhs_k);
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
         return Err(format!(
             "dot_general on TPU: operands of one dtype accumulating in float32, got {} · {} in {}",
@@ -226,23 +313,36 @@ pub(crate) fn encode(
         .map(|o| o.2)
         .chain(e.inputs.iter().filter(|i| !i.1).map(|i| i.0))
         .collect();
-    let streamed: usize = streams.iter().map(|d| d.size_of()).sum();
+    let values = match e.nodes.is_empty() {
+        true => 0,
+        false => 4,
+    };
+    let streamed: usize = streams.iter().map(|d| d.size_of()).sum::<usize>() + values;
     let mut unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(value, "the output")?);
     for &d in &streams {
         unit_m = unit_m.max(Layout::new(d, &[1, 1])?.rows);
     }
-    let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
+    let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, whole_k);
     let mut blocks;
     loop {
         blocks = (
-            block(f.m, unit_m, cap_m),
+            block(whole_m, if f.lhs_transposed { 128 } else { unit_m }, cap_m),
             block(unit_n, 128, cap_n),
-            block(f.k, 128, cap_k),
+            block(whole_k, 128, cap_k),
         );
         let (Some(bm), Some(bn), Some(bk)) = blocks else {
             break;
         };
-        if footprint(bm, bn, bk, f.k / bk, lhs.dtype, streamed) <= VMEM {
+        if footprint(
+            bm,
+            bn,
+            bk,
+            f.k / bk,
+            e.lhs.len().max(1),
+            lhs.dtype,
+            streamed,
+        ) <= VMEM
+        {
             break;
         }
         match (cap_m, cap_n, cap_k) {
@@ -293,10 +393,14 @@ pub(crate) fn encode(
     let outputs_spec: Vec<String> = e
         .outputs
         .iter()
-        .map(|(v, p, d)| format!("[{v}, {p}, \"{}\"]", d.full_name()))
+        .zip(&windows)
+        .map(|((v, p, d), w)| {
+            let (whole, start) = w.unwrap_or((0, 0));
+            format!("[{v}, {p}, \"{}\", {whole}, {start}]", d.full_name())
+        })
         .collect();
     let spec = format!(
-        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \
+        "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
          \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         f.batch,
@@ -305,6 +409,9 @@ pub(crate) fn encode(
         f.n,
         f.k,
         f.transposed,
+        f.lhs_transposed,
+        e.lhs,
+        e.rows,
         lhs.dtype.full_name(),
         value.full_name(),
         e.widths,
