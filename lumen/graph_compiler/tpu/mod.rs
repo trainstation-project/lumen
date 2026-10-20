@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::pass::{CompilerPass, Module, Pipeline};
 use super::passes::dot_strength::DotStrength;
 use super::passes::fold_dot_reshapes::FoldDotReshapes;
@@ -6,6 +8,7 @@ use super::passes::simplify::Simplify;
 use super::plan::DeviceLayout;
 use super::{Options, positions};
 use crate::graph::{Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::{Plan, PlanOptions};
 
 const LAYOUT: DeviceLayout = DeviceLayout {
@@ -79,31 +82,197 @@ fn columns(graph: &Graph, dot: &Node) -> Option<Vec<(usize, Var)>> {
     covers.then(|| parts.into_iter().map(|(a, b, v)| (b - a, v)).collect())
 }
 
-fn split_dots(graph: &Graph) -> Graph {
+struct Fused {
+    parts: Option<Vec<(usize, Var)>>,
+    inside: Vec<usize>,
+    extras: Vec<Var>,
+    outputs: Vec<Var>,
+}
+
+fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
+    let nodes = graph.nodes();
+    let n = graph.types.len();
+    let mut producer: Vec<Option<usize>> = vec![None; n];
+    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+        node.inputs.iter().for_each(|&v| users[v].push(i));
+    }
+    let mut claimed = vec![false; nodes.len()];
+    let mut found: Vec<Option<Fused>> = (0..nodes.len()).map(|_| None).collect();
+    for (d, dot) in nodes.iter().enumerate() {
+        if !matches!(dot.primitive, Primitive::DotGeneral { .. }) {
+            continue;
+        }
+        let before = |v: Var| producer[v].is_none_or(|p| p < d);
+        let parts = columns(graph, dot);
+        let mut member: HashMap<Var, usize> = match &parts {
+            Some(parts) => parts
+                .iter()
+                .enumerate()
+                .map(|(k, &(_, v))| (v, k))
+                .collect(),
+            None => HashMap::from([(dot.output, 0)]),
+        };
+        let shape_of = |p: usize| match &parts {
+            Some(parts) => &graph.type_of(parts[p].1).shape,
+            None => &graph.type_of(dot.output).shape,
+        };
+        let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
+        let mut read_by: HashMap<Var, usize> = HashMap::new();
+        for (u, un) in nodes.iter().enumerate().skip(d + 1) {
+            if !epilogues || claimed[u] || !elementwise(&un.primitive) {
+                continue;
+            }
+            let mut of: Vec<usize> = un
+                .inputs
+                .iter()
+                .filter_map(|v| member.get(v))
+                .copied()
+                .collect();
+            of.dedup();
+            let [p] = of[..] else {
+                continue;
+            };
+            if graph.type_of(un.output).shape != *shape_of(p) {
+                continue;
+            }
+            let (mut constants, mut operands) = (Vec::new(), Vec::new());
+            let fits = un
+                .inputs
+                .iter()
+                .filter(|v| !member.contains_key(v))
+                .all(|&v| {
+                    let ty = graph.type_of(v);
+                    let made = producer[v].map(|k| &nodes[k]);
+                    match made.map(|m| &m.primitive) {
+                        Some(Primitive::Full { .. }) => {
+                            constants.push(producer[v].expect("made"));
+                            true
+                        }
+                        Some(Primitive::BroadcastInDim {
+                            broadcast_dimensions,
+                            ..
+                        }) if broadcast_dimensions.is_empty() => {
+                            let x = made.expect("made").inputs[0];
+                            constants.push(producer[v].expect("made"));
+                            match producer[x].map(|k| &nodes[k].primitive) {
+                                Some(Primitive::Full { .. }) => {
+                                    constants.push(producer[x].expect("made"));
+                                    true
+                                }
+                                _ if before(x) => {
+                                    operands.push(x);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => before(v) && (ty.shape.is_empty() || ty.shape == *shape_of(p)),
+                    }
+                });
+            for v in un.inputs.iter().filter(|v| !member.contains_key(v)) {
+                let constant = producer[*v].is_some_and(|k| constants.contains(&k));
+                if !constant && !operands.contains(v) {
+                    operands.push(*v);
+                }
+            }
+            let shared = operands.iter().any(|v| {
+                !graph.type_of(*v).shape.is_empty() && read_by.get(v).is_some_and(|&q| q != p)
+            });
+            if !fits || shared {
+                continue;
+            }
+            for &v in &operands {
+                read_by.entry(v).or_insert(p);
+            }
+            claimed[u] = true;
+            member.insert(un.output, p);
+            absorbed.push(u);
+            for k in constants.into_iter().chain([u]) {
+                if !inside.contains(&k) {
+                    inside.push(k);
+                }
+            }
+            for v in operands {
+                if !extras.contains(&v) {
+                    extras.push(v);
+                }
+            }
+        }
+        if parts.is_none() && absorbed.is_empty() {
+            continue;
+        }
+        inside.sort_unstable();
+        let read_outside =
+            |v: Var| graph.outputs().contains(&v) || users[v].iter().any(|u| !absorbed.contains(u));
+        let mut outputs: Vec<Var> = member
+            .keys()
+            .copied()
+            .filter(|&v| read_outside(v))
+            .collect();
+        outputs.sort_unstable();
+        if outputs.is_empty() {
+            continue;
+        }
+        found[d] = Some(Fused {
+            parts,
+            inside,
+            extras,
+            outputs,
+        });
+    }
+    found
+}
+
+fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
+    let nodes = graph.nodes();
+    let found = fused(graph, epilogues);
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    let mut skipped = vec![false; nodes.len()];
+    for f in found.iter().flatten() {
+        f.inside
+            .iter()
+            .filter(|&&k| {
+                !matches!(
+                    nodes[k].primitive,
+                    Primitive::Full { .. } | Primitive::BroadcastInDim { .. }
+                )
+            })
+            .for_each(|&k| skipped[k] = true);
+    }
     let mut parted = vec![false; graph.types.len()];
-    for node in graph.nodes() {
+    for (d, node) in nodes.iter().enumerate() {
         out.set_origin(node);
-        if parted[node.output] {
+        if skipped[d] || parted[node.output] {
             continue;
         }
-        if let Some(parts) = columns(graph, node) {
-            let mut body = Graph::new();
-            let operands: Vec<Var> = node
-                .inputs
-                .iter()
-                .map(|&v| body.input(graph.type_of(v).clone()))
-                .collect();
-            let dot = body
-                .apply(node.primitive.clone(), &operands)
-                .expect("the dot's operands");
+        let Some(f) = &found[d] else {
+            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("the node's own operands");
+            out.set_label(map[node.output], node.label);
+            continue;
+        };
+        let mut body = Graph::new();
+        let mut within: HashMap<Var, Var> = HashMap::new();
+        for &v in node.inputs.iter().chain(&f.extras) {
+            within.insert(v, body.input(graph.type_of(v).clone()));
+        }
+        let operands: Vec<Var> = node.inputs.iter().map(|v| within[v]).collect();
+        let dot = body
+            .apply(node.primitive.clone(), &operands)
+            .expect("the dot's operands");
+        within.insert(node.output, dot);
+        if let Some(parts) = &f.parts {
             let shape = body.type_of(dot).shape.clone();
-            let (mut start, mut outputs) = (0, Vec::new());
-            for &(width, _) in &parts {
+            let mut start = 0;
+            for &(width, v) in parts {
                 let (mut starts, mut limits) = (vec![0; shape.len()], shape.clone());
                 (starts[shape.len() - 1], limits[shape.len() - 1]) = (start, start + width);
                 let slice = Primitive::Slice {
@@ -111,37 +280,54 @@ fn split_dots(graph: &Graph) -> Graph {
                     limit_indices: limits,
                     view: false,
                 };
-                outputs.push(body.apply(slice, &[dot]).expect("within the dot"));
+                within.insert(v, body.apply(slice, &[dot]).expect("within the dot"));
+                parted[v] = true;
                 start += width;
             }
-            body.set_outputs(&outputs).expect("the body's values");
-            let label = intern(format!("{}x dot_general", parts.len()));
-            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-            let fused = out
-                .apply(
-                    Primitive::Fusion {
-                        name: "dot_general".into(),
-                        label,
-                        body,
-                    },
-                    &inputs,
-                )
-                .expect("a fusion of the dot");
-            map[parts[0].1] = fused;
-            for (index, &(_, v)) in parts.iter().enumerate().skip(1) {
-                let ty = graph.type_of(v).clone();
-                map[v] = out
-                    .apply(Primitive::FusionOutput { index, ty }, &[fused])
-                    .expect("the fusion's output");
-            }
-            parts.iter().for_each(|&(_, v)| parted[v] = true);
-            continue;
         }
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("the node's own operands");
-        out.set_label(map[node.output], node.label);
+        let mut names = Vec::new();
+        for &k in &f.inside {
+            let inputs: Vec<Var> = nodes[k].inputs.iter().map(|v| within[v]).collect();
+            let v = body
+                .apply(nodes[k].primitive.clone(), &inputs)
+                .expect("the epilogue's operands");
+            within.insert(nodes[k].output, v);
+            if skipped[k] {
+                names.push(nodes[k].primitive.name());
+            }
+        }
+        let outputs: Vec<Var> = f.outputs.iter().map(|v| within[v]).collect();
+        body.set_outputs(&outputs).expect("the body's values");
+        let mut label = match &f.parts {
+            Some(parts) => format!("{}x dot_general", parts.len()),
+            None => "dot_general".into(),
+        };
+        for name in names {
+            label += &format!(" → {name}");
+        }
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .chain(&f.extras)
+            .map(|&v| map[v])
+            .collect();
+        let fused = out
+            .apply(
+                Primitive::Fusion {
+                    name: "dot_general".into(),
+                    label: intern(label),
+                    body,
+                },
+                &inputs,
+            )
+            .expect("a fusion of the dot");
+        map[f.outputs[0]] = fused;
+        for (index, &v) in f.outputs.iter().enumerate().skip(1) {
+            let ty = graph.type_of(v).clone();
+            map[v] = out
+                .apply(Primitive::FusionOutput { index, ty }, &[fused])
+                .expect("the fusion's output");
+        }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs)
@@ -149,15 +335,15 @@ fn split_dots(graph: &Graph) -> Graph {
     out
 }
 
-struct SplitDots;
+struct FuseDots;
 
-impl CompilerPass<TpuModule<'_>> for SplitDots {
+impl CompilerPass<TpuModule<'_>> for FuseDots {
     fn name(&self) -> &'static str {
-        "split_dots"
+        "fuse_dots"
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph = split_dots(&m.graph);
+        m.graph = fuse_dots(&m.graph, m.options.config.contraction_epilogues);
         Ok(())
     }
 }
@@ -175,17 +361,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(Simplify { matched: true })
         .add(DotStrength { matrices: false });
     if options.config.merge_dots {
-        pipeline
-            .add(MergeDots {
-                target: Target {
-                    reads: |_, _| true,
-                    views: false,
-                    lanes: 128,
-                    columns: 1,
-                },
-            })
-            .add(SplitDots);
+        pipeline.add(MergeDots {
+            target: Target {
+                reads: |_, _| true,
+                views: false,
+                lanes: 128,
+                columns: 1,
+            },
+        });
     }
+    pipeline.add(FuseDots);
     pipeline.run(&mut module)?;
     let TpuModule {
         graph,

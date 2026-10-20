@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use crate::DType;
+use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
+use crate::graph::{Graph, Var};
 use crate::graph_compiler::plan::Step;
 use crate::ops::tpu::{Launch, launch};
 
@@ -79,9 +83,9 @@ fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     }
 }
 
-fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, output: DType) -> usize {
+fn footprint(bm: usize, bn: usize, bk: usize, kb: usize, operand: DType, streamed: usize) -> usize {
     let operands = bm * bk + bk * bn;
-    let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * output.size_of();
+    let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * streamed;
     if kb > 1 {
         bytes += bm * bn * 4;
     }
@@ -101,6 +105,84 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     }
 }
 
+struct Epilogue {
+    widths: Vec<usize>,
+    inputs: Vec<(DType, bool, usize)>,
+    nodes: Vec<String>,
+    outputs: Vec<(usize, usize, DType)>,
+}
+
+impl Epilogue {
+    fn of(body: &Graph) -> Epilogue {
+        let dot = &body.nodes()[0];
+        let extras = &body.inputs()[2..];
+        let mut value: HashMap<Var, usize> = HashMap::from([(dot.output, 0)]);
+        let mut member: HashMap<Var, usize> = HashMap::new();
+        for (k, &v) in extras.iter().enumerate() {
+            value.insert(v, 1 + k);
+        }
+        let (mut widths, mut nodes) = (Vec::new(), Vec::new());
+        let mut readers: HashMap<Var, usize> = HashMap::new();
+        for node in &body.nodes()[1..] {
+            if let Primitive::Slice {
+                start_indices,
+                limit_indices,
+                ..
+            } = &node.primitive
+                && node.inputs[0] == dot.output
+            {
+                let last = start_indices.len() - 1;
+                value.insert(node.output, 0);
+                member.insert(node.output, widths.len());
+                widths.push(limit_indices[last] - start_indices[last]);
+                continue;
+            }
+            let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
+            nodes.push(super::super::elementwise::tpu::node(&node.primitive, &args));
+            value.insert(node.output, 1 + extras.len() + nodes.len() - 1);
+            if let Some(&p) = node.inputs.iter().find_map(|v| member.get(v)) {
+                member.insert(node.output, p);
+                for &v in &node.inputs {
+                    readers.entry(v).or_insert(p);
+                }
+            }
+        }
+        if widths.is_empty() {
+            widths.push(*body.type_of(dot.output).shape.last().expect("a matrix"));
+            member.insert(dot.output, 0);
+        }
+        Epilogue {
+            widths,
+            inputs: extras
+                .iter()
+                .map(|v| {
+                    let ty = body.type_of(*v);
+                    (
+                        ty.dtype,
+                        ty.shape.is_empty(),
+                        readers.get(v).copied().unwrap_or(0),
+                    )
+                })
+                .collect(),
+            nodes,
+            outputs: body
+                .outputs()
+                .iter()
+                .map(|v| (value[v], member[v], body.type_of(*v).dtype))
+                .collect(),
+        }
+    }
+
+    fn plain(n: usize, output: DType) -> Epilogue {
+        Epilogue {
+            widths: vec![n],
+            inputs: Vec::new(),
+            nodes: Vec::new(),
+            outputs: vec![(0, 0, output)],
+        }
+    }
+}
+
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -112,28 +194,40 @@ pub(crate) fn encode(
     if out.numel() == 0 {
         return Ok(());
     }
-    let (dot, widths) = match &step.primitive {
-        Primitive::Fusion { body, .. } => (
-            &body.nodes()[0].primitive,
-            body.outputs()
-                .iter()
-                .map(|&v| *body.type_of(v).shape.last().expect("a matrix"))
-                .collect(),
-        ),
-        p => (p, Vec::new()),
+    let (dot, value, epilogue) = match &step.primitive {
+        Primitive::Fusion { body, .. } => {
+            let d = &body.nodes()[0];
+            (
+                &d.primitive,
+                body.type_of(d.output).dtype,
+                Some(Epilogue::of(body)),
+            )
+        }
+        p => (p, out.dtype, None),
     };
     let Primitive::DotGeneral { accum_dtype, .. } = *dot else {
         unreachable!("a dot_general step")
     };
     let f = form(dot, &lhs.shape, &rhs.shape)?;
-    let unit_n = widths.iter().fold(f.n, |g, &w| gcd(g, w));
+    let e = epilogue.unwrap_or_else(|| Epilogue::plain(f.n, out.dtype));
+    let unit_n = e.widths.iter().fold(f.n, |g, &w| gcd(g, w));
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
         return Err(format!(
             "dot_general on TPU: operands of one dtype accumulating in float32, got {} · {} in {}",
             lhs.dtype, rhs.dtype, accum_dtype
         ));
     }
-    let unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(out.dtype, "the output")?);
+    let streams: Vec<DType> = e
+        .outputs
+        .iter()
+        .map(|o| o.2)
+        .chain(e.inputs.iter().filter(|i| !i.1).map(|i| i.0))
+        .collect();
+    let streamed: usize = streams.iter().map(|d| d.size_of()).sum();
+    let mut unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(value, "the output")?);
+    for &d in &streams {
+        unit_m = unit_m.max(Layout::new(d, &[1, 1])?.rows);
+    }
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, f.k);
     let mut blocks;
     loop {
@@ -145,7 +239,7 @@ pub(crate) fn encode(
         let (Some(bm), Some(bn), Some(bk)) = blocks else {
             break;
         };
-        if footprint(bm, bn, bk, f.k / bk, lhs.dtype, out.dtype) <= VMEM {
+        if footprint(bm, bn, bk, f.k / bk, lhs.dtype, streamed) <= VMEM {
             break;
         }
         match (cap_m, cap_n, cap_k) {
@@ -188,9 +282,20 @@ pub(crate) fn encode(
             failed.join(" and ")
         ));
     };
+    let inputs_spec: Vec<String> = e
+        .inputs
+        .iter()
+        .map(|(d, scalar, p)| format!("[\"{}\", {scalar}, {p}]", d.full_name()))
+        .collect();
+    let outputs_spec: Vec<String> = e
+        .outputs
+        .iter()
+        .map(|(v, p, d)| format!("[{v}, {p}, \"{}\"]", d.full_name()))
+        .collect();
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \
-         \"operands\": \"{}\", \"output\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"outputs\": {widths:?}",
+         \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
+         \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         f.batch,
         f.lead,
         f.m,
@@ -198,15 +303,22 @@ pub(crate) fn encode(
         f.k,
         f.transposed,
         lhs.dtype.full_name(),
-        out.dtype.full_name()
+        value.full_name(),
+        e.widths,
+        inputs_spec.join(", "),
+        e.nodes.join(", "),
+        outputs_spec.join(", "),
     );
-    let rows: Vec<*const u8> = [inputs[0], inputs[1], output.cast_const()]
-        .into_iter()
-        .chain(inputs[2..].iter().copied())
+    let n = step.inputs.len();
+    let rows: Vec<*const u8> = inputs[..n]
+        .iter()
+        .copied()
+        .chain([output.cast_const()])
+        .chain(inputs[n..].iter().copied())
         .collect();
     let launched = Launch {
         module: "lumen.ops.dot_general.tpu",
-        kernel: format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, out.dtype),
+        kernel: format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, value),
         spec,
         rows: &rows,
         scalars: &[],
