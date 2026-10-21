@@ -83,5 +83,5 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 ## Related
 
 * [`../ops/tpu/`](../ops/tpu/README.md) — how a kernel is wrapped, compiled and run on a device's memory.
-* [`../ops/dot_general/`](../ops/dot_general/README.md) — the dot kernel (`tpu.py`), written on this.
+* [`../ops/dot_general/`](../ops/dot_general/README.md) — the dot kernel (`tpu/__init__.py`), written on this.
 * [`../graph/`](../graph/README.md) — the tracer (`tracer.tracing`) and `Primitive`s.

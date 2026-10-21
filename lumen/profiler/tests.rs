@@ -561,43 +561,6 @@ mod mps {
     }
 
     #[test]
-    fn metal_fills_are_timed_on_the_gpu() {
-        if !mps::MPS.is_available() {
-            return eprintln!("Metal unavailable, skipping");
-        }
-        let config = ProfilerConfig {
-            activities: vec![Activity::Cpu, Activity::Mps],
-            profile_memory: true,
-            record_shapes: false,
-        };
-        let p = profile(config, || {
-            let t = Tensor::zeros(&[1 << 16], on_mps(DType::F32));
-            crate::stream::mps::synchronize();
-            drop(t);
-        });
-        let fill = one(&p, "Fill");
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
-        let zeros = one(&p, "lumen::zeros");
-        assert_eq!(fill.parent, Some(zeros.id));
-        assert!(
-            fill.start_ns + 1_000_000 >= zeros.start_ns,
-            "{fill:?} before {zeros:?}"
-        );
-        assert!(fill.end_ns >= fill.start_ns);
-        let memory: Vec<&Event> = named(&p, "[memory]")
-            .into_iter()
-            .filter(|e| e.device == Device::Mps(0))
-            .collect();
-        assert_eq!(memory.len(), 2);
-        assert_eq!((memory[0].bytes, memory[1].bytes), (1 << 18, -(1 << 18)));
-        let table = p.table(Some(SortBy::SelfDeviceTimeTotal), None);
-        assert!(
-            table.contains("Self MPS") && table.contains("MPS Mem"),
-            "{table}"
-        );
-    }
-
-    #[test]
     fn metal_stream_work_runs_in_order() {
         if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
@@ -624,54 +587,6 @@ mod mps {
             assert!(pair[1].start_ns + 50_000 >= pair[0].end_ns, "{pair:#?}");
         }
         assert_eq!(t.to_vec::<f32>(), vec![2.0; 1 << 24]);
-    }
-
-    #[test]
-    fn metal_ones_is_a_gpu_fill_kernel() {
-        if !mps::MPS.is_available() {
-            return eprintln!("Metal unavailable, skipping");
-        }
-        let config = ProfilerConfig {
-            activities: vec![Activity::Cpu, Activity::Mps],
-            ..cpu()
-        };
-        let p = profile(config, || {
-            drop(Tensor::ones(&[1 << 16], on_mps(DType::F32)))
-        });
-        let fill = one(&p, "Fill");
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
-        assert_eq!(fill.parent, Some(one(&p, "lumen::ones").id));
-        assert!(
-            p.chrome_trace()
-                .contains("\"cat\":\"kernel\",\"name\":\"Fill\"")
-        );
-    }
-
-    #[test]
-    fn metal_strided_fills_run_on_the_gpu() {
-        if !mps::MPS.is_available() {
-            return eprintln!("Metal unavailable, skipping");
-        }
-        let config = ProfilerConfig {
-            activities: vec![Activity::Cpu, Activity::Mps],
-            ..cpu()
-        };
-        let t = Tensor::ones(&[64, 64], on_mps(DType::F32));
-        let p = profile(config, || {
-            t.transpose(0, 1).narrow(1, 0, 32).zero_();
-        });
-        let fill = one(&p, "Fill");
-        assert_eq!((fill.kind, fill.device), (EventKind::Gpu, Device::Mps(0)));
-    }
-
-    #[test]
-    fn metal_fills_are_not_timed_without_the_mps_activity() {
-        if !mps::MPS.is_available() {
-            return eprintln!("Metal unavailable, skipping");
-        }
-        let p = profile(cpu(), || drop(Tensor::zeros(&[16], on_mps(DType::U8))));
-        assert!(named(&p, "Fill").is_empty());
-        assert_eq!(named(&p, "lumen::zeros").len(), 1);
     }
 }
 

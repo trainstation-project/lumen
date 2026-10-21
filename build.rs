@@ -102,8 +102,6 @@ fn build_mps_shim() {
     }
 
     println!("cargo:rerun-if-changed=lumen/allocator/mps/mps_shim.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/shim.mm");
-    println!("cargo:rerun-if-changed=lumen/ops/fill/mps/kernels.metal");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
     println!("cargo:rerun-if-changed=lumen/ops/mps/shim.mm");
@@ -113,11 +111,6 @@ fn build_mps_shim() {
     }
 
     embed_metal_source(
-        &["lumen/ops/fill/mps/kernels.metal"],
-        "kMpsFillSource",
-        "mps_fill_source.h",
-    );
-    embed_metal_source(
         PRIMITIVE_KERNELS,
         "kPrimitiveKernels",
         "primitive_kernels.h",
@@ -125,7 +118,6 @@ fn build_mps_shim() {
 
     cc::Build::new()
         .file("lumen/allocator/mps/mps_shim.mm")
-        .file("lumen/ops/fill/mps/shim.mm")
         .file("lumen/stream/mps/mps.mm")
         .file("lumen/ops/mps/shim.mm")
         .file("lumen/graph_compiler/mps/ane/coreml.mm")

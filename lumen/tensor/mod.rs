@@ -13,4 +13,4 @@ pub mod tensor_options;
 mod tests;
 
 pub use tensor::Tensor;
-pub(crate) use tensor::{contiguous_strides, flat_offset, for_each_index};
+pub(crate) use tensor::{contiguous_strides, for_each_index};

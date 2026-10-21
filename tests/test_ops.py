@@ -35,7 +35,7 @@ def test_ops_is_exported_from_the_package():
 
 def test_registered_ops_lists_the_ops_that_take_python_kernels():
     signature = "(dtype, shape, strides, vector_size) -> launch(address, value, stream)"
-    assert lumen.ops.registered_ops() == {"lumen::fill_": signature, "lumen::dummy_op": signature}
+    assert lumen.ops.registered_ops() == {"lumen::dummy_op": signature}
 
 
 def test_signature_of_a_known_op():
