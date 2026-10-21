@@ -712,7 +712,7 @@ def test_array_reduce(op_name, op, np_op, dtype, axis):
     rng = np.random.default_rng(0)
 
     def make_x():
-        if np.issubdtype(np.dtype(dtype), np.integer):
+        if dtype.startswith(("int", "uint")):
             return rng.permutation(np.arange(m * n, dtype=dtype)).reshape(m, n)
         return rounded(rng.standard_normal((m, n), dtype=np.float32), dtype)
 
@@ -740,7 +740,7 @@ def test_cumsum(dtype, axis):
     rng = np.random.default_rng(0)
 
     def make_x():
-        if np.issubdtype(np.dtype(dtype), np.integer):
+        if dtype.startswith(("int", "uint")):
             return rng.permutation(np.arange(m * n, dtype=dtype)).reshape(m, n)
         return rng.standard_normal((m, n)).astype(dtype)
 

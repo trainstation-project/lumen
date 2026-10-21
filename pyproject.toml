@@ -53,4 +53,5 @@ markers = [
     "mps: needs an MPS (Metal) device",
     "cuda: needs a CUDA device and a wheel built with the `cuda` feature",
     "tpu: needs a TPU and a wheel built with the `tpu` feature",
+    "all_devices: needs every device of its kind, not one worker's (make test runs these after the rest, serially)",
 ]

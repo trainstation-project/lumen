@@ -67,7 +67,7 @@ jobs:
       - name: Set up virtualenv
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest numpy
+          .venv/bin/pip install maturin pytest pytest-xdist numpy
           echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       # No GPU here: the MPS and CUDA tests skip.
