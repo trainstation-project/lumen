@@ -126,6 +126,7 @@ fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> 
         rows,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched)
 }
@@ -237,6 +238,7 @@ pub(crate) fn encode(
         rows: &rows,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched)
 }

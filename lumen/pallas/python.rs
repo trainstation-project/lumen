@@ -25,6 +25,17 @@ impl PyKernel {
         }
     }
 
+    #[staticmethod]
+    fn sparse_core(refs: Vec<(String, Vec<usize>)>, mesh: [usize; 2]) -> PyResult<Self> {
+        let refs = refs
+            .iter()
+            .map(|(dtype, shape)| Ok(TensorType::new(parse_dtype(dtype)?, shape)))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyKernel {
+            inner: Kernel::sparse_core(&refs, mesh),
+        })
+    }
+
     fn params(&self) -> Vec<Var> {
         self.inner.params().to_vec()
     }
@@ -86,6 +97,7 @@ impl PyKernel {
             Type::Ref(t, space) => {
                 let space = match space {
                     Space::Any => "any",
+                    Space::Hbm => "hbm",
                     Space::Vmem => "vmem",
                     Space::Smem => "smem",
                 };
@@ -166,6 +178,19 @@ impl PyKernel {
 
     fn dma(&mut self, src: Var, dst: Var, sem: Var, wait: bool) -> PyResult<()> {
         self.inner.dma(src, dst, sem, wait).map_err(err)
+    }
+
+    fn indirect_dma(
+        &mut self,
+        src: Var,
+        dst: Var,
+        offsets: Var,
+        sem: Var,
+        wait: bool,
+    ) -> PyResult<()> {
+        self.inner
+            .indirect_dma(src, dst, offsets, sem, wait)
+            .map_err(err)
     }
 
     fn begin_if(&mut self, cond: Var) -> PyResult<()> {

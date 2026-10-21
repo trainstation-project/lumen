@@ -22,6 +22,13 @@ fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     }
 }
 
+fn device_alignment(device: Device, dtype: DType, shape: &[usize]) -> usize {
+    match device {
+        Device::Tpu(_) => crate::device::tpu::layout::alignment(dtype, shape),
+        _ => crate::allocator::ALIGNMENT,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Arc<Storage>,
@@ -47,11 +54,24 @@ impl Tensor {
     /// Its elements are uninitialized: each must be written before it is
     /// read.
     pub unsafe fn empty(size: &[usize], options: impl Into<TensorOptions>) -> Self {
+        unsafe { Self::empty_aligned(size, options, 0) }
+    }
+
+    /// # Safety
+    ///
+    /// Its elements are uninitialized: each must be written before it is
+    /// read.
+    pub unsafe fn empty_aligned(
+        size: &[usize],
+        options: impl Into<TensorOptions>,
+        alignment: usize,
+    ) -> Self {
         let op = crate::profiler::record_op(op_name!("empty"), Vec::new);
         let options = options.into();
         let dtype = options.dtype_opt().unwrap_or(DEFAULT_DTYPE);
         let device = device_of(&options);
-        let storage = Storage::new(device_bytes(device, dtype, size), device);
+        let alignment = alignment.max(device_alignment(device, dtype, size));
+        let storage = Storage::aligned(device_bytes(device, dtype, size), alignment, device);
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 

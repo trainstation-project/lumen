@@ -17,6 +17,8 @@ unsafe impl Send for Reserved {}
 
 pub(crate) const ROW: usize = 512;
 
+const TILE_ROWS: usize = 8 * 64 * 9 * 5 * 7;
+
 pub struct TpuAllocator {
     index: usize,
     region: Region,
@@ -25,6 +27,11 @@ pub struct TpuAllocator {
 
 impl TpuAllocator {
     pub fn new(index: usize, capacity: usize) -> Self {
+        let unit = TILE_ROWS * ROW;
+        let capacity = match capacity >= unit {
+            true => capacity - capacity % unit,
+            false => capacity,
+        };
         TpuAllocator {
             index,
             region: Region::new(Device::Tpu(index), capacity),
@@ -145,8 +152,13 @@ impl TpuAllocator {
 
 impl Allocator for TpuAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+        self.allocate_aligned(nbytes, ROW)
+    }
+
+    fn allocate_aligned(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
         let nbytes = nbytes.next_multiple_of(ROW);
-        self.region.take(nbytes, |n| self.reserve(n), || {})
+        self.region
+            .take_aligned(nbytes, alignment.max(ROW), |n| self.reserve(n), || {})
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {

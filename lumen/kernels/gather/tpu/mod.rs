@@ -3,7 +3,7 @@ use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::block;
-use crate::kernels::tpu::{Launch, launch};
+use crate::kernels::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
 
 const LANES: usize = 128;
 
@@ -12,6 +12,8 @@ const BLOCK_BYTES: usize = 8 << 20;
 const WINDOW: usize = 8192;
 
 const ROWS: usize = 64;
+
+const SPARSE_CORE_ROWS: usize = 160 << 10;
 
 pub(crate) fn encode(
     index: usize,
@@ -31,6 +33,9 @@ pub(crate) fn encode(
         return failed("a table of other than float32, bfloat16 or int32");
     }
     let (vocab, width) = (table.shape[0], table.shape[1]);
+    if sparse_core(index, step, inputs, output)? {
+        return Ok(());
+    }
     let tile = Layout::new(table.dtype, &[1, 1])?.rows;
     let rank = ids.shape.len();
     let s = ids.shape[rank - 1];
@@ -74,6 +79,79 @@ pub(crate) fn encode(
         rows: &rows,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
+}
+
+fn sparse_core(
+    index: usize,
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+) -> Result<bool, String> {
+    let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
+    let width = table.shape[1];
+    let words = match table.dtype.bits() {
+        32 if width.is_multiple_of(LANES) => width,
+        _ => return Ok(false),
+    };
+    let fits = |slots: usize| {
+        [64, 32, 16, 8]
+            .into_iter()
+            .find(|k| slots * k * words * 4 <= SPARSE_CORE_ROWS)
+            .map(|k| (k, slots))
+    };
+    let Some((k, slots)) = fits(2).or_else(|| fits(1)) else {
+        return Ok(false);
+    };
+    let column = words / LANES;
+    let region = crate::allocator::tpu::rows(index)?;
+    let rows = crate::allocator::tpu::rows_of(index, &[inputs[0], output.cast_const()])?;
+    if [region, rows[0] as usize, rows[1] as usize]
+        .iter()
+        .any(|r| !r.is_multiple_of(8 * column))
+    {
+        return Ok(false);
+    }
+    let n = ids.numel();
+    let s = ids.shape[ids.shape.len() - 1];
+    let workers = SPARSE_CORE_MESH[0] * SPARSE_CORE_MESH[1];
+    let count = n.next_multiple_of(k * workers);
+    let spec = format!(
+        "\"sparse_core\": true, \"rows_of_view\": {}, \"width\": {words}, \"count\": {count}, \"k\": {k}, \"slots\": {slots}, \"mesh\": {SPARSE_CORE_MESH:?}",
+        region * LANES / words
+    );
+    let sparse = SparseCore {
+        width: words,
+        count,
+        indices: vec![
+            Indices {
+                values: Values::Rows {
+                    scalar: 0,
+                    shape: ids.shape.clone(),
+                },
+                base: 1,
+            },
+            Indices {
+                values: Values::Iota {
+                    dims: vec![n / s, s],
+                    strides: vec![s.div_ceil(8) * 8, 1],
+                },
+                base: 2,
+            },
+        ],
+    };
+    let operands = [inputs[1], inputs[0], output.cast_const()];
+    let launched = Launch {
+        module: "lumen.kernels.gather.tpu",
+        kernel: format!("gather_sparse_core_{}_{k}x{words}", table.dtype),
+        spec,
+        rows: &operands,
+        scalars: &[],
+        host: &[],
+        sparse: Some(sparse),
+    };
+    launch(index, launched).map_err(|e| format!("{}: {e}", step.label))?;
+    Ok(true)
 }

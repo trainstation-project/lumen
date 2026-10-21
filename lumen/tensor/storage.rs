@@ -23,6 +23,15 @@ impl Storage {
         Self::with_allocator(nbytes, allocator_or_panic(device), device)
     }
 
+    pub fn aligned(nbytes: usize, alignment: usize, device: Device) -> Self {
+        Storage {
+            id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
+            data: DataPtr::allocate_aligned(allocator_or_panic(device), nbytes, alignment),
+            device,
+            parameter: Parameter::default(),
+        }
+    }
+
     pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>, device: Device) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),

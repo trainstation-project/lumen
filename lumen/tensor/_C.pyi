@@ -13,7 +13,9 @@ class Tensor:
         device: Optional[DeviceLike] = None,
     ) -> None: ...
     @staticmethod
-    def empty(shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None) -> Tensor:
+    def empty(
+        shape: Sequence[int], dtype: Optional[str] = None, device: Optional[DeviceLike] = None, alignment: int = 0
+    ) -> Tensor:
         """Uninitialized, like ``torch.empty``: write every element before
         reading it (reading first is undefined behavior in the Rust core)."""
 

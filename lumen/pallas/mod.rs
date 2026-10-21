@@ -12,6 +12,7 @@ pub type Var = usize;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Space {
     Any,
+    Hbm,
     Vmem,
     Smem,
 }
@@ -54,6 +55,8 @@ pub enum Op {
     StridedStore(Vec<usize>),
     DmaStart,
     DmaWait,
+    IndirectDmaStart,
+    IndirectDmaWait,
     Delay,
     If {
         then: Block,
@@ -105,6 +108,7 @@ pub struct Kernel {
     scratch: Vec<Var>,
     body: Block,
     open: Vec<Open>,
+    mesh: Option<[usize; 2]>,
 }
 
 fn words(rows: usize) -> Type {
@@ -119,6 +123,7 @@ impl Kernel {
             scratch: Vec::new(),
             body: Block::default(),
             open: Vec::new(),
+            mesh: None,
         };
         let mut params = vec![Type::Ref(
             TensorType::new(DType::I32, &[scalars]),
@@ -128,6 +133,31 @@ impl Kernel {
         params.extend([words(rows), words(rows)]);
         k.params = params.into_iter().map(|t| k.var(t)).collect();
         k
+    }
+
+    pub fn sparse_core(refs: &[TensorType], mesh: [usize; 2]) -> Self {
+        let mut k = Kernel {
+            types: Vec::new(),
+            params: Vec::new(),
+            scratch: Vec::new(),
+            body: Block::default(),
+            open: Vec::new(),
+            mesh: Some(mesh),
+        };
+        let index = Type::Value(TensorType::new(DType::I32, &[]));
+        let params = [index.clone(), index]
+            .into_iter()
+            .chain(refs.iter().map(|t| Type::Ref(t.clone(), Space::Hbm)));
+        k.params = params
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| k.var(t))
+            .collect();
+        k
+    }
+
+    pub fn mesh(&self) -> Option<[usize; 2]> {
+        self.mesh
     }
 
     fn var(&mut self, ty: Type) -> Var {
@@ -324,7 +354,10 @@ impl Kernel {
 
     pub fn view(&mut self, memory: Var, row: Var, ty: TensorType) -> Result<Var, String> {
         self.check(&[memory, row])?;
-        if !self.params.contains(&memory) || self.types[memory] != words(self.rows()) {
+        if self.mesh.is_some()
+            || !self.params.contains(&memory)
+            || self.types[memory] != words(self.rows())
+        {
             return Err("a view is of the kernel's memory".into());
         }
         if *self.value(row)? != TensorType::new(DType::I32, &[]) {
@@ -501,6 +534,49 @@ impl Kernel {
         }
         let op = if wait { Op::DmaWait } else { Op::DmaStart };
         self.push(op, &[src, dst, sem], vec![]);
+        Ok(())
+    }
+
+    pub fn indirect_dma(
+        &mut self,
+        src: Var,
+        dst: Var,
+        offsets: Var,
+        sem: Var,
+        wait: bool,
+    ) -> Result<(), String> {
+        self.check(&[src, dst, offsets, sem])?;
+        let ((s, s_space), (d, d_space)) = (self.reference(src)?, self.reference(dst)?);
+        let (o, o_space) = self.reference(offsets)?;
+        if o_space != Space::Vmem || o.dtype != DType::I32 || o.shape.len() != 1 {
+            return Err(format!(
+                "indexed copies' offsets are a VMEM int32 vector, got {o}"
+            ));
+        }
+        let (table, rows) = match (s_space, d_space) {
+            (Space::Hbm, Space::Vmem) => (s, d),
+            (Space::Vmem, Space::Hbm) => (d, s),
+            _ => return Err("an indexed copy is between HBM rows and VMEM".into()),
+        };
+        if table.dtype != rows.dtype
+            || table.shape.len() != rows.shape.len()
+            || table.shape[1..] != rows.shape[1..]
+            || rows.shape[0] != o.shape[0]
+        {
+            return Err(format!(
+                "an indexed copy moves a row of {table} for each of {} offsets into {rows}",
+                o.shape[0]
+            ));
+        }
+        if self.types[sem] != Type::Semaphore(vec![]) {
+            return Err("a copy signals one DMA semaphore".into());
+        }
+        let op = if wait {
+            Op::IndirectDmaWait
+        } else {
+            Op::IndirectDmaStart
+        };
+        self.push(op, &[src, dst, offsets, sem], vec![]);
         Ok(())
     }
 

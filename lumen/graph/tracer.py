@@ -439,7 +439,7 @@ def compile(fn, device=None):
         returned = len(graph.outputs()) - len(written) - len(written_scalars) - len(written_arguments)
         donate = [(len(tensors) + w, returned + j) for j, w in enumerate(written)]
         plan = Plan(graph, target, donate_into=donate, parameters=params, packable=packable, scalars=scalars)
-        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)
         entries.append((plan, workspace))
         placed = inputs_for(plan)
         if placed is None:
@@ -569,7 +569,7 @@ def compile(fn, device=None):
             shape = list(shape)
             shape[dimension] = sum(types[i][1][dimension] for i in positions)
             inputs.append(Tensor.ones(shape, dtype, target))
-        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)
         return graph, plan, target, inputs, workspace, scalars
 
     compiled.dump_graph = dump_graph

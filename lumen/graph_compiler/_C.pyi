@@ -49,6 +49,8 @@ class Plan:
     @property
     def workspace_bytes(self) -> int: ...
     @property
+    def workspace_alignment(self) -> int: ...
+    @property
     def neural_engine(self) -> bool:
         """Whether it runs steps on the Apple Neural Engine (Core ML
         programs, ``lumen.config.compiler.neural_engine``)."""

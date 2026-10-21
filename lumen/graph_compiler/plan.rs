@@ -117,6 +117,15 @@ pub struct PlanOptions {
 pub struct DeviceLayout {
     pub bytes: fn(&TensorType) -> usize,
     pub same: fn(&TensorType, &TensorType) -> bool,
+    pub align: fn(&TensorType) -> usize,
+}
+
+pub(crate) fn lcm(a: usize, b: usize) -> usize {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    a / x * b
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +138,7 @@ pub struct Plan {
     outputs_at: Vec<Buffer>,
     steps: Vec<Step>,
     workspace_bytes: usize,
+    workspace_alignment: usize,
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
     pub(crate) interleaved: Vec<Vec<usize>>,
     pub(crate) staged: Option<Box<Staged>>,
@@ -439,6 +449,10 @@ impl Plan {
             Scratch(usize),
         }
 
+        let align = |v: Var| match options.layout {
+            Some(l) => (l.align)(graph.type_of(v)).max(ALIGNMENT),
+            None => ALIGNMENT,
+        };
         let mut regions: Vec<(usize, usize, usize, Region)> = (0..n)
             .filter(|&r| root[r] == r && buffer[r].is_none() && first[r] != usize::MAX)
             .map(|r| (bytes(r), first[r], last[r], Region::Value(r)))
@@ -457,7 +471,13 @@ impl Plan {
         let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut scratch_at = vec![None; nodes.len()];
         let mut workspace_bytes = 0;
+        let mut workspace_alignment = ALIGNMENT;
         for (size, from, to, region) in regions {
+            let alignment = match region {
+                Region::Value(r) => align(r),
+                Region::Scratch(_) => ALIGNMENT,
+            };
+            workspace_alignment = lcm(workspace_alignment, alignment);
             let mut taken: Vec<(usize, usize)> = placed
                 .iter()
                 .filter(|&&(_, _, f, l)| f <= to && from <= l)
@@ -469,7 +489,7 @@ impl Plan {
                 if offset + size <= start {
                     break;
                 }
-                offset = offset.max((start + len).next_multiple_of(ALIGNMENT));
+                offset = offset.max((start + len).next_multiple_of(alignment));
             }
             placed.push((offset, size, from, to));
             match region {
@@ -555,6 +575,7 @@ impl Plan {
             outputs_at,
             steps,
             workspace_bytes,
+            workspace_alignment,
             packed: Vec::new(),
             interleaved: Vec::new(),
             staged: None,
@@ -566,7 +587,7 @@ impl Plan {
         outputs: Vec<TensorType>,
         staged: Staged,
         steps: Vec<Step>,
-        workspace_bytes: usize,
+        (workspace_bytes, workspace_alignment): (usize, usize),
         packed: Vec<(Vec<usize>, usize)>,
         interleaved: Vec<Vec<usize>>,
     ) -> Plan {
@@ -579,6 +600,7 @@ impl Plan {
             outputs_at: Vec::new(),
             steps,
             workspace_bytes,
+            workspace_alignment,
             packed,
             interleaved,
             staged: Some(Box::new(staged)),
@@ -657,6 +679,10 @@ impl Plan {
         self.workspace_bytes
     }
 
+    pub fn workspace_alignment(&self) -> usize {
+        self.workspace_alignment
+    }
+
     pub fn packed(&self) -> &[(Vec<usize>, usize)] {
         &self.packed
     }
@@ -700,7 +726,13 @@ impl Plan {
             })
             .collect();
         let options = |dtype| TensorOptions::new().dtype(dtype).device(executor);
-        let workspace = unsafe { Tensor::empty(&[self.workspace_bytes], options(DType::U8)) };
+        let workspace = unsafe {
+            Tensor::empty_aligned(
+                &[self.workspace_bytes],
+                options(DType::U8),
+                self.workspace_alignment,
+            )
+        };
         let outputs: Vec<Tensor> = self
             .outputs
             .iter()

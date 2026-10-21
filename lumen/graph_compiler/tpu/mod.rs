@@ -32,6 +32,7 @@ const LAYOUT: DeviceLayout = DeviceLayout {
             .unwrap_or(t.numel() * t.dtype.size_of())
     },
     same: crate::device::tpu::layout::same,
+    align: |t| crate::device::tpu::layout::alignment(t.dtype, &t.shape),
 };
 
 struct TpuModule<'a> {

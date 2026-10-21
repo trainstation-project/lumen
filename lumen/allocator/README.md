@@ -114,7 +114,10 @@ alive reuse the same bytes every iteration instead of growing. A zero-byte
 allocation takes no block at all and returns any aligned offset.
 
 **Alignment.** `ALIGNMENT` = 256, matching `cudaMalloc`'s and Metal's
-guarantees.
+guarantees. `Allocator::allocate_aligned` asks for more (the TPU's: a tiled
+tensor's tile row, a plan's workspace its values'): `Region::take_aligned`
+takes the first free block holding an aligned start, leaving the gap before
+it free.
 
 **Laziness and teardown.** `Region::new(device, capacity)` reserves nothing;
 the first `take` reserves the range through its owner's `reserve` closure
@@ -202,7 +205,10 @@ The shim (`mps/mps_shim.mm`) does the Objective-C work:
 one **`u32[rows, 1, 128]` PJRT buffer**: rows of 512 bytes (`ROW`), tiled
 `(1, 128)`, so stored byte for byte as the host does and addressable by a
 program at any row (see [`../device/tpu/README.md`](../device/tpu/README.md)).
-Every allocation is rounded up to whole rows. TPU memory is not
+Every allocation is rounded up to whole rows, and its capacity down to a
+multiple of `8 * 64 * 9 * 5 * 7` rows (~79 MiB): a SparseCore launch views
+the whole buffer as rows of a table's width (`lumen/kernels/tpu`), so its
+rows must be a multiple of that width's tile rows. TPU memory is not
 host-addressable: the pointers handed out are the runtime's address of
 that buffer plus the allocation's offset, never dereferenced.
 `copy_to_host(index, ptr, dst)` reads an allocation back at its offset (the

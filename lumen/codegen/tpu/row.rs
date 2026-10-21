@@ -300,6 +300,7 @@ pub(crate) fn encode(
         rows: &rows_of,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched)
 }

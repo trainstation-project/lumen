@@ -170,6 +170,11 @@ impl PyPlan {
         self.inner.workspace_bytes()
     }
 
+    #[getter]
+    fn workspace_alignment(&self) -> usize {
+        self.inner.workspace_alignment()
+    }
+
     fn steps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let typed = |(buffer, ty): &(Buffer, TensorType)| {
             (buffer.to_string(), dtype_name(ty.dtype), ty.shape.clone())
