@@ -286,6 +286,9 @@ pub(crate) fn encode(
         Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
             super::attention::tpu::encode(index, step, inputs, output)
         }
+        Primitive::Fusion { ref name, .. } if name == "row" => {
+            crate::codegen::tpu::row::encode(index, step, inputs, output)
+        }
         Primitive::Fusion { ref name, .. } if name == "loop" => {
             crate::codegen::tpu::encode(index, step, inputs, output)
         }

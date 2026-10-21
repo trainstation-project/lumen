@@ -448,3 +448,66 @@ def test_flash_attention_is_one_kernel_each_way(causal, n, nkv, dtype, tol):
         args[x] = args[x] - 2 * eps * direction
         lo = (_attention_reference(*[t.reshape(b, s, -1, h) for t in args], causal).reshape(b, s, n * h) * g).sum()
         np.testing.assert_allclose((got * direction).sum(), (hi - lo) / (2 * eps), rtol=100 * tol)
+
+
+def _softmax(x):
+    e = np.exp(x - x.max(-1, keepdims=True))
+    return e / e.sum(-1, keepdims=True)
+
+
+def _layer_norm(x, w, b):
+    mean = F.mean(x, -1, keepdim=True)
+    centered = x - mean
+    return centered / F.sqrt(F.mean(centered * centered, -1, keepdim=True) + 1e-5) * w + b
+
+
+@pytest.mark.parametrize(
+    "f, expected, rounded",
+    [
+        (lambda x, w, b: F.softmax(x, -1), lambda x, w, b: _softmax(x), False),
+        (
+            lambda x, w, b: F.rms_norm(x, 512, w),
+            lambda x, w, b: x / np.sqrt((x * x).mean(-1, keepdims=True) + np.finfo(np.float32).eps) * w,
+            False,
+        ),
+        (
+            _layer_norm,
+            lambda x, w, b: (x - x.mean(-1, keepdims=True)) / np.sqrt(x.var(-1, keepdims=True) + 1e-5) * w + b,
+            False,
+        ),
+        (
+            lambda x, w, b: F.rms_norm(x.bfloat16().float(), 512, w).bfloat16(),
+            lambda x, w, b: x / np.sqrt((x * x).mean(-1, keepdims=True) + np.finfo(np.float32).eps) * w,
+            True,
+        ),
+    ],
+    ids=["softmax", "rms_norm", "layer_norm", "rms_norm bfloat16"],
+)
+def test_a_normalization_is_one_row_kernel(f, expected, rounded):
+    """A normalization diamond (XLA's ``SoftmaxRewriterTriton``: a row's
+    reductions and the elementwise work around them) runs as one kernel
+    over blocks of whole rows, its weight read once for every row."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal([4, 64, 512], dtype=np.float32)
+    w, b = rng.standard_normal([512], dtype=np.float32), rng.standard_normal([512], dtype=np.float32)
+    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+    graph = lumen.make_graph(f)(meta(4, 64, 512), meta(512), meta(512))
+    assert len(lumen.graph_compiler.Plan(graph, "tpu").steps()) == 1
+    tpu = lambda a: lumen.from_numpy(a).to("tpu")
+    got = floats(lumen.compile(f)(tpu(x), tpu(w), tpu(b)))
+    want = expected(floats(lumen.from_numpy(x).to(dtype="bfloat16")) if rounded else x, w, b)
+    np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2)
+
+
+def test_a_softmax_backward_is_one_row_kernel():
+    rng = np.random.default_rng(0)
+    x, dy = (rng.standard_normal([256, 512], dtype=np.float32) for _ in range(2))
+
+    def grad(x, dy):
+        return lumen.grad(lambda x: F.sum(F.softmax(x, -1) * dy))(x)
+
+    meta = lumen.empty([256, 512], "float32", "meta")
+    assert len(lumen.graph_compiler.Plan(lumen.make_graph(grad)(meta, meta), "tpu").steps()) == 1
+    got = floats(lumen.compile(grad)(lumen.from_numpy(x).to("tpu"), lumen.from_numpy(dy).to("tpu")))
+    p = _softmax(x)
+    np.testing.assert_allclose(got, p * (dy - (p * dy).sum(-1, keepdims=True)), rtol=1e-5, atol=1e-6)

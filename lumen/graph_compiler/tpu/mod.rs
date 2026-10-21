@@ -1,7 +1,9 @@
+mod diamonds;
 mod loop_fusion;
 
 use std::collections::HashMap;
 
+use diamonds::Diamonds;
 use loop_fusion::LoopFusion;
 
 use super::attention;
@@ -924,6 +926,9 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
                 columns: 1,
             },
         });
+    }
+    if options.config.normalization_diamonds {
+        pipeline.add(Diamonds);
     }
     pipeline.add(FuseDots).add(PlaceConcats).add(LoopFusion);
     pipeline.run(&mut module)?;
