@@ -2,7 +2,7 @@
 
 Attention kernels. There is no attention primitive: the graph compiler
 matches `softmax(q @ kᵀ * scale [masked]) @ v` as traced
-(`graph_compiler/attention.rs`, when `CompilerConfig::flash_attention` is on)
+(`graph_compiler/common/attention.rs`, when `CompilerConfig::flash_attention` is on)
 and turns it into a fusion: on MPS its generated kernel instantiates the
 Metal templates here; on a TPU it runs the Pallas kernels here, splash
 attention's (`jax.experimental.pallas.ops.tpu.splash_attention`), ported.
@@ -64,5 +64,5 @@ each costs about 3 to 10% more.
 
 ## Related
 
-* `lumen/graph_compiler/attention.rs` — the pattern matcher.
+* `lumen/graph_compiler/common/attention.rs` — the pattern matcher.
 * `lumen/codegen/mps/mod.rs` — `attention_kernel` and the backward's kernel generator.

@@ -1,4 +1,4 @@
-use super::passes::cse::cse;
+use super::common::cse::cse;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::plan_tests::data;
@@ -166,7 +166,7 @@ fn algebraic_simplification() {
     };
     let b = apply(&mut g, outer, &[b]);
     g.set_outputs(&[r, t, b]).unwrap();
-    let simplified = super::passes::simplify::simplify_with(&g, false);
+    let simplified = super::common::simplify::simplify_with(&g, false);
     assert_eq!(
         names(&simplified),
         ["reshape", "broadcast_in_dim"],
@@ -195,14 +195,14 @@ fn transposes_of_dots_swap_their_operands() {
     };
     let inputs = [data(&[4, 6], 1), data(&[6, 5], 2)];
     let g = build(false);
-    let swapped = super::passes::simplify::simplify_with(&g, true);
+    let swapped = super::common::simplify::simplify_with(&g, true);
     assert_eq!(names(&swapped), ["dot_general"], "{swapped}");
     same_values(&g, &swapped, &inputs);
     assert_eq!(
-        names(&super::passes::simplify::simplify_with(&g, false)),
+        names(&super::common::simplify::simplify_with(&g, false)),
         ["dot_general", "transpose"]
     );
-    let twice = super::passes::simplify::simplify_with(&build(true), true);
+    let twice = super::common::simplify::simplify_with(&build(true), true);
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
@@ -221,7 +221,7 @@ fn rearranges_move_past_elementwise_primitives() {
     let a = apply(&mut g, Mul, &[a, two]);
     let a = apply(&mut g, Exp, &[a]);
     g.set_outputs(&[a]).unwrap();
-    let moved = super::passes::simplify::simplify_with(&g, true);
+    let moved = super::common::simplify::simplify_with(&g, true);
     assert_eq!(
         names(&moved),
         ["add", "full", "mul", "exp", "transpose"],
@@ -229,7 +229,7 @@ fn rearranges_move_past_elementwise_primitives() {
     );
     same_values(&g, &moved, &[data(&[2, 3], 1), data(&[2, 3], 2)]);
     assert_eq!(
-        names(&super::passes::simplify::simplify_with(&g, false)),
+        names(&super::common::simplify::simplify_with(&g, false)),
         ["full", "transpose", "transpose", "add", "mul", "exp"]
     );
 }
@@ -247,7 +247,7 @@ fn casts_move_past_layout_primitives() {
     let w = widened(&mut g);
     let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[w]);
     g.set_outputs(&[r]).unwrap();
-    let moved = super::passes::simplify::simplify_with(&g, true);
+    let moved = super::common::simplify::simplify_with(&g, true);
     assert_eq!(names(&moved), ["cast", "reshape", "cast"], "{moved}");
     same_values(&g, &moved, &inputs);
     let mut g = Graph::new();
@@ -265,7 +265,7 @@ fn casts_move_past_layout_primitives() {
     let n = apply(&mut g, cast(DType::BF16), &[s]);
     let o = apply(&mut g, cast(DType::F32), &[n]);
     g.set_outputs(&[o]).unwrap();
-    let moved = super::passes::simplify::simplify_with(&g, true);
+    let moved = super::common::simplify::simplify_with(&g, true);
     assert_eq!(
         names(&moved),
         ["cast", "transpose", "slice", "cast"],
@@ -288,7 +288,7 @@ fn casts_move_past_layout_primitives() {
             &[w, c],
         );
         g.set_outputs(&[cat]).unwrap();
-        let moved = super::passes::simplify::simplify_with(&g, true);
+        let moved = super::common::simplify::simplify_with(&g, true);
         assert_eq!(names(&moved), want, "{moved}");
         same_values(&g, &moved, &inputs);
     }
@@ -389,8 +389,8 @@ fn ops_on_host_and_device_values_raise() {
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
+    use super::common::cse::Cse;
     use super::pass::{CompilerPass, GraphModule, Pipeline};
-    use super::passes::cse::Cse;
     use super::{CompilerConfig, Options};
 
     struct Negate;

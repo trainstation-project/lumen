@@ -190,5 +190,5 @@ arguments in this exact order — change both together.
 
 * [`ane/`](ane/README.md) — the Neural Engine lowering.
 * [`lumen/graph`](../../graph/README.md) — `Graph`, `Primitive`, `placements()`.
-* [`lumen/graph_compiler/mps`](../../graph_compiler/mps/README.md) — fusion passes and `kernel_codegen.rs` (the caller); `graph_compiler/attention.rs` defines `Attention` / `Backward`; `graph_compiler/config.rs` the flags read here.
+* [`lumen/graph_compiler/mps`](../../graph_compiler/mps/README.md) — fusion passes and `kernel_codegen.rs` (the caller); `graph_compiler/common/attention.rs` defines `Attention` / `Backward`; `graph_compiler/config.rs` the flags read here.
 * [`lumen/ops`](../../ops/README.md) — the Metal templates and launch code (`ops/mps`, `ops/reduce/mps`, `ops/dot_general/mps`, `ops/attention/mps`).

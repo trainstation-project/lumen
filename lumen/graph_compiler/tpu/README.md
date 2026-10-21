@@ -2,32 +2,31 @@
 
 The TPU pipeline: the passes that turn a program's graph into fusions the
 TPU kernels run (`ops/tpu`, `codegen/tpu`), then the plan. Laid out as the
-MPS pipeline is ([`../mps/`](../mps/README.md)): a file per pass, loop
+MPS pipeline is (the forward attention pass shared, `../common/flash_attention.rs`) ([`../mps/`](../mps/README.md)): a file per pass, loop
 fusion a folder per phase.
 
 ## Files
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `TpuModule`, the TPU layout's sizes (`LAYOUT`), `compile` (the pipeline below, then `Plan::compile_with`). |
-| `flash_attention.rs` | Pass `flash_attention`: each matched attention one fusion (splash attention's forward). |
+| `mod.rs` | `TpuModule` (its `Attentions`: epilogues reading scalars, the raw output with heads merged), the TPU layout's sizes (`LAYOUT`), `compile` (the pipeline below, then `Plan::compile_with`). |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention's backward as its `dq` and `dkv` fusions; their outputs laid out for the kernels (`merged_outputs`, `reshaped_outputs`), Δ computed inside them (`delta_inside`), and a check that every attention runs (`attentions`). |
-| `diamonds.rs` | Pass `normalization_diamonds`: each normalization diamond (`graph_compiler/diamonds.rs`) the row kernel can run one `row` fusion. |
+| `diamonds.rs` | Pass `normalization_diamonds`: each normalization diamond (`graph_compiler/common/diamonds.rs`) the row kernel can run one `row` fusion. |
 | `place_concats.rs` | Pass `place_concats`: concatenates along the last dimension whose operands' kernels write them in place (`placeable`). |
 | `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`); re-exports `FuseDots`. |
 | `fusion/dot_epilogues.rs` | Pass `fuse_dots` (`FuseDots`): a dot and its column or row slices and elementwise consumers one `dot_general` fusion, the dot kernel's epilogue (members, together, in-place outputs). |
 | `fusion/groups.rs` | Loop fusion's groups: each fusible node joins the group of its readers (`groups`); a reduction one a group, layout only where `codegen/tpu/indexing.rs` plans it (`planned`). |
 | `fusion/emit.rs` | Each group as a `loop` or `reduction` fusion (`members`, `body`, `loop_fusion`). |
-| `fusion/horizontal.rs` | Pass `horizontal_fusion` (`HorizontalFusion`): independent small elementwise loops of one shape as one multi-output loop (`../horizontal.rs`, with the TPU's `Target`: up to 1M elements, 32 streams, none a concatenate writes in place). A TPU kernel costs ~2–8 µs besides its bytes. |
+| `fusion/horizontal.rs` | Pass `horizontal_fusion` (`HorizontalFusion`): independent small elementwise loops of one shape as one multi-output loop (`../common/horizontal.rs`, with the TPU's `Target`: up to 1M elements, 32 streams, none a concatenate writes in place). A TPU kernel costs ~2–8 µs besides its bytes. |
 
 ## Pipeline
 
 | # | Pass | When | File |
 | --- | --- | --- | --- |
-| 1 | `merge_dots_backward` | `merge_dots` | `../passes/merge_dots_backward.rs` |
-| 2 | `flash_attention`, `flash_attention_backward` | `flash_attention` | `flash_attention.rs`, `flash_attention_backward.rs` |
-| 3 | `fold_dot_reshapes`, `simplify`, `dot_strength` | always | `../passes/` |
-| 4 | `merge_dots` | `merge_dots` | `../passes/merge_dots.rs` |
+| 1 | `merge_dots_backward` | `merge_dots` | `../common/merge_dots_backward.rs` |
+| 2 | `flash_attention`, `flash_attention_backward` | `flash_attention` | `../common/flash_attention.rs`, `flash_attention_backward.rs` |
+| 3 | `fold_dot_reshapes`, `simplify`, `dot_strength` | always | `../common/` |
+| 4 | `merge_dots` | `merge_dots` | `../common/merge_dots.rs` |
 | 5 | `normalization_diamonds` | `normalization_diamonds` | `diamonds.rs` |
 | 6 | `fuse_dots` | always (epilogues with `contraction_epilogues`) | `fusion/dot_epilogues.rs` |
 | 7 | `place_concats` | always | `place_concats.rs` |

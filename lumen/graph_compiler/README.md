@@ -25,9 +25,6 @@ and *where it lives in memory*.
 | `schedule.rs` | Memory-reducing topological orders: `list` (XLA `ListScheduler`), `dfs` (XLA `DFSMemoryScheduler`), and `Graph::reordered`. |
 | `remat.rs` | Rematerialization under `memory_limit` (XLA `hlo_rematerialization`). |
 | `stages.rs` | Splits a program with `to_host` values into alternating device/host stages; `without_transfers` strips `ToHost`/`ToDevice`. |
-| `horizontal.rs` | Horizontal fusion (XLA's horizontal loop fusion): independent fusions grouped into one multi-output fusion (`fuse`), what a device groups and how much its `Target` says (MPS: `mps/horizontal.rs`, TPU: `tpu/fusion/horizontal.rs`). |
-| `diamonds.rs` | Normalization diamonds (XLA `SoftmaxRewriterTriton`): `Row`s of a row's reductions and the elementwise work around them, chained and grown (`diamonds`, over a device's `Fusible`); MPS and TPU each turn them into row kernels. |
-| `attention.rs` | Pattern matcher for attention (`softmax(q @ k^T * scale [mask]) @ v`, dropout, its backward), shared by the MPS fusions, the codegen and the tracer (`Graph.attentions`). |
 | `python.rs` | PyO3 bindings: `lumen.graph_compiler.Plan` (`PyPlan`) and the `CompilerConfig` class behind `lumen.config.compiler`. |
 | `__init__.py` | The `lumen.graph_compiler` package: re-exports `Plan` from `lumen.graph_compiler._C`. |
 | `_C.pyi` | Type stub for what `python.rs` defines. |
@@ -36,7 +33,7 @@ and *where it lives in memory*.
 
 ## Subfolders
 
-- [`passes/`](passes/README.md) — the device-independent passes (`cse`, `simplify`, pattern rewrites), each a `CompilerPass` of any module.
+- [`common/`](common/README.md) — what every device shares: the device-independent passes (`cse`, `simplify`, pattern rewrites, `flash_attention`), each a `CompilerPass` of any module, and the matchers devices specialize (attention, normalization diamonds, horizontal fusion).
 - [`cpu/`](cpu/README.md) — the host compiler (one `simplify` pass, then plan).
 - [`mps/`](mps/README.md) — the MPS compiler: fusion passes, Metal codegen driving, `encode`.
 - [`mps/ane/`](mps/ane/README.md) — optional Apple Neural Engine offload through Core ML.
@@ -79,7 +76,7 @@ there too.
 - `Module` — what a pass rewrites (graph + options). `GraphModule` is the
   plain one used by the frontend and CPU; MPS has its own `MpsModule`.
 - `CompilerPass<M>` — the pass interface every pass implements: `name()` +
-  `apply(&mut M)`. A pass of the graph alone (`passes/`) implements it for
+  `apply(&mut M)`. A pass of the graph alone (`common/`) implements it for
   any `M: Module`, so every device's pipeline can run it; a device's pass
   implements it for its own module (`MpsModule`).
 - `Pipeline::new(name).add(..).run(&mut module)` — runs passes in order,
@@ -136,7 +133,7 @@ each stage is compiled by its side's compiler and the result is a `Plan`
 with `staged: Some(..)` whose device stages share one workspace side by
 side. Programs with no host values return `None` and compile normally.
 
-### Attention matching (`attention.rs`)
+### Attention matching (`common/attention.rs`)
 
 `attentions(graph)` finds `softmax(q @ k^T * scale [masked]) @ v` however
 written (casts, causal `iota` masks, dropout via `random_bits`, GQA
@@ -169,7 +166,7 @@ the `Config` class in `lumen/allocator/python.rs`.
   `Step::sources` / `scope` (profiler ranges, source lines) survive.
 - `Pipeline::run` with `dump_to` writes files — a write error fails the
   compile.
-- `mps` is compiled only with `cfg(lumen_mps_linked)`; `attention.rs` is
+- `mps` is compiled only with `cfg(lumen_mps_linked)`; `common/attention.rs` is
   `allow(dead_code)` elsewhere.
 - Planner behavior is measured, not estimated: changes that add steps or
   views must keep `plan_tests.rs` green (workspace sizes are asserted).

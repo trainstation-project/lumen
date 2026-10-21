@@ -1,24 +1,24 @@
 mod diamonds;
-mod flash_attention;
 mod flash_attention_backward;
 mod fusion;
 mod place_concats;
 
 use diamonds::Diamonds;
-use flash_attention::FlashAttention;
 use flash_attention_backward::FlashAttentionBackward;
 use fusion::{FuseDots, HorizontalFusion, LoopFusion};
 use place_concats::PlaceConcats;
 
+use super::common::attention;
+use super::common::dot_strength::DotStrength;
+use super::common::flash_attention::{Attentions, FlashAttention};
+use super::common::fold_dot_reshapes::FoldDotReshapes;
+use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
+use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
-use super::passes::dot_strength::DotStrength;
-use super::passes::fold_dot_reshapes::FoldDotReshapes;
-use super::passes::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::passes::merge_dots_backward::MergeDotsBackward;
-use super::passes::simplify::Simplify;
 use super::plan::DeviceLayout;
 use super::{Options, positions};
-use crate::graph::Graph;
+use crate::graph::{Graph, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 
 const LANES: usize = 128;
@@ -49,6 +49,23 @@ impl Module for TpuModule<'_> {
 
     fn options(&self) -> &Options {
         self.options
+    }
+}
+
+impl Attentions for TpuModule<'_> {
+    fn epilogues(&self) -> attention::Epilogues {
+        attention::Epilogues {
+            leaves: |graph, v| graph.type_of(v).shape.is_empty(),
+            reshaped: true,
+        }
+    }
+
+    fn scalars(&self) -> Vec<Var> {
+        Vec::new()
+    }
+
+    fn kernel(&mut self) -> String {
+        "flash_attention".into()
     }
 }
 

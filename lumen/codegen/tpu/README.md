@@ -70,6 +70,6 @@ row count. Its kernel name is `row_<rows>x<n>_<block>`.
 
 * [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` (rows, before the dots take their epilogues) and `loop_fusion` (loops and reductions, after).
 * [`../../ops/reduce/tpu/`](../../ops/reduce/tpu/) — the reduction template.
-* [`../../graph_compiler/diamonds.rs`](../../graph_compiler/diamonds.rs) — the diamond matcher, shared with MPS.
+* [`../../graph_compiler/common/diamonds.rs`](../../graph_compiler/common/diamonds.rs) — the diamond matcher, shared with MPS.
 * [`../../ops/tpu/`](../../ops/tpu/README.md) — routes a `loop` fusion's step here.
 * [`../../ops/dot_general/tpu/`](../../ops/dot_general/) — the dot, whose epilogue uses `node` and `computed`.

@@ -18,11 +18,10 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode`, `fusion_scratch_bytes`. |
-| `flash_attention.rs` | Pass `flash_attention`: each matched attention one fusion (`attention::fuse`), `Kernel::Attention`. |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
 | `canonicalize_dots.rs` | Pass `canonicalize_dots`: transposes dot operands into matmul form as a separate step. |
-| `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): the softmax/RMS/layer-norm style row diamonds (`graph_compiler/diamonds.rs`, over MPS's `fusible`) and their `partials` (column sums a row's kernel adds up too); stores `Row`s in `MpsModule::rows`. |
+| `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): the softmax/RMS/layer-norm style row diamonds (`graph_compiler/common/diamonds.rs`, over MPS's `fusible`) and their `partials` (column sums a row's kernel adds up too); stores `Row`s in `MpsModule::rows`. |
 | `place_concats.rs` | Pass `place_concats`: marks concatenates whose operands' kernels can write them in place; `in_place_concats` also re-checked by `Codegen`. |
 | `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`): `fuse` runs the phases below in order, then horizontal fusion; also `fusible`, `label`. |
 | `fusion/analysis.rs` | What every phase reads: each value's producer and readers, liveness, outputs, what is fusible (`Analysis`); `depends`, `recomputed`. |
@@ -31,7 +30,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `fusion/dot_epilogues.rs` | A dot's epilogue: its column regions, or the chain of elementwise nodes after it, and the values it writes besides (`dot_epilogues`). |
 | `fusion/hosts.rs` | Which nodes start a fusion (`roots`) and which values a fusion writes besides its root (`hosts`, multi-output fusion). |
 | `fusion/emit.rs` | Each fusion's members and reads within a kernel's bindings (`fusions`), rows joined to the dot they read (`row_dots`), and the fused graph (`emitted`). |
-| `horizontal.rs` | MPS's horizontal fusion `Target` (`../horizontal.rs`): which fusions join (no reductions, attention, atomic split-K or GEMM; at most 1M elements), keyed by element count (and shape for tiled transposes), within Metal's 30 buffers and the transpose tiles' heroes. |
+| `horizontal.rs` | MPS's horizontal fusion `Target` (`../common/horizontal.rs`): which fusions join (no reductions, attention, atomic split-K or GEMM; at most 1M elements), keyed by element count (and shape for tiled transposes), within Metal's 30 buffers and the transpose tiles' heroes. |
 | `alone.rs` | Pass `alone`: every elementwise node and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (neither has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
 | `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`. |
@@ -51,23 +50,23 @@ MPS's alone: the CPU's reference and a TPU (whose v6e computes those in
 bfloat16, and multiplies bfloat16 by float8) run them.
 
 `pipeline(config)` builds these passes, each a `CompilerPass` (MPS ones of
-`MpsModule`; the device-independent ones from [`../passes/`](../passes/README.md),
+`MpsModule`; the device-independent ones from [`../common/`](../common/README.md),
 of any module). The order is load-bearing; the comments in
 `pipeline()` say why each sits where it does.
 
 | # | Pass name | Runs when | File | What it does |
 | --- | --- | --- | --- | --- |
-| 0 | `take_along_axis` | always | `../passes/take_along_axis.rs` | Gathers along an axis (`F.gather`) as gathers of the operand's flat positions, which the MPS's kernels (and the cross-entropy patterns) read. |
-| 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
-| 2 | `merge_dots_backward` | `fuse && merge_dots && contraction_epilogues` | `../passes/merge_dots_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
-| 3 | `merge_dots` | `fuse && merge_dots` | `../passes/merge_dots.rs` | Merge dots over packable parameters into blocks (`Target`: `fusion::fusible` readers, views, 8 columns); fills `MpsModule::packed`. |
-| 4 | `flash_attention` | `fuse && flash_attention` | `flash_attention.rs` | Attention → one flash-attention fusion (before dots are put in matmul form). |
+| 0 | `take_along_axis` | always | `../common/take_along_axis.rs` | Gathers along an axis (`F.gather`) as gathers of the operand's flat positions, which the MPS's kernels (and the cross-entropy patterns) read. |
+| 1 | `chunked_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../common/chunked_cross_entropy.rs` | Chunked CE's rows from each chunk's logits, before dots merge or the forward is matched as a linear CE. |
+| 2 | `merge_dots_backward` | `fuse && merge_dots && contraction_epilogues` | `../common/merge_dots_backward.rs` | Merge a gated pair's/group's backward dots (before `merge_dots`, which reads its weights' concatenate as the forward's block). |
+| 3 | `merge_dots` | `fuse && merge_dots` | `../common/merge_dots.rs` | Merge dots over packable parameters into blocks (`Target`: `fusion::fusible` readers, views, 8 columns); fills `MpsModule::packed`. |
+| 4 | `flash_attention` | `fuse && flash_attention` | `../common/flash_attention.rs` (`Attentions` in `mod.rs`) | Attention → one flash-attention fusion (before dots are put in matmul form). |
 | 5 | `flash_attention_backward` | `fuse && flash_attention` | `flash_attention_backward.rs` | Attention backward → flash-attention backward fusion(s). |
-| 6 | `linear_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../passes/linear_cross_entropy.rs` | CE of unshared logits → `LinearCrossEntropy`. |
-| 7 | `clamp_indices` | `safe_kernels` | `../passes/clamp_indices.rs` | Clamp indices (after linear CE matching, which reads the gather's index). |
-| 8 | `simplify` | always | `../passes/simplify.rs` | `Simplify { matched: true }`: now that patterns are matched, swap transposes of dots, move reshapes/transposes/casts. |
+| 6 | `linear_cross_entropy` | `fuse && fused_linear_cross_entropy` | `../common/linear_cross_entropy.rs` | CE of unshared logits → `LinearCrossEntropy`. |
+| 7 | `clamp_indices` | `safe_kernels` | `../common/clamp_indices.rs` | Clamp indices (after linear CE matching, which reads the gather's index). |
+| 8 | `simplify` | always | `../common/simplify.rs` | `Simplify { matched: true }`: now that patterns are matched, swap transposes of dots, move reshapes/transposes/casts. |
 | 9 | `neural_engine` | `neural_engine` | `ane/mod.rs` | Offload float16 regions on fixed weights to Core ML (whole dots, before split-K). |
-| 10 | `dot_strength` | always | `../passes/dot_strength.rs` | Vector dots → product + sum. |
+| 10 | `dot_strength` | always | `../common/dot_strength.rs` | Vector dots → product + sum. |
 | 11 | `split_k` | `split_k` | `split_k.rs` | Split long-K dots; atomic unless `deterministic`. |
 | 12 | `canonicalize_dots` | always | `canonicalize_dots.rs` | Dot operands into matmul form. |
 | 13 | `normalization_diamonds` | `fuse && normalization_diamonds` | `diamonds.rs` | Row kernels' `Row`s for loop fusion. |

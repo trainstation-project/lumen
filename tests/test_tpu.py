@@ -602,3 +602,39 @@ def test_independent_small_loops_are_one_kernel():
     a, b, c, d = xs
     for g, want in zip(got, [a * 2 + 1, np.exp(b), c - d, d * d]):
         np.testing.assert_allclose(floats(g), want, rtol=1e-6)
+
+
+@pytest.mark.parametrize("training", [False, True], ids=["inference", "training"])
+def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
+    """A cast and a scale of attention's output are its kernel's epilogue,
+    applied to each output block: one kernel in inference; in training the
+    kernel also writes the raw output (heads merged) its backward reads.
+    The same values as unfused."""
+    b, s, n, h = 2, 256, 4, 128
+    rng = np.random.default_rng(0)
+    q, k, v, g = (tpu(rng.standard_normal([b, s, n * h], dtype=np.float32), "bfloat16") for _ in range(4))
+    g = g.to(dtype="float32")
+
+    def attention(q, k, v):
+        heads = [t.reshape(b, s, n, h) for t in (q, k, v)]
+        return F.flash_attention(*heads, is_causal=True).reshape(b, s, n * h).float() * 0.5
+
+    def step(q, k, v, g):
+        e = attention(q, k, v)
+        if not training:
+            return (e,)
+        e.backward(g)
+        return e, q.grad, k.grad, v.grad
+
+    meta = [lumen.empty(list(t.shape), str(t.dtype), "meta") for t in (q, k, v, g)]
+    labels = [st["label"] for st in lumen.graph_compiler.Plan(lumen.make_graph(step)(*meta), "tpu").steps()]
+    assert labels[0] == "flash_attention → reshape → cast(bfloat16 -> float32) → mul", labels
+    assert len(labels) == (4 if training else 1), labels
+    got = [floats(t) for t in lumen.compile(step)(q, k, v, g)]
+    lumen.config.compiler.contraction_epilogues = False
+    try:
+        want = [floats(t) for t in lumen.compile(step)(q, k, v, g)]
+    finally:
+        lumen.config.compiler.reset()
+    for a, w in zip(got, want):
+        np.testing.assert_array_equal(a, w)

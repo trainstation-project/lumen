@@ -1,7 +1,8 @@
 use crate::DType;
 use crate::device::tpu::layout::Layout;
-use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::attention::{self, Access, Score};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::common::attention::{self, Access, Score};
+use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
@@ -212,16 +213,26 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
         view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
         view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
         view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
-        view(
+    ];
+    let lse_k = a.lse.map(|_| body.outputs().len() - 1);
+    let (mut raw, mut ends) = ("null".to_string(), ("null".to_string(), "null".to_string()));
+    for k in (0..body.outputs().len()).filter(|&k| Some(k) != lse_k) {
+        let chain = path(body, a.out.base, k)
+            .ok_or("flash attention on TPU: an output written through other than its layout")?;
+        let acc = written_at(body, &a.out, &a.batch, k)?.1;
+        let shown = view(
             "the output",
-            &output(body, 0, written(body, &a.out, &a.batch)?.1, a.hv),
+            &output(body, k, acc, a.hv),
             &a.batch,
             Some(a.sq),
-        )?,
-    ];
-    let lse = match a.lse {
-        Some(_) => {
-            let k = body.outputs().len() - 1;
+        )?;
+        match epilogue(&chain) {
+            true => ends = (shown, epilogue_spec(body, &chain, a.out.base)?),
+            false => raw = shown,
+        }
+    }
+    let lse = match lse_k {
+        Some(k) => {
             let ty = body.type_of(body.outputs()[k]).clone();
             let acc = per_head(&ty, &a.batch);
             view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, None)?
@@ -230,7 +241,8 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
     };
     let spec = format!(
         "\"kind\": \"forward\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
-         \"scores\": {}, \"causal\": {}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {}, \"lse\": {lse}",
+         \"scores\": {}, \"causal\": {}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {raw}, \"e\": {}, \"epilogue\": {}, \
+         \"o_dtype\": \"{}\", \"lse\": {lse}",
         a.batch,
         a.sq,
         a.sk,
@@ -243,7 +255,9 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
         views[0],
         views[1],
         views[2],
-        views[3],
+        ends.0,
+        ends.1,
+        a.out_dtype.full_name(),
     );
     Ok(("forward", spec))
 }
@@ -438,37 +452,124 @@ fn group(dk: &Access) -> usize {
     dk.batch.last().map_or(1, |&(_, div)| div)
 }
 
-fn written(body: &Graph, acc: &Access, batch: &[usize]) -> Result<(usize, Access), String> {
-    let failed = || {
-        Err("flash attention on TPU: an output written through other than reshapes and sums".into())
-    };
+fn path(body: &Graph, from: Var, k: usize) -> Option<Vec<&Node>> {
+    let mut depends = vec![false; body.types.len()];
+    depends[from] = true;
+    for n in body.nodes() {
+        depends[n.output] |= n.inputs.iter().any(|&v| depends[v]);
+    }
     let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
-    let mut found = None;
-    for (k, &o) in body.outputs().iter().enumerate() {
-        let (mut chain, mut v) = (Vec::new(), o);
-        while v != acc.base {
-            match producer(v) {
-                Some(n)
-                    if matches!(
-                        n.primitive,
-                        Primitive::Reshape { .. }
-                            | Primitive::ReduceSum { .. }
-                            | Primitive::Cast { .. }
-                    ) =>
-                {
-                    chain.push(n);
-                    v = n.inputs[0];
-                }
-                _ => break,
-            }
+    let (mut chain, mut v) = (Vec::new(), body.outputs()[k]);
+    while v != from {
+        let n = producer(v)?;
+        let step = matches!(
+            n.primitive,
+            Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
+        ) || elementwise(&n.primitive);
+        if !step {
+            return None;
         }
-        if v == acc.base {
-            chain.reverse();
-            found = Some((k, chain));
-            break;
+        chain.push(n);
+        v = *n.inputs.iter().find(|&&x| depends[x])?;
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+fn epilogue(chain: &[&Node]) -> bool {
+    chain.iter().any(|n| {
+        !matches!(
+            n.primitive,
+            Primitive::Reshape { .. } | Primitive::ReduceSum { .. } | Primitive::Cast { .. }
+        )
+    })
+}
+
+fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, String> {
+    let failed = || Err("flash attention on TPU: an epilogue reading other than scalars".into());
+    let nodes = body.nodes();
+    let producer = |v: Var| nodes.iter().position(|n| n.output == v);
+    let on_path: Vec<Var> = std::iter::once(from)
+        .chain(chain.iter().map(|n| n.output))
+        .collect();
+    let mut needed = vec![false; nodes.len()];
+    let mut stack: Vec<Var> = chain
+        .iter()
+        .flat_map(|n| n.inputs.iter().copied())
+        .filter(|v| !on_path.contains(v))
+        .collect();
+    let mut scalars: Vec<Var> = Vec::new();
+    while let Some(v) = stack.pop() {
+        match producer(v) {
+            Some(i) if !needed[i] => {
+                needed[i] = true;
+                stack.extend(&nodes[i].inputs);
+            }
+            Some(_) => {}
+            None if body.type_of(v).shape.is_empty() => {
+                if !scalars.contains(&v) {
+                    scalars.push(v);
+                }
+            }
+            None => return failed(),
         }
     }
-    let Some((k, chain)) = found else {
+    let mut value: std::collections::HashMap<Var, usize> =
+        std::collections::HashMap::from([(from, 0)]);
+    for (k, &v) in scalars.iter().enumerate() {
+        value.insert(v, k + 1);
+    }
+    let mut shown = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        let wanted = needed[i] || chain.iter().any(|m| m.output == n.output);
+        if !wanted {
+            continue;
+        }
+        if matches!(n.primitive, Primitive::Reshape { .. }) {
+            let x = value[&n.inputs[0]];
+            value.insert(n.output, x);
+            continue;
+        }
+        let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
+        shown.push(crate::codegen::tpu::node(&n.primitive, &args));
+        value.insert(n.output, scalars.len() + shown.len());
+    }
+    let rows: Vec<String> = scalars
+        .iter()
+        .map(|&v| {
+            let row = body
+                .inputs()
+                .iter()
+                .position(|&u| u == v)
+                .expect("an input");
+            format!("[{row}, \"{}\"]", body.type_of(v).dtype.full_name())
+        })
+        .collect();
+    let end = chain.last().expect("a step").output;
+    Ok(format!(
+        "{{\"scalars\": [{}], \"nodes\": [{}], \"result\": {}}}",
+        rows.join(", "),
+        shown.join(", "),
+        value[&end]
+    ))
+}
+
+fn written(body: &Graph, acc: &Access, batch: &[usize]) -> Result<(usize, Access), String> {
+    let k = (0..body.outputs().len())
+        .find(|&k| path(body, acc.base, k).is_some_and(|c| !epilogue(&c)))
+        .ok_or("flash attention on TPU: an output written through other than reshapes and sums")?;
+    written_at(body, acc, batch, k)
+}
+
+fn written_at(
+    body: &Graph,
+    acc: &Access,
+    batch: &[usize],
+    k: usize,
+) -> Result<(usize, Access), String> {
+    let failed =
+        || Err("flash attention on TPU: an output written through other than its layout".into());
+    let Some(chain) = path(body, acc.base, k) else {
         return failed();
     };
     let f = |mut a: usize| {

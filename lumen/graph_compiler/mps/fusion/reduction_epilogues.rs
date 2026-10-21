@@ -2,7 +2,7 @@ use super::analysis::Analysis;
 use super::{constant, elementwise};
 use crate::graph::Primitive;
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) struct ReductionEpilogues {
     pub(super) epilogue: Vec<Option<usize>>,

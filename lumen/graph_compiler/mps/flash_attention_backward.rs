@@ -1,5 +1,5 @@
 use super::{Kernel, MpsModule, codegen, request};
-use crate::graph_compiler::attention;
+use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
 pub(super) struct FlashAttentionBackward;

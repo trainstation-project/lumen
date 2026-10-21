@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{Kernel, MpsModule, PENDING, codegen, fusion};
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::attention;
+use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
 pub(super) struct PlaceConcats;

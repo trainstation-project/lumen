@@ -1,6 +1,6 @@
 use super::analysis::Analysis;
 use super::elementwise;
-use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) fn extended(a: &Analysis, rows: &[Row]) -> Vec<Row> {
     let (nodes, users, is_output, fusible) = (a.nodes, &a.users, &a.is_output, &a.fusible);

@@ -4,7 +4,7 @@ use super::alone::wrapped;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::attention;
+use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
 pub(super) struct Codegen;

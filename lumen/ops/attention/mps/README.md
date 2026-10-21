@@ -75,5 +75,5 @@ The generated kernel supplies:
 ## Related
 
 * [`../../mps/README.md`](../../mps/README.md) — shared prelude and launch.
-* `lumen/graph_compiler/attention.rs` — what gets matched and its exact rounding.
+* `lumen/graph_compiler/common/attention.rs` — what gets matched and its exact rounding.
 * [`../../dot_general/mps/README.md`](../../dot_general/mps/README.md) — the same simdgroup-matrix style for matmuls.

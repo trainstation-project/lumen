@@ -1,5 +1,5 @@
+use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
-use super::passes::simplify::Simplify;
 use super::{Options, positions};
 use crate::graph::Graph;
 use crate::graph_compiler::{Plan, PlanOptions};

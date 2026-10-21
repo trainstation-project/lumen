@@ -1,7 +1,7 @@
 use super::TpuModule;
 use crate::codegen::tpu::row::{fits, fusible};
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
-use crate::graph_compiler::diamonds::{Row, diamonds};
+use crate::graph_compiler::common::diamonds::{Row, diamonds};
 use crate::graph_compiler::pass::CompilerPass;
 
 pub(super) struct Diamonds;
