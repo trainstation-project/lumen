@@ -112,13 +112,13 @@ def first_query_block(spec, j):
     return div(maximum(add(mul(j, bkv), -spec["causal"]), 0), bq)
 
 
-def masked(spec, qk, queries, keys, transposed=False):
-    if spec["causal"] is None:
-        return qk
+def offsets(shape):
+    return prims.sub(prims.iota("int32", shape, 1), prims.iota("int32", shape, 0))
+
+
+def masked(spec, qk, queries, keys, offset_ref):
     limit = broadcast(add(add(queries, mul(keys, -1)), spec["causal"]), qk.shape)
-    rows, columns = prims.iota("int32", qk.shape, 0), prims.iota("int32", qk.shape, 1)
-    offset = prims.sub(rows, columns) if transposed else prims.sub(columns, rows)
-    return F.where(offset <= limit, qk, MASK)
+    return F.where(offset_ref[...] <= limit, qk, MASK)
 
 
 def chunk(n, cap=512):

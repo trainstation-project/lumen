@@ -16,6 +16,7 @@ from lumen.ops.attention.tpu import (
     matrix,
     minimum,
     mul,
+    offsets,
     scored,
     tile,
     vector,
@@ -42,7 +43,9 @@ def program(spec):
     def key_block(i, j):
         return j if causal is None else minimum(j, last_key_block(spec, i))
 
-    def kernel(rows, memory, result, m_ref, l_ref, acc_ref):
+    def kernel(rows, memory, result, m_ref, l_ref, acc_ref, *offset_ref):
+        if offset_ref:
+            offset_ref[0][...] = offsets((bq, bkc))
         ops = [(q, False), (k, False), (v, False), (o, True)] + ([(lse, True)] if lse else [])
         query_rows = lambda g, i, j: (g, i)  # noqa: E731
         key_rows = lambda g, i, j: (g, key_block(i, j))  # noqa: E731
@@ -65,7 +68,7 @@ def program(spec):
                 keys = slice(c * bkc, (c + 1) * bkc)
                 qk = scored(spec, pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32"))
                 if mask:
-                    qk = masked(spec, qk, mul(i, bq), add(mul(key_block(i, j), bkv), c * bkc))
+                    qk = masked(spec, qk, mul(i, bq), add(mul(key_block(i, j), bkv), c * bkc), offset_ref[0])
                 m_prev, l_prev = m_ref[...], l_ref[...]
                 m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
                 s = F.exp(qk - tile(m_next, bkc))
@@ -90,4 +93,6 @@ def program(spec):
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
 
     scratch = [pl.VMEM((bq, LANES), "float32"), pl.VMEM((bq, LANES), "float32"), pl.VMEM((bq, hv), "float32")]
+    if causal is not None:
+        scratch.append(pl.VMEM((bq, bkc), "int32"))
     return pallas.program(kernel, spec, scratch=scratch)

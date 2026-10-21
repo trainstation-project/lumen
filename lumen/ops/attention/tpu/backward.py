@@ -5,8 +5,10 @@ from lumen.ops.attention.tpu import (
     NN,
     NT,
     TN,
+    add,
     broadcast,
     by_mask,
+    chunk,
     first_query_block,
     heads,
     lanes,
@@ -17,6 +19,7 @@ from lumen.ops.attention.tpu import (
     minimum,
     mod,
     mul,
+    offsets,
     scored,
     tile,
     vector,
@@ -32,30 +35,38 @@ def program(spec):
     of keys) or ``dkv`` (``_flash_attention_dkv_kernel``: for each block of
     keys, its gradients summed over the query heads of its group and their
     blocks of queries), the probabilities recomputed from the rows'
-    log-sum-exp, ``dS = (dP - delta) P``, scaled by ``ds_scale``."""
+    log-sum-exp, ``dS = (dP - delta) P``, scaled by ``ds_scale``; a block of
+    keys in chunks of up to 512, each masked only where a causal mask
+    crosses it."""
     bq, bkv = spec["blocks"]
+    bkc = chunk(bkv)
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
     h, hv, causal, ds_scale = spec["h"], spec["hv"], spec["causal"], spec["ds_scale"]
     q, k, v, do, lse, delta = (spec[n] for n in ("q", "k", "v", "do", "lse", "delta"))
     per_query = (delta, False) if delta else (spec["o"], False)
 
-    def probabilities(qb, kb, lseb, g, i, j, mask):
-        qk = scored(spec, pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32"))
-        if mask:
-            qk = masked(spec, qk, mul(i, bq), mul(j, bkv))
-        return F.exp(qk - tile(lanes(spec, lseb, lse, g), bkv))
-
-    def gradient(p, dob, vb, deltab, g):
-        dp = pl.dot_general(dob[...], vb[...], NT, preferred_element_type="float32")
+    def rows_of(lseb, deltab, dob, g):
         if delta:
             d = lanes(spec, deltab, delta, g)
         else:
             d = F.sum(deltab[...].to("float32") * dob[...].to("float32"), -1, keepdim=True)
             d = broadcast(d, (d.shape[0], LANES))
-        return (dp - tile(d, bkv)) * p * ds_scale
+        return lanes(spec, lseb, lse, g), d
+
+    def chunks(qb, kb, vb, dob, stats, queries, keys, offset_ref, c, mask):
+        part = slice(c * bkc, (c + 1) * bkc)
+        qk = scored(spec, pl.dot_general(qb[...], kb[part, :], NT, preferred_element_type="float32"))
+        if mask:
+            qk = masked(spec, qk, queries, add(keys, c * bkc), offset_ref)
+        lse_rows, delta_rows = stats
+        p = F.exp(qk - tile(lse_rows, bkc))
+        dp = pl.dot_general(dob[...], vb[part, :], NT, preferred_element_type="float32")
+        return part, p, (dp - tile(delta_rows, bkc)) * p * ds_scale
 
     def per_row(height, block_of):
         return vector(spec, delta, height, block_of) if delta else matrix(spec, spec["o"], height, hv, block_of)
+
+    scratch_offsets = [pl.VMEM((bq, bkc), "int32")] if causal is not None else []
 
     if spec["kind"] == "dq":
         dq = spec["dq"]
@@ -63,7 +74,9 @@ def program(spec):
         def key_block(i, j):
             return j if causal is None else minimum(j, last_key_block(spec, i))
 
-        def kernel(rows, memory, result, acc_ref):
+        def kernel(rows, memory, result, acc_ref, *offset_ref):
+            if offset_ref:
+                offset_ref[0][...] = offsets((bq, bkc))
             ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), per_query, (dq, True)]
             query_rows = lambda g, i, j: (g, i)  # noqa: E731
             key_rows = lambda g, i, j: (g, key_block(i, j))  # noqa: E731
@@ -84,12 +97,16 @@ def program(spec):
                 def _():
                     acc_ref[...] = zeros((bq, h))
 
-                def run(mask):
-                    p = probabilities(qb, kb, lseb, g, i, key_block(i, j), mask)
-                    ds = gradient(p, dob, vb, deltab, g)
-                    acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[...], NN, preferred_element_type="float32")
+                stats = rows_of(lseb, deltab, dob, g)
+                queries, keys = mul(i, bq), mul(key_block(i, j), bkv)
 
-                by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
+                def run(c, mask):
+                    part, _, ds = chunks(qb, kb, vb, dob, stats, queries, keys, offset_ref and offset_ref[0], c, mask)
+                    acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32")
+
+                for c in range(bkv // bkc):
+                    start = add(mul(j, bkv), c * bkc)
+                    by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
 
                 @pl.when(j == nk - 1)
                 def _():
@@ -100,14 +117,16 @@ def program(spec):
                 *views(memory, result, rows, ops)
             )
 
-        return pallas.program(kernel, spec, scratch=[pl.VMEM((bq, h), "float32")])
+        return pallas.program(kernel, spec, scratch=[pl.VMEM((bq, h), "float32")] + scratch_offsets)
 
     dk, dv, group = spec["dk"], spec["dv"], spec["group"]
 
     def query_block(i, j):
         return i if causal is None else maximum(i, first_query_block(spec, j))
 
-    def kernel(rows, memory, result, dk_ref, dv_ref):
+    def kernel(rows, memory, result, dk_ref, dv_ref, *offset_ref):
+        if offset_ref:
+            offset_ref[0][...] = offsets((bq, bkc))
         ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), per_query, (dk, True), (dv, True)]
         query_rows = lambda j, g, i: (g, query_block(i, j))  # noqa: E731
         key_rows = lambda j, g, i: (g, j)  # noqa: E731
@@ -132,13 +151,16 @@ def program(spec):
                 dk_ref[...] = zeros((bkv, h))
                 dv_ref[...] = zeros((bkv, hv))
 
-            def run(mask):
-                p = probabilities(qb, kb, lseb, g, query_block(i, j), j, mask)
-                dv_ref[...] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
-                ds = gradient(p, dob, vb, deltab, g)
-                dk_ref[...] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+            stats = rows_of(lseb, deltab, dob, g)
+            queries, keys = mul(query_block(i, j), bq), mul(j, bkv)
 
-            by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
+            def run(c, mask):
+                part, p, ds = chunks(qb, kb, vb, dob, stats, queries, keys, offset_ref and offset_ref[0], c, mask)
+                dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
+                dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+
+            for c in range(bkv // bkc):
+                by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
 
             @pl.when(last)
             def _():
@@ -148,4 +170,5 @@ def program(spec):
         grid = (nk, heads(spec), nq)
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
 
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bkv, h), "float32"), pl.VMEM((bkv, hv), "float32")])
+    scratch = [pl.VMEM((bkv, h), "float32"), pl.VMEM((bkv, hv), "float32")] + scratch_offsets
+    return pallas.program(kernel, spec, scratch=scratch)
