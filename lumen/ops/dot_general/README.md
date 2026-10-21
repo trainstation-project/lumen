@@ -14,7 +14,7 @@ evaluates it with `ops/reference.rs`.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | Module doc and the `#[cfg(lumen_mps_linked)] mod mps;` and `#[cfg(lumen_tpu_linked)] mod tpu;` hooks. |
-| `tpu/mod.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec; see *TPU* below. |
+| `tpu/mod.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec, its epilogue's from `codegen/tpu/gemm.rs`; see *TPU* below. |
 | `tpu/__init__.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
 
 ## TPU
@@ -63,7 +63,7 @@ accumulating in float32; the output float32 or bfloat16.
   values of the member's shape computed before the dot) are one `Fusion`.
   A concatenate its lhs is, read only by dots, that no kernel writes in
   place, is the fusion's too: its parts are buffers of their own the
-  kernel reads side by side along k or m (`lhs`, `lhs_k`). `tpu/mod.rs`
+  kernel reads side by side along k or m (`lhs`, `lhs_k`). `codegen/tpu/gemm.rs`
   (`Epilogue::of`) writes the spec: `widths` (the members), `inputs` (the
   other operands: 0-d ones copied once, the rest read a block at a time at
   the member's blocks), `nodes` (as the elementwise kernel's, computed by

@@ -1,27 +1,7 @@
 from lumen import pallas as pl
+from lumen.codegen.tpu import per_row
 from lumen.graph import prims
 from lumen.ops.tpu import pallas
-
-
-def replayed(nodes, values, shapes):
-    values = list(values)
-    for node in nodes:
-        args = [values[i] for i in node["args"]]
-        name, params, shape = node["name"], node["params"], shapes[node["kind"]]
-        if name in ("reduce_sum", "reduce_max"):
-            if name == "reduce_sum":
-                reduced = prims.reduce_sum(args[0], (1,), params["accum_dtype"])
-            else:
-                reduced = prims.reduce_max(args[0], (1,))
-            values.append(prims.reshape(reduced, shape))
-        elif name in ("broadcast_in_dim", "reshape"):
-            x = args[0]
-            values.append(x if tuple(x.shape) == shape else prims.broadcast_in_dim(x, shape, (0, 1)))
-        elif name == "full":
-            values.append(prims.full(shape, params["fill_value"], params["dtype"]))
-        else:
-            values.append(prims.bind(name, *args, **params))
-    return values
 
 
 def program(spec):
@@ -71,7 +51,7 @@ def program(spec):
                     continue
                 v = next(given)[...]
                 values.append(prims.reshape(v, (1, n)) if kind == "lanes" else v)
-            values = replayed(spec["nodes"], values, shapes)
+            values = per_row(spec["nodes"], values, shapes)
             for ref, (k, _, _) in zip(refs_[len(piped) :], outputs):
                 ref[...] = values[k]
 

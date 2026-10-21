@@ -12,7 +12,7 @@ attention's (`jax.experimental.pallas.ops.tpu.splash_attention`), ported.
 * [`mps/`](mps/README.md) — `forward.metal` (`flash_attention`,
   `attention_decode`) and `backward.metal` (`flash_attention_dkdv`,
   `flash_attention_dq`).
-* `tpu/` — `forward.py` (splash's `flash_attention_kernel`) and
+* `tpu/` — the templates (its specs generated in `codegen/tpu/attention.rs`; `mod.rs` the blocks and launch): `forward.py` (splash's `flash_attention_kernel`) and
   `backward.py` (its dq and dkv kernels), in lumen's Pallas; `__init__.py`
   their shared parts (each head's slab and column of its operand, the
   scores' roundings and scale, the causal mask, the blocks it skips);

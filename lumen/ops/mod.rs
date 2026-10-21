@@ -3,6 +3,7 @@ pub mod device_transfer;
 pub mod dot_general;
 pub mod dummy_op;
 pub mod dynamic_slice;
+pub(crate) mod elementwise;
 pub mod factory;
 pub mod gather;
 pub mod layout;
@@ -12,6 +13,7 @@ pub(crate) mod mps;
 pub mod python;
 pub mod reduce;
 pub mod reference;
+pub(crate) mod row;
 pub mod scan;
 #[cfg(test)]
 mod tests;
