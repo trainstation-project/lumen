@@ -14,8 +14,10 @@ gathers and reductions are not yet generated.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `fusible` (the primitives a loop fusion holds: elementwise, `full`, a 0-d operand's `broadcast_in_dim`, `Unary`/`Binary`), `node` (a primitive as the spec's JSON, also the dot's epilogue), the block choice (`blocks`), output windows (`window`, for in-place concatenates) and `encode` (only with `cfg(lumen_tpu_linked)`). |
-| `__init__.py` | `program(spec)`: the generated kernel, a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) whose body replays `nodes` (`computed`, which the dot's epilogue uses too); 0-d operands copied to VMEM once. |
+| `mod.rs` | What the kinds share with the dot's epilogue: `fusible` (the primitives a loop fusion holds: elementwise, `full`, a 0-d operand's `broadcast_in_dim`, `Unary`/`Binary`), `node` (a primitive as the spec's JSON) and `window` (an output's column window, for in-place concatenates); re-exports `encode`. |
+| `__init__.py` | `computed`: a spec's `nodes` replayed on blocks, for the generated kernels and the dot's epilogue. |
+| `elementwise.rs` | Elementwise loops: the block choice (`blocks`) and `encode`, a fusion's body as its spec (only with `cfg(lumen_tpu_linked)`). |
+| `elementwise.py` | `program(spec)`: the loop's kernel, a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) replaying the body; 0-d operands copied to VMEM once. |
 
 ## Spec
 
