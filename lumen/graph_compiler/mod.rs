@@ -2,6 +2,7 @@
 pub(crate) mod attention;
 pub mod config;
 mod cpu;
+pub(crate) mod diamonds;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;

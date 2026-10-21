@@ -1,5 +1,6 @@
 #[cfg(lumen_tpu_linked)]
 mod elementwise;
+pub(crate) mod row;
 
 #[cfg(lumen_tpu_linked)]
 use crate::Scalar;
