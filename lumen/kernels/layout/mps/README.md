@@ -47,7 +47,7 @@ dtype works.
 - Sizes, strides and offsets are 32-bit (`dims32_arg`, `offset_of32`,
   `uint` indices).
 - `gather_<bytes>` here is a strided copy, not the `gather` primitive
-  (that is `gather_<bytes>_<i32|i64>` in [`lumen/kernels/gather/mps`](../../gather/mps/)).
+  (that one is generated, `lumen/codegen/mps`).
 - `kernels.metal` is concatenated after `lumen/kernels/mps/kernels.metal` by
   `build.rs` (`PRIMITIVE_KERNELS`), which provides `offset_of32` and `FOR_BYTES`.
 

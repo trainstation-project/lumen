@@ -6,7 +6,7 @@ in graph plans on MPS, plus `copy`, a dtype-agnostic contiguous device copy.
 `encode(step, inputs, output, keep)` is called from the primitive dispatch in
 [`lumen/kernels/mps/mod.rs`](../../mps/mod.rs). `copy(src, dst, ty, keep, name)`
 is also called by `dynamic_update_slice` here, by `scatter_add` in
-[`lumen/kernels/gather/mps`](../../gather/mps/), by `lumen/graph_compiler/plan.rs`
+[`lumen/kernels/scatter_add/mps`](../../scatter_add/mps/), by `lumen/graph_compiler/plan.rs`
 (copying an operand that is not updated in place), by
 `lumen/kernels/device_transfer/mps.rs` (`copy_h2d`) and by `Tensor::copy_` in
 `lumen/tensor/tensor.rs`.
@@ -55,5 +55,5 @@ Buffer layout: 0 = source (operand, or the update), 1 = output, 2..9 = up to
 ## Related
 
 - [`lumen/kernels/mps`](../../mps/) — `launch`, `Grid`, `dims_arg`, `u32_arg`, prelude.
-- [`lumen/kernels/gather/mps`](../../gather/mps/) — another indexed-access kernel family.
+- [`lumen/kernels/scatter_add/mps`](../../scatter_add/mps/) — another indexed-access kernel family.
 - `lumen/kernels/reference.rs` — reference semantics.

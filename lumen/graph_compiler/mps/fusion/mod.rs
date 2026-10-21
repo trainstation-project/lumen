@@ -44,8 +44,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Iota { .. }
             | RandomBits { .. }
     );
-    let gather = matches!(node.primitive, Gather { .. })
-        && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
+    let gather = matches!(node.primitive, Gather { .. });
     let reduction = matches!(node.primitive, ReduceSum { .. } | ReduceMax { .. })
         && graph.type_of(node.inputs[0]).numel() <= u32::MAX as usize;
     let f64 = node

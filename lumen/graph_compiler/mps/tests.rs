@@ -57,6 +57,27 @@ fn apply(g: &mut Graph, p: Primitive, inputs: &[Var]) -> Var {
 }
 
 #[test]
+fn gathers_from_tables_past_u32_index_in_ulong() {
+    let source = |rows: usize| {
+        let mut g = Graph::new();
+        let table = g.input(ty(DType::U8, &[rows, 4]));
+        let index = g.input(ty(DType::I32, &[8]));
+        let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
+        g.set_outputs(&[out]).unwrap();
+        codegen::kernel(&g, &[], &CompilerConfig::default(), &Default::default()).1
+    };
+    let (narrow, wide) = (source(1000), source(1 << 31));
+    assert!(
+        !narrow.contains("ulong") && narrow.contains("uint i"),
+        "{narrow}"
+    );
+    assert!(
+        wide.contains("ulong i") && !wide.contains("uint i"),
+        "{wide}"
+    );
+}
+
+#[test]
 fn fuses_elementwise_and_layout_chains() {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 4]));

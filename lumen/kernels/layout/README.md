@@ -23,4 +23,4 @@ the primitive dispatch in [`lumen/kernels/mps/mod.rs`](../mps/mod.rs)
 ## Related
 
 - [`lumen/kernels/mps`](../mps/) — launch helpers and `offset_of32`.
-- [`lumen/kernels/gather`](../gather/) — the indexed `gather` primitive (different kernels).
+- The indexed `gather` primitive is generated (`lumen/codegen/mps`), not these kernels.

@@ -38,7 +38,7 @@ fn alone(p: &Primitive) -> bool {
         Primitive::Concatenate {
             in_place: false,
             ..
-        }
+        } | Primitive::Gather { .. }
     ) || elementwise(p)
 }
 
