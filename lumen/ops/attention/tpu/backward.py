@@ -1,9 +1,11 @@
 import lumen.functional as F
 from lumen import pallas as pl
 from lumen.ops.attention.tpu import (
+    LANES,
     NN,
     NT,
     TN,
+    broadcast,
     by_mask,
     first_query_block,
     heads,
@@ -35,6 +37,7 @@ def program(spec):
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
     h, hv, causal, ds_scale = spec["h"], spec["hv"], spec["causal"], spec["ds_scale"]
     q, k, v, do, lse, delta = (spec[n] for n in ("q", "k", "v", "do", "lse", "delta"))
+    per_query = (delta, False) if delta else (spec["o"], False)
 
     def probabilities(qb, kb, lseb, g, i, j, mask):
         qk = scored(spec, pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32"))
@@ -44,7 +47,15 @@ def program(spec):
 
     def gradient(p, dob, vb, deltab, g):
         dp = pl.dot_general(dob[...], vb[...], NT, preferred_element_type="float32")
-        return (dp - tile(lanes(spec, deltab, delta, g), bkv)) * p * ds_scale
+        if delta:
+            d = lanes(spec, deltab, delta, g)
+        else:
+            d = F.sum(deltab[...].to("float32") * dob[...].to("float32"), -1, keepdim=True)
+            d = broadcast(d, (d.shape[0], LANES))
+        return (dp - tile(d, bkv)) * p * ds_scale
+
+    def per_row(height, block_of):
+        return vector(spec, delta, height, block_of) if delta else matrix(spec, spec["o"], height, hv, block_of)
 
     if spec["kind"] == "dq":
         dq = spec["dq"]
@@ -53,7 +64,7 @@ def program(spec):
             return j if causal is None else minimum(j, last_key_block(spec, i))
 
         def kernel(rows, memory, result, acc_ref):
-            ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), (delta, False), (dq, True)]
+            ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), per_query, (dq, True)]
             query_rows = lambda g, i, j: (g, i)  # noqa: E731
             key_rows = lambda g, i, j: (g, key_block(i, j))  # noqa: E731
             in_specs = [
@@ -62,7 +73,7 @@ def program(spec):
                 matrix(spec, v, bkv, hv, key_rows),
                 matrix(spec, do, bq, hv, query_rows),
                 vector(spec, lse, bq, query_rows),
-                vector(spec, delta, bq, query_rows),
+                per_row(bq, query_rows),
             ]
             out_specs = [matrix(spec, dq, bq, h, query_rows)]
 
@@ -97,7 +108,7 @@ def program(spec):
         return i if causal is None else maximum(i, first_query_block(spec, j))
 
     def kernel(rows, memory, result, dk_ref, dv_ref):
-        ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), (delta, False), (dk, True), (dv, True)]
+        ops = [(q, False), (k, False), (v, False), (do, False), (lse, False), per_query, (dk, True), (dv, True)]
         query_rows = lambda j, g, i: (g, query_block(i, j))  # noqa: E731
         key_rows = lambda j, g, i: (g, j)  # noqa: E731
         in_specs = [
@@ -106,7 +117,7 @@ def program(spec):
             matrix(spec, v, bkv, hv, key_rows),
             matrix(spec, do, bq, hv, query_rows),
             vector(spec, lse, bq, query_rows),
-            vector(spec, delta, bq, query_rows),
+            per_row(bq, query_rows),
         ]
         out_specs = [matrix(spec, dk, bkv, h, key_rows), matrix(spec, dv, bkv, hv, key_rows)]
 

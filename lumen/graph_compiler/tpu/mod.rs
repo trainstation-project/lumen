@@ -491,6 +491,83 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 }
 
+fn delta_inside(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let producer = |v: Var| nodes.iter().find(|n| n.output == v);
+    let unshaped = |v: Var| match producer(v) {
+        Some(n) if matches!(n.primitive, Primitive::Reshape { .. }) => (n.inputs[0], Some(n)),
+        _ => (v, None),
+    };
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    let mut changed = false;
+    for node in nodes {
+        out.set_origin(node);
+        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let mut primitive = node.primitive.clone();
+        if let Primitive::Fusion { name, label, body } = &node.primitive
+            && name == "flash_attention_backward"
+            && let Some(b) = attention::backward_of_body(body)
+            && let Some(k) = body.inputs().iter().position(|&v| v == b.delta.base)
+            && let Some(dot) = producer(node.inputs[k])
+            && matches!(dot.primitive, Primitive::DotGeneral { .. })
+        {
+            let operands: Vec<(Var, Option<&Node>)> =
+                dot.inputs.iter().map(|&v| unshaped(v)).collect();
+            let mut inner = Graph::new();
+            let mut within: Vec<Var> = vec![0; body.types.len()];
+            let mut reads = Vec::new();
+            for (j, &v) in body.inputs().iter().enumerate() {
+                if j != k {
+                    within[v] = inner.input(body.type_of(v).clone());
+                    reads.push(map[node.inputs[j]]);
+                    continue;
+                }
+                let mut sides = Vec::new();
+                for &(base, reshape) in &operands {
+                    let mut x = inner.input(graph.type_of(base).clone());
+                    reads.push(map[base]);
+                    if let Some(r) = reshape {
+                        x = inner
+                            .apply(r.primitive.clone(), &[x])
+                            .expect("the operand's reshape");
+                    }
+                    sides.push(x);
+                }
+                within[v] = inner
+                    .apply(dot.primitive.clone(), &sides)
+                    .expect("delta's dot");
+            }
+            for n in body.nodes() {
+                let ins: Vec<Var> = n.inputs.iter().map(|&v| within[v]).collect();
+                within[n.output] = inner
+                    .apply(n.primitive.clone(), &ins)
+                    .expect("a node of the body");
+            }
+            let outputs: Vec<Var> = body.outputs().iter().map(|&v| within[v]).collect();
+            inner.set_outputs(&outputs).expect("the body's values");
+            primitive = Primitive::Fusion {
+                name: name.clone(),
+                label,
+                body: inner,
+            };
+            inputs = reads;
+            changed = true;
+        }
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(map[node.output], node.label);
+    }
+    if !changed {
+        return graph.clone();
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
     let wide = |acc: &attention::Access| {
         let shape = &body.type_of(acc.base).shape;
@@ -793,7 +870,7 @@ impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph =
             attention::fuse_backward(&m.graph, |_| false, |_| "flash_attention_backward".into());
-        m.graph = reshaped_outputs(&merged_outputs(&m.graph));
+        m.graph = delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
         attentions(&m.graph)
     }
 }

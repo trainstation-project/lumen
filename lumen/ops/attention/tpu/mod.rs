@@ -252,8 +252,20 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
             &b.batch,
             false,
         )?,
-        view("delta", &operand(body, &b.delta, 1), &b.batch, false)?,
     ];
+    let delta = match rows_of(body, &b.delta, usize::MAX) {
+        usize::MAX => {
+            let o = inside(body, &b.delta, &b.d_o, &b.batch, b.sq)?;
+            format!(
+                "\"delta\": null, \"o\": {}",
+                view("o", &operand(body, &o, b.hv), &b.batch, true)?
+            )
+        }
+        _ => format!(
+            "\"delta\": {}",
+            view("delta", &operand(body, &b.delta, 1), &b.batch, false)?
+        ),
+    };
     let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
         (Some(_), None, None) => "dq",
         (None, Some(_), Some(_)) => "dkv",
@@ -276,7 +288,7 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
     let spec = format!(
         "\"kind\": \"{kind}\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
          \"scores\": {}, \"causal\": {}, \"ds_scale\": {:?}, \"q\": {}, \"k\": {}, \"v\": {}, \"do\": {}, \
-         \"lse\": {}, \"delta\": {}, {outs}",
+         \"lse\": {}, {delta}, {outs}",
         b.batch,
         b.sq,
         b.sk,
@@ -292,9 +304,102 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         ins[2],
         ins[3],
         ins[4],
-        ins[5],
     );
     Ok((kind, spec))
+}
+
+fn inside(
+    body: &Graph,
+    delta: &Access,
+    d_o: &Access,
+    batch: &[usize],
+    sq: usize,
+) -> Result<Access, String> {
+    let failed =
+        || Err("flash attention backward on TPU: delta neither an operand nor rowsum(dO o)".into());
+    let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
+    let Some(dot) = producer(delta.base) else {
+        return failed();
+    };
+    let Primitive::DotGeneral {
+        lhs_batch,
+        rhs_batch,
+        lhs_contracting,
+        rhs_contracting,
+        ..
+    } = &dot.primitive
+    else {
+        return failed();
+    };
+    let based = |mut v: Var| {
+        while let Some(n) = producer(v).filter(|n| matches!(n.primitive, Primitive::Reshape { .. }))
+        {
+            v = n.inputs[0];
+        }
+        v
+    };
+    let side = match (
+        based(dot.inputs[0]) == d_o.base,
+        based(dot.inputs[1]) == d_o.base,
+    ) {
+        (true, false) => 1,
+        (false, true) => 0,
+        _ => return failed(),
+    };
+    let (dims, contracting) = match side {
+        0 => (lhs_batch, lhs_contracting),
+        _ => (rhs_batch, rhs_contracting),
+    };
+    let operand = dot.inputs[side];
+    let shape = body.type_of(operand).shape.clone();
+    let out = body.type_of(dot.output).shape.clone();
+    if contracting.len() != 1 || out.len() != dims.len() {
+        return failed();
+    }
+    let (strides, out_strides) = (contiguous_strides(&shape), contiguous_strides(&out));
+    let at = |a: usize, h: usize| {
+        let mut address = h * strides[contracting[0]];
+        for (k, &d) in dims.iter().enumerate() {
+            address += ((a / out_strides[k]) % out[k]) * strides[d];
+        }
+        address
+    };
+    let offset = at(delta.offset, 0);
+    let mut fitted = Vec::new();
+    for (d, &(stride, div)) in delta.batch.iter().enumerate() {
+        let size = batch[d];
+        let of = |i: usize| at(delta.offset + (i / div) * stride, 0);
+        let period = (1..size).find(|&i| of(i) != of(0)).unwrap_or(size);
+        let scaled = if period < size { of(period) - of(0) } else { 0 };
+        if (0..size).any(|i| of(i) != of(0) + (i / period) * scaled) {
+            return failed();
+        }
+        fitted.push((scaled, period));
+    }
+    let o = Access {
+        base: based(operand),
+        offset,
+        batch: fitted,
+        row: at(delta.offset + delta.col, 0) - offset,
+        col: at(delta.offset, 1) - offset,
+    };
+    let heads: usize = batch.iter().product();
+    for g in 0..heads {
+        for q in [0, sq - 1] {
+            let (mut rest, mut from, mut to) =
+                (g, delta.offset + q * delta.col, o.offset + q * o.row);
+            for d in (0..batch.len()).rev() {
+                let idx = rest % batch[d];
+                rest /= batch[d];
+                from += (idx / delta.batch[d].1) * delta.batch[d].0;
+                to += (idx / o.batch[d].1) * o.batch[d].0;
+            }
+            if at(from, 0) != to {
+                return failed();
+            }
+        }
+    }
+    Ok(o)
 }
 
 fn group(dk: &Access) -> usize {
