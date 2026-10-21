@@ -23,7 +23,11 @@ def substitute(tape):
         ctx.dot1, ctx.dot2 = tape[at[m["scores"]]][2], tape[at[m["out"]]][2]
         ctx.chain, ctx.causal, ctx.dropout = m["chain"], m["causal"], m["dropout"]
         q, k, v, o = (_value(m[name]) for name in ("q", "k", "v", "out"))
-        lse = prims.add(_value(m["max"]), prims.log(_value(m["sum"])))
+        mx, total = _value(m["max"]), _value(m["sum"])
+        if mx.ndim < o.ndim:
+            kept = [*mx.shape, 1]
+            mx, total = prims.reshape(mx, kept), prims.reshape(total, kept)
+        lse = prims.add(mx, prims.log(total))
         ctx.save_for_backward(q, k, v, o, lse=lse)
         node = (
             _FUNCTION,
