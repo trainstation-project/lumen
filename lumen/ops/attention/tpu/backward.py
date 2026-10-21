@@ -6,6 +6,7 @@ from lumen.ops.attention.tpu import (
     NT,
     TN,
     add,
+    any_visible,
     broadcast,
     by_mask,
     chunk,
@@ -23,6 +24,7 @@ from lumen.ops.attention.tpu import (
     tile,
     vector,
     views,
+    when,
     zeros,
 )
 from lumen.ops.tpu import pallas
@@ -93,16 +95,22 @@ def program(spec):
                 def _():
                     acc_ref[...] = zeros((bq, h))
 
-                stats = rows_of(lseb, deltab, dob, g)
                 queries, keys = mul(i, bq), mul(key_block(i, j), bkv)
 
-                def run(c, mask):
-                    part, _, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
-                    acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32")
+                def block():
+                    stats = rows_of(lseb, deltab, dob, g)
 
-                for c in range(bkv // bkc):
-                    start = add(mul(j, bkv), c * bkc)
-                    by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
+                    def run(c, mask):
+                        part, _, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
+                        acc_ref[...] += pl.dot_general(
+                            ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32"
+                        )
+
+                    for c in range(bkv // bkc):
+                        start = add(mul(j, bkv), c * bkc)
+                        by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
+
+                when(any_visible(spec, queries, mul(j, bkv), bq), block)
 
                 @pl.when(j == nk - 1)
                 def _():
@@ -147,16 +155,20 @@ def program(spec):
                 dk_ref[...] = zeros((bkv, h))
                 dv_ref[...] = zeros((bkv, hv))
 
-            stats = rows_of(lseb, deltab, dob, g)
             queries, keys = mul(query_block(i, j), bq), mul(j, bkv)
 
-            def run(c, mask):
-                part, p, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
-                dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
-                dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+            def block():
+                stats = rows_of(lseb, deltab, dob, g)
 
-            for c in range(bkv // bkc):
-                by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
+                def run(c, mask):
+                    part, p, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
+                    dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
+                    dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+
+                for c in range(bkv // bkc):
+                    by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
+
+            when(any_visible(spec, mul(i, bq), keys, bq), block)
 
             @pl.when(last)
             def _():

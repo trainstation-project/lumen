@@ -144,6 +144,12 @@ def when(condition, f):
         pl.when(condition)(f)
 
 
+def any_visible(spec, queries, keys, height):
+    if spec["causal"] is None:
+        return True
+    return add(keys, mul(add(queries, height - 1), -1)) <= spec["causal"]
+
+
 def by_mask(spec, queries, keys, height, width, run):
     causal = spec["causal"]
     if causal is None:
