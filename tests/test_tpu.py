@@ -3,6 +3,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
+from lumen.graph import prims
 
 pytestmark = pytest.mark.tpu
 
@@ -557,3 +558,30 @@ def test_a_reductions_prologue_and_epilogue_are_its_kernel():
     x = lumen.from_numpy(a).to(dtype="bfloat16").to("tpu")
     b = floats(x)
     np.testing.assert_allclose(floats(lumen.compile(f)(x)), (b * b).mean(-1) * 2, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "f, expected, shapes",
+    [
+        (lambda x, v: x - v.reshape(1024, 1), lambda x, v: x - v[:, None], [[1024, 2048], [1024]]),
+        (lambda x, v: x + v, lambda x, v: x + v, [[1024, 2048], [2048]]),
+        (lambda x, v: x[64:128] * 2.0, lambda x, v: x[64:128] * 2, [[1024, 2048], [8]]),
+        (lambda x, v: x.transpose(0, 1) * 2.0, lambda x, v: x.transpose(1, 0, 2, 3) * 2, [[4, 8, 64, 128], [8]]),
+        (
+            lambda x, v: x + prims.iota("int32", (1024, 2048), 1).float(),
+            lambda x, v: x + np.arange(2048, dtype=np.float32),
+            [[1024, 2048], [8]],
+        ),
+    ],
+    ids=["a value a row", "a value a column", "slice", "transpose", "iota"],
+)
+def test_layout_is_a_loops_index_maps(f, expected, shapes):
+    """Broadcasts, slices at whole blocks, transposes of major dimensions
+    and iota in a loop: each operand read in blocks of its own (where the
+    layout puts them), one kernel."""
+    rng = np.random.default_rng(0)
+    x, v = (rng.standard_normal(s, dtype=np.float32) for s in shapes)
+    metas = [lumen.empty(s, "float32", "meta") for s in shapes]
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+    got = floats(lumen.compile(f)(lumen.from_numpy(x).to("tpu"), lumen.from_numpy(v).to("tpu")))
+    np.testing.assert_array_equal(got, expected(x, v))
