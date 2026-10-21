@@ -10,8 +10,11 @@ impl CompilerPass<TpuModule<'_>> for FlashAttention {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        let scalar: attention::Leaves = |graph, v| graph.type_of(v).shape.is_empty();
-        let epilogues = m.options.config.contraction_epilogues.then_some(scalar);
+        let scalars = attention::Epilogues {
+            leaves: |graph, v| graph.type_of(v).shape.is_empty(),
+            reshaped: true,
+        };
+        let epilogues = m.options.config.contraction_epilogues.then_some(scalars);
         m.graph = attention::fuse(&m.graph, epilogues, &[], |_| "flash_attention".into());
         Ok(())
     }

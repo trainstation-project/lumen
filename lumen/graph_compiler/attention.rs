@@ -281,9 +281,15 @@ type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
 
 pub(crate) type Leaves = fn(&Graph, Var) -> bool;
 
+#[derive(Clone, Copy)]
+pub(crate) struct Epilogues {
+    pub(crate) leaves: Leaves,
+    pub(crate) reshaped: bool,
+}
+
 pub(crate) fn fuse(
     graph: &Graph,
-    epilogues: Option<Leaves>,
+    epilogues: Option<Epilogues>,
     scalars: &[Var],
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
@@ -292,7 +298,7 @@ pub(crate) fn fuse(
         .into_iter()
         .map(|a| {
             let (mut chain, mut leaves, mut kept) = match epilogues {
-                Some(readable) => m.epilogue(a.root, scalars, readable),
+                Some(e) => m.epilogue(a.root, scalars, e.leaves),
                 None => (Vec::new(), Vec::new(), false),
             };
             let read_after =
@@ -348,7 +354,17 @@ pub(crate) fn fuse(
         if let Some(d) = &a.dropout {
             bases.extend([d.seed, d.start]);
         }
-        let raw = kept.then_some(nodes[a.root].output);
+        let root = nodes[a.root].output;
+        let reshapes = chain
+            .iter()
+            .take_while(|&&n| matches!(nodes[n].primitive, Primitive::Reshape { .. }))
+            .count();
+        let reshaped =
+            epilogues.is_some_and(|e| e.reshaped) && reshapes > 0 && reshapes < chain.len();
+        let raw = kept.then(|| match reshaped {
+            true => nodes[chain[reshapes - 1]].output,
+            false => root,
+        });
         let lse = a.lse.map(|n| nodes[n].output);
         let outputs: Vec<Var> = std::iter::once(node.output).chain(raw).chain(lse).collect();
         let body = body_of(graph, &m.producer, &outputs, &bases);
@@ -368,6 +384,12 @@ pub(crate) fn fuse(
             map[v] = out
                 .apply(Primitive::FusionOutput { index, ty }, &[fused])
                 .expect("the fusion's output");
+        }
+        if let Some(r) = raw.filter(|&r| r != root) {
+            let new_sizes = graph.type_of(root).shape.clone();
+            map[root] = out
+                .apply(Primitive::Reshape { new_sizes }, &[map[r]])
+                .expect("the attention's value");
         }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
