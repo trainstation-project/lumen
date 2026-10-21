@@ -13,10 +13,6 @@ const QUERIES: usize = 1024;
 
 const KEYS: usize = 4096;
 
-const BACKWARD_QUERIES: usize = 512;
-
-const BACKWARD_KEYS: usize = 1024;
-
 struct Operand {
     row: usize,
     ty: TensorType,
@@ -298,8 +294,8 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         b.sk,
         b.h,
         b.hv,
-        block(b.sq, BACKWARD_QUERIES),
-        block(b.sk, BACKWARD_KEYS),
+        block(b.sq, QUERIES),
+        block(b.sk, KEYS),
         scores(&b.scores),
         b.causal.map_or("null".into(), |c| c.to_string()),
         b.ds_scale,
