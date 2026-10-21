@@ -26,7 +26,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `place_concats.rs` | Pass `place_concats`: marks concatenates whose operands' kernels can write them in place; `in_place_concats` also re-checked by `Codegen`. |
 | `fusion.rs` | Pass `loop_fusion` (`LoopFusion`): loop/reduction/epilogue/multi-output fusion (`fuse`), then horizontal fusion; also `fusible`, `label`. |
 | `horizontal.rs` | Horizontal loop fusion: independent same-size small loop fusions run as one multi-output kernel. |
-| `concatenates_alone.rs` | Pass `concatenates_alone` (with `fuse` off): every concatenate becomes a one-node fusion, since concatenate has no primitive kernel on MPS. |
+| `alone.rs` | Pass `alone`: every elementwise node and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (neither has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
 | `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`. |
 | `tests.rs` | End-to-end MPS compiler tests against the reference executor (skip without Metal via `plan_tests::mps::available`). |
@@ -67,7 +67,7 @@ of any module). The order is load-bearing; the comments in
 | 13 | `normalization_diamonds` | `fuse && normalization_diamonds` | `diamonds.rs` | Row kernels' `Row`s for loop fusion. |
 | 14 | `place_concats` | `fuse` | `place_concats.rs` | Mark in-place concatenates (loop fusion leaves them alone). |
 | 15 | `loop_fusion` | `fuse` | `fusion.rs` (+ `horizontal.rs` if `horizontal_fusion`) | Fuse; clears `rows`; may drop runtime scalars. |
-| 15′ | `concatenates_alone` | `!fuse` (instead of 13–15) | `concatenates_alone.rs` | Each concatenate its own fusion; clears `scalars`. |
+| 15′ | `alone` | always | `alone.rs` | Each elementwise node or concatenate left alone its own fusion; keeps a runtime scalar by value only if fusions alone read it. |
 | 16 | `codegen` | always | `kernel_codegen.rs` | Generate Metal for each pending fusion; unmark concatenates that can no longer be in place. |
 | 17 | `place_views` | always | `place_views.rs` | Mark slices dots read in place as views. |
 
@@ -120,7 +120,7 @@ copying; `Graph::placements()` turns them into `(value, View)` pairs, which
   is an attention backward's. It runs *before* fusion, guessing which
   operands will become fusions; `codegen` re-runs `in_place_concats(..,
   false)` on the fused graph and unmarks any that no longer qualify,
-  turning them into `concatenates_alone` fusions. Marked concatenates have
+  turning them into one-node fusions (`alone::wrapped`). Marked concatenates have
   no step: their operands' kernels get `output_views`.
 - **`Primitive::Slice { view }`** — set by `place_views` (last pass) for
   slices read only by dots, or GEMM-epilogue fusions

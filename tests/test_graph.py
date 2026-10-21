@@ -2555,7 +2555,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         (step,) = lumen.graph_compiler.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
         code = [open(f).read().splitlines()[line - 1].strip() for f, line in step["sources"]]
         assert sorted(code) == ["return y.bfloat16()", 'y = F.matmul(x, w, "float32", "float32")'], code
-        assert [t.split("[")[0] for t in dots(both, x, w)] == ["dot_general", "cast"]
+        assert [t.split("[")[0] for t in dots(both, x, w)] == ["dot_general", "cast(float32 -> bfloat16)"]
     finally:
         lumen.config.compiler.reset()
     got = lumen.to_numpy(lumen.compile(rounded)(x, w).to(dtype="float32"))
@@ -2564,7 +2564,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     half = lambda x, w: F.matmul(x, w, "float32", "float32").half()  # noqa: E731
     lumen.config.compiler.contraction_epilogues = False
     try:
-        assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast"]
+        assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast(float32 -> float16)"]
     finally:
         lumen.config.compiler.reset()
 
