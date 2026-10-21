@@ -3,6 +3,7 @@ pub(crate) mod attention;
 pub mod config;
 mod cpu;
 pub(crate) mod diamonds;
+pub(crate) mod horizontal;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;

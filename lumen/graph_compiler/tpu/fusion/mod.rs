@@ -1,8 +1,10 @@
 mod dot_epilogues;
 mod emit;
 mod groups;
+mod horizontal;
 
 pub(super) use dot_epilogues::FuseDots;
+pub(super) use horizontal::HorizontalFusion;
 
 use super::TpuModule;
 use crate::graph_compiler::pass::CompilerPass;

@@ -18,6 +18,7 @@ fusion a folder per phase.
 | `fusion/dot_epilogues.rs` | Pass `fuse_dots` (`FuseDots`): a dot and its column or row slices and elementwise consumers one `dot_general` fusion, the dot kernel's epilogue (members, together, in-place outputs). |
 | `fusion/groups.rs` | Loop fusion's groups: each fusible node joins the group of its readers (`groups`); a reduction one a group, layout only where `codegen/tpu/indexing.rs` plans it (`planned`). |
 | `fusion/emit.rs` | Each group as a `loop` or `reduction` fusion (`members`, `body`, `loop_fusion`). |
+| `fusion/horizontal.rs` | Pass `horizontal_fusion` (`HorizontalFusion`): independent small elementwise loops of one shape as one multi-output loop (`../horizontal.rs`, with the TPU's `Target`: up to 1M elements, 32 streams, none a concatenate writes in place). A TPU kernel costs ~2–8 µs besides its bytes. |
 
 ## Pipeline
 
@@ -31,6 +32,7 @@ fusion a folder per phase.
 | 6 | `fuse_dots` | always (epilogues with `contraction_epilogues`) | `fusion/dot_epilogues.rs` |
 | 7 | `place_concats` | always | `place_concats.rs` |
 | 8 | `loop_fusion` | always | `fusion/` |
+| 9 | `horizontal_fusion` | `horizontal_fusion` | `fusion/horizontal.rs` |
 
 The frontend (`cse`, `simplify`) runs before, for every device; the plan's
 stages (scheduling, rematerialization, buffers) after.

@@ -31,7 +31,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `fusion/dot_epilogues.rs` | A dot's epilogue: its column regions, or the chain of elementwise nodes after it, and the values it writes besides (`dot_epilogues`). |
 | `fusion/hosts.rs` | Which nodes start a fusion (`roots`) and which values a fusion writes besides its root (`hosts`, multi-output fusion). |
 | `fusion/emit.rs` | Each fusion's members and reads within a kernel's bindings (`fusions`), rows joined to the dot they read (`row_dots`), and the fused graph (`emitted`). |
-| `horizontal.rs` | Horizontal loop fusion: independent same-size small loop fusions run as one multi-output kernel. |
+| `horizontal.rs` | MPS's horizontal fusion `Target` (`../horizontal.rs`): which fusions join (no reductions, attention, atomic split-K or GEMM; at most 1M elements), keyed by element count (and shape for tiled transposes), within Metal's 30 buffers and the transpose tiles' heroes. |
 | `alone.rs` | Pass `alone`: every elementwise node and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (neither has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
 | `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`. |

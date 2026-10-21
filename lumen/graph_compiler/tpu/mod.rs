@@ -7,7 +7,7 @@ mod place_concats;
 use diamonds::Diamonds;
 use flash_attention::FlashAttention;
 use flash_attention_backward::FlashAttentionBackward;
-use fusion::{FuseDots, LoopFusion};
+use fusion::{FuseDots, HorizontalFusion, LoopFusion};
 use place_concats::PlaceConcats;
 
 use super::pass::{Module, Pipeline};
@@ -90,6 +90,9 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         pipeline.add(Diamonds);
     }
     pipeline.add(FuseDots).add(PlaceConcats).add(LoopFusion);
+    if options.config.horizontal_fusion {
+        pipeline.add(HorizontalFusion);
+    }
     pipeline.run(&mut module)?;
     let TpuModule {
         graph,

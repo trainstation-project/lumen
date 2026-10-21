@@ -11,6 +11,8 @@ use crate::ops::tpu::{Launch, launch};
 
 const BLOCK_BYTES: usize = 1 << 20;
 
+const STREAM_BYTES: usize = 32 << 20;
+
 fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
     if shape.len() < 2 {
@@ -27,10 +29,23 @@ fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
         .max()
         .unwrap_or(8);
     let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
-    let bm = block(m, rows, 512).ok_or_else(|| failed("its rows"))?;
-    let bn = block(n, 128, 2048).ok_or_else(|| failed("its columns"))?;
+    let mut bm = block(m, rows, 512).ok_or_else(|| failed("its rows"))?;
+    let mut bn = block(n, 128, 2048).ok_or_else(|| failed("its columns"))?;
     let lead: usize = shape[..shape.len() - 2].iter().product();
     let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
+    let budget = STREAM_BYTES / dtypes.len();
+    while bm * bn * width > budget {
+        let halves = |b: usize, unit: usize, of: usize| {
+            (b / 2).is_multiple_of(unit) && of.is_multiple_of(b / 2)
+        };
+        if halves(bm, rows, m) {
+            bm /= 2;
+        } else if halves(bn, 128, n) {
+            bn /= 2;
+        } else {
+            break;
+        }
+    }
     let tile = bm.div_ceil(rows) * rows * bn.div_ceil(128) * 128 * width;
     let bl = (1..=lead)
         .rev()
@@ -206,7 +221,7 @@ pub(crate) fn encode(
     let dtypes: Vec<DType> = operands
         .iter()
         .map(|t| t.dtype)
-        .chain([out.dtype])
+        .chain(body.outputs().iter().map(|&v| body.type_of(v).dtype))
         .collect();
     let names: Vec<String> = operands
         .iter()
@@ -238,20 +253,27 @@ pub(crate) fn encode(
         .map(usize::to_string)
         .collect();
     let kernel = format!("loop_{}_{}", out.dtype, shown.join("x"));
+    let results: Vec<usize> = body.outputs().iter().map(|v| value[v]).collect();
+    let outputs: Vec<String> = body
+        .outputs()
+        .iter()
+        .map(|&v| format!("\"{}\"", body.type_of(v).dtype.full_name()))
+        .collect();
     let spec = format!(
-        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"result\": {}, \"output\": \"{}\", \"blocks\": {:?}, \"window\": {}",
+        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"results\": {results:?}, \"outputs\": [{}], \"blocks\": {:?}, \"window\": {}",
         out.shape,
         names.join(", "),
         nodes.join(", "),
-        value[&body.outputs()[0]],
-        out.dtype.full_name(),
+        outputs.join(", "),
         blocks,
         window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
     );
-    let rows: Vec<*const u8> = inputs
+    let n = step.inputs.len();
+    let rows: Vec<*const u8> = inputs[..n]
         .iter()
         .copied()
         .chain([output.cast_const()])
+        .chain(inputs[n..].iter().copied())
         .collect();
     let launched = Launch {
         module: "lumen.codegen.tpu.elementwise",
