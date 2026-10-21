@@ -491,6 +491,120 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 }
 
+fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
+    let wide = |acc: &attention::Access| {
+        let shape = &body.type_of(acc.base).shape;
+        shape.len() >= 3 && acc.row != shape[shape.len() - 1]
+    };
+    let index = |acc: &attention::Access| body.outputs().iter().position(|&o| o == acc.base);
+    let accesses: Vec<attention::Access> = match forward {
+        true => attention::of_body(body)
+            .map(|a| a.out)
+            .into_iter()
+            .collect(),
+        false => attention::backward_of_body(body)
+            .map(|b| {
+                [b.dq_out, b.dk_out, b.dv_out]
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, acc)| acc)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    accesses
+        .iter()
+        .filter(|acc| wide(acc))
+        .filter_map(index)
+        .collect()
+}
+
+fn merged_outputs(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        node.inputs.iter().for_each(|&v| readers[v].push(i));
+    }
+    let laid_out = |v: Var| {
+        readers[v].iter().any(|&r| {
+            matches!(
+                nodes[r].primitive,
+                Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
+            )
+        })
+    };
+    let mut merged = vec![false; graph.types.len()];
+    for node in nodes {
+        let Primitive::Fusion { name, body, .. } = &node.primitive else {
+            continue;
+        };
+        if !name.starts_with("flash_attention") {
+            continue;
+        }
+        for k in unreadable(body, name == "flash_attention") {
+            let v = match k {
+                0 => Some(node.output),
+                _ => readers[node.output]
+                    .iter()
+                    .find_map(|&u| match nodes[u].primitive {
+                        Primitive::FusionOutput { index, .. } if index == k => {
+                            Some(nodes[u].output)
+                        }
+                        _ => None,
+                    }),
+            };
+            if let Some(v) = v.filter(|&v| !laid_out(v)) {
+                merged[v] = true;
+            }
+        }
+    }
+    if !merged.contains(&true) {
+        return graph.clone();
+    }
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    let mut own: Vec<Var> = vec![0; graph.types.len()];
+    for node in nodes {
+        out.set_origin(node);
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&v| match node.primitive {
+                Primitive::FusionOutput { .. } => own[v],
+                _ => map[v],
+            })
+            .collect();
+        let v = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("a node of the graph");
+        out.set_label(v, node.label);
+        (map[node.output], own[node.output]) = (v, v);
+        if merged[node.output] {
+            let shape = &graph.type_of(node.output).shape;
+            let r = shape.len();
+            let mut flat = shape[..r - 2].to_vec();
+            flat.push(shape[r - 2] * shape[r - 1]);
+            let m = out
+                .apply(Primitive::Reshape { new_sizes: flat }, &[v])
+                .expect("the output merged");
+            map[node.output] = out
+                .apply(
+                    Primitive::Reshape {
+                        new_sizes: shape.clone(),
+                    },
+                    &[m],
+                )
+                .expect("the output as traced");
+        }
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
 fn reshaped_outputs(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -518,7 +632,9 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         };
         while let Some(&last) = chain.last() {
             match alone(nodes[last].output) {
-                Some(r) if (reduce(r) || reshape(r)) && alone(v).is_some() => chain.push(r),
+                Some(r) if (reduce(r) || (reshape(r) && reduce(last))) && alone(v).is_some() => {
+                    chain.push(r)
+                }
                 _ => break,
             }
         }
@@ -673,7 +789,7 @@ impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph =
             attention::fuse_backward(&m.graph, |_| false, |_| "flash_attention_backward".into());
-        m.graph = reshaped_outputs(&m.graph);
+        m.graph = reshaped_outputs(&merged_outputs(&m.graph));
         attentions(&m.graph)
     }
 }

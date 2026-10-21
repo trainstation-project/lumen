@@ -9,7 +9,9 @@ use crate::tensor::contiguous_strides;
 
 const LANES: usize = 128;
 
-const BLOCK: usize = 128;
+const QUERIES: usize = 512;
+
+const KEYS: usize = 1024;
 
 struct Operand {
     row: usize,
@@ -111,11 +113,12 @@ fn per_head(ty: &TensorType, batch: &[usize]) -> Access {
     }
 }
 
-fn block(n: usize) -> usize {
-    match n.is_multiple_of(BLOCK) {
-        true => BLOCK,
-        false => n,
-    }
+fn block(n: usize, cap: usize) -> usize {
+    (1..=cap / LANES)
+        .rev()
+        .map(|k| k * LANES)
+        .find(|&b| n.is_multiple_of(b))
+        .unwrap_or(n)
 }
 
 #[cfg(lumen_tpu_linked)]
@@ -222,8 +225,8 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
         a.sk,
         a.h,
         a.hv,
-        block(a.sq),
-        block(a.sk),
+        block(a.sq, QUERIES),
+        block(a.sk, KEYS),
         scores(&a.scores),
         a.causal.map_or("null".into(), |c| c.to_string()),
         views[0],
@@ -279,8 +282,8 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         b.sk,
         b.h,
         b.hv,
-        block(b.sq),
-        block(b.sk),
+        block(b.sq, QUERIES),
+        block(b.sk, KEYS),
         scores(&b.scores),
         b.causal.map_or("null".into(), |c| c.to_string()),
         b.ds_scale,

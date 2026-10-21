@@ -412,13 +412,14 @@ def _attention_reference(q, k, v, causal):
     return np.einsum("bnqk,bknh->bqnh", p, v)
 
 
+@pytest.mark.parametrize("dtype, tol", [("float32", 2e-4), ("bfloat16", 3e-2)], ids=["float32", "bfloat16"])
 @pytest.mark.parametrize("causal", [False, True], ids=["full", "causal"])
 @pytest.mark.parametrize("n, nkv", [(4, 4), (4, 2)], ids=["mha", "gqa"])
-def test_flash_attention_is_one_kernel_each_way(causal, n, nkv):
+def test_flash_attention_is_one_kernel_each_way(causal, n, nkv, dtype, tol):
     b, s, h = 2, 256, 128
     rng = np.random.default_rng(0)
-    q, g = (rng.standard_normal([b, s, n * h], dtype=np.float32) for _ in range(2))
-    k, v = (rng.standard_normal([b, s, nkv * h], dtype=np.float32) for _ in range(2))
+    q, g = (tpu(rng.standard_normal([b, s, n * h], dtype=np.float32), dtype) for _ in range(2))
+    k, v = (tpu(rng.standard_normal([b, s, nkv * h], dtype=np.float32), dtype) for _ in range(2))
 
     def attention(q, k, v):
         heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
@@ -429,14 +430,16 @@ def test_flash_attention_is_one_kernel_each_way(causal, n, nkv):
         o.backward(g)
         return o, q.grad, k.grad, v.grad
 
-    meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
+    meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
     graph = lumen.make_graph(step)(meta(b, s, n * h), meta(b, s, nkv * h), meta(b, s, nkv * h), meta(b, s, n * h))
     labels = [st["label"] for st in lumen.graph_compiler.Plan(graph, "tpu").steps()]
     assert labels.count("flash_attention") == 1, labels
     assert sum(label.startswith("flash_attention_backward") for label in labels) == 2, labels
-    o, dq, dk, dv = (floats(t) for t in lumen.compile(step)(*(tpu(t) for t in (q, k, v, g))))
+    o, dq, dk, dv = (floats(t) for t in lumen.compile(step)(q, k, v, g))
+    q, k, v, g = (floats(t) for t in (q, k, v, g))
     heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
-    np.testing.assert_allclose(o, _attention_reference(*heads, causal).reshape(b, s, n * h), rtol=2e-4, atol=2e-4)
+    want = _attention_reference(*heads, causal).reshape(b, s, n * h)
+    np.testing.assert_allclose(o, want, atol=tol * np.abs(want).max())
     eps = 1e-3
     for x, got in ((0, dq), (1, dk), (2, dv)):
         args = [t.copy() for t in (q, k, v)]
@@ -445,4 +448,4 @@ def test_flash_attention_is_one_kernel_each_way(causal, n, nkv):
         hi = (_attention_reference(*[t.reshape(b, s, -1, h) for t in args], causal).reshape(b, s, n * h) * g).sum()
         args[x] = args[x] - 2 * eps * direction
         lo = (_attention_reference(*[t.reshape(b, s, -1, h) for t in args], causal).reshape(b, s, n * h) * g).sum()
-        np.testing.assert_allclose((got * direction).sum(), (hi - lo) / (2 * eps), rtol=2e-2)
+        np.testing.assert_allclose((got * direction).sum(), (hi - lo) / (2 * eps), rtol=100 * tol)
