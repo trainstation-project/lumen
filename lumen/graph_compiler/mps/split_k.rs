@@ -1,7 +1,7 @@
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::ops::dot_general::mps::float_groups;
+use crate::kernels::dot_general::mps::float_groups;
 
 const GROUPS: usize = 256;
 const MAX_SPLIT: usize = 8;

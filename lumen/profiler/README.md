@@ -89,7 +89,7 @@ With `record_shapes`, ops record (via closures that only run then):
   `start`. Without CUPTI linked, starting a CUDA session from Python raises
   (`CUDA_TIMING_MISSING` tells you to set `CUPTI_LIB_DIR`).
 * **TPU** (`Activity::Tpu`): `tpu.rs` starts libtpu's profiler (once the
-  programs in flight have run) and `ops/tpu`'s `launch` records each
+  programs in flight have run) and `kernels/tpu`'s `launch` records each
   kernel's `GpuContext` and name (the variant its spec makes, as MPS names
   its kernels: `matmul_bf16_f32_bf16_2048x1024x4096`, `max_bf16_512x1024`).
   At `stop`, libtpu's

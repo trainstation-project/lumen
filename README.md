@@ -38,8 +38,8 @@ graph_compiler         lumen/graph_compiler: a pass pipeline per device
 Plan                   graph_compiler/plan.rs: every value placed in one
       |                workspace allocated once; the steps to run
       v
-Kernels                lumen/ops/reference.rs (CPU reference: what each
-                       primitive computes), lumen/ops/*/mps + generated
+Kernels                lumen/kernels/reference.rs (CPU reference: what each
+                       primitive computes), lumen/kernels/*/mps + generated
                        Metal (lumen/codegen/mps), Core ML on the Neural
                        Engine (opt-in), CUDA (allocator, streams, fill_)
 ```

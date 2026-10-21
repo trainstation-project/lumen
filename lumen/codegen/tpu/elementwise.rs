@@ -5,9 +5,9 @@ use super::{fusible, node, window};
 use crate::DType;
 use crate::graph::{Primitive, TensorType, Var};
 use crate::graph_compiler::plan::Step;
-use crate::ops::dot_general::tpu::block;
-use crate::ops::elementwise::tpu::{blocks, gcd};
-use crate::ops::tpu::{Launch, launch};
+use crate::kernels::dot_general::tpu::block;
+use crate::kernels::elementwise::tpu::{blocks, gcd};
+use crate::kernels::tpu::{Launch, launch};
 
 fn indexed_node(
     p: &Primitive,
@@ -120,7 +120,7 @@ fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> 
     );
     let shown: Vec<String> = plan.blocks.iter().map(usize::to_string).collect();
     let launched = Launch {
-        module: "lumen.ops.elementwise.tpu",
+        module: "lumen.kernels.elementwise.tpu",
         kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
         spec,
         rows,
@@ -224,7 +224,7 @@ pub(crate) fn encode(
         .chain(inputs[n..].iter().copied())
         .collect();
     let launched = Launch {
-        module: "lumen.ops.elementwise.tpu",
+        module: "lumen.kernels.elementwise.tpu",
         kernel,
         spec,
         rows: &rows,

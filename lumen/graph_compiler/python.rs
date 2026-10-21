@@ -223,7 +223,7 @@ impl PyPlan {
 
 #[pyfunction]
 fn _capture_launches() {
-    crate::ops::launched::capture();
+    crate::kernels::launched::capture();
 }
 
 type Captured = (
@@ -236,7 +236,7 @@ type Captured = (
 
 #[pyfunction]
 fn _captured_launches() -> Vec<Captured> {
-    crate::ops::launched::captured()
+    crate::kernels::launched::captured()
         .into_iter()
         .map(|l| (l.step, l.label, l.kernel, l.code, l.template))
         .collect()

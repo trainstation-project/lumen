@@ -3,7 +3,7 @@
 The IR. `lumen.compile` traces a Python function once per input signature
 into a `Graph` of strict, JAX `lax`-style `Primitive`s (a jaxpr); the
 graph compiler (`lumen/graph_compiler`) rewrites and fuses it and compiles
-it into a static `Plan`; the CPU interpreter `lumen/ops/reference.rs` defines
+it into a static `Plan`; the CPU interpreter `lumen/kernels/reference.rs` defines
 what each primitive computes. This folder holds the Rust IR, its Python
 bindings, the Python tracer that builds graphs (`TracedTensor`,
 `compile`), the primitive functions (`prims`), and the HTML graph viewer.
@@ -156,7 +156,7 @@ warnings at the source line.
   matters (`prune` does via `set_label`).
 * A new primitive needs: the enum variant, `name()`, `infer()`, `Display`
   params, `python.rs` parsing, a `prims.py` function, a reference
-  implementation in `lumen/ops/reference.rs`, and device support.
+  implementation in `lumen/kernels/reference.rs`, and device support.
 * Tracing happens only inside `lumen.compile`; `prims.bind` and custom ops
   raise outside a trace.
 
@@ -165,6 +165,6 @@ warnings at the source line.
 * [`lumen/graph_compiler`](../graph_compiler/README.md) — passes, fusion, `Plan` and scheduling over this IR.
 * [`lumen/codegen`](../codegen/README.md) — Metal / Core ML generated from `Fusion` bodies.
 * [`lumen/custom_op`](../custom_op/README.md) — builds `CustomCall` nodes.
-* `lumen/ops/reference.rs` — the CPU interpreter defining each primitive's semantics.
+* `lumen/kernels/reference.rs` — the CPU interpreter defining each primitive's semantics.
 * [`lumen/autograd`](../autograd/README.md) — uses the tracer's tapes for `.backward()`.
 * [`lumen/profiler`](../profiler/README.md) — `record_function` ranges that become node scopes.

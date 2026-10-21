@@ -2,12 +2,12 @@
 
 What TPU kernels generate from a fusion's body, as `codegen/mps` is to
 Metal: each kind's spec (the body's nodes, its operands' views and blocks)
-for a hand-written template in `ops/<op>/tpu/` (a Pallas program, its
+for a hand-written template in `kernels/<op>/tpu/` (a Pallas program, its
 schedule), and the replay of those nodes while the template is traced
 (`__init__.py`, the `Emitter` of a TPU: tracing inlines them, as Metal's
-compiler inlines a functor). Templates: loops (`ops/elementwise/tpu`), rows
-(`ops/row/tpu`), reductions (`ops/reduce/tpu`), the dot
-(`ops/dot_general/tpu`) and attention (`ops/attention/tpu`).
+compiler inlines a functor). Templates: loops (`kernels/elementwise/tpu`), rows
+(`kernels/row/tpu`), reductions (`kernels/reduce/tpu`), the dot
+(`kernels/dot_general/tpu`) and attention (`kernels/attention/tpu`).
 
 Fusions come from the TPU graph compiler: loops and reductions from
 `loop_fusion` (`graph_compiler/tpu/fusion/`), rows from `diamonds`
@@ -25,11 +25,11 @@ that move elements between tiles are not yet generated.
 | `mod.rs` | What the kinds share: `fusible` (the primitives a loop fusion holds), `node` (a primitive as the spec's JSON) and `window` (an output's column window, for in-place concatenates); re-exports `encode`. |
 | `__init__.py` | The replay of a spec's nodes while a template is traced: `computed` (on blocks of a loop or an epilogue), `indexed` (a loop's layout primitives on blocks), `per_row` (a row's values at their kinds' block shapes). |
 | `indexing.rs` | Layout in loops, as XLA's indexing analysis at the grain of blocks: `plan` maps each value's dimensions to the output's or to one index and picks blocks every operand reads whole; `loop_fusion` asks it of every loop with layout. |
-| `elementwise.rs` | Loops: `encode`, a fusion's body as `ops/elementwise/tpu`'s spec (plain, or `indexed` with layout). |
-| `row.rs` | Rows: `fusible`, `kinds` (each value's kind, from the dataflow), `readable`, `fits` (what the diamonds pass asks) and `encode`, for `ops/row/tpu`. |
-| `reduction.rs` | Reductions: `layout` (rows, columns or total), `reducible` and `encode` (prologue, reduce, epilogue), for `ops/reduce/tpu`. |
-| `gemm.rs` | The dot's epilogue (`Epilogue::of`): its members' widths, extra inputs, nodes and outputs, for `ops/dot_general/tpu`. |
-| `attention.rs` | Attention's forward and backward specs (`forward`, `backward`): each operand's view of its heads, the score chain, the outputs' layout (`written`) and the epilogue, for `ops/attention/tpu`; `graph_compiler/tpu` asks them at compile time. |
+| `elementwise.rs` | Loops: `encode`, a fusion's body as `kernels/elementwise/tpu`'s spec (plain, or `indexed` with layout). |
+| `row.rs` | Rows: `fusible`, `kinds` (each value's kind, from the dataflow), `readable`, `fits` (what the diamonds pass asks) and `encode`, for `kernels/row/tpu`. |
+| `reduction.rs` | Reductions: `layout` (rows, columns or total), `reducible` and `encode` (prologue, reduce, epilogue), for `kernels/reduce/tpu`. |
+| `gemm.rs` | The dot's epilogue (`Epilogue::of`): its members' widths, extra inputs, nodes and outputs, for `kernels/dot_general/tpu`. |
+| `attention.rs` | Attention's forward and backward specs (`forward`, `backward`): each operand's view of its heads, the score chain, the outputs' layout (`written`) and the epilogue, for `kernels/attention/tpu`; `graph_compiler/tpu` asks them at compile time. |
 
 ## Spec
 
@@ -66,7 +66,7 @@ row count. Its kernel name is `row_<rows>x<n>_<block>`.
 ## Related
 
 * [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` (rows, before the dots take their epilogues) and `loop_fusion` (loops and reductions, after).
-* [`../../ops/reduce/tpu/`](../../ops/reduce/tpu/) — the reduction template.
+* [`../../kernels/reduce/tpu/`](../../kernels/reduce/tpu/) — the reduction template.
 * [`../../graph_compiler/common/diamonds.rs`](../../graph_compiler/common/diamonds.rs) — the diamond matcher, shared with MPS.
-* [`../../ops/tpu/`](../../ops/tpu/README.md) — routes a `loop` fusion's step here.
-* [`../../ops/dot_general/tpu/`](../../ops/dot_general/) — the dot, whose epilogue uses `node` and `computed`.
+* [`../../kernels/tpu/`](../../kernels/tpu/README.md) — routes a `loop` fusion's step here.
+* [`../../kernels/dot_general/tpu/`](../../kernels/dot_general/) — the dot, whose epilogue uses `node` and `computed`.

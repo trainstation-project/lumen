@@ -4,7 +4,7 @@ use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::diamonds::Finder;
 pub(super) use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::pass::CompilerPass;
-use crate::ops::reduce::mps::REDUCE_THREADS;
+use crate::kernels::reduce::mps::REDUCE_THREADS;
 
 const MAX_GROUPS: usize = 64;
 

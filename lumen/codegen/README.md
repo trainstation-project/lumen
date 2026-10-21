@@ -6,7 +6,7 @@ this folder turns a fusion's body graph into source text a device can
 compile. It does not decide *what* to fuse, compile the source, or launch
 anything: the device's graph compiler calls in here (for MPS, the `codegen`
 pass in `graph_compiler/mps/kernel_codegen.rs`; for TPU, the step's encoder
-in `ops/tpu`) and hands the result to the runtime.
+in `kernels/tpu`) and hands the result to the runtime.
 
 Two backends: Apple's (Metal kernels for the GPU, Core ML programs for the
 Neural Engine) and TPU's (lumen's Pallas programs, elementwise loops so
@@ -36,11 +36,11 @@ row, reduction, GEMM-epilogue and attention fusions; its
   build (the TPU graph compiler reads it); the rest needs
   `cfg(lumen_tpu_linked)`.
 * Generated programs must compute exactly what the traced graph does (the
-  CPU interpreter in `lumen/ops/reference.rs` defines each primitive): no
+  CPU interpreter in `lumen/kernels/reference.rs` defines each primitive): no
   hidden dtype changes.
 
 ## Related
 
 * [`lumen/graph`](../graph/README.md) — the IR whose `Fusion` bodies are generated from.
 * [`lumen/graph_compiler`](../graph_compiler/README.md) — the passes that form fusions and call codegen; `config.rs` holds the flags codegen reads.
-* [`lumen/ops`](../ops/README.md) — the hand-written Metal templates the generated kernels instantiate (`ops/mps`, `ops/reduce/mps`, `ops/dot_general/mps`, `ops/attention/mps`).
+* [`lumen/kernels`](../kernels/README.md) — the hand-written Metal templates the generated kernels instantiate (`kernels/mps`, `kernels/reduce/mps`, `kernels/dot_general/mps`, `kernels/attention/mps`).

@@ -6,7 +6,7 @@ use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
 use crate::graph::TensorType;
-use crate::ops::device_transfer::{copy_d2h, copy_h2d};
+use crate::kernels::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
 
 fn device_of(options: &TensorOptions) -> Device {
@@ -507,7 +507,7 @@ impl Tensor {
     }
 
     pub fn wait_(&self) -> &Self {
-        crate::ops::wait::wait(self);
+        crate::kernels::wait::wait(self);
         self
     }
 
@@ -587,7 +587,7 @@ impl Tensor {
             if self.numel() > 0 && self.data_ptr() != src.data_ptr() {
                 let (from, to) = (src.data_ptr().cast_const(), self.data_ptr());
                 let keep = vec![src.clone(), self.clone()];
-                crate::ops::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
+                crate::kernels::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
             }
             return Ok(self);
         }

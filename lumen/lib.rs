@@ -18,7 +18,7 @@ pub mod custom_op;
 pub mod device;
 pub mod graph;
 pub mod graph_compiler;
-pub mod ops;
+pub mod kernels;
 pub mod pallas;
 pub mod profiler;
 #[cfg(feature = "python")]

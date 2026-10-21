@@ -166,7 +166,7 @@ def _check_block(label, sizes, shape, dtype):
 def _padded(ref, shape):
     """HBM view ``ref`` (a pallas_call operand's) as ``shape``, no smaller:
     its bytes the same (padded to whole tiles as they are), or an error."""
-    from lumen.ops.tpu.pallas import view
+    from lumen.kernels.tpu.pallas import view
 
     def tiles(s):
         if len(s) < 2:

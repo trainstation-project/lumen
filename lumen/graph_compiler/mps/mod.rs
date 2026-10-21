@@ -32,7 +32,7 @@ use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
-use crate::ops::mps::{
+use crate::kernels::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
 use crate::tensor::contiguous_strides;
@@ -52,17 +52,17 @@ unsafe extern "C" {
 }
 
 const PRELUDE: &str = concat!(
-    include_str!("../../ops/mps/kernels.metal"),
+    include_str!("../../kernels/mps/kernels.metal"),
     indoc::indoc!(
         "
 
         #define TEMPLATES_ONLY
         "
     ),
-    include_str!("../../ops/reduce/mps/kernels.metal"),
-    include_str!("../../ops/dot_general/mps/kernels.metal"),
-    include_str!("../../ops/attention/mps/forward.metal"),
-    include_str!("../../ops/attention/mps/backward.metal"),
+    include_str!("../../kernels/reduce/mps/kernels.metal"),
+    include_str!("../../kernels/dot_general/mps/kernels.metal"),
+    include_str!("../../kernels/attention/mps/forward.metal"),
+    include_str!("../../kernels/attention/mps/backward.metal"),
 );
 
 struct MpsModule<'a> {
@@ -370,7 +370,7 @@ pub(crate) fn encode(
     if let Some(dot) = split_k::atomic_dot(body) {
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
-        let plan = crate::ops::dot_general::mps::plan_matmul(
+        let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
             rhs,
@@ -420,7 +420,7 @@ pub(crate) fn encode(
             )
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
-        let plan = crate::ops::dot_general::mps::plan_matmul(
+        let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
             rhs,
@@ -495,7 +495,7 @@ pub(crate) fn encode(
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
         let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));
-        return crate::ops::reduce::mps::encode_reduction(
+        return crate::kernels::reduce::mps::encode_reduction(
             step,
             &root.primitive,
             x,
@@ -551,7 +551,7 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
             };
             let x = body.type_of(root.inputs[0]);
             let accum = body.type_of(root.output).dtype;
-            crate::ops::reduce::mps::scratch_bytes(x, axes, accum)
+            crate::kernels::reduce::mps::scratch_bytes(x, axes, accum)
         }
         None => 0,
     }

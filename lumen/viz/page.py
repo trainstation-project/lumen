@@ -9,7 +9,7 @@ from lumen.graph._C import FUSION_SEPARATOR
 from lumen.graph_compiler._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 
-from .common import OPS, source_of, type_text
+from .common import KERNELS, source_of, type_text
 
 
 def profile_steps(plan, run, runs, device):
@@ -220,9 +220,9 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
         "unfused_text": str(unfused),
         "workspace": {"fused": plan.workspace_bytes, "unfused": unfused.workspace_bytes},
         "views": views,
-        "sources": {f: (OPS / f).read_text() for f in files},
+        "sources": {f: (KERNELS / f).read_text() for f in files},
         "code": code_of(view["nodes"] for view in views.values()),
-        "prelude": (OPS / "mps" / "kernels.metal").read_text(),
+        "prelude": (KERNELS / "mps" / "kernels.metal").read_text(),
     }
 
 

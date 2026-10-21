@@ -3,7 +3,7 @@ import re
 
 import lumen
 
-OPS = pathlib.Path(lumen.__file__).parent / "ops"
+KERNELS = pathlib.Path(lumen.__file__).parent / "kernels"
 
 DTYPES = {
     "f32": "float32",

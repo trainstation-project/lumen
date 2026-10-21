@@ -3,7 +3,7 @@ use std::fmt;
 
 pub use crate::graph::View;
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, Var};
-use crate::ops::reference;
+use crate::kernels::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
@@ -804,7 +804,7 @@ impl Plan {
                             let operands = [&s.inputs[0].1, &s.inputs[1].1];
                             view.is_none()
                                 && operands[k].shape == self.inputs[i].shape
-                                && crate::ops::dot_general::mps::reads_strided(
+                                && crate::kernels::dot_general::mps::reads_strided(
                                     &s.primitive,
                                     operands,
                                     k,
@@ -914,11 +914,11 @@ impl Plan {
         let mut scopes = crate::profiler::is_enabled().then(OpenScopes::default);
         #[cfg(lumen_tpu_linked)]
         let batch = match executor {
-            Device::Tpu(index) => Some(crate::ops::tpu::Batch::new(index)),
+            Device::Tpu(index) => Some(crate::kernels::tpu::Batch::new(index)),
             _ => None,
         };
         for (at, step) in self.steps.iter().enumerate() {
-            crate::ops::launched::step(at, step.label);
+            crate::kernels::launched::step(at, step.label);
             if let Some(scopes) = &mut scopes {
                 scopes.enter(step.scope);
             }
@@ -989,18 +989,18 @@ impl Plan {
                     if step.scratch.is_some() {
                         keep.push(workspace.clone());
                     }
-                    crate::ops::mps::encode(step, &args, out, scratch, keep)?;
+                    crate::kernels::mps::encode(step, &args, out, scratch, keep)?;
                 }
                 #[cfg(lumen_tpu_linked)]
                 Device::Tpu(index) => {
                     let _ = scratch;
-                    crate::ops::tpu::encode(index, step, &args, out)?;
+                    crate::kernels::tpu::encode(index, step, &args, out)?;
                 }
                 _ => {
                     let _ = scratch;
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
                     let _kernel = crate::profiler::record_host_kernel(step.label);
-                    crate::ops::launched::launched(step.label, || None);
+                    crate::kernels::launched::launched(step.label, || None);
                     unsafe {
                         reference::eval_raw(&step.primitive, &args, &types, out, &step.output.1)
                     };
@@ -1049,7 +1049,7 @@ impl Plan {
                         return Err(format!("{}: custom ops do not run on TPU yet", step.label));
                     }
                     #[cfg(lumen_mps_linked)]
-                    Device::Mps(_) => crate::ops::dynamic_slice::mps::copy(
+                    Device::Mps(_) => crate::kernels::dynamic_slice::mps::copy(
                         src.data_ptr().cast_const(),
                         out.data_ptr(),
                         ty,

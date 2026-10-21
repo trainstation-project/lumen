@@ -35,7 +35,7 @@ and runs it through `graph_compiler::compile`.
 * **Views share storage.** `reshape` (when contiguous), `narrow`, `select`,
   `transpose`, `permute`, `(un)squeeze` only change shape/strides/offset.
   `storage_id` / `shares_storage_with` expose aliasing.
-* **Device copies** go through `ops::device_transfer` (`copy_h2d` /
+* **Device copies** go through `kernels::device_transfer` (`copy_h2d` /
   `copy_d2h`); only CPU storage is dereferenced directly. Device-to-device
   copies hop through the CPU. Meta tensors have no data: reading or copying
   one panics / raises.
@@ -66,6 +66,6 @@ and runs it through `graph_compiler::compile`.
 
 * [`lumen/allocator`](../allocator/README.md) — where `Storage` gets its bytes.
 * [`lumen/device`](../device/README.md) — `Device` and `resolve_device`.
-* [`lumen/ops`](../ops/) — copies and waits on tensors.
+* [`lumen/kernels`](../kernels/) — copies and waits on tensors.
 * [`lumen/graph`](../graph/) — `TracedTensor`, the compute-side tensor.
 * `tests/test_tensor.py`, `tests/test_dlpack.py`, `tests/device/test_tensor_devices.py`.

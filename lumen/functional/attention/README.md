@@ -38,5 +38,5 @@ forward as one flash-attention kernel (`lumen.config.compiler.flash_attention`).
 ## Related
 
 * [`lumen/autograd`](../../autograd/README.md) — `Function`, the attention substitution pass.
-* `lumen/graph_compiler/common/attention.rs`, `lumen/ops/attention/mps/` — matcher and Metal kernels.
+* `lumen/graph_compiler/common/attention.rs`, `lumen/kernels/attention/mps/` — matcher and Metal kernels.
 * `tests/test_attention.py`.

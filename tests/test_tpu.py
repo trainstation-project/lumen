@@ -648,8 +648,8 @@ def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     text = loop.read_text()
     assert loop.suffix == ".mlir" and text.startswith("// step 0: exp → mul\n") and "math.exp" in text
     pallas = loop.with_name(loop.stem + ".pallas.py")
-    assert "from lumen.ops.elementwise.tpu import program" in pallas.read_text()
+    assert "from lumen.kernels.elementwise.tpu import program" in pallas.read_text()
     scope = {}
     exec(pallas.read_text(), scope)
     assert scope["mosaic"] in text
-    assert (tmp_path / "pallas" / "lumen.ops.elementwise.tpu.py").read_text().startswith("import math")
+    assert (tmp_path / "pallas" / "lumen.kernels.elementwise.tpu.py").read_text().startswith("import math")
