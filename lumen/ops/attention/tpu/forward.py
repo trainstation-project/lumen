@@ -8,6 +8,7 @@ from lumen.ops.attention.tpu import (
     NT,
     add,
     broadcast,
+    by_mask,
     chunk,
     heads,
     last_key_block,
@@ -19,8 +20,6 @@ from lumen.ops.attention.tpu import (
     tile,
     vector,
     views,
-    visible,
-    when,
     zeros,
 )
 from lumen.ops.tpu import pallas
@@ -62,22 +61,23 @@ def program(spec):
                 l_ref[...] = zeros((bq, LANES))
                 acc_ref[...] = zeros((bq, hv))
 
-            def run():
-                start = mul(key_block(i, j), bkv)
-                for c in range(bkv // bkc):
-                    keys = slice(c * bkc, (c + 1) * bkc)
-                    qk = pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32")
-                    qk = masked(spec, scored(spec, qk), mul(i, bq), add(start, c * bkc))
-                    m_prev, l_prev = m_ref[...], l_ref[...]
-                    m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
-                    s = F.exp(qk - tile(m_next, bkc))
-                    alpha = F.exp(m_prev - m_next)
-                    l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
-                    m_ref[...] = m_next
-                    pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
-                    acc_ref[...] = tile(alpha, hv) * acc_ref[...] + pv
+            def compute(c, mask):
+                keys = slice(c * bkc, (c + 1) * bkc)
+                qk = scored(spec, pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32"))
+                if mask:
+                    qk = masked(spec, qk, mul(i, bq), add(mul(key_block(i, j), bkv), c * bkc))
+                m_prev, l_prev = m_ref[...], l_ref[...]
+                m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
+                s = F.exp(qk - tile(m_next, bkc))
+                alpha = F.exp(m_prev - m_next)
+                l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
+                m_ref[...] = m_next
+                pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
+                acc_ref[...] = tile(alpha, hv) * acc_ref[...] + pv
 
-            when(visible(spec, i, j), run)
+            for c in range(bkv // bkc):
+                start = add(mul(j, bkv), c * bkc)
+                by_mask(spec, mul(i, bq), start, bq, bkc, lambda mask, c=c: compute(c, mask))
 
             @pl.when(j == nk - 1)
             def _():

@@ -112,13 +112,6 @@ def first_query_block(spec, j):
     return div(maximum(add(mul(j, bkv), -spec["causal"]), 0), bq)
 
 
-def visible(spec, i, j):
-    if spec["causal"] is None:
-        return True
-    bq, bkv = spec["blocks"]
-    return add(mul(j, bkv), mul(i, -bq)) <= bq - 1 + spec["causal"]
-
-
 def masked(spec, qk, queries, keys, transposed=False):
     if spec["causal"] is None:
         return qk
@@ -135,8 +128,22 @@ def chunk(n, cap=512):
 def when(condition, f):
     if condition is True:
         f()
-    else:
+    elif condition is not False:
         pl.when(condition)(f)
+
+
+def by_mask(spec, queries, keys, height, width, run):
+    causal = spec["causal"]
+    if causal is None:
+        run(False)
+        return
+    last = add(add(keys, width - 1), mul(queries, -1))
+    first = add(keys, mul(add(queries, height - 1), -1))
+    when(last <= causal, lambda: run(False))
+    if isinstance(last, int) and isinstance(first, int):
+        when(first <= causal < last, lambda: run(True))
+    else:
+        when((_traced(first) <= causal) & (_traced(last) > causal), lambda: run(True))
 
 
 def views(memory, result, rows, ops):
@@ -159,6 +166,11 @@ def vector(spec, op, height, block_of):
         return slab, i, 0
 
     return pl.BlockSpec((None, height, op["view"][2]), index)
+
+
+def lanes(spec, ref, op, g):
+    x = column(spec, ref, op, g)
+    return broadcast(x, (x.shape[0], LANES))
 
 
 def column(spec, ref, op, g):

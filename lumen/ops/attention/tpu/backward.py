@@ -4,10 +4,10 @@ from lumen.ops.attention.tpu import (
     NN,
     NT,
     TN,
-    broadcast,
-    column,
+    by_mask,
     first_query_block,
     heads,
+    lanes,
     last_key_block,
     masked,
     matrix,
@@ -16,10 +16,9 @@ from lumen.ops.attention.tpu import (
     mod,
     mul,
     scored,
+    tile,
     vector,
     views,
-    visible,
-    when,
     zeros,
 )
 from lumen.ops.tpu import pallas
@@ -37,14 +36,15 @@ def program(spec):
     h, hv, causal, ds_scale = spec["h"], spec["hv"], spec["causal"], spec["ds_scale"]
     q, k, v, do, lse, delta = (spec[n] for n in ("q", "k", "v", "do", "lse", "delta"))
 
-    def probabilities(qb, kb, lseb, g, i, j):
-        qk = pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32")
-        qk = masked(spec, scored(spec, qk), mul(i, bq), mul(j, bkv))
-        return F.exp(qk - broadcast(column(spec, lseb, lse, g), qk.shape))
+    def probabilities(qb, kb, lseb, g, i, j, mask):
+        qk = scored(spec, pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32"))
+        if mask:
+            qk = masked(spec, qk, mul(i, bq), mul(j, bkv))
+        return F.exp(qk - tile(lanes(spec, lseb, lse, g), bkv))
 
     def gradient(p, dob, vb, deltab, g):
         dp = pl.dot_general(dob[...], vb[...], NT, preferred_element_type="float32")
-        return (dp - broadcast(column(spec, deltab, delta, g), p.shape)) * p * ds_scale
+        return (dp - tile(lanes(spec, deltab, delta, g), bkv)) * p * ds_scale
 
     if spec["kind"] == "dq":
         dq = spec["dq"]
@@ -73,12 +73,12 @@ def program(spec):
                 def _():
                     acc_ref[...] = zeros((bq, h))
 
-                def run():
-                    p = probabilities(qb, kb, lseb, g, i, key_block(i, j))
+                def run(mask):
+                    p = probabilities(qb, kb, lseb, g, i, key_block(i, j), mask)
                     ds = gradient(p, dob, vb, deltab, g)
                     acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[...], NN, preferred_element_type="float32")
 
-                when(visible(spec, i, j), run)
+                by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
 
                 @pl.when(j == nk - 1)
                 def _():
@@ -121,13 +121,13 @@ def program(spec):
                 dk_ref[...] = zeros((bkv, h))
                 dv_ref[...] = zeros((bkv, hv))
 
-            def run():
-                p = probabilities(qb, kb, lseb, g, query_block(i, j), j)
+            def run(mask):
+                p = probabilities(qb, kb, lseb, g, query_block(i, j), j, mask)
                 dv_ref[...] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
                 ds = gradient(p, dob, vb, deltab, g)
                 dk_ref[...] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
 
-            when(visible(spec, i, j), run)
+            by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
 
             @pl.when(last)
             def _():
