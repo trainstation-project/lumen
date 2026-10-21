@@ -108,7 +108,7 @@ class Attention(lumen.nn.Module):
         v = v.transpose(-2, -3)
         x = F.matmul(q, k.transpose(-1, -2), accum_dtype="float32", output_dtype="float32")
         x = F.softmax(x, dim=-1).to("bfloat16")
-        x = F.matmul(x, v, accum_dtype="float32", output_dtype="bfloat16")
+        x = F.matmul(x, v, accum_dtype="float32", output_dtype="bfloat16").transpose(-2, -3)
 
         x = F.matmul(x.reshape(tokens, dim), self.wo.t().bfloat16(), "float32", "float32")
         return x
