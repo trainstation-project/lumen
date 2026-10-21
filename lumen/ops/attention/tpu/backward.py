@@ -14,6 +14,7 @@ from lumen.ops.attention.tpu import (
     maximum,
     minimum,
     mod,
+    mul,
     scored,
     vector,
     views,
@@ -38,7 +39,7 @@ def program(spec):
 
     def probabilities(qb, kb, lseb, g, i, j):
         qk = pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32")
-        qk = masked(spec, scored(spec, qk), i, j)
+        qk = masked(spec, scored(spec, qk), mul(i, bq), mul(j, bkv))
         return F.exp(qk - broadcast(column(spec, lseb, lse, g), qk.shape))
 
     def gradient(p, dob, vb, deltab, g):

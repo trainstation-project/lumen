@@ -6,12 +6,15 @@ from lumen.ops.attention.tpu import (
     MASK,
     NN,
     NT,
+    add,
     broadcast,
+    chunk,
     heads,
     last_key_block,
     masked,
     matrix,
     minimum,
+    mul,
     scored,
     vector,
     views,
@@ -26,10 +29,12 @@ def program(spec):
     """Splash attention's forward (``flash_attention_kernel``): for each head
     and block of queries, the blocks of keys in order, an online softmax of
     their scores (its running max and sum in ``(bq, 128)`` lanes) and its
-    probabilities' product with the values, normalized after the last; the
+    probabilities' product with the values (a block of keys in chunks of
+    up to 512, as ``block_kv_compute``), normalized after the last; the
     rows' log-sum-exp too if ``lse``. A causal mask skips the blocks past
     the diagonal, and their copies."""
     bq, bkv = spec["blocks"]
+    bkc = chunk(bkv)
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
     h, hv, causal = spec["h"], spec["hv"], spec["causal"]
     q, k, v, o, lse = spec["q"], spec["k"], spec["v"], spec["o"], spec["lse"]
@@ -57,16 +62,19 @@ def program(spec):
                 acc_ref[...] = zeros((bq, hv))
 
             def run():
-                qk = pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32")
-                qk = masked(spec, scored(spec, qk), i, key_block(i, j))
-                m_prev, l_prev = m_ref[...], l_ref[...]
-                m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
-                s = F.exp(qk - broadcast(m_next[:, :1], qk.shape))
-                alpha = F.exp(m_prev - m_next)
-                l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
-                m_ref[...] = m_next
-                pv = pl.dot_general(s.to(vb.dtype), vb[...], NN, preferred_element_type="float32")
-                acc_ref[...] = broadcast(alpha[:, :1], (bq, hv)) * acc_ref[...] + pv
+                start = mul(key_block(i, j), bkv)
+                for c in range(bkv // bkc):
+                    keys = slice(c * bkc, (c + 1) * bkc)
+                    qk = pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32")
+                    qk = masked(spec, scored(spec, qk), mul(i, bq), add(start, c * bkc))
+                    m_prev, l_prev = m_ref[...], l_ref[...]
+                    m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
+                    s = F.exp(qk - broadcast(m_next[:, :1], qk.shape))
+                    alpha = F.exp(m_prev - m_next)
+                    l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
+                    m_ref[...] = m_next
+                    pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
+                    acc_ref[...] = broadcast(alpha[:, :1], (bq, hv)) * acc_ref[...] + pv
 
             when(visible(spec, i, j), run)
 

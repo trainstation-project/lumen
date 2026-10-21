@@ -111,13 +111,17 @@ def visible(spec, i, j):
     return add(mul(j, bkv), mul(i, -bq)) <= bq - 1 + spec["causal"]
 
 
-def masked(spec, qk, i, j):
+def masked(spec, qk, queries, keys, transposed=False):
     if spec["causal"] is None:
         return qk
-    bq, bkv = spec["blocks"]
-    offset = prims.sub(prims.iota("int32", qk.shape, 1), prims.iota("int32", qk.shape, 0))
-    limit = add(add(mul(i, bq), mul(j, -bkv)), spec["causal"])
-    return F.where(offset <= broadcast(limit, qk.shape), qk, MASK)
+    limit = broadcast(add(add(queries, mul(keys, -1)), spec["causal"]), qk.shape)
+    rows, columns = prims.iota("int32", qk.shape, 0), prims.iota("int32", qk.shape, 1)
+    offset = prims.sub(rows, columns) if transposed else prims.sub(columns, rows)
+    return F.where(offset <= limit, qk, MASK)
+
+
+def chunk(n, cap=512):
+    return next((c for c in range(cap, 0, -LANES) if c <= n and n % c == 0), n)
 
 
 def when(condition, f):

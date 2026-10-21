@@ -162,7 +162,12 @@ pub(crate) fn encode(
     if let Some((_, t)) = step.inputs.first().filter(|(_, t)| t.dtype != out.dtype) {
         kernel += &format!("_{}", t.dtype);
     }
-    let shown: Vec<String> = blocks.iter().map(usize::to_string).collect();
+    let leading = blocks.len() == 3 && blocks[0] == 1;
+    let shown: Vec<String> = blocks
+        .iter()
+        .skip(usize::from(leading))
+        .map(usize::to_string)
+        .collect();
     kernel += &format!("_{}_{}", out.dtype, shown.join("x"));
     let spec = format!(
         "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"output\": \"{}\", \"blocks\": {:?}, \"window\": {}",
