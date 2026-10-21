@@ -30,6 +30,7 @@ fn fusion(graph: &Graph, row: &Row) -> Fused {
         .inner
         .iter()
         .chain(&row.reductions)
+        .chain(&row.partials)
         .chain([&row.root])
         .copied()
         .collect();

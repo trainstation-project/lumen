@@ -25,14 +25,14 @@ def replayed(nodes, values, shapes):
 
 
 def program(spec):
-    """A row fusion's kernel: ``rows`` rows of ``n``, ``block`` rows a step,
+    """A row fusion's kernel: ``height`` rows of ``n``, ``block`` rows a step,
     whole rows in VMEM. ``inputs`` (each ``[dtype, kind]``), ``nodes`` (as
     an elementwise kernel's, each with the ``kind`` of its value) and
     ``outputs`` (each ``[value, dtype, kind]``); a kind is ``full`` (a block
     of rows), ``row`` (a value a row), ``lanes`` (a value a column, the same
     for every row) or ``scalar``. Its scalars are the operands' rows, then
     the outputs'."""
-    rows, n, bm = spec["rows"], spec["n"], spec["block"]
+    rows, n, bm = spec["height"], spec["n"], spec["block"]
     shapes = {"full": (bm, n), "row": (bm, 1), "lanes": (1, n), "scalar": (1, 1)}
     views = {"full": (rows, n), "row": (rows, 1), "lanes": (n,)}
     blocks = {

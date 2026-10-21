@@ -289,7 +289,7 @@ pub(crate) fn encode(
         }
     };
     let spec = format!(
-        "\"rows\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
+        "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         operands.join(", "),
         nodes.join(", "),
         outputs.join(", "),
