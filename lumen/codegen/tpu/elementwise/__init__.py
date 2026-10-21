@@ -101,8 +101,9 @@ def program(spec):
     """The kernel of ``spec``: ``shape``, ``inputs`` (the operands' dtypes),
     ``broadcast`` (whether each operand is 0-d, the output not), ``nodes``
     (each a primitive's ``name``, ``params`` and ``args``: indices of the
-    values, the operands then the nodes before), ``result`` (the index of
-    the value written), ``output`` (its dtype),
+    values, the operands then the nodes before), ``results`` (the indices
+    of the values written, an output each: a horizontal fusion's several),
+    ``outputs`` (their dtypes),
     ``blocks`` (of the leading dimensions together and the last two, or of
     the elements) and
     ``window`` (``[n, start]``: the output written at columns ``start`` on
@@ -134,7 +135,8 @@ def program(spec):
     shape_of = (1,) if scalar else block_shape
 
     def apply(values):
-        return computed(spec["nodes"], values, shape_of)[spec["result"]]
+        values = computed(spec["nodes"], values, shape_of)
+        return [values[r] for r in spec["results"]]
 
     def kernel(rows, memory, result):
         def copy(src, dst):
@@ -150,18 +152,24 @@ def program(spec):
             scalars[i] = pl.scratch(pl.VMEM((1,), dtype))
             copy(pallas.view(memory, rows[i], (), dtype), scalars[i])
         read = {i: s[...] for i, s in scalars.items()}
-        out = pallas.view(result, rows[len(dtypes)], () if scalar else out_view, spec["output"])
+        outputs = spec["outputs"]
+        outs = [
+            pallas.view(result, rows[len(dtypes) + k], () if scalar else (out_view if k == 0 else view), dtype)
+            for k, dtype in enumerate(outputs)
+        ]
         if scalar:
-            vmem = pl.scratch(pl.VMEM((1,), spec["output"]))
-            vmem[...] = apply(read[i] for i in range(len(dtypes)))
-            copy(vmem, out)
+            vmem = pl.scratch(pl.VMEM((1,), outputs[0]))
+            vmem[...] = apply(read[i] for i in range(len(dtypes)))[0]
+            copy(vmem, outs[0])
             return
 
         def body(*blocks):
-            blocks = iter(blocks)
-            values = [read[i] if i in read else next(blocks)[...] for i in range(len(dtypes))]
-            next(blocks)[...] = apply(values)
+            given = iter(blocks)
+            values = [read[i] if i in read else next(given)[...] for i in range(len(dtypes))]
+            for ref, value in zip(blocks[len(piped) :], apply(values)):
+                ref[...] = value
 
-        pl.emit_pipeline(body, grid=grid, in_specs=[block] * len(piped), out_specs=[out_block])(*piped, out)
+        o_specs = [out_block] + [block] * (len(outputs) - 1)
+        pl.emit_pipeline(body, grid=grid, in_specs=[block] * len(piped), out_specs=o_specs)(*piped, *outs)
 
     return pallas.program(kernel, spec)

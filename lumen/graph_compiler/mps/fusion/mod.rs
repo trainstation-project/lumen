@@ -132,7 +132,10 @@ impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
             let fused = match config.horizontal_fusion {
                 true => {
                     let vars: Vec<Var> = m.scalars.iter().map(|&i| fused.inputs()[i]).collect();
-                    horizontal::fuse(&fused, &vars, &mut kernel)
+                    let mut target = horizontal::Horizontal {
+                        kernel: &mut kernel,
+                    };
+                    crate::graph_compiler::horizontal::fuse(&fused, &vars, &mut target)
                 }
                 false => fused,
             };
