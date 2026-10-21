@@ -24,7 +24,13 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `canonicalize_dots.rs` | Pass `canonicalize_dots`: transposes dot operands into matmul form as a separate step. |
 | `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): the softmax/RMS/layer-norm style row diamonds (`graph_compiler/diamonds.rs`, over MPS's `fusible`) and their `partials` (column sums a row's kernel adds up too); stores `Row`s in `MpsModule::rows`. |
 | `place_concats.rs` | Pass `place_concats`: marks concatenates whose operands' kernels can write them in place; `in_place_concats` also re-checked by `Codegen`. |
-| `fusion.rs` | Pass `loop_fusion` (`LoopFusion`): loop/reduction/epilogue/multi-output fusion (`fuse`), then horizontal fusion; also `fusible`, `label`. |
+| `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`): `fuse` runs the phases below in order, then horizontal fusion; also `fusible`, `label`. |
+| `fusion/analysis.rs` | What every phase reads: each value's producer and readers, liveness, outputs, what is fusible (`Analysis`); `depends`, `recomputed`. |
+| `fusion/rows.rs` | Normalization rows grown by the elementwise nodes reading their roots (`extended`). |
+| `fusion/reduction_epilogues.rs` | A reduction's elementwise consumers, its epilogue (`reduction_epilogues`). |
+| `fusion/dot_epilogues.rs` | A dot's epilogue: its column regions, or the chain of elementwise nodes after it, and the values it writes besides (`dot_epilogues`). |
+| `fusion/hosts.rs` | Which nodes start a fusion (`roots`) and which values a fusion writes besides its root (`hosts`, multi-output fusion). |
+| `fusion/emit.rs` | Each fusion's members and reads within a kernel's bindings (`fusions`), rows joined to the dot they read (`row_dots`), and the fused graph (`emitted`). |
 | `horizontal.rs` | Horizontal loop fusion: independent same-size small loop fusions run as one multi-output kernel. |
 | `alone.rs` | Pass `alone`: every elementwise node and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (neither has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
@@ -66,14 +72,14 @@ of any module). The order is load-bearing; the comments in
 | 12 | `canonicalize_dots` | always | `canonicalize_dots.rs` | Dot operands into matmul form. |
 | 13 | `normalization_diamonds` | `fuse && normalization_diamonds` | `diamonds.rs` | Row kernels' `Row`s for loop fusion. |
 | 14 | `place_concats` | `fuse` | `place_concats.rs` | Mark in-place concatenates (loop fusion leaves them alone). |
-| 15 | `loop_fusion` | `fuse` | `fusion.rs` (+ `horizontal.rs` if `horizontal_fusion`) | Fuse; clears `rows`; may drop runtime scalars. |
+| 15 | `loop_fusion` | `fuse` | `fusion/` (+ `horizontal.rs` if `horizontal_fusion`) | Fuse; clears `rows`; may drop runtime scalars. |
 | 15′ | `alone` | always | `alone.rs` | Each elementwise node or concatenate left alone its own fusion; keeps a runtime scalar by value only if fusions alone read it. |
 | 16 | `codegen` | always | `kernel_codegen.rs` | Generate Metal for each pending fusion; unmark concatenates that can no longer be in place. |
 | 17 | `place_views` | always | `place_views.rs` | Mark slices dots read in place as views. |
 
 Other flags are read inside passes rather than gating them:
 `contraction_epilogues` (flash attention's and GEMM epilogues in
-`fusion.rs`), `reduction_epilogues` and `multi_output_fusion` (`fusion.rs`),
+`fusion/`), `reduction_epilogues` and `multi_output_fusion` (`fusion/`),
 `online_softmax` and `row_cache` (`lumen/codegen/mps`), `deterministic`
 (split-K, attention backward).
 
@@ -162,7 +168,7 @@ copying; `Graph::placements()` turns them into `(value, View)` pairs, which
   and `loop_fusion` invalidates them.
 - `merge_dots` requires fusion: merged dots' readers read their slices in
   place.
-- A Metal kernel binds at most 31 buffers; `fusion.rs` caps a fusion's
+- A Metal kernel binds at most 31 buffers; `fusion/` caps a fusion's
   inputs (`MAX_INPUTS`).
 - Kernels read indices as given; clamping exists only behind
   `safe_kernels`.
