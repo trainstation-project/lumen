@@ -88,6 +88,8 @@ def program(spec):
     def reduce(x):
         if name == "sum":
             r = prims.reduce_sum(x, s["axes"], accum)
+        elif total and accum != "float32":
+            r = prims.cast(prims.reduce_max(prims.cast(x, "float32"), s["axes"]), accum)
         else:
             r = prims.reduce_max(x, s["axes"])
         return prims.broadcast_in_dim(r, (1,), ()) if total else r

@@ -178,11 +178,11 @@ pub(crate) fn encode(
             let made = nodes.iter().find(|m| m.output == v);
             match made {
                 Some(m) if shared && m.inputs.is_empty() => {
-                    if !copied.contains_key(&v) {
+                    let at = *copied.entry(v).or_insert_with(|| {
                         epilogue.push(super::node(&m.primitive, &[]));
-                        copied.insert(v, k + prologue.len() + epilogue.len());
-                    }
-                    args.push(copied[&v]);
+                        k + prologue.len() + epilogue.len()
+                    });
+                    args.push(at);
                 }
                 Some(_) if shared => return Err(failed("its epilogue reads its prologue")),
                 _ => args.push(value[&v]),
