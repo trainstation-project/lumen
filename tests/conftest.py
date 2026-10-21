@@ -1,4 +1,8 @@
+import json
+import os
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -15,6 +19,11 @@ def pytest_collection_modifyitems(config, items):
         skip = pytest.mark.skip(reason=f"{device} is not available")
         for item in items:
             if item.get_closest_marker(device):
+                item.add_marker(skip)
+    if hasattr(config, "workerinput"):
+        skip = pytest.mark.skip(reason="a worker sees one device of each kind: run it without -n")
+        for item in items:
+            if item.get_closest_marker("all_devices"):
                 item.add_marker(skip)
 
 
@@ -38,3 +47,44 @@ def pytest_runtest_makereport(item, call):
         if gap:
             report.outcome = "skipped"
             report.wasxfail = str(call.excinfo.value).splitlines()[0]
+
+
+PINNED = {
+    "tpu": lambda chip, worker: {
+        "TPU_VISIBLE_CHIPS": str(chip),
+        "TPU_CHIPS_PER_PROCESS_BOUNDS": "1,1,1",
+        "TPU_PROCESS_BOUNDS": "1,1,1",
+        "TPU_PROCESS_PORT": str(8476 + worker),
+    },
+    "cuda": lambda chip, worker: {"CUDA_VISIBLE_DEVICES": str(chip)},
+}
+
+
+def device_counts(config):
+    if not hasattr(config, "device_counts"):
+        probe = "import json, lumen; print(json.dumps({d: getattr(lumen, d).device_count() for d in %r}))"
+        run = [sys.executable, "-c", probe % list(PINNED)]
+        out = subprocess.run(run, capture_output=True, text=True, check=True).stdout
+        config.device_counts = json.loads(out.splitlines()[-1])
+    return config.device_counts
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config):
+    counts = [n for n in device_counts(config).values() if n]
+    return counts[0] if counts else os.cpu_count()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    node.workerinput["device_counts"] = device_counts(node.config)
+
+
+def pytest_configure(config):
+    worker = getattr(config, "workerinput", None)
+    if worker is None:
+        return
+    k = int(worker["workerid"].removeprefix("gw"))
+    for device, count in worker["device_counts"].items():
+        if count:
+            os.environ.update(PINNED[device](k % count, k))

@@ -67,11 +67,11 @@ re-export them.
 ## Build and test
 
 Requires a Rust toolchain, Python >= 3.10 in an active virtualenv, and
-`maturin`, `pytest`, `numpy` (what CI installs).
+`maturin`, `pytest`, `pytest-xdist`, `numpy` (what CI installs).
 
 | Command | What it does |
 | --- | --- |
-| `make test` | `maturin develop`, then `cargo test --lib`, `cargo test --doc` and `python -m pytest tests -q -rs`, with the device features of the machine's hardware (CUDA, TPU) detected. **Always run this after a change** (AGENTS.md). |
+| `make test` | `maturin develop`, then `cargo test --lib`, `cargo test --doc` and `python -m pytest tests -q -rs -n auto` (a worker per TPU or CUDA chip, or per CPU core; then the `all_devices` tests serially), with the device features of the machine's hardware (CUDA, TPU) detected. **Always run this after a change** (AGENTS.md). |
 | `make ci` | Every CI job locally: `fmt-check`, `clang-format-check`, `clippy`, `test`, `miri`. |
 | `make fmt-check` | `cargo fmt --all -- --check`. |
 | `make clang-format-check` | Checks the `.mm`/`.metal`/`.h` sources; needs `clang-format==21.1.6`. |

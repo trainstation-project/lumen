@@ -41,13 +41,17 @@ NO_METAL_FEATURES := --no-default-features --features cuda
 ## tests always run; MPS, CUDA and TPU ones run where the device is
 ## available. The wheel is built first: it installs the device extras the
 ## tests load (libtpu). On a TPU machine where lumen sees no TPU, it fails
-## rather than skip the TPU tests.
+## rather than skip the TPU tests. The Python tests run in parallel
+## (pytest-xdist): a worker per TPU or CUDA chip, each seeing its own, or
+## a worker per CPU core (tests/conftest.py); then, serially, the tests
+## needing every device (`all_devices`).
 test:
 	maturin develop $(MATURIN_FEATURES)
 	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
 	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
 	cargo test --doc
-	$(TPU_ENV) python -m pytest tests -q -rs
+	$(TPU_ENV) python -m pytest tests -q -rs -n auto -m "not all_devices"
+	$(TPU_ENV) python -m pytest tests -q -rs -m all_devices
 
 fmt-check:
 	cargo fmt --all -- --check

@@ -128,6 +128,7 @@ def test_programs_of_other_primitives_say_they_do_not_run_yet():
         lumen.compile(lambda a: lumen.functional.cumsum(a, 0), device="tpu")(x)
 
 
+@pytest.mark.all_devices
 def test_the_profiler_times_each_tpu_program():
     """``ProfilerActivity.TPU``: each step's kernel run, timed by libtpu's
     profiler, on its device's row, inside the op that launched it: its
