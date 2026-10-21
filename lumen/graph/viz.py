@@ -51,12 +51,6 @@ _SOURCES = [
     (r"^transpose_", "layout/mps/kernels.metal", "#define TRANSPOSE"),
     (r"^fill_\d$", "factory/mps/kernels.metal", "#define FULL"),
     (r"^iota_", "factory/mps/kernels.metal", "#define IOTA"),
-    (r"^convert_", "elementwise/mps/kernels.metal", "#define CONVERT"),
-    (r"^select_", "elementwise/mps/kernels.metal", "#define SELECT"),
-    (r"^neg_", "elementwise/mps/kernels.metal", "#define NEG"),
-    (r"^(exp|log|sqrt|tanh|logistic)_", "elementwise/mps/kernels.metal", "#define UNARY"),
-    (r"^(max|eq|lt)_", "elementwise/mps/kernels.metal", "#define ORDERED"),
-    (r"^(add|sub|mul|div)_", "elementwise/mps/kernels.metal", "#define BINARY"),
 ]
 
 

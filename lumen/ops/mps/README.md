@@ -37,7 +37,6 @@ the module is `pub(crate)`. Callers:
 | `Cumsum` | `scan::mps::encode` (with scratch) |
 | `Fusion` | `graph_compiler::mps::encode` (with scratch) |
 | `LinearCrossEntropy` | `dot_general::mps::encode_linear_cross_entropy` (with scratch) |
-| `Add` … `Logistic`, `Cast`, `Select` | `elementwise::mps::encode` |
 | `DotGeneral` | `dot_general::mps::encode` |
 | `Reshape`, `BroadcastInDim`, `Transpose`, `Slice` | `layout::mps::encode` |
 | `DynamicSlice`, `DynamicUpdateSlice` | `dynamic_slice::mps::encode` |

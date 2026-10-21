@@ -77,7 +77,9 @@ pub(crate) fn encode(
         | Tanh
         | Logistic
         | Cast { .. }
-        | Select => super::elementwise::mps::encode,
+        | Select => {
+            unreachable!("a one-node fusion's loop kernel (graph_compiler::mps::alone)")
+        }
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
             unreachable!("encoded above")
         }

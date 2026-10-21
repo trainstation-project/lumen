@@ -1,6 +1,6 @@
+mod alone;
 pub(crate) mod ane;
 mod canonicalize_dots;
-mod concatenates_alone;
 mod diamonds;
 mod flash_attention;
 mod flash_attention_backward;
@@ -37,10 +37,10 @@ use crate::ops::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
+use alone::Alone;
 use canonicalize_dots::CanonicalizeDots;
 #[cfg(test)]
 use canonicalize_dots::canonicalize_dots;
-use concatenates_alone::ConcatenatesAlone;
 use flash_attention::FlashAttention;
 use flash_attention_backward::FlashAttentionBackward;
 use kernel_codegen::Codegen;
@@ -153,9 +153,8 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
         }
         p.add(PlaceConcats);
         p.add(fusion::LoopFusion);
-    } else {
-        p.add(ConcatenatesAlone);
     }
+    p.add(Alone);
     p.add(Codegen);
     p.add(PlaceViews);
     p

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::concatenates_alone::concatenates_alone;
+use super::alone::wrapped;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::graph::{Primitive, Var};
@@ -29,7 +29,18 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
         }
         if unmarked {
             let kernels = &mut m.kernels;
-            m.graph = concatenates_alone(&m.graph, |_| request(kernels, Kernel::Loop(Vec::new())));
+            let concatenate = |p: &Primitive| {
+                matches!(
+                    p,
+                    Primitive::Concatenate {
+                        in_place: false,
+                        ..
+                    }
+                )
+            };
+            m.graph = wrapped(&m.graph, &[], concatenate, |_| {
+                request(kernels, Kernel::Loop(Vec::new()))
+            });
         }
         let placements = m.graph.placements();
         let mut views: HashMap<Var, HashMap<usize, (usize, Vec<usize>)>> = HashMap::new();
