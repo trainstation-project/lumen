@@ -27,16 +27,18 @@ def program(spec):
     ``broadcast`` (whether each operand is 0-d, the output not), ``nodes``
     (each a primitive's ``name``, ``params`` and ``args``: indices of the
     values, the operands then the nodes before), ``output`` (its dtype),
-    ``blocks`` (of the last two dimensions, or of the elements) and
+    ``blocks`` (of the leading dimensions together and the last two, or of
+    the elements) and
     ``window`` (``[n, start]``: the output written at columns ``start`` on
     of a buffer ``n`` wide; none: a buffer of its own).
     Its scalars are the operands' rows, then the output's."""
     shape, dtypes, broadcast = spec["shape"], spec["inputs"], spec["broadcast"]
     if len(shape) >= 2:
-        (bm, bn), (m, n) = spec["blocks"], shape[-2:]
-        view, block_shape = (math.prod(shape[:-2]), m, n), (bm, bn)
-        block = pl.BlockSpec((None, bm, bn), lambda l, i, j: (l, i, j))
-        grid = (view[0], m // bm, n // bn)
+        (bl, bm, bn), (m, n) = spec["blocks"], shape[-2:]
+        view = (math.prod(shape[:-2]), m, n)
+        block_shape = (bl, bm, bn) if bl > 1 else (bm, bn)
+        block = pl.BlockSpec((bl if bl > 1 else None, bm, bn), lambda l, i, j: (l, i, j))
+        grid = (view[0] // bl, m // bm, n // bn)
     else:
         (b,) = spec["blocks"]
         view, block_shape = (max(math.prod(shape), 1),), (b,)
@@ -46,7 +48,7 @@ def program(spec):
     if spec["window"]:
         whole, start = spec["window"]
         out_view = (view[0], m, whole)
-        out_block = pl.BlockSpec((None, bm, bn), lambda l, i, j: (l, i, j + start // bn))
+        out_block = pl.BlockSpec((bl if bl > 1 else None, bm, bn), lambda l, i, j: (l, i, j + start // bn))
 
     scalar = not shape
 

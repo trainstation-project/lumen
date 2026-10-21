@@ -24,7 +24,7 @@ and runs it through `graph_compiler::compile`.
 | `tensor_options.rs` | `TensorOptions` (dtype + device builder) and `DEFAULT_DTYPE = F32`. |
 | `parameter.rs` | Weights as meta tensors: `is_parameter`, `placed(device)`, `pack(members, dimension, interleave, device)` (side by side, or interleaved: element j of the i-th at `j * interleave + i`), `version` / `mark_written`, `copy_into_placements`. |
 | `dlpack.rs` | DLPack export (legacy and versioned capsules) and import (`python` feature). |
-| `python.rs` | The `lumen._C.Tensor` pyclass (`PyTensor`), dtype-string parsing, nested-list construction, `_pack`, `_to_dlpack*`, `_from_dlpack`. |
+| `python.rs` | The `lumen.tensor._C.Tensor` pyclass (`PyTensor`), dtype-string parsing, nested-list construction, `_pack`, `_to_dlpack*`, `_from_dlpack`. |
 | `__init__.py` | Python package: dtype constants (strings like `"float32"`), `default_dtype`, factories (`tensor`, `empty`, `zeros`, `ones`, `full`, `arange`), `to_numpy` / `from_numpy`; attaches `__array__` / `__dlpack__` to `Tensor`. All re-exported at `lumen.*`. |
 | `dlpack.py` | `__dlpack__` / `__dlpack_device__` (CPU, CUDA, Metal), CUDA stream handshake, and `from_dlpack`. |
 | `_C.pyi` | Type stub for what `python.rs` defines. |

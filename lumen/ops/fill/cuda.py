@@ -6,7 +6,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 
-from lumen._C import LIBRARY_NAME
+from lumen._native import LIBRARY_NAME
 from lumen.ops import register
 
 _ELEMENT = {

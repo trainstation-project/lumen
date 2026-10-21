@@ -18,9 +18,9 @@ profiler modules build on top of.
 | `mps.rs` | `Mps` / `MPS` — Apple Metal backend; queries the `lumen_mps_shim` FFI when linked. |
 | `meta.rs` | `Meta` / `META` — the placeholder/"no data" device, like `torch.device("meta")`. |
 | `tpu/` | `Tpu` / `TPU` — Google TPUs through libtpu's PJRT C API, loaded at run time; see [`tpu/README.md`](tpu/README.md). |
-| `python.rs` | Python bindings (`python` feature): the `lumen.device` class and `resolve_device`, registered into `lumen._C`. |
+| `python.rs` | Python bindings (`python` feature): the `lumen.device` class and `resolve_device`, registered into `lumen.device._C`. |
 | `__init__.py` | The `lumen.device` package: re-exports the class (`from lumen.device import device`); `lumen/__init__.py` rebinds `lumen.device` to it. |
-| `_C.pyi` | Type stub for what `python.rs` defines, re-exported by `lumen/_C.pyi`. |
+| `_C.pyi` | Type stub for what `python.rs` defines. |
 | `tests.rs` | Unit tests for backend naming, counts, `check()` and `is_available()` consistency. |
 
 ## The `DeviceBackend` trait

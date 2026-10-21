@@ -16,8 +16,8 @@ streams are no-ops because their work is already done when the op returns.
 | `meta.rs` | `MetaStream` — `synchronize` is a no-op. |
 | `tpu.rs` | `TpuStream { index }` — `synchronize` waits for the programs run on the device so far (`allocator::tpu::wait`): a TPU's kernels run in order on its memory, asynchronously (each takes the previous one's result, `lumen/ops/tpu`), and every read of it (`copy_to_host`) waits for the latest itself. Only with `cfg(lumen_tpu_linked)`. |
 | `cuda.rs` | `CudaStream { index }` and `cudart` FFI: `synchronize` (`cudaDeviceSynchronize`), `synchronize_external` (`cudaStreamSynchronize` on a foreign stream), `wait` (event record on the default stream + `cudaStreamWaitEvent`). Only with `cfg(lumen_cuda_linked)`. |
-| `python.rs` | The `lumen.Stream` pyclass (`PyStream`), registered into `lumen._C`. |
-| `__init__.py` | Re-exports `Stream` from `lumen._C`; `lumen/__init__.py` exposes it as `lumen.Stream`. |
+| `python.rs` | The `lumen.Stream` pyclass (`PyStream`), registered into `lumen.stream._C`. |
+| `__init__.py` | Re-exports `Stream` from `lumen.stream._C`; `lumen/__init__.py` exposes it as `lumen.Stream`. |
 | `_C.pyi` | Type stub for `Stream`. |
 | `tests.rs` | Every available device has a synchronizable stream; unavailable devices get an error. |
 

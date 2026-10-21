@@ -1,7 +1,7 @@
 import builtins
 
-from lumen._C import Tensor
 from lumen.tensor import dlpack
+from lumen.tensor._C import Tensor
 from lumen.tensor.dlpack import from_dlpack
 
 __all__ = [

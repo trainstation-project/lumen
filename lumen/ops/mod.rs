@@ -1,3 +1,4 @@
+pub(crate) mod attention;
 pub mod device_transfer;
 pub mod dot_general;
 pub mod dummy_op;

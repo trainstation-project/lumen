@@ -27,7 +27,7 @@ and *where it lives in memory*.
 | `stages.rs` | Splits a program with `to_host` values into alternating device/host stages; `without_transfers` strips `ToHost`/`ToDevice`. |
 | `attention.rs` | Pattern matcher for attention (`softmax(q @ k^T * scale [mask]) @ v`, dropout, its backward), shared by the MPS fusions, the codegen and the tracer (`Graph.attentions`). |
 | `python.rs` | PyO3 bindings: `lumen.graph_compiler.Plan` (`PyPlan`) and the `CompilerConfig` class behind `lumen.config.compiler`. |
-| `__init__.py` | The `lumen.graph_compiler` package: re-exports `Plan` from `lumen._C`. |
+| `__init__.py` | The `lumen.graph_compiler` package: re-exports `Plan` from `lumen.graph_compiler._C`. |
 | `_C.pyi` | Type stub for what `python.rs` defines. |
 | `tests.rs` | Frontend tests: CSE, simplification rewrites, stages, pipeline order and dumps. |
 | `plan_tests.rs` | Planner tests (workspace reuse, scheduling, remat, donation, in-place concatenates, scratch, meta) plus the `mps` test helpers (`available`, `check`, `values`, ...) that `mps/tests.rs` reuses. |

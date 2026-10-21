@@ -1,6 +1,7 @@
 import pytest
 
 import lumen
+from lumen.allocator import _C
 
 
 @pytest.fixture(autouse=True)
@@ -33,5 +34,5 @@ def test_unknown_settings_are_rejected():
 
 
 def test_config_is_a_single_shared_instance():
-    assert lumen.config is lumen._C.config
-    assert isinstance(lumen.config, lumen._C.Config)
+    assert lumen.config is _C.config
+    assert isinstance(lumen.config, _C.Config)

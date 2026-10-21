@@ -15,7 +15,7 @@ calls the Python function back with real tensors.
 | `__init__.py` | `custom_op(name, fn=None, *, mutates_args, overlappable=None)` decorator and the `CustomOp` class; re-exports `MetalKernel`. |
 | `mod.rs` | Declares `mps`, `python` (feature `python`) and `tests`. |
 | `mps.rs` | `MetalKernel` (compile Metal source, `launch` on MPS tensors) and `Grid` (`Threads` or `Groups`, 3-D). |
-| `python.rs` | The `MetalKernel` pyclass (in `lumen._C`, re-exported by `__init__.py`) wrapping `mps::MetalKernel`; `register`. |
+| `python.rs` | The `MetalKernel` pyclass (in `lumen.custom_op._C`, re-exported by `__init__.py`) wrapping `mps::MetalKernel`; `register`. |
 | `_C.pyi` | Type stub for `MetalKernel`. |
 | `tests.rs` | Launches an `axpy` kernel into the MPS stream (skips without Metal). |
 
@@ -30,7 +30,7 @@ calls the Python function back with real tensors.
    arguments are captured as constants. Tensors nested in
    lists/tuples/dicts are rejected.
 3. A `run(tensors)` closure rebinds the arguments with real tensors and
-   calls `fn`; it is registered via `lumen._C._register_custom_op`
+   calls `fn`; it is registered via `lumen.graph._C._register_custom_op`
    (`graph/python.rs`), which returns an integer handle.
 4. `prims._custom_call(operands, name, handle, mutated, overlappable)`
    records the `custom_call` node (plus a `fusion_output` per extra

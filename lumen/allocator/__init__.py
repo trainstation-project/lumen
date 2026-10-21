@@ -1,3 +1,3 @@
-from lumen._C import config
+from lumen.allocator._C import config
 
 __all__ = ["config"]

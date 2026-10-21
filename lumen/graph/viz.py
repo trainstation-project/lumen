@@ -10,7 +10,8 @@ import statistics
 import sys
 
 import lumen
-from lumen._C import FUSION_SEPARATOR, Plan
+from lumen.graph._C import FUSION_SEPARATOR
+from lumen.graph_compiler._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 
 OPS = pathlib.Path(lumen.__file__).parent / "ops"

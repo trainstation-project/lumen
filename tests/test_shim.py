@@ -1,10 +1,11 @@
 import lumen
 from lumen import Tensor
+from lumen.tensor import _C
 
 
 def test_shim_reexports_native_tensor():
-    assert lumen._C.__name__ == "lumen._C"
-    assert lumen.Tensor is lumen._C.Tensor
+    assert _C.__name__ == "lumen.tensor._C"
+    assert lumen.Tensor is _C.Tensor
     assert Tensor.__module__ == "lumen"
     assert isinstance(lumen.__version__, str)
 

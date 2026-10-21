@@ -1,4 +1,4 @@
-from lumen._C import _register_kernel, _registered_ops, _unregister_kernel
+from lumen.ops._C import _register_kernel, _registered_ops, _unregister_kernel
 
 __all__ = ["register", "registered_ops", "signature", "unregister"]
 
@@ -20,7 +20,7 @@ def signature(op):
     return registered_ops().get(op)
 
 
-from lumen._C import cuda as _cuda
+from lumen.device._C import cuda as _cuda
 
 if _cuda.is_available():
     from lumen.ops.fill import cuda

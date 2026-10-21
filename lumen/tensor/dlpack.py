@@ -1,8 +1,9 @@
 import enum
 
-from lumen import _C
-from lumen._C import LIBRARY_NAME
+from lumen._native import LIBRARY_NAME
 from lumen.device import device
+from lumen.stream._C import Stream
+from lumen.tensor import _C
 
 __all__ = ["DLDeviceType", "from_dlpack"]
 
@@ -60,7 +61,7 @@ def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
         if stream == 2:
             raise BufferError("the per-thread default stream is not supported")
         if stream not in (None, -1, 1):
-            _C.Stream(d, stream_id=stream).wait_stream(_C.Stream(d))
+            Stream(d, stream_id=stream).wait_stream(Stream(d))
     elif stream not in (None, -1):
         raise ValueError(f"stream must be None or -1 for a tensor on {self.device}")
 

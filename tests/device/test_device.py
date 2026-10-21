@@ -3,6 +3,7 @@ import pickle
 import pytest
 
 import lumen
+from lumen.device import _C
 
 
 @pytest.mark.parametrize(
@@ -83,7 +84,7 @@ def test_invalid_arguments():
 
 
 def test_module_and_name():
-    assert lumen.device is lumen._C.device
+    assert lumen.device is _C.device
     assert lumen.device.__module__ == "lumen"
     assert lumen.device.__name__ == "device"
 
