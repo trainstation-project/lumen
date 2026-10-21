@@ -214,6 +214,29 @@ mod region {
     }
 
     #[test]
+    fn aligned_allocations_start_at_their_alignment_and_leave_the_gap_free() {
+        let allocator = allocator(1 << 16);
+        let a = Allocator::allocate(&allocator, 300);
+        let base = a.as_ptr().addr();
+        let b = allocator
+            .try_take_aligned(4096, 4096, |n| CpuAllocator.allocate(n))
+            .unwrap();
+        assert_eq!(b.as_ptr().addr() - base, 4096);
+        let c = Allocator::allocate(&allocator, 1000);
+        assert_eq!(
+            c.as_ptr().addr() - base,
+            512,
+            "the gap before an aligned block is free"
+        );
+        free(&allocator, b, 4096);
+        free(&allocator, c, 1000);
+        free(&allocator, a, 300);
+        assert_eq!(allocator.used(), 0);
+        let whole = Allocator::allocate(&allocator, 1 << 16);
+        assert_eq!(whole.as_ptr().addr(), base, "freed blocks merge back");
+    }
+
+    #[test]
     #[should_panic(expected = "static_allocator_bytes")]
     fn allocating_past_the_end_names_the_setting() {
         Allocator::allocate(&allocator(1024), 2048);

@@ -46,6 +46,7 @@ pub(crate) fn encode(
         rows: &rows,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched)
 }

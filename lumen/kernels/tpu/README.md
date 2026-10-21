@@ -68,6 +68,27 @@ is the same memory, whose new handle the allocator keeps
 handles: each takes the previous one's result, and reads (`copy_to_host`)
 wait for the latest.
 
+## SparseCore launches
+
+A `Launch` with `sparse: Some(SparseCore)` runs on a TPU's SparseCores
+(`SPARSE_CORE_MESH`), in the same program as the TensorCore kernels.
+SparseCore kernels see no scalars and no views of the memory, so `program`
+wraps the custom call in HLO that gives them both:
+
+* **Index arrays** (`Indices`): int32 values at a buffer's row (a dynamic
+  slice of the memory at its row scalar, a tiled `[.., r, s]` tensor
+  relaid out row-major) or a strided iota, plus a buffer's row in units of
+  the view's rows; padded to `count` with their last value.
+* **The view**: the memory `u32[rows, 1, 128]` as `u32[rows * 128 / width,
+  width]` (reshape, transpose of each tile's rows and columns, reshape),
+  which XLA compiles to bitcasts: a tiled `[n, width]` 32-bit tensor
+  starting on a tile row of the view (a multiple of `8 * width / 128`
+  rows) is rows of it. A `bitcast_convert` of the whole memory is not free
+  (XLA copies it): the view stays `u32`.
+* **The call**: `DEVICE_TYPE_SPARSECORE` with `sparse_core_config` (TensorCore
+  tiling, `TILING_COMPACT`), the view aliased to its result, then the
+  inverse view back to the memory.
+
 ## Invariants & gotchas
 
 * **Python only.** Kernels are traced from Python: TPU kernels run where
@@ -82,9 +103,11 @@ wait for the latest.
   copy of each distinct row count, too).
 * **Rows, not bytes**: a buffer a kernel touches must start at a row
   (`allocator::tpu::run` errors otherwise). The allocator rounds every
-  allocation up to whole rows; a plan's workspace offsets are aligned to 256
-  bytes only, which is fine while every TPU buffer is whole rows (a dot's
-  operands and output are).
+  allocation up to whole rows, and a tiled tensor up to 40 tiles (5120
+  32-bit columns) wide starts on a tile row of its own
+  (`device::tpu::layout::alignment`: 4 KiB a 128-column tile, less than its
+  padded size), in the allocator and in a plan's workspace
+  (`DeviceLayout::align`), which SparseCore launches rely on.
 * **Mosaic version 17**, which the libtpu of the `tpu` extra reads (0.0.48
   on).
 * **Portable**: programs are compiled for no device in particular and run on

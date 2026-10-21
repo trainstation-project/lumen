@@ -43,6 +43,18 @@ impl DataPtr {
         }
     }
 
+    pub fn allocate_aligned(
+        allocator: Arc<dyn Allocator>,
+        nbytes: usize,
+        alignment: usize,
+    ) -> Self {
+        DataPtr {
+            ptr: allocator.allocate_aligned(nbytes, alignment),
+            nbytes,
+            allocator,
+        }
+    }
+
     /// # Safety
     ///
     /// `ptr` must be `nbytes` bytes `allocator` allocated, owned by the
@@ -80,6 +92,9 @@ impl Drop for DataPtr {
 
 pub trait Allocator: Send + Sync {
     fn allocate(&self, nbytes: usize) -> NonNull<u8>;
+    fn allocate_aligned(&self, nbytes: usize, _alignment: usize) -> NonNull<u8> {
+        self.allocate(nbytes)
+    }
     /// # Safety
     ///
     /// `ptr` must be `nbytes` bytes this allocator allocated, not yet
@@ -172,16 +187,29 @@ impl Region {
         self.lock().live_bytes
     }
 
+    #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
     pub(crate) fn take(
         &self,
         nbytes: usize,
         reserve: impl Fn(usize) -> NonNull<u8>,
         synchronize: impl Fn(),
     ) -> NonNull<u8> {
-        let data = self.try_take(nbytes, &reserve).or_else(|| {
-            synchronize();
-            self.try_take(nbytes, &reserve)
-        });
+        self.take_aligned(nbytes, ALIGNMENT, reserve, synchronize)
+    }
+
+    pub(crate) fn take_aligned(
+        &self,
+        nbytes: usize,
+        alignment: usize,
+        reserve: impl Fn(usize) -> NonNull<u8>,
+        synchronize: impl Fn(),
+    ) -> NonNull<u8> {
+        let data = self
+            .try_take_aligned(nbytes, alignment, &reserve)
+            .or_else(|| {
+                synchronize();
+                self.try_take_aligned(nbytes, alignment, &reserve)
+            });
         data.unwrap_or_else(|| {
             let state = self.lock();
             panic!(
@@ -196,9 +224,19 @@ impl Region {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn try_take(
         &self,
         nbytes: usize,
+        reserve: impl Fn(usize) -> NonNull<u8>,
+    ) -> Option<NonNull<u8>> {
+        self.try_take_aligned(nbytes, ALIGNMENT, reserve)
+    }
+
+    pub(crate) fn try_take_aligned(
+        &self,
+        nbytes: usize,
+        alignment: usize,
         reserve: impl Fn(usize) -> NonNull<u8>,
     ) -> Option<NonNull<u8>> {
         let mut state = self.lock();
@@ -206,16 +244,27 @@ impl Region {
             state.base = Some(Base(reserve(self.capacity)));
         }
         let block = self.block(nbytes);
-        let (&offset, &len) = match nbytes {
-            0 => state.free.iter().next().unwrap_or((&0, &0)),
-            _ => state.free.iter().find(|&(_, &len)| len >= block)?,
+        let alignment = alignment.max(ALIGNMENT);
+        let (free, start, len) = match nbytes {
+            0 => {
+                let (&offset, &len) = state.free.iter().next().unwrap_or((&0, &0));
+                (offset, offset, len)
+            }
+            _ => state.free.iter().find_map(|(&offset, &len)| {
+                let start = offset.next_multiple_of(alignment);
+                (start + block <= offset + len).then_some((offset, start, len))
+            })?,
         };
+        let offset = start;
         let base = state.base.as_ref().expect("reserved above").0.as_ptr();
         let ptr = NonNull::new(base.wrapping_add(offset))?;
         if nbytes > 0 {
-            state.free.remove(&offset);
-            if len > block {
-                state.free.insert(offset + block, len - block);
+            state.free.remove(&free);
+            if start > free {
+                state.free.insert(free, start - free);
+            }
+            if free + len > start + block {
+                state.free.insert(start + block, free + len - start - block);
             }
             state.live.insert(offset, nbytes);
             state.live_bytes += nbytes;

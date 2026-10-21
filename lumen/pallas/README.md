@@ -41,7 +41,7 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 | `call.py` | `pallas_call`: a kernel as an op of a lumen program, its operands staged as JAX stages them (whole in VMEM or SMEM, as HBM refs, or pipelined in blocks over a grid, named or not), `input_output_aliases`. |
 | `pipeline.py` | `emit_pipeline`, `BlockSpec` (`Blocked`, `Element`, `None` dimensions), `program_id`, `num_programs`, `axis_index`, `axis_size`: Pallas's two-slot double-buffered pipeline over a grid (see the module doc for its schedule), with JAX's checks of block shapes and index maps. A block past its operand's end reads the operand viewed larger where that is its tiles' padding, else (at a static position) copies the operand's rows alone, the rest of the slot undefined. |
 | `_C.pyi` | Type stub for `Kernel`. |
-| `tests.rs` | Lowering tests, without a TPU: a copy kernel, a loop accumulating a matmul in VMEM, bfloat16 word unpacking, exact constants, and what kernels refuse. |
+| `tests.rs` | Lowering tests, without a TPU: a copy kernel, a loop accumulating a matmul in VMEM, bfloat16 word unpacking, exact constants, what kernels refuse, and a SparseCore kernel's indexed gather. |
 
 ## The IR
 
@@ -57,6 +57,16 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
   host rows, the memory as read, the memory as written, then their scratch
   (VMEM buffers and semaphore arrays, `Kernel::alloc`, made as the body is
   traced). Their function has no grid: pipelines are loops.
+* **SparseCore kernels** (`Kernel::sparse_core`, `pl.sparse_core_kernel`)
+  run on a TPU's SparseCores, a mesh of cores by vector subcores (2 by 16
+  on a v6e), each running the body: they take their core's and subcore's
+  index (int32 values), then typed HBM refs (`Hbm`), then their scratch.
+  They have no scalar prefetch and no views of the memory (SparseCore
+  Mosaic refuses `tpu.reinterpret_cast`): the runtime hands them their
+  operands (`lumen/kernels/tpu`). An **indexed copy**
+  (`Kernel::indirect_dma`; `pl.async_copy(table.at[offsets], rows, sem)`,
+  or into `table.at[offsets]`) moves a row of an HBM ref for each int32
+  offset in a VMEM vector, to or from VMEM rows: a gather, or a scatter.
 
 ## Lowering notes
 
@@ -74,6 +84,10 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 * `take_along_axis` (`F.gather`) as `tpu.dynamic_gather`, as Pallas: along
   one of the last two dimensions, indices of the operand's shape, extended
   to its elements' width (Mosaic's).
+* A SparseCore kernel's function: `dimension_semantics` core and subcore
+  parallel, `iteration_bounds` its mesh, `window_params` whole (zero index
+  maps), `tpu.core_type = #tpu.core_type<sc_vector_subcore>`; indexed copies
+  as `tpu.enqueue_indirect_dma` / `tpu.wait_indirect_dma`.
 * Not lowered yet (they error): `jnp.take`-like gathers and scatters, cumulative sums,
   dots of several contracting dimensions
   (libtpu 0.0.48's Mosaic aborts on them, under JAX too), `BoundedSlice`

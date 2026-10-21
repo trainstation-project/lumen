@@ -27,7 +27,273 @@ fn lower(module: &str, _spec: &str) -> Result<String, String> {
 
 const VMEM_LIMIT: usize = 100 << 20;
 
-fn program(kernels: &[(&str, &str, usize)], host: Option<usize>, rows: usize) -> String {
+pub(crate) const SPARSE_CORE_MESH: [usize; 2] = [2, 16];
+
+#[derive(Clone, Debug)]
+pub(crate) enum Values {
+    Rows {
+        scalar: usize,
+        shape: Vec<usize>,
+    },
+    Iota {
+        dims: Vec<usize>,
+        strides: Vec<usize>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Indices {
+    pub(crate) values: Values,
+    pub(crate) base: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SparseCore {
+    pub(crate) width: usize,
+    pub(crate) count: usize,
+    pub(crate) indices: Vec<Indices>,
+}
+
+struct Hlo {
+    body: String,
+    names: usize,
+}
+
+impl Hlo {
+    fn op(&mut self, text: &str, ty: &str) -> String {
+        self.names += 1;
+        let name = format!("%h{}", self.names);
+        self.body += &format!("    {name} = {text} -> {ty}\n");
+        name
+    }
+
+    fn assign(&mut self, rhs: &str) -> String {
+        self.names += 1;
+        let name = format!("%h{}", self.names);
+        self.body += &format!("    {name} = {rhs}\n");
+        name
+    }
+
+    fn constant(&mut self, value: i64, ty: &str) -> String {
+        self.assign(&format!("stablehlo.constant dense<{value}> : {ty}"))
+    }
+
+    fn reshape(&mut self, x: &str, from: &str, to: &str) -> String {
+        self.op(&format!("\"stablehlo.reshape\"({x}) : ({from})"), to)
+    }
+
+    fn transpose(&mut self, x: &str, from: &str, to: &str, permutation: &str) -> String {
+        self.op(
+            &format!("\"stablehlo.transpose\"({x}) {{permutation = array<i64: {permutation}>}} : ({from})"),
+            to,
+        )
+    }
+
+    fn binary(&mut self, op: &str, a: &str, b: &str, ty: &str) -> String {
+        self.op(&format!("\"stablehlo.{op}\"({a}, {b}) : ({ty}, {ty})"), ty)
+    }
+
+    fn splat(&mut self, scalar: &str, n: usize) -> String {
+        self.op(
+            &format!("\"stablehlo.broadcast_in_dim\"({scalar}) {{broadcast_dimensions = array<i64>}} : (tensor<i32>)"),
+            &format!("tensor<{n}xi32>"),
+        )
+    }
+
+    fn scalar(&mut self, scalars: &str, count: usize, j: usize) -> String {
+        let one = self.op(
+            &format!(
+                "\"stablehlo.slice\"({scalars}) {{start_indices = array<i64: {j}>, limit_indices = array<i64: {}>, \
+                 strides = array<i64: 1>}} : (tensor<{count}xi32>)",
+                j + 1
+            ),
+            "tensor<1xi32>",
+        );
+        self.reshape(&one, "tensor<1xi32>", "tensor<i32>")
+    }
+}
+
+fn indices(
+    h: &mut Hlo,
+    memory: &str,
+    rows: usize,
+    scalar: &dyn Fn(&mut Hlo, usize) -> String,
+    sparse: &SparseCore,
+    of: &Indices,
+) -> String {
+    let column = sparse.width / 128;
+    let (values, n) = match &of.values {
+        Values::Rows { scalar: j, shape } => {
+            let r = shape.len();
+            let n: usize = shape.iter().product();
+            let (lead, m, s) = match r {
+                1 => (1, 1, shape[0]),
+                _ => (shape[..r - 2].iter().product(), shape[r - 2], shape[r - 1]),
+            };
+            let (mp, sp) = match r {
+                1 => (1, s),
+                _ => (m.div_ceil(8) * 8, s.div_ceil(128) * 128),
+            };
+            let total = lead * mp * sp;
+            let flat_t = format!("tensor<{}xui32>", rows * 128);
+            let flat = h.reshape(memory, &format!("tensor<{rows}x1x128xui32>"), &flat_t);
+            let row = scalar(h, *j);
+            let words = h.constant(128, "tensor<i32>");
+            let start = h.binary("multiply", &row, &words, "tensor<i32>");
+            let total_t = format!("tensor<{total}xui32>");
+            let mut x = h.op(
+                &format!("\"stablehlo.dynamic_slice\"({flat}, {start}) {{slice_sizes = array<i64: {total}>}} : ({flat_t}, tensor<i32>)"),
+                &total_t,
+            );
+            let mut x_t = total_t;
+            if r > 1 {
+                let tiles = format!("tensor<{lead}x{}x{}x8x128xui32>", mp / 8, sp / 128);
+                x = h.reshape(&x, &x_t, &tiles);
+                let rows_t = format!("tensor<{lead}x{}x8x{}x128xui32>", mp / 8, sp / 128);
+                x = h.transpose(&x, &tiles, &rows_t, "0, 1, 3, 2, 4");
+                let padded = format!("tensor<{lead}x{mp}x{sp}xui32>");
+                x = h.reshape(&x, &rows_t, &padded);
+                let kept = format!("tensor<{lead}x{m}x{s}xui32>");
+                x = h.op(
+                    &format!(
+                        "\"stablehlo.slice\"({x}) {{start_indices = array<i64: 0, 0, 0>, limit_indices = array<i64: {lead}, {m}, {s}>, \
+                         strides = array<i64: 1, 1, 1>}} : ({padded})"
+                    ),
+                    &kept,
+                );
+                x_t = kept;
+            } else if total != n {
+                x = h.op(
+                    &format!("\"stablehlo.slice\"({x}) {{start_indices = array<i64: 0>, limit_indices = array<i64: {n}>, strides = array<i64: 1>}} : ({x_t})"),
+                    &format!("tensor<{n}xui32>"),
+                );
+                x_t = format!("tensor<{n}xui32>");
+            }
+            let flat_n = format!("tensor<{n}xui32>");
+            if x_t != flat_n {
+                x = h.reshape(&x, &x_t, &flat_n);
+            }
+            (
+                h.op(
+                    &format!("\"stablehlo.bitcast_convert\"({x}) : ({flat_n})"),
+                    &format!("tensor<{n}xi32>"),
+                ),
+                n,
+            )
+        }
+        Values::Iota { dims, strides } => {
+            let n: usize = dims.iter().product();
+            let ty = format!("tensor<{n}xi32>");
+            let i = h.assign(&format!(
+                "\"stablehlo.iota\"() {{iota_dimension = 0 : i64}} : () -> {ty}"
+            ));
+            let mut sum: Option<String> = None;
+            let mut inner = 1;
+            for (&d, &stride) in dims.iter().zip(strides).rev() {
+                let mut term = i.clone();
+                if inner != 1 {
+                    let c = h.constant(inner as i64, &ty);
+                    term = h.binary("divide", &term, &c, &ty);
+                }
+                if inner * d != n {
+                    let c = h.constant(d as i64, &ty);
+                    term = h.binary("remainder", &term, &c, &ty);
+                }
+                if stride != 1 {
+                    let c = h.constant(stride as i64, &ty);
+                    term = h.binary("multiply", &term, &c, &ty);
+                }
+                sum = Some(match sum {
+                    Some(s) => h.binary("add", &s, &term, &ty),
+                    None => term,
+                });
+                inner *= d;
+            }
+            (sum.expect("an index of a dimension"), n)
+        }
+    };
+    let ty = format!("tensor<{n}xi32>");
+    let row = scalar(h, of.base);
+    let c = h.constant(column as i64, "tensor<i32>");
+    let base = h.binary("divide", &row, &c, "tensor<i32>");
+    let base = h.splat(&base, n);
+    let mut out = h.binary("add", &values, &base, &ty);
+    if sparse.count > n {
+        let last = h.op(
+            &format!("\"stablehlo.slice\"({out}) {{start_indices = array<i64: {}>, limit_indices = array<i64: {n}>, strides = array<i64: 1>}} : ({ty})", n - 1),
+            "tensor<1xi32>",
+        );
+        let pad = h.op(
+            &format!("\"stablehlo.broadcast_in_dim\"({last}) {{broadcast_dimensions = array<i64: 0>}} : (tensor<1xi32>)"),
+            &format!("tensor<{}xi32>", sparse.count - n),
+        );
+        out = h.op(
+            &format!(
+                "\"stablehlo.concatenate\"({out}, {pad}) {{dimension = 0 : i64}} : ({ty}, tensor<{}xi32>)",
+                sparse.count - n
+            ),
+            &format!("tensor<{}xi32>", sparse.count),
+        );
+    }
+    out
+}
+
+fn sparse_core_call(
+    h: &mut Hlo,
+    memory: &str,
+    rows: usize,
+    (scalars, count): (&str, usize),
+    sparse: &SparseCore,
+    (name, mosaic): (&str, &str),
+) -> String {
+    let column = sparse.width / 128;
+    let x = rows * 128 / sparse.width;
+    let scalar = |h: &mut Hlo, j: usize| h.scalar(scalars, count, j);
+    let offsets: Vec<String> = sparse
+        .indices
+        .iter()
+        .map(|of| indices(h, memory, rows, &scalar, sparse, of))
+        .collect();
+    let region = format!("tensor<{rows}x1x128xui32>");
+    let tiles = format!("tensor<{}x{column}x8x128xui32>", x / 8);
+    let rows_t = format!("tensor<{}x8x{column}x128xui32>", x / 8);
+    let view_t = format!("tensor<{x}x{}xui32>", sparse.width);
+    let t = h.reshape(memory, &region, &tiles);
+    let t = h.transpose(&t, &tiles, &rows_t, "0, 2, 1, 3");
+    let view = h.reshape(&t, &rows_t, &view_t);
+    let offsets_t = format!("tensor<{}xi32>", sparse.count);
+    let operand_types: Vec<String> = std::iter::once(view_t.clone())
+        .chain(offsets.iter().map(|_| offsets_t.clone()))
+        .collect();
+    let layouts: Vec<&str> = std::iter::once("dense<[1, 0]> : tensor<2xindex>")
+        .chain(offsets.iter().map(|_| "dense<0> : tensor<1xindex>"))
+        .collect();
+    let operands: Vec<String> = std::iter::once(view).chain(offsets).collect();
+    let called = h.op(
+        &format!(
+            "stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \"{{\\22custom_call_config\\22: \
+             {{\\22body\\22: \\22{}\\22, \\22serialization_format\\22: 1, \\22needs_layout_passes\\22: true}}, \
+             \\22sparse_core_config\\22: {{\\22tiling\\22: \\22TILING_COMPACT\\22}}, \
+             \\22device_type\\22: \\22DEVICE_TYPE_SPARSECORE\\22}}\", kernel_name = \"{name}\", \
+             operand_layouts = [{}], output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [], \
+             operand_index = 0, operand_tuple_indices = []>], result_layouts = [dense<[1, 0]> : tensor<2xindex>]}} : ({})",
+            operands.join(", "),
+            base64(mosaic.as_bytes()),
+            layouts.join(", "),
+            operand_types.join(", "),
+        ),
+        &view_t,
+    );
+    let t = h.reshape(&called, &view_t, &rows_t);
+    let t = h.transpose(&t, &rows_t, &tiles, "0, 2, 1, 3");
+    h.reshape(&t, &tiles, &region)
+}
+
+fn program(
+    kernels: &[(&str, &str, usize, Option<&SparseCore>)],
+    host: Option<usize>,
+    rows: usize,
+) -> String {
     let rows_of = |n| format!("tensor<{n}x1x128xui32>");
     let total: usize = kernels.iter().map(|k| k.2).sum();
     let mut types = vec![format!("tensor<{total}xi32>")];
@@ -51,7 +317,11 @@ fn program(kernels: &[(&str, &str, usize)], host: Option<usize>, rows: usize) ->
     let result = rows_of(rows);
     let mut body = String::new();
     let (mut start, mut value) = (0, format!("%arg{memory}"));
-    for (k, &(name, mosaic, count)) in kernels.iter().enumerate() {
+    let mut hlo = Hlo {
+        body: String::new(),
+        names: 0,
+    };
+    for (k, &(name, mosaic, count, sparse)) in kernels.iter().enumerate() {
         let mut scalars = types[0].clone();
         let mut operands = vec!["%arg0".to_string()];
         if count != total {
@@ -65,6 +335,19 @@ fn program(kernels: &[(&str, &str, usize)], host: Option<usize>, rows: usize) ->
             );
         }
         start += count;
+        if let Some(sparse) = sparse {
+            hlo.body = std::mem::take(&mut body);
+            value = sparse_core_call(
+                &mut hlo,
+                &value,
+                rows,
+                (&operands[0], count),
+                sparse,
+                (name, mosaic),
+            );
+            body = std::mem::take(&mut hlo.body);
+            continue;
+        }
         let mut operand_types = vec![scalars];
         if host.is_some() {
             operands.push("%arg1".into());
@@ -140,6 +423,7 @@ struct Lowered {
     spec: String,
     mosaic: Arc<str>,
     scalars: Vec<i32>,
+    sparse: Option<Box<SparseCore>>,
 }
 
 fn compiled(
@@ -151,7 +435,13 @@ fn compiled(
     static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
     let mut key = format!("{index} {host:?} {rows}");
     for l in launches {
-        key += &format!("\n{} {} {}", l.module, l.spec, l.scalars.len());
+        key += &format!(
+            "\n{} {} {} {:?}",
+            l.module,
+            l.spec,
+            l.scalars.len(),
+            l.sparse
+        );
     }
     let mut cache = CACHE
         .get_or_init(Default::default)
@@ -160,9 +450,16 @@ fn compiled(
     if let Some(&executable) = cache.get(&key) {
         return Ok(executable);
     }
-    let kernels: Vec<(&str, &str, usize)> = launches
+    let kernels: Vec<(&str, &str, usize, Option<&SparseCore>)> = launches
         .iter()
-        .map(|l| (l.module.as_str(), &*l.mosaic, l.scalars.len()))
+        .map(|l| {
+            (
+                l.module.as_str(),
+                &*l.mosaic,
+                l.scalars.len(),
+                l.sparse.as_deref(),
+            )
+        })
         .collect();
     let code = program(&kernels, host, rows);
     let executable =
@@ -242,6 +539,7 @@ pub(crate) struct Launch<'a> {
     pub(crate) rows: &'a [*const u8],
     pub(crate) scalars: &'a [i32],
     pub(crate) host: &'a [u8],
+    pub(crate) sparse: Option<SparseCore>,
 }
 
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
@@ -265,6 +563,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
             launch.scalars,
         ]
         .concat(),
+        sparse: launch.sparse.map(Box::new),
     };
     crate::profiler::tpu::launched(index, &launch.kernel);
     crate::kernels::launched::templated(&launch.kernel, || {
@@ -330,6 +629,7 @@ pub(crate) fn encode(
                 rows: &rows,
                 scalars: &[],
                 host: &[],
+                sparse: None,
             };
             launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
         }

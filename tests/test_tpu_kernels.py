@@ -591,3 +591,27 @@ def test_the_transformers_embedding_runs_on_tpu():
 
     got = lumen.compile(embed)(tpu(tokens), tpu(positions), lumen.from_numpy(ids).to("tpu"))
     np.testing.assert_array_equal(floats(got), (tokens[ids] + positions).reshape(batch * seq, dim))
+
+
+@pytest.mark.parametrize(
+    "dtype, width, ids, kernel",
+    [
+        ("float32", 768, [4, 300], "gather_sparse_core_f32"),
+        ("int32", 1024, [3, 7, 5], "gather_sparse_core_i32"),
+        ("float32", 128, [1], "gather_sparse_core_f32"),
+        ("float32", 8192, [4, 256], "gather_f32"),
+        ("bfloat16", 1024, [4, 256], "gather_bf16"),
+    ],
+)
+def test_32_bit_tables_are_gathered_on_the_sparse_core(dtype, width, ids, kernel, tmp_path):
+    rng = np.random.default_rng(0)
+    table = rng.standard_normal([2000, width], dtype=np.float32)
+    index = rng.integers(0, 2000, ids).astype(np.int32)
+    t = lumen.from_numpy(table if dtype != "int32" else table.view(np.int32)).to(dtype=dtype).to("tpu")
+    f = lumen.compile(lambda t, i: t[i])
+    got = f(t, lumen.from_numpy(index).to("tpu"))
+    exact = "float32" if dtype == "bfloat16" else dtype
+    want = lumen.to_numpy(t.to("cpu").to(dtype=exact))[index]
+    np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu").to(dtype=exact)).view(np.uint8), want.view(np.uint8))
+    (launched,) = f.dump_code(tmp_path)
+    assert kernel in launched.name, launched.name

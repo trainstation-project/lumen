@@ -25,6 +25,7 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
         rows: &[dst.data_ptr().cast_const()],
         scalars: &[],
         host: &host,
+        sparse: None,
     };
     launch(index, launched)
         .unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));

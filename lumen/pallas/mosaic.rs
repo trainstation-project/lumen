@@ -68,6 +68,7 @@ fn type_name(ty: &Type) -> String {
         Type::Ref(t, space) => {
             let space = match space {
                 Space::Any => "any",
+                Space::Hbm => "hbm",
                 Space::Vmem => "vmem",
                 Space::Smem => "smem",
             };
@@ -483,6 +484,11 @@ impl Emitter<'_> {
                 "operandSegmentSizes = array<i32: 1, 0, 1, 1, 0, 0, 0>, priority = 0 : i32, strict_ordering = false",
                 &[],
             ),
+            Op::IndirectDmaStart => self.op("tpu.enqueue_indirect_dma", &refs(&ins), "add = false", &[]),
+            Op::IndirectDmaWait => {
+                let operands = [ins[3].clone(), ins[0].clone(), ins[1].clone()];
+                self.op("tpu.wait_indirect_dma", &refs(&operands), "", &[])
+            }
             Op::DmaWait => {
                 let operands = [ins[2].clone(), ins[0].clone(), ins[1].clone()];
                 self.op(
@@ -1388,14 +1394,40 @@ pub fn lower(kernel: &Kernel, name: &str) -> Result<String, String> {
         .iter()
         .map(|&p| type_name(kernel.type_of(p)))
         .collect();
+    let attributes = match kernel.mesh() {
+        None => format!(
+            "dimension_semantics = [], function_type = ({}) -> (), scalar_prefetch = 1 : i64, \
+             scratch_operands = {} : i64, sym_name = \"{name}\", tpu.core_type = #tpu.core_type<tc>",
+            types.join(", "),
+            kernel.scratch().len(),
+        ),
+        Some([cores, subcores]) => {
+            let windows: Vec<String> = kernel.params()[2..]
+                .iter()
+                .map(|&p| {
+                    let Type::Ref(t, _) = kernel.type_of(p) else {
+                        unreachable!("a SparseCore kernel's operands are refs")
+                    };
+                    let zeros = vec!["0"; t.shape.len()].join(", ");
+                    format!("{{transform_indices = affine_map<(d0, d1) -> ({zeros})>}}")
+                })
+                .collect();
+            format!(
+                "dimension_semantics = [#tpu.dimension_semantics<core_parallel>, \
+                 #tpu.dimension_semantics<subcore_parallel>], function_type = ({}) -> (), \
+                 iteration_bounds = array<i64: {cores}, {subcores}>, scalar_prefetch = 0 : i64, \
+                 scratch_operands = {} : i64, sym_name = \"{name}\", \
+                 tpu.core_type = #tpu.core_type<sc_vector_subcore>, window_params = [{}]",
+                types.join(", "),
+                kernel.scratch().len(),
+                windows.join(", "),
+            )
+        }
+    };
     Ok(format!(
         "\"builtin.module\"() ({{\n  \"stable_mosaic.func.func\"() ({{\n  ^bb0({}):\n{}  }}) \
-         {{dimension_semantics = [], function_type = ({}) -> (), scalar_prefetch = 1 : i64, \
-         scratch_operands = {} : i64, sym_name = \"{name}\", tpu.core_type = #tpu.core_type<tc>}} : \
-         () -> ()\n}}) {{stable_mosaic.version = {VERSION} : i64}} : () -> ()\n",
+         {{{attributes}}} : () -> ()\n}}) {{stable_mosaic.version = {VERSION} : i64}} : () -> ()\n",
         args.join(", "),
         e.out,
-        types.join(", "),
-        kernel.scratch().len(),
     ))
 }

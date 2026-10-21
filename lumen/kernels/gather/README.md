@@ -1,7 +1,9 @@
 # `lumen/kernels/gather`
 
-The `gather` template on TPU: an embedding's lookup, `table[ids]`, the rows
-of a `[vocab, width]` table at int32 indices of any shape. On MPS a gather
+The `gather` templates on TPU: an embedding's lookup, `table[ids]`, the rows
+of a `[vocab, width]` table at int32 indices of any shape. A 32-bit table
+(float32, int32) is gathered on the TPU's **SparseCores**; a bfloat16 one,
+or a 32-bit one the SparseCore path cannot take, on the TensorCore. On MPS a gather
 has no kernel: it is generated (in a fusion, or alone as a one-node fusion,
 `graph_compiler/mps/alone.rs`).
 
@@ -13,10 +15,28 @@ Callers: plan steps on a TPU reach [`tpu::encode`](tpu/mod.rs) through
 | File | Contents |
 | --- | --- |
 | `mod.rs` | The `#[cfg(lumen_tpu_linked)] mod tpu;` hook. |
-| `tpu/mod.rs` | `encode`: checks the gather is one the template runs, picks the blocks and writes the spec. |
-| `tpu/__init__.py` | `program(spec)`: the kernel. |
+| `tpu/mod.rs` | `encode`: checks the gather is one the templates run, launches the SparseCore one where it can (`sparse_core`), else picks the TensorCore one's blocks and writes its spec. |
+| `tpu/__init__.py` | `program(spec)`: the kernels (`_sparse_core` for the SparseCores). |
 
-## How it runs
+## On the SparseCores (32-bit tables)
+
+`tpu::encode` launches a SparseCore kernel (`_sparse_core`) when the table
+is 32-bit, its width a multiple of 128 whose rows fit VMEM in chunks of at
+least 8, and the table, the output and the memory start on tile rows of
+that width (the allocator's and the plan's alignment makes them). The
+launch (`lumen/kernels/tpu`'s SparseCore launches) gives the kernel the
+memory as `u32[_, width]` rows and two index arrays: each position's table
+row (its id plus the table's row) and its output row. Each of the 32
+subcores takes its share of positions in chunks of `k`: it copies the
+chunk's table rows in by one indexed copy (a hardware gather, 32 bytes at a
+time: no tile is over-read) and writes them out by another, two slots so
+one chunk's gather runs while the last one's rows are written.
+
+On a v6e, float32 lookups write 326-405 GB/s (`[8, 2048]` ids in a
+`[32000, 1024]` table: 167 µs), against 96-133 GB/s on the TensorCore and
+XLA's 250-369 GB/s (`jnp.take`).
+
+## On the TensorCore
 
 A TPU copies whole tiles: a table row alone cannot be copied (a copy of one
 row starts at its tile's first). So for each index the kernel copies the

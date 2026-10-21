@@ -203,3 +203,49 @@ fn kernels_refuse_what_tpus_cannot_do() {
     k.end_if(&[]).unwrap();
     assert!(lower(&k, "closed").is_ok());
 }
+
+#[test]
+fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
+    let view = TensorType::new(DType::U32, &[64, 256]);
+    let offsets = TensorType::new(DType::I32, &[16]);
+    let mut k = Kernel::sparse_core(&[view.clone(), offsets.clone(), view], [2, 16]);
+    let [core, _, _, src, region] = k.params()[..] else {
+        unreachable!()
+    };
+    let at = k
+        .alloc(Type::Ref(TensorType::new(DType::I32, &[8]), Space::Vmem))
+        .unwrap();
+    let rows = k
+        .alloc(Type::Ref(
+            TensorType::new(DType::U32, &[8, 256]),
+            Space::Vmem,
+        ))
+        .unwrap();
+    let sem = k.alloc(Type::Semaphore(vec![])).unwrap();
+    let eight = constant(&mut k, 8);
+    let start = k.apply(Primitive::Mul, &[core, eight]).unwrap();
+    let window = k
+        .slice(src, vec![None], &[start], vec![8], vec![false])
+        .unwrap();
+    k.dma(window, at, sem, false).unwrap();
+    k.dma(window, at, sem, true).unwrap();
+    k.indirect_dma(region, rows, at, sem, false).unwrap();
+    k.indirect_dma(region, rows, at, sem, true).unwrap();
+    assert!(
+        k.indirect_dma(rows, rows, at, sem, false).is_err(),
+        "between HBM rows and VMEM"
+    );
+    let text = lower(&k, "gather").unwrap();
+    for expected in [
+        "^bb0(%arg0: i32, %arg1: i32, %arg2: memref<64x256xi32, #tpu.memory_space<hbm>>, %arg3: \
+         memref<16xi32, #tpu.memory_space<hbm>>, %arg4: memref<64x256xi32, #tpu.memory_space<hbm>>,",
+        "\"stable_mosaic.tpu.enqueue_indirect_dma\"(%arg4, %arg6, %arg5, %arg7) {add = false}",
+        "\"stable_mosaic.tpu.wait_indirect_dma\"(%arg7, %arg4, %arg6)",
+        "iteration_bounds = array<i64: 2, 16>, scalar_prefetch = 0 : i64, scratch_operands = 3 : i64",
+        "tpu.core_type = #tpu.core_type<sc_vector_subcore>",
+        "window_params = [{transform_indices = affine_map<(d0, d1) -> (0, 0)>}, \
+         {transform_indices = affine_map<(d0, d1) -> (0)>}, {transform_indices = affine_map<(d0, d1) -> (0, 0)>}]",
+    ] {
+        assert!(text.contains(expected), "{expected}\nin\n{text}");
+    }
+}

@@ -2,6 +2,8 @@ use crate::DType;
 
 const ROW: usize = 512;
 
+const ALIGNED_COLUMNS: usize = 40;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     pub shape: Vec<usize>,
@@ -165,6 +167,20 @@ impl Layout {
 
 pub fn bytes(dtype: DType, shape: &[usize]) -> Result<usize, String> {
     Ok(Layout::new(dtype, shape)?.bytes())
+}
+
+pub fn alignment(dtype: DType, shape: &[usize]) -> usize {
+    let Ok(layout) = Layout::new(dtype, shape) else {
+        return ROW;
+    };
+    if !layout.tiled() {
+        return ROW;
+    }
+    let columns = shape[shape.len() - 1].div_ceil(128);
+    match columns <= ALIGNED_COLUMNS {
+        true => 8 * columns * ROW,
+        false => ROW,
+    }
 }
 
 pub fn same(a: &crate::graph::TensorType, b: &crate::graph::TensorType) -> bool {

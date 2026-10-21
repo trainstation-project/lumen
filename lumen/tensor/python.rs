@@ -326,14 +326,17 @@ impl PyTensor {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (shape, dtype=None, device=None))]
+    #[pyo3(signature = (shape, dtype=None, device=None, alignment=0))]
     fn empty(
         shape: Vec<usize>,
         dtype: Option<&str>,
         device: Option<&Bound<'_, PyAny>>,
+        alignment: usize,
     ) -> PyResult<Self> {
         let options = options(dtype, device)?;
-        Ok(Self::wrap(unsafe { Tensor::empty(&shape, options) }))
+        Ok(Self::wrap(unsafe {
+            Tensor::empty_aligned(&shape, options, alignment)
+        }))
     }
 
     #[staticmethod]

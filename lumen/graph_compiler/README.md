@@ -113,7 +113,10 @@ Within one order (`compile_in_order`):
   Packed `blocks` delay a member's donation until no step reads its block.
 - **Workspace**: values without a buffer and each step's kernel scratch
   (`PlanOptions::scratch`, alive for that step only) are packed largest
-  first at the lowest free offset, aligned to `ALIGNMENT` (256).
+  first at the lowest free offset, aligned to `ALIGNMENT` (256) or the
+  device layout's alignment of the value (`DeviceLayout::align`: a tiled TPU
+  tensor's tile row); the workspace's own alignment (`workspace_alignment`)
+  is all of theirs, and the tracer allocates the workspace with it.
 - **Owned plans** (`parameters: Some(..)`): outputs live in the workspace;
   `run_in(workspace, inputs)` reads parameters in place and returns views
   valid until the next run.

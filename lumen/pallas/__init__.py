@@ -61,6 +61,7 @@ __all__ = [
     "program_id",
     "shift_left",
     "shift_right_logical",
+    "sparse_core_kernel",
     "switch",
     "when",
     "while_loop",
@@ -145,7 +146,14 @@ class _At:
         self.ref = ref
 
     def __getitem__(self, index):
+        if isinstance(index, Ref):
+            return _Indexed(self.ref, index)
         return self.ref._window(index)
+
+
+class _Indexed:
+    def __init__(self, ref, offsets):
+        self.ref, self.offsets, self.kernel = ref, offsets, ref.kernel
 
 
 class Ref:
@@ -351,6 +359,16 @@ def kernel(body, *, scalars, rows, host_rows=None, scratch=(), name="kernel"):
     return k.lower(name)
 
 
+def sparse_core_kernel(body, *, refs, mesh, scratch=(), name="kernel"):
+    k = Kernel.sparse_core([(dtype, list(shape)) for dtype, shape in refs], list(mesh))
+    with tracer.tracing(k):
+        params = k.params()
+        args = [TracedTensor(k, v) for v in params[:2]] + [Ref(k, v) for v in params[2:]]
+        args += [_alloc(k, s) for s in scratch]
+        body(*args)
+    return k.lower(name)
+
+
 def _alloc(k, s):
     """A ref of scratch ``s`` (``VMEM``, ``SMEM``, ``SemaphoreType``) of kernel
     ``k``."""
@@ -502,11 +520,20 @@ class _Copy:
     def __init__(self, src, dst, sem):
         self.src, self.dst, self.sem = src, dst, sem
 
+    def _issue(self, wait):
+        indexed = [r for r in (self.src, self.dst) if isinstance(r, _Indexed)]
+        if not indexed:
+            self.src.kernel.dma(self.src.var, self.dst.var, self.sem.var, wait)
+            return
+        (rows,) = indexed
+        src, dst = (r.ref if isinstance(r, _Indexed) else r for r in (self.src, self.dst))
+        self.src.kernel.indirect_dma(src.var, dst.var, rows.offsets.var, self.sem.var, wait)
+
     def start(self):
-        self.src.kernel.dma(self.src.var, self.dst.var, self.sem.var, False)
+        self._issue(False)
 
     def wait(self):
-        self.src.kernel.dma(self.src.var, self.dst.var, self.sem.var, True)
+        self._issue(True)
 
 
 def make_async_copy(src, dst, sem):

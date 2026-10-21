@@ -1,7 +1,8 @@
 use super::Options;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::{Plan, Source, Stage, Staged, plan::ALIGNMENT};
+use crate::graph_compiler::plan::{ALIGNMENT, lcm};
+use crate::graph_compiler::{Plan, Source, Stage, Staged};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Place {
@@ -114,7 +115,8 @@ pub(crate) fn compile(
     let (mut stages, mut steps, mut packed, mut block_types) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut interleaved = Vec::new();
-    let mut workspace_bytes = 0;
+    let mut workspace_bytes: usize = 0;
+    let mut workspace_alignment = ALIGNMENT;
     for &s in &kept {
         let b = &mut builders[s];
         let values: Vec<Var> = b
@@ -173,8 +175,9 @@ pub(crate) fn compile(
             block_types.push(plan.input_types()[inputs.len() + j].clone());
         }
         steps.extend(plan.steps().iter().cloned());
-        let offset = workspace_bytes;
+        let offset = workspace_bytes.next_multiple_of(plan.workspace_alignment());
         if !b.host {
+            workspace_alignment = lcm(workspace_alignment, plan.workspace_alignment());
             workspace_bytes = (offset + plan.workspace_bytes()).next_multiple_of(ALIGNMENT);
         }
         stages.push(Stage {
@@ -202,7 +205,7 @@ pub(crate) fn compile(
         output_types,
         staged,
         steps,
-        workspace_bytes,
+        (workspace_bytes, workspace_alignment),
         packed,
         interleaved,
     )))

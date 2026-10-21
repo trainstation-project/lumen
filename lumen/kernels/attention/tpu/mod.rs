@@ -36,6 +36,7 @@ fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(),
         rows,
         scalars: &[],
         host: &[],
+        sparse: None,
     };
     launch(index, launched)
 }
