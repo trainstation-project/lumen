@@ -6,7 +6,7 @@ cross-entropy, never materialized). There is no `Op` here: `dot_general` is
 a graph primitive, run by a compiled plan. On MPS, `ops::mps::encode` sends
 its steps to `mps::encode` / `mps::encode_linear_cross_entropy`; on a TPU,
 `ops::tpu::encode` sends `dot_general` to `tpu::encode` (its kernel, in lumen's Pallas:
-`tpu.py`); elsewhere the plan
+`tpu/__init__.py`); elsewhere the plan
 evaluates it with `ops/reference.rs`.
 
 ## Files
@@ -14,12 +14,12 @@ evaluates it with `ops/reference.rs`.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | Module doc and the `#[cfg(lumen_mps_linked)] mod mps;` and `#[cfg(lumen_tpu_linked)] mod tpu;` hooks. |
-| `tpu.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec; see *TPU* below. |
-| `tpu.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
+| `tpu/mod.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec; see *TPU* below. |
+| `tpu/__init__.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
 
 ## TPU
 
-`tpu.py` is the kernel, in lumen's Pallas ([`../../pallas/`](../../pallas/README.md)); `tpu.rs` its spec
+`tpu/__init__.py` is the kernel, in lumen's Pallas ([`../../pallas/`](../../pallas/README.md)); `tpu/mod.rs` its spec
 ([`../tpu/`](../tpu/README.md) lowers and runs it). The lhs must be batch,
 free then contracting dimensions; the rhs batch, then contracting and free
 dimensions (`[K, N]`) or free and contracting (`[N, K]`, `transposed`);
@@ -35,7 +35,7 @@ accumulating in float32; the output float32 or bfloat16.
   block, rounded to the dot's dtype, then through its epilogue (below). One block of k needs no accumulator: the
   product is written as it is. One product a step: Mosaic unrolls it over
   the block's matrix-unit tiles, so a second copy of it costs dearly.
-* **Blocks** (`tpu.rs`, `caps`): as large as feed the matrix unit (a step
+* **Blocks** (`tpu/mod.rs`, `caps`): as large as feed the matrix unit (a step
   does `bm · bn / (bm + bn)` flops a byte read; a v6e's HBM moves a byte
   while it does ~800), measured on a v6e (`benchmarks/tpu_matmul.py`):
   bfloat16 2048 × 1024 × K for K ≤ 4096 (no accumulator), else
@@ -63,7 +63,7 @@ accumulating in float32; the output float32 or bfloat16.
   values of the member's shape computed before the dot) are one `Fusion`.
   A concatenate its lhs is, read only by dots, that no kernel writes in
   place, is the fusion's too: its parts are buffers of their own the
-  kernel reads side by side along k or m (`lhs`, `lhs_k`). `tpu.rs`
+  kernel reads side by side along k or m (`lhs`, `lhs_k`). `tpu/mod.rs`
   (`Epilogue::of`) writes the spec: `widths` (the members), `inputs` (the
   other operands: 0-d ones copied once, the rest read a block at a time at
   the member's blocks), `nodes` (as the elementwise kernel's, computed by
