@@ -20,8 +20,6 @@ bindings, the Python tracer that builds graphs (`TracedTensor`,
 | `__init__.py` | Re-exports `Graph`, `TracedTensor`, `compile`, `make_graph`, `prims` (tracer imported before `prims`). |
 | `tracer.py` | Tracing: `TracedTensor` (torch-like methods), `compile`, `make_graph`, trace-global state (scopes, sources, tapes, RNG), and `tracing` (a trace of one's own, of a graph or anything answering as one: a `lumen.pallas` kernel). |
 | `prims.py` | One Python function per primitive (`jax.lax`-like); `bind` records a node. |
-| `viz.py` | `dump_graph`'s backend: profiles fused and unfused plans and writes one self-contained HTML page; also a CLI (`python -m lumen.graph.viz`). |
-| `viz.html` | The page template (`__TITLE__`, `__DATA__` placeholders), its CSS and JS. |
 | `tests.rs` | Unit tests: type rules, display, reference-executor values. |
 
 ## Core types (`mod.rs`)
@@ -144,11 +142,9 @@ warnings at the source line.
     devices (no tracing machinery a call); runs in a single preallocated
     workspace;
     handles meta-tensor compile-only calls, weight packing for merged dots,
-    Neural Engine invalidation, and `compiled.dump_graph(...)`.
+    Neural Engine invalidation, and `compiled.dump_graph(...)` / `dump_code(...)`
+    (written by [`lumen/viz`](../viz/README.md)).
   * `make_graph(fn)` — returns the traced `Graph` (like `jax.make_jaxpr`).
-* `viz.py` / `viz.html` — `collect` profiles the fused plan and an unfused
-  plan (`fuse=False`) and gathers graph/plan text, per-node kernels with
-  GPU time and Metal sources; `write` fills the template.
 
 ## Invariants & gotchas
 

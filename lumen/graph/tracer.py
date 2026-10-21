@@ -379,11 +379,11 @@ def compile(fn, device=None):
     module's float so assigned (a step count), into the module.
 
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
-    call's signature, profiled, as an HTML page (``lumen.graph.viz``);
+    call's signature, profiled, as an HTML page (``lumen.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature.
     ``compiled.dump_code(directory)`` writes the code of every kernel a call
     of that signature runs, in the order it runs them, a file each
-    (``lumen.graph.viz.dump_code``).
+    (``lumen.viz.dump_code``).
 
     With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
@@ -529,7 +529,7 @@ def compile(fn, device=None):
         ``fragment`` leaves out the doctype, for a host that wraps the page
         (a published artifact)."""
         graph, plan, target, inputs, workspace, scalars = planned("dump_graph", args, device)
-        from lumen.graph import viz
+        from lumen import viz
 
         data = viz.collect(
             graph,
@@ -546,7 +546,7 @@ def compile(fn, device=None):
 
     def dump_code(directory, *args, device=None):
         graph, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
-        from lumen.graph import viz
+        from lumen import viz
 
         return viz.dump_code(graph, plan, lambda: plan.run_in(workspace, inputs), target, directory)
 
