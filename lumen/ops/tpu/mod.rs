@@ -286,6 +286,9 @@ pub(crate) fn encode(
         Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
             super::attention::tpu::encode(index, step, inputs, output)
         }
+        Primitive::Fusion { ref name, .. } if name == "reduction" => {
+            crate::codegen::tpu::reduction::encode(index, step, inputs, output)
+        }
         Primitive::Fusion { ref name, .. } if name == "row" => {
             crate::codegen::tpu::row::encode(index, step, inputs, output)
         }
@@ -295,7 +298,6 @@ pub(crate) fn encode(
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
         }
-        Primitive::ReduceSum { .. } => super::reduce::tpu::encode(index, step, inputs, output),
         Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
         Primitive::PallasCall { kernel, .. } => {
             let n = step.inputs.len();

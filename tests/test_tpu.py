@@ -120,11 +120,11 @@ def test_elementwise_primitives_agree_with_numpy(shape):
 
 def test_programs_of_other_primitives_say_they_do_not_run_yet():
     """Outside a kernel, a TPU program runs dots, elementwise primitives,
-    sums and Pallas kernels: another primitive (a max) says it does not run
-    on a TPU yet."""
+    reductions and Pallas kernels: another primitive (a cumulative sum) says
+    it does not run on a TPU yet."""
     x = lumen.ones([8, 128]).to("tpu")
-    with pytest.raises(ValueError, match="reduce_max does not run on TPU yet"):
-        lumen.compile(lambda a: lumen.functional.amax(a, 0), device="tpu")(x)
+    with pytest.raises(ValueError, match="cumsum does not run on TPU yet"):
+        lumen.compile(lambda a: lumen.functional.cumsum(a, 0), device="tpu")(x)
 
 
 def test_the_profiler_times_each_tpu_program():
@@ -179,10 +179,10 @@ def test_sums_over_the_last_dimension(shape):
     np.testing.assert_allclose(floats(out), floats(x).sum(-1), rtol=1e-5, atol=1e-4)
 
 
-def test_a_sum_over_another_dimension_says_so():
-    x = lumen.ones([64, 128]).to("tpu")
-    with pytest.raises(ValueError, match="over the last dimension"):
-        lumen.compile(lambda x: lumen.functional.sum(x, 0))(x)
+def test_a_sum_over_a_middle_dimension_says_so():
+    x = lumen.ones([4, 64, 128]).to("tpu")
+    with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
+        lumen.compile(lambda x: lumen.functional.sum(x, 1))(x)
 
 
 class Projections(lumen.nn.Module):
@@ -511,3 +511,49 @@ def test_a_softmax_backward_is_one_row_kernel():
     got = floats(lumen.compile(grad)(lumen.from_numpy(x).to("tpu"), lumen.from_numpy(dy).to("tpu")))
     p = _softmax(x)
     np.testing.assert_allclose(got, p * (dy - (p * dy).sum(-1, keepdims=True)), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "shape, dims",
+    [
+        ([512, 1024], -1),
+        ([4, 64, 1024], -1),
+        ([512, 1024], 0),
+        ([4, 64, 1024], (0, 1)),
+        ([512, 1024], (0, 1)),
+        ([4096], 0),
+    ],
+    ids=["rows", "rows 3d", "columns", "columns 3d", "total", "total 1d"],
+)
+@pytest.mark.parametrize("op", ["sum", "max"])
+def test_a_reduction_is_one_kernel(op, shape, dims, dtype):
+    """A reduction over the last axis (rows), every other axis (columns) or
+    all of them (total) runs as the reduce template, one kernel with its
+    operand's cast."""
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal(shape, dtype=np.float32)
+    if op == "sum":
+        f = lambda x: F.sum(x.float(), dims)  # noqa: E731
+        want = lambda x: x.sum(dims)  # noqa: E731
+    else:
+        f = lambda x: F.amax(x, dims)  # noqa: E731
+        want = lambda x: x.max(dims)  # noqa: E731
+    x = lumen.from_numpy(a).to(dtype=dtype).to("tpu")
+    meta = lumen.empty(shape, dtype, "meta")
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(meta), "tpu").steps()
+    got = floats(lumen.compile(f)(x))
+    np.testing.assert_allclose(got, want(floats(x)), rtol=1e-2 if dtype == "bfloat16" else 1e-5, atol=1e-2)
+
+
+def test_a_reductions_prologue_and_epilogue_are_its_kernel():
+    """``mean(x * x) * 2`` over rows: the product read in blocks, the mean's
+    division and the scale on the results, one kernel."""
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal([512, 1024], dtype=np.float32)
+    f = lambda x: F.mean(x.float() * x.float(), -1) * 2.0  # noqa: E731
+    meta = lumen.empty([512, 1024], "bfloat16", "meta")
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(meta), "tpu").steps()
+    x = lumen.from_numpy(a).to(dtype="bfloat16").to("tpu")
+    b = floats(x)
+    np.testing.assert_allclose(floats(lumen.compile(f)(x)), (b * b).mean(-1) * 2, rtol=1e-5, atol=1e-5)
