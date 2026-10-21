@@ -77,7 +77,8 @@ pub(crate) fn encode(
         | Tanh
         | Logistic
         | Cast { .. }
-        | Select => {
+        | Select
+        | Gather { .. } => {
             unreachable!("a one-node fusion's loop kernel (graph_compiler::mps::alone)")
         }
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
@@ -89,7 +90,7 @@ pub(crate) fn encode(
             super::layout::mps::encode
         }
         DynamicSlice { .. } | DynamicUpdateSlice => super::dynamic_slice::mps::encode,
-        Gather { .. } | ScatterAdd { .. } => super::gather::mps::encode,
+        ScatterAdd { .. } => super::scatter_add::mps::encode,
         Wait => super::wait::encode,
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")

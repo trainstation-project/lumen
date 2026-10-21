@@ -40,7 +40,7 @@ the module is `pub(crate)`. Callers:
 | `DotGeneral` | `dot_general::mps::encode` |
 | `Reshape`, `BroadcastInDim`, `Transpose`, `Slice` | `layout::mps::encode` |
 | `DynamicSlice`, `DynamicUpdateSlice` | `dynamic_slice::mps::encode` |
-| `Gather`, `ScatterAdd` | `gather::mps::encode` |
+| `ScatterAdd` | `scatter_add::mps::encode` |
 | `Full`, `Iota`, `RandomBits` | `factory::mps::encode` |
 | `Wait` | `wait::encode` |
 
@@ -76,7 +76,7 @@ strides by `threads_per_grid` up to `per_thread<T>()` times.
 
 `build.rs` concatenates `PRIMITIVE_KERNELS` — this folder's `kernels.metal`
 first, then elementwise, reduce, scan, dot_general, layout, dynamic_slice,
-gather, factory — into one source embedded as `kPrimitiveKernels`
+scatter_add, factory — into one source embedded as `kPrimitiveKernels`
 (`primitive_kernels.h` in `OUT_DIR`). The shim compiles it on first use with
 `fastMathEnabled = NO`. So every family's `.metal` may use anything defined
 earlier, and kernel names must be unique across all files.

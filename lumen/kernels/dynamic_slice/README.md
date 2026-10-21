@@ -25,5 +25,5 @@ interpreter (`lumen/kernels/reference.rs`) has its own `DynamicSlice` /
 ## Related
 
 - [`lumen/kernels/mps`](../mps/) — `launch`, `Grid`, arg helpers, shared Metal prelude.
-- [`lumen/kernels/gather`](../gather/) — `scatter_add` reuses `mps::copy`.
+- [`lumen/kernels/scatter_add`](../scatter_add/) — `scatter_add` reuses `mps::copy`.
 - `lumen/kernels/reference.rs` — the CPU reference semantics.

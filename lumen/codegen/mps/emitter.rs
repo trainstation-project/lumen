@@ -11,6 +11,7 @@ pub(super) struct Emitter<'a> {
     pub(super) invariant: Vec<bool>,
     pub(super) row_locals: HashMap<Var, String>,
     pub(super) hoisted: String,
+    pub(super) wide: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -28,6 +29,7 @@ impl<'a> Emitter<'a> {
             values: HashMap::new(),
             indices: HashMap::new(),
             locals: 0,
+            wide: body.types.iter().any(|t| t.numel() > u32::MAX as usize),
             invariant: vec![false; body.types.len()],
             row_locals: HashMap::new(),
             hoisted: String::new(),
@@ -47,7 +49,8 @@ impl<'a> Emitter<'a> {
             return name.clone();
         }
         let name = self.fresh("i");
-        writeln!(self.lines, "        uint {name} = {expr};").unwrap();
+        let ty = if self.wide { "ulong" } else { "uint" };
+        writeln!(self.lines, "        {ty} {name} = {expr};").unwrap();
         self.indices.insert(expr, name.clone());
         name
     }
@@ -177,14 +180,19 @@ impl<'a> Emitter<'a> {
                         }
                         let t = self.index(t);
                         let k = self.value(node.inputs[1], t);
-                        let k = self.index(format!("uint({k})"));
+                        let (int, u) = if self.wide {
+                            ("ulong", "ul")
+                        } else {
+                            ("uint", "u")
+                        };
+                        let k = self.index(format!("{int}({k})"));
                         let mut terms = Vec::new();
                         if ty.numel() > m * inner {
-                            terms.push(format!("({idx} / {}u) * {}u", m * inner, n * inner));
+                            terms.push(format!("({idx} / {}{u}) * {}{u}", m * inner, n * inner));
                         }
                         terms.push(match inner {
                             1 => k,
-                            _ => format!("{k} * {inner}u + {idx} % {inner}u"),
+                            _ => format!("{k} * {inner}{u} + {idx} % {inner}{u}"),
                         });
                         let i = self.index(terms.join(" + "));
                         return self.value(node.inputs[0], i);

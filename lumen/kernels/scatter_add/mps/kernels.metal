@@ -1,24 +1,5 @@
 #define SCAN_BLOCK 256
 
-#define GATHER(NAME, E, INAME, I)                                             \
-    kernel void gather_##NAME##_##INAME(device const E *in [[buffer(0)]],     \
-                                        device const I *index [[buffer(1)]],  \
-                                        device E *out [[buffer(2)]],          \
-                                        constant ulong &n [[buffer(3)]],      \
-                                        constant ulong &m [[buffer(4)]],      \
-                                        constant ulong &inner [[buffer(5)]],  \
-                                        constant ulong &total [[buffer(6)]],  \
-                                        uint2 at [[thread_position_in_grid]], \
-                                        uint2 grid [[threads_per_grid]]) {    \
-        ulong j = ulong(at.y) * grid.x + at.x;                                \
-        if (j >= total) {                                                     \
-            return;                                                           \
-        }                                                                     \
-        ulong r = j % inner, t = j / inner % m, o = j / inner / m;            \
-        ulong k = ulong(index[t]);                                            \
-        out[j] = in[(o * n + k) * inner + r];                                 \
-    }
-
 #define SCATTER_ADD(NAME, T, INAME, I)                                              \
     kernel void scatter_add_##NAME##_##INAME(device const T *updates [[buffer(0)]], \
                                              device const I *index [[buffer(1)]],   \
@@ -90,12 +71,10 @@
         }                                                                                       \
     }
 
-#define GATHER_KERNELS(NAME, E) GATHER(NAME, E, i32, int) GATHER(NAME, E, i64, long)
 #define SCATTER_KERNELS(NAME, T)   \
     SCATTER_ADD(NAME, T, i32, int) \
     SCATTER_ADD(NAME, T, i64, long) SCATTER_ADD_SCAN(NAME, T, i32, int) SCATTER_ADD_SCAN(NAME, T, i64, long)
 
 #ifndef TEMPLATES_ONLY
-FOR_BYTES(GATHER_KERNELS)
 FOR_NUMERIC(SCATTER_KERNELS)
 #endif
