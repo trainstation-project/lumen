@@ -195,10 +195,11 @@ def train_step(model, opt, x, y):
         loss.backward()
 
     c = 0
-    for p in model.parameters():
+    grads = [p for p in model.parameters() if p.grad is not None]
+    for p in grads:
         c += F.sum(p.grad)
 
-    for p in model.parameters():
+    for p in grads:
         p.grad = p.grad / c
 
     opt.step()
