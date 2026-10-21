@@ -1,17 +1,18 @@
 import math
 
+import lumen
+import lumen.functional as F
 from lumen import pallas as pl
 from lumen.codegen.tpu import computed
-from lumen.graph import prims
 from lumen.ops.tpu import pallas
 
 
 def _identity(name, dtype, shape):
     if name == "sum":
-        return prims.full(shape, 0, dtype)
+        return lumen.full(shape, 0, dtype)
     if dtype in ("float32", "bfloat16", "float16"):
-        return prims.full(shape, float("-inf"), dtype)
-    return prims.full(shape, -(2 ** (8 * {"int8": 1, "int16": 2}.get(dtype, 4) - 1)), dtype)
+        return lumen.full(shape, float("-inf"), dtype)
+    return lumen.full(shape, -(2 ** (8 * {"int8": 1, "int16": 2}.get(dtype, 4) - 1)), dtype)
 
 
 def _schedule(spec):
@@ -87,15 +88,15 @@ def program(spec):
 
     def reduce(x):
         if name == "sum":
-            r = prims.reduce_sum(x, s["axes"], accum)
+            r = F.sum(x.to(accum), s["axes"])
         elif total and accum != "float32":
-            r = prims.cast(prims.reduce_max(prims.cast(x, "float32"), s["axes"]), accum)
+            r = F.amax(x.to("float32"), s["axes"]).to(accum)
         else:
-            r = prims.reduce_max(x, s["axes"])
-        return prims.broadcast_in_dim(r, (1,), ()) if total else r
+            r = F.amax(x, s["axes"])
+        return r.expand((1,)) if total else r
 
     def combine(a, b):
-        return a + b if name == "sum" else prims.max(a, b)
+        return a + b if name == "sum" else F.maximum(a, b)
 
     def kernel(rows, memory, result, acc):
         def copy(src, dst):

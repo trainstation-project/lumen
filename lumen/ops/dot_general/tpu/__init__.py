@@ -1,6 +1,5 @@
 from lumen import pallas as pl
 from lumen.codegen.tpu import computed
-from lumen.graph import prims
 from lumen.ops.tpu import pallas
 
 
@@ -44,15 +43,12 @@ def program(spec):
     def rhs_batch(b):
         if lead == 1:
             return b
-        if isinstance(b, int):
-            return b // lead
-        return prims.div(b, prims.full((), lead, "int32"))
+        return b // lead
 
     def clamp(x, start, count):
         if isinstance(x, int):
             return min(max(x - start, 0), count - 1)
-        shifted = prims.max(prims.sub(x, prims.full((), start, "int32")), prims.full((), 0, "int32"))
-        return prims.neg(prims.max(prims.neg(shifted), prims.full((), 1 - count, "int32")))
+        return F.minimum(F.maximum(x - start, 0), count - 1)
 
     def within(x, start, count):
         return (x >= start) & (x < start + count)
@@ -124,7 +120,7 @@ def program(spec):
 
             def index(b, i, j, s):
                 if at:
-                    j = j + at if isinstance(j, int) else prims.add(j, prims.full((), at, "int32"))
+                    j = j + at
                 return (rhs_batch(b), j, s) if t else (rhs_batch(b), s, j)
 
             return pl.BlockSpec((None, bn, bk) if t else (None, bk, bn), index)
@@ -141,7 +137,7 @@ def program(spec):
                 if at and isinstance(column, int):
                     column += at // bn
                 elif at:
-                    column = prims.add(column, prims.full((), at // bn, "int32"))
+                    column = column + at // bn
                 return b, i, column
 
             return pl.BlockSpec((None, bm, bn), index)

@@ -1,7 +1,7 @@
+import lumen
 import lumen.functional as F
 from lumen import pallas as pl
 from lumen.codegen.tpu import computed
-from lumen.graph import prims
 from lumen.ops.attention.tpu import (
     LANES,
     MASK,
@@ -76,7 +76,7 @@ def program(spec):
 
             @pl.when(j == 0)
             def _():
-                m_ref[...] = prims.full((bq, LANES), MASK, "float32")
+                m_ref[...] = lumen.full((bq, LANES), MASK, "float32")
                 l_ref[...] = zeros((bq, LANES))
                 acc_ref[...] = zeros((bq, hv))
 

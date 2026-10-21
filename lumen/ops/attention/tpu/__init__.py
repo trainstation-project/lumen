@@ -1,6 +1,6 @@
+import lumen
 import lumen.functional as F
 from lumen import pallas as pl
-from lumen.graph import prims
 from lumen.ops.tpu import pallas
 
 LANES = 128
@@ -14,53 +14,40 @@ NT = (((1,), (1,)), ((), ()))
 TN = (((0,), (0,)), ((), ()))
 
 
-def _scalar(v):
-    return prims.full((), v, "int32")
-
-
 def _traced(x):
-    return _scalar(x) if isinstance(x, int) else x
+    return lumen.full((), x, "int32") if isinstance(x, int) else x
 
 
 def div(x, n):
-    if n == 1:
-        return x
-    return x // n if isinstance(x, int) else prims.div(x, _scalar(n))
+    return x if n == 1 else x // n
 
 
 def mod(x, n):
-    if n == 1:
-        return 0
-    return x % n if isinstance(x, int) else prims.sub(x, prims.mul(div(x, n), _scalar(n)))
+    return 0 if n == 1 else x % n
 
 
 def add(x, y):
-    if isinstance(x, int) and isinstance(y, int):
-        return x + y
-    return prims.add(_traced(x), _traced(y))
+    return x + y
 
 
 def mul(x, n):
-    if isinstance(x, int):
-        return x * n
-    return x if n == 1 else prims.mul(x, _scalar(n))
+    return x if n == 1 else x * n
 
 
 def maximum(x, y):
     if isinstance(x, int) and isinstance(y, int):
         return max(x, y)
-    return prims.max(_traced(x), _traced(y))
+    return F.maximum(_traced(x), _traced(y))
 
 
 def minimum(x, y):
     if isinstance(x, int) and isinstance(y, int):
         return min(x, y)
-    return prims.neg(maximum(prims.neg(_traced(x)), -y))
+    return F.minimum(_traced(x), _traced(y))
 
 
 def broadcast(x, shape):
-    x = _traced(x)
-    return prims.broadcast_in_dim(x, tuple(shape), tuple(range(len(shape) - len(x.shape), len(shape))))
+    return _traced(x).expand(tuple(shape))
 
 
 def tile(x, width):
@@ -72,7 +59,7 @@ def tile(x, width):
 
 
 def zeros(shape):
-    return prims.full(tuple(shape), 0.0, "float32")
+    return lumen.zeros(tuple(shape), "float32")
 
 
 def _splits(spec):
@@ -116,7 +103,7 @@ def last_key_block(spec, i):
 def key_block(spec, i, j):
     if spec["causal"] is None:
         return j
-    return prims.mul(_traced(j), (_traced(j) <= last_key_block(spec, i)).to("int32"))
+    return _traced(j) * (_traced(j) <= last_key_block(spec, i)).to("int32")
 
 
 def first_query_block(spec, j):
@@ -128,8 +115,8 @@ def masked(spec, qk, queries, keys, transposed=False):
     if spec["causal"] is None:
         return qk
     limit = broadcast(add(add(queries, mul(keys, -1)), spec["causal"]), qk.shape)
-    rows, columns = prims.iota("int32", qk.shape, 0), prims.iota("int32", qk.shape, 1)
-    offset = prims.sub(rows, columns) if transposed else prims.sub(columns, rows)
+    rows, columns = pl.broadcasted_iota("int32", qk.shape, 0), pl.broadcasted_iota("int32", qk.shape, 1)
+    offset = rows - columns if transposed else columns - rows
     return F.where(offset <= limit, qk, MASK)
 
 
@@ -196,5 +183,5 @@ def column(spec, ref, op, g):
     if op["view"][2] == 1:
         return x
     _, lane = head(spec, op, g)
-    lanes = prims.iota("int32", x.shape, 1)
+    lanes = pl.broadcasted_iota("int32", x.shape, 1)
     return F.sum(F.where(lanes == broadcast(lane, x.shape), x, 0.0), -1, keepdim=True)
