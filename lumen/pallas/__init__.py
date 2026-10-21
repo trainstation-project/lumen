@@ -37,6 +37,7 @@ __all__ = [
     "cdiv",
     "clz",
     "cond",
+    "broadcasted_iota",
     "delay",
     "dot_general",
     "dslice",
@@ -598,6 +599,10 @@ def population_count(x):
 
 def clz(x):
     return prims.clz(x)
+
+
+def broadcasted_iota(dtype, shape, dimension):
+    return prims.iota(dtype, tuple(shape), dimension)
 
 
 def select_n(which, *cases):

@@ -1,6 +1,5 @@
 from lumen import pallas as pl
 from lumen.codegen.tpu import per_row
-from lumen.graph import prims
 from lumen.ops.tpu import pallas
 
 
@@ -36,7 +35,7 @@ def program(spec):
                 continue
             piped.append(pallas.view(memory, refs[i], views[kind], dtype))
             specs.append(blocks[kind])
-        read = {i: prims.broadcast_in_dim(s[...], (1, 1), (1,)) for i, s in scalars.items()}
+        read = {i: s[...].expand((1, 1)) for i, s in scalars.items()}
         outs = [
             pallas.view(result, refs[len(inputs) + k], views[kind], dtype)
             for k, (_, dtype, kind) in enumerate(outputs)
@@ -50,7 +49,7 @@ def program(spec):
                     values.append(read[i])
                     continue
                 v = next(given)[...]
-                values.append(prims.reshape(v, (1, n)) if kind == "lanes" else v)
+                values.append(v.reshape(1, n) if kind == "lanes" else v)
             values = per_row(spec["nodes"], values, shapes)
             for ref, (k, _, _) in zip(refs_[len(piped) :], outputs):
                 ref[...] = values[k]
