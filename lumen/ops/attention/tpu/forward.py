@@ -31,9 +31,10 @@ def program(spec):
     and block of queries, the blocks of keys in order, an online softmax of
     their scores (its running max and sum in ``(bq, 128)`` lanes) and its
     probabilities' product with the values (a block of keys in chunks of
-    up to 512, as ``block_kv_compute``), normalized after the last; the
-    rows' log-sum-exp too if ``lse``. A causal mask skips the blocks past
-    the diagonal, and their copies."""
+    up to 512, as ``block_kv_compute``, in one straight run), normalized
+    after the last; the rows' log-sum-exp too if ``lse``. A causal mask
+    skips the blocks past the diagonal, and their copies, and is applied
+    only in the blocks it crosses."""
     bq, bkv = spec["blocks"]
     bkc = chunk(bkv)
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
@@ -78,9 +79,11 @@ def program(spec):
                 pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
                 acc_ref[...] = tile(alpha, hv) * acc_ref[...] + pv
 
-            for c in range(bkv // bkc):
-                start = add(mul(j, bkv), c * bkc)
-                by_mask(spec, mul(i, bq), start, bq, bkc, lambda mask, c=c: compute(c, mask))
+            def run(mask):
+                for c in range(bkv // bkc):
+                    compute(c, mask)
+
+            by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
 
             @pl.when(j == nk - 1)
             def _():

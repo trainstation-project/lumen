@@ -36,8 +36,8 @@ def program(spec):
     keys, its gradients summed over the query heads of its group and their
     blocks of queries), the probabilities recomputed from the rows'
     log-sum-exp, ``dS = (dP - delta) P``, scaled by ``ds_scale``; a block of
-    keys in chunks of up to 512, each masked only where a causal mask
-    crosses it."""
+    keys in chunks of up to 512 in one straight run, masked only where a
+    causal mask crosses the block."""
     bq, bkv = spec["blocks"]
     bkc = chunk(bkv)
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
@@ -104,9 +104,11 @@ def program(spec):
                     part, _, ds = chunks(qb, kb, vb, dob, stats, queries, keys, offset_ref and offset_ref[0], c, mask)
                     acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32")
 
-                for c in range(bkv // bkc):
-                    start = add(mul(j, bkv), c * bkc)
-                    by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
+                def chunked(mask):
+                    for c in range(bkv // bkc):
+                        run(c, mask)
+
+                by_mask(spec, queries, mul(j, bkv), bq, bkv, chunked)
 
                 @pl.when(j == nk - 1)
                 def _():
@@ -159,8 +161,11 @@ def program(spec):
                 dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
                 dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
 
-            for c in range(bkv // bkc):
-                by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
+            def chunked(mask):
+                for c in range(bkv // bkc):
+                    run(c, mask)
+
+            by_mask(spec, mul(i, bq), keys, bq, bkv, chunked)
 
             @pl.when(last)
             def _():
