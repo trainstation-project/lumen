@@ -197,8 +197,14 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
         _ => {
             let (m, n) = (out.shape[rank - 2], out.shape[rank - 1]);
             let mut found = None;
+            let mut rows = candidates(m, 8, 512);
+            rows.extend(
+                candidates(m, FLAT, 8 * FLAT)
+                    .into_iter()
+                    .filter(|b| *b > 512),
+            );
             'search: for bn in candidates(n, LANES, 2048) {
-                for bm in candidates(m, 8, 512) {
+                for &bm in &rows {
                     let mut blocks = vec![1; rank];
                     blocks[rank - 2] = bm;
                     blocks[rank - 1] = bn;
