@@ -4,6 +4,7 @@ import lumen
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def _require(device):
@@ -46,7 +47,7 @@ def test_unavailable_cuda_raises_runtime_error():
         assert t.device == "cuda:0"
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_tensor_on_device(device):
     _require(device)
     t = lumen.tensor([[1, 2, 3], [4, 5, 6]], device=device)
@@ -58,7 +59,7 @@ def test_tensor_on_device(device):
     assert row.tolist() == [4, 5, 6]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_to_and_back(device):
     _require(device)
     cpu = lumen.arange(6).reshape([2, 3]).transpose(0, 1)
@@ -72,7 +73,7 @@ def test_to_and_back(device):
     assert back.tolist() == cpu.tolist()
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_factories_on_device(device):
     _require(device)
     assert lumen.zeros([2], dtype=lumen.int32, device=device).tolist() == [0, 0]
@@ -80,7 +81,7 @@ def test_factories_on_device(device):
     assert lumen.full([2], 7, device=device).tolist() == [7, 7]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 def test_fill_and_zero_in_place(device):
     if device != "cpu":
         _require(device)
@@ -95,7 +96,7 @@ def test_fill_and_zero_in_place(device):
         t.fill_("x")
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_fill_strided_higher_rank(device):
     _require(device)
     for shape, perm, value in [
@@ -139,7 +140,7 @@ def test_cuda_fill_launches_on_the_tensors_device():
         assert t.tolist() == [5.0] * (1 << 16)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_empty_and_ones_on_device(device):
     _require(device)
     e = lumen.empty([2, 2], dtype=lumen.int64, device=device)

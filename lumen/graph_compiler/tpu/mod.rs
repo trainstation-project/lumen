@@ -2,6 +2,8 @@ mod diamonds;
 mod flash_attention_backward;
 mod fusion;
 mod place_concats;
+#[cfg(test)]
+mod tests;
 
 use diamonds::Diamonds;
 use flash_attention_backward::FlashAttentionBackward;

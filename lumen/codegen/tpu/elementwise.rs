@@ -143,6 +143,13 @@ pub(crate) fn encode(
     if out.numel() == 0 {
         return Ok(());
     }
+    let mut values = body
+        .inputs()
+        .iter()
+        .chain(body.nodes().iter().map(|n| &n.output));
+    if values.any(|&v| body.type_of(v).dtype == DType::F16) {
+        return Err(format!("{}: float16 does not run on TPU yet", step.label));
+    }
     if body
         .nodes()
         .iter()

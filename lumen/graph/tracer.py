@@ -55,11 +55,11 @@ def _record(name, inputs, params, var):
 
 
 def _is_device(x):
-    """Whether ``x`` names a device (``"cpu"``, ``"mps"``, ``"cuda:0"``, a
+    """Whether ``x`` names a device (``"cpu"``, ``"mps"``, ``"tpu"``, ``"cuda:0"``, a
     ``lumen.device``), not a dtype."""
     from lumen.device import device
 
-    return isinstance(x, device) or (isinstance(x, str) and _device_type(x) in ("cpu", "mps", "cuda", "meta"))
+    return isinstance(x, device) or (isinstance(x, str) and _device_type(x) in ("cpu", "mps", "cuda", "tpu", "meta"))
 
 
 def _device_name(d):

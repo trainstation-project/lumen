@@ -6,6 +6,7 @@ import lumen.functional as F
 from lumen import prims
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
+TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def numeric_grad(f, xs, argnum, eps=1e-6):
@@ -74,14 +75,14 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 @pytest.mark.parametrize("name", list(CASES))
 def test_torch_and_jax_styles_agree(name, device):
     """loss.backward() and .grad (torch) give exactly lumen.grad's (jax)
     gradients: the same transformation of the same program."""
     f, shapes = CASES[name]
     dtype = np.float64 if device == "cpu" else np.float32
-    if device == "mps" and name in ("dot_general", "cast"):
+    if device in ("mps", "tpu") and name in ("dot_general", "cast"):
         pytest.skip("float64 on the CPU only")
     try:
         xs = [lumen.from_numpy(a.astype(dtype)).to(device) for a in arrays(*shapes)]
@@ -447,7 +448,7 @@ def _qkv_step(m, x):
     return loss, x.grad, [p.grad for p in m.parameters()]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_dots_sharing_an_operand_are_differentiated_as_one(device):
     """x @ wq, x @ wk, x @ wv run as one dot (merge_dots); before autodiff
     they become one node (lumen/autograd/dots.py), differentiated as that

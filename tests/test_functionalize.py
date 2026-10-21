@@ -4,7 +4,7 @@ import pytest
 import lumen
 import lumen.functional as F
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
+DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
 
 
 def _run(f, *arrays, device="cpu"):

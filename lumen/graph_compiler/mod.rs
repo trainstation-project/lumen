@@ -17,7 +17,7 @@ mod tests;
 mod tpu;
 
 use crate::Device;
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
 use common::cse::Cse;
 use common::simplify::Simplify;
@@ -153,4 +153,17 @@ pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> boo
         ref p if elementwise(p) => node.inputs.iter().all(|&u| constant(graph, producer, u)),
         _ => false,
     }
+}
+
+pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
+    let nodes = graph.nodes();
+    let names = |all: bool| -> Vec<&str> {
+        members
+            .iter()
+            .filter(|&&m| all || !constant(graph, producer, nodes[m].output))
+            .map(|&m| graph.label(&nodes[m]))
+            .collect()
+    };
+    let shown = names(false);
+    intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }

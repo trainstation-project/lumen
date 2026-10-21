@@ -409,7 +409,9 @@ def test_device_transfers_are_profiled():
     assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+)
 def test_record_function_inside_a_compiled_function(device, tmp_path):
     """A ``record_function`` range inside a compiled function (with or as a
     decorator) holds the steps of the ops traced in it each time the plan
@@ -447,7 +449,7 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
     steps = {e["name"]: parent(e) for e in events if e["kind"] == "op" and not e["name"].startswith("lumen::")}
     want = (
         {"reduce_sum → exp → add": "outer"}
-        if device == "mps"
+        if device in ("mps", "tpu")
         else {"reduce_sum": "outer", "exp": "outer", "add": None}
     )
     assert {k: steps.get(k, "missing") for k in ["dot_general", *want]} == {"dot_general": "inner", **want}, steps
@@ -460,7 +462,9 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
         assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+)
 def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
     """Each call of a ``record_function`` range is its own range when the
     plan runs, as uncompiled code's, even with no step between them (two
@@ -490,7 +494,9 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
     assert set(names) == {"layer", "layer (backward)"}, names
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+)
 def test_record_function_holds_its_ops_gradients_as_backward(device):
     """The gradient ops of what a ``record_function`` range traced run in
     ``name (backward)``, nested as the forward's (each range of the
