@@ -638,3 +638,13 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
         lumen.config.compiler.reset()
     for a, w in zip(got, want):
         np.testing.assert_array_equal(a, w)
+
+
+def test_dump_code_writes_each_launchs_mosaic(tmp_path):
+    x = lumen.ones([256, 512]).to("tpu")
+    f = lumen.compile(lambda x: F.exp(x) * x)
+    f(x)
+    (loop,) = f.dump_code(tmp_path)
+    text = loop.read_text()
+    assert loop.suffix == ".mlir" and text.startswith("// lumen.ops.elementwise.tpu\n")
+    assert "func.func" in text and "math.exp" in text

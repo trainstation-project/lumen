@@ -276,6 +276,61 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
     }
 
 
+def _slug(text):
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")[:60] or "step"
+
+
+def _snippet(text, anchor):
+    lines = text.splitlines()
+    start = next((k for k, line in enumerate(lines) if line.startswith(anchor)), None)
+    if start is None:
+        return text
+    if anchor.startswith("#define"):
+        end = next((k for k in range(start, len(lines)) if not lines[k].endswith("\\")), len(lines) - 1)
+    else:
+        end = next((k for k in range(start, len(lines)) if lines[k] == "}"), len(lines) - 1)
+    return "\n".join(lines[start : end + 1]) + "\n"
+
+
+def _launch_code(step, kernel, code):
+    if code is not None:
+        return code, "mlir"
+    fusion = step["fusion"]
+    if fusion and fusion["source"]:
+        return fusion["source"], "metal"
+    src = source_of(kernel)
+    if src is not None:
+        path, anchor = src
+        return f"// {path}\n" + _snippet((OPS / path).read_text(), anchor), "metal"
+    return step["text"] + "\n", "txt"
+
+
+def dump_code(plan, run, device, directory):
+    from lumen.graph_compiler._C import _capture_launches, _captured_launches
+
+    _capture_launches()
+    try:
+        run()
+        lumen.Stream(device).synchronize()
+    finally:
+        launches = _captured_launches()
+    directory = pathlib.Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    steps = plan.steps()
+    index, written = [], []
+    for n, (at, label, kernel, code) in enumerate(launches):
+        text, ext = _launch_code(steps[at], kernel, code)
+        name = f"{n:04d}-{_slug(label)}-{_slug(kernel)}.{ext}"
+        (directory / name).write_text(text)
+        index.append(f"{n:04d}  step {at:4d}  {label}  {kernel}  {name}")
+        written.append(directory / name)
+    if str(device).startswith("mps"):
+        (directory / "prelude.metal").write_text((OPS / "mps" / "kernels.metal").read_text())
+        index.append("prelude.metal  the Metal prelude every kernel above is compiled with")
+    (directory / "index.txt").write_text("\n".join(index) + "\n")
+    return written
+
+
 def write(data, path, json_path=None, fragment=False):
     """Write the page for ``data`` to ``path`` (and ``data`` as JSON to
     ``json_path``). ``fragment`` leaves out the doctype, for a host that

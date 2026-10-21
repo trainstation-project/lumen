@@ -379,6 +379,29 @@ def test_dump_graph(tmp_path):
     assert data["inputs"] == ["f16[5,3]", "f16[3,4]"]
 
 
+def test_dump_code_writes_each_kernel_in_order(tmp_path):
+    f = lumen.compile(lambda x, w: F.relu(F.matmul(x, w, "float32", x.dtype)))
+    with pytest.raises(RuntimeError, match="call <lambda> first"):
+        f.dump_code(tmp_path)
+    f(lumen.zeros([2, 3]), lumen.zeros([3, 4]))
+    written = f.dump_code(tmp_path / "cpu")
+    index = (tmp_path / "cpu" / "index.txt").read_text().splitlines()
+    assert sorted(p.name.split("-")[1] for p in written) == ["broadcast_in_dim", "dot_general", "full", "max"]
+    assert [int(line.split()[2]) for line in index] == [0, 1, 2, 3]
+    assert all(p.read_text().startswith(p.name.split("-")[1]) for p in written)
+
+
+@pytest.mark.mps
+def test_dump_code_of_mps_kernels(tmp_path):
+    x, w = lumen.zeros([64, 128]).to("mps"), lumen.zeros([128, 256]).to("mps")
+    f = lumen.compile(lambda x, w: F.softmax(F.matmul(x, w, "float32", "float32"), -1) * 2.0)
+    f(x, w)
+    matmul, row = f.dump_code(tmp_path)
+    assert matmul.suffix == ".metal" and "matmul" in matmul.read_text()
+    assert "kernel void" in row.read_text() and row.name.startswith("0001-reduce_max")
+    assert (tmp_path / "prelude.metal").exists()
+
+
 def test_meta_tensors_have_no_data():
     x = lumen.empty([2, 3], device="meta")
     assert (x.device, x.shape, x.dtype) == ("meta:0", [2, 3], "float32")

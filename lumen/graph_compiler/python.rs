@@ -221,7 +221,22 @@ impl PyPlan {
     }
 }
 
+#[pyfunction]
+fn _capture_launches() {
+    crate::ops::launched::capture();
+}
+
+#[pyfunction]
+fn _captured_launches() -> Vec<(usize, &'static str, String, Option<String>)> {
+    crate::ops::launched::captured()
+        .into_iter()
+        .map(|l| (l.step, l.label, l.kernel, l.code))
+        .collect()
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompilerConfig>()?;
+    m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
+    m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;
     m.add_class::<PyPlan>()
 }
