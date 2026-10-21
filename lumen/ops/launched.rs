@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) struct Launched {
     pub(crate) step: usize,
     pub(crate) label: &'static str,
@@ -12,10 +13,12 @@ thread_local! {
     static STEP: Cell<(usize, &'static str)> = const { Cell::new((0, "")) };
 }
 
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn capture() {
     CAPTURED.with_borrow_mut(|c| *c = Some(Vec::new()));
 }
 
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn captured() -> Vec<Launched> {
     CAPTURED.with_borrow_mut(Option::take).unwrap_or_default()
 }

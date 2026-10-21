@@ -278,3 +278,6 @@ print("wrote transformer_trace.json")
 
 train_step.dump_graph("transformer_graph.html")
 print("wrote transformer_graph.html")
+
+train_step.dump_code("transformer_code")
+print("wrote transformer_code/ (a file each kernel a step runs, in order; transformer_code/index.txt)")

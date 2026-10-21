@@ -39,6 +39,15 @@ def type_text(dtype, shape):
 
 
 _SOURCES = [
+    (r"^matmul_atomic_", "dot_general/mps/kernels.metal", "#define MATMUL_ATOMIC"),
+    (r"^lce_partials", "dot_general/mps/kernels.metal", "#define LCE_PARTIALS"),
+    (r"^lce_combine", "dot_general/mps/kernels.metal", "kernel void lce_combine"),
+    (r"^dynamic_slice_copy_", "dynamic_slice/mps/kernels.metal", "#define DS_COPY"),
+    (r"^dynamic_update_slice_", "dynamic_slice/mps/kernels.metal", "#define DYNAMIC_UPDATE_SLICE"),
+    (r"^dynamic_slice_", "dynamic_slice/mps/kernels.metal", "#define DYNAMIC_SLICE"),
+    (r"^scatter_add_scan_", "gather/mps/kernels.metal", "#define SCATTER_ADD_SCAN"),
+    (r"^scatter_add_", "gather/mps/kernels.metal", "#define SCATTER_ADD("),
+    (r"^random_bits", "factory/mps/kernels.metal", "kernel void random_bits"),
     (r"^matmul_(small|mid)_", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$", "dot_general/mps/kernels.metal", "inline void matmul_sg_impl"),
     (r"^matmul_(u64|i64)$", "dot_general/mps/kernels.metal", "inline void matmul_wide_impl"),
