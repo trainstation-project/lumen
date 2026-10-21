@@ -73,7 +73,7 @@ wait for the latest.
 * **Python only.** Kernels are traced from Python: TPU kernels run where
   lumen runs from Python (the `python` feature). The Rust tests of a TPU
   stop at its memory (`allocator`); kernels' lowering is tested in Rust
-  (`lumen/pallas/tests.rs`), their runs from Python (`tests/test_tpu.py`).
+  (`lumen/pallas/tests.rs`), their runs from Python (`tests/test_tpu_kernels.py`).
 * **Specs are numbers.** A spec carries what the kernel needs as numbers
   (packing: elements a 32-bit word, not dtype names), its fields JSON that
   Rust writes by hand.

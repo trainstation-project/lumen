@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 import lumen
@@ -148,3 +149,18 @@ def test_empty_and_ones_on_device(device):
     assert e.zero_().tolist() == [[0, 0], [0, 0]]
     o = lumen.ones([3], device=device)
     assert (o.dtype, o.tolist()) == ("float32", [1.0, 1.0, 1.0])
+
+
+@pytest.mark.parametrize("shape", [[1], [128], [129], [10, 100]])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
+def test_copies_round_trip_without_touching_their_neighbours(device, shape):
+    _require(device)
+    rng = np.random.default_rng(0)
+    hosts = [rng.standard_normal(shape, dtype=np.float32) for _ in range(3)]
+    placed = [lumen.from_numpy(h).to(device) for h in hosts]
+    for host, t in zip(hosts, placed):
+        assert t.device == f"{device}:0"
+        np.testing.assert_array_equal(lumen.to_numpy(t.to("cpu")), host)
+    bf16 = lumen.from_numpy(hosts[0]).to(dtype="bfloat16")
+    on_host = lambda t: lumen.to_numpy(t.to("cpu").to(dtype="float32"))  # noqa: E731
+    np.testing.assert_array_equal(on_host(bf16.to(device)), on_host(bf16))

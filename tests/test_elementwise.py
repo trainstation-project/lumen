@@ -8,6 +8,7 @@ import lumen.functional as F
 from lumen import prims
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
+TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def tensor(a, dtype=None, device="cpu"):
@@ -420,3 +421,23 @@ def test_narrow_dtypes_through_numpy(dtype):
     back = lumen.to_numpy(t)
     assert back.dtype == np_dtype
     np.testing.assert_array_equal(back.astype(np.float32), a.astype(np.float32))
+
+
+@pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+def test_elementwise_primitives_agree_with_numpy(device, shape):
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
+    x, y = tensor(a, device=device), tensor(b, device=device)
+    cases = [
+        (lambda x, y: x + y, a + b),
+        (lambda x, y: x * y, a * b),
+        (lambda x, y: F.exp(x), np.exp(a)),
+    ]
+    if device != "mps":
+        cases.append((lambda x, y: F.sin(x), np.sin(a)))
+    for f, expected in cases:
+        out = lumen.compile(f)(x, y)
+        assert out.device == f"{device}:0"
+        np.testing.assert_allclose(host(out), expected, rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(host(lumen.compile(lambda x, y: x < y)(x, y)), a < b)
