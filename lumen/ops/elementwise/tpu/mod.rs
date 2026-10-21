@@ -1,8 +1,6 @@
-use crate::Tensor;
 use crate::device::tpu::layout::Layout;
-use crate::graph::TensorType;
 use crate::graph::{Primitive, UnaryOp};
-use crate::graph_compiler::plan::{Buffer, Step};
+use crate::graph_compiler::plan::Step;
 use crate::ops::dot_general::tpu::block;
 use crate::ops::tpu::{Launch, launch};
 use crate::{DType, Scalar};
@@ -192,29 +190,4 @@ pub(crate) fn encode(
         host: &[],
     };
     launch(index, launched)
-}
-
-pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
-    assert!(
-        t.is_contiguous(),
-        "a TPU tensor is filled whole: contiguous"
-    );
-    let ty = TensorType::new(t.dtype(), t.shape());
-    let step = Step {
-        primitive: Primitive::Full {
-            shape: ty.shape.clone(),
-            fill_value: value,
-            dtype: ty.dtype,
-        },
-        label: "fill_",
-        inputs: Vec::new(),
-        views: Vec::new(),
-        output: (Buffer::Workspace(0), ty),
-        extra_outputs: Vec::new(),
-        output_views: vec![None],
-        scratch: None,
-        scope: &[],
-        sources: Vec::new(),
-    };
-    encode(t.device().index(), &step, &[], t.data_ptr())
 }

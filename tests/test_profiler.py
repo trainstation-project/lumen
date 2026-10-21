@@ -137,31 +137,6 @@ def test_unknown_activity_names_are_rejected():
         profile(activities=["npu"])
 
 
-MPS = pytest.param(ProfilerActivity.MPS, marks=pytest.mark.mps)
-CUDA = pytest.param(ProfilerActivity.CUDA, marks=pytest.mark.cuda)
-
-
-@pytest.mark.parametrize("activity", [MPS, CUDA])
-def test_device_fills_are_timed_on_the_gpu(activity):
-    if activity not in lumen.profiler.supported_activities():
-        pytest.skip(f"{activity.value} not available in this build")
-    with profile(activities=[ProfilerActivity.CPU, activity], profile_memory=True) as prof:
-        lumen.zeros([1 << 16], device=activity.value)
-    gpu = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
-    assert len(gpu) == 1
-    if activity == ProfilerActivity.MPS:
-        assert gpu[0]["name"] == "Fill"
-    assert gpu[0]["device"].startswith(activity.value)
-    zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
-    assert gpu[0]["parent"] == zeros["id"]
-    name = activity.name
-    table = prof.key_averages().table(sort_by="self_device_time_total")
-    assert f"Self {name}" in table and f"{name} Mem" in table
-    trace = json.loads(_trace(prof))
-    assert any(e.get("cat") == "kernel" for e in trace["traceEvents"])
-    assert any(e.get("cat") == "ac2g" for e in trace["traceEvents"])
-
-
 @pytest.mark.cuda
 def test_cuda_copies_are_timed_on_the_gpu():
     if ProfilerActivity.CUDA not in lumen.profiler.supported_activities():

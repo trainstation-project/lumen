@@ -47,7 +47,6 @@ templates in these `.metal` files (compiled with `TEMPLATES_ONLY`, see
 | `dynamic_slice/` | `dynamic_slice` / `dynamic_update_slice` on MPS, plus the strided `copy` that `device_transfer` reuses. |
 | `gather/` | `gather` / `scatter_add` on MPS. |
 | `factory/` | `full`, `iota`, `random_bits` on MPS. |
-| `fill/` | The `fill_` tensor op: `cpu.rs`, `mps/` (its own shim and Metal library), and `cuda.py`, a CuTe DSL kernel registered from Python. |
 | [`device_transfer/`](device_transfer/README.md) | `copy_h2d` / `copy_d2h` tensor ops. |
 | `wait/` | The `wait` op (synchronize a tensor's stream) and its plan-step `encode`. |
 
@@ -63,10 +62,10 @@ since it would never be used. `dispatch(device)` panics with
 `"<op> has no kernel for <key> (<device>)"` if neither has one.
 
 **Python kernels** (`python.rs`). Only ops listed in `OP_SIGNATURES`
-(`fill_`, `dummy_op`) accept them, and never for the CPU. A registered
+(`dummy_op`) accept them, and never for the CPU. A registered
 callable is a *compile hook*: `(dtype, shape, strides, vector_size) ->
 launch(address, value, stream)`. Each op keeps a parallel `Op<KernelHandle>`
-(`FILL_PY`, `DUMMY_OP_PY`); the op's entry function (e.g. `fill_op`) checks
+(`DUMMY_OP_PY`); the op's entry function (e.g. `dummy_op`) checks
 `python::handle_for` first and falls back to `dispatch`. Launchers are
 cached per (kernel, dtype, shape, strides, vector size) and, if they expose
 `__chandle__`, called through `tvm_ffi.rs` instead of Python.

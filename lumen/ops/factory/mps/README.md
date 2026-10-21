@@ -27,10 +27,6 @@ primitive dispatch in [`lumen/ops/mps/mod.rs`](../../mps/mod.rs).
 
 ## Invariants & gotchas
 
-- Kernel `fill_<bytes>` here (e.g. `fill_4`) is unrelated to the eager
-  `fill_u32` / `fill_strided_u32` kernels in
-  [`lumen/ops/fill/mps`](../../fill/mps/); they live in different Metal
-  libraries.
 - `n` is `u32`; the iota grid uses 32-bit coordinates per dimension.
 - `kernels.metal` is concatenated after `lumen/ops/mps/kernels.metal` by
   `build.rs` (`PRIMITIVE_KERNELS`), which defines `FOR_BYTES`,

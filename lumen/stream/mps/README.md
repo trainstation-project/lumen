@@ -12,12 +12,12 @@ part of the `lumen_mps_shim` static library.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | Rust side: `MpsStream`, `synchronize`, `submit` / `cancel` / `completed`, `mark`, `flush`, `encoded`, `command_buffer`. |
-| `mps.h` | C/ObjC interface used by the kernel shims (`ops/mps/shim.mm`, `ops/fill/mps/shim.mm`): `lumen_mps_stream_queue`, `lumen_mps_stream_encoder`, `lumen_mps_stream_encoded`, and the `lumen_mps_completion` callback type. |
+| `mps.h` | C/ObjC interface used by the kernel shims (`ops/mps/shim.mm`): `lumen_mps_stream_queue`, `lumen_mps_stream_encoder`, `lumen_mps_stream_encoded`, and the `lumen_mps_completion` callback type. |
 | `mps.mm` | The queue, the open command buffer/encoder, batching, counter-sample timestamps, and the `extern "C"` functions `mod.rs` calls. |
 
 ## Launch flow
 
-1. Rust (`ops/mps/mod.rs`, `ops/fill/mps/mod.rs`) calls
+1. Rust (`ops/mps/mod.rs`) calls
    `submit(tensors, name, kernel)`: boxes a `Submission` holding the tensors
    (kept alive until the GPU is done) and, if the profiler times MPS, a
    `GpuContext` plus the paired profiler/host clocks. Returns

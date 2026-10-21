@@ -71,30 +71,6 @@ fn a_missing_kernel_panics_with_the_op_and_key() {
 }
 
 #[test]
-fn fill_has_built_in_host_kernels() {
-    let fill = &fill::FILL;
-    assert_eq!(fill.name(), "lumen::fill_");
-    assert!(fill.kernel(DispatchKey::Cpu).is_some());
-    if cfg!(lumen_mps_linked) {
-        assert!(fill.kernel(DispatchKey::Mps).is_some());
-    }
-    assert!(fill.kernel(DispatchKey::Cuda).is_none());
-}
-
-#[test]
-fn a_fill_layout_is_sorted_by_stride_and_merged() {
-    use super::fill::fill_layout;
-    assert_eq!(fill_layout(&[2, 3, 4], &[12, 4, 1]), (vec![24], vec![1]));
-    assert_eq!(fill_layout(&[4, 3], &[1, 4]), (vec![12], vec![1]));
-    assert_eq!(fill_layout(&[1, 5, 1], &[99, 1, 7]), (vec![5], vec![1]));
-    assert_eq!(fill_layout(&[4, 4], &[8, 1]), (vec![4, 4], vec![1, 8]));
-    assert_eq!(fill_layout(&[4], &[4]), (vec![4], vec![4]));
-    assert_eq!(fill_layout(&[4, 2, 3], &[1, 12, 4]), (vec![24], vec![1]));
-    assert_eq!(fill_layout(&[], &[]), (vec![1], vec![1]));
-    assert_eq!(fill_layout(&[1, 1], &[1, 1]), (vec![1], vec![1]));
-}
-
-#[test]
 fn the_vector_size_is_the_widest_aligned_store() {
     assert_eq!(vector_size(&[1024], &[1], 4, 256), 4);
     assert_eq!(vector_size(&[1024], &[1], 2, 256), 8);

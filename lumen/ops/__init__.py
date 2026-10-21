@@ -18,9 +18,3 @@ def unregister(op, device):
 
 def signature(op):
     return registered_ops().get(op)
-
-
-from lumen.device._C import cuda as _cuda
-
-if _cuda.is_available():
-    from lumen.ops.fill import cuda

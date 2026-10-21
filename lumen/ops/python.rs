@@ -17,10 +17,7 @@ pub struct KernelHandle(usize);
 
 static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new());
 
-const OP_SIGNATURES: &[(&str, &str)] = &[
-    (op_name!("fill_"), LAUNCHER_SIGNATURE),
-    (op_name!("dummy_op"), LAUNCHER_SIGNATURE),
-];
+const OP_SIGNATURES: &[(&str, &str)] = &[(op_name!("dummy_op"), LAUNCHER_SIGNATURE)];
 
 const LAUNCHER_SIGNATURE: &str =
     "(dtype, shape, strides, vector_size) -> launch(address, value, stream)";
@@ -64,7 +61,6 @@ const STREAM: usize = 0;
 
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
-        n if n == core::ops::fill::FILL.name() => &core::ops::fill::FILL_PY,
         n if n == core::ops::dummy_op::DUMMY_OP.name() => &core::ops::dummy_op::DUMMY_OP_PY,
         _ => unreachable!("{name} is not in OP_SIGNATURES"),
     }

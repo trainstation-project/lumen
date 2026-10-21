@@ -8,8 +8,8 @@ Callers: graph plan steps on MPS reach [`mps::encode`](mps/mod.rs) through
 the primitive dispatch in [`lumen/ops/mps/mod.rs`](../mps/mod.rs)
 (`Full | Iota | RandomBits`). The reference interpreter
 (`lumen/ops/reference.rs`) has its own arms for them. Eager `fill_` /
-`zeros` / `ones` on tensors do not come here; they use
-[`lumen/ops/fill`](../fill/).
+`zeros` / `ones` on tensors do not come here: they fill on the host and
+copy in (`Tensor::fill` in `lumen/tensor/tensor.rs`).
 
 ## Files
 
@@ -23,5 +23,4 @@ the primitive dispatch in [`lumen/ops/mps/mod.rs`](../mps/mod.rs)
 
 ## Related
 
-- [`lumen/ops/fill`](../fill/) — the eager `fill_` op (separate kernels).
 - [`lumen/ops/mps`](../mps/) — launch helpers, `philox_bits`.
