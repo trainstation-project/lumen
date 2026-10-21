@@ -39,18 +39,28 @@ matcher, then lays the fusions' operands out for the kernels:
   two dimensions merged (`merged_outputs`), reshaped back for its readers.
 * The backward's `delta = rowsum(dO o)` is computed in its kernels from o
   and dO (`delta_inside`), not as separate kernels.
-* Blocks are up to 512 queries and 1024 keys (the forward's keys in
-  chunks of 512); a causal mask skips the blocks past the diagonal and
-  their copies, and masks only the blocks it crosses.
+* Blocks are up to 1024 queries and 4096 keys, computed in chunks of 512
+  keys: each grid step of the in-kernel pipeline costs about 0.3 us of
+  scalar work whatever it computes, so fewer, larger steps win. A causal
+  mask skips the chunks past the diagonal (and the copies of whole
+  blocks past it, fetching the next row's first block instead), masking
+  only the chunks it crosses.
 * Not yet: dropout, head dimensions that are not a multiple of 128 when
   heads share rows, an attention whose log-sum-exp is not `[..., S, 1]`.
   These are compile errors naming the operand.
 
-On a v6e (bfloat16, `B=4 S=2048 N=16 H=128`): the forward 717 µs, full
-or 702 µs causal (JAX's splash attention 678 / 623 µs); a training step's
-attention 2.36 ms full, 2.51 ms causal (splash 2.38 / 2.19 ms). At
-`B=2 S=4096 N=32/8`: 2.79 ms forward, 9.14 ms training (splash 2.58 /
-9.08 ms); causal 2.52 / 8.24 ms (splash 2.02 / 7.30 ms).
+On a v6e, bfloat16, the scale folded into q as JAX's splash attention
+takes it (its blocks 512 by 1024, chunks of 512):
+
+| B, S, heads | | forward | splash | training step | splash |
+| --- | --- | --- | --- | --- | --- |
+| 4, 2048, 16 | full | 469 us | 678 us | 1.75 ms | 2.38 ms |
+| 4, 2048, 16 | causal | 592 us | 623 us | 2.19 ms | 2.19 ms |
+| 2, 4096, 32/8 | full | 1.71 ms | 2.58 ms | 6.40 ms | 9.08 ms |
+| 2, 4096, 32/8 | causal | 1.74 ms | 2.02 ms | 6.36 ms | 7.30 ms |
+
+With the scale applied to the scores, as `F.flash_attention` traces it,
+each costs about 3 to 10% more.
 
 ## Related
 
