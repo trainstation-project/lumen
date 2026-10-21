@@ -520,27 +520,35 @@ fn delta_inside(graph: &Graph) -> Graph {
             let mut inner = Graph::new();
             let mut within: Vec<Var> = vec![0; body.types.len()];
             let mut reads = Vec::new();
+            let mut outer: Vec<(Var, Var)> = Vec::new();
             for (j, &v) in body.inputs().iter().enumerate() {
                 if j != k {
                     within[v] = inner.input(body.type_of(v).clone());
                     reads.push(map[node.inputs[j]]);
-                    continue;
+                    outer.push((node.inputs[j], within[v]));
                 }
-                let mut sides = Vec::new();
-                for &(base, reshape) in &operands {
-                    let mut x = inner.input(graph.type_of(base).clone());
-                    reads.push(map[base]);
-                    if let Some(r) = reshape {
-                        x = inner
-                            .apply(r.primitive.clone(), &[x])
-                            .expect("the operand's reshape");
-                    }
-                    sides.push(x);
-                }
-                within[v] = inner
-                    .apply(dot.primitive.clone(), &sides)
-                    .expect("delta's dot");
             }
+            let mut sides = Vec::new();
+            for &(base, reshape) in &operands {
+                let mut x = match outer.iter().find(|(o, _)| *o == base) {
+                    Some(&(_, x)) => x,
+                    None => {
+                        let x = inner.input(graph.type_of(base).clone());
+                        reads.push(map[base]);
+                        outer.push((base, x));
+                        x
+                    }
+                };
+                if let Some(r) = reshape {
+                    x = inner
+                        .apply(r.primitive.clone(), &[x])
+                        .expect("the operand's reshape");
+                }
+                sides.push(x);
+            }
+            within[body.inputs()[k]] = inner
+                .apply(dot.primitive.clone(), &sides)
+                .expect("delta's dot");
             for n in body.nodes() {
                 let ins: Vec<Var> = n.inputs.iter().map(|&v| within[v]).collect();
                 within[n.output] = inner
