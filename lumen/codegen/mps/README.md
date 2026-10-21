@@ -17,7 +17,8 @@ struct that computes the fused primitives per element.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | Kernel-kind dispatch (`kernel`), naming and formatting (`named`, `formatted`), kernel parameters (`io_params`), output views (`writes_views`, `written`), Metal types and functors (`metal_type`, `functor`, `constant`); re-exports each kind's predicates. |
+| `mod.rs` | Kernel-kind dispatch (`kernel`: the first kind a body is, else an elementwise loop), naming and formatting (`named`, `formatted`), kernel parameters (`io_params`), which kinds write views (`writes_views`), Metal types and functors (`metal_type`, `functor`, `constant`); re-exports each kind's predicates. |
+| `elementwise.rs` | Elementwise loops (`elementwise_kernel`): one thread an output element, every fused value an `Emitter` expression at its flat index, layout primitives as index arithmetic; `written`, each output's store (at its view's offset and strides), the tiled transpose's too. |
 | `emitter.rs` | The `Emitter`: each fused value as a Metal expression at an index (`value`), hoisting values the same across a row; `gather_index`. |
 | `reduction.rs` | Reductions with prologue and epilogue (`reduction`, `reduction_root`, `split_launches`, `has_epilogue`). |
 | `transpose.rs` | Tiled transposes (`TransposeTiling`, `transpose_tiling`, `transpose_kernel`). |
