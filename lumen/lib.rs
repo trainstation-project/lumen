@@ -16,6 +16,7 @@ pub mod allocator;
 pub(crate) mod codegen;
 pub mod custom_op;
 pub mod device;
+pub mod distributed;
 pub mod graph;
 pub mod graph_compiler;
 pub mod kernels;
