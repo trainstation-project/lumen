@@ -179,10 +179,10 @@ def test_sums_over_the_last_dimension(shape):
     np.testing.assert_allclose(floats(out), floats(x).sum(-1), rtol=1e-5, atol=1e-4)
 
 
-def test_a_sum_over_another_dimension_says_so():
-    x = lumen.ones([64, 128]).to("tpu")
-    with pytest.raises(ValueError, match="over the last dimension"):
-        lumen.compile(lambda x: lumen.functional.sum(x, 0))(x)
+def test_a_sum_over_a_middle_dimension_says_so():
+    x = lumen.ones([4, 64, 128]).to("tpu")
+    with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
+        lumen.compile(lambda x: lumen.functional.sum(x, 1))(x)
 
 
 class Projections(lumen.nn.Module):
