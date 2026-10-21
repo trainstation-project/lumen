@@ -218,7 +218,7 @@ impl PyGraph {
     }
 
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        use crate::graph_compiler::attention::{Score, traced};
+        use crate::graph_compiler::common::attention::{Score, traced};
         let nodes = self.inner.nodes();
         traced(&self.inner)
             .into_iter()

@@ -1,7 +1,7 @@
 use super::{codegen, fusion, split_k};
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::attention;
-use crate::graph_compiler::horizontal::Target;
+use crate::graph_compiler::common::attention;
+use crate::graph_compiler::common::horizontal::Target;
 
 const MAX_BUFFERS: usize = 30;
 

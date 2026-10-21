@@ -1,5 +1,5 @@
 use crate::graph::Var;
-use crate::graph_compiler::attention::{self, Epilogues};
+use crate::graph_compiler::common::attention::{self, Epilogues};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
 pub(crate) trait Attentions: Module {

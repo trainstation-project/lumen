@@ -95,7 +95,7 @@ Each rewrites tape entries into a `Function` node whose `forward` is never
 called (the forward is already in the graph); only its `backward` matters.
 
 * **`attention.py`** — uses `graph.attentions()` (the Rust matcher in
-  `lumen/graph_compiler/attention.rs`) to find attentions however written,
+  `lumen/graph_compiler/common/attention.rs`) to find attentions however written,
   replaces their member nodes with one `_Attention` node and adds the
   log-sum-exp (`max + log(sum)`) to the graph. The backward recomputes the
   probabilities on `S^T = K Q^T`, handling the matched scale/rounding chain,

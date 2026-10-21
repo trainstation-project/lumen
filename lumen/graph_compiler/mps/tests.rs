@@ -1,5 +1,5 @@
 use super::codegen::metal_type;
-use crate::graph_compiler::passes::merge_dots::{Target, merge_dots};
+use crate::graph_compiler::common::merge_dots::{Target, merge_dots};
 
 const MPS: Target = Target {
     reads: super::fusion::fusible,
@@ -1654,7 +1654,7 @@ fn vector_dots_are_reduced() {
     };
     let d = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[d]).unwrap();
-    let reduced = crate::graph_compiler::passes::dot_strength::reduce_vector_dots(&g, true);
+    let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g, true);
     let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
     let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
@@ -1796,7 +1796,7 @@ fn matrix_vector_dots_are_reduced() {
         let b = g.input(ty(DType::F32, rhs));
         let d = apply(&mut g, p, &[a, b]);
         g.set_outputs(&[d]).unwrap();
-        let reduced = crate::graph_compiler::passes::dot_strength::reduce_vector_dots(&g, true);
+        let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g, true);
         let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
         assert_eq!(names, want, "{reduced}");
         let inputs = [data(lhs, 1), data(rhs, 2)];

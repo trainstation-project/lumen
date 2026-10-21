@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use super::constant;
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
+use crate::graph_compiler::constant;
 use crate::tensor::contiguous_strides;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,7 +430,8 @@ impl<'a> Matcher<'a> {
                 _ => break,
             };
             let n = &nodes[u];
-            let step = super::elementwise(&n.primitive) || matches!(n.primitive, Reshape { .. });
+            let step = crate::graph_compiler::elementwise(&n.primitive)
+                || matches!(n.primitive, Reshape { .. });
             if !step {
                 break;
             }

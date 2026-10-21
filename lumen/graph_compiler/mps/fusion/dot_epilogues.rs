@@ -3,7 +3,7 @@ use super::{MAX_AUX, elementwise};
 use crate::DType;
 use crate::graph::{Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) struct DotEpilogues {
     pub(super) end: Vec<Option<usize>>,

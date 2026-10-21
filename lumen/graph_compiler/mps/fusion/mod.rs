@@ -135,7 +135,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
                     let mut target = horizontal::Horizontal {
                         kernel: &mut kernel,
                     };
-                    crate::graph_compiler::horizontal::fuse(&fused, &vars, &mut target)
+                    crate::graph_compiler::common::horizontal::fuse(&fused, &vars, &mut target)
                 }
                 false => fused,
             };

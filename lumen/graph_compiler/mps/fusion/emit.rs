@@ -4,7 +4,7 @@ use super::reduction_epilogues::ReductionEpilogues;
 use super::{MAX_INPUTS, label};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) type Fusions = Vec<Option<(Vec<usize>, Vec<Var>)>>;
 

@@ -1,7 +1,7 @@
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::attention::{self, Access, Score};
+use crate::graph_compiler::common::attention::{self, Access, Score};
 use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;

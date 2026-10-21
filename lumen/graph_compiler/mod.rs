@@ -1,13 +1,9 @@
-#[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
-pub(crate) mod attention;
+pub(crate) mod common;
 pub mod config;
 mod cpu;
-pub(crate) mod diamonds;
-pub(crate) mod horizontal;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;
-mod passes;
 pub mod plan;
 #[cfg(test)]
 pub(crate) mod plan_tests;
@@ -23,10 +19,10 @@ mod tpu;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
 
+use common::cse::Cse;
+use common::simplify::Simplify;
 pub use config::CompilerConfig;
 use pass::{GraphModule, Pipeline};
-use passes::cse::Cse;
-use passes::simplify::Simplify;
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 

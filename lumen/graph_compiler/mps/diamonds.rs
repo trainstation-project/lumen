@@ -1,8 +1,8 @@
 use super::MpsModule;
 use super::fusion::fusible;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::diamonds::Finder;
-pub(super) use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Finder;
+pub(super) use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::pass::CompilerPass;
 use crate::ops::reduce::mps::REDUCE_THREADS;
 
@@ -13,7 +13,7 @@ const MIN_GROUPS: usize = 16;
 const MAX_COLUMNS: usize = 16;
 
 pub(super) fn diamonds(graph: &Graph) -> Vec<Row> {
-    crate::graph_compiler::diamonds::diamonds(graph, fusible)
+    crate::graph_compiler::common::diamonds::diamonds(graph, fusible)
 }
 
 fn partials(graph: &Graph, mut rows: Vec<Row>) -> (Graph, Vec<Row>) {

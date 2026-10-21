@@ -1,9 +1,13 @@
-# `lumen/graph_compiler/passes`
+# `lumen/graph_compiler/common`
 
-The device-independent compiler passes: rewrites of the graph alone, with no
-knowledge of any device's kernels, tiles or memory. Each is a
-[`CompilerPass`](../pass.rs) implemented for **any** `M: Module`, so the
-frontend pipeline, the CPU's and the MPS's can all run it. A device's own
+What every device's compiler shares (XLA's `hlo/transforms`, beside each
+backend's own): the device-independent compiler passes, rewrites of the
+graph alone, with no knowledge of any device's kernels, tiles or memory;
+and the matchers a device specializes through a trait or a filter
+(attention, normalization diamonds, horizontal fusion). Each pass is a
+[`CompilerPass`](../pass.rs) implemented for **any** `M: Module` (or one
+with the trait it asks, as `Blocks` or `Attentions`), so the frontend
+pipeline and the CPU's, MPS's and TPU's can all run it. A device's own
 passes (those that request its kernels, follow its matmul layouts or tile
 sizes, or fuse for it) live in that device's folder, e.g.
 [`../mps/`](../mps/README.md).
@@ -12,7 +16,10 @@ sizes, or fuse for it) live in that device's folder, e.g.
 
 | File | Pass (`name()`) | Contents |
 | --- | --- | --- |
-| `mod.rs` | — | Declares the passes. |
+| `mod.rs` | — | Declares the passes and matchers. |
+| `horizontal.rs` | — | Horizontal fusion (XLA's horizontal loop fusion): independent fusions grouped into one multi-output fusion (`fuse`), what a device groups and how much its `Target` says (MPS: `../mps/horizontal.rs`, TPU: `../tpu/fusion/horizontal.rs`). |
+| `diamonds.rs` | — | Normalization diamonds (XLA `SoftmaxRewriterTriton`): `Row`s of a row's reductions and the elementwise work around them, chained and grown (`diamonds`, over a device's `Fusible`); MPS and TPU each turn them into row kernels. |
+| `attention.rs` | — | Pattern matcher for attention (`softmax(q @ k^T * scale [mask]) @ v`, dropout, its backward), shared by the MPS fusions, the codegen and the tracer (`Graph.attentions`). |
 | `cse.rs` | `Cse` (`cse`) | Common subexpression elimination (XLA's `HloCSE`): a node applying the same primitive, parameters included, to the same values as an earlier one is that node's value; commutative primitives match in either operand order. |
 | `simplify.rs` | `Simplify { matched }` (`simplify`) | Algebraic simplification (`x * 1`, `x + 0`, composed transposes, ...). With `matched` (after a device's patterns are matched), also swaps transposes of dots and moves reshapes, transposes and casts; the frontend runs it unmatched so devices can match patterns first. |
 | `merge_dots.rs` | `MergeDots { target }` (`merge_dots`) | Dots sharing an operand become one dot over a packed block of parameters (XLA `DotMerger`), for a module with `Blocks` (its `packed` and `interleaved`). `Target` is the device's say: `reads` (which readers read a merged result), `views` (whether members may be views of a block: strided weights and interleaved groups, MPS), `lanes` (members' sizes along their last two dimensions multiples of it: 128 on a TPU) and `columns` (an interleaved row's width: the MPS's 8). Groups of K dividing `columns` get an interleaved region each (`Plan::interleaved`); otherwise side by side. On a TPU (`views` off) only weights side by side along their rows (`nn.Linear`'s `[out, in]`) merge. |

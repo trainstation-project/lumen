@@ -4,7 +4,7 @@ use super::reduction_epilogues::ReductionEpilogues;
 use super::{elementwise, expensive, is_reduction};
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::diamonds::Row;
+use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) fn roots(
     a: &Analysis,

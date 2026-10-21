@@ -1,6 +1,6 @@
 use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::attention;
+use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
 fn delta_inside(graph: &Graph) -> Graph {
