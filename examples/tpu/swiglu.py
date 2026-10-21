@@ -67,3 +67,6 @@ print(f"{per_call:.1f} us a call ({2 * 2 * M * D * H / per_call / 1e6:.0f} TFLOP
 print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=10))
 prof.export_chrome_trace("tpu_swiglu_trace.json")
 print("wrote tpu_swiglu_trace.json")
+
+swiglu.dump_code("tpu_swiglu_code")
+print("wrote tpu_swiglu_code/ (a file each kernel a call runs, in order; tpu_swiglu_code/index.txt)")

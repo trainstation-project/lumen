@@ -640,12 +640,16 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
         np.testing.assert_array_equal(a, w)
 
 
-def test_dump_code_writes_each_launchs_mosaic(tmp_path):
+def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     x = lumen.ones([256, 512]).to("tpu")
     f = lumen.compile(lambda x: F.exp(x) * x)
     f(x)
     (loop,) = f.dump_code(tmp_path)
     text = loop.read_text()
-    assert loop.suffix == ".mlir" and text.startswith("// step 0: exp → mul\n")
-    assert "\n// lumen.ops.elementwise.tpu\n" in text and "exp" in text.split("\n\n")[0]
-    assert "func.func" in text and "math.exp" in text
+    assert loop.suffix == ".mlir" and text.startswith("// step 0: exp → mul\n") and "math.exp" in text
+    pallas = loop.with_name(loop.stem + ".pallas.py")
+    assert "from lumen.ops.elementwise.tpu import program" in pallas.read_text()
+    scope = {}
+    exec(pallas.read_text(), scope)
+    assert scope["mosaic"] in text
+    assert (tmp_path / "pallas" / "lumen.ops.elementwise.tpu.py").read_text().startswith("import math")

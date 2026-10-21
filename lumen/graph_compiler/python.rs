@@ -226,11 +226,19 @@ fn _capture_launches() {
     crate::ops::launched::capture();
 }
 
+type Captured = (
+    usize,
+    &'static str,
+    String,
+    Option<String>,
+    Option<(String, String)>,
+);
+
 #[pyfunction]
-fn _captured_launches() -> Vec<(usize, &'static str, String, Option<String>)> {
+fn _captured_launches() -> Vec<Captured> {
     crate::ops::launched::captured()
         .into_iter()
-        .map(|l| (l.step, l.label, l.kernel, l.code))
+        .map(|l| (l.step, l.label, l.kernel, l.code, l.template))
         .collect()
 }
 

@@ -6,6 +6,7 @@ pub(crate) struct Launched {
     pub(crate) label: &'static str,
     pub(crate) kernel: String,
     pub(crate) code: Option<String>,
+    pub(crate) template: Option<(String, String)>,
 }
 
 thread_local! {
@@ -28,14 +29,23 @@ pub(crate) fn step(index: usize, label: &'static str) {
 }
 
 pub(crate) fn launched(kernel: &str, code: impl FnOnce() -> Option<String>) {
+    templated(kernel, || (code(), None));
+}
+
+pub(crate) fn templated(
+    kernel: &str,
+    code: impl FnOnce() -> (Option<String>, Option<(String, String)>),
+) {
     CAPTURED.with_borrow_mut(|c| {
         if let Some(c) = c {
             let (step, label) = STEP.get();
+            let (code, template) = code();
             c.push(Launched {
                 step,
                 label,
                 kernel: kernel.to_owned(),
-                code: code(),
+                code,
+                template,
             });
         }
     });

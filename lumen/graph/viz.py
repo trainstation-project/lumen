@@ -359,6 +359,14 @@ def program_source(graph, name="program"):
     return "\n".join(lines) + "\n"
 
 
+def _pallas(step, at, module, spec):
+    return (
+        _header(step, at, "txt")
+        + f"import json\n\nfrom {module} import program\n\n"
+        + f"spec = json.loads({spec!r})\nmosaic = program(spec)\n"
+    )
+
+
 def dump_code(graph, plan, run, device, directory):
     from lumen.graph_compiler._C import _capture_launches, _captured_launches
 
@@ -372,12 +380,24 @@ def dump_code(graph, plan, run, device, directory):
     directory.mkdir(parents=True, exist_ok=True)
     steps = plan.steps()
     index, written = [], []
-    for n, (at, label, kernel, code) in enumerate(launches):
+    templates = set()
+    for n, (at, label, kernel, code, template) in enumerate(launches):
         text, ext = _launch_code(steps[at], kernel, code)
         name = f"{n:04d}-{_slug(label)}-{_slug(kernel)}.{ext}"
         (directory / name).write_text(_header(steps[at], at, ext) + text)
         index.append(f"{n:04d}  step {at:4d}  {label}  {kernel}  {name}")
         written.append(directory / name)
+        if template is not None:
+            module, spec = template
+            pallas = name.rsplit(".", 1)[0] + ".pallas.py"
+            (directory / pallas).write_text(_pallas(steps[at], at, module, spec))
+            index.append(f"{n:04d}  {' ' * 9}  its Pallas: {module}'s program(spec)  {pallas}")
+            templates.add(module)
+    for module in sorted(templates):
+        source = pathlib.Path(importlib.util.find_spec(module).origin)
+        (directory / "pallas").mkdir(exist_ok=True)
+        (directory / "pallas" / f"{module}.py").write_text(source.read_text())
+        index.append(f"pallas/{module}.py  the template {module}")
     if str(device).startswith("mps"):
         (directory / "prelude.metal").write_text((OPS / "mps" / "kernels.metal").read_text())
         index.append("prelude.metal  the Metal prelude every kernel above is compiled with")

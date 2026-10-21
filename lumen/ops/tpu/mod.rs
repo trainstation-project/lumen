@@ -256,11 +256,9 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         .concat(),
     };
     crate::profiler::tpu::launched(index, &launch.kernel);
-    crate::ops::launched::launched(&launch.kernel, || {
-        Some(format!(
-            "// {}\n// {}\n{}",
-            lowered.module, lowered.spec, lowered.mosaic
-        ))
+    crate::ops::launched::templated(&launch.kernel, || {
+        let template = (lowered.module.clone(), lowered.spec.clone());
+        (Some(lowered.mosaic.to_string()), Some(template))
     });
     let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
         Some((i, launches)) if *i == index => match launch.host.is_empty() {

@@ -287,3 +287,6 @@ print("wrote tpu_transformer_trace.json")
 
 train_step.dump_graph("tpu_transformer_graph.html")
 print("wrote tpu_transformer_graph.html")
+
+train_step.dump_code("tpu_transformer_code")
+print("wrote tpu_transformer_code/ (a file each kernel a step runs, in order; tpu_transformer_code/index.txt)")
