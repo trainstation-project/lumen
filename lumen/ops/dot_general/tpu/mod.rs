@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use crate::DType;
 use crate::codegen::tpu::gemm::Epilogue;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
-use crate::graph::{Graph, Node, Var};
+use crate::graph::Var;
 use crate::graph_compiler::plan::Step;
 use crate::ops::tpu::{Launch, launch};
 

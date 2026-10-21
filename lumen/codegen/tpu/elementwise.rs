@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use super::indexing::{Dim, Plan, layout, plan};
 use super::{fusible, node, window};
 use crate::DType;
-use crate::device::tpu::layout::Layout;
 use crate::graph::{Primitive, TensorType, Var};
 use crate::graph_compiler::plan::Step;
 use crate::ops::dot_general::tpu::block;
