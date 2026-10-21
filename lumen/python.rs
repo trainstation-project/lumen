@@ -2,8 +2,9 @@ use pyo3::prelude::*;
 
 type Register = fn(&Bound<'_, PyModule>) -> PyResult<()>;
 
-const PACKAGES: [(&str, Register); 11] = [
+const PACKAGES: [(&str, Register); 12] = [
     ("device", crate::device::python::register),
+    ("distributed", crate::distributed::python::register),
     ("tensor", crate::tensor::python::register),
     ("allocator", crate::allocator::python::register),
     ("graph_compiler", crate::graph_compiler::python::register),
