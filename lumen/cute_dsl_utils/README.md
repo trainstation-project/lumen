@@ -4,8 +4,7 @@ Helpers for writing CUDA kernels in NVIDIA's CuTe DSL (`cutlass.cute`, from
 the `nvidia-cutlass-dsl` dependency, Linux only): dtype mapping, tensor
 conversion, fast activations, and generic grid-stride elementwise kernel
 classes. Pure Python; importing it requires `cutlass` and `cuda.bindings`.
-No other module in the repo imports this package at present (the CuTe fill
-kernel in `lumen/ops/fill/cuda.py` is self-contained).
+No other module in the repo imports this package at present.
 
 ## Files
 
@@ -40,5 +39,4 @@ kernel in `lumen/ops/fill/cuda.py` is self-contained).
 
 ## Related
 
-* `lumen/ops/fill/cuda.py` — a CuTe DSL kernel in the ops tree.
 * `pyproject.toml` — the `nvidia-cutlass-dsl` dependency.

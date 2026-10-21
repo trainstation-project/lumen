@@ -49,7 +49,6 @@ _SOURCES = [
     (r"^reduce_", "reduce/mps/kernels.metal", "inline void reduce("),
     (r"^gather_", "layout/mps/kernels.metal", "#define GATHER"),
     (r"^transpose_", "layout/mps/kernels.metal", "#define TRANSPOSE"),
-    (r"^fill_(strided_)?u\d+$", "fill/mps/kernels.metal", "inline void fill"),
     (r"^fill_\d$", "factory/mps/kernels.metal", "#define FULL"),
     (r"^iota_", "factory/mps/kernels.metal", "#define IOTA"),
     (r"^convert_", "elementwise/mps/kernels.metal", "#define CONVERT"),

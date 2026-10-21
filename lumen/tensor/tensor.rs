@@ -65,14 +65,14 @@ impl Tensor {
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("zeros"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
-        crate::ops::fill::fill_op(&t, Scalar::Int(0));
+        t.fill(Scalar::Int(0));
         recorded(op, t)
     }
 
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("ones"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
-        crate::ops::fill::fill_op(&t, Scalar::Int(1));
+        t.fill(Scalar::Int(1));
         recorded(op, t)
     }
 
@@ -120,6 +120,35 @@ impl Tensor {
         let t = unsafe { Self::empty(size, options) };
         t.fill_(value);
         t
+    }
+
+    fn fill(&self, value: Scalar) {
+        if self.numel() == 0 || self.device() == Device::Meta(0) {
+            return;
+        }
+        if let Device::Cpu(_) = self.device() {
+            return dispatch_dtype!(self.dtype, T => self.fill_host(T::from_scalar(value)));
+        }
+        let host = unsafe { Self::empty(&self.shape, self.dtype) };
+        host.fill(value);
+        self.copy_(&host).unwrap_or_else(|e| panic!("fill_: {e}"));
+    }
+
+    fn fill_host<T: Element>(&self, value: T) {
+        self.wait_();
+        let base = self.data_ptr().cast::<T>();
+        if self.is_contiguous() {
+            for i in 0..self.numel() {
+                unsafe { base.add(i).write_unaligned(value) };
+            }
+            return;
+        }
+        for_each_index(&self.shape, |idx| {
+            unsafe {
+                base.add(flat_offset(&idx, &self.strides))
+                    .write_unaligned(value)
+            };
+        });
     }
 
     fn from_values<T: Element>(data: &[T], device: Device) -> Self {
@@ -528,7 +557,7 @@ impl Tensor {
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
         let mut op = crate::profiler::record_op(op_name!("fill_"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
-        crate::ops::fill::fill_op(self, value.into());
+        self.fill(value.into());
         self
     }
 
