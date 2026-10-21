@@ -35,8 +35,9 @@ fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
     let budget = STREAM_BYTES / dtypes.len();
     while bm * bn * width > budget {
-        let halves =
-            |b: usize, unit: usize, of: usize| b / 2 % unit == 0 && of.is_multiple_of(b / 2);
+        let halves = |b: usize, unit: usize, of: usize| {
+            (b / 2).is_multiple_of(unit) && of.is_multiple_of(b / 2)
+        };
         if halves(bm, rows, m) {
             bm /= 2;
         } else if halves(bn, 128, n) {

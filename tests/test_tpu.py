@@ -585,3 +585,20 @@ def test_layout_is_a_loops_index_maps(f, expected, shapes):
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
     got = floats(lumen.compile(f)(lumen.from_numpy(x).to("tpu"), lumen.from_numpy(v).to("tpu")))
     np.testing.assert_array_equal(got, expected(x, v))
+
+
+def test_independent_small_loops_are_one_kernel():
+    """Horizontal fusion: loops of one shape that don't read each other run
+    as one kernel writing each its output."""
+    rng = np.random.default_rng(0)
+    xs = [rng.standard_normal([256, 512], dtype=np.float32) for _ in range(4)]
+
+    def f(a, b, c, d):
+        return a * 2.0 + 1.0, F.exp(b), c - d, d * d
+
+    metas = [lumen.empty([256, 512], "float32", "meta")] * 4
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+    got = lumen.compile(f)(*(lumen.from_numpy(x).to("tpu") for x in xs))
+    a, b, c, d = xs
+    for g, want in zip(got, [a * 2 + 1, np.exp(b), c - d, d * d]):
+        np.testing.assert_allclose(floats(g), want, rtol=1e-6)
