@@ -1,38 +1,35 @@
 # `lumen/codegen/tpu`
 
-TPU kernels generated from fused graphs, in lumen's Pallas
-([`../../pallas/`](../../pallas/README.md)). The TPU graph compiler's
-`loop_fusion` pass (`graph_compiler/tpu/fusion/`) groups elementwise
-chains into `Primitive::Fusion { name: "loop" }`; `encode` turns a fusion's
-body into a spec, and the Python program (`__init__.py`) replays the body's
-nodes on blocks of the output, which lumen's Pallas lowers to Mosaic.
+What TPU kernels generate from a fusion's body, as `codegen/mps` is to
+Metal: each kind's spec (the body's nodes, its operands' views and blocks)
+for a hand-written template in `ops/<op>/tpu/` (a Pallas program, its
+schedule), and the replay of those nodes while the template is traced
+(`__init__.py`, the `Emitter` of a TPU: tracing inlines them, as Metal's
+compiler inlines a functor). Templates: loops (`ops/elementwise/tpu`), rows
+(`ops/row/tpu`), reductions (`ops/reduce/tpu`), the dot
+(`ops/dot_general/tpu`) and attention (`ops/attention/tpu`).
 
-Two kinds so far: loops of elementwise primitives, and rows
-(`Primitive::Fusion { name: "row" }`, from `graph_compiler/tpu/diamonds.rs`:
-normalization diamonds, as XLA's `SoftmaxRewriterTriton`), whole rows a
-block with their last-axis reductions. A third, reductions
-(`Primitive::Fusion { name: "reduction" }`, from `loop_fusion`: a
-reduction with the elementwise work producing its operand and consuming its
-result), runs the hand-written template in `ops/reduce/tpu`, its prologue
-and epilogue generated here, as MPS's reduction kernels instantiate
-`ops/reduce/mps`. Loops take layout primitives too (`indexing.rs`): a
-broadcast, a reshape of unit dimensions, a slice at whole blocks, a
-transpose of major dimensions and iota become where each operand is read.
-Gathers, update slices and reshapes that move elements between tiles are
-not yet generated.
+Fusions come from the TPU graph compiler: loops and reductions from
+`loop_fusion` (`graph_compiler/tpu/fusion/`), rows from `diamonds`
+(normalization diamonds, XLA's `SoftmaxRewriterTriton`), the dot's
+epilogues from `fuse_dots`, attention's from `flash_attention`. Loops take
+layout primitives too (`indexing.rs`): a broadcast, a reshape of unit
+dimensions, a slice at whole blocks, a transpose of major dimensions and
+iota become where each operand is read. Gathers, update slices and reshapes
+that move elements between tiles are not yet generated.
 
 ## Files
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | What the kinds share with the dot's epilogue: `fusible` (the primitives a loop fusion holds: elementwise, `full`, a 0-d operand's `broadcast_in_dim`, `Unary`/`Binary`), `node` (a primitive as the spec's JSON) and `window` (an output's column window, for in-place concatenates); re-exports `encode`. |
-| `__init__.py` | `computed`: a spec's `nodes` replayed on blocks, for the generated kernels and the dot's epilogue. |
-| `indexing.rs` | Layout in loops, as XLA's indexing analysis at the grain of blocks: `plan` maps each value's dimensions to the output's (`Dim::Out`, at an offset for a slice) or to a single index (`Dim::One`, a broadcast or unit dimension), walking back from the output, and picks the output's blocks so every operand reads whole tiles at whole blocks; `layout` names the primitives it maps. `loop_fusion` asks it of every loop with layout. |
-| `elementwise/mod.rs` | Elementwise loops: the block choice (`blocks`) and `encode`, a fusion's body as its spec (only with `cfg(lumen_tpu_linked)`). |
-| `elementwise/__init__.py` | `program(spec)`: the loop's kernel (an output each of `results`: a horizontal fusion's several), a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) replaying the body; 0-d operands copied to VMEM once. With layout (`indexed`), each operand its own `BlockSpec` from `plan`, and `replayed` runs the layout primitives on blocks (a broadcast of a block, a reshape of unit dimensions, a 2-D transpose, iota offset by the program ids). |
-| `reduction.rs` | Reductions: `layout` (rows, columns or total, from the reduced axes; others are not run), `reducible` (what `loop_fusion` asks) and `encode` (the body as the template's spec: `prologue` nodes up to the reduced operand, `reduce`, `epilogue` nodes after it; a constant both read is copied into the epilogue). |
-| `row/mod.rs` | Rows: `fusible` (what a row holds: the loop's primitives, reshapes, broadcasts, `reduce_sum`/`reduce_max`), `kinds` (each value's kind, from the dataflow), `readable` (whether an operand's TPU layout reads as whole rows), `fits` (what the diamonds pass asks) and `encode`. |
-| `row/__init__.py` | `program(spec)`: the row's kernel, a pipeline over blocks of whole rows; `replayed` runs the body with each value at its kind's block shape. |
+| `mod.rs` | What the kinds share: `fusible` (the primitives a loop fusion holds), `node` (a primitive as the spec's JSON) and `window` (an output's column window, for in-place concatenates); re-exports `encode`. |
+| `__init__.py` | The replay of a spec's nodes while a template is traced: `computed` (on blocks of a loop or an epilogue), `indexed` (a loop's layout primitives on blocks), `per_row` (a row's values at their kinds' block shapes). |
+| `indexing.rs` | Layout in loops, as XLA's indexing analysis at the grain of blocks: `plan` maps each value's dimensions to the output's or to one index and picks blocks every operand reads whole; `loop_fusion` asks it of every loop with layout. |
+| `elementwise.rs` | Loops: `encode`, a fusion's body as `ops/elementwise/tpu`'s spec (plain, or `indexed` with layout). |
+| `row.rs` | Rows: `fusible`, `kinds` (each value's kind, from the dataflow), `readable`, `fits` (what the diamonds pass asks) and `encode`, for `ops/row/tpu`. |
+| `reduction.rs` | Reductions: `layout` (rows, columns or total), `reducible` and `encode` (prologue, reduce, epilogue), for `ops/reduce/tpu`. |
+| `gemm.rs` | The dot's epilogue (`Epilogue::of`): its members' widths, extra inputs, nodes and outputs, for `ops/dot_general/tpu`. |
+| `attention.rs` | Attention's forward and backward specs (`forward`, `backward`): each operand's view of its heads, the score chain, the outputs' layout (`written`) and the epilogue, for `ops/attention/tpu`; `graph_compiler/tpu` asks them at compile time. |
 
 ## Spec
 
