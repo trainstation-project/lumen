@@ -303,9 +303,134 @@ impl PyGraph {
     }
 }
 
+fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
+    use Primitive::*;
+    let d = PyDict::new(py);
+    let dtype = |t: &crate::DType| dtype_name(*t);
+    match p {
+        Cast { new_dtype } => d.set_item("new_dtype", dtype(new_dtype))?,
+        ReduceSum { axes, accum_dtype } => {
+            d.set_item("axes", axes.clone())?;
+            d.set_item("accum_dtype", dtype(accum_dtype))?;
+        }
+        ReduceMax { axes } => d.set_item("axes", axes.clone())?,
+        Cumsum {
+            axis,
+            reverse,
+            accum_dtype,
+        } => {
+            d.set_item("axis", axis)?;
+            d.set_item("reverse", reverse)?;
+            d.set_item("accum_dtype", dtype(accum_dtype))?;
+        }
+        DotGeneral {
+            lhs_contracting,
+            rhs_contracting,
+            lhs_batch,
+            rhs_batch,
+            accum_dtype,
+            output_dtype,
+        } => {
+            d.set_item("lhs_contracting", lhs_contracting.clone())?;
+            d.set_item("rhs_contracting", rhs_contracting.clone())?;
+            d.set_item("lhs_batch", lhs_batch.clone())?;
+            d.set_item("rhs_batch", rhs_batch.clone())?;
+            d.set_item("accum_dtype", dtype(accum_dtype))?;
+            d.set_item("output_dtype", dtype(output_dtype))?;
+        }
+        Reshape { new_sizes } => d.set_item("new_sizes", new_sizes.clone())?,
+        BroadcastInDim {
+            shape,
+            broadcast_dimensions,
+        } => {
+            d.set_item("shape", shape.clone())?;
+            d.set_item("broadcast_dimensions", broadcast_dimensions.clone())?;
+        }
+        Transpose { permutation } => d.set_item("permutation", permutation.clone())?,
+        Slice {
+            start_indices,
+            limit_indices,
+            ..
+        } => {
+            d.set_item("start_indices", start_indices.clone())?;
+            d.set_item("limit_indices", limit_indices.clone())?;
+        }
+        DynamicSlice { slice_sizes } => d.set_item("slice_sizes", slice_sizes.clone())?,
+        Gather { axis } | TakeAlongAxis { axis } | ScatterAdd { axis } => {
+            d.set_item("axis", axis)?
+        }
+        CustomCall {
+            label,
+            kernel,
+            mutated,
+            overlappable,
+        } => {
+            d.set_item("op", *label)?;
+            d.set_item("kernel", kernel)?;
+            d.set_item("mutated", mutated.clone())?;
+            d.set_item("overlappable", overlappable.clone())?;
+        }
+        PallasCall {
+            label,
+            kernel,
+            outputs,
+        } => {
+            d.set_item("op", *label)?;
+            d.set_item("kernel", kernel)?;
+            let outputs: Vec<(&str, Vec<usize>)> = outputs
+                .iter()
+                .map(|t| (dtype(&t.dtype), t.shape.clone()))
+                .collect();
+            d.set_item("outputs", outputs)?;
+        }
+        FusionOutput { index, ty } => {
+            d.set_item("index", index)?;
+            d.set_item("dtype", dtype(&ty.dtype))?;
+            d.set_item("shape", ty.shape.clone())?;
+        }
+        Concatenate { dimension, .. } => d.set_item("dimension", dimension)?,
+        Full {
+            shape,
+            fill_value,
+            dtype: t,
+        } => {
+            d.set_item("shape", shape.clone())?;
+            match *fill_value {
+                crate::Scalar::Bool(b) => d.set_item("fill_value", b)?,
+                crate::Scalar::Int(i) => d.set_item("fill_value", i)?,
+                crate::Scalar::Float(f) => d.set_item("fill_value", f)?,
+            }
+            d.set_item("dtype", dtype(t))?;
+        }
+        Iota {
+            dtype: t,
+            shape,
+            dimension,
+        } => {
+            d.set_item("dtype", dtype(t))?;
+            d.set_item("shape", shape.clone())?;
+            d.set_item("dimension", dimension)?;
+        }
+        RandomBits { shape, offset } => {
+            d.set_item("shape", shape.clone())?;
+            d.set_item("offset", offset)?;
+        }
+        Unary(crate::graph::UnaryOp::ReducePrecision {
+            exponent_bits,
+            mantissa_bits,
+        }) => {
+            d.set_item("exponent_bits", exponent_bits)?;
+            d.set_item("mantissa_bits", mantissa_bits)?;
+        }
+        _ => {}
+    }
+    Ok(d)
+}
+
 pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
+    d.set_item("params", params_of(py, p)?)?;
     match p {
         Primitive::Fusion { name, body, .. } => {
             d.set_item("text", p.name())?;

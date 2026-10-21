@@ -381,6 +381,9 @@ def compile(fn, device=None):
     ``compiled.dump_graph(path)`` writes the graph and plan of the latest
     call's signature, profiled, as an HTML page (``lumen.graph.viz``);
     ``compiled.dump_graph(path, *args)``, those of ``args``' signature.
+    ``compiled.dump_code(directory)`` writes the code of every kernel a call
+    of that signature runs, in the order it runs them, a file each
+    (``lumen.graph.viz.dump_code``).
 
     With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
@@ -525,25 +528,7 @@ def compile(fn, device=None):
         types; ``json_path`` also gets the page's data, which is returned.
         ``fragment`` leaves out the doctype, for a host that wraps the page
         (a published artifact)."""
-        if args:
-            prepare(args)
-        elif not latest:
-            raise RuntimeError(f"dump_graph: call {fn.__name__} first, or pass it arguments to trace")
-        ((_, target, _),) = latest
-        graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
-        target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
-        types = [graph.type_of(v) for v in graph.inputs()]
-        n_rng = 2 if drawn is not None else 0
-        params = list(range(n_tensors, len(types) - n_rng))
-        scalars = scalars + list(range(len(types) - n_rng, len(types)))
-        plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
-        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
-        for positions, dimension in plan.packed:
-            dtype, shape = types[positions[0]]
-            shape = list(shape)
-            shape[dimension] = sum(types[i][1][dimension] for i in positions)
-            inputs.append(Tensor.ones(shape, dtype, target))
-        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        graph, plan, target, inputs, workspace, scalars = planned("dump_graph", args, device)
         from lumen.graph import viz
 
         data = viz.collect(
@@ -559,7 +544,36 @@ def compile(fn, device=None):
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
+    def dump_code(directory, *args, device=None):
+        graph, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
+        from lumen.graph import viz
+
+        return viz.dump_code(graph, plan, lambda: plan.run_in(workspace, inputs), target, directory)
+
+    def planned(name, args, device):
+        if args:
+            prepare(args)
+        elif not latest:
+            raise RuntimeError(f"{name}: call {fn.__name__} first, or pass it arguments to trace")
+        ((_, target, _),) = latest
+        graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
+        target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
+        types = [graph.type_of(v) for v in graph.inputs()]
+        n_rng = 2 if drawn is not None else 0
+        params = list(range(n_tensors, len(types) - n_rng))
+        scalars = scalars + list(range(len(types) - n_rng, len(types)))
+        plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
+        inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
+        for positions, dimension in plan.packed:
+            dtype, shape = types[positions[0]]
+            shape = list(shape)
+            shape[dimension] = sum(types[i][1][dimension] for i in positions)
+            inputs.append(Tensor.ones(shape, dtype, target))
+        workspace = Tensor.empty([plan.workspace_bytes], "uint8", target)
+        return graph, plan, target, inputs, workspace, scalars
+
     compiled.dump_graph = dump_graph
+    compiled.dump_code = dump_code
     return compiled
 
 
