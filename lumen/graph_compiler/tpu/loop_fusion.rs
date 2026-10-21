@@ -1,5 +1,6 @@
 use super::TpuModule;
 use crate::codegen::tpu::fusible;
+use crate::codegen::tpu::reduction::reducible;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -16,7 +17,7 @@ impl CompilerPass<TpuModule<'_>> for LoopFusion {
     }
 }
 
-fn groups(graph: &Graph) -> Vec<Option<usize>> {
+fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<bool>) {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
@@ -27,8 +28,11 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         }
     }
     let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut reduces = vec![false; nodes.len()];
+    let reducing = |r: usize| reducible(graph, &nodes[r]);
     for i in (0..nodes.len()).rev() {
-        if !fusible(&nodes[i].primitive) {
+        let reduction = reducing(i);
+        if !fusible(&nodes[i].primitive) && !reduction {
             continue;
         }
         let v = nodes[i].output;
@@ -38,21 +42,25 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
             && readers[v]
                 .iter()
                 .all(|&r| matches!(nodes[r].primitive, Primitive::BroadcastInDim { .. }));
+        let shaped = |r: usize| reducing(r) || graph.type_of(nodes[r].output).shape == *shape;
         let joined = match readers[v].split_first() {
             Some((&first, rest)) if !graph.outputs().contains(&v) => group[first].filter(|&g| {
                 rest.iter().all(|&r| group[r] == Some(g))
-                    && (graph.type_of(nodes[g].output).shape == *shape || constant)
+                    && (readers[v].iter().all(|&r| shaped(r)) || constant)
+                    && !(reduction && reduces[g])
             }),
             _ => None,
         };
-        group[i] = Some(joined.unwrap_or(i));
+        let g = joined.unwrap_or(i);
+        group[i] = Some(g);
+        reduces[g] |= reduction;
     }
-    group
+    (group, reduces)
 }
 
 fn loop_fusion(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
-    let group = groups(graph);
+    let (group, reduces) = groups(graph);
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -98,7 +106,10 @@ fn loop_fusion(graph: &Graph) -> Graph {
                 map[node.output] = out
                     .apply(
                         Primitive::Fusion {
-                            name: "loop".into(),
+                            name: match reduces[i] {
+                                true => "reduction".into(),
+                                false => "loop".into(),
+                            },
                             label,
                             body,
                         },
