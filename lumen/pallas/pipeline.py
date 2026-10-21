@@ -217,7 +217,8 @@ class _Buffered:
             except NotImplementedError:
                 self.clip = [n != w for n, w in zip(ref.shape, whole)]
         self.flat = len(self.sizes) == 1 and self.sizes[0] % (128 * (32 // _bits(ref.dtype))) == 0
-        slots = (2 * self.sizes[0],) if self.flat else (2, *self.sizes)
+        self.single = len(self.sizes) == 1 and not self.flat and math.prod(grid) == 1
+        slots = (2 * self.sizes[0],) if self.flat else tuple(self.sizes) if self.single else (2, *self.sizes)
         self.window = pl.scratch(pl.VMEM(slots, ref.dtype))
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
@@ -284,6 +285,8 @@ class _Buffered:
         from lumen import pallas as pl
 
         parity = pl.bitwise_and(counter, 1)
+        if self.single:
+            return self.window, self.sems.at[parity]
         if self.flat:
             n = self.sizes[0]
             return self.window.at[pl.ds(pl.multiple_of(parity * n, n), n)], self.sems.at[parity]

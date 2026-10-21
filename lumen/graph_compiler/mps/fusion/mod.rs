@@ -8,10 +8,10 @@ mod rows;
 use super::diamonds::Row;
 use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
-use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::pass::CompilerPass;
-pub(crate) use crate::graph_compiler::{constant, elementwise};
+pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
 const MAX_INPUTS: usize = 29;
 
@@ -97,19 +97,6 @@ pub(super) fn fuse(
         &reductions,
         kernel,
     )
-}
-
-pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
-    let nodes = graph.nodes();
-    let names = |all: bool| -> Vec<&str> {
-        members
-            .iter()
-            .filter(|&&m| all || !constant(graph, producer, nodes[m].output))
-            .map(|&m| graph.label(&nodes[m]))
-            .collect()
-    };
-    let shown = names(false);
-    intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }
 
 pub(super) struct LoopFusion;

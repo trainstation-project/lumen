@@ -216,6 +216,17 @@ impl Batch {
     }
 }
 
+pub(crate) fn flush(index: usize) -> Result<(), String> {
+    let pending = BATCHES.with(|b| match b.borrow_mut().last_mut() {
+        Some((i, launches)) if *i == index => std::mem::take(launches),
+        _ => Vec::new(),
+    });
+    match pending.is_empty() {
+        true => Ok(()),
+        false => run(index, &pending, &[]),
+    }
+}
+
 impl Drop for Batch {
     fn drop(&mut self) {
         if !self.ran {

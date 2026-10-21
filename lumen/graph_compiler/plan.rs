@@ -868,6 +868,17 @@ impl Plan {
                 step.label
             ));
         }
+        if let Device::Tpu(_) = executor
+            && let Some(step) = self.steps.iter().find(|s| {
+                !matches!(s.primitive, Primitive::CustomCall { .. })
+                    && s.inputs.iter().any(|(b, _)| matches!(b, Buffer::Scalar(_)))
+            })
+        {
+            return Err(format!(
+                "{}: runtime scalars do not run on TPU yet",
+                step.label
+            ));
+        }
         if executor == Device::Mps(0) {
             let f64_step = self.steps.iter().find(|s| {
                 s.inputs

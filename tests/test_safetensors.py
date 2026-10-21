@@ -5,6 +5,7 @@ import lumen
 from lumen.safetensors import load, load_file, safe_open, save, save_file
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
+TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 DTYPES = [
     "bool",
     "uint8",
@@ -62,7 +63,7 @@ def test_files_and_safe_open(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["model.safetensors"]
 
 
-@pytest.mark.parametrize("device", [MPS])
+@pytest.mark.parametrize("device", [MPS, TPU])
 def test_load_onto_device(tmp_path, device):
     try:
         on_device = {k: v.to(device) for k, v in tensors().items()}

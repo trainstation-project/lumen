@@ -12,6 +12,7 @@ from lumen.profiler import ProfilerActivity, profile
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def run(fn, *args):
@@ -247,7 +248,7 @@ def test_shape_methods():
         lumen.compile(lambda x: F.sum(x, 3))(t)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_results_on_input_device(device):
     try:
         x = lumen.tensor([[1.0, 2.0], [3.0, 4.0]], device=device)
@@ -451,7 +452,7 @@ def test_modules_are_frozen_dataclasses_of_weights():
         m.load_state_dict({})
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_module_weights_are_placed_once_and_shared(device):
     """A module argument's tensors are the function's weights: placed
     (zeroed) on the device when it compiles (a call on meta tensors, which
@@ -551,7 +552,7 @@ def test_indexing_and_splitting_follow_numpy():
             lumen.compile(fn)(t)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_packed_weights_are_one_matmul(device):
     """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
     matmul, on MPS the gate its epilogue (its halves a gated pair)."""
@@ -576,7 +577,7 @@ def test_packed_weights_are_one_matmul(device):
         assert steps.count("dot_general") == 1
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_concatenate(device):
     a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
     try:
@@ -597,7 +598,7 @@ class Gated(lumen.nn.Module):
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_dots_sharing_an_operand_merge(device):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
     x and a block holding w1 and w3 interleaved (XLA's DotMerger, with the
@@ -633,7 +634,7 @@ def test_dots_sharing_an_operand_merge(device):
         names = {(e["kind"], e["name"]) for e in prof.events()}
         assert {("op", "2x dot_general → max → mul"), ("gpu", "2x dot_general → max → mul")} <= names
     else:
-        assert plan.packed == [] and steps.count("dot_general") == 2
+        assert plan.packed == [] and [s.split(" → ")[0] for s in steps].count("dot_general") == 2
 
 
 class Attention(lumen.nn.Module):
@@ -1489,7 +1490,7 @@ def test_packed_weights_are_read_in_place_elsewhere():
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_softmax_traces_to_its_primitives(device):
     """softmax traces to its primitives (max, sub, exp, sum, div; no
     primitive of its own): over the last dimension the MPS compiler runs
@@ -1532,7 +1533,7 @@ class Norm(lumen.nn.Module):
         return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_rms_norm(device):
     """F.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
     as primitives, which the MPS compiler recognizes, as it does an RMS norm
@@ -1574,7 +1575,7 @@ def test_rms_norm(device):
     np.testing.assert_allclose(lumen.to_numpy(step(norm, X)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_sqrt(device):
     """sqrt is a primitive (rsqrt is not: write 1 / F.sqrt(x)); on MPS a fused
     division by a fused sqrt stays a sqrt and a division, as traced."""
@@ -1608,7 +1609,7 @@ class ScaledNorm(lumen.nn.Module):
         return self.weight * (x / F.sqrt(F.mean(x * x, -1, keepdim=True) + self.eps))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_float_fields_are_runtime_scalars(device):
     """A module's float field is a runtime scalar: another value runs the same
     plan (no trace, no kernel compiled), read by the kernel, not baked in; an
@@ -1647,7 +1648,7 @@ def test_float_fields_are_runtime_scalars(device):
         assert "constant float &in1" in step["fusion"]["source"]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no MPS kernel and raises there (the CPU's
@@ -1661,7 +1662,7 @@ def test_programs_run_in_their_dtypes(device):
     except RuntimeError as e:
         pytest.skip(str(e))
     for f in (F.exp, F.sqrt, lambda a: F.softmax(a, -1), F.tanh):
-        if device == "cpu":
+        if device != "mps":
             assert lumen.compile(f)(x).dtype == "bfloat16"
             continue
         with pytest.raises(RuntimeError, match="convert to float32"):
@@ -1925,7 +1926,7 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
     np.testing.assert_allclose(grad, g * (np.exp(xr - lse[:, None]) - hit), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 @pytest.mark.parametrize(
     "n, d, vocab, dtype", [(5, 16, 7, "float32"), (300, 64, 1000, "float32"), (128, 256, 32000, "bfloat16")]
 )
@@ -2809,7 +2810,9 @@ def test_concatenate_runs_unfused():
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+)
 def test_cpu_inside_a_compiled_function(device):
     """``x.cpu()`` (and ``x.to("cpu")``, with a dtype too) inside a compiled
     function, as in PyTorch: a traced tensor has a device (the plan's, or

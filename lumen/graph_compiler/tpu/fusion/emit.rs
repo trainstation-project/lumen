@@ -1,5 +1,7 @@
 use super::groups::{Groups, planned};
-use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
+use crate::codegen::tpu::reduction::reducible;
+use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::label;
 
 pub(super) fn members(group: &[Option<usize>], root: usize) -> Vec<usize> {
     (0..=root).filter(|&j| group[j] == Some(root)).collect()
@@ -37,10 +39,12 @@ pub(super) fn loop_fusion(graph: &Graph) -> Graph {
     let Groups { group, reduces } = planned(graph);
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
         out.set_origin(node);
         match group[i] {
             None => {
@@ -53,8 +57,9 @@ pub(super) fn loop_fusion(graph: &Graph) -> Graph {
             Some(g) if g == i => {
                 let members = members(&group, i);
                 let (body, reads) = body(graph, &members, i);
-                let labels: Vec<&str> = members.iter().map(|&j| graph.label(&nodes[j])).collect();
-                let label = intern(labels.join(FUSION_SEPARATOR));
+                let label = label(graph, &producer, &members);
+                let main = members.iter().find(|&&j| reducible(graph, &nodes[j]));
+                out.set_origin(&nodes[*main.unwrap_or(&i)]);
                 let reads: Vec<Var> = reads.iter().map(|&v| map[v]).collect();
                 map[node.output] = out
                     .apply(

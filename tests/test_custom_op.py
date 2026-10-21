@@ -5,7 +5,7 @@ import lumen
 import lumen.functional as F
 from lumen.custom_op import custom_op
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
+DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
 
 RUNS = []
 

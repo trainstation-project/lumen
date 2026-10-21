@@ -5,7 +5,7 @@ import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps)]
+DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
 
 CASES = [((4, 1000), 1), ((1, 70000), 1), ((3000, 3), 0), ((3, 50, 7), 1), ((8, 3), -1), ((5, 0, 3), 1)]
 

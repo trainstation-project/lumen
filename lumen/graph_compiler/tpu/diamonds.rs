@@ -1,6 +1,6 @@
 use super::TpuModule;
 use crate::codegen::tpu::row::{fits, fusible};
-use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::common::diamonds::{Row, diamonds};
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -69,13 +69,41 @@ fn fusion(graph: &Graph, row: &Row) -> Fused {
     }
 }
 
-fn fused(graph: &Graph, rows: &[Row]) -> Graph {
+fn convex(graph: &Graph, f: &Fused) -> bool {
+    let mut after = vec![false; graph.types.len()];
+    for (i, node) in graph.nodes().iter().enumerate() {
+        let member = f.members.binary_search(&i).is_ok();
+        after[node.output] = member || node.inputs.iter().any(|&v| after[v]);
+    }
+    !f.reads.iter().any(|&v| after[v])
+}
+
+fn sealed(graph: &Graph, f: &Fused) -> bool {
+    let inside = |v: Var| {
+        let readers = graph
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.inputs.contains(&v));
+        !graph.outputs().contains(&v)
+            && readers
+                .map(|(k, _)| k)
+                .all(|k| f.members.binary_search(&k).is_ok())
+    };
+    let nodes = graph.nodes();
+    f.members
+        .iter()
+        .map(|&j| nodes[j].output)
+        .all(|v| f.outputs.contains(&v) || inside(v))
+}
+
+pub(super) fn fused(graph: &Graph, rows: &[Row]) -> Graph {
     let nodes = graph.nodes();
     let mut root: Vec<Option<Fused>> = (0..nodes.len()).map(|_| None).collect();
     let mut member = vec![false; nodes.len()];
     for row in rows {
         let f = fusion(graph, row);
-        if !fits(&f.body) {
+        if !fits(&f.body) || !convex(graph, &f) || !sealed(graph, &f) {
             continue;
         }
         f.members.iter().for_each(|&j| member[j] = true);
@@ -89,40 +117,61 @@ fn fused(graph: &Graph, rows: &[Row]) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
-    for (i, node) in nodes.iter().enumerate() {
-        out.set_origin(node);
-        if let Some(f) = root[i].take() {
-            let labels: Vec<&str> = f.members.iter().map(|&j| graph.label(&nodes[j])).collect();
-            let reads: Vec<Var> = f.reads.iter().map(|&v| map[v]).collect();
-            let fused = out
-                .apply(
-                    Primitive::Fusion {
-                        name: "row".into(),
-                        label: intern(labels.join(FUSION_SEPARATOR)),
-                        body: f.body,
-                    },
-                    &reads,
-                )
-                .expect("a fusion typed as its root");
-            map[f.outputs[0]] = fused;
-            for (index, &v) in f.outputs.iter().enumerate().skip(1) {
-                let ty = graph.type_of(v).clone();
-                map[v] = out
-                    .apply(Primitive::FusionOutput { index, ty }, &[fused])
-                    .expect("the row's output");
+    let mut deferred: Vec<usize> = Vec::new();
+    for i in 0..nodes.len() {
+        if member[i] && root[i].is_none() {
+            continue;
+        }
+        deferred.push(i);
+        while let Some(k) = deferred.iter().position(|&j| {
+            let reads = root[j].as_ref().map_or(&nodes[j].inputs, |f| &f.reads);
+            reads.iter().all(|&v| map[v] != usize::MAX)
+        }) {
+            let j = deferred.remove(k);
+            match root[j].take() {
+                Some(f) => emit(&mut out, &mut map, graph, &nodes[j], f),
+                None => copy(&mut out, &mut map, &nodes[j]),
             }
-            continue;
         }
-        if member[i] {
-            continue;
-        }
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("a node of the graph");
-        out.set_label(map[node.output], node.label);
     }
+    assert!(
+        deferred.is_empty(),
+        "every node reads values computed before it"
+    );
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+fn copy(out: &mut Graph, map: &mut [Var], node: &Node) {
+    out.set_origin(node);
+    let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+    map[node.output] = out
+        .apply(node.primitive.clone(), &inputs)
+        .expect("a node of the graph");
+    out.set_label(map[node.output], node.label);
+}
+
+fn emit(out: &mut Graph, map: &mut [Var], graph: &Graph, node: &Node, f: Fused) {
+    out.set_origin(node);
+    let nodes = graph.nodes();
+    let labels: Vec<&str> = f.members.iter().map(|&j| graph.label(&nodes[j])).collect();
+    let reads: Vec<Var> = f.reads.iter().map(|&v| map[v]).collect();
+    let fused = out
+        .apply(
+            Primitive::Fusion {
+                name: "row".into(),
+                label: intern(labels.join(FUSION_SEPARATOR)),
+                body: f.body,
+            },
+            &reads,
+        )
+        .expect("a fusion typed as its root");
+    map[f.outputs[0]] = fused;
+    for (index, &v) in f.outputs.iter().enumerate().skip(1) {
+        let ty = graph.type_of(v).clone();
+        map[v] = out
+            .apply(Primitive::FusionOutput { index, ty }, &[fused])
+            .expect("the row's output");
+    }
 }

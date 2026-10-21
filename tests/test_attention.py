@@ -66,8 +66,10 @@ def _ids(cases):
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
 @pytest.mark.parametrize(
     "device, case",
-    [("cpu", c) for c in CPU_CASES] + [pytest.param("mps", c, marks=pytest.mark.mps) for c in CASES],
-    ids=[f"cpu-{i}" for i in _ids(CPU_CASES)] + [f"mps-{i}" for i in _ids(CASES)],
+    [("cpu", c) for c in CPU_CASES]
+    + [pytest.param("mps", c, marks=pytest.mark.mps) for c in CASES]
+    + [pytest.param("tpu", c, marks=pytest.mark.tpu) for c in CASES],
+    ids=[f"cpu-{i}" for i in _ids(CPU_CASES)] + [f"mps-{i}" for i in _ids(CASES)] + [f"tpu-{i}" for i in _ids(CASES)],
 )
 def test_flash_attention(device, case, dtype):
     """F.flash_attention agrees with attention in float64, on

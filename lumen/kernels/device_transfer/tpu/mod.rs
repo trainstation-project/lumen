@@ -4,7 +4,7 @@ use crate::Tensor;
 use crate::allocator::tpu::ROW;
 use crate::device::Device;
 use crate::device::tpu::layout::Layout;
-use crate::kernels::tpu::{Launch, launch};
+use crate::kernels::tpu::{Launch, flush, launch};
 
 fn layout(t: &Tensor) -> Layout {
     Layout::new(t.dtype(), t.shape()).unwrap_or_else(|e| panic!("{e}"))
@@ -38,6 +38,8 @@ pub(super) fn copy_d2h(dst: &Tensor, src: &Tensor) {
     let Some(ptr) = NonNull::new(src.data_ptr()) else {
         return;
     };
+    flush(index)
+        .unwrap_or_else(|e| panic!("running tpu:{index}'s launches before a copy failed: {e}"));
     let layout = layout(src);
     let mut memory = vec![0u8; layout.bytes()];
     crate::allocator::tpu::copy_to_host(index, ptr, &mut memory)
