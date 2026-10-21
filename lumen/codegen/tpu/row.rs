@@ -8,11 +8,9 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::ops::dot_general::tpu::block;
-#[cfg(lumen_tpu_linked)]
 use crate::ops::tpu::{Launch, launch};
 
-const ROW_BYTES: usize = 1 << 21;
+pub(crate) const ROW_BYTES: usize = 1 << 21;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Kind {
@@ -281,13 +279,7 @@ pub(crate) fn encode(
         .map(|l| l.rows)
         .max()
         .unwrap_or(8);
-    let cap = (ROW_BYTES / (n * 4)).max(unit);
-    let bm = match rows < unit {
-        true => rows,
-        false => {
-            block(rows, unit, cap).ok_or_else(|| failed("its rows have no block of whole tiles"))?
-        }
-    };
+    let bm = crate::ops::row::tpu::block_rows(rows, n, unit).map_err(|e| failed(&e))?;
     let spec = format!(
         "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         operands.join(", "),
@@ -302,7 +294,7 @@ pub(crate) fn encode(
         .chain(inputs[n_in..].iter().copied())
         .collect();
     let launched = Launch {
-        module: "lumen.codegen.tpu.row",
+        module: "lumen.ops.row.tpu",
         kernel: format!("row_{rows}x{n}_{bm}"),
         spec,
         rows: &rows_of,
