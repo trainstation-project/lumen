@@ -25,6 +25,7 @@ and *where it lives in memory*.
 | `schedule.rs` | Memory-reducing topological orders: `list` (XLA `ListScheduler`), `dfs` (XLA `DFSMemoryScheduler`), and `Graph::reordered`. |
 | `remat.rs` | Rematerialization under `memory_limit` (XLA `hlo_rematerialization`). |
 | `stages.rs` | Splits a program with `to_host` values into alternating device/host stages; `without_transfers` strips `ToHost`/`ToDevice`. |
+| `diamonds.rs` | Normalization diamonds (XLA `SoftmaxRewriterTriton`): `Row`s of a row's reductions and the elementwise work around them, chained and grown (`diamonds`, over a device's `Fusible`); MPS and TPU each turn them into row kernels. |
 | `attention.rs` | Pattern matcher for attention (`softmax(q @ k^T * scale [mask]) @ v`, dropout, its backward), shared by the MPS fusions, the codegen and the tracer (`Graph.attentions`). |
 | `python.rs` | PyO3 bindings: `lumen.graph_compiler.Plan` (`PyPlan`) and the `CompilerConfig` class behind `lumen.config.compiler`. |
 | `__init__.py` | The `lumen.graph_compiler` package: re-exports `Plan` from `lumen.graph_compiler._C`. |

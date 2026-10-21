@@ -22,7 +22,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
 | `canonicalize_dots.rs` | Pass `canonicalize_dots`: transposes dot operands into matmul form as a separate step. |
-| `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): finds softmax/RMS/layer-norm style row diamonds and their `partials` (XLA `SoftmaxRewriterTriton`); stores `Row`s in `MpsModule::rows`. |
+| `diamonds.rs` | Pass `normalization_diamonds` (`Diamonds`): the softmax/RMS/layer-norm style row diamonds (`graph_compiler/diamonds.rs`, over MPS's `fusible`) and their `partials` (column sums a row's kernel adds up too); stores `Row`s in `MpsModule::rows`. |
 | `place_concats.rs` | Pass `place_concats`: marks concatenates whose operands' kernels can write them in place; `in_place_concats` also re-checked by `Codegen`. |
 | `fusion.rs` | Pass `loop_fusion` (`LoopFusion`): loop/reduction/epilogue/multi-output fusion (`fuse`), then horizontal fusion; also `fusible`, `label`. |
 | `horizontal.rs` | Horizontal loop fusion: independent same-size small loop fusions run as one multi-output kernel. |
