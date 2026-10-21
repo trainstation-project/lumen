@@ -1,3 +1,4 @@
+import lumen.functional as F
 from lumen import pallas as pl
 from lumen.codegen.tpu import computed
 from lumen.ops.tpu import pallas
