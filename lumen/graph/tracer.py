@@ -545,10 +545,10 @@ def compile(fn, device=None):
         return data
 
     def dump_code(directory, *args, device=None):
-        _, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
+        graph, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
         from lumen.graph import viz
 
-        return viz.dump_code(plan, lambda: plan.run_in(workspace, inputs), target, directory)
+        return viz.dump_code(graph, plan, lambda: plan.run_in(workspace, inputs), target, directory)
 
     def planned(name, args, device):
         if args:

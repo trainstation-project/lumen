@@ -314,7 +314,26 @@ def _launch_code(step, kernel, code):
     return step["text"] + "\n", "txt"
 
 
-def dump_code(plan, run, device, directory):
+def _traced_at(sources):
+    lines = []
+    for file, line in sources:
+        try:
+            code = pathlib.Path(file).read_text().splitlines()[line - 1].strip()
+        except (OSError, UnicodeDecodeError, IndexError):
+            code = ""
+        lines.append(f"{file}:{line}  {code}")
+    return lines
+
+
+def _header(step, at, ext):
+    fusion = step["fusion"]
+    graph = fusion["body"] if fusion else step["text"]
+    mark = "#" if ext == "txt" else "//"
+    lines = [f"step {at}: {step['label']}", *_traced_at(step["sources"]), *graph.rstrip().splitlines()]
+    return "".join(f"{mark} {line}\n" for line in lines) + "\n"
+
+
+def dump_code(graph, plan, run, device, directory):
     from lumen.graph_compiler._C import _capture_launches, _captured_launches
 
     _capture_launches()
@@ -330,12 +349,15 @@ def dump_code(plan, run, device, directory):
     for n, (at, label, kernel, code) in enumerate(launches):
         text, ext = _launch_code(steps[at], kernel, code)
         name = f"{n:04d}-{_slug(label)}-{_slug(kernel)}.{ext}"
-        (directory / name).write_text(text)
+        (directory / name).write_text(_header(steps[at], at, ext) + text)
         index.append(f"{n:04d}  step {at:4d}  {label}  {kernel}  {name}")
         written.append(directory / name)
     if str(device).startswith("mps"):
         (directory / "prelude.metal").write_text((OPS / "mps" / "kernels.metal").read_text())
         index.append("prelude.metal  the Metal prelude every kernel above is compiled with")
+    (directory / "graph.txt").write_text(str(graph) + "\n")
+    (directory / "plan.txt").write_text(str(plan) + "\n")
+    index[:0] = ["graph.txt  the traced program", "plan.txt  its plan: the steps below and their buffers"]
     (directory / "index.txt").write_text("\n".join(index) + "\n")
     return written
 

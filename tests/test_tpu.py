@@ -646,5 +646,6 @@ def test_dump_code_writes_each_launchs_mosaic(tmp_path):
     f(x)
     (loop,) = f.dump_code(tmp_path)
     text = loop.read_text()
-    assert loop.suffix == ".mlir" and text.startswith("// lumen.ops.elementwise.tpu\n")
+    assert loop.suffix == ".mlir" and text.startswith("// step 0: exp → mul\n")
+    assert "\n// lumen.ops.elementwise.tpu\n" in text and "exp" in text.split("\n\n")[0]
     assert "func.func" in text and "math.exp" in text
