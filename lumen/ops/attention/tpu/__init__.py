@@ -75,22 +75,28 @@ def zeros(shape):
     return prims.full(tuple(shape), 0.0, "float32")
 
 
+def _splits(spec):
+    ops = [op for op in spec.values() if isinstance(op, dict) and "dims" in op]
+    return [max(op["dims"][d][1] for op in ops) for d in range(len(spec["batch"]))]
+
+
 def heads(spec):
-    count = 1
-    for size in spec["batch"]:
-        count *= size
-    return count
+    sizes = []
+    for size, split in zip(spec["batch"], _splits(spec)):
+        sizes += [size // split, split] if split > 1 else [size]
+    return tuple(sizes)
 
 
-def head(spec, op, g):
+def head(spec, op, ids):
     slab, column = op["at"]
-    rest = g
-    batch = spec["batch"]
-    for d in reversed(range(len(batch))):
-        size, divisor, dl, dc = op["dims"][d]
-        idx = rest if d == 0 else mod(rest, size)
-        rest = div(rest, size)
-        idx = div(idx, divisor)
+    ids = list(ids)
+    for d, split in enumerate(_splits(spec)):
+        _, divisor, dl, dc = op["dims"][d]
+        if split == 1:
+            idx = ids.pop(0)
+        else:
+            outer, inner = ids.pop(0), ids.pop(0)
+            idx = outer if divisor == split else add(mul(outer, split), inner)
         slab, column = add(slab, mul(idx, dl)), add(column, mul(idx, dc))
     return slab, column
 
@@ -112,13 +118,13 @@ def first_query_block(spec, j):
     return div(maximum(add(mul(j, bkv), -spec["causal"]), 0), bq)
 
 
-def offsets(shape):
-    return prims.sub(prims.iota("int32", shape, 1), prims.iota("int32", shape, 0))
-
-
-def masked(spec, qk, queries, keys, offset_ref):
+def masked(spec, qk, queries, keys, transposed=False):
+    if spec["causal"] is None:
+        return qk
     limit = broadcast(add(add(queries, mul(keys, -1)), spec["causal"]), qk.shape)
-    return F.where(offset_ref[...] <= limit, qk, MASK)
+    rows, columns = prims.iota("int32", qk.shape, 0), prims.iota("int32", qk.shape, 1)
+    offset = prims.sub(rows, columns) if transposed else prims.sub(columns, rows)
+    return F.where(offset <= limit, qk, MASK)
 
 
 def chunk(n, cap=512):
