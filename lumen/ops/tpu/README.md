@@ -3,8 +3,8 @@
 TPU kernels and how they run. A plan step on a TPU (`Plan::execute`, the
 executor `Device::Tpu`) goes to `encode`, which routes on the step's
 `Primitive`; so far `dot_general` ([`../dot_general/`](../dot_general/README.md)),
-loop fusions of elementwise primitives (generated: [`../../codegen/tpu/`](../../codegen/tpu/README.md)) and
-`reduce_sum` over the last dimension ([`../reduce/tpu/`](../reduce/tpu/)) have
+loop, row and reduction fusions (generated: [`../../codegen/tpu/`](../../codegen/tpu/README.md);
+reductions on the template in [`../reduce/tpu/`](../reduce/tpu/)) have
 kernels, and any other step errors
 (`<primitive> does not run on TPU yet`). The host-to-TPU copy
 (`../device_transfer/tpu/mod.rs`) is a kernel too.
@@ -95,7 +95,7 @@ wait for the latest.
 * [`../../pallas/`](../../pallas/README.md) — lumen's Pallas: the kernel API, its IR and Mosaic lowering.
 * [`../dot_general/`](../dot_general/README.md) — the dot (`tpu.rs`: its spec; `tpu.py`: its kernel).
 * [`../../codegen/tpu/`](../../codegen/tpu/README.md) — generated loop fusions of elementwise primitives (`mod.rs`: their spec; `__init__.py`: their program).
-* [`../reduce/tpu/`](../reduce/tpu/) — `reduce_sum` over the last dimension, in blocks of an accumulator (`mod.rs`: its spec; `__init__.py`: its kernel).
+* [`../reduce/tpu/`](../reduce/tpu/) — the reduction template: rows, columns or total, in blocks of an accumulator (`mod.rs`: its blocks; `__init__.py`: its kernel).
 * [`../device_transfer/`](../device_transfer/README.md) — host ↔ TPU copies.
 * [`../../device/tpu/`](../../device/tpu/README.md) — the PJRT shim: compile and run.
 * [`../../allocator/`](../../allocator/README.md) — `TpuAllocator`: the memory, its rows, `run`.

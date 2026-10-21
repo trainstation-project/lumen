@@ -10,8 +10,12 @@ nodes on blocks of the output, which lumen's Pallas lowers to Mosaic.
 Two kinds so far: loops of elementwise primitives, and rows
 (`Primitive::Fusion { name: "row" }`, from `graph_compiler/tpu/diamonds.rs`:
 normalization diamonds, as XLA's `SoftmaxRewriterTriton`), whole rows a
-block with their last-axis reductions. Layout primitives and gathers are
-not yet generated.
+block with their last-axis reductions. A third, reductions
+(`Primitive::Fusion { name: "reduction" }`, from `loop_fusion`: a
+reduction with the elementwise work producing its operand and consuming its
+result), runs the hand-written template in `ops/reduce/tpu`, its prologue
+and epilogue generated here, as MPS's reduction kernels instantiate
+`ops/reduce/mps`. Layout primitives and gathers are not yet generated.
 
 ## Files
 
@@ -21,6 +25,7 @@ not yet generated.
 | `__init__.py` | `computed`: a spec's `nodes` replayed on blocks, for the generated kernels and the dot's epilogue. |
 | `elementwise.rs` | Elementwise loops: the block choice (`blocks`) and `encode`, a fusion's body as its spec (only with `cfg(lumen_tpu_linked)`). |
 | `elementwise.py` | `program(spec)`: the loop's kernel, a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) replaying the body; 0-d operands copied to VMEM once. |
+| `reduction.rs` | Reductions: `layout` (rows, columns or total, from the reduced axes; others are not run), `reducible` (what `loop_fusion` asks) and `encode` (the body as the template's spec: `prologue` nodes up to the reduced operand, `reduce`, `epilogue` nodes after it; a constant both read is copied into the epilogue). |
 | `row.rs` | Rows: `fusible` (what a row holds: the loop's primitives, reshapes, broadcasts, `reduce_sum`/`reduce_max`), `kinds` (each value's kind, from the dataflow), `readable` (whether an operand's TPU layout reads as whole rows), `fits` (what the diamonds pass asks) and `encode`. |
 | `row.py` | `program(spec)`: the row's kernel, a pipeline over blocks of whole rows; `replayed` runs the body with each value at its kind's block shape. |
 
@@ -58,7 +63,8 @@ row count. Its kernel name is `row_<rows>x<n>_<block>`.
 
 ## Related
 
-* [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` (rows, before the dots take their epilogues) and `loop_fusion` (after).
+* [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` (rows, before the dots take their epilogues) and `loop_fusion` (loops and reductions, after).
+* [`../../ops/reduce/tpu/`](../../ops/reduce/tpu/) — the reduction template.
 * [`../../graph_compiler/diamonds.rs`](../../graph_compiler/diamonds.rs) — the diamond matcher, shared with MPS.
 * [`../../ops/tpu/`](../../ops/tpu/README.md) — routes a `loop` fusion's step here.
 * [`../../ops/dot_general/tpu/`](../../ops/dot_general/) — the dot, whose epilogue uses `node` and `computed`.
