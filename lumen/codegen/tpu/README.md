@@ -23,11 +23,11 @@ and epilogue generated here, as MPS's reduction kernels instantiate
 | --- | --- |
 | `mod.rs` | What the kinds share with the dot's epilogue: `fusible` (the primitives a loop fusion holds: elementwise, `full`, a 0-d operand's `broadcast_in_dim`, `Unary`/`Binary`), `node` (a primitive as the spec's JSON) and `window` (an output's column window, for in-place concatenates); re-exports `encode`. |
 | `__init__.py` | `computed`: a spec's `nodes` replayed on blocks, for the generated kernels and the dot's epilogue. |
-| `elementwise.rs` | Elementwise loops: the block choice (`blocks`) and `encode`, a fusion's body as its spec (only with `cfg(lumen_tpu_linked)`). |
-| `elementwise.py` | `program(spec)`: the loop's kernel, a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) replaying the body; 0-d operands copied to VMEM once. |
+| `elementwise/mod.rs` | Elementwise loops: the block choice (`blocks`) and `encode`, a fusion's body as its spec (only with `cfg(lumen_tpu_linked)`). |
+| `elementwise/__init__.py` | `program(spec)`: the loop's kernel, a pipeline over blocks of the output (leading dimensions together, then the last two; or the elements) replaying the body; 0-d operands copied to VMEM once. |
 | `reduction.rs` | Reductions: `layout` (rows, columns or total, from the reduced axes; others are not run), `reducible` (what `loop_fusion` asks) and `encode` (the body as the template's spec: `prologue` nodes up to the reduced operand, `reduce`, `epilogue` nodes after it; a constant both read is copied into the epilogue). |
-| `row.rs` | Rows: `fusible` (what a row holds: the loop's primitives, reshapes, broadcasts, `reduce_sum`/`reduce_max`), `kinds` (each value's kind, from the dataflow), `readable` (whether an operand's TPU layout reads as whole rows), `fits` (what the diamonds pass asks) and `encode`. |
-| `row.py` | `program(spec)`: the row's kernel, a pipeline over blocks of whole rows; `replayed` runs the body with each value at its kind's block shape. |
+| `row/mod.rs` | Rows: `fusible` (what a row holds: the loop's primitives, reshapes, broadcasts, `reduce_sum`/`reduce_max`), `kinds` (each value's kind, from the dataflow), `readable` (whether an operand's TPU layout reads as whole rows), `fits` (what the diamonds pass asks) and `encode`. |
+| `row/__init__.py` | `program(spec)`: the row's kernel, a pipeline over blocks of whole rows; `replayed` runs the body with each value at its kind's block shape. |
 
 ## Spec
 
