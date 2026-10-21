@@ -1,4 +1,5 @@
 use crate::DType;
+use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::attention::{self, Access, Score};
 #[cfg(lumen_tpu_linked)]
@@ -20,7 +21,12 @@ struct Operand {
     width: usize,
 }
 
-fn view(name: &str, op: &Operand, batch: &[usize], matrix: bool) -> Result<String, String> {
+fn view(
+    name: &str,
+    op: &Operand,
+    batch: &[usize],
+    matrix: Option<usize>,
+) -> Result<String, String> {
     let shape = &op.ty.shape;
     let failed = |why: &str| {
         Err(format!(
@@ -32,21 +38,26 @@ fn view(name: &str, op: &Operand, batch: &[usize], matrix: bool) -> Result<Strin
         return failed("an operand of fewer than two dimensions");
     }
     let (rows, width) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+    let tiles = Layout::new(op.ty.dtype, shape)?.rows;
+    let rows = match matrix {
+        Some(seq) if rows.is_multiple_of(seq) && seq.is_multiple_of(tiles) => seq,
+        _ => rows,
+    };
     let slab = rows * width;
     let slabs = op.ty.numel() / slab.max(1);
     let (row, col) = (op.acc.row, op.acc.col);
     let fits = match matrix {
-        true => col == 1 && row == width,
-        false => col == width,
+        Some(_) => col == 1 && row == width,
+        None => col == width,
     };
     if !fits {
         return failed("an operand whose rows are not its tiles' rows");
     }
     let unit = match matrix {
-        true => op.width,
-        false => 1,
+        Some(_) => op.width,
+        None => 1,
     };
-    if matrix && !(op.width.is_multiple_of(LANES) || op.width == width) {
+    if matrix.is_some() && !(op.width.is_multiple_of(LANES) || op.width == width) {
         return failed("a head dimension that is neither a multiple of 128 nor its rows' width");
     }
     let split = |a: usize| (a / slab, (a % slab) / width, (a % slab) % width);
@@ -198,14 +209,14 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
     let a = attention::of_body(body).ok_or("flash attention on TPU: no attention in its body")?;
     unsupported(a.dropout.is_some(), a.dtype)?;
     let views = [
-        view("q", &operand(body, &a.q, a.h), &a.batch, true)?,
-        view("k", &operand(body, &a.k, a.h), &a.batch, true)?,
-        view("v", &operand(body, &a.v, a.hv), &a.batch, true)?,
+        view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
+        view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
+        view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
         view(
             "the output",
             &output(body, 0, written(body, &a.out, &a.batch)?.1, a.hv),
             &a.batch,
-            true,
+            Some(a.sq),
         )?,
     ];
     let lse = match a.lse {
@@ -213,7 +224,7 @@ pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
             let k = body.outputs().len() - 1;
             let ty = body.type_of(body.outputs()[k]).clone();
             let acc = per_head(&ty, &a.batch);
-            view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, false)?
+            view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, None)?
         }
         None => "null".into(),
     };
@@ -242,28 +253,23 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         .ok_or("flash attention backward on TPU: no attention backward in its body")?;
     unsupported(b.dropout.is_some(), b.dtype)?;
     let ins = [
-        view("q", &operand(body, &b.q, b.h), &b.batch, true)?,
-        view("k", &operand(body, &b.k, b.h), &b.batch, true)?,
-        view("v", &operand(body, &b.v, b.hv), &b.batch, true)?,
-        view("dO", &operand(body, &b.d_o, b.hv), &b.batch, true)?,
-        view(
-            "the log-sum-exp",
-            &operand(body, &b.lse, 1),
-            &b.batch,
-            false,
-        )?,
+        view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
+        view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk))?,
+        view("v", &operand(body, &b.v, b.hv), &b.batch, Some(b.sk))?,
+        view("dO", &operand(body, &b.d_o, b.hv), &b.batch, Some(b.sq))?,
+        view("the log-sum-exp", &operand(body, &b.lse, 1), &b.batch, None)?,
     ];
     let delta = match rows_of(body, &b.delta, usize::MAX) {
         usize::MAX => {
             let o = inside(body, &b.delta, &b.d_o, &b.batch, b.sq)?;
             format!(
                 "\"delta\": null, \"o\": {}",
-                view("o", &operand(body, &o, b.hv), &b.batch, true)?
+                view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq))?
             )
         }
         _ => format!(
             "\"delta\": {}",
-            view("delta", &operand(body, &b.delta, 1), &b.batch, false)?
+            view("delta", &operand(body, &b.delta, 1), &b.batch, None)?
         ),
     };
     let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
@@ -271,17 +277,21 @@ pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
         (None, Some(_), Some(_)) => "dkv",
         _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
     };
-    let out = |name: &str, out: &Option<(usize, Access)>, width: usize| -> Result<String, String> {
+    let out = |name: &str,
+               out: &Option<(usize, Access)>,
+               width: usize,
+               seq: usize|
+     -> Result<String, String> {
         let (_, acc) = out.as_ref().expect("an output");
         let (k, acc) = written(body, acc, &b.batch)?;
-        view(name, &output(body, k, acc, width), &b.batch, true)
+        view(name, &output(body, k, acc, width), &b.batch, Some(seq))
     };
     let outs = match kind {
-        "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h)?),
+        "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h, b.sq)?),
         _ => format!(
             "\"dk\": {}, \"dv\": {}, \"group\": {}",
-            out("dk", &b.dk_out, b.h)?,
-            out("dv", &b.dv_out, b.hv)?,
+            out("dk", &b.dk_out, b.h, b.sk)?,
+            out("dv", &b.dv_out, b.hv, b.sk)?,
             group(&written(body, &b.dk_out.as_ref().expect("dk").1, &b.batch)?.1)
         ),
     };
