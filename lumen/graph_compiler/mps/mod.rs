@@ -2,7 +2,6 @@ mod alone;
 pub(crate) mod ane;
 mod canonicalize_dots;
 mod diamonds;
-mod flash_attention;
 mod flash_attention_backward;
 pub(crate) mod fusion;
 mod horizontal;
@@ -30,6 +29,7 @@ use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::attention;
+use crate::graph_compiler::passes::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::ops::mps::{
@@ -41,7 +41,6 @@ use alone::Alone;
 use canonicalize_dots::CanonicalizeDots;
 #[cfg(test)]
 use canonicalize_dots::canonicalize_dots;
-use flash_attention::FlashAttention;
 use flash_attention_backward::FlashAttentionBackward;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
@@ -75,6 +74,26 @@ struct MpsModule<'a> {
     scalars: Vec<usize>,
     kernels: Vec<Kernel>,
     sources: BTreeMap<String, String>,
+}
+
+impl Attentions for MpsModule<'_> {
+    fn epilogues(&self) -> attention::Epilogues {
+        attention::Epilogues {
+            leaves: |_, _| true,
+            reshaped: false,
+        }
+    }
+
+    fn scalars(&self) -> Vec<Var> {
+        self.scalars
+            .iter()
+            .map(|&i| self.graph.inputs()[i])
+            .collect()
+    }
+
+    fn kernel(&mut self) -> String {
+        request(&mut self.kernels, Kernel::Attention)
+    }
 }
 
 impl Blocks for MpsModule<'_> {

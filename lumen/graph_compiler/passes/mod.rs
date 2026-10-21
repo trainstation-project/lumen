@@ -8,6 +8,7 @@ pub(crate) mod chunked_cross_entropy;
 pub(crate) mod clamp_indices;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod dot_strength;
+pub(crate) mod flash_attention;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;
 pub(crate) mod merge_dots;

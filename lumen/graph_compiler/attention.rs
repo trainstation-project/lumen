@@ -298,7 +298,7 @@ pub(crate) fn fuse(
         .into_iter()
         .map(|a| {
             let (mut chain, mut leaves, mut kept) = match epilogues {
-                Some(e) => m.epilogue(a.root, scalars, e.leaves),
+                Some(e) => m.epilogue(a.root, scalars, e.leaves, e.reshaped),
                 None => (Vec::new(), Vec::new(), false),
             };
             let read_after =
@@ -413,6 +413,7 @@ impl<'a> Matcher<'a> {
         root: usize,
         scalars: &[Var],
         readable: Leaves,
+        reshaped: bool,
     ) -> (Vec<usize>, Vec<Var>, bool) {
         use Primitive::*;
         let nodes = self.graph.nodes();
@@ -449,6 +450,12 @@ impl<'a> Matcher<'a> {
             }
             end = u;
             chain.push(u);
+        }
+        let layout = chain
+            .iter()
+            .all(|&n| matches!(nodes[n].primitive, Reshape { .. }));
+        if reshaped && layout {
+            return (Vec::new(), Vec::new(), false);
         }
         let kept = kept && !chain.is_empty();
         (chain, leaves, kept)
