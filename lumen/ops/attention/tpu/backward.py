@@ -9,12 +9,13 @@ from lumen.ops.attention.tpu import (
     by_mask,
     first_query_block,
     heads,
+)
+from lumen.ops.attention.tpu import key_block as fetched
+from lumen.ops.attention.tpu import (
     lanes,
-    last_key_block,
     masked,
     matrix,
     maximum,
-    minimum,
     mul,
     scored,
     tile,
@@ -60,7 +61,7 @@ def program(spec):
         dq = spec["dq"]
 
         def key_block(i, j):
-            return j if causal is None else minimum(j, last_key_block(spec, i))
+            return fetched(spec, i, j)
 
         grid = (*heads(spec), nq, nk)
 

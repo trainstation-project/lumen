@@ -113,6 +113,12 @@ def last_key_block(spec, i):
     return minimum(div(add(mul(i, bq), bq - 1 + spec["causal"]), bkv), nk - 1)
 
 
+def key_block(spec, i, j):
+    if spec["causal"] is None:
+        return j
+    return prims.mul(_traced(j), (_traced(j) <= last_key_block(spec, i)).to("int32"))
+
+
 def first_query_block(spec, j):
     bq, bkv = spec["blocks"]
     return div(maximum(add(mul(j, bkv), -spec["causal"]), 0), bq)

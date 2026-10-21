@@ -11,10 +11,11 @@ from lumen.ops.attention.tpu import (
     by_mask,
     chunk,
     heads,
-    last_key_block,
+)
+from lumen.ops.attention.tpu import key_block as fetched
+from lumen.ops.attention.tpu import (
     masked,
     matrix,
-    minimum,
     mul,
     scored,
     tile,
@@ -40,7 +41,7 @@ def program(spec):
     q, k, v, o, lse = spec["q"], spec["k"], spec["v"], spec["o"], spec["lse"]
 
     def key_block(i, j):
-        return j if causal is None else minimum(j, last_key_block(spec, i))
+        return fetched(spec, i, j)
 
     grid = (*heads(spec), nq, nk)
 
