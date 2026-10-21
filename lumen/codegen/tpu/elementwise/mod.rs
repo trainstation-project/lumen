@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use super::{node, window};
+use super::indexing::{Dim, Plan, layout, plan};
+use super::{fusible, node, window};
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Primitive, TensorType, Var};
@@ -45,6 +46,127 @@ fn gcd(a: usize, b: usize) -> usize {
     }
 }
 
+fn indexed_node(
+    p: &Primitive,
+    args: &[usize],
+    shape: &[usize],
+    map: &[Dim],
+    plan: &Plan,
+) -> String {
+    let params = match p {
+        Primitive::BroadcastInDim {
+            broadcast_dimensions,
+            ..
+        } => format!("\"broadcast_dimensions\": {broadcast_dimensions:?}"),
+        Primitive::Transpose { permutation } => format!("\"permutation\": {permutation:?}"),
+        Primitive::Iota {
+            dimension, dtype, ..
+        } => {
+            let base = match map[*dimension] {
+                Dim::Out { d, offset } => format!("[{d}, {}, {offset}]", plan.blocks[d]),
+                Dim::One { offset } => format!("[-1, 0, {offset}]"),
+            };
+            format!(
+                "\"dimension\": {dimension}, \"dtype\": \"{}\", \"base\": {base}",
+                dtype.full_name()
+            )
+        }
+        Primitive::Reshape { .. } | Primitive::Slice { .. } => String::new(),
+        p => {
+            let plain = node(p, args);
+            let start = plain.find("\"params\": {").expect("params") + "\"params\": {".len();
+            let end = plain.find("}, \"args\"").expect("args");
+            plain[start..end].to_string()
+        }
+    };
+    format!(
+        "{{\"name\": \"{}\", \"params\": {{{params}}}, \"args\": {args:?}, \"shape\": {shape:?}}}",
+        p.name()
+    )
+}
+
+fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        unreachable!("a loop fusion")
+    };
+    let out = &step.output.1;
+    let window = window(step, 0);
+    let plan =
+        plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("{} on TPU: {e}", step.label))?;
+    let block = |v: Var| match body.type_of(v).shape.is_empty() {
+        true => Vec::new(),
+        false => plan.block(plan.maps[v].as_ref().expect("a value of the loop")),
+    };
+    let index_of = |map: &[Dim]| -> Vec<[i64; 2]> {
+        map.iter()
+            .map(|m| match *m {
+                Dim::Out { d, offset } => [d as i64, (offset / plan.blocks[d]) as i64],
+                Dim::One { offset } => [-1, offset as i64],
+            })
+            .collect()
+    };
+    let operands: Vec<String> = body
+        .inputs()
+        .iter()
+        .map(|&v| {
+            let t = body.type_of(v);
+            let map = plan.maps[v].as_deref().unwrap_or(&[]);
+            format!(
+                "[\"{}\", {:?}, {:?}, {:?}]",
+                t.dtype.full_name(),
+                t.shape,
+                block(v),
+                index_of(map)
+            )
+        })
+        .collect();
+    let mut value: HashMap<Var, usize> = body
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| (v, k))
+        .collect();
+    let mut nodes = Vec::new();
+    for n in body.nodes() {
+        let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
+        let map = plan.maps[n.output].as_deref().unwrap_or(&[]);
+        nodes.push(indexed_node(
+            &n.primitive,
+            &args,
+            &block(n.output),
+            map,
+            &plan,
+        ));
+        value.insert(n.output, body.inputs().len() + nodes.len() - 1);
+    }
+    let grid: Vec<usize> = out
+        .shape
+        .iter()
+        .zip(&plan.blocks)
+        .map(|(n, b)| n / b)
+        .collect();
+    let spec = format!(
+        "\"indexed\": true, \"shape\": {:?}, \"grid\": {grid:?}, \"blocks\": {:?}, \"inputs\": [{}], \"nodes\": [{}], \"result\": {}, \"output\": \"{}\", \"window\": {}",
+        out.shape,
+        plan.blocks,
+        operands.join(", "),
+        nodes.join(", "),
+        value[&body.outputs()[0]],
+        out.dtype.full_name(),
+        window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
+    );
+    let shown: Vec<String> = plan.blocks.iter().map(usize::to_string).collect();
+    let launched = Launch {
+        module: "lumen.codegen.tpu.elementwise",
+        kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
+        spec,
+        rows,
+        scalars: &[],
+        host: &[],
+    };
+    launch(index, launched)
+}
+
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -57,6 +179,18 @@ pub(crate) fn encode(
     let out = &step.output.1;
     if out.numel() == 0 {
         return Ok(());
+    }
+    if body
+        .nodes()
+        .iter()
+        .any(|n| layout(&n.primitive) && !fusible(&n.primitive))
+    {
+        let rows: Vec<*const u8> = inputs
+            .iter()
+            .copied()
+            .chain([output.cast_const()])
+            .collect();
+        return indexed(index, step, &rows);
     }
     let operands: Vec<&TensorType> = body.inputs().iter().map(|&v| body.type_of(v)).collect();
     if let Some(t) = operands
