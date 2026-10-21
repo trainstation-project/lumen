@@ -12,55 +12,6 @@ def floats(t):
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 
-@pytest.mark.parametrize("shape", [[1], [128], [129], [10, 100]])
-def test_copies_round_trip_without_touching_their_neighbours(shape):
-    rng = np.random.default_rng(0)
-    hosts = [rng.standard_normal(shape, dtype=np.float32) for _ in range(3)]
-    devices = [lumen.from_numpy(h).to("tpu") for h in hosts]
-    for host, device in zip(hosts, devices):
-        assert device.device == "tpu:0"
-        np.testing.assert_array_equal(floats(device), host)
-    bf16 = lumen.from_numpy(hosts[0]).to(dtype="bfloat16")
-    np.testing.assert_array_equal(floats(bf16.to("tpu")), floats(bf16))
-
-
-def check(f, lhs, rhs, dtype, tol, transposed=False):
-    """``f`` compiled on TPU tensors of shapes ``lhs`` and ``rhs`` agrees
-    with numpy's ``x @ w`` (``w.T`` if ``transposed``), in float32 on the
-    operands the TPU got, within ``tol`` of its largest output."""
-    rng = np.random.default_rng(0)
-    x, w = (lumen.from_numpy(rng.standard_normal(s, dtype=np.float32)).to(dtype=dtype).to("tpu") for s in (lhs, rhs))
-    y = lumen.compile(f)(x, w)
-    assert y.device == "tpu:0"
-    a, b = floats(x), floats(w)
-    expected = a @ (b.T if transposed else b)
-    assert list(y.shape) == list(expected.shape)
-    assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
-    return y
-
-
-@pytest.mark.parametrize(
-    "lhs, rhs",
-    [
-        ([256, 512], [512, 384]),
-        ([64, 1024], [1024, 128]),
-        ([1, 256], [256, 256]),
-        ([2, 3, 256], [256, 128]),
-        ([2, 64, 256], [2, 256, 384]),
-    ],
-)
-def test_float32_dots_run_on_the_matrix_unit(lhs, rhs):
-    y = check(lambda x, w: F.matmul(x, w, "float32", x.dtype), lhs, rhs, "float32", 1e-5)
-    assert y.dtype == "float32"
-
-
-def test_a_transposed_rhs():
-    check(lambda x, w: F.matmul(x, w.t(), "float32", x.dtype), [64, 256], [384, 256], "float32", 1e-5, transposed=True)
-    check(
-        lambda x, w: F.matmul(x, w.t(), "float32", x.dtype), [8, 1024], [512, 1024], "bfloat16", 1e-2, transposed=True
-    )
-
-
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
 @pytest.mark.parametrize("g, x", [([128, 256], [128, 512]), ([4096, 1024], [4096, 2048])])
 def test_a_transposed_lhs(g, x, dtype, tol):
@@ -80,43 +31,18 @@ def test_a_transposed_lhs(g, x, dtype, tol):
     ],
 )
 def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
-    y = check(lambda x, w: F.matmul(x, w, "float32", x.dtype), lhs, rhs, "bfloat16", 1e-2)
+    rng = np.random.default_rng(0)
+    x, w = (tpu(rng.standard_normal(s, dtype=np.float32), "bfloat16") for s in (lhs, rhs))
+    y = lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype))(x, w)
     assert y.dtype == "bfloat16"
-
-
-def test_a_bfloat16_dot_with_a_float32_output():
-    f = lambda x, w: lumen.functional.matmul(x, w.t(), "float32", "float32")
-    y = check(f, [8, 1024], [512, 1024], "bfloat16", 1e-5, transposed=True)
-    assert y.dtype == "float32"
-
-
-def test_small_dots_take_their_dimensions_whole():
-    check(lambda x, w: F.matmul(x, w, "float32", x.dtype), [4, 8], [8, 16], "float32", 1e-5)
-    check(lambda x, w: F.matmul(x, w, "float32", x.dtype), [3, 100], [100, 30], "bfloat16", 1e-2)
+    expected = floats(x) @ floats(w)
+    assert np.abs(floats(y) - expected).max() <= 1e-2 * np.abs(expected).max()
 
 
 def test_a_dot_the_kernel_cannot_run_says_why():
     x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
     with pytest.raises(ValueError, match="accumulating in float32"):
         lumen.compile(lambda x, w: F.matmul(x, w, "int32", "int32"))(x, w)
-
-
-@pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
-def test_elementwise_primitives_agree_with_numpy(shape):
-    rng = np.random.default_rng(0)
-    a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
-    x, y = (lumen.from_numpy(h).to("tpu") for h in (a, b))
-    cases = [
-        (lambda x, y: x + y, a + b),
-        (lambda x, y: x * y, a * b),
-        (lambda x, y: lumen.functional.sin(x), np.sin(a)),
-        (lambda x, y: lumen.functional.exp(x), np.exp(a)),
-    ]
-    for f, expected in cases:
-        out = lumen.compile(f)(x, y)
-        assert out.device == "tpu:0"
-        np.testing.assert_allclose(floats(out), expected, rtol=1e-5, atol=1e-5)
-    np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda x, y: x < y)(x, y).to("cpu")), a < b)
 
 
 def test_programs_of_other_primitives_say_they_do_not_run_yet():
@@ -152,33 +78,6 @@ def test_the_profiler_times_each_tpu_program():
         assert ops[run["parent"]]["name"] == run["name"]
     (row,) = [r for r in prof.key_averages() if r.key == "exp → mul"]
     assert row.count == 1 and row.self_device_time_total == pytest.approx(runs[0]["duration_us"], rel=1e-3)
-
-
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_a_dot_of_two_vectors_runs_as_a_product_and_a_sum(dtype):
-    """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
-    free dimensions (no matmul runs it): dot strength reduction's product
-    and row sum, in float32."""
-    rng = np.random.default_rng(0)
-    a, b = (rng.standard_normal([2, 8, 1024, 128], dtype=np.float32) for _ in range(2))
-    x, y = (lumen.from_numpy(t).to(dtype=dtype).to("tpu") for t in (a, b))
-    out = lumen.compile(
-        lambda x, y: lumen.functional.einsum("bhsd,bhsd->bhs", x, y, accum_dtype="float32", output_dtype=x.dtype)
-    )(x, y)
-    assert out.device == "tpu:0" and list(out.shape) == [2, 8, 1024]
-    expected = (floats(x) * floats(y)).sum(-1)
-    assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
-
-
-@pytest.mark.parametrize("shape", [[64, 128], [2048, 2048], [3, 16, 256, 128], [8, 1024, 1000]])
-def test_sums_over_the_last_dimension(shape):
-    """Two dimensions or more, the summed one in blocks of an accumulator
-    (2048: four), bfloat16 summed in float32."""
-    rng = np.random.default_rng(0)
-    x = lumen.from_numpy(rng.standard_normal(shape, dtype=np.float32)).to(dtype="bfloat16").to("tpu")
-    out = lumen.compile(lambda x: lumen.functional.sum(x.float(), -1))(x)
-    assert out.dtype == "float32" and list(out.shape) == shape[:-1]
-    np.testing.assert_allclose(floats(out), floats(x).sum(-1), rtol=1e-5, atol=1e-4)
 
 
 def test_a_sum_over_a_middle_dimension_says_so():

@@ -177,6 +177,71 @@ def test_matmul(a_shape, b_shape):
     np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
 
 
+def floats(t):
+    return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
+
+
+def placed(shape, dtype, device, seed=0):
+    a = np.random.default_rng(seed).standard_normal(shape, dtype=np.float32)
+    return lumen.from_numpy(a).to(dtype=dtype).to(device)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize(
+    "lhs, rhs, dtype, transposed, output",
+    [
+        ([256, 512], [512, 384], "float32", False, None),
+        ([64, 1024], [1024, 128], "float32", False, None),
+        ([1, 256], [256, 256], "float32", False, None),
+        ([2, 3, 256], [256, 128], "float32", False, None),
+        ([2, 64, 256], [2, 256, 384], "float32", False, None),
+        ([4, 8], [8, 16], "float32", False, None),
+        ([3, 100], [100, 30], "bfloat16", False, None),
+        ([64, 256], [384, 256], "float32", True, None),
+        ([8, 1024], [512, 1024], "bfloat16", True, None),
+        ([8, 1024], [512, 1024], "bfloat16", True, "float32"),
+    ],
+)
+def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output):
+    """A dot, in float32 on the operands as placed, within its operands'
+    dtype's precision of its largest output (float32's when it writes
+    float32)."""
+    x, w = placed(lhs, dtype, device), placed(rhs, dtype, device, seed=1)
+    out = output or dtype
+    y = lumen.compile(lambda x, w: F.matmul(x, w.t() if transposed else w, "float32", out))(x, w)
+    assert y.device == f"{device}:0" and y.dtype == out
+    a, b = floats(x), floats(w)
+    expected = a @ (b.T if transposed else b)
+    assert list(y.shape) == list(expected.shape)
+    tol = 1e-5 if out == "float32" else 1e-2
+    assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):
+    """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
+    free dimensions: dot strength reduction's product and row sum, in
+    float32."""
+    x, y = placed([2, 8, 1024, 128], dtype, device), placed([2, 8, 1024, 128], dtype, device, seed=1)
+    out = lumen.compile(lambda x, y: F.einsum("bhsd,bhsd->bhs", x, y, accum_dtype="float32", output_dtype=x.dtype))(
+        x, y
+    )
+    assert out.device == f"{device}:0" and list(out.shape) == [2, 8, 1024]
+    expected = (floats(x) * floats(y)).sum(-1)
+    assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("shape", [[64, 128], [2048, 2048], [3, 16, 256, 128], [8, 1024, 1000]])
+def test_sums_over_the_last_dimension(device, shape):
+    """bfloat16 summed in float32 over its last dimension."""
+    x = placed(shape, "bfloat16", device)
+    out = lumen.compile(lambda x: F.sum(x.float(), -1))(x)
+    assert out.dtype == "float32" and list(out.shape) == shape[:-1]
+    np.testing.assert_allclose(floats(out), floats(x).sum(-1), rtol=1e-5, atol=1e-4)
+
+
 def test_matmul_folds_a_batch_times_a_matrix():
     """A batch times a matrix (``x @ w``, a weight) is one matmul of the
     batch's rows, as torch folds it: the matrix read as it is, never
