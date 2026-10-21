@@ -63,6 +63,14 @@ def broadcast(x, shape):
     return prims.broadcast_in_dim(x, tuple(shape), tuple(range(len(shape) - len(x.shape), len(shape))))
 
 
+def tile(x, width):
+    if width == LANES:
+        return x
+    if width % LANES:
+        return broadcast(x[:, :1], (x.shape[0], width))
+    return F.cat([x] * (width // LANES), -1)
+
+
 def zeros(shape):
     return prims.full(tuple(shape), 0.0, "float32")
 

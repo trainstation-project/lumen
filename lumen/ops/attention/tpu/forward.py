@@ -16,6 +16,7 @@ from lumen.ops.attention.tpu import (
     minimum,
     mul,
     scored,
+    tile,
     vector,
     views,
     visible,
@@ -69,21 +70,21 @@ def program(spec):
                     qk = masked(spec, scored(spec, qk), mul(i, bq), add(start, c * bkc))
                     m_prev, l_prev = m_ref[...], l_ref[...]
                     m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
-                    s = F.exp(qk - broadcast(m_next[:, :1], qk.shape))
+                    s = F.exp(qk - tile(m_next, bkc))
                     alpha = F.exp(m_prev - m_next)
                     l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
                     m_ref[...] = m_next
                     pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
-                    acc_ref[...] = broadcast(alpha[:, :1], (bq, hv)) * acc_ref[...] + pv
+                    acc_ref[...] = tile(alpha, hv) * acc_ref[...] + pv
 
             when(visible(spec, i, j), run)
 
             @pl.when(j == nk - 1)
             def _():
-                total = l_ref[...][:, :1]
-                ob[...] = (acc_ref[...] * broadcast(1.0 / total, (bq, hv))).to(ob.dtype)
+                total = l_ref[...]
+                ob[...] = (acc_ref[...] * tile(1.0 / total, hv)).to(ob.dtype)
                 if rest:
-                    rest[0][...] = (F.log(total) + m_ref[...][:, :1]).to(rest[0].dtype)
+                    rest[0][...] = (F.log(total) + m_ref[...])[:, :1].to(rest[0].dtype)
 
         grid = (heads(spec), nq, nk)
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
