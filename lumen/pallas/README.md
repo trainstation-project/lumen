@@ -27,7 +27,7 @@ uses (`tracer.tracing`), so lumen's ops work in kernels as they do in
 programs (`@`, `lumen.functional`, `.to(dtype)`, indexing, `lumen.zeros`),
 each a graph `Primitive` whose types are inferred as the graph's. Its refs
 are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
-`multiple_of`) and `lax`'s that lumen has no name for (`select_n`,
+`multiple_of`) and `lax`'s that lumen has no name for (`broadcasted_iota`, `select_n`,
 `integer_pow`, `erf_inv`, control flow) are functions of this module.
 
 ## Files
@@ -37,7 +37,7 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 | `mod.rs` | The kernel IR: `Kernel` (parameters, scratch, a body `Block` of `Node`s), `Type` (`Value`, `Ref` of a `Space`, `Semaphore` array, tiled `View`), `Op` (graph primitives, bit ops, ref `Slice`/`Reshape`/`RefBitcast`, `Load`, `Store`, `StridedLoad`/`StridedStore`, `DmaStart`/`DmaWait`, `If` (with an `else` and values), `For`, `While`), and the builder that checks each node as it is added. |
 | `mosaic.rs` | `lower(kernel, name)`: the kernel as a Mosaic module in libtpu's serialized form (generic ops named `stable_mosaic.*`, version 17). Pallas's lowering rules for each primitive (`arith`, `math`, `vector`, `tpu.matmul`, `scf`). |
 | `python.rs` | `lumen.pallas._C.Kernel`, the bindings the Python API drives; it answers the tracer as a `Graph` does (`apply`, `type_of`, `_set_source`, `_set_scope`). |
-| `__init__.py` | `lumen.pallas`: `kernel` (trace and lower a kernel on a device's memory), `Ref` (loads, stores, strided indexing, `.at` windows, `reshape`, `bitcast`), `ds`, `VMEM`, `SMEM`, `SemaphoreType`, control flow (`when`, `cond`, `switch`, `fori_loop`, `while_loop`, `scan` of a carry, `loop`), `make_async_copy` / `async_copy`, bit ops, `multiple_of`, `dot`, `dot_general`, `select_n`, `integer_pow`, `reduce_precision`, `erf_inv`, `population_count`, `clz`. |
+| `__init__.py` | `lumen.pallas`: `kernel` (trace and lower a kernel on a device's memory), `Ref` (loads, stores, strided indexing, `.at` windows, `reshape`, `bitcast`), `ds`, `VMEM`, `SMEM`, `SemaphoreType`, control flow (`when`, `cond`, `switch`, `fori_loop`, `while_loop`, `scan` of a carry, `loop`), `make_async_copy` / `async_copy`, bit ops, `multiple_of`, `dot`, `dot_general`, `broadcasted_iota`, `select_n`, `integer_pow`, `reduce_precision`, `erf_inv`, `population_count`, `clz`. |
 | `call.py` | `pallas_call`: a kernel as an op of a lumen program, its operands staged as JAX stages them (whole in VMEM or SMEM, as HBM refs, or pipelined in blocks over a grid, named or not), `input_output_aliases`. |
 | `pipeline.py` | `emit_pipeline`, `BlockSpec` (`Blocked`, `Element`, `None` dimensions), `program_id`, `num_programs`, `axis_index`, `axis_size`: Pallas's two-slot double-buffered pipeline over a grid (see the module doc for its schedule), with JAX's checks of block shapes and index maps. A block past its operand's end reads the operand viewed larger where that is its tiles' padding, else (at a static position) copies the operand's rows alone, the rest of the slot undefined. |
 | `_C.pyi` | Type stub for `Kernel`. |
