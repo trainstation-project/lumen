@@ -45,3 +45,6 @@ print(f"{per_call:.1f} us a call ({2 * M * K * N / per_call / 1e6:.0f} TFLOP/s)"
 print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=10))
 prof.export_chrome_trace("tpu_gemm_relu_trace.json")
 print("wrote tpu_gemm_relu_trace.json")
+
+gemm_relu.dump_code("tpu_gemm_relu_code")
+print("wrote tpu_gemm_relu_code/ (a file each kernel a call runs, in order; tpu_gemm_relu_code/index.txt)")
