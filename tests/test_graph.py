@@ -387,10 +387,17 @@ def test_dump_code_writes_each_kernel_in_order(tmp_path):
     written = f.dump_code(tmp_path / "cpu")
     index = (tmp_path / "cpu" / "index.txt").read_text().splitlines()
     assert sorted(p.name.split("-")[1] for p in written) == ["broadcast_in_dim", "dot_general", "full", "max"]
-    assert [int(line.split()[2]) for line in index[2:]] == [0, 1, 2, 3]
+    assert [int(line.split()[2]) for line in index[3:]] == [0, 1, 2, 3]
     assert all(p.read_text().startswith(f"# step {k}: {p.name.split('-')[1]}") for k, p in enumerate(written))
-    assert "dot_general" in (tmp_path / "cpu" / "graph.txt").read_text()
+    graph = (tmp_path / "cpu" / "graph.txt").read_text()
+    assert "dot_general" in graph
     assert (tmp_path / "cpu" / "plan.txt").read_text().count("\n") >= 4
+    scope = {}
+    exec((tmp_path / "cpu" / "program.py").read_text(), scope)
+    x, w = lumen.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3) - 2), lumen.ones([3, 4])
+    assert str(lumen.make_graph(scope["program"])(x, w)) + "\n" == graph
+    (got,) = lumen.compile(scope["program"])(x, w)
+    assert got.tolist() == f(x, w).tolist()
 
 
 @pytest.mark.mps

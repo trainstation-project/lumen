@@ -333,6 +333,32 @@ def _header(step, at, ext):
     return "".join(f"{mark} {line}\n" for line in lines) + "\n"
 
 
+def _literal(value):
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return f'float("{value}")'
+    return repr(value)
+
+
+def program_source(graph, name="program"):
+    names = {v: f"in{k}" for k, v in enumerate(graph.inputs())}
+    lines = ["from lumen.graph import prims", "", ""]
+    lines += [f"# {names[v]}: {type_text(*graph.type_of(v))}" for v in graph.inputs()]
+    lines.append(f"def {name}({', '.join(names[v] for v in graph.inputs())}):")
+    traced = None
+    for node in graph.nodes():
+        at = _traced_at(node["sources"])
+        if at and at != traced:
+            lines += [f"    # {line}" for line in at]
+            traced = at
+        names[node["output"]] = f"v{node['output']}"
+        operands = [f'"{node["primitive"]}"', *(names[v] for v in node["inputs"])]
+        operands += [f"{key}={_literal(value)}" for key, value in node["params"].items()]
+        lines.append(f"    {names[node['output']]} = prims.bind({', '.join(operands)})")
+    outputs = [names[v] for v in graph.outputs()]
+    lines.append(f"    return {', '.join(outputs)}" + ("," if len(outputs) == 1 else ""))
+    return "\n".join(lines) + "\n"
+
+
 def dump_code(graph, plan, run, device, directory):
     from lumen.graph_compiler._C import _capture_launches, _captured_launches
 
@@ -356,8 +382,13 @@ def dump_code(graph, plan, run, device, directory):
         (directory / "prelude.metal").write_text((OPS / "mps" / "kernels.metal").read_text())
         index.append("prelude.metal  the Metal prelude every kernel above is compiled with")
     (directory / "graph.txt").write_text(str(graph) + "\n")
+    (directory / "program.py").write_text(program_source(graph))
     (directory / "plan.txt").write_text(str(plan) + "\n")
-    index[:0] = ["graph.txt  the traced program", "plan.txt  its plan: the steps below and their buffers"]
+    index[:0] = [
+        "graph.txt  the traced program",
+        "program.py  the traced program as Python (prims.bind a node), tracing to the same graph",
+        "plan.txt  its plan: the steps below and their buffers",
+    ]
     (directory / "index.txt").write_text("\n".join(index) + "\n")
     return written
 
