@@ -5,11 +5,11 @@ Core ML programs for the Neural Engine). The MPS graph compiler
 (`lumen/graph_compiler/mps`) groups primitives into `Primitive::Fusion`
 nodes; its `codegen` pass (`graph_compiler/mps/kernel_codegen.rs`) calls
 this module once per fusion body and gets back `(name, Metal source)`. The
-source is compiled and launched by the MPS runtime (`lumen/ops/mps`); this
+source is compiled and launched by the MPS runtime (`lumen/kernels/mps`); this
 module only writes text.
 
 Generated kernels are thin: most instantiate a hand-written template from
-`lumen/ops/**/mps/*.metal` (the elementwise prelude, reductions, the
+`lumen/kernels/**/mps/*.metal` (the elementwise prelude, reductions, the
 simdgroup matmul, flash attention) with a generated functor or input
 struct that computes the fused primitives per element.
 
@@ -54,7 +54,7 @@ views*).
 
 **Loop (elementwise).** One thread per output element, flat index `j`,
 using the `ELEMENTWISE_ARGS` / `FOR_EACH_ELEMENT` macros from
-`ops/mps/kernels.metal`. Multi-output fusions write `out1`, `out2`, ... at
+`kernels/mps/kernels.metal`. Multi-output fusions write `out1`, `out2`, ... at
 the same index. Layout primitives (reshape, broadcast_in_dim, transpose,
 slice), gather, concatenate, iota, full and random_bits are computed by
 index arithmetic inside the loop, never materialized.
@@ -88,17 +88,17 @@ pass writing the output. Details:
   dimension.
 
 **Reductions** (`reduction`, XLA's reduce input fusion). The fusion's root
-is a `reduce_sum`/`reduce_max` reached through elementwise ops/reshapes.
+is a `reduce_sum`/`reduce_max` reached through elementwise kernels/reshapes.
 Generates a `NAME_input` struct whose `operator[]` computes each input
 element from the fusion's inputs, and instantiates `reduce_rows` /
-`reduce_cols` / `reduce_grouped` from `ops/reduce/mps/kernels.metal` per
+`reduce_cols` / `reduce_grouped` from `kernels/reduce/mps/kernels.metal` per
 `reduce::layout`. An epilogue (cast, a mean's division) becomes a
 `NAME_epilogue` functor. When `reduce::splits` says the reduction splits,
 the epilogue is applied in a second kernel `NAME_final` over the partials
 (`split_launches` names the two launches for profiling).
 
 **GEMM with epilogue** (`gemm_kernel`). Instantiates `matmul_sg_impl` from
-`ops/dot_general/mps/kernels.metal` three times — `NAME` (128x64 tiles),
+`kernels/dot_general/mps/kernels.metal` three times — `NAME` (128x64 tiles),
 `NAME_mid` (64x64), `NAME_small` (32x32) — and the encoder picks one. The
 epilogue (bias, activation, residual, cast) is a `NAME_epi` functor of the
 dot's value `r` and the flat index. Variants:
@@ -121,14 +121,14 @@ each tile in threadgroup memory, and runs the row code from there
 
 **Attention.** `attention_kernel` instantiates `flash_attention`, or
 `attention_decode` when `decodes(a)` (at most 8 queries), from
-`ops/attention/mps/forward.metal`, with per-operand stride indexers
+`kernels/attention/mps/forward.metal`, with per-operand stride indexers
 (`ix_method`), a score functor (the traced roundings/casts/scale,
 `score_functor`) and an optional dropout functor (`dropout_functor`; the
 random state is the body's last two inputs, `random_state`). Key block:
 largest of 32/16/8 fitting 28 KB (`key_block`).
 `attention_backward_kernel` instantiates `flash_attention_dkdv` (dV and dK,
 plus dQ when `backward_block_with_dq` finds a block that fits) or
-`flash_attention_dq` from `ops/attention/mps/backward.metal`.
+`flash_attention_dq` from `kernels/attention/mps/backward.metal`.
 
 ## The `Emitter`
 
@@ -140,7 +140,7 @@ index through a layout primitive (XLA's indexing maps), using
 `gather_index`, which merges contiguous dimensions to save div/mod.
 Fields `invariant` / `row_locals` / `hoisted` let callers pin a value to a
 name computed once (a row's reduction, a GEMM's `r`, a transpose tile
-slot). Elementwise ops map to functors in `ops/mps/kernels.metal`
+slot). Elementwise ops map to functors in `kernels/mps/kernels.metal`
 (`functor`); constants are emitted from the exact bits `full` would fill
 (`constant`). Anything else hits `unreachable!("... is not loop-fusible")`.
 
@@ -168,7 +168,7 @@ strides inside a larger buffer — an operand of an in-place `concatenate`
 Buffers in order: non-by-value inputs `in{k}`, `out`, extra outputs
 `out1..`, then by-value inputs as `constant T &in{k}`; kernel-specific
 arguments (reduction counts, matmul params `p`) start at the returned
-index. The encoders in `graph_compiler/mps` and `ops/*/mps` bind
+index. The encoders in `graph_compiler/mps` and `kernels/*/mps` bind
 arguments in this exact order — change both together.
 
 ## Invariants & gotchas
@@ -192,4 +192,4 @@ arguments in this exact order — change both together.
 * [`ane/`](ane/README.md) — the Neural Engine lowering.
 * [`lumen/graph`](../../graph/README.md) — `Graph`, `Primitive`, `placements()`.
 * [`lumen/graph_compiler/mps`](../../graph_compiler/mps/README.md) — fusion passes and `kernel_codegen.rs` (the caller); `graph_compiler/common/attention.rs` defines `Attention` / `Backward`; `graph_compiler/config.rs` the flags read here.
-* [`lumen/ops`](../../ops/README.md) — the Metal templates and launch code (`ops/mps`, `ops/reduce/mps`, `ops/dot_general/mps`, `ops/attention/mps`).
+* [`lumen/kernels`](../../kernels/README.md) — the Metal templates and launch code (`kernels/mps`, `kernels/reduce/mps`, `kernels/dot_general/mps`, `kernels/attention/mps`).

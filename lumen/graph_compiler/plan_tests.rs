@@ -2,7 +2,7 @@ use super::Plan;
 use super::plan::Buffer;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::ops::reference;
+use crate::kernels::reference;
 use crate::{DType, Scalar, Tensor};
 
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
@@ -182,7 +182,7 @@ fn plan_rematerializes_under_a_memory_limit() {
 
 #[test]
 fn philox_matches_random123() {
-    use crate::ops::reference::philox4x32;
+    use crate::kernels::reference::philox4x32;
     let kat: [([u32; 2], [u32; 4], [u32; 4]); 3] = [
         (
             [0; 2],
@@ -207,7 +207,7 @@ fn philox_matches_random123() {
 
 #[test]
 fn random_bits_are_a_counter_stream() {
-    use crate::ops::reference::philox_bits;
+    use crate::kernels::reference::philox_bits;
     let draw = |offset: u64, shape: &[usize]| {
         let mut g = Graph::new();
         let seed = g.input(ty(DType::U64, &[]));
@@ -690,7 +690,7 @@ pub(crate) mod mps {
     use super::{data, mlp};
     use crate::graph::{Graph, Primitive, TensorType};
     use crate::graph_compiler::Plan;
-    use crate::ops::reference;
+    use crate::kernels::reference;
     use crate::tensor::dtype::dispatch_dtype;
     use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 

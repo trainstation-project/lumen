@@ -8,7 +8,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::ops::tpu::{Launch, launch};
+use crate::kernels::tpu::{Launch, launch};
 
 pub(crate) const ROW_BYTES: usize = 1 << 21;
 
@@ -279,7 +279,7 @@ pub(crate) fn encode(
         .map(|l| l.rows)
         .max()
         .unwrap_or(8);
-    let bm = crate::ops::row::tpu::block_rows(rows, n, unit).map_err(|e| failed(&e))?;
+    let bm = crate::kernels::row::tpu::block_rows(rows, n, unit).map_err(|e| failed(&e))?;
     let spec = format!(
         "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         operands.join(", "),
@@ -294,7 +294,7 @@ pub(crate) fn encode(
         .chain(inputs[n_in..].iter().copied())
         .collect();
     let launched = Launch {
-        module: "lumen.ops.row.tpu",
+        module: "lumen.kernels.row.tpu",
         kernel: format!("row_{rows}x{n}_{bm}"),
         spec,
         rows: &rows_of,

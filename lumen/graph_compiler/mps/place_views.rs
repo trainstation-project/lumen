@@ -1,7 +1,7 @@
 use super::{MpsModule, codegen};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::CompilerPass;
-use crate::ops::dot_general::mps::reads_strided;
+use crate::kernels::dot_general::mps::reads_strided;
 use crate::tensor::contiguous_strides;
 
 pub(super) struct PlaceViews;
@@ -65,7 +65,7 @@ pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) ->
     let operands = [body.type_of(dot.inputs[0]), body.type_of(dot.inputs[1])];
     match side {
         Some(side) if only && dot.inputs[0] != dot.inputs[1] => {
-            crate::ops::dot_general::mps::reads_strided(&dot.primitive, operands, side, strides)
+            crate::kernels::dot_general::mps::reads_strided(&dot.primitive, operands, side, strides)
         }
         _ => false,
     }

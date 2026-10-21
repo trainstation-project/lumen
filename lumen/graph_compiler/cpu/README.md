@@ -34,7 +34,7 @@ plan — so this folder is only the glue from `Options` to `PlanOptions`.
 - Host stages of a staged plan (`../stages.rs`) are compiled here too.
 - Steps run on the host when the plan runs (`Plan::run`), with device inputs
   copied there and outputs copied back, except on a TPU: its plans run TPU
-  kernels (`lumen/ops/tpu`), so far only `dot_general`'s.
+  kernels (`lumen/kernels/tpu`), so far only `dot_general`'s.
 
 ## Related
 

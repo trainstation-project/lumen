@@ -2,11 +2,11 @@
 
 The MPS (Apple Metal) graph compiler. It rewrites a graph that already went
 through the frontend (`cse`, `simplify`) into one whose steps are either
-lumen's primitive kernels (`lumen/ops/*/mps`) or `Primitive::Fusion`s whose
+lumen's primitive kernels (`lumen/kernels/*/mps`) or `Primitive::Fusion`s whose
 kernels are generated as Metal source by `lumen/codegen/mps`, compiles all
 generated sources into one Metal library, and plans the result with
 `Plan::compile_with` (with kernel scratch in the workspace, so no kernel
-allocates). At run time, `lumen/ops/mps` calls `encode` here for every
+allocates). At run time, `lumen/kernels/mps` calls `encode` here for every
 fusion step.
 
 The whole module only exists with `cfg(lumen_mps_linked)` (macOS, shim
@@ -130,17 +130,17 @@ copying; `Graph::placements()` turns them into `(value, View)` pairs, which
 - **`Primitive::Slice { view }`** — set by `place_views` (last pass) for
   slices read only by dots, or GEMM-epilogue fusions
   (`fusion_reads_strided`), that the matmul kernels can read at the slice's
-  strides (`ops::dot_general::mps::reads_strided`), and that are not
+  strides (`kernels::dot_general::mps::reads_strided`), and that are not
   outputs or slices of another view. The step reads them via `Step::views`.
 
 ## What stays in `mod.rs`
 
 - **`compile`**: build `MpsModule`, run `pipeline(config)`,
   `compile_kernels` (prelude + all sources into one library through
-  `lumen_mps_compile_kernels` in `lumen/ops/mps/shim.mm`; sources are kept
+  `lumen_mps_compile_kernels` in `lumen/kernels/mps/shim.mm`; sources are kept
   in `SOURCES` for `fusion_source`, which the graph viewer shows), extend
   `parameters` to cover packed blocks, plan with
-  `scratch: Some(ops::mps::scratch_bytes)`, then relabel dots reading a
+  `scratch: Some(kernels::mps::scratch_bytes)`, then relabel dots reading a
   packed block (or a value computed elementwise from one) as
   `Nx dot_general`.
 - **`encode(step, …)`**: launches a fusion step. Dispatch order:
@@ -148,7 +148,7 @@ copying; `Graph::placements()` turns them into `(value, View)` pairs, which
   first when it is added atomically); atomic split-K dot (zero output, then
   `matmul_atomic_<dtype>`); GEMM with epilogue (`_small` / `_mid` tile
   variants, or a row-dot grid); row kernel; reduction fusion
-  (`ops::reduce::mps::encode_reduction`, `_final` launch for epilogues);
+  (`kernels::reduce::mps::encode_reduction`, `_final` launch for epilogues);
   tiled transpose; plain elementwise grid. Inputs that are
   `Buffer::Scalar` are passed as bytes before the kernel's own arguments.
 - **`fusion_scratch_bytes`**: workspace a reduction fusion's split
@@ -180,5 +180,5 @@ copying; `Graph::placements()` turns them into `(value, View)` pairs, which
 - [`..`](../README.md) — frontend, `Pass`/`Pipeline`, `Plan`, `attention.rs`.
 - [`ane/`](ane/README.md) — Core ML offload used by pass 9 and `encode`.
 - [`../../codegen/`](../../codegen/) — Metal source for fusions (`kernel`, `gemm_dot`, `row_reductions`, …).
-- [`../../ops/`](../../ops/) — primitive MPS kernels, `launch`, `scratch_bytes`, matmul planning.
+- [`../../kernels/`](../../kernels/) — primitive MPS kernels, `launch`, `scratch_bytes`, matmul planning.
 - [`../../graph/`](../../graph/) — `Primitive` flags (`in_place`, `view`), `placements`, `slot`.

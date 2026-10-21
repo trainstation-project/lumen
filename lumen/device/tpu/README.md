@@ -5,7 +5,7 @@ outside JAX. This folder owns the process's one PJRT client, its devices
 (`tpu:0`, `tpu:1`, ...), the device-memory calls the TPU allocator
 ([`../../allocator/tpu.rs`](../../allocator/README.md)) is built on, and
 compiling and running the programs of lumen's TPU kernels
-([`../../ops/tpu/`](../../ops/tpu/README.md)).
+([`../../kernels/tpu/`](../../kernels/tpu/README.md)).
 
 libtpu is **loaded at run time** (`dlopen`), never linked: the crate builds
 anywhere, and a machine without libtpu or TPUs simply reports no TPU devices.
@@ -57,7 +57,7 @@ What libtpu does (0.0.17 to 0.0.50, PJRT API 0.69 on), as probed on a v6e:
   (`PJRT_Client_BufferFromHostBuffer`) for a kernel to copy in.
 * **Programs** are StableHLO text (`format = "mlir"`) of one
   `tpu_custom_call` (a kernel in lumen's Pallas, lowered by lumen:
-  `lumen/ops/tpu`),
+  `lumen/kernels/tpu`),
   compiled once with
   hand-encoded `CompileOptionsProto` bytes: one replica, one partition,
   `compile_portable_executable`, so one executable runs on any device
@@ -86,6 +86,6 @@ What libtpu does (0.0.17 to 0.0.50, PJRT API 0.69 on), as probed on a v6e:
 
 - [`../`](../README.md) — the `DeviceBackend` trait and the `Device` enum (`Device::Tpu`).
 - [`../../allocator/`](../../allocator/README.md) — `TpuAllocator`, a `Region` over the buffer this folder reserves.
-- [`../../ops/device_transfer/`](../../ops/device_transfer/README.md) — copies to and from a TPU (`tpu.rs`).
-- [`../../ops/tpu/`](../../ops/tpu/README.md) — the kernels: lumen's Pallas, wrapped, launched.
+- [`../../kernels/device_transfer/`](../../kernels/device_transfer/README.md) — copies to and from a TPU (`tpu.rs`).
+- [`../../kernels/tpu/`](../../kernels/tpu/README.md) — the kernels: lumen's Pallas, wrapped, launched.
 - [`../../stream/`](../../stream/README.md) — `TpuStream`.

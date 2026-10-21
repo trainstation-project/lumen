@@ -10,7 +10,7 @@ the primitives as they are), then buffer assignment and scheduling in
 
 `lumen.compile` (`lumen/graph/tracer.py`) builds `lumen.graph_compiler.Plan`
 objects and caches them; `lumen.config.compiler` holds the flags they are
-compiled with. Kernels themselves live in `lumen/ops` (primitive kernels) and
+compiled with. Kernels themselves live in `lumen/kernels` (primitive kernels) and
 `lumen/codegen` (generated fusion kernels); this folder decides *what* runs
 and *where it lives in memory*.
 
@@ -118,8 +118,8 @@ Within one order (`compile_in_order`):
   `run_in(workspace, inputs)` reads parameters in place and returns views
   valid until the next run.
 
-`Plan::run` runs on the inputs' device (MPS steps through `lumen/ops/mps`,
-TPU steps through `lumen/ops/tpu` (dots, merged dots' fusions,
+`Plan::run` runs on the inputs' device (MPS steps through `lumen/kernels/mps`,
+TPU steps through `lumen/kernels/tpu` (dots, merged dots' fusions,
 loop, row and reduction fusions: any other step errors), elsewhere on the host); `run_on` takes an explicit device (meta runs
 nothing). `print(plan)` shows each step as `out:type = primitive in...`.
 
@@ -175,6 +175,6 @@ the `Config` class in `lumen/allocator/python.rs`.
 
 - [`../graph/`](../graph/) — `Graph`, `Primitive`, `View`, `placements()`, the tracer that calls `Plan`.
 - [`../codegen/`](../codegen/) — Metal (and Core ML MIL) source generation for fusions.
-- [`../ops/`](../ops/) — primitive kernels, MPS launch helpers, `scratch_bytes`, the reference executor.
+- [`../kernels/`](../kernels/) — primitive kernels, MPS launch helpers, `scratch_bytes`, the reference executor.
 - [`../allocator/`](../allocator/README.md) — device memory behind workspaces; hosts `lumen.config`.
 - [`../device/`](../device/README.md) — the `Device` passed to `compile`.

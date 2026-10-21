@@ -42,7 +42,7 @@ impl MetalKernel {
             let buffers: Vec<*const u8> =
                 tensors.iter().map(|t| t.data_ptr().cast_const()).collect();
             let label = crate::graph::intern(self.name.clone());
-            crate::ops::mps::launch(&self.key, &buffers, args, grid, tensors.to_vec(), label)
+            crate::kernels::mps::launch(&self.key, &buffers, args, grid, tensors.to_vec(), label)
         }
         #[cfg(not(lumen_mps_linked))]
         {

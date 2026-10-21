@@ -9,7 +9,7 @@ A device runs a graph with two kinds of kernels: a few hand-written ones,
 where scheduling decides the speed, and generated ones for everything
 else. Pick by what the kernel does, not by which primitive is missing.
 
-## Hand-written (`lumen/ops/<op>/<device>/`)
+## Hand-written (`lumen/kernels/<op>/<device>/`)
 
 Write a kernel by hand only when its speed comes from a schedule codegen
 cannot derive from the graph: tiling, pipelining, on-chip memory, the
@@ -46,7 +46,7 @@ Everything per element is generated from the fusion's body.
 
 1. **No kernel per primitive.** When a primitive does not run on a device,
    give it a lowering in that device's codegen, not a new kernel under
-   `lumen/ops/<primitive>/<device>/`. Per-primitive kernels (today's TPU
+   `lumen/kernels/<primitive>/<device>/`. Per-primitive kernels (today's TPU
    reduce_sum and reshape kernels) are stopgaps until `lumen/codegen/tpu`
    generates them, as it does elementwise loops; don't add more.
 2. **A new hand-written kernel needs a reason codegen can't meet:** a
@@ -57,12 +57,12 @@ Everything per element is generated from the fusion's body.
    editing the kernel.
 4. **Same split on every device.** A device's `codegen/<device>` mirrors
    `codegen/mps` (loop, row, reduction, transpose kinds), and its
-   hand-written kernels mirror `ops/*/mps`, so a fusion that runs on one
+   hand-written kernels mirror `kernels/*/mps`, so a fusion that runs on one
    device runs on the others.
 5. **Layout.** Hand-written kernels for a device go in a `<device>/` folder
    (`mod.rs` plus its kernel files) when they are more than one file.
 6. **Templates are written in lumen's API.** A TPU template (a Pallas
-   program in `lumen/ops/<op>/tpu/`) uses operators, `lumen.functional`,
+   program in `lumen/kernels/<op>/tpu/`) uses operators, `lumen.functional`,
    `lumen.full`/`lumen.zeros` and `lumen.pallas` (its `lax` names, such as
    `pl.broadcasted_iota`), as a JAX Pallas kernel uses `jnp` and `lax`; not
    `lumen.graph.prims`. Only codegen's replay of a body's nodes
@@ -73,4 +73,4 @@ Everything per element is generated from the fusion's body.
 - [ ] Is this per element? Then it belongs in codegen.
 - [ ] If hand-written: a scheduling reason or a measurement, recorded in the README.
 - [ ] Fused work comes in through the spec or a generated functor, not edits to the kernel.
-- [ ] Files: `lumen/ops/<op>/<device>/` for hand-written, `lumen/codegen/<device>/` for generated.
+- [ ] Files: `lumen/kernels/<op>/<device>/` for hand-written, `lumen/codegen/<device>/` for generated.

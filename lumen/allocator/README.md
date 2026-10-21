@@ -207,7 +207,7 @@ host-addressable: the pointers handed out are the runtime's address of
 that buffer plus the allocation's offset, never dereferenced.
 `copy_to_host(index, ptr, dst)` reads an allocation back at its offset (the
 TPU-to-host copy kernel's); `run(index, executable, rows, scalars, host)`
-runs a TPU program (`lumen/ops/tpu`) on the buffer, the rows of the TPU
+runs a TPU program (`lumen/kernels/tpu`) on the buffer, the rows of the TPU
 pointers `rows` its first scalars (each must start a row), and keeps the
 handle of its result, the same memory donated and written. The allocator
 keeps its buffer handle itself (`Region::base` is the CUDA and MPS
@@ -259,7 +259,7 @@ compiler's flags, defined in `lumen/graph_compiler`).
 * `cuda` / `mps` / `tpu` — hardware-gated, with `require_cuda!` /
   `require_mps!` / `require_tpu!` macros that print "unavailable,
   skipping" and return early. The TPU tests run one at a time
-  (`device::tpu::ONE_AT_A_TIME`, which `ops/tpu`'s tests hold too: they
+  (`device::tpu::ONE_AT_A_TIME`, which `kernels/tpu`'s tests hold too: they
   measure the device's memory, which the others would change): the region is in the
   device's memory once reserved and gone when dropped, offsets are aligned
   and reused, reads at any offset agree, reads past the region fail, and a

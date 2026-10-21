@@ -1,7 +1,7 @@
 # `lumen/graph_compiler/tpu`
 
 The TPU pipeline: the passes that turn a program's graph into fusions the
-TPU kernels run (`ops/tpu`, `codegen/tpu`), then the plan. Laid out as the
+TPU kernels run (`kernels/tpu`, `codegen/tpu`), then the plan. Laid out as the
 MPS pipeline is (the forward attention pass shared, `../common/flash_attention.rs`) ([`../mps/`](../mps/README.md)): a file per pass, loop
 fusion a folder per phase.
 
@@ -39,4 +39,4 @@ stages (scheduling, rematerialization, buffers) after.
 ## Related
 
 * [`../../codegen/tpu/`](../../codegen/tpu/README.md) — the generated kernels of `loop`, `row` and `reduction` fusions.
-* [`../../ops/tpu/`](../../ops/tpu/README.md) — routes each step to its kernel.
+* [`../../kernels/tpu/`](../../kernels/tpu/README.md) — routes each step to its kernel.

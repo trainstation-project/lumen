@@ -1,6 +1,6 @@
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::ops::dot_general::mps::{collapsed, matmul_order};
+use crate::kernels::dot_general::mps::{collapsed, matmul_order};
 use crate::tensor::contiguous_strides;
 
 pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {

@@ -9,9 +9,9 @@ pub(crate) struct TransposeTiling {
 }
 
 impl TransposeTiling {
-    pub(crate) fn grid(&self) -> crate::ops::mps::Grid {
+    pub(crate) fn grid(&self) -> crate::kernels::mps::Grid {
         let batches = self.batch.iter().map(|d| d.0).product();
-        crate::ops::mps::Grid::Groups([self.a.div_ceil(TILE), self.b.div_ceil(TILE), batches])
+        crate::kernels::mps::Grid::Groups([self.a.div_ceil(TILE), self.b.div_ceil(TILE), batches])
     }
 }
 

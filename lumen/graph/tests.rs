@@ -1,6 +1,6 @@
 use super::Primitive::*;
 use super::{Graph, Primitive, TensorType};
-use crate::ops::reference;
+use crate::kernels::reference;
 use crate::tensor::dtype::bf16;
 use crate::{DType, Scalar, Tensor};
 

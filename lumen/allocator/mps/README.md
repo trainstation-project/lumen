@@ -33,7 +33,7 @@ Compiled only with `cfg(lumen_mps_linked)`; `mps_shim.mm` is part of the
   strong reference); `lumen_mps_free` erases it, releasing it under ARC.
 * `lumen_mps_buffer(ptr, &offset)` — `upper_bound` lookup so any pointer
   *inside* a buffer resolves to that buffer and byte offset; the kernel shims
-  (`ops/mps/shim.mm`) bind tensors this way.
+  (`kernels/mps/shim.mm`) bind tensors this way.
   `lumen_mps_buffer_pointer` is the unretained C-pointer version, used by
   `lumen.Stream.buffer`.
 * `lumen_mps_limits` — alignment, page size, `maxBufferLength`,

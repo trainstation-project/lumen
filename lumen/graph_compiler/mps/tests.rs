@@ -15,7 +15,7 @@ use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
 use crate::graph_compiler::plan_tests::{data, mlp};
-use crate::ops::reference;
+use crate::kernels::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
@@ -420,7 +420,7 @@ fn transposes_in_fusions_are_tiled() {
 
 #[test]
 fn reductions_are_normalized() {
-    use crate::ops::reduce::mps::scratch_bytes;
+    use crate::kernels::reduce::mps::scratch_bytes;
     for (shape, axes, kernel) in [
         (vec![400, 1, 300], vec![0, 2], "reduce_rows"),
         (vec![4, 1, 64, 1, 300], vec![1, 2, 3, 4], "reduce_rows"),
@@ -460,7 +460,7 @@ fn reductions_are_normalized() {
 
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
-    use crate::ops::reduce::mps::scratch_bytes;
+    use crate::kernels::reduce::mps::scratch_bytes;
     let mentions = |source: &str, word: &str| {
         source
             .split(|c: char| !c.is_alphanumeric() && c != '_')

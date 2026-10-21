@@ -104,7 +104,7 @@ fn build_mps_shim() {
     println!("cargo:rerun-if-changed=lumen/allocator/mps/mps_shim.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
-    println!("cargo:rerun-if-changed=lumen/ops/mps/shim.mm");
+    println!("cargo:rerun-if-changed=lumen/kernels/mps/shim.mm");
     println!("cargo:rerun-if-changed=lumen/graph_compiler/mps/ane/coreml.mm");
     for source in PRIMITIVE_KERNELS {
         println!("cargo:rerun-if-changed={source}");
@@ -119,7 +119,7 @@ fn build_mps_shim() {
     cc::Build::new()
         .file("lumen/allocator/mps/mps_shim.mm")
         .file("lumen/stream/mps/mps.mm")
-        .file("lumen/ops/mps/shim.mm")
+        .file("lumen/kernels/mps/shim.mm")
         .file("lumen/graph_compiler/mps/ane/coreml.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
@@ -135,14 +135,14 @@ fn build_mps_shim() {
 }
 
 const PRIMITIVE_KERNELS: &[&str] = &[
-    "lumen/ops/mps/kernels.metal",
-    "lumen/ops/reduce/mps/kernels.metal",
-    "lumen/ops/scan/mps/kernels.metal",
-    "lumen/ops/dot_general/mps/kernels.metal",
-    "lumen/ops/layout/mps/kernels.metal",
-    "lumen/ops/dynamic_slice/mps/kernels.metal",
-    "lumen/ops/gather/mps/kernels.metal",
-    "lumen/ops/factory/mps/kernels.metal",
+    "lumen/kernels/mps/kernels.metal",
+    "lumen/kernels/reduce/mps/kernels.metal",
+    "lumen/kernels/scan/mps/kernels.metal",
+    "lumen/kernels/dot_general/mps/kernels.metal",
+    "lumen/kernels/layout/mps/kernels.metal",
+    "lumen/kernels/dynamic_slice/mps/kernels.metal",
+    "lumen/kernels/gather/mps/kernels.metal",
+    "lumen/kernels/factory/mps/kernels.metal",
 ];
 
 fn embed_metal_source(sources: &[&str], name: &str, header: &str) {

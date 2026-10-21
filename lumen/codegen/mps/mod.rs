@@ -10,8 +10,8 @@ use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph_compiler::mps::fusion;
-use crate::ops::mps::element_arg;
-use crate::ops::reduce::mps as reduce;
+use crate::kernels::mps::element_arg;
+use crate::kernels::reduce::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 

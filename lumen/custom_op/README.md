@@ -50,7 +50,7 @@ calls the Python function back with real tensors.
   of `grid` (threads) or `threadgroups`; sizes padded to 3-D with 1s.
   Tensors bind as buffers `0..`, then each `args` entry (bytes, or any
   object with `.tobytes()`, e.g. a NumPy scalar) as by-value bytes. Every
-  tensor must be on MPS. The launch goes through `ops::mps::launch` with
+  tensor must be on MPS. The launch goes through `kernels::mps::launch` with
   the kernel name as profiler label.
 
 ## Invariants & gotchas
@@ -69,4 +69,4 @@ calls the Python function back with real tensors.
 
 * [`lumen/graph`](../graph/README.md) — `CustomCall`, `prims._custom_call`, `custom.rs` hook, `_register_custom_op`.
 * [`lumen/graph_compiler`](../graph_compiler/README.md) — `plan.rs` runs the custom-call step.
-* [`lumen/ops/mps`](../ops/mps/README.md) — `launch` and the shim (`shim.mm`) that compiles kernels.
+* [`lumen/kernels/mps`](../kernels/mps/README.md) — `launch` and the shim (`shim.mm`) that compiles kernels.
