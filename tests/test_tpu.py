@@ -140,16 +140,15 @@ def test_the_profiler_times_each_tpu_program():
         f(x)
     events = prof.events()
     runs = [e for e in events if e["kind"] == "gpu"]
-    assert [e["name"] for e in runs] == ["exp", "mul"]
-    assert [e["kernel"] for e in runs] == ["exp_f32_256x512", "mul_f32_256x512"]
+    assert [e["name"] for e in runs] == ["exp → mul"]
+    assert [e["kernel"] for e in runs] == ["loop_f32_256x512"]
     ops = {e["id"]: e for e in events if e["kind"] == "op"}
     for run in runs:
         assert run["device"] == "tpu:1"
         assert run["outputs"] == [("float32", [256, 512])]
         assert run["duration_us"] > 0
         assert ops[run["parent"]]["name"] == run["name"]
-    assert runs[0]["end_us"] <= runs[1]["start_us"]
-    (row,) = [r for r in prof.key_averages() if r.key == "exp"]
+    (row,) = [r for r in prof.key_averages() if r.key == "exp → mul"]
     assert row.count == 1 and row.self_device_time_total == pytest.approx(runs[0]["duration_us"], rel=1e-3)
 
 

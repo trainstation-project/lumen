@@ -286,11 +286,11 @@ pub(crate) fn encode(
         Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
             super::attention::tpu::encode(index, step, inputs, output)
         }
+        Primitive::Fusion { ref name, .. } if name == "loop" => {
+            crate::codegen::tpu::encode(index, step, inputs, output)
+        }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
-        }
-        ref p if super::elementwise::tpu::elementwise(p) => {
-            super::elementwise::tpu::encode(index, step, inputs, output)
         }
         Primitive::ReduceSum { .. } => super::reduce::tpu::encode(index, step, inputs, output),
         Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),

@@ -200,7 +200,7 @@ impl Epilogue {
                 continue;
             }
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
-            nodes.push(super::super::elementwise::tpu::node(&node.primitive, &args));
+            nodes.push(crate::codegen::tpu::node(&node.primitive, &args));
             value.insert(node.output, results + extras.len() + nodes.len() - 1);
             let mut of: Vec<usize> = node
                 .inputs
@@ -307,7 +307,7 @@ pub(crate) fn encode(
         false => n,
     };
     let windows: Vec<Option<(usize, usize)>> = (0..e.outputs.len())
-        .map(|o| super::super::elementwise::tpu::window(step, o))
+        .map(|o| crate::codegen::tpu::window(step, o))
         .collect();
     if e.rows && windows.iter().any(Option::is_some) {
         return Err("dot_general on TPU: members of rows written into a wider buffer".into());
