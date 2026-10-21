@@ -237,8 +237,8 @@ model = Transformer(
 opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 
 train_step = lumen.compile(train_step, device="tpu")
-ids_meta = meta(BATCH, SEQ, dtype="int64")
-train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int64")] * 2)
+ids_meta = meta(BATCH, SEQ, dtype="int32")
+train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int32")] * 2)
 
 rng = np.random.default_rng(0)
 
@@ -254,17 +254,17 @@ model.load_state_dict({name: lumen.from_numpy(init(name, w.shape)) for name, w i
 
 def batch():
     """Arithmetic sequences mod VOCAB: the tokens and each one's successor
-    (the targets), ``[BATCH, SEQ]`` int64 each."""
+    (the targets), ``[BATCH, SEQ]`` int32 each."""
     start = rng.integers(0, VOCAB, (BATCH, 1))
     step = rng.integers(1, VOCAB, (BATCH, 1))
     seq = (start + step * np.arange(SEQ + 1)) % VOCAB
-    x, y = np.ascontiguousarray(seq[:, :-1]), np.ascontiguousarray(seq[:, 1:])
+    x, y = (np.ascontiguousarray(s, dtype=np.int32) for s in (seq[:, :-1], seq[:, 1:]))
     return lumen.from_numpy(x), lumen.from_numpy(y), y
 
 
 def microbatches():
     """A step's ``ACCUM`` batches, stacked: the tokens and the targets,
-    ``[ACCUM, BATCH, SEQ]`` int64 each."""
+    ``[ACCUM, BATCH, SEQ]`` int32 each."""
     xs, ys, _ = zip(*(batch() for _ in range(ACCUM)))
     return tuple(lumen.from_numpy(np.stack([lumen.to_numpy(t) for t in ts])) for ts in (xs, ys))
 
