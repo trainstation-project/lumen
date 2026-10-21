@@ -5,8 +5,10 @@ from lumen.ops.attention.tpu import (
     NN,
     NT,
     TN,
+    add,
     broadcast,
     by_mask,
+    chunk,
     first_query_block,
     heads,
 )
@@ -39,20 +41,24 @@ def program(spec):
     q, k, v, do, lse, delta = (spec[n] for n in ("q", "k", "v", "do", "lse", "delta"))
     per_query = (delta, False) if delta else (spec["o"], False)
 
-    def probabilities(qb, kb, lseb, g, i, j, mask):
-        qk = scored(spec, pl.dot_general(qb[...], kb[...], NT, preferred_element_type="float32"))
-        if mask:
-            qk = masked(spec, qk, mul(i, bq), mul(j, bkv))
-        return F.exp(qk - tile(lanes(spec, lseb, lse, g), bkv))
+    bkc = chunk(bkv)
 
-    def gradient(p, dob, vb, deltab, g):
-        dp = pl.dot_general(dob[...], vb[...], NT, preferred_element_type="float32")
+    def rows_of(lseb, deltab, dob, g):
         if delta:
             d = lanes(spec, deltab, delta, g)
         else:
             d = F.sum(deltab[...].to("float32") * dob[...].to("float32"), -1, keepdim=True)
             d = broadcast(d, (d.shape[0], LANES))
-        return (dp - tile(d, bkv)) * p * ds_scale
+        return lanes(spec, lseb, lse, g), d
+
+    def gradients(qb, kb, vb, dob, stats, queries, keys, c, mask):
+        part = slice(c * bkc, (c + 1) * bkc)
+        qk = scored(spec, pl.dot_general(qb[...], kb[part, :], NT, preferred_element_type="float32"))
+        if mask:
+            qk = masked(spec, qk, queries, add(keys, c * bkc))
+        p = F.exp(qk - tile(stats[0], bkc))
+        dp = pl.dot_general(dob[...], vb[part, :], NT, preferred_element_type="float32")
+        return part, p, (dp - tile(stats[1], bkc)) * p * ds_scale
 
     def per_row(height, block_of):
         return vector(spec, delta, height, block_of) if delta else matrix(spec, spec["o"], height, hv, block_of)
@@ -87,12 +93,16 @@ def program(spec):
                 def _():
                     acc_ref[...] = zeros((bq, h))
 
-                def run(mask):
-                    p = probabilities(qb, kb, lseb, g, i, key_block(i, j), mask)
-                    ds = gradient(p, dob, vb, deltab, g)
-                    acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[...], NN, preferred_element_type="float32")
+                stats = rows_of(lseb, deltab, dob, g)
+                queries, keys = mul(i, bq), mul(key_block(i, j), bkv)
 
-                by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
+                def run(c, mask):
+                    part, _, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
+                    acc_ref[...] += pl.dot_general(ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32")
+
+                for c in range(bkv // bkc):
+                    start = add(mul(j, bkv), c * bkc)
+                    by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
 
                 @pl.when(j == nk - 1)
                 def _():
@@ -137,13 +147,16 @@ def program(spec):
                 dk_ref[...] = zeros((bkv, h))
                 dv_ref[...] = zeros((bkv, hv))
 
-            def run(mask):
-                p = probabilities(qb, kb, lseb, g, query_block(i, j), j, mask)
-                dv_ref[...] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
-                ds = gradient(p, dob, vb, deltab, g)
-                dk_ref[...] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+            stats = rows_of(lseb, deltab, dob, g)
+            queries, keys = mul(query_block(i, j), bq), mul(j, bkv)
 
-            by_mask(spec, mul(i, bq), mul(j, bkv), bq, bkv, run)
+            def run(c, mask):
+                part, p, ds = gradients(qb, kb, vb, dob, stats, queries, keys, c, mask)
+                dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
+                dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
+
+            for c in range(bkv // bkc):
+                by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
 
             @pl.when(last)
             def _():
