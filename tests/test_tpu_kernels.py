@@ -553,3 +553,41 @@ def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     exec(pallas.read_text(), scope)
     assert scope["mosaic"] in text
     assert (tmp_path / "pallas" / "lumen.kernels.elementwise.tpu.py").read_text().startswith("import math")
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
+@pytest.mark.parametrize(
+    "vocab, width, ids",
+    [(1000, 256, [64]), (20000, 512, [4, 256]), (300, 128, [2, 3]), (2048, 8192, [8, 128]), (100, 384, [3, 8, 16])],
+)
+def test_an_embeddings_lookup_is_its_rows_exactly(vocab, width, ids, dtype):
+    rng = np.random.default_rng(0)
+    table = rng.standard_normal([vocab, width], dtype=np.float32)
+    table[:4, :2] = [[np.nan, -0.0], [np.inf, 0.0], [-np.inf, -1.0], [1e-40, -1e-40]]
+    index = rng.integers(0, vocab, ids).astype(np.int32)
+    index.flat[: min(4, index.size)] = np.arange(min(4, index.size))
+    t = lumen.from_numpy(table if dtype != "int32" else table.view(np.int32)).to(dtype=dtype).to("tpu")
+    meta = (lumen.empty([vocab, width], dtype, "meta"), lumen.empty(ids, "int32", "meta"))
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(lambda t, i: t[i])(*meta), "tpu").steps()
+    got = lumen.compile(lambda t, i: t[i])(t, lumen.from_numpy(index).to("tpu"))
+    assert got.device == "tpu:0" and list(got.shape) == [*ids, width]
+    exact = "float32" if dtype == "bfloat16" else dtype
+    host = lumen.to_numpy(t.to("cpu").to(dtype=exact))
+    np.testing.assert_array_equal(
+        lumen.to_numpy(got.to("cpu").to(dtype=exact)).view(np.uint8), host[index].view(np.uint8)
+    )
+
+
+def test_the_transformers_embedding_runs_on_tpu():
+    batch, seq, vocab, dim = 4, 128, 512, 256
+    rng = np.random.default_rng(0)
+    tokens, positions = rng.standard_normal([vocab, dim], dtype=np.float32), rng.standard_normal(
+        [seq, dim], dtype=np.float32
+    )
+    ids = rng.integers(0, vocab, [batch, seq]).astype(np.int32)
+
+    def embed(t, p, i):
+        return (t[i] + p).reshape(batch * seq, dim)
+
+    got = lumen.compile(embed)(tpu(tokens), tpu(positions), lumen.from_numpy(ids).to("tpu"))
+    np.testing.assert_array_equal(floats(got), (tokens[ids] + positions).reshape(batch * seq, dim))

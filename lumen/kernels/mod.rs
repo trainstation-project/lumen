@@ -5,6 +5,7 @@ pub mod dummy_op;
 pub mod dynamic_slice;
 pub(crate) mod elementwise;
 pub mod factory;
+pub mod gather;
 pub(crate) mod launched;
 pub mod layout;
 #[cfg(lumen_mps_linked)]
