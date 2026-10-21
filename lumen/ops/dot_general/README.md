@@ -56,7 +56,7 @@ accumulating in float32; the output float32 or bfloat16.
   (`tpu.reinterpret_cast`), with no packing or reshuffling of words.
 * float32 operands multiply in full float32 (`contract_precision<fp32>`),
   not the matrix unit's single bfloat16 pass.
-* **Fusions** (`fuse_dots` in `graph_compiler/tpu/mod.rs`): a dot, its
+* **Fusions** (`fuse_dots` in `graph_compiler/tpu/fusion/dot_epilogues.rs`): a dot, its
   slices if merged (`merge_dots`: members of its columns; a merged weight
   gradient's: of its rows, `split_rows`), and the elementwise nodes after
   it that read one member's values (and otherwise constants, 0-d values or
