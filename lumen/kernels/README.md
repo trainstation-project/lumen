@@ -45,7 +45,8 @@ templates in these `.metal` files (compiled with `TEMPLATES_ONLY`, see
 | `elementwise/` | add, sub, mul, div, max, eq, lt, neg, exp, log, sqrt, tanh, logistic, cast, select on MPS. |
 | `layout/` | A plan's reshape copies, `broadcast_in_dim`, `transpose`, `slice` on MPS. |
 | `dynamic_slice/` | `dynamic_slice` / `dynamic_update_slice` on MPS, plus the strided `copy` that `device_transfer` reuses. |
-| `scatter_add/` | `scatter_add` on MPS (`gather` is generated). |
+| `gather/` | `gather` on TPU (an embedding's lookup); on MPS it is generated. |
+| `scatter_add/` | `scatter_add` on MPS. |
 | `factory/` | `full`, `iota`, `random_bits` on MPS. |
 | [`device_transfer/`](device_transfer/README.md) | `copy_h2d` / `copy_d2h` tensor ops. |
 | `wait/` | The `wait` op (synchronize a tensor's stream) and its plan-step `encode`. |

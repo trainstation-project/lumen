@@ -15,8 +15,9 @@ Fusions come from the TPU graph compiler: loops and reductions from
 epilogues from `fuse_dots`, attention's from `flash_attention`. Loops take
 layout primitives too (`indexing.rs`): a broadcast, a reshape of unit
 dimensions, a slice at whole blocks, a transpose of major dimensions and
-iota become where each operand is read. Gathers, update slices and reshapes
-that move elements between tiles are not yet generated.
+iota become where each operand is read. Gathers (a lone one runs the
+template in [`../../kernels/gather/`](../../kernels/gather/README.md)), update
+slices and reshapes that move elements between tiles are not yet generated.
 
 ## Files
 

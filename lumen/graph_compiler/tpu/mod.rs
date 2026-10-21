@@ -11,6 +11,7 @@ use fusion::{FuseDots, HorizontalFusion, LoopFusion};
 use place_concats::PlaceConcats;
 
 use super::common::attention;
+use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
 use super::common::flash_attention::{Attentions, FlashAttention};
 use super::common::fold_dot_reshapes::FoldDotReshapes;
@@ -90,6 +91,9 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     }
     if options.config.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
+    }
+    if options.config.safe_kernels {
+        pipeline.add(ClampIndices);
     }
     pipeline
         .add(FoldDotReshapes)
