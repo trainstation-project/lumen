@@ -2,7 +2,7 @@
 
 TPU kernels generated from fused graphs, in lumen's Pallas
 ([`../../pallas/`](../../pallas/README.md)). The TPU graph compiler's
-`loop_fusion` pass (`graph_compiler/tpu/loop_fusion.rs`) groups elementwise
+`loop_fusion` pass (`graph_compiler/tpu/fusion/`) groups elementwise
 chains into `Primitive::Fusion { name: "loop" }`; `encode` turns a fusion's
 body into a spec, and the Python program (`__init__.py`) replays the body's
 nodes on blocks of the output, which lumen's Pallas lowers to Mosaic.
