@@ -342,15 +342,21 @@ fn inside(
         return failed();
     };
     let based = |mut v: Var| {
-        while let Some(n) = producer(v).filter(|n| matches!(n.primitive, Primitive::Reshape { .. }))
-        {
+        let mut chain = Vec::new();
+        while let Some(n) = producer(v).filter(|n| {
+            matches!(
+                n.primitive,
+                Primitive::Reshape { .. } | Primitive::Transpose { .. }
+            )
+        }) {
+            chain.push(n);
             v = n.inputs[0];
         }
-        v
+        (v, chain)
     };
     let side = match (
-        based(dot.inputs[0]) == d_o.base,
-        based(dot.inputs[1]) == d_o.base,
+        based(dot.inputs[0]).0 == d_o.base,
+        based(dot.inputs[1]).0 == d_o.base,
     ) {
         (true, false) => 1,
         (false, true) => 0,
@@ -361,7 +367,23 @@ fn inside(
         _ => (rhs_batch, rhs_contracting),
     };
     let operand = dot.inputs[side];
+    let (base, chain) = based(operand);
     let shape = body.type_of(operand).shape.clone();
+    let through = |mut a: usize| {
+        for n in &chain {
+            if let Primitive::Transpose { permutation } = &n.primitive {
+                let (from, to) = (
+                    &body.type_of(n.output).shape,
+                    &body.type_of(n.inputs[0]).shape,
+                );
+                let (fs, ts) = (contiguous_strides(from), contiguous_strides(to));
+                a = (0..from.len())
+                    .map(|d| ((a / fs[d]) % from[d]) * ts[permutation[d]])
+                    .sum();
+            }
+        }
+        a
+    };
     let out = body.type_of(dot.output).shape.clone();
     if contracting.len() != 1 || out.len() != dims.len() {
         return failed();
@@ -372,7 +394,7 @@ fn inside(
         for (k, &d) in dims.iter().enumerate() {
             address += ((a / out_strides[k]) % out[k]) * strides[d];
         }
-        address
+        through(address)
     };
     let offset = at(delta.offset, 0);
     let mut fitted = Vec::new();
@@ -387,7 +409,7 @@ fn inside(
         fitted.push((scaled, period));
     }
     let o = Access {
-        base: based(operand),
+        base,
         offset,
         batch: fitted,
         row: at(delta.offset + delta.col, 0) - offset,

@@ -494,9 +494,18 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
 fn delta_inside(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let producer = |v: Var| nodes.iter().find(|n| n.output == v);
-    let unshaped = |v: Var| match producer(v) {
-        Some(n) if matches!(n.primitive, Primitive::Reshape { .. }) => (n.inputs[0], Some(n)),
-        _ => (v, None),
+    let unshaped = |mut v: Var| {
+        let mut chain = Vec::new();
+        while let Some(n) = producer(v).filter(|n| {
+            matches!(
+                n.primitive,
+                Primitive::Reshape { .. } | Primitive::Transpose { .. }
+            )
+        }) {
+            chain.push(n);
+            v = n.inputs[0];
+        }
+        (v, chain)
     };
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -515,7 +524,7 @@ fn delta_inside(graph: &Graph) -> Graph {
             && let Some(dot) = producer(node.inputs[k])
             && matches!(dot.primitive, Primitive::DotGeneral { .. })
         {
-            let operands: Vec<(Var, Option<&Node>)> =
+            let operands: Vec<(Var, Vec<&Node>)> =
                 dot.inputs.iter().map(|&v| unshaped(v)).collect();
             let mut inner = Graph::new();
             let mut within: Vec<Var> = vec![0; body.types.len()];
@@ -529,7 +538,8 @@ fn delta_inside(graph: &Graph) -> Graph {
                 }
             }
             let mut sides = Vec::new();
-            for &(base, reshape) in &operands {
+            for (base, chain) in &operands {
+                let base = *base;
                 let mut x = match outer.iter().find(|(o, _)| *o == base) {
                     Some(&(_, x)) => x,
                     None => {
@@ -539,10 +549,10 @@ fn delta_inside(graph: &Graph) -> Graph {
                         x
                     }
                 };
-                if let Some(r) = reshape {
+                for r in chain.iter().rev() {
                     x = inner
                         .apply(r.primitive.clone(), &[x])
-                        .expect("the operand's reshape");
+                        .expect("the operand's reshape or transpose");
                 }
                 sides.push(x);
             }
