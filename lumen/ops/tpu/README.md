@@ -7,7 +7,7 @@ the elementwise primitives ([`../elementwise/tpu/`](../elementwise/tpu/)) and
 `reduce_sum` over the last dimension ([`../reduce/tpu/`](../reduce/tpu/)) have
 kernels, and any other step errors
 (`<primitive> does not run on TPU yet`). The host-to-TPU copy
-(`../device_transfer/tpu.rs`) is a kernel too.
+(`../device_transfer/tpu/mod.rs`) is a kernel too.
 
 Kernels are lumen's own, written in **lumen's Pallas**
 ([`../../pallas/`](../../pallas/README.md): Pallas's API, traced and lowered
