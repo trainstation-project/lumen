@@ -314,7 +314,9 @@ fn written(body: &Graph, acc: &Access, batch: &[usize]) -> Result<(usize, Access
                 Some(n)
                     if matches!(
                         n.primitive,
-                        Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
+                        Primitive::Reshape { .. }
+                            | Primitive::ReduceSum { .. }
+                            | Primitive::Cast { .. }
                     ) =>
                 {
                     chain.push(n);

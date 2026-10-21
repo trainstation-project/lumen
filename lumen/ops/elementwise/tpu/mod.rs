@@ -71,6 +71,8 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     )
 }
 
+const BLOCK_BYTES: usize = 1 << 20;
+
 fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
     if shape.len() < 2 {
@@ -87,10 +89,16 @@ fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
         .max()
         .unwrap_or(8);
     let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
-    Ok(vec![
-        block(m, rows, 512).ok_or_else(|| failed("its rows"))?,
-        block(n, 128, 2048).ok_or_else(|| failed("its columns"))?,
-    ])
+    let bm = block(m, rows, 512).ok_or_else(|| failed("its rows"))?;
+    let bn = block(n, 128, 2048).ok_or_else(|| failed("its columns"))?;
+    let lead: usize = shape[..shape.len() - 2].iter().product();
+    let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
+    let tile = bm.div_ceil(rows) * rows * bn.div_ceil(128) * 128 * width;
+    let bl = (1..=lead)
+        .rev()
+        .find(|&b| lead.is_multiple_of(b) && b * tile <= BLOCK_BYTES)
+        .unwrap_or(1);
+    Ok(vec![bl, bm, bn])
 }
 
 pub(crate) fn gcd(a: usize, b: usize) -> usize {
@@ -147,7 +155,7 @@ pub(crate) fn encode(
     let mut blocks = blocks(&out.shape, &dtypes)?;
     if let Some((_, start)) = window {
         let n = *out.shape.last().expect("a matrix");
-        blocks[1] = block(gcd(n, start), 128, 2048)
+        blocks[2] = block(gcd(n, start), 128, 2048)
             .ok_or("elementwise on TPU: a window of no whole columns' block")?;
     }
     let mut kernel = step.primitive.name().to_owned();

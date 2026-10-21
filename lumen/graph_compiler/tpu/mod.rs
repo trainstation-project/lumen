@@ -620,6 +620,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
     let attention = |p: &Primitive| matches!(p, Primitive::Fusion { name, .. } if name.starts_with("flash_attention"));
     let reshape = |r: usize| matches!(nodes[r].primitive, Primitive::Reshape { .. });
     let reduce = |r: usize| matches!(nodes[r].primitive, Primitive::ReduceSum { .. });
+    let cast = |r: usize| matches!(nodes[r].primitive, Primitive::Cast { .. });
     let alone = |v: Var| match readers[v].as_slice() {
         [r] if !graph.outputs().contains(&v) => Some(*r),
         _ => None,
@@ -632,7 +633,10 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         };
         while let Some(&last) = chain.last() {
             match alone(nodes[last].output) {
-                Some(r) if (reduce(r) || (reshape(r) && reduce(last))) && alone(v).is_some() => {
+                Some(r)
+                    if (reduce(r) || cast(r) || (reshape(r) && (reduce(last) || cast(last))))
+                        && alone(v).is_some() =>
+                {
                     chain.push(r)
                 }
                 _ => break,
