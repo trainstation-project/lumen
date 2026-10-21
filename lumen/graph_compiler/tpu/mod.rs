@@ -1,4 +1,8 @@
+mod loop_fusion;
+
 use std::collections::HashMap;
+
+use loop_fusion::LoopFusion;
 
 use super::attention;
 use super::pass::{CompilerPass, Module, Pipeline};
@@ -426,7 +430,7 @@ fn placeable(
     };
     let writes = |p: &Primitive| match p {
         Primitive::DotGeneral { .. } | Primitive::Full { .. } => true,
-        Primitive::Fusion { name, .. } => name == "dot_general",
+        Primitive::Fusion { name, .. } => name == "dot_general" || name == "loop",
         Primitive::BroadcastInDim {
             broadcast_dimensions,
             ..
@@ -921,7 +925,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             },
         });
     }
-    pipeline.add(FuseDots).add(PlaceConcats);
+    pipeline.add(FuseDots).add(PlaceConcats).add(LoopFusion);
     pipeline.run(&mut module)?;
     let TpuModule {
         graph,

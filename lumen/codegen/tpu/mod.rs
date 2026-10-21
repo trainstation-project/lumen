@@ -1,0 +1,84 @@
+#[cfg(lumen_tpu_linked)]
+mod elementwise;
+
+#[cfg(lumen_tpu_linked)]
+use crate::Scalar;
+use crate::graph::Primitive;
+#[cfg(lumen_tpu_linked)]
+use crate::graph::UnaryOp;
+#[cfg(lumen_tpu_linked)]
+use crate::graph_compiler::plan::Step;
+#[cfg(lumen_tpu_linked)]
+pub(crate) use elementwise::encode;
+
+pub(crate) fn fusible(p: &Primitive) -> bool {
+    use Primitive::*;
+    if let BroadcastInDim {
+        broadcast_dimensions,
+        ..
+    } = p
+    {
+        return broadcast_dimensions.is_empty();
+    }
+    matches!(
+        p,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | Cast { .. }
+            | Full { .. }
+            | Select
+            | Unary(_)
+            | Binary(_)
+    )
+}
+
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
+    let params = match p {
+        Primitive::Full {
+            fill_value, dtype, ..
+        } => {
+            let value = match *fill_value {
+                Scalar::Bool(b) => b.to_string(),
+                Scalar::Int(i) => i.to_string(),
+                Scalar::Float(f) if f.is_nan() => "NaN".into(),
+                Scalar::Float(f) if f.is_infinite() => {
+                    format!("{}Infinity", if f < 0.0 { "-" } else { "" })
+                }
+                Scalar::Float(f) => format!("{f:?}"),
+            };
+            format!(
+                "\"fill_value\": {value}, \"dtype\": \"{}\"",
+                dtype.full_name()
+            )
+        }
+        Primitive::BroadcastInDim { .. } => "\"broadcast_dimensions\": []".into(),
+        Primitive::Cast { new_dtype } => format!("\"new_dtype\": \"{}\"", new_dtype.full_name()),
+        Primitive::Unary(UnaryOp::ReducePrecision {
+            exponent_bits,
+            mantissa_bits,
+        }) => format!("\"exponent_bits\": {exponent_bits}, \"mantissa_bits\": {mantissa_bits}"),
+        _ => String::new(),
+    };
+    format!(
+        "{{\"name\": \"{}\", \"params\": {{{params}}}, \"args\": {args:?}}}",
+        p.name()
+    )
+}
+
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn window(step: &Step, k: usize) -> Option<(usize, usize)> {
+    let view = step.output_views.get(k)?.as_ref()?;
+    let rank = view.strides.len();
+    (rank >= 2).then(|| (view.strides[rank - 2], view.offset % view.strides[rank - 2]))
+}

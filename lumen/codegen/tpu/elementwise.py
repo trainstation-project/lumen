@@ -1,32 +1,16 @@
 import math
 
 from lumen import pallas as pl
-from lumen.graph import prims
+from lumen.codegen.tpu import computed
 from lumen.ops.tpu import pallas
-
-
-def computed(nodes, values, shape):
-    """``values`` and each of ``nodes``' after them, on blocks of ``shape``."""
-    values = list(values)
-    for node in nodes:
-        args = [values[i] for i in node["args"]]
-        params = node["params"]
-        if node["name"] == "full":
-            params = {**params, "shape": shape}
-        if node["name"] == "broadcast_in_dim":
-            if tuple(args[0].shape) == tuple(shape):
-                values.append(args[0])
-                continue
-            params = {"shape": shape, "broadcast_dimensions": (len(shape) - 1,)}
-        values.append(prims.bind(node["name"], *args, **params))
-    return values
 
 
 def program(spec):
     """The kernel of ``spec``: ``shape``, ``inputs`` (the operands' dtypes),
     ``broadcast`` (whether each operand is 0-d, the output not), ``nodes``
     (each a primitive's ``name``, ``params`` and ``args``: indices of the
-    values, the operands then the nodes before), ``output`` (its dtype),
+    values, the operands then the nodes before), ``result`` (the index of
+    the value written), ``output`` (its dtype),
     ``blocks`` (of the leading dimensions together and the last two, or of
     the elements) and
     ``window`` (``[n, start]``: the output written at columns ``start`` on
@@ -55,7 +39,7 @@ def program(spec):
     shape_of = (1,) if scalar else block_shape
 
     def apply(values):
-        return computed(spec["nodes"], values, shape_of)[-1]
+        return computed(spec["nodes"], values, shape_of)[spec["result"]]
 
     def kernel(rows, memory, result):
         def copy(src, dst):

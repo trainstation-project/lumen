@@ -1,6 +1,6 @@
 from lumen import pallas as pl
+from lumen.codegen.tpu import computed
 from lumen.graph import prims
-from lumen.ops.elementwise.tpu import computed
 from lumen.ops.tpu import pallas
 
 

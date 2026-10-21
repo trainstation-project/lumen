@@ -47,8 +47,8 @@ Everything per element is generated from the fusion's body.
 1. **No kernel per primitive.** When a primitive does not run on a device,
    give it a lowering in that device's codegen, not a new kernel under
    `lumen/ops/<primitive>/<device>/`. Per-primitive kernels (today's TPU
-   elementwise, reduce_sum and reshape kernels) are stopgaps until
-   `lumen/codegen/tpu` exists; don't add more.
+   reduce_sum and reshape kernels) are stopgaps until `lumen/codegen/tpu`
+   generates them, as it does elementwise loops; don't add more.
 2. **A new hand-written kernel needs a reason codegen can't meet:** a
    schedule, the matrix unit, or a measured win over the generated kernel.
    Put the measurement in its README.

@@ -121,7 +121,7 @@ Within one order (`compile_in_order`):
 
 `Plan::run` runs on the inputs' device (MPS steps through `lumen/ops/mps`,
 TPU steps through `lumen/ops/tpu` (dots, merged dots' fusions,
-elementwise primitives and `reduce_sum`: any other step errors), elsewhere on the host); `run_on` takes an explicit device (meta runs
+loop fusions of elementwise primitives and `reduce_sum`: any other step errors), elsewhere on the host); `run_on` takes an explicit device (meta runs
 nothing). `print(plan)` shows each step as `out:type = primitive in...`.
 
 ### Stages (`stages.rs`)
