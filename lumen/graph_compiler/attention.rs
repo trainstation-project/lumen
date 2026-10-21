@@ -279,9 +279,11 @@ pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
 
 type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
 
+pub(crate) type Leaves = fn(&Graph, Var) -> bool;
+
 pub(crate) fn fuse(
     graph: &Graph,
-    epilogues: bool,
+    epilogues: Option<Leaves>,
     scalars: &[Var],
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
@@ -290,8 +292,8 @@ pub(crate) fn fuse(
         .into_iter()
         .map(|a| {
             let (mut chain, mut leaves, mut kept) = match epilogues {
-                true => m.epilogue(a.root, scalars),
-                false => (Vec::new(), Vec::new(), false),
+                Some(readable) => m.epilogue(a.root, scalars, readable),
+                None => (Vec::new(), Vec::new(), false),
             };
             let read_after =
                 |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
@@ -384,7 +386,12 @@ struct Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
-    fn epilogue(&self, root: usize, scalars: &[Var]) -> (Vec<usize>, Vec<Var>, bool) {
+    fn epilogue(
+        &self,
+        root: usize,
+        scalars: &[Var],
+        readable: Leaves,
+    ) -> (Vec<usize>, Vec<Var>, bool) {
         use Primitive::*;
         let nodes = self.graph.nodes();
         let (mut end, mut chain, mut leaves) = (root, Vec::new(), Vec::new());
@@ -409,6 +416,7 @@ impl<'a> Matcher<'a> {
             if !others
                 .into_iter()
                 .all(|&x| self.leaves(x, scalars, &mut found))
+                || !found.iter().all(|&leaf| readable(self.graph, leaf))
             {
                 break;
             }

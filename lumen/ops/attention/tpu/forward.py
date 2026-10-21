@@ -1,5 +1,6 @@
 import lumen.functional as F
 from lumen import pallas as pl
+from lumen.codegen.tpu import computed
 from lumen.graph import prims
 from lumen.ops.attention.tpu import (
     LANES,
@@ -31,14 +32,18 @@ def program(spec):
     and block of queries, the blocks of keys in order, an online softmax of
     their scores (its running max and sum in ``(bq, 128)`` lanes) and its
     probabilities' product with the values (a block of keys in chunks of
-    up to 512, as ``block_kv_compute``), normalized after the last; the
-    rows' log-sum-exp too if ``lse``. A causal mask skips the blocks past
-    the diagonal, and their copies."""
+    up to 512, as ``block_kv_compute``), normalized after the last and
+    rounded to ``o_dtype``: written as ``o`` and, through ``epilogue`` (its
+    ``nodes`` on the output block, the scalars it reads by row), as ``e``;
+    the rows' log-sum-exp too if ``lse``. A causal mask skips the blocks
+    past the diagonal, and their copies."""
     bq, bkv = spec["blocks"]
     bkc = chunk(bkv)
     nq, nk = spec["sq"] // bq, spec["sk"] // bkv
     h, hv, causal = spec["h"], spec["hv"], spec["causal"]
     q, k, v, o, lse = spec["q"], spec["k"], spec["v"], spec["o"], spec["lse"]
+    e, epilogue = spec.get("e"), spec.get("epilogue")
+    outs = [x for x in (o, e) if x]
 
     def key_block(i, j):
         return fetched(spec, i, j)
@@ -46,16 +51,26 @@ def program(spec):
     grid = (*heads(spec), nq, nk)
 
     def kernel(rows, memory, result, m_ref, l_ref, acc_ref):
-        ops = [(q, False), (k, False), (v, False), (o, True)] + ([(lse, True)] if lse else [])
+        def copy(src, dst):
+            c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
+            c.start()
+            c.wait()
+
+        scalars = []
+        for row, dtype in epilogue["scalars"] if epilogue else []:
+            s = pl.scratch(pl.VMEM((1,), dtype))
+            copy(pallas.view(memory, rows[row], (), dtype), s)
+            scalars.append(s)
+        ops = [(q, False), (k, False), (v, False)] + [(x, True) for x in outs] + ([(lse, True)] if lse else [])
         query_rows = lambda *ids: (ids[:-2], ids[-2])  # noqa: E731
         key_rows = lambda *ids: (ids[:-2], key_block(ids[-2], ids[-1]))  # noqa: E731
         in_specs = [matrix(spec, q, bq, h, query_rows), matrix(spec, k, bkv, h, key_rows)]
         in_specs.append(matrix(spec, v, bkv, hv, key_rows))
-        out_specs = [matrix(spec, o, bq, hv, query_rows)]
+        out_specs = [matrix(spec, x, bq, hv, query_rows) for x in outs]
         if lse:
             out_specs.append(vector(spec, lse, bq, query_rows))
 
-        def body(qb, kb, vb, ob, *rest):
+        def body(qb, kb, vb, *rest):
             ids = [pl.program_id(a) for a in range(len(grid))]
             g, i, j = tuple(ids[:-2]), ids[-2], ids[-1]
 
@@ -86,9 +101,15 @@ def program(spec):
             @pl.when(j == nk - 1)
             def _():
                 total = l_ref[...]
-                ob[...] = (acc_ref[...] * tile(1.0 / total, hv)).to(ob.dtype)
-                if rest:
-                    rest[0][...] = (F.log(total) + m_ref[...])[:, :1].to(rest[0].dtype)
+                value = (acc_ref[...] * tile(1.0 / total, hv)).to(spec["o_dtype"])
+                for x, ref in zip(outs, rest):
+                    if x is o:
+                        ref[...] = value.to(ref.dtype)
+                        continue
+                    values = [value] + [s[...] for s in scalars]
+                    ref[...] = computed(epilogue["nodes"], values, (bq, hv))[epilogue["result"]].to(ref.dtype)
+                if lse:
+                    rest[len(outs)][...] = (F.log(total) + m_ref[...])[:, :1].to(rest[len(outs)].dtype)
 
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
 

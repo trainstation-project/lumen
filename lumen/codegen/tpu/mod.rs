@@ -4,10 +4,8 @@ pub(crate) mod indexing;
 pub(crate) mod reduction;
 pub(crate) mod row;
 
-#[cfg(lumen_tpu_linked)]
 use crate::Scalar;
 use crate::graph::Primitive;
-#[cfg(lumen_tpu_linked)]
 use crate::graph::UnaryOp;
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
@@ -45,7 +43,6 @@ pub(crate) fn fusible(p: &Primitive) -> bool {
     )
 }
 
-#[cfg(lumen_tpu_linked)]
 pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
         Primitive::Full {
