@@ -17,7 +17,14 @@ struct that computes the fused primitives per element.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | All Metal codegen (~2.5k lines): kernel-kind dispatch, the per-kind generators, the `Emitter`, naming/formatting, and the predicates the graph compiler asks (`gemm_dot`, `row_dot`, `row_reductions`, `simd_rows`, `transpose_tiling`, `reduction_root`, `writes_views`, ...). |
+| `mod.rs` | Kernel-kind dispatch (`kernel`), naming and formatting (`named`, `formatted`), kernel parameters (`io_params`), output views (`writes_views`, `written`), Metal types and functors (`metal_type`, `functor`, `constant`); re-exports each kind's predicates. |
+| `emitter.rs` | The `Emitter`: each fused value as a Metal expression at an index (`value`), hoisting values the same across a row; `gather_index`. |
+| `reduction.rs` | Reductions with prologue and epilogue (`reduction`, `reduction_root`, `split_launches`, `has_epilogue`). |
+| `transpose.rs` | Tiled transposes (`TransposeTiling`, `transpose_tiling`, `transpose_kernel`). |
+| `row.rs` | Row kernels for normalization diamonds (`row_kernel`, `row_reductions`, `row_partials`, `simd_rows`, `row_groups`) and the helpers they share with GEMM rows (`softmax_pair`, `kept_values`, `depends_on`). |
+| `gemm_row.rs` | A dot whose rows a row kernel normalizes (`row_dot`, `gemm_row_kernel`, `gemm_rows`, `gemm_tiles`, `tile_scratch`). |
+| `gemm.rs` | GEMM with epilogues (`gemm_dot`, `gemm_kernel`), column regions (`gemm_regions`, `Columns`), paired, interleaved and expanded outputs. |
+| `attention.rs` | Flash attention forward and backward (`attention_kernel`, `attention_backward_kernel`), dropout and score functors, block choice. |
 
 ## Subfolders
 
