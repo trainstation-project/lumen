@@ -79,6 +79,43 @@ def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
     np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "shape, update, starts",
+    [
+        ((512, 256), (32, 256), [(0, 0), (32, 0), (96, 0), (480, 0)]),
+        ((300, 700), (40, 300), [(13, 77), (0, 0), (290, 500), (64, 128)]),
+        ((3, 70, 260), (1, 9, 130), [(1, 5, 3), (0, 0, 0), (2, 61, 130)]),
+    ],
+    ids=["aligned", "unaligned", "lead"],
+)
+@pytest.mark.parametrize("in_place", [True, False])
+def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
+    """Updates at constant starts, each into the last's result, land in
+    order (later ones over earlier ones); on TPU they run as one step."""
+    rng = np.random.default_rng(1)
+    xt = _tensor(rng.standard_normal(shape).astype(np.float32), device, dtype)
+    uts = [_tensor(rng.standard_normal(update).astype(np.float32), device, dtype) for _ in starts]
+    x, *us = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, *uts))
+
+    def f(x, *us):
+        x = x * 2.0 if in_place else x
+        for u, at in zip(us, starts):
+            x = prims.dynamic_update_slice(x, u, at)
+        return x
+
+    if device == "tpu":
+        metas = [lumen.empty(list(t.shape), dtype, "meta") for t in (xt, *uts)]
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+        assert [s["label"] for s in steps].count(f"{len(starts)}x dynamic_update_slice") == 1, steps
+    got = lumen.compile(f)(xt, *uts)
+    want = 2 * x if in_place else x.copy()
+    for u, at in zip(us, starts):
+        want[_block(shape, at, update)] = u
+    np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
+
+
 def test_start_indices():
     """Python ints are constants of the traced indices' dtype; indices must
     be int32 or int64 scalars of one dtype, and the block inside."""

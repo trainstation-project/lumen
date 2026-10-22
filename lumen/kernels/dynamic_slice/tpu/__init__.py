@@ -20,25 +20,36 @@ def _int(n):
     return prims.full((), n, "int32")
 
 
+def _started(copies):
+    for c in copies:
+        c.start()
+
+
+def _waited(copies):
+    for c in copies:
+        c.wait()
+
+
 def program(spec):
     shape, update, dtype, tile = spec["shape"], spec["update"], spec["dtype"], spec["tile"]
     bm, bn, gm, width = spec["bm"], spec["bn"], spec["gm"], spec["width"]
-    copied, cbm = spec["copy"], spec["copy_rows"]
+    copied, cbm, count, fixed = spec["copy"], spec["copy_rows"], spec["count"], spec["static"]
     rank = len(shape)
     (rows, cols), (ur, uc) = shape[-2:], update[-2:]
     rp, cp, urp, ucp = _up(rows, tile), _up(cols, LANES), _up(ur, tile), _up(uc, LANES)
     lead, ulead = shape[:-2], update[:-2]
     whole = (ur % tile == 0 or ur == rows) and (uc % LANES == 0 or uc == cols)
     wide = "float32" if dtype.startswith("bfloat") or dtype.startswith("float") else "int32"
-    single = math.prod(ulead) == 1 and urp == bm and ucp == bn
+    small = math.prod(ulead) == 1 and gm == urp
     strips = uc != cols and width > 2 * STRIP
     blocks = urp // gm
+    indices = 0 if fixed else count * rank
+    output = 1 + count + indices
 
     def kernel(refs, memory, result):
         sem = pl.scratch(pl.SemaphoreType.DMA)
         x = pallas.view(memory, refs[0], (math.prod(lead), rp, cp), dtype)
-        u = pallas.view(memory, refs[1], (math.prod(ulead), urp, ucp), dtype)
-        out = pallas.view(result, refs[2 + rank], (math.prod(lead), rp, cp), dtype)
+        out = pallas.view(result, refs[output], (math.prod(lead), rp, cp), dtype)
         slots = pl.scratch(pl.VMEM((SLOTS, bm, bn), dtype))
         flights = pl.scratch(pl.SemaphoreType.DMA((2, SLOTS)))
         sources = pl.scratch(pl.VMEM((2, gm, ucp), dtype))
@@ -46,18 +57,15 @@ def program(spec):
         edge = pl.scratch(pl.VMEM((tile, width), dtype))
         loads, reads, stores = (pl.scratch(pl.SemaphoreType.DMA((2,))) for _ in range(3))
 
-        def piece(k, t):
-            across = ucp // bn
-            a, b = pl.multiple_of(t // across * bm, tile), pl.multiple_of(t % across * bn, LANES)
-            return pl.make_async_copy(u.at[k, pl.ds(a, bm), pl.ds(b, bn)], slots.at[t % SLOTS], flights.at[0, t % SLOTS])
+        def updated(m):
+            return pallas.view(memory, refs[1 + m], (math.prod(ulead), urp, ucp), dtype)
 
-        def source(k, i):
+        def source(m, k, i, slot):
             rows_at = pl.multiple_of(i * gm, tile)
-            return pl.make_async_copy(u.at[k, pl.ds(rows_at, gm)], sources.at[i % 2], loads.at[i % 2])
+            return pl.make_async_copy(updated(m).at[k, pl.ds(rows_at, gm)], sources.at[slot], loads.at[slot])
 
-        early = source(0, _int(0)) if math.prod(ulead) == 1 else None
-        if early is not None:
-            early.start()
+        if small:
+            source(_int(0), 0, _int(0), _int(0)).start()
 
         if copied:
 
@@ -68,161 +76,196 @@ def program(spec):
             pl.emit_pipeline(moved, grid=(math.prod(lead), rp // cbm), in_specs=[whole_rows], out_specs=[whole_rows])(
                 x, out
             )
-        held = pl.scratch(pl.SMEM((rank, SCALARS), "int32"))
-        fetched = [
-            pl.async_copy(pallas.view(memory, refs[2 + d], (SCALARS,), "int32"), held.at[d], sem) for d in range(rank)
-        ]
-        for c in fetched:
-            c.wait()
-        starts = [prims.min(prims.max(held[d, 0], _int(0)), _int(shape[d] - update[d])) for d in range(rank)]
-        r0, c0 = starts[-2], starts[-1]
-        a = pl.multiple_of(r0 // tile * tile, tile)
-        b = pl.multiple_of(prims.min(c0 // LANES * LANES, _int(cp - width)), LANES)
-        dr, dc = r0 - a, c0 - b
 
-        def slab(k):
-            at, rest = _int(0), k
-            for d in reversed(range(len(ulead))):
-                at = at + (starts[d] + rest % ulead[d]) * math.prod(lead[d + 1 :])
-                rest = rest // ulead[d]
-            return at
+        if fixed:
 
-        def staged(k, at):
-            if early is not None:
-                early.wait()
-            if single:
-                to = out.at[at, pl.ds(pl.multiple_of(r0, tile), bm), pl.ds(pl.multiple_of(c0, LANES), bn)]
-                pl.async_copy(sources.at[0], to, sem).wait()
-                return
-            count = urp // bm * (ucp // bn)
-            for t in range(min(SLOTS, count)):
-                piece(k, _int(t)).start()
+            def start(m, d):
+                return refs[output + 1 + m * rank + d]
 
-            def store(t):
+        else:
+            held = pl.scratch(pl.SMEM((indices, SCALARS), "int32"))
+            fetched = [
+                pl.async_copy(pallas.view(memory, refs[1 + count + j], (SCALARS,), "int32"), held.at[j], sem)
+                for j in range(indices)
+            ]
+            _waited(fetched)
+
+            def start(m, d):
+                return prims.min(prims.max(held[m * rank + d, 0], _int(0)), _int(shape[d] - update[d]))
+
+        def one(m):
+            starts = [start(m, d) for d in range(rank)]
+            r0, c0 = starts[-2], starts[-1]
+            a = pl.multiple_of(r0 // tile * tile, tile)
+            b = pl.multiple_of(prims.min(c0 // LANES * LANES, _int(cp - width)), LANES)
+            dr, dc = r0 - a, c0 - b
+            aligned = (dr == 0) & (c0 % LANES == 0)
+
+            def slab(k):
+                at, rest = _int(0), k
+                for d in reversed(range(len(ulead))):
+                    at = at + (starts[d] + rest % ulead[d]) * math.prod(lead[d + 1 :])
+                    rest = rest // ulead[d]
+                return at
+
+            def piece(k, t):
                 across = ucp // bn
-                rows_at = pl.multiple_of(r0 + t // across * bm, tile)
-                cols_at = pl.multiple_of(c0 + t % across * bn, LANES)
-                to = out.at[at, pl.ds(rows_at, bm), pl.ds(cols_at, bn)]
-                return pl.make_async_copy(slots.at[t % SLOTS], to, flights.at[1, t % SLOTS])
+                rows_at, cols_at = pl.multiple_of(t // across * bm, tile), pl.multiple_of(t % across * bn, LANES)
+                return pl.make_async_copy(
+                    updated(m).at[k, pl.ds(rows_at, bm), pl.ds(cols_at, bn)],
+                    slots.at[t % SLOTS],
+                    flights.at[0, t % SLOTS],
+                )
 
-            @pl.loop(0, count)
-            def _(t):
-                piece(k, t).wait()
-                store(t).start()
+            def staged(k, at):
+                total = urp // bm * (ucp // bn)
+                for t in range(min(SLOTS, total)):
+                    piece(k, _int(t)).start()
 
-                @pl.when(t + SLOTS < count)
-                def _():
+                def store(t):
+                    across = ucp // bn
+                    rows_at = pl.multiple_of(r0 + t // across * bm, tile)
+                    cols_at = pl.multiple_of(c0 + t % across * bn, LANES)
+                    to = out.at[at, pl.ds(rows_at, bm), pl.ds(cols_at, bn)]
+                    return pl.make_async_copy(slots.at[t % SLOTS], to, flights.at[1, t % SLOTS])
+
+                @pl.loop(0, total)
+                def _(t):
+                    piece(k, t).wait()
+                    store(t).start()
+
+                    @pl.when(t + SLOTS < total)
+                    def _():
+                        store(t).wait()
+                        piece(k, t + SLOTS).start()
+
+                @pl.loop(max(0, total - SLOTS), total)
+                def _(t):
                     store(t).wait()
-                    piece(k, t + SLOTS).start()
 
-            @pl.loop(max(0, count - SLOTS), count)
-            def _(t):
-                store(t).wait()
+            def placed(tail, current, rows_of):
+                v = prims.concatenate([tail, current], 0).to(wide)
+                if width > ucp:
+                    v = prims.concatenate([v, prims.full((tile + rows_of, width - ucp), 0, wide)], 1)
+                v = pl.roll(pl.roll(v, dr, 0), dc, 1)
+                return prims.slice(v, (tile, 0), (tile + rows_of, width))
 
-        def placed(tail, current, rows_of):
-            v = prims.concatenate([tail, current], 0).to(wide)
-            if width > ucp:
-                v = prims.concatenate([v, prims.full((tile + rows_of, width - ucp), 0, wide)], 1)
-            v = pl.roll(pl.roll(v, dr, 0), dc, 1)
-            return prims.slice(v, (tile, 0), (tile + rows_of, width))
+            def inside(top, rows_of):
+                g = top + pl.broadcasted_iota("int32", (rows_of, width), 0)
+                c = pl.broadcasted_iota("int32", (rows_of, width), 1)
+                return (g >= r0) & (g < r0 + ur) & (c >= dc) & (c < dc + uc)
 
-        def inside(top, rows_of):
-            g = top + pl.broadcasted_iota("int32", (rows_of, width), 0)
-            c = pl.broadcasted_iota("int32", (rows_of, width), 1)
-            return (g >= r0) & (g < r0 + ur) & (c >= dc) & (c < dc + uc)
+            def window_reads(at, slot, top):
+                to = windows.at[slot]
+                target = out.at[at, pl.ds(top, gm)]
+                full = pl.make_async_copy(target.at[:, pl.ds(b, width)], to, reads.at[slot])
+                if not strips:
+                    return [full], [full] if uc != cols else []
+                left = pl.make_async_copy(target.at[:, pl.ds(b, STRIP)], to.at[:, pl.ds(0, STRIP)], reads.at[slot])
+                right_at = pl.multiple_of(b + width - STRIP, LANES)
+                right = pl.make_async_copy(
+                    target.at[:, pl.ds(right_at, STRIP)], to.at[:, pl.ds(width - STRIP, STRIP)], reads.at[slot]
+                )
+                return [full], [left, right]
 
-        def window_reads(at, i, top):
-            to = windows.at[i % 2]
-            target = out.at[at, pl.ds(top, gm)]
-            full = pl.make_async_copy(target.at[:, pl.ds(b, width)], to, reads.at[i % 2])
-            if not strips:
-                return [full], [full] if uc != cols else None
-            left = pl.make_async_copy(target.at[:, pl.ds(b, STRIP)], to.at[:, pl.ds(0, STRIP)], reads.at[i % 2])
-            right_at = pl.multiple_of(b + width - STRIP, LANES)
-            right = pl.make_async_copy(
-                target.at[:, pl.ds(right_at, STRIP)], to.at[:, pl.ds(width - STRIP, STRIP)], reads.at[i % 2]
-            )
-            return [full], [left, right]
+            def edged(at, last):
+                @pl.when(dr + ur > urp)
+                def _():
+                    top = pl.multiple_of(a + urp, tile)
+                    target = out.at[at, pl.ds(top, tile), pl.ds(b, width)]
+                    pl.async_copy(target, edge, sem).wait()
+                    tail = sources[last, gm - tile : gm, :]
+                    v = placed(tail, prims.full((tile, ucp), 0, dtype), tile)
+                    edge[...] = prims.select(inside(top, tile), v, edge[...].to(wide)).to(dtype)
+                    pl.async_copy(edge, target, sem).wait()
 
-        def streamed(k, at):
-            if early is None:
-                source(k, _int(0)).start()
-
-            def written(i):
-                top = pl.multiple_of(a + i * gm, tile)
-                return pl.make_async_copy(windows.at[i % 2], out.at[at, pl.ds(top, gm), pl.ds(b, width)], stores.at[i % 2])
-
-            @pl.loop(0, blocks)
-            def _(i):
+            def block(at, i, slot, tail_slot, loaded, prefetch):
                 top = pl.multiple_of(a + i * gm, tile)
                 bordered = (top < r0) | (top + gm > r0 + ur)
-
-                @pl.when(i >= 2)
-                def _():
-                    written(i - 2).wait()
-
-                whole_copies, strip_copies = window_reads(at, i, top)
-
-                @pl.when(bordered)
-                def _():
-                    for c in whole_copies:
-                        c.start()
-
-                if strip_copies:
-
-                    @pl.when(~bordered)
-                    def _():
-                        for c in strip_copies:
-                            c.start()
-
-                source(k, i).wait()
-                tail = sources[(i + 1) % 2, gm - tile : gm, :]
-                current = sources[i % 2, :, :]
-
-                @pl.when(i + 1 < blocks)
-                def _():
-                    source(k, i + 1).start()
-
+                whole_copies, strip_copies = window_reads(at, slot, top)
+                pl.when(bordered)(lambda: _started(whole_copies))
+                pl.when(~bordered)(lambda: _started(strip_copies))
+                loaded()
+                tail = sources[tail_slot, gm - tile : gm, :]
+                current = sources[slot, :, :]
+                prefetch()
                 v = placed(tail, current, gm)
-
-                @pl.when(bordered)
-                def _():
-                    for c in whole_copies:
-                        c.wait()
-
-                if strip_copies:
-
-                    @pl.when(~bordered)
-                    def _():
-                        for c in strip_copies:
-                            c.wait()
-
-                to = windows.at[i % 2]
+                pl.when(bordered)(lambda: _waited(whole_copies))
+                pl.when(~bordered)(lambda: _waited(strip_copies))
+                to = windows.at[slot]
                 to[...] = prims.select(inside(top, gm), v, to[...].to(wide)).to(dtype)
-                written(i).start()
+                return pl.make_async_copy(to, out.at[at, pl.ds(top, gm), pl.ds(b, width)], stores.at[slot])
 
-            @pl.loop(max(0, blocks - 2), blocks)
-            def _(i):
-                written(i).wait()
+            def streamed(k, at):
+                source(m, k, _int(0), _int(0)).start()
 
-            @pl.when(dr + ur > urp)
-            def _():
-                top = pl.multiple_of(a + urp, tile)
-                target = out.at[at, pl.ds(top, tile), pl.ds(b, width)]
-                pl.async_copy(target, edge, sem).wait()
-                tail = sources[(blocks - 1) % 2, gm - tile : gm, :]
-                v = placed(tail, prims.full((tile, ucp), 0, dtype), tile)
-                edge[...] = prims.select(inside(top, tile), v, edge[...].to(wide)).to(dtype)
-                pl.async_copy(edge, target, sem).wait()
+                def written(i):
+                    top = pl.multiple_of(a + i * gm, tile)
+                    return pl.make_async_copy(
+                        windows.at[i % 2], out.at[at, pl.ds(top, gm), pl.ds(b, width)], stores.at[i % 2]
+                    )
 
-        @pl.loop(0, math.prod(ulead))
-        def _(k):
-            at = slab(k)
-            if not whole:
-                streamed(k, at)
+                @pl.loop(0, blocks)
+                def _(i):
+                    @pl.when(i >= 2)
+                    def _():
+                        written(i - 2).wait()
+
+                    def prefetch():
+                        @pl.when(i + 1 < blocks)
+                        def _():
+                            source(m, k, i + 1, (i + 1) % 2).start()
+
+                    block(at, i, i % 2, (i + 1) % 2, lambda: source(m, k, i, i % 2).wait(), prefetch).start()
+
+                @pl.loop(max(0, blocks - 2), blocks)
+                def _(i):
+                    written(i).wait()
+
+                edged(at, (blocks - 1) % 2)
+
+            if small:
+                slot = m % 2
+                at = slab(0)
+
+                def prefetch():
+                    @pl.when(m + 1 < count)
+                    def _():
+                        source(m + 1, 0, _int(0), (m + 1) % 2).start()
+
+                def loaded():
+                    source(m, 0, _int(0), slot).wait()
+
+                def fast():
+                    loaded()
+                    prefetch()
+                    to = out.at[at, pl.ds(pl.multiple_of(r0, tile), gm), pl.ds(pl.multiple_of(c0, LANES), ucp)]
+                    pl.async_copy(sources.at[slot], to, stores.at[slot]).wait()
+
+                def slow():
+                    written = block(at, _int(0), slot, 1 - slot, loaded, prefetch)
+                    written.start()
+                    written.wait()
+                    edged(at, slot)
+
+                if whole:
+                    pl.when(aligned)(fast)
+                    pl.when(~aligned)(slow)
+                else:
+                    slow()
                 return
-            aligned = (dr == 0) & (c0 % LANES == 0)
-            pl.when(aligned)(lambda: staged(k, at))
-            pl.when(~aligned)(lambda: streamed(k, at))
+
+            @pl.loop(0, math.prod(ulead))
+            def _(k):
+                at = slab(k)
+                if not whole:
+                    streamed(k, at)
+                    return
+                pl.when(aligned)(lambda: staged(k, at))
+                pl.when(~aligned)(lambda: streamed(k, at))
+
+        @pl.loop(0, count)
+        def _(m):
+            one(m)
 
     return pallas.program(kernel, spec)

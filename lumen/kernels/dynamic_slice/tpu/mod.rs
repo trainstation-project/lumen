@@ -1,8 +1,10 @@
 use crate::DType;
 use crate::device::tpu::layout::Layout;
+use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
+use crate::tensor::scalar::Scalar;
 
 const LANES: usize = 128;
 
@@ -32,10 +34,39 @@ pub(crate) fn encode(
         ))
     };
     let rank = operand.shape.len();
+    let fixed: Option<Vec<i32>> = match &step.primitive {
+        Primitive::Fusion { body, .. } => {
+            let nodes = body.nodes();
+            let value = |v| match nodes.iter().find(|n| n.output == v).map(|n| &n.primitive) {
+                Some(Primitive::Full {
+                    fill_value: Scalar::Int(i),
+                    ..
+                }) => *i,
+                _ => unreachable!("a constant start"),
+            };
+            let starts = nodes
+                .iter()
+                .filter(|n| matches!(n.primitive, Primitive::DynamicUpdateSlice))
+                .flat_map(|n| {
+                    n.inputs[2..]
+                        .iter()
+                        .enumerate()
+                        .map(|(d, &v)| (d, value(v)))
+                })
+                .map(|(d, s)| s.clamp(0, (operand.shape[d] - update.shape[d]) as i64) as i32)
+                .collect();
+            Some(starts)
+        }
+        _ => None,
+    };
+    let count = match fixed {
+        Some(_) => step.inputs.len() - 1,
+        None => 1,
+    };
     if rank < 2 {
         return failed("a dynamic_update_slice of fewer than 2 dimensions");
     }
-    if step.inputs[2..].iter().any(|(_, t)| t.dtype != DType::I32) {
+    if fixed.is_none() && step.inputs[2..].iter().any(|(_, t)| t.dtype != DType::I32) {
         return failed("a dynamic_update_slice at other than int32 indices");
     }
     let layout = Layout::new(operand.dtype, &operand.shape)?;
@@ -70,10 +101,11 @@ pub(crate) fn encode(
     )
     .unwrap_or(tile);
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}",
         operand.shape,
         update.shape,
-        operand.dtype.full_name()
+        operand.dtype.full_name(),
+        fixed.is_some()
     );
     let n = step.inputs.len();
     let rows_of: Vec<*const u8> = inputs[..n]
@@ -83,10 +115,13 @@ pub(crate) fn encode(
         .collect();
     let launched = Launch {
         module: "lumen.kernels.dynamic_slice.tpu",
-        kernel: format!("dynamic_update_slice_{}_{bm}x{bn}_{gm}", operand.dtype),
+        kernel: format!(
+            "dynamic_update_slice_{count}x{}_{bm}x{bn}_{gm}",
+            operand.dtype
+        ),
         spec,
         rows: &rows_of,
-        scalars: &[],
+        scalars: fixed.as_deref().unwrap_or(&[]),
         host: &[],
         sparse: None,
     };
