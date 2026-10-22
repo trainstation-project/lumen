@@ -44,7 +44,7 @@ templates in these `.metal` files (compiled with `TEMPLATES_ONLY`, see
 | [`scan/`](scan/README.md) | `cumsum`. |
 | `elementwise/` | add, sub, mul, div, max, eq, lt, neg, exp, log, sqrt, tanh, logistic, cast, select on MPS. |
 | `layout/` | A plan's reshape copies, `broadcast_in_dim`, `transpose`, `slice` on MPS. |
-| `dynamic_slice/` | `dynamic_slice` / `dynamic_update_slice` on MPS, plus the strided `copy` that `device_transfer` reuses. |
+| `dynamic_slice/` | `dynamic_slice` / `dynamic_update_slice` on MPS, plus the strided `copy` that `device_transfer` reuses; `dynamic_update_slice` on TPU. |
 | `gather/` | `gather` on TPU (an embedding's lookup); on MPS it is generated. |
 | `scatter_add/` | `scatter_add` on MPS. |
 | `factory/` | `full`, `iota`, `random_bits` on MPS. |
