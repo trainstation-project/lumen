@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
-pub use primitive::{BinaryOp, FUSION_SEPARATOR, NEURAL_ENGINE, Primitive, UnaryOp};
+pub use primitive::{BinaryOp, FUSION_SEPARATOR, NEURAL_ENGINE, Primitive, UPDATES, UnaryOp};
 
 use crate::DType;
 use crate::tensor::contiguous_strides;

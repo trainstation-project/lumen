@@ -24,21 +24,34 @@ interpreter (`lumen/kernels/reference.rs`) has its own `DynamicSlice` /
 
 ## On TPU
 
-The operand is updated in place when the plan gives the output its memory;
-otherwise it is first copied into the output (a pipelined copy through VMEM:
-one HBM-to-HBM DMA streams at ~64 GB/s). The starts are DMA'd into SMEM and
-clamped as XLA's. For each of the update's leading slabs:
+A step is one `dynamic_update_slice` (starts read on the device: DMA'd into
+SMEM and clamped as XLA's) or a `dynamic_update_slices` fusion: a chain of
+updates of one shape at constant starts, each into the last's result
+(`graph_compiler/tpu/updates.rs`), whose starts `encode` clamps and passes
+as the launch's scalars. The operand is updated in place when the plan gives
+the output its memory; otherwise it is first copied into the output through
+VMEM (one HBM-to-HBM DMA streams at ~64 GB/s, so nothing moves HBM to HBM).
 
-* **Aligned** (rows and columns of whole tiles, starting on a tile, checked
-  at run time): the update's blocks are staged through VMEM, double-buffered,
-  into the output.
-* **Otherwise**: each block of the update reads the output's tile-aligned
-  window around it, rolls the update into place (`pl.roll`), merges it under
-  a mask (16-bit values widened to 32 bits) and writes the window back:
-  Mosaic stores only at offsets it can prove tile-aligned.
+Mosaic DMAs and stores only at offsets it can prove tile-aligned (an
+unaligned DMA misplaces data silently), so an update that is not
+(rows and columns of whole tiles, starting on a tile) is rolled into place
+(`pl.roll`) and merged under a mask with the tile-aligned window around it
+(16-bit values widened to 32 bits). Kernels by what `encode` knows:
 
-When the update is one block it is fetched before the starts. Blocks are of
-whole tiles (`bm` rows, `bn` columns, up to 512K elements).
+* **Resident** (constant starts, the chain's tile-aligned box within 48 MiB
+  of VMEM, updates every one aligned, or overlapping ones of one block):
+  the box is read into VMEM once, unless the updates tile it exactly (and
+  then a copy of the operand skips its rows); each update is DMA'd into it
+  (all at once if no two overlap) or merged into it in order, and the box
+  is written once.
+* **One block each**: updates are prefetched 8 ahead; an aligned one is
+  written from VMEM, any other merged with its window. If no two updates'
+  windows overlap, each one's write overlaps the next.
+* **Larger**: per update, aligned ones are staged through VMEM in blocks of
+  up to 1M elements, double-buffered; any other streams in blocks of whole
+  rows: each output block is the update's block and the last tile of the one
+  before, rolled into place; only blocks on its first or last row read the
+  output whole, the others its two edge strips of 256 columns.
 
 ## Subfolders
 
