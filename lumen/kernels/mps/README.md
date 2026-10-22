@@ -23,7 +23,7 @@ the module is `pub(crate)`. Callers:
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`. |
+| `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`, `mark_event` (an `Event`'s timed marker kernel). |
 | `kernels.metal` | Shared Metal definitions (no kernels): dtype predicates and ranges, saturating conversions, the binary/unary functors, Philox, `FOR_EACH_ELEMENT`, strided `offset_of`/`offset_of32`, dtype X-macros, simdgroup-fragment helpers. |
 | `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_launch_kernel`. |
 
@@ -68,9 +68,13 @@ workspace its partials need (0 for everything else).
 * A non-zero shim status (unknown kernel name, a pointer that is not an MPS
   buffer, a grid dimension over `u32::MAX`) becomes `Err`.
 
-`elementwise_grid(n, dtype)` gives one thread per 16 bytes
-(`BYTES_PER_THREAD`) of output; kernels loop with `FOR_EACH_ELEMENT`, which
-strides by `threads_per_grid` up to `per_thread<T>()` times.
+`elementwise_grid(n, dtype)` gives each thread `n / 32K` elements of output,
+at least one and at most 16 bytes' worth (`BYTES_PER_THREAD`): a small output
+runs on as many threads as the GPU holds at once (an M4 Pro's 20 cores, about
+20K), since there latency, not bandwidth, sets its time; a large one on 16
+bytes a thread, for bandwidth. Kernels loop with `FOR_EACH_ELEMENT`, which
+strides by `threads_per_grid` up to `per_thread<T>()` times and stops at `n`,
+so any grid of at least `n / per_thread<T>()` threads covers the output.
 
 ## The Metal library
 

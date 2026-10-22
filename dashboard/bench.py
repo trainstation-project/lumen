@@ -12,7 +12,6 @@ import numpy as np
 
 import lumen
 from lumen import prims
-from lumen.profiler import ProfilerActivity, profile
 
 try:
     import torch
@@ -66,10 +65,6 @@ class Flush:
         self.lumen_fn = lumen.compile(lambda z: prims.add(prims.mul(z, z), z))
         self.lumen_fn(self.lumen_buffer)
         lumen.mps.synchronize()
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-            self.lumen()
-            lumen.mps.synchronize()
-        self.lumen_kernels = {e["name"] for e in prof.events() if e["kind"] == "gpu"}
 
     def lumen(self):
         self.lumen_fn(self.lumen_buffer)
@@ -79,25 +74,16 @@ def kernel_time(f, args, flush, reps=20):
     f(*args)
     for _ in range(10):
         flush.lumen()
-    lumen.mps.synchronize()
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-        for _ in range(reps):
-            flush.lumen()
-            f(*args)
-        lumen.mps.synchronize()
-    calls, current = [], None
-    for e in prof.events():
-        if e["kind"] != "gpu":
-            continue
-        if e["name"] in flush.lumen_kernels:
-            if current:
-                calls.append(current)
-            current = 0.0
-        elif current is not None:
-            current += e["duration_us"]
-    if current:
-        calls.append(current)
-    return min(calls)
+    pairs = []
+    for _ in range(reps):
+        flush.lumen()
+        start, end = lumen.Event("mps", enable_timing=True), lumen.Event("mps", enable_timing=True)
+        start.record()
+        f(*args)
+        end.record()
+        pairs.append((start, end))
+    pairs[-1][1].synchronize()
+    return min(start.elapsed_time(end) for start, end in pairs) * 1e3
 
 
 ROTATION_BYTES = 512 << 20

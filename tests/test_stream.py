@@ -21,15 +21,66 @@ def test_every_device_has_a_stream():
 
 
 def test_the_stream_is_the_only_api():
-    """``lumen.Stream`` is the stream API (no per-device stream
-    functions)."""
-    assert lumen.stream.__all__ == ["Stream"]
+    """``lumen.Stream`` and ``lumen.Event`` are the stream API (no
+    per-device stream functions)."""
+    assert lumen.stream.__all__ == ["Event", "Stream"]
     cpu = lumen.Stream("cpu")
     assert cpu == lumen.Stream("cpu:0") and hash(cpu) == hash(lumen.Stream()) and cpu != lumen.Stream("meta")
     cpu.wait_stream(lumen.Stream("cpu"))
     cpu.wait_stream(lumen.Stream("meta"))
     with pytest.raises(ValueError, match="an external stream is CUDA's"):
         lumen.Stream("cpu", stream_id=1)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("mps", marks=pytest.mark.mps),
+        pytest.param("tpu", marks=pytest.mark.tpu),
+        pytest.param("cuda", marks=pytest.mark.cuda),
+    ],
+)
+def test_events_time_the_work_between_them(device):
+    """Two events with ``enable_timing`` around a compiled program:
+    ``elapsed_time`` is the device time between them in milliseconds,
+    longer for more work, and ``query`` holds once the later is done."""
+    try:
+        x = lumen.ones([1024, 4096], device=device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(lambda x: x * 2.0 + 1.0)
+    f(x)
+    lumen.Stream(device).synchronize()
+
+    def timed(reps):
+        start, end = lumen.Event(device, enable_timing=True), lumen.Event(device, enable_timing=True)
+        start.record()
+        for _ in range(reps):
+            f(x)
+        end.record()
+        end.synchronize()
+        assert end.query() and start.query()
+        return start.elapsed_time(end)
+
+    one, many = timed(1), timed(20)
+    assert 0 < one < many
+
+
+def test_events_need_timing_and_a_record():
+    """``elapsed_time`` needs both events recorded and timed; the meta
+    device runs nothing to record an event after."""
+    plain, timed = lumen.Event("cpu"), lumen.Event("cpu", enable_timing=True)
+    assert plain.query() and not plain.enable_timing and timed.enable_timing
+    assert repr(plain) == "lumen.Event(device='cpu:0', enable_timing=False)"
+    with pytest.raises(RuntimeError, match="record both"):
+        timed.elapsed_time(lumen.Event("cpu", enable_timing=True))
+    plain.record()
+    timed.record()
+    with pytest.raises(RuntimeError, match="enable_timing=True"):
+        plain.elapsed_time(timed)
+    with pytest.raises(RuntimeError, match="meta device"):
+        lumen.Event("meta")
 
 
 def test_a_stream_of_an_absent_device_raises():

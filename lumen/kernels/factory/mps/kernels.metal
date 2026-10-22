@@ -21,3 +21,5 @@ kernel void random_bits(device const ulong *seed [[buffer(0)]],
                         ELEMENTWISE_ARGS(4)) {
     FOR_EACH_ELEMENT(j, uint) { out[j] = philox_bits(*seed, *start + offset + j); }
 }
+
+kernel void event_marker() {}

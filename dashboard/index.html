@@ -141,7 +141,7 @@
     </div>
     <div class="lx-card">
       <h2>Elementwise ops on MPS</h2>
-      <p class="lx-note">At 64M elements unless noted. Bandwidth is from lumen's kernel time: one call on a cold cache (a 256 MB flush before it), timed by the profiler, best of 20, as PyTorch's Inductor benchmarks kernels. vs PyTorch compares time per call with PyTorch <span id="torch-version"></span> on MPS: calls back to back, rotating through enough separate inputs that none is in cache: above 1× lumen is faster. Small call is that time at 4,096 elements, where launch cost dominates.</p>
+      <p class="lx-note">At 64M elements unless noted. Bandwidth is from lumen's kernel time: one call on a cold cache (a 256 MB flush before it), timed with lumen.Event (the GPU's timestamp counters), best of 20, as PyTorch's Inductor benchmarks kernels. vs PyTorch compares time per call with PyTorch <span id="torch-version"></span> on MPS: calls back to back, rotating through enough separate inputs that none is in cache: above 1× lumen is faster. Small call is that time at 4,096 elements, where launch cost dominates.</p>
       <div class="lx-scroll"><table id="perf-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
   </section>

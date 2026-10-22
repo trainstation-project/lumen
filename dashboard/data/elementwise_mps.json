@@ -19,12 +19,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 3.583,
-   "lumen_call_us": 11.054,
-   "torch_call_us": 2.886,
+   "device_us": 2.666,
+   "lumen_call_us": 3.004,
+   "torch_call_us": 2.558,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.15
+   "gbs": 12.29
   },
   {
    "op": "neg",
@@ -36,12 +36,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 3.708,
-   "lumen_call_us": 11.041,
-   "torch_call_us": 3.017,
+   "device_us": 3.501,
+   "lumen_call_us": 2.85,
+   "torch_call_us": 2.883,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 35.35
+   "gbs": 37.44
   },
   {
    "op": "neg",
@@ -53,12 +53,12 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 5.124,
-   "lumen_call_us": 12.513,
-   "torch_call_us": 4.465,
+   "device_us": 5.083,
+   "lumen_call_us": 3.443,
+   "torch_call_us": 5.301,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 102.32
+   "gbs": 103.15
   },
   {
    "op": "neg",
@@ -70,12 +70,12 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 13.543,
-   "lumen_call_us": 13.751,
-   "torch_call_us": 10.691,
+   "device_us": 13.583,
+   "lumen_call_us": 7.78,
+   "torch_call_us": 11.173,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 154.85
+   "gbs": 154.4
   },
   {
    "op": "neg",
@@ -87,12 +87,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 41.084,
-   "lumen_call_us": 30.352,
-   "torch_call_us": 42.518,
+   "device_us": 41.25,
+   "lumen_call_us": 28.04,
+   "torch_call_us": 43.13,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 204.18
+   "gbs": 203.36
   },
   {
    "op": "neg",
@@ -104,12 +104,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 145.625,
-   "lumen_call_us": 143.49,
-   "torch_call_us": 175.26,
+   "device_us": 148.25,
+   "lumen_call_us": 145.835,
+   "torch_call_us": 158.265,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 230.42
+   "gbs": 226.34
   },
   {
    "op": "neg",
@@ -121,12 +121,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 583.542,
-   "lumen_call_us": 602.938,
-   "torch_call_us": 651.604,
+   "device_us": 580.5,
+   "lumen_call_us": 592.802,
+   "torch_call_us": 607.877,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 230.01
+   "gbs": 231.21
   },
   {
    "op": "neg",
@@ -138,12 +138,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2323.833,
-   "lumen_call_us": 2361.221,
-   "torch_call_us": 2345.967,
+   "device_us": 2354.292,
+   "lumen_call_us": 2414.446,
+   "torch_call_us": 2422.481,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 231.03
+   "gbs": 228.04
   },
   {
    "op": "neg",
@@ -155,12 +155,12 @@
    "inputs": 1,
    "bytes": 16384,
    "flops": 4096,
-   "device_us": 4.793,
-   "lumen_call_us": 10.739,
-   "torch_call_us": 2.408,
+   "device_us": 2.708,
+   "lumen_call_us": 2.677,
+   "torch_call_us": 2.469,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 3.42
+   "gbs": 6.05
   },
   {
    "op": "neg",
@@ -172,12 +172,12 @@
    "inputs": 1,
    "bytes": 65536,
    "flops": 16384,
-   "device_us": 4.75,
-   "lumen_call_us": 10.597,
-   "torch_call_us": 2.637,
+   "device_us": 2.791,
+   "lumen_call_us": 2.63,
+   "torch_call_us": 2.71,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 13.8
+   "gbs": 23.48
   },
   {
    "op": "neg",
@@ -189,12 +189,12 @@
    "inputs": 1,
    "bytes": 262144,
    "flops": 65536,
-   "device_us": 5.666,
-   "lumen_call_us": 10.845,
-   "torch_call_us": 3.83,
+   "device_us": 4.292,
+   "lumen_call_us": 2.907,
+   "torch_call_us": 3.817,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 46.27
+   "gbs": 61.08
   },
   {
    "op": "neg",
@@ -206,12 +206,12 @@
    "inputs": 1,
    "bytes": 1048576,
    "flops": 262144,
-   "device_us": 8.042,
-   "lumen_call_us": 11.374,
-   "torch_call_us": 6.747,
+   "device_us": 8.292,
+   "lumen_call_us": 6.302,
+   "torch_call_us": 7.562,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 130.39
+   "gbs": 126.46
   },
   {
    "op": "neg",
@@ -223,12 +223,12 @@
    "inputs": 1,
    "bytes": 4194304,
    "flops": 1048576,
-   "device_us": 29.916,
-   "lumen_call_us": 17.14,
-   "torch_call_us": 20.496,
+   "device_us": 28.167,
+   "lumen_call_us": 15.105,
+   "torch_call_us": 21.772,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 140.2
+   "gbs": 148.91
   },
   {
    "op": "neg",
@@ -240,12 +240,12 @@
    "inputs": 1,
    "bytes": 16777216,
    "flops": 4194304,
-   "device_us": 74.333,
-   "lumen_call_us": 61.553,
-   "torch_call_us": 77.875,
+   "device_us": 74.833,
+   "lumen_call_us": 61.516,
+   "torch_call_us": 77.751,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 225.7
+   "gbs": 224.2
   },
   {
    "op": "neg",
@@ -257,12 +257,12 @@
    "inputs": 1,
    "bytes": 67108864,
    "flops": 16777216,
-   "device_us": 291.668,
-   "lumen_call_us": 304.271,
-   "torch_call_us": 299.89,
+   "device_us": 290.625,
+   "lumen_call_us": 286.283,
+   "torch_call_us": 302.262,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 230.09
+   "gbs": 230.91
   },
   {
    "op": "neg",
@@ -274,12 +274,12 @@
    "inputs": 1,
    "bytes": 268435456,
    "flops": 67108864,
-   "device_us": 1162.167,
-   "lumen_call_us": 1195.819,
-   "torch_call_us": 1206.335,
+   "device_us": 1163.917,
+   "lumen_call_us": 1223.888,
+   "torch_call_us": 1166.45,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.98
+   "gbs": 230.63
   },
   {
    "op": "exp",
@@ -291,12 +291,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 3.584,
-   "lumen_call_us": 3.316,
-   "torch_call_us": 2.717,
+   "device_us": 2.708,
+   "lumen_call_us": 2.581,
+   "torch_call_us": 2.544,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.14
+   "gbs": 12.1
   },
   {
    "op": "exp",
@@ -308,12 +308,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 3.667,
-   "lumen_call_us": 3.132,
-   "torch_call_us": 2.956,
+   "device_us": 3.166,
+   "lumen_call_us": 2.639,
+   "torch_call_us": 2.826,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 35.74
+   "gbs": 41.4
   },
   {
    "op": "exp",
@@ -325,12 +325,12 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 5.0,
-   "lumen_call_us": 3.425,
-   "torch_call_us": 4.565,
+   "device_us": 4.875,
+   "lumen_call_us": 3.273,
+   "torch_call_us": 4.544,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 104.86
+   "gbs": 107.55
   },
   {
    "op": "exp",
@@ -343,8 +343,8 @@
    "bytes": 2097152,
    "flops": 262144,
    "device_us": 13.625,
-   "lumen_call_us": 8.059,
-   "torch_call_us": 11.781,
+   "lumen_call_us": 7.923,
+   "torch_call_us": 11.03,
    "matches_torch": true,
    "rotation": 256,
    "gbs": 153.92
@@ -359,12 +359,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 42.25,
-   "lumen_call_us": 28.061,
-   "torch_call_us": 43.365,
+   "device_us": 41.375,
+   "lumen_call_us": 26.596,
+   "torch_call_us": 42.954,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 198.55
+   "gbs": 202.75
   },
   {
    "op": "exp",
@@ -376,12 +376,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 150.875,
-   "lumen_call_us": 160.108,
-   "torch_call_us": 170.423,
+   "device_us": 146.75,
+   "lumen_call_us": 133.683,
+   "torch_call_us": 153.631,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 222.4
+   "gbs": 228.65
   },
   {
    "op": "exp",
@@ -393,12 +393,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 577.375,
-   "lumen_call_us": 577.894,
-   "torch_call_us": 596.502,
+   "device_us": 578.667,
+   "lumen_call_us": 582.352,
+   "torch_call_us": 596.871,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 232.46
+   "gbs": 231.94
   },
   {
    "op": "exp",
@@ -410,12 +410,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2362.999,
-   "lumen_call_us": 2400.527,
-   "torch_call_us": 2367.027,
+   "device_us": 2312.208,
+   "lumen_call_us": 2387.563,
+   "torch_call_us": 2380.938,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 227.2
+   "gbs": 232.19
   },
   {
    "op": "exp",
@@ -475,12 +475,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 3.625,
-   "lumen_call_us": 3.065,
-   "torch_call_us": 2.803,
+   "device_us": 2.791,
+   "lumen_call_us": 2.52,
+   "torch_call_us": 2.554,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.04
+   "gbs": 11.74
   },
   {
    "op": "log",
@@ -492,12 +492,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 4.082,
-   "lumen_call_us": 3.177,
-   "torch_call_us": 3.113,
+   "device_us": 3.084,
+   "lumen_call_us": 2.554,
+   "torch_call_us": 3.086,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 32.11
+   "gbs": 42.5
   },
   {
    "op": "log",
@@ -509,12 +509,12 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 5.375,
-   "lumen_call_us": 3.361,
-   "torch_call_us": 4.658,
+   "device_us": 4.791,
+   "lumen_call_us": 3.241,
+   "torch_call_us": 4.576,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 97.54
+   "gbs": 109.43
   },
   {
    "op": "log",
@@ -526,12 +526,12 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 13.792,
-   "lumen_call_us": 7.929,
-   "torch_call_us": 11.469,
+   "device_us": 14.083,
+   "lumen_call_us": 7.847,
+   "torch_call_us": 11.269,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 152.06
+   "gbs": 148.91
   },
   {
    "op": "log",
@@ -543,12 +543,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 42.708,
-   "lumen_call_us": 34.41,
-   "torch_call_us": 46.432,
+   "device_us": 42.333,
+   "lumen_call_us": 28.497,
+   "torch_call_us": 43.654,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 196.42
+   "gbs": 198.16
   },
   {
    "op": "log",
@@ -560,12 +560,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 151.084,
-   "lumen_call_us": 149.977,
-   "torch_call_us": 161.321,
+   "device_us": 148.125,
+   "lumen_call_us": 132.956,
+   "torch_call_us": 151.633,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 222.09
+   "gbs": 226.53
   },
   {
    "op": "log",
@@ -577,12 +577,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 588.709,
-   "lumen_call_us": 614.36,
-   "torch_call_us": 646.873,
+   "device_us": 582.875,
+   "lumen_call_us": 600.531,
+   "torch_call_us": 598.081,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 227.99
+   "gbs": 230.27
   },
   {
    "op": "log",
@@ -594,12 +594,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2329.541,
-   "lumen_call_us": 2449.896,
-   "torch_call_us": 2589.56,
+   "device_us": 2314.418,
+   "lumen_call_us": 2346.373,
+   "torch_call_us": 2351.313,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.46
+   "gbs": 231.97
   },
   {
    "op": "log",
@@ -659,12 +659,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 3.541,
-   "lumen_call_us": 3.101,
-   "torch_call_us": 2.689,
+   "device_us": 2.625,
+   "lumen_call_us": 2.645,
+   "torch_call_us": 2.482,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.25
+   "gbs": 12.48
   },
   {
    "op": "sqrt",
@@ -676,12 +676,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 4.166,
-   "lumen_call_us": 3.458,
-   "torch_call_us": 3.032,
+   "device_us": 3.792,
+   "lumen_call_us": 2.609,
+   "torch_call_us": 2.852,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 31.46
+   "gbs": 34.57
   },
   {
    "op": "sqrt",
@@ -693,12 +693,12 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 5.5,
-   "lumen_call_us": 3.856,
-   "torch_call_us": 4.588,
+   "device_us": 5.917,
+   "lumen_call_us": 4.639,
+   "torch_call_us": 4.491,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 95.33
+   "gbs": 88.61
   },
   {
    "op": "sqrt",
@@ -710,12 +710,12 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 14.25,
-   "lumen_call_us": 10.232,
-   "torch_call_us": 11.175,
+   "device_us": 14.125,
+   "lumen_call_us": 9.805,
+   "torch_call_us": 11.205,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 147.17
+   "gbs": 148.47
   },
   {
    "op": "sqrt",
@@ -727,12 +727,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 41.875,
-   "lumen_call_us": 34.489,
-   "torch_call_us": 56.516,
+   "device_us": 42.084,
+   "lumen_call_us": 34.014,
+   "torch_call_us": 44.19,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 200.32
+   "gbs": 199.33
   },
   {
    "op": "sqrt",
@@ -744,12 +744,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 149.375,
-   "lumen_call_us": 143.506,
-   "torch_call_us": 157.65,
+   "device_us": 146.042,
+   "lumen_call_us": 132.05,
+   "torch_call_us": 153.94,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 224.63
+   "gbs": 229.76
   },
   {
    "op": "sqrt",
@@ -761,12 +761,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 576.708,
-   "lumen_call_us": 638.192,
-   "torch_call_us": 600.552,
+   "device_us": 579.25,
+   "lumen_call_us": 582.619,
+   "torch_call_us": 597.444,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 232.73
+   "gbs": 231.71
   },
   {
    "op": "sqrt",
@@ -778,12 +778,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2318.584,
-   "lumen_call_us": 2358.356,
-   "torch_call_us": 2455.802,
+   "device_us": 2328.875,
+   "lumen_call_us": 2455.938,
+   "torch_call_us": 2611.148,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 231.55
+   "gbs": 230.53
   },
   {
    "op": "sqrt",
@@ -843,12 +843,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 4.125,
-   "lumen_call_us": 3.214,
-   "torch_call_us": 3.159,
+   "device_us": 3.292,
+   "lumen_call_us": 2.708,
+   "torch_call_us": 2.931,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 7.94
+   "gbs": 9.95
   },
   {
    "op": "tanh",
@@ -860,12 +860,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 4.625,
-   "lumen_call_us": 3.847,
-   "torch_call_us": 3.4,
+   "device_us": 3.791,
+   "lumen_call_us": 2.658,
+   "torch_call_us": 3.166,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 28.34
+   "gbs": 34.57
   },
   {
    "op": "tanh",
@@ -878,8 +878,8 @@
    "bytes": 524288,
    "flops": 65536,
    "device_us": 6.25,
-   "lumen_call_us": 4.332,
-   "torch_call_us": 4.869,
+   "lumen_call_us": 4.966,
+   "torch_call_us": 4.922,
    "matches_torch": true,
    "rotation": 1024,
    "gbs": 83.89
@@ -894,12 +894,12 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 14.5,
-   "lumen_call_us": 10.347,
-   "torch_call_us": 11.783,
+   "device_us": 14.667,
+   "lumen_call_us": 10.51,
+   "torch_call_us": 11.937,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 144.63
+   "gbs": 142.98
   },
   {
    "op": "tanh",
@@ -911,12 +911,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 41.417,
-   "lumen_call_us": 40.357,
-   "torch_call_us": 48.592,
+   "device_us": 42.791,
+   "lumen_call_us": 36.021,
+   "torch_call_us": 43.24,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 202.54
+   "gbs": 196.04
   },
   {
    "op": "tanh",
@@ -928,12 +928,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 148.416,
-   "lumen_call_us": 146.423,
-   "torch_call_us": 157.129,
+   "device_us": 146.875,
+   "lumen_call_us": 133.81,
+   "torch_call_us": 157.163,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 226.08
+   "gbs": 228.46
   },
   {
    "op": "tanh",
@@ -945,12 +945,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 575.417,
-   "lumen_call_us": 698.171,
-   "torch_call_us": 609.885,
+   "device_us": 576.834,
+   "lumen_call_us": 575.198,
+   "torch_call_us": 589.202,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 233.25
+   "gbs": 232.68
   },
   {
    "op": "tanh",
@@ -962,12 +962,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2343.5,
-   "lumen_call_us": 2407.942,
-   "torch_call_us": 2548.169,
+   "device_us": 2313.542,
+   "lumen_call_us": 2338.869,
+   "torch_call_us": 2362.315,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 229.09
+   "gbs": 232.06
   },
   {
    "op": "tanh",
@@ -1027,12 +1027,12 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 3.625,
-   "lumen_call_us": 3.215,
-   "torch_call_us": 2.645,
+   "device_us": 2.792,
+   "lumen_call_us": 2.681,
+   "torch_call_us": 2.55,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.04
+   "gbs": 11.74
   },
   {
    "op": "logistic",
@@ -1044,12 +1044,12 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 4.334,
-   "lumen_call_us": 3.521,
-   "torch_call_us": 3.41,
+   "device_us": 3.75,
+   "lumen_call_us": 2.687,
+   "torch_call_us": 2.961,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 30.24
+   "gbs": 34.95
   },
   {
    "op": "logistic",
@@ -1061,12 +1061,12 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 5.458,
-   "lumen_call_us": 3.932,
-   "torch_call_us": 4.756,
+   "device_us": 6.124,
+   "lumen_call_us": 4.746,
+   "torch_call_us": 4.541,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 96.06
+   "gbs": 85.61
   },
   {
    "op": "logistic",
@@ -1078,12 +1078,12 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 14.5,
-   "lumen_call_us": 10.248,
-   "torch_call_us": 11.729,
+   "device_us": 14.292,
+   "lumen_call_us": 10.129,
+   "torch_call_us": 11.334,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 144.63
+   "gbs": 146.74
   },
   {
    "op": "logistic",
@@ -1095,12 +1095,12 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 42.125,
-   "lumen_call_us": 36.049,
-   "torch_call_us": 44.612,
+   "device_us": 41.708,
+   "lumen_call_us": 35.716,
+   "torch_call_us": 44.248,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 199.14
+   "gbs": 201.13
   },
   {
    "op": "logistic",
@@ -1112,12 +1112,12 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 148.041,
-   "lumen_call_us": 142.7,
-   "torch_call_us": 155.2,
+   "device_us": 145.709,
+   "lumen_call_us": 139.581,
+   "torch_call_us": 151.883,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 226.66
+   "gbs": 230.28
   },
   {
    "op": "logistic",
@@ -1129,12 +1129,12 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 580.583,
-   "lumen_call_us": 656.95,
-   "torch_call_us": 665.975,
+   "device_us": 577.917,
+   "lumen_call_us": 574.665,
+   "torch_call_us": 590.319,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 231.18
+   "gbs": 232.24
   },
   {
    "op": "logistic",
@@ -1146,12 +1146,12 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2332.875,
-   "lumen_call_us": 2525.769,
-   "torch_call_us": 2502.16,
+   "device_us": 2313.833,
+   "lumen_call_us": 2343.783,
+   "torch_call_us": 2351.427,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.13
+   "gbs": 232.03
   },
   {
    "op": "logistic",
@@ -1211,12 +1211,12 @@
    "inputs": 2,
    "bytes": 49152,
    "flops": 4096,
-   "device_us": 3.833,
-   "lumen_call_us": 3.775,
-   "torch_call_us": 3.066,
+   "device_us": 3.25,
+   "lumen_call_us": 3.057,
+   "torch_call_us": 2.964,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 12.82
+   "gbs": 15.12
   },
   {
    "op": "add",
@@ -1228,12 +1228,12 @@
    "inputs": 2,
    "bytes": 196608,
    "flops": 16384,
-   "device_us": 4.375,
-   "lumen_call_us": 3.686,
-   "torch_call_us": 3.681,
+   "device_us": 3.333,
+   "lumen_call_us": 3.042,
+   "torch_call_us": 3.563,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 44.94
+   "gbs": 58.99
   },
   {
    "op": "add",
@@ -1245,12 +1245,12 @@
    "inputs": 2,
    "bytes": 786432,
    "flops": 65536,
-   "device_us": 6.791,
-   "lumen_call_us": 4.205,
-   "torch_call_us": 5.957,
+   "device_us": 6.708,
+   "lumen_call_us": 4.222,
+   "torch_call_us": 6.111,
    "matches_torch": true,
    "rotation": 683,
-   "gbs": 115.81
+   "gbs": 117.24
   },
   {
    "op": "add",
@@ -1262,12 +1262,12 @@
    "inputs": 2,
    "bytes": 3145728,
    "flops": 262144,
-   "device_us": 23.083,
-   "lumen_call_us": 12.313,
-   "torch_call_us": 18.995,
+   "device_us": 23.166,
+   "lumen_call_us": 11.896,
+   "torch_call_us": 18.56,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 136.28
+   "gbs": 135.79
   },
   {
    "op": "add",
@@ -1279,12 +1279,12 @@
    "inputs": 2,
    "bytes": 12582912,
    "flops": 1048576,
-   "device_us": 59.208,
-   "lumen_call_us": 42.153,
-   "torch_call_us": 61.905,
+   "device_us": 58.417,
+   "lumen_call_us": 43.878,
+   "torch_call_us": 59.884,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 212.52
+   "gbs": 215.4
   },
   {
    "op": "add",
@@ -1296,12 +1296,12 @@
    "inputs": 2,
    "bytes": 50331648,
    "flops": 4194304,
-   "device_us": 219.959,
-   "lumen_call_us": 211.858,
-   "torch_call_us": 221.39,
+   "device_us": 220.5,
+   "lumen_call_us": 220.306,
+   "torch_call_us": 226.379,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 228.82
+   "gbs": 228.26
   },
   {
    "op": "add",
@@ -1313,12 +1313,12 @@
    "inputs": 2,
    "bytes": 201326592,
    "flops": 16777216,
-   "device_us": 875.125,
-   "lumen_call_us": 875.948,
-   "torch_call_us": 859.698,
+   "device_us": 874.958,
+   "lumen_call_us": 870.665,
+   "torch_call_us": 879.06,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 230.05
+   "gbs": 230.1
   },
   {
    "op": "add",
@@ -1330,12 +1330,12 @@
    "inputs": 2,
    "bytes": 805306368,
    "flops": 67108864,
-   "device_us": 3536.833,
-   "lumen_call_us": 3593.992,
-   "torch_call_us": 3607.142,
+   "device_us": 3499.792,
+   "lumen_call_us": 3550.55,
+   "torch_call_us": 3368.485,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 227.69
+   "gbs": 230.1
   },
   {
    "op": "add",
@@ -1347,12 +1347,12 @@
    "inputs": 2,
    "bytes": 24576,
    "flops": 4096,
-   "device_us": 4.792,
-   "lumen_call_us": 4.283,
-   "torch_call_us": 3.086,
+   "device_us": 2.917,
+   "lumen_call_us": 3.708,
+   "torch_call_us": 2.866,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.13
+   "gbs": 8.43
   },
   {
    "op": "add",
@@ -1364,12 +1364,12 @@
    "inputs": 2,
    "bytes": 98304,
    "flops": 16384,
-   "device_us": 5.0,
-   "lumen_call_us": 3.775,
-   "torch_call_us": 3.301,
+   "device_us": 3.375,
+   "lumen_call_us": 2.986,
+   "torch_call_us": 3.074,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 19.66
+   "gbs": 29.13
   },
   {
    "op": "add",
@@ -1381,12 +1381,12 @@
    "inputs": 2,
    "bytes": 393216,
    "flops": 65536,
-   "device_us": 6.335,
-   "lumen_call_us": 4.313,
-   "torch_call_us": 4.846,
+   "device_us": 4.958,
+   "lumen_call_us": 3.125,
+   "torch_call_us": 4.77,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 62.07
+   "gbs": 79.31
   },
   {
    "op": "add",
@@ -1398,12 +1398,12 @@
    "inputs": 2,
    "bytes": 1572864,
    "flops": 262144,
-   "device_us": 11.959,
-   "lumen_call_us": 7.279,
-   "torch_call_us": 10.912,
+   "device_us": 11.791,
+   "lumen_call_us": 7.244,
+   "torch_call_us": 10.38,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 131.52
+   "gbs": 133.4
   },
   {
    "op": "add",
@@ -1415,12 +1415,12 @@
    "inputs": 2,
    "bytes": 6291456,
    "flops": 1048576,
-   "device_us": 40.209,
-   "lumen_call_us": 24.341,
-   "torch_call_us": 34.633,
+   "device_us": 39.917,
+   "lumen_call_us": 23.542,
+   "torch_call_us": 32.679,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 156.47
+   "gbs": 157.61
   },
   {
    "op": "add",
@@ -1432,12 +1432,12 @@
    "inputs": 2,
    "bytes": 25165824,
    "flops": 4194304,
-   "device_us": 109.958,
-   "lumen_call_us": 114.106,
-   "torch_call_us": 118.536,
+   "device_us": 109.208,
+   "lumen_call_us": 90.818,
+   "torch_call_us": 114.562,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 228.87
+   "gbs": 230.44
   },
   {
    "op": "add",
@@ -1449,12 +1449,12 @@
    "inputs": 2,
    "bytes": 100663296,
    "flops": 16777216,
-   "device_us": 439.375,
-   "lumen_call_us": 472.21,
-   "torch_call_us": 482.056,
+   "device_us": 433.041,
+   "lumen_call_us": 418.256,
+   "torch_call_us": 426.271,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 229.11
+   "gbs": 232.46
   },
   {
    "op": "add",
@@ -1466,12 +1466,12 @@
    "inputs": 2,
    "bytes": 402653184,
    "flops": 67108864,
-   "device_us": 1787.543,
-   "lumen_call_us": 2055.467,
-   "torch_call_us": 1799.335,
+   "device_us": 1738.75,
+   "lumen_call_us": 1747.912,
+   "torch_call_us": 1788.852,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 225.26
+   "gbs": 231.58
   },
   {
    "op": "sub",
@@ -1483,12 +1483,12 @@
    "inputs": 2,
    "bytes": 49152,
    "flops": 4096,
-   "device_us": 3.917,
-   "lumen_call_us": 6.175,
-   "torch_call_us": 3.211,
+   "device_us": 2.834,
+   "lumen_call_us": 3.171,
+   "torch_call_us": 2.923,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 12.55
+   "gbs": 17.34
   },
   {
    "op": "sub",
@@ -1500,12 +1500,12 @@
    "inputs": 2,
    "bytes": 196608,
    "flops": 16384,
-   "device_us": 4.291,
-   "lumen_call_us": 4.148,
-   "torch_call_us": 3.777,
+   "device_us": 3.291,
+   "lumen_call_us": 3.165,
+   "torch_call_us": 3.614,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 45.82
+   "gbs": 59.74
   },
   {
    "op": "sub",
@@ -1518,8 +1518,8 @@
    "bytes": 786432,
    "flops": 65536,
    "device_us": 6.75,
-   "lumen_call_us": 4.329,
-   "torch_call_us": 6.513,
+   "lumen_call_us": 4.202,
+   "torch_call_us": 5.949,
    "matches_torch": true,
    "rotation": 683,
    "gbs": 116.51
@@ -1534,12 +1534,12 @@
    "inputs": 2,
    "bytes": 3145728,
    "flops": 262144,
-   "device_us": 23.417,
-   "lumen_call_us": 13.011,
-   "torch_call_us": 18.797,
+   "device_us": 22.499,
+   "lumen_call_us": 11.928,
+   "torch_call_us": 19.39,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 134.34
+   "gbs": 139.82
   },
   {
    "op": "sub",
@@ -1551,12 +1551,12 @@
    "inputs": 2,
    "bytes": 12582912,
    "flops": 1048576,
-   "device_us": 57.5,
-   "lumen_call_us": 43.228,
-   "torch_call_us": 57.978,
+   "device_us": 58.0,
+   "lumen_call_us": 44.366,
+   "torch_call_us": 65.136,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 218.83
+   "gbs": 216.95
   },
   {
    "op": "sub",
@@ -1568,12 +1568,12 @@
    "inputs": 2,
    "bytes": 50331648,
    "flops": 4194304,
-   "device_us": 219.166,
-   "lumen_call_us": 203.402,
-   "torch_call_us": 218.54,
+   "device_us": 218.625,
+   "lumen_call_us": 209.171,
+   "torch_call_us": 217.269,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 229.65
+   "gbs": 230.22
   },
   {
    "op": "sub",
@@ -1585,12 +1585,12 @@
    "inputs": 2,
    "bytes": 201326592,
    "flops": 16777216,
-   "device_us": 872.958,
-   "lumen_call_us": 903.723,
-   "torch_call_us": 897.4,
+   "device_us": 870.208,
+   "lumen_call_us": 877.921,
+   "torch_call_us": 860.367,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 230.63
+   "gbs": 231.35
   },
   {
    "op": "sub",
@@ -1602,524 +1602,524 @@
    "inputs": 2,
    "bytes": 805306368,
    "flops": 67108864,
-   "device_us": 3511.084,
-   "lumen_call_us": 3535.929,
-   "torch_call_us": 3426.558,
+   "device_us": 3501.292,
+   "lumen_call_us": 3511.752,
+   "torch_call_us": 3339.15,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 229.36
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 4096,
-   "inputs": 2,
-   "bytes": 24576,
-   "flops": 4096,
-   "device_us": 4.668,
-   "lumen_call_us": 4.078,
-   "torch_call_us": 2.849,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 5.26
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 16384,
-   "inputs": 2,
-   "bytes": 98304,
-   "flops": 16384,
-   "device_us": 4.751,
-   "lumen_call_us": 3.835,
-   "torch_call_us": 2.982,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 20.69
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 65536,
-   "inputs": 2,
-   "bytes": 393216,
-   "flops": 65536,
-   "device_us": 6.126,
-   "lumen_call_us": 4.257,
-   "torch_call_us": 4.925,
-   "matches_torch": true,
-   "rotation": 1366,
-   "gbs": 64.19
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 262144,
-   "inputs": 2,
-   "bytes": 1572864,
-   "flops": 262144,
-   "device_us": 11.709,
-   "lumen_call_us": 7.385,
-   "torch_call_us": 10.557,
-   "matches_torch": true,
-   "rotation": 342,
-   "gbs": 134.33
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 1048576,
-   "inputs": 2,
-   "bytes": 6291456,
-   "flops": 1048576,
-   "device_us": 39.833,
-   "lumen_call_us": 22.92,
-   "torch_call_us": 31.016,
-   "matches_torch": true,
-   "rotation": 86,
-   "gbs": 157.95
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 4194304,
-   "inputs": 2,
-   "bytes": 25165824,
-   "flops": 4194304,
-   "device_us": 111.46,
-   "lumen_call_us": 88.871,
-   "torch_call_us": 110.345,
-   "matches_torch": true,
-   "rotation": 22,
-   "gbs": 225.78
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 16777216,
-   "inputs": 2,
-   "bytes": 100663296,
-   "flops": 16777216,
-   "device_us": 432.042,
-   "lumen_call_us": 432.596,
-   "torch_call_us": 437.721,
-   "matches_torch": true,
-   "rotation": 6,
-   "gbs": 232.99
-  },
-  {
-   "op": "sub",
-   "kind": "binary",
-   "formula": "x − y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 67108864,
-   "inputs": 2,
-   "bytes": 402653184,
-   "flops": 67108864,
-   "device_us": 1725.541,
-   "lumen_call_us": 1739.673,
-   "torch_call_us": 1712.096,
-   "matches_torch": true,
-   "rotation": 2,
-   "gbs": 233.35
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 4096,
-   "inputs": 2,
-   "bytes": 49152,
-   "flops": 4096,
-   "device_us": 3.625,
-   "lumen_call_us": 3.532,
-   "torch_call_us": 2.658,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 13.56
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 16384,
-   "inputs": 2,
-   "bytes": 196608,
-   "flops": 16384,
-   "device_us": 4.166,
-   "lumen_call_us": 3.527,
-   "torch_call_us": 3.212,
-   "matches_torch": true,
-   "rotation": 2731,
-   "gbs": 47.19
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 65536,
-   "inputs": 2,
-   "bytes": 786432,
-   "flops": 65536,
-   "device_us": 6.667,
-   "lumen_call_us": 4.188,
-   "torch_call_us": 5.936,
-   "matches_torch": true,
-   "rotation": 683,
-   "gbs": 117.96
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 262144,
-   "inputs": 2,
-   "bytes": 3145728,
-   "flops": 262144,
-   "device_us": 22.333,
-   "lumen_call_us": 11.99,
-   "torch_call_us": 16.66,
-   "matches_torch": true,
-   "rotation": 171,
-   "gbs": 140.86
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 1048576,
-   "inputs": 2,
-   "bytes": 12582912,
-   "flops": 1048576,
-   "device_us": 57.75,
-   "lumen_call_us": 44.123,
-   "torch_call_us": 59.009,
-   "matches_torch": true,
-   "rotation": 43,
-   "gbs": 217.89
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 4194304,
-   "inputs": 2,
-   "bytes": 50331648,
-   "flops": 4194304,
-   "device_us": 220.333,
-   "lumen_call_us": 223.867,
-   "torch_call_us": 227.071,
-   "matches_torch": true,
-   "rotation": 11,
-   "gbs": 228.43
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 16777216,
-   "inputs": 2,
-   "bytes": 201326592,
-   "flops": 16777216,
-   "device_us": 882.458,
-   "lumen_call_us": 1196.798,
-   "torch_call_us": 1195.756,
-   "matches_torch": true,
-   "rotation": 3,
-   "gbs": 228.14
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 67108864,
-   "inputs": 2,
-   "bytes": 805306368,
-   "flops": 67108864,
-   "device_us": 3494.792,
-   "lumen_call_us": 3540.808,
-   "torch_call_us": 3372.569,
-   "matches_torch": true,
-   "rotation": 2,
-   "gbs": 230.43
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 4096,
-   "inputs": 2,
-   "bytes": 24576,
-   "flops": 4096,
-   "device_us": 4.708,
-   "lumen_call_us": 3.893,
-   "torch_call_us": 2.727,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 5.22
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 16384,
-   "inputs": 2,
-   "bytes": 98304,
-   "flops": 16384,
-   "device_us": 4.75,
-   "lumen_call_us": 3.817,
-   "torch_call_us": 2.83,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 20.7
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 65536,
-   "inputs": 2,
-   "bytes": 393216,
-   "flops": 65536,
-   "device_us": 6.292,
-   "lumen_call_us": 4.256,
-   "torch_call_us": 4.436,
-   "matches_torch": true,
-   "rotation": 1366,
-   "gbs": 62.49
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 262144,
-   "inputs": 2,
-   "bytes": 1572864,
-   "flops": 262144,
-   "device_us": 11.501,
-   "lumen_call_us": 7.148,
-   "torch_call_us": 9.536,
-   "matches_torch": true,
-   "rotation": 342,
-   "gbs": 136.76
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 1048576,
-   "inputs": 2,
-   "bytes": 6291456,
-   "flops": 1048576,
-   "device_us": 39.917,
-   "lumen_call_us": 23.941,
-   "torch_call_us": 32.523,
-   "matches_torch": true,
-   "rotation": 86,
-   "gbs": 157.61
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 4194304,
-   "inputs": 2,
-   "bytes": 25165824,
-   "flops": 4194304,
-   "device_us": 109.667,
-   "lumen_call_us": 89.884,
-   "torch_call_us": 109.163,
-   "matches_torch": true,
-   "rotation": 22,
-   "gbs": 229.47
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 16777216,
-   "inputs": 2,
-   "bytes": 100663296,
-   "flops": 16777216,
-   "device_us": 433.25,
-   "lumen_call_us": 421.131,
-   "torch_call_us": 423.465,
-   "matches_torch": true,
-   "rotation": 6,
-   "gbs": 232.34
-  },
-  {
-   "op": "mul",
-   "kind": "binary",
-   "formula": "x · y",
-   "dtype": "bfloat16",
-   "out_dtype": "bfloat16",
-   "n": 67108864,
-   "inputs": 2,
-   "bytes": 402653184,
-   "flops": 67108864,
-   "device_us": 1726.168,
-   "lumen_call_us": 1737.835,
-   "torch_call_us": 1709.621,
-   "matches_torch": true,
-   "rotation": 2,
-   "gbs": 233.26
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 4096,
-   "inputs": 2,
-   "bytes": 49152,
-   "flops": 4096,
-   "device_us": 3.959,
-   "lumen_call_us": 3.844,
-   "torch_call_us": 2.776,
-   "matches_torch": true,
-   "rotation": 4096,
-   "gbs": 12.42
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 16384,
-   "inputs": 2,
-   "bytes": 196608,
-   "flops": 16384,
-   "device_us": 4.54,
-   "lumen_call_us": 3.66,
-   "torch_call_us": 3.273,
-   "matches_torch": true,
-   "rotation": 2731,
-   "gbs": 43.31
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 65536,
-   "inputs": 2,
-   "bytes": 786432,
-   "flops": 65536,
-   "device_us": 7.041,
-   "lumen_call_us": 4.556,
-   "torch_call_us": 5.91,
-   "matches_torch": true,
-   "rotation": 683,
-   "gbs": 111.69
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 262144,
-   "inputs": 2,
-   "bytes": 3145728,
-   "flops": 262144,
-   "device_us": 22.584,
-   "lumen_call_us": 12.123,
-   "torch_call_us": 16.894,
-   "matches_torch": true,
-   "rotation": 171,
-   "gbs": 139.29
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 1048576,
-   "inputs": 2,
-   "bytes": 12582912,
-   "flops": 1048576,
-   "device_us": 57.46,
-   "lumen_call_us": 42.576,
-   "torch_call_us": 56.514,
-   "matches_torch": true,
-   "rotation": 43,
-   "gbs": 218.99
-  },
-  {
-   "op": "div",
-   "kind": "binary",
-   "formula": "x / y",
-   "dtype": "float32",
-   "out_dtype": "float32",
-   "n": 4194304,
-   "inputs": 2,
-   "bytes": 50331648,
-   "flops": 4194304,
-   "device_us": 218.833,
-   "lumen_call_us": 200.144,
-   "torch_call_us": 215.45,
-   "matches_torch": true,
-   "rotation": 11,
    "gbs": 230.0
   },
   {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 4096,
+   "inputs": 2,
+   "bytes": 24576,
+   "flops": 4096,
+   "device_us": 3.0,
+   "lumen_call_us": 3.252,
+   "torch_call_us": 2.857,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 8.19
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 16384,
+   "inputs": 2,
+   "bytes": 98304,
+   "flops": 16384,
+   "device_us": 3.333,
+   "lumen_call_us": 3.465,
+   "torch_call_us": 3.221,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 29.49
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 65536,
+   "inputs": 2,
+   "bytes": 393216,
+   "flops": 65536,
+   "device_us": 4.958,
+   "lumen_call_us": 3.122,
+   "torch_call_us": 4.678,
+   "matches_torch": true,
+   "rotation": 1366,
+   "gbs": 79.31
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 262144,
+   "inputs": 2,
+   "bytes": 1572864,
+   "flops": 262144,
+   "device_us": 11.792,
+   "lumen_call_us": 7.377,
+   "torch_call_us": 10.203,
+   "matches_torch": true,
+   "rotation": 342,
+   "gbs": 133.38
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 1048576,
+   "inputs": 2,
+   "bytes": 6291456,
+   "flops": 1048576,
+   "device_us": 40.417,
+   "lumen_call_us": 23.384,
+   "torch_call_us": 33.315,
+   "matches_torch": true,
+   "rotation": 86,
+   "gbs": 155.66
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 4194304,
+   "inputs": 2,
+   "bytes": 25165824,
+   "flops": 4194304,
+   "device_us": 111.333,
+   "lumen_call_us": 91.498,
+   "torch_call_us": 114.932,
+   "matches_torch": true,
+   "rotation": 22,
+   "gbs": 226.04
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 16777216,
+   "inputs": 2,
+   "bytes": 100663296,
+   "flops": 16777216,
+   "device_us": 431.25,
+   "lumen_call_us": 421.429,
+   "torch_call_us": 426.627,
+   "matches_torch": true,
+   "rotation": 6,
+   "gbs": 233.42
+  },
+  {
+   "op": "sub",
+   "kind": "binary",
+   "formula": "x − y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 67108864,
+   "inputs": 2,
+   "bytes": 402653184,
+   "flops": 67108864,
+   "device_us": 1731.792,
+   "lumen_call_us": 1746.367,
+   "torch_call_us": 1720.46,
+   "matches_torch": true,
+   "rotation": 2,
+   "gbs": 232.51
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4096,
+   "inputs": 2,
+   "bytes": 49152,
+   "flops": 4096,
+   "device_us": 2.792,
+   "lumen_call_us": 3.188,
+   "torch_call_us": 2.745,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 17.6
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 16384,
+   "inputs": 2,
+   "bytes": 196608,
+   "flops": 16384,
+   "device_us": 3.376,
+   "lumen_call_us": 3.142,
+   "torch_call_us": 3.561,
+   "matches_torch": true,
+   "rotation": 2731,
+   "gbs": 58.24
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 65536,
+   "inputs": 2,
+   "bytes": 786432,
+   "flops": 65536,
+   "device_us": 6.625,
+   "lumen_call_us": 4.188,
+   "torch_call_us": 5.891,
+   "matches_torch": true,
+   "rotation": 683,
+   "gbs": 118.71
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 262144,
+   "inputs": 2,
+   "bytes": 3145728,
+   "flops": 262144,
+   "device_us": 23.125,
+   "lumen_call_us": 12.378,
+   "torch_call_us": 17.698,
+   "matches_torch": true,
+   "rotation": 171,
+   "gbs": 136.03
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 1048576,
+   "inputs": 2,
+   "bytes": 12582912,
+   "flops": 1048576,
+   "device_us": 58.333,
+   "lumen_call_us": 46.998,
+   "torch_call_us": 61.113,
+   "matches_torch": true,
+   "rotation": 43,
+   "gbs": 215.71
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4194304,
+   "inputs": 2,
+   "bytes": 50331648,
+   "flops": 4194304,
+   "device_us": 224.5,
+   "lumen_call_us": 229.198,
+   "torch_call_us": 229.621,
+   "matches_torch": true,
+   "rotation": 11,
+   "gbs": 224.19
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 16777216,
+   "inputs": 2,
+   "bytes": 201326592,
+   "flops": 16777216,
+   "device_us": 873.458,
+   "lumen_call_us": 937.627,
+   "torch_call_us": 912.315,
+   "matches_torch": true,
+   "rotation": 3,
+   "gbs": 230.49
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 67108864,
+   "inputs": 2,
+   "bytes": 805306368,
+   "flops": 67108864,
+   "device_us": 3492.834,
+   "lumen_call_us": 3868.804,
+   "torch_call_us": 3728.392,
+   "matches_torch": true,
+   "rotation": 2,
+   "gbs": 230.56
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 4096,
+   "inputs": 2,
+   "bytes": 24576,
+   "flops": 4096,
+   "device_us": 2.792,
+   "lumen_call_us": 3.176,
+   "torch_call_us": 2.646,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 8.8
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 16384,
+   "inputs": 2,
+   "bytes": 98304,
+   "flops": 16384,
+   "device_us": 3.125,
+   "lumen_call_us": 3.302,
+   "torch_call_us": 3.041,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 31.46
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 65536,
+   "inputs": 2,
+   "bytes": 393216,
+   "flops": 65536,
+   "device_us": 4.875,
+   "lumen_call_us": 3.334,
+   "torch_call_us": 4.759,
+   "matches_torch": true,
+   "rotation": 1366,
+   "gbs": 80.66
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 262144,
+   "inputs": 2,
+   "bytes": 1572864,
+   "flops": 262144,
+   "device_us": 11.417,
+   "lumen_call_us": 7.194,
+   "torch_call_us": 9.986,
+   "matches_torch": true,
+   "rotation": 342,
+   "gbs": 137.77
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 1048576,
+   "inputs": 2,
+   "bytes": 6291456,
+   "flops": 1048576,
+   "device_us": 39.875,
+   "lumen_call_us": 23.094,
+   "torch_call_us": 32.723,
+   "matches_torch": true,
+   "rotation": 86,
+   "gbs": 157.78
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 4194304,
+   "inputs": 2,
+   "bytes": 25165824,
+   "flops": 4194304,
+   "device_us": 114.165,
+   "lumen_call_us": 96.267,
+   "torch_call_us": 116.104,
+   "matches_torch": true,
+   "rotation": 22,
+   "gbs": 220.43
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 16777216,
+   "inputs": 2,
+   "bytes": 100663296,
+   "flops": 16777216,
+   "device_us": 450.833,
+   "lumen_call_us": 466.871,
+   "torch_call_us": 460.925,
+   "matches_torch": true,
+   "rotation": 6,
+   "gbs": 223.28
+  },
+  {
+   "op": "mul",
+   "kind": "binary",
+   "formula": "x · y",
+   "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
+   "n": 67108864,
+   "inputs": 2,
+   "bytes": 402653184,
+   "flops": 67108864,
+   "device_us": 1816.542,
+   "lumen_call_us": 1840.471,
+   "torch_call_us": 1802.344,
+   "matches_torch": true,
+   "rotation": 2,
+   "gbs": 221.66
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4096,
+   "inputs": 2,
+   "bytes": 49152,
+   "flops": 4096,
+   "device_us": 3.042,
+   "lumen_call_us": 3.253,
+   "torch_call_us": 2.912,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 16.16
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 16384,
+   "inputs": 2,
+   "bytes": 196608,
+   "flops": 16384,
+   "device_us": 3.958,
+   "lumen_call_us": 3.759,
+   "torch_call_us": 4.367,
+   "matches_torch": true,
+   "rotation": 2731,
+   "gbs": 49.67
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 65536,
+   "inputs": 2,
+   "bytes": 786432,
+   "flops": 65536,
+   "device_us": 7.125,
+   "lumen_call_us": 4.972,
+   "torch_call_us": 5.891,
+   "matches_torch": true,
+   "rotation": 683,
+   "gbs": 110.38
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 262144,
+   "inputs": 2,
+   "bytes": 3145728,
+   "flops": 262144,
+   "device_us": 22.917,
+   "lumen_call_us": 12.263,
+   "torch_call_us": 19.278,
+   "matches_torch": true,
+   "rotation": 171,
+   "gbs": 137.27
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 1048576,
+   "inputs": 2,
+   "bytes": 12582912,
+   "flops": 1048576,
+   "device_us": 58.416,
+   "lumen_call_us": 44.325,
+   "torch_call_us": 60.12,
+   "matches_torch": true,
+   "rotation": 43,
+   "gbs": 215.4
+  },
+  {
+   "op": "div",
+   "kind": "binary",
+   "formula": "x / y",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4194304,
+   "inputs": 2,
+   "bytes": 50331648,
+   "flops": 4194304,
+   "device_us": 219.875,
+   "lumen_call_us": 207.61,
+   "torch_call_us": 219.975,
+   "matches_torch": true,
+   "rotation": 11,
+   "gbs": 228.91
+  },
+  {
    "op": "div",
    "kind": "binary",
    "formula": "x / y",
@@ -2129,12 +2129,12 @@
    "inputs": 2,
    "bytes": 201326592,
    "flops": 16777216,
-   "device_us": 868.75,
-   "lumen_call_us": 868.608,
-   "torch_call_us": 855.56,
+   "device_us": 877.5,
+   "lumen_call_us": 924.637,
+   "torch_call_us": 868.331,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 231.74
+   "gbs": 229.43
   },
   {
    "op": "div",
@@ -2146,12 +2146,12 @@
    "inputs": 2,
    "bytes": 805306368,
    "flops": 67108864,
-   "device_us": 3498.333,
-   "lumen_call_us": 3534.469,
-   "torch_call_us": 3408.894,
+   "device_us": 3496.208,
+   "lumen_call_us": 3529.048,
+   "torch_call_us": 3368.548,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.2
+   "gbs": 230.34
   },
   {
    "op": "div",
@@ -2163,12 +2163,12 @@
    "inputs": 2,
    "bytes": 24576,
    "flops": 4096,
-   "device_us": 5.125,
-   "lumen_call_us": 3.93,
-   "torch_call_us": 2.704,
+   "device_us": 3.042,
+   "lumen_call_us": 3.04,
+   "torch_call_us": 2.789,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 4.8
+   "gbs": 8.08
   },
   {
    "op": "div",
@@ -2180,12 +2180,12 @@
    "inputs": 2,
    "bytes": 98304,
    "flops": 16384,
-   "device_us": 5.375,
-   "lumen_call_us": 4.118,
-   "torch_call_us": 2.958,
+   "device_us": 3.625,
+   "lumen_call_us": 3.316,
+   "torch_call_us": 3.165,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 18.29
+   "gbs": 27.12
   },
   {
    "op": "div",
@@ -2197,12 +2197,12 @@
    "inputs": 2,
    "bytes": 393216,
    "flops": 65536,
-   "device_us": 6.583,
-   "lumen_call_us": 4.683,
-   "torch_call_us": 4.521,
+   "device_us": 5.958,
+   "lumen_call_us": 4.623,
+   "torch_call_us": 4.768,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 59.73
+   "gbs": 66.0
   },
   {
    "op": "div",
@@ -2214,12 +2214,12 @@
    "inputs": 2,
    "bytes": 1572864,
    "flops": 262144,
-   "device_us": 12.292,
-   "lumen_call_us": 8.329,
-   "torch_call_us": 9.544,
+   "device_us": 12.542,
+   "lumen_call_us": 8.301,
+   "torch_call_us": 9.681,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 127.96
+   "gbs": 125.41
   },
   {
    "op": "div",
@@ -2231,12 +2231,12 @@
    "inputs": 2,
    "bytes": 6291456,
    "flops": 1048576,
-   "device_us": 40.5,
-   "lumen_call_us": 23.79,
-   "torch_call_us": 30.929,
+   "device_us": 40.375,
+   "lumen_call_us": 24.393,
+   "torch_call_us": 33.09,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 155.34
+   "gbs": 155.83
   },
   {
    "op": "div",
@@ -2248,12 +2248,12 @@
    "inputs": 2,
    "bytes": 25165824,
    "flops": 4194304,
-   "device_us": 110.167,
-   "lumen_call_us": 88.443,
-   "torch_call_us": 109.445,
+   "device_us": 115.625,
+   "lumen_call_us": 100.913,
+   "torch_call_us": 118.138,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 228.43
+   "gbs": 217.65
   },
   {
    "op": "div",
@@ -2265,12 +2265,12 @@
    "inputs": 2,
    "bytes": 100663296,
    "flops": 16777216,
-   "device_us": 435.041,
-   "lumen_call_us": 424.34,
-   "torch_call_us": 426.64,
+   "device_us": 451.292,
+   "lumen_call_us": 489.215,
+   "torch_call_us": 450.01,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 231.39
+   "gbs": 223.06
   },
   {
    "op": "div",
@@ -2282,12 +2282,12 @@
    "inputs": 2,
    "bytes": 402653184,
    "flops": 67108864,
-   "device_us": 1729.0,
-   "lumen_call_us": 1757.431,
-   "torch_call_us": 1727.527,
+   "device_us": 1734.375,
+   "lumen_call_us": 1755.358,
+   "torch_call_us": 1833.712,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 232.88
+   "gbs": 232.16
   },
   {
    "op": "max",
@@ -2299,12 +2299,12 @@
    "inputs": 2,
    "bytes": 49152,
    "flops": 4096,
-   "device_us": 3.625,
-   "lumen_call_us": 3.693,
-   "torch_call_us": 2.718,
+   "device_us": 2.875,
+   "lumen_call_us": 3.149,
+   "torch_call_us": 2.86,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 13.56
+   "gbs": 17.1
   },
   {
    "op": "max",
@@ -2316,12 +2316,12 @@
    "inputs": 2,
    "bytes": 196608,
    "flops": 16384,
-   "device_us": 4.125,
-   "lumen_call_us": 3.758,
-   "torch_call_us": 3.332,
+   "device_us": 3.625,
+   "lumen_call_us": 3.128,
+   "torch_call_us": 3.607,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 47.66
+   "gbs": 54.24
   },
   {
    "op": "max",
@@ -2333,12 +2333,12 @@
    "inputs": 2,
    "bytes": 786432,
    "flops": 65536,
-   "device_us": 6.667,
-   "lumen_call_us": 4.206,
-   "torch_call_us": 5.929,
+   "device_us": 6.791,
+   "lumen_call_us": 4.16,
+   "torch_call_us": 6.122,
    "matches_torch": true,
    "rotation": 683,
-   "gbs": 117.96
+   "gbs": 115.81
   },
   {
    "op": "max",
@@ -2350,12 +2350,12 @@
    "inputs": 2,
    "bytes": 3145728,
    "flops": 262144,
-   "device_us": 22.667,
-   "lumen_call_us": 12.057,
-   "torch_call_us": 16.921,
+   "device_us": 22.917,
+   "lumen_call_us": 12.673,
+   "torch_call_us": 18.443,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 138.78
+   "gbs": 137.27
   },
   {
    "op": "max",
@@ -2367,12 +2367,12 @@
    "inputs": 2,
    "bytes": 12582912,
    "flops": 1048576,
-   "device_us": 57.25,
-   "lumen_call_us": 42.749,
-   "torch_call_us": 56.397,
+   "device_us": 59.083,
+   "lumen_call_us": 49.55,
+   "torch_call_us": 85.09,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 219.79
+   "gbs": 212.97
   },
   {
    "op": "max",
@@ -2384,12 +2384,12 @@
    "inputs": 2,
    "bytes": 50331648,
    "flops": 4194304,
-   "device_us": 223.583,
-   "lumen_call_us": 215.285,
-   "torch_call_us": 223.067,
+   "device_us": 229.376,
+   "lumen_call_us": 231.015,
+   "torch_call_us": 227.36,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 225.11
+   "gbs": 219.43
   },
   {
    "op": "max",
@@ -2401,12 +2401,12 @@
    "inputs": 2,
    "bytes": 201326592,
    "flops": 16777216,
-   "device_us": 870.708,
-   "lumen_call_us": 866.029,
-   "torch_call_us": 856.206,
+   "device_us": 880.208,
+   "lumen_call_us": 1033.702,
+   "torch_call_us": 993.762,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 231.22
+   "gbs": 228.73
   },
   {
    "op": "max",
@@ -2418,12 +2418,12 @@
    "inputs": 2,
    "bytes": 805306368,
    "flops": 67108864,
-   "device_us": 3506.375,
-   "lumen_call_us": 3524.858,
-   "torch_call_us": 3371.61,
+   "device_us": 3671.791,
+   "lumen_call_us": 3667.642,
+   "torch_call_us": 3607.185,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 229.67
+   "gbs": 219.32
   },
   {
    "op": "max",
@@ -2435,12 +2435,12 @@
    "inputs": 2,
    "bytes": 24576,
    "flops": 4096,
-   "device_us": 4.833,
-   "lumen_call_us": 3.739,
-   "torch_call_us": 2.698,
+   "device_us": 2.834,
+   "lumen_call_us": 3.044,
+   "torch_call_us": 2.628,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.09
+   "gbs": 8.67
   },
   {
    "op": "max",
@@ -2452,12 +2452,12 @@
    "inputs": 2,
    "bytes": 98304,
    "flops": 16384,
-   "device_us": 4.916,
-   "lumen_call_us": 3.885,
-   "torch_call_us": 2.847,
+   "device_us": 3.042,
+   "lumen_call_us": 3.139,
+   "torch_call_us": 3.008,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 20.0
+   "gbs": 32.32
   },
   {
    "op": "max",
@@ -2469,12 +2469,12 @@
    "inputs": 2,
    "bytes": 393216,
    "flops": 65536,
-   "device_us": 6.25,
-   "lumen_call_us": 4.376,
-   "torch_call_us": 4.469,
+   "device_us": 4.959,
+   "lumen_call_us": 3.203,
+   "torch_call_us": 4.765,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 62.91
+   "gbs": 79.29
   },
   {
    "op": "max",
@@ -2487,8 +2487,8 @@
    "bytes": 1572864,
    "flops": 262144,
    "device_us": 11.625,
-   "lumen_call_us": 7.257,
-   "torch_call_us": 9.532,
+   "lumen_call_us": 7.203,
+   "torch_call_us": 10.102,
    "matches_torch": true,
    "rotation": 342,
    "gbs": 135.3
@@ -2503,12 +2503,12 @@
    "inputs": 2,
    "bytes": 6291456,
    "flops": 1048576,
-   "device_us": 41.5,
-   "lumen_call_us": 64.91,
-   "torch_call_us": 58.848,
+   "device_us": 40.292,
+   "lumen_call_us": 23.224,
+   "torch_call_us": 32.471,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 151.6
+   "gbs": 156.15
   },
   {
    "op": "max",
@@ -2520,12 +2520,12 @@
    "inputs": 2,
    "bytes": 25165824,
    "flops": 4194304,
-   "device_us": 109.583,
-   "lumen_call_us": 96.667,
-   "torch_call_us": 112.665,
+   "device_us": 108.875,
+   "lumen_call_us": 92.104,
+   "torch_call_us": 114.187,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 229.65
+   "gbs": 231.14
   },
   {
    "op": "max",
@@ -2537,12 +2537,12 @@
    "inputs": 2,
    "bytes": 100663296,
    "flops": 16777216,
-   "device_us": 431.833,
-   "lumen_call_us": 423.746,
-   "torch_call_us": 425.915,
+   "device_us": 446.459,
+   "lumen_call_us": 442.904,
+   "torch_call_us": 441.1,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 233.11
+   "gbs": 225.47
   },
   {
    "op": "max",
@@ -2554,12 +2554,12 @@
    "inputs": 2,
    "bytes": 402653184,
    "flops": 67108864,
-   "device_us": 1724.0,
-   "lumen_call_us": 1741.773,
-   "torch_call_us": 1722.356,
+   "device_us": 1744.167,
+   "lumen_call_us": 1760.196,
+   "torch_call_us": 1738.994,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 233.56
+   "gbs": 230.86
   },
   {
    "op": "eq",
@@ -2571,12 +2571,12 @@
    "inputs": 2,
    "bytes": 36864,
    "flops": 4096,
-   "device_us": 7.166,
-   "lumen_call_us": 6.251,
-   "torch_call_us": 2.412,
+   "device_us": 2.833,
+   "lumen_call_us": 3.333,
+   "torch_call_us": 2.622,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.14
+   "gbs": 13.01
   },
   {
    "op": "eq",
@@ -2588,12 +2588,12 @@
    "inputs": 2,
    "bytes": 147456,
    "flops": 16384,
-   "device_us": 7.667,
-   "lumen_call_us": 6.3,
-   "torch_call_us": 2.988,
+   "device_us": 3.291,
+   "lumen_call_us": 3.188,
+   "torch_call_us": 3.108,
    "matches_torch": true,
    "rotation": 3641,
-   "gbs": 19.23
+   "gbs": 44.81
   },
   {
    "op": "eq",
@@ -2605,12 +2605,12 @@
    "inputs": 2,
    "bytes": 589824,
    "flops": 65536,
-   "device_us": 9.75,
-   "lumen_call_us": 6.952,
-   "torch_call_us": 4.901,
+   "device_us": 6.5,
+   "lumen_call_us": 3.911,
+   "torch_call_us": 5.039,
    "matches_torch": true,
    "rotation": 911,
-   "gbs": 60.49
+   "gbs": 90.74
   },
   {
    "op": "eq",
@@ -2622,12 +2622,12 @@
    "inputs": 2,
    "bytes": 2359296,
    "flops": 262144,
-   "device_us": 19.875,
-   "lumen_call_us": 11.146,
-   "torch_call_us": 12.961,
+   "device_us": 20.291,
+   "lumen_call_us": 11.414,
+   "torch_call_us": 13.464,
    "matches_torch": true,
    "rotation": 228,
-   "gbs": 118.71
+   "gbs": 116.27
   },
   {
    "op": "eq",
@@ -2639,12 +2639,12 @@
    "inputs": 2,
    "bytes": 9437184,
    "flops": 1048576,
-   "device_us": 56.375,
-   "lumen_call_us": 40.45,
-   "torch_call_us": 42.624,
+   "device_us": 57.708,
+   "lumen_call_us": 44.903,
+   "torch_call_us": 47.089,
    "matches_torch": true,
    "rotation": 57,
-   "gbs": 167.4
+   "gbs": 163.53
   },
   {
    "op": "eq",
@@ -2656,12 +2656,12 @@
    "inputs": 2,
    "bytes": 37748736,
    "flops": 4194304,
-   "device_us": 162.042,
-   "lumen_call_us": 147.91,
-   "torch_call_us": 157.563,
+   "device_us": 167.625,
+   "lumen_call_us": 160.415,
+   "torch_call_us": 169.683,
    "matches_torch": true,
    "rotation": 15,
-   "gbs": 232.96
+   "gbs": 225.2
   },
   {
    "op": "eq",
@@ -2673,12 +2673,12 @@
    "inputs": 2,
    "bytes": 150994944,
    "flops": 16777216,
-   "device_us": 619.0,
-   "lumen_call_us": 607.813,
-   "torch_call_us": 608.988,
+   "device_us": 674.25,
+   "lumen_call_us": 715.604,
+   "torch_call_us": 653.91,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 243.93
+   "gbs": 223.95
   },
   {
    "op": "eq",
@@ -2690,12 +2690,12 @@
    "inputs": 2,
    "bytes": 603979776,
    "flops": 67108864,
-   "device_us": 2455.75,
-   "lumen_call_us": 2496.538,
-   "torch_call_us": 2424.821,
+   "device_us": 2458.75,
+   "lumen_call_us": 2496.037,
+   "torch_call_us": 2882.31,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 245.95
+   "gbs": 245.65
   },
   {
    "op": "eq",
@@ -2707,12 +2707,12 @@
    "inputs": 2,
    "bytes": 20480,
    "flops": 4096,
-   "device_us": 7.125,
-   "lumen_call_us": 6.107,
-   "torch_call_us": 2.759,
+   "device_us": 2.875,
+   "lumen_call_us": 3.118,
+   "torch_call_us": 2.656,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 2.87
+   "gbs": 7.12
   },
   {
    "op": "eq",
@@ -2724,12 +2724,12 @@
    "inputs": 2,
    "bytes": 81920,
    "flops": 16384,
-   "device_us": 7.166,
-   "lumen_call_us": 6.16,
-   "torch_call_us": 2.764,
+   "device_us": 2.958,
+   "lumen_call_us": 3.217,
+   "torch_call_us": 2.856,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 11.43
+   "gbs": 27.69
   },
   {
    "op": "eq",
@@ -2741,12 +2741,12 @@
    "inputs": 2,
    "bytes": 327680,
    "flops": 65536,
-   "device_us": 8.667,
-   "lumen_call_us": 6.466,
-   "torch_call_us": 4.029,
+   "device_us": 4.791,
+   "lumen_call_us": 3.119,
+   "torch_call_us": 4.299,
    "matches_torch": true,
    "rotation": 1639,
-   "gbs": 37.81
+   "gbs": 68.39
   },
   {
    "op": "eq",
@@ -2758,12 +2758,12 @@
    "inputs": 2,
    "bytes": 1310720,
    "flops": 262144,
-   "device_us": 12.791,
-   "lumen_call_us": 8.229,
-   "torch_call_us": 8.322,
+   "device_us": 11.667,
+   "lumen_call_us": 7.251,
+   "torch_call_us": 8.615,
    "matches_torch": true,
    "rotation": 410,
-   "gbs": 102.47
+   "gbs": 112.34
   },
   {
    "op": "eq",
@@ -2775,12 +2775,12 @@
    "inputs": 2,
    "bytes": 5242880,
    "flops": 1048576,
-   "device_us": 40.708,
-   "lumen_call_us": 22.725,
-   "torch_call_us": 24.883,
+   "device_us": 40.875,
+   "lumen_call_us": 23.008,
+   "torch_call_us": 25.309,
    "matches_torch": true,
    "rotation": 103,
-   "gbs": 128.79
+   "gbs": 128.27
   },
   {
    "op": "eq",
@@ -2792,12 +2792,12 @@
    "inputs": 2,
    "bytes": 20971520,
    "flops": 4194304,
-   "device_us": 93.459,
-   "lumen_call_us": 78.556,
-   "torch_call_us": 90.349,
+   "device_us": 93.166,
+   "lumen_call_us": 82.793,
+   "torch_call_us": 100.575,
    "matches_torch": true,
    "rotation": 26,
-   "gbs": 224.39
+   "gbs": 225.1
   },
   {
    "op": "eq",
@@ -2809,12 +2809,12 @@
    "inputs": 2,
    "bytes": 83886080,
    "flops": 16777216,
-   "device_us": 356.082,
-   "lumen_call_us": 344.519,
-   "torch_call_us": 345.946,
+   "device_us": 354.292,
+   "lumen_call_us": 388.229,
+   "torch_call_us": 362.923,
    "matches_torch": true,
    "rotation": 7,
-   "gbs": 235.58
+   "gbs": 236.77
   },
   {
    "op": "eq",
@@ -2826,12 +2826,12 @@
    "inputs": 2,
    "bytes": 335544320,
    "flops": 67108864,
-   "device_us": 1408.292,
-   "lumen_call_us": 1409.51,
-   "torch_call_us": 1371.537,
+   "device_us": 1419.75,
+   "lumen_call_us": 1574.665,
+   "torch_call_us": 1421.012,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 238.26
+   "gbs": 236.34
   },
   {
    "op": "lt",
@@ -2843,12 +2843,12 @@
    "inputs": 2,
    "bytes": 36864,
    "flops": 4096,
-   "device_us": 7.167,
-   "lumen_call_us": 6.254,
-   "torch_call_us": 2.542,
+   "device_us": 3.167,
+   "lumen_call_us": 3.195,
+   "torch_call_us": 2.676,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.14
+   "gbs": 11.64
   },
   {
    "op": "lt",
@@ -2860,12 +2860,12 @@
    "inputs": 2,
    "bytes": 147456,
    "flops": 16384,
-   "device_us": 7.75,
-   "lumen_call_us": 6.327,
-   "torch_call_us": 3.172,
+   "device_us": 3.625,
+   "lumen_call_us": 3.116,
+   "torch_call_us": 3.404,
    "matches_torch": true,
    "rotation": 3641,
-   "gbs": 19.03
+   "gbs": 40.68
   },
   {
    "op": "lt",
@@ -2877,12 +2877,12 @@
    "inputs": 2,
    "bytes": 589824,
    "flops": 65536,
-   "device_us": 9.791,
-   "lumen_call_us": 6.981,
-   "torch_call_us": 4.829,
+   "device_us": 6.666,
+   "lumen_call_us": 3.949,
+   "torch_call_us": 5.029,
    "matches_torch": true,
    "rotation": 911,
-   "gbs": 60.24
+   "gbs": 88.48
   },
   {
    "op": "lt",
@@ -2894,12 +2894,12 @@
    "inputs": 2,
    "bytes": 2359296,
    "flops": 262144,
-   "device_us": 19.958,
-   "lumen_call_us": 11.176,
-   "torch_call_us": 12.866,
+   "device_us": 20.458,
+   "lumen_call_us": 11.457,
+   "torch_call_us": 14.0,
    "matches_torch": true,
    "rotation": 228,
-   "gbs": 118.21
+   "gbs": 115.32
   },
   {
    "op": "lt",
@@ -2911,12 +2911,12 @@
    "inputs": 2,
    "bytes": 9437184,
    "flops": 1048576,
-   "device_us": 56.417,
-   "lumen_call_us": 40.375,
-   "torch_call_us": 42.495,
+   "device_us": 56.625,
+   "lumen_call_us": 42.575,
+   "torch_call_us": 44.754,
    "matches_torch": true,
    "rotation": 57,
-   "gbs": 167.28
+   "gbs": 166.66
   },
   {
    "op": "lt",
@@ -2928,12 +2928,12 @@
    "inputs": 2,
    "bytes": 37748736,
    "flops": 4194304,
-   "device_us": 159.625,
-   "lumen_call_us": 144.86,
-   "torch_call_us": 157.258,
+   "device_us": 161.417,
+   "lumen_call_us": 151.344,
+   "torch_call_us": 160.679,
    "matches_torch": true,
    "rotation": 15,
-   "gbs": 236.48
+   "gbs": 233.86
   },
   {
    "op": "lt",
@@ -2945,12 +2945,12 @@
    "inputs": 2,
    "bytes": 150994944,
    "flops": 16777216,
-   "device_us": 636.709,
-   "lumen_call_us": 700.879,
-   "torch_call_us": 677.915,
+   "device_us": 643.75,
+   "lumen_call_us": 759.283,
+   "torch_call_us": 703.204,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 237.15
+   "gbs": 234.56
   },
   {
    "op": "lt",
@@ -2962,12 +2962,12 @@
    "inputs": 2,
    "bytes": 603979776,
    "flops": 67108864,
-   "device_us": 2524.0,
-   "lumen_call_us": 2570.258,
-   "torch_call_us": 2550.596,
+   "device_us": 2485.291,
+   "lumen_call_us": 3005.302,
+   "torch_call_us": 2720.758,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 239.29
+   "gbs": 243.02
   },
   {
    "op": "lt",
@@ -2979,12 +2979,12 @@
    "inputs": 2,
    "bytes": 20480,
    "flops": 4096,
-   "device_us": 6.792,
-   "lumen_call_us": 6.206,
-   "torch_call_us": 2.489,
+   "device_us": 3.0,
+   "lumen_call_us": 3.388,
+   "torch_call_us": 2.69,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 3.02
+   "gbs": 6.83
   },
   {
    "op": "lt",
@@ -2996,12 +2996,12 @@
    "inputs": 2,
    "bytes": 81920,
    "flops": 16384,
-   "device_us": 7.458,
-   "lumen_call_us": 7.269,
-   "torch_call_us": 2.915,
+   "device_us": 3.084,
+   "lumen_call_us": 3.241,
+   "torch_call_us": 2.934,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 10.98
+   "gbs": 26.56
   },
   {
    "op": "lt",
@@ -3013,12 +3013,12 @@
    "inputs": 2,
    "bytes": 327680,
    "flops": 65536,
-   "device_us": 9.0,
-   "lumen_call_us": 6.669,
-   "torch_call_us": 4.232,
+   "device_us": 4.792,
+   "lumen_call_us": 3.157,
+   "torch_call_us": 4.074,
    "matches_torch": true,
    "rotation": 1639,
-   "gbs": 36.41
+   "gbs": 68.38
   },
   {
    "op": "lt",
@@ -3030,12 +3030,12 @@
    "inputs": 2,
    "bytes": 1310720,
    "flops": 262144,
-   "device_us": 12.833,
-   "lumen_call_us": 9.148,
-   "torch_call_us": 8.666,
+   "device_us": 11.125,
+   "lumen_call_us": 6.836,
+   "torch_call_us": 8.42,
    "matches_torch": true,
    "rotation": 410,
-   "gbs": 102.14
+   "gbs": 117.82
   },
   {
    "op": "lt",
@@ -3047,12 +3047,12 @@
    "inputs": 2,
    "bytes": 5242880,
    "flops": 1048576,
-   "device_us": 41.083,
-   "lumen_call_us": 22.742,
-   "torch_call_us": 25.339,
+   "device_us": 40.834,
+   "lumen_call_us": 23.602,
+   "torch_call_us": 27.157,
    "matches_torch": true,
    "rotation": 103,
-   "gbs": 127.62
+   "gbs": 128.39
   },
   {
    "op": "lt",
@@ -3064,12 +3064,12 @@
    "inputs": 2,
    "bytes": 20971520,
    "flops": 4194304,
-   "device_us": 92.709,
-   "lumen_call_us": 83.088,
-   "torch_call_us": 90.787,
+   "device_us": 93.709,
+   "lumen_call_us": 84.46,
+   "torch_call_us": 93.665,
    "matches_torch": true,
    "rotation": 26,
-   "gbs": 226.21
+   "gbs": 223.79
   },
   {
    "op": "lt",
@@ -3081,12 +3081,12 @@
    "inputs": 2,
    "bytes": 83886080,
    "flops": 16777216,
-   "device_us": 360.334,
-   "lumen_call_us": 367.906,
-   "torch_call_us": 357.55,
+   "device_us": 368.292,
+   "lumen_call_us": 364.881,
+   "torch_call_us": 357.31,
    "matches_torch": true,
    "rotation": 7,
-   "gbs": 232.8
+   "gbs": 227.77
   },
   {
    "op": "lt",
@@ -3098,12 +3098,12 @@
    "inputs": 2,
    "bytes": 335544320,
    "flops": 67108864,
-   "device_us": 1408.5,
-   "lumen_call_us": 1437.377,
-   "torch_call_us": 1393.692,
+   "device_us": 1409.083,
+   "lumen_call_us": 1406.004,
+   "torch_call_us": 1392.821,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 238.23
+   "gbs": 238.13
   },
   {
    "op": "select",
@@ -3115,12 +3115,12 @@
    "inputs": 3,
    "bytes": 65536,
    "flops": 4096,
-   "device_us": 4.042,
-   "lumen_call_us": 4.339,
-   "torch_call_us": 15.907,
+   "device_us": 3.333,
+   "lumen_call_us": 4.117,
+   "torch_call_us": 17.493,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 16.21
+   "gbs": 19.66
   },
   {
    "op": "select",
@@ -3132,12 +3132,12 @@
    "inputs": 3,
    "bytes": 262144,
    "flops": 16384,
-   "device_us": 4.625,
-   "lumen_call_us": 4.336,
-   "torch_call_us": 16.888,
+   "device_us": 3.834,
+   "lumen_call_us": 3.852,
+   "torch_call_us": 17.641,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 56.68
+   "gbs": 68.37
   },
   {
    "op": "select",
@@ -3149,12 +3149,12 @@
    "inputs": 3,
    "bytes": 1048576,
    "flops": 65536,
-   "device_us": 8.333,
-   "lumen_call_us": 5.339,
-   "torch_call_us": 17.001,
+   "device_us": 8.625,
+   "lumen_call_us": 5.479,
+   "torch_call_us": 19.21,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 125.83
+   "gbs": 121.57
   },
   {
    "op": "select",
@@ -3166,12 +3166,12 @@
    "inputs": 3,
    "bytes": 4194304,
    "flops": 262144,
-   "device_us": 31.75,
-   "lumen_call_us": 16.295,
-   "torch_call_us": 22.44,
+   "device_us": 32.667,
+   "lumen_call_us": 17.125,
+   "torch_call_us": 23.31,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 132.1
+   "gbs": 128.4
   },
   {
    "op": "select",
@@ -3183,12 +3183,12 @@
    "inputs": 3,
    "bytes": 16777216,
    "flops": 1048576,
-   "device_us": 74.542,
-   "lumen_call_us": 61.31,
-   "torch_call_us": 84.283,
+   "device_us": 76.541,
+   "lumen_call_us": 61.714,
+   "torch_call_us": 91.376,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 225.07
+   "gbs": 219.19
   },
   {
    "op": "select",
@@ -3200,12 +3200,12 @@
    "inputs": 3,
    "bytes": 67108864,
    "flops": 4194304,
-   "device_us": 288.291,
-   "lumen_call_us": 346.677,
-   "torch_call_us": 392.196,
+   "device_us": 287.5,
+   "lumen_call_us": 281.525,
+   "torch_call_us": 394.258,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 232.78
+   "gbs": 233.42
   },
   {
    "op": "select",
@@ -3217,12 +3217,12 @@
    "inputs": 3,
    "bytes": 268435456,
    "flops": 16777216,
-   "device_us": 1136.916,
-   "lumen_call_us": 1196.615,
-   "torch_call_us": 1902.931,
+   "device_us": 1142.374,
+   "lumen_call_us": 1154.008,
+   "torch_call_us": 1716.05,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 236.11
+   "gbs": 234.98
   },
   {
    "op": "select",
@@ -3234,12 +3234,12 @@
    "inputs": 3,
    "bytes": 1073741824,
    "flops": 67108864,
-   "device_us": 4613.542,
-   "lumen_call_us": 4651.596,
-   "torch_call_us": 6390.115,
+   "device_us": 4586.791,
+   "lumen_call_us": 4630.01,
+   "torch_call_us": 6351.185,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 232.74
+   "gbs": 234.09
   },
   {
    "op": "select",
@@ -3251,12 +3251,12 @@
    "inputs": 3,
    "bytes": 32768,
    "flops": 4096,
-   "device_us": 4.958,
-   "lumen_call_us": 4.723,
-   "torch_call_us": 16.809,
+   "device_us": 3.0,
+   "lumen_call_us": 3.5,
+   "torch_call_us": 15.948,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 6.61
+   "gbs": 10.92
   },
   {
    "op": "select",
@@ -3268,12 +3268,12 @@
    "inputs": 3,
    "bytes": 131072,
    "flops": 16384,
-   "device_us": 5.75,
-   "lumen_call_us": 4.485,
-   "torch_call_us": 17.352,
+   "device_us": 3.25,
+   "lumen_call_us": 3.566,
+   "torch_call_us": 16.411,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 22.8
+   "gbs": 40.33
   },
   {
    "op": "select",
@@ -3285,12 +3285,12 @@
    "inputs": 3,
    "bytes": 524288,
    "flops": 65536,
-   "device_us": 6.833,
-   "lumen_call_us": 4.759,
-   "torch_call_us": 17.843,
+   "device_us": 5.667,
+   "lumen_call_us": 3.57,
+   "torch_call_us": 18.393,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 76.73
+   "gbs": 92.52
   },
   {
    "op": "select",
@@ -3302,12 +3302,12 @@
    "inputs": 3,
    "bytes": 2097152,
    "flops": 262144,
-   "device_us": 15.833,
-   "lumen_call_us": 9.258,
-   "torch_call_us": 19.267,
+   "device_us": 16.458,
+   "lumen_call_us": 9.701,
+   "torch_call_us": 20.566,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 132.45
+   "gbs": 127.42
   },
   {
    "op": "select",
@@ -3319,12 +3319,12 @@
    "inputs": 3,
    "bytes": 8388608,
    "flops": 1048576,
-   "device_us": 48.208,
-   "lumen_call_us": 33.453,
-   "torch_call_us": 48.899,
+   "device_us": 51.043,
+   "lumen_call_us": 35.52,
+   "torch_call_us": 51.414,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 174.01
+   "gbs": 164.34
   },
   {
    "op": "select",
@@ -3336,12 +3336,12 @@
    "inputs": 3,
    "bytes": 33554432,
    "flops": 4194304,
-   "device_us": 145.958,
-   "lumen_call_us": 129.735,
-   "torch_call_us": 195.94,
+   "device_us": 144.791,
+   "lumen_call_us": 120.683,
+   "torch_call_us": 188.229,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 229.89
+   "gbs": 231.74
   },
   {
    "op": "select",
@@ -3353,12 +3353,12 @@
    "inputs": 3,
    "bytes": 134217728,
    "flops": 16777216,
-   "device_us": 578.167,
-   "lumen_call_us": 598.446,
-   "torch_call_us": 883.835,
+   "device_us": 573.333,
+   "lumen_call_us": 582.279,
+   "torch_call_us": 823.554,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 232.14
+   "gbs": 234.1
   },
   {
    "op": "select",
@@ -3370,12 +3370,12 @@
    "inputs": 3,
    "bytes": 536870912,
    "flops": 67108864,
-   "device_us": 2279.625,
-   "lumen_call_us": 2328.985,
-   "torch_call_us": 3441.144,
+   "device_us": 2286.292,
+   "lumen_call_us": 2287.735,
+   "torch_call_us": 3393.733,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 235.51
+   "gbs": 234.82
   },
   {
    "op": "cast",
@@ -3387,12 +3387,12 @@
    "inputs": 1,
    "bytes": 24576,
    "flops": 4096,
-   "device_us": 4.458,
-   "lumen_call_us": 3.703,
-   "torch_call_us": 3.2,
+   "device_us": 4.793,
+   "lumen_call_us": 4.334,
+   "torch_call_us": 6.617,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.51
+   "gbs": 5.13
   },
   {
    "op": "cast",
@@ -3404,12 +3404,12 @@
    "inputs": 1,
    "bytes": 98304,
    "flops": 16384,
-   "device_us": 4.834,
-   "lumen_call_us": 3.884,
-   "torch_call_us": 3.617,
+   "device_us": 8.291,
+   "lumen_call_us": 18.518,
+   "torch_call_us": 18.543,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 20.34
+   "gbs": 11.86
   },
   {
    "op": "cast",
@@ -3421,12 +3421,12 @@
    "inputs": 1,
    "bytes": 393216,
    "flops": 65536,
-   "device_us": 6.0,
-   "lumen_call_us": 4.762,
-   "torch_call_us": 5.335,
+   "device_us": 4.625,
+   "lumen_call_us": 3.045,
+   "torch_call_us": 5.069,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 65.54
+   "gbs": 85.02
   },
   {
    "op": "cast",
@@ -3438,12 +3438,12 @@
    "inputs": 1,
    "bytes": 1572864,
    "flops": 262144,
-   "device_us": 10.875,
-   "lumen_call_us": 7.208,
-   "torch_call_us": 10.495,
+   "device_us": 11.917,
+   "lumen_call_us": 8.092,
+   "torch_call_us": 11.204,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 144.63
+   "gbs": 131.98
   },
   {
    "op": "cast",
@@ -3455,12 +3455,12 @@
    "inputs": 1,
    "bytes": 6291456,
    "flops": 1048576,
-   "device_us": 39.334,
-   "lumen_call_us": 22.938,
-   "torch_call_us": 33.466,
+   "device_us": 39.875,
+   "lumen_call_us": 23.104,
+   "torch_call_us": 33.653,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 159.95
+   "gbs": 157.78
   },
   {
    "op": "cast",
@@ -3472,12 +3472,12 @@
    "inputs": 1,
    "bytes": 25165824,
    "flops": 4194304,
-   "device_us": 109.71,
-   "lumen_call_us": 92.75,
-   "torch_call_us": 116.39,
+   "device_us": 110.542,
+   "lumen_call_us": 89.943,
+   "torch_call_us": 114.161,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 229.38
+   "gbs": 227.66
   },
   {
    "op": "cast",
@@ -3489,12 +3489,12 @@
    "inputs": 1,
    "bytes": 100663296,
    "flops": 16777216,
-   "device_us": 436.459,
-   "lumen_call_us": 471.242,
-   "torch_call_us": 463.023,
+   "device_us": 441.124,
+   "lumen_call_us": 442.704,
+   "torch_call_us": 448.64,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 230.64
+   "gbs": 228.2
   },
   {
    "op": "cast",
@@ -3506,12 +3506,12 @@
    "inputs": 1,
    "bytes": 402653184,
    "flops": 67108864,
-   "device_us": 1734.958,
-   "lumen_call_us": 1879.14,
-   "torch_call_us": 1790.748,
+   "device_us": 1750.125,
+   "lumen_call_us": 1752.908,
+   "torch_call_us": 4381.637,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 232.08
+   "gbs": 230.07
   }
  ],
  "code": {
@@ -3577,20 +3577,20 @@
   }
  },
  "measured_at": {
-  "neg": "2026-10-22T09:01:22+00:00",
-  "exp": "2026-10-22T08:04:57+00:00",
-  "log": "2026-10-22T08:05:18+00:00",
-  "sqrt": "2026-10-22T08:05:38+00:00",
-  "tanh": "2026-10-22T08:05:58+00:00",
-  "logistic": "2026-10-22T08:06:19+00:00",
-  "add": "2026-10-22T08:07:17+00:00",
-  "sub": "2026-10-22T08:13:50+00:00",
-  "mul": "2026-10-22T08:14:38+00:00",
-  "div": "2026-10-22T08:15:26+00:00",
-  "max": "2026-10-22T08:16:16+00:00",
-  "eq": "2026-10-22T08:17:10+00:00",
-  "lt": "2026-10-22T08:18:06+00:00",
-  "select": "2026-10-22T08:19:08+00:00",
-  "cast": "2026-10-22T08:19:25+00:00"
+  "neg": "2026-10-22T09:11:06+00:00",
+  "exp": "2026-10-22T09:11:22+00:00",
+  "log": "2026-10-22T09:11:37+00:00",
+  "sqrt": "2026-10-22T09:11:53+00:00",
+  "tanh": "2026-10-22T09:12:09+00:00",
+  "logistic": "2026-10-22T09:12:25+00:00",
+  "add": "2026-10-22T09:13:14+00:00",
+  "sub": "2026-10-22T09:14:03+00:00",
+  "mul": "2026-10-22T09:14:53+00:00",
+  "div": "2026-10-22T09:15:43+00:00",
+  "max": "2026-10-22T09:16:33+00:00",
+  "eq": "2026-10-22T09:17:29+00:00",
+  "lt": "2026-10-22T09:18:25+00:00",
+  "select": "2026-10-22T09:19:50+00:00",
+  "cast": "2026-10-22T09:41:32+00:00"
  }
 }
