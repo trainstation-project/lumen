@@ -1,8 +1,15 @@
+import json
+import os
+import socket
+import subprocess
+import sys
+from datetime import timedelta
+
 import numpy as np
 import pytest
 
 import lumen
-from lumen.distributed import DeviceMesh, get_rank, get_world_size, init_device_mesh
+from lumen.distributed import DeviceMesh, TCPStore, get_rank, get_world_size, init_device_mesh
 
 
 @pytest.fixture
@@ -99,3 +106,86 @@ def test_a_compiled_function_closes_over_a_mesh(rank5_of_8):
     f = lumen.compile(lambda x: x + mesh.get_local_rank("dp"), device="cpu")
     x = lumen.from_numpy(np.zeros(3, np.float32))
     np.testing.assert_array_equal(lumen.to_numpy(f(x)), np.ones(3, np.float32))
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_store_set_get_add_wait():
+    master = TCPStore("127.0.0.1", 0, is_master=True, timeout=timedelta(seconds=10))
+    client = TCPStore("127.0.0.1", master.port, timeout=10)
+    master.set("text", "hello")
+    client.set("raw", b"\x00\x01")
+    assert (client.get("text"), master.get("raw")) == (b"hello", b"\x00\x01")
+    assert (master.add("n", 3), client.add("n", 4), client.get("n")) == (3, 7, b"7")
+    client.wait(["text", "n"])
+    with pytest.raises(RuntimeError, match="timed out"):
+        client.wait(["missing"], timeout=0.05)
+
+
+def test_a_world_of_one_process(monkeypatch):
+    monkeypatch.setenv("RANK", "3")
+    store = TCPStore("127.0.0.1", 0, is_master=True, timeout=10)
+    lumen.distributed.init_process_group(store=store, rank=0, world_size=1)
+    try:
+        assert lumen.distributed.is_initialized()
+        assert (get_rank(), get_world_size()) == (0, 1)
+        with pytest.raises(RuntimeError, match="already initialized"):
+            lumen.distributed.init_process_group(store=store, rank=0, world_size=1)
+    finally:
+        lumen.distributed.destroy_process_group()
+    assert not lumen.distributed.is_initialized()
+    assert get_rank() == 3
+
+
+def test_env_rendezvous_needs_the_launchers_variables(monkeypatch):
+    for name in ("MASTER_ADDR", "MASTER_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="MASTER_PORT is not set"):
+        lumen.distributed.init_process_group(rank=0, world_size=1)
+    with pytest.raises(ValueError, match="needs rank"):
+        lumen.distributed.init_process_group(init_method="tcp://127.0.0.1:1", world_size=1)
+
+
+RANK_PROGRAM = """
+import json
+import lumen
+from lumen.distributed import get_rank, get_world_size, init_device_mesh, init_process_group
+
+init_process_group(timeout=60)
+rank = get_rank()
+mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp", "tp"))
+print(json.dumps({"rank": rank, "world_size": get_world_size(), "tp": mesh["tp"].mesh, "coordinate": mesh.get_coordinate()}))
+"""
+
+
+def test_processes_meet_through_env_rendezvous():
+    port = free_port()
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", RANK_PROGRAM],
+            env={
+                **os.environ,
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": str(port),
+                "RANK": str(rank),
+                "WORLD_SIZE": "4",
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for rank in reversed(range(4))
+    ]
+    results = []
+    for p in processes:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, err
+        results.append(json.loads(out))
+    results.sort(key=lambda r: r["rank"])
+    assert [r["world_size"] for r in results] == [4] * 4
+    assert [r["tp"] for r in results] == [[0, 1], [0, 1], [2, 3], [2, 3]]
+    assert [r["coordinate"] for r in results] == [[0, 0], [0, 1], [1, 0], [1, 1]]
