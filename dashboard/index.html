@@ -639,7 +639,7 @@ function drawOp(op) {
     { key: "lumen_us", label: "lumen", kind: "num", render: (r) => r.error ? "" : fmt.us(r.lumen_us) },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (r) => r.error ? "" : fmt.gbs(r.gbs) },
     { key: "torch_us", label: "PyTorch", kind: "num", render: (r) => r.error ? "" : maybe(r.torch_us, fmt.us) },
-    { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "yes" : "no") },
+    { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "✅" : "❌") },
   ], rows, opSort);
 }
 const opSort = { key: null, dir: 1, draw: () => drawOp(current.op) };

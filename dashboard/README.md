@@ -17,6 +17,11 @@ server shows the dashboard (`python -m http.server` in this folder), but
 only `serve.py` runs benchmarks. Opened from disk, the page cannot load
 `data/`.
 
+`.github/workflows/pages.yml` publishes `index.html` and `data/` to
+https://trainstation-project.github.io/lumen/ on each push to `main` that
+touches `dashboard/`. There it shows the committed numbers; benchmarks run
+only through `serve.py`.
+
 ## Files
 
 | File | Contents |

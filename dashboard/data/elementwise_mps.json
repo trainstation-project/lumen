@@ -451,11 +451,11 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "lumen_us": 7.154,
-   "torch_us": 1.325,
+   "lumen_us": 7.169,
+   "torch_us": 2.671,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 4.58
+   "gbs": 4.57
   },
   {
    "op": "log",
@@ -467,11 +467,11 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "lumen_us": 7.142,
-   "torch_us": 2.203,
+   "lumen_us": 7.241,
+   "torch_us": 3.131,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 18.35
+   "gbs": 18.1
   },
   {
    "op": "log",
@@ -483,11 +483,11 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "lumen_us": 7.094,
-   "torch_us": 4.256,
+   "lumen_us": 7.152,
+   "torch_us": 5.013,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 73.91
+   "gbs": 73.31
   },
   {
    "op": "log",
@@ -499,11 +499,11 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "lumen_us": 7.213,
-   "torch_us": 10.786,
+   "lumen_us": 9.408,
+   "torch_us": 10.93,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 290.75
+   "gbs": 222.91
   },
   {
    "op": "log",
@@ -515,11 +515,11 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "lumen_us": 45.361,
-   "torch_us": 42.821,
+   "lumen_us": 44.464,
+   "torch_us": 44.186,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 184.93
+   "gbs": 188.66
   },
   {
    "op": "log",
@@ -531,11 +531,11 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "lumen_us": 133.867,
-   "torch_us": 140.583,
+   "lumen_us": 172.317,
+   "torch_us": 160.942,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 250.65
+   "gbs": 194.73
   },
   {
    "op": "log",
@@ -547,11 +547,11 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "lumen_us": 559.523,
-   "torch_us": 578.352,
+   "lumen_us": 605.54,
+   "torch_us": 609.225,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 239.88
+   "gbs": 221.65
   },
   {
    "op": "log",
@@ -563,11 +563,11 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "lumen_us": 2328.065,
-   "torch_us": 2337.535,
+   "lumen_us": 2376.227,
+   "torch_us": 2528.169,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.61
+   "gbs": 225.93
   },
   {
    "op": "log",
@@ -3523,7 +3523,7 @@
  "measured_at": {
   "neg": "2026-10-22T17:11:10+00:00",
   "exp": "2026-10-22T17:12:55+00:00",
-  "log": "2026-10-22T16:36:12+00:00",
+  "log": "2026-10-22T17:14:42+00:00",
   "sqrt": "2026-10-22T16:37:57+00:00",
   "tanh": "2026-10-22T16:39:42+00:00",
   "logistic": "2026-10-22T16:50:51+00:00",
