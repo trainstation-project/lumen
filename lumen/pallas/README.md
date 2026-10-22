@@ -60,7 +60,9 @@ are `Ref`s; the TPU's own ops (`bitcast`, shifts, bitwise ops,
 * **SparseCore kernels** (`Kernel::sparse_core`, `pl.sparse_core_kernel`)
   run on a TPU's SparseCores, a mesh of cores by vector subcores (2 by 16
   on a v6e), each running the body: they take their core's and subcore's
-  index (int32 values), then typed HBM refs (`Hbm`), then their scratch.
+  index (int32 values), then typed HBM refs (`Hbm`), then their scratch
+  (also shared VMEM, `pl.VMEM_SHARED`: a vector subcore copies HBM to SMEM
+  through it).
   They have no scalar prefetch and no views of the memory (SparseCore
   Mosaic refuses `tpu.reinterpret_cast`): the runtime hands them their
   operands (`lumen/kernels/tpu`). An **indexed copy**

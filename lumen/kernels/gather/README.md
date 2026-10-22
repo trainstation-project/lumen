@@ -21,20 +21,32 @@ Callers: plan steps on a TPU reach [`tpu::encode`](tpu/mod.rs) through
 ## On the SparseCores (32-bit tables)
 
 `tpu::encode` launches a SparseCore kernel (`_sparse_core`) when the table
-is 32-bit, its width a multiple of 128 whose rows fit VMEM in chunks of at
-least 8, and the table, the output and the memory start on tile rows of
-that width (the allocator's and the plan's alignment makes them). The
-launch (`lumen/kernels/tpu`'s SparseCore launches) gives the kernel the
-memory as `u32[_, width]` rows and two index arrays: each position's table
-row (its id plus the table's row) and its output row. Each of the 32
-subcores takes its share of positions in chunks of `k`: it copies the
-chunk's table rows in by one indexed copy (a hardware gather, 32 bytes at a
-time: no tile is over-read) and writes them out by another, two slots so
-one chunk's gather runs while the last one's rows are written.
+is 32-bit, its width a multiple of 128 with at least 8 rows in 128 KiB, and
+the table, the output and the memory start on tile rows of that width (the
+allocator's and the plan's alignment makes them). The launch
+(`lumen/kernels/tpu`'s SparseCore launches) gives the kernel the memory as
+`u32[_, width]` rows and each position's table row (its id plus the
+table's row). Each of the 32 subcores takes its share of positions in
+chunks of `k` rows (the most a power of two that fit 128 KiB: the chunk
+size, not more chunks in flight, is what makes it fast), copies the
+chunk's rows in by one indexed copy (a hardware gather, 32 bytes at a
+time: no tile is over-read) and writes them out:
 
-On a v6e, float32 lookups write 326-405 GB/s (`[8, 2048]` ids in a
-`[32000, 1024]` table: 167 µs), against 96-133 GB/s on the TensorCore and
-XLA's 250-369 GB/s (`jnp.take`).
+* **linearly**, where the output's rows are contiguous (1-D ids, or a last
+  index dimension a multiple of 8): the launch passes its row scalars, the
+  kernel reads the output's row from them (HBM to shared VMEM to SMEM: a
+  vector subcore copies nothing from HBM to SMEM itself) and writes each
+  chunk at its position, the last part chunk in whole tiles (its tail in
+  the output's tile padding);
+* else by an indexed copy at each position's output row (a second index
+  array).
+
+On a v6e, a lookup takes as long as JAX's own SparseCore gather (Pallas,
+`tpu_sc`) on the same shapes, 2.5x faster than XLA's `jnp.take`: per lookup
+in a program of several, `[8, 2048]` ids in a `[32000, 1024]` float32 table
+139 µs (484 GB/s written; JAX 138, XLA 334), `[8, 4096]` in `[32000, 256]`
+72 µs (469 GB/s; JAX 70, XLA 107), `[4, 1024]` in `[8000, 4096]` 139 µs
+(JAX 139, XLA 226).
 
 ## On the TensorCore
 

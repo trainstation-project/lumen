@@ -45,6 +45,14 @@ impl PyKernel {
         self.inner.alloc(ty).map_err(err)
     }
 
+    fn vmem_shared(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
+        let ty = Type::Ref(
+            TensorType::new(parse_dtype(dtype)?, &shape),
+            Space::VmemShared,
+        );
+        self.inner.alloc(ty).map_err(err)
+    }
+
     fn semaphores(&mut self, shape: Vec<usize>) -> PyResult<Var> {
         self.inner.alloc(Type::Semaphore(shape)).map_err(err)
     }
@@ -99,6 +107,7 @@ impl PyKernel {
                     Space::Any => "any",
                     Space::Hbm => "hbm",
                     Space::Vmem => "vmem",
+                    Space::VmemShared => "vmem_shared",
                     Space::Smem => "smem",
                 };
                 Ok((dtype_name(t.dtype), t.shape.clone(), space))
