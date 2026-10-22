@@ -34,6 +34,7 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
     assert compiler.fused_linear_cross_entropy is True and compiler.fused_linear_cross_entropy_chunk_size is None
     assert compiler.safe_kernels is False and compiler.dump_to is None
+    assert compiler.autotune is True
     assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
     compiler.online_softmax, compiler.row_cache = False, 4

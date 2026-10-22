@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 use std::sync::{Mutex, PoisonError};
@@ -33,10 +34,85 @@ unsafe extern "C" {
         nargs: usize,
         grid: *const usize,
         groups: i32,
+        group: usize,
         timed: i32,
         done: Completion,
         context: *mut c_void,
     ) -> i32;
+    fn lumen_mps_time_pipeline(
+        pipeline: *mut c_void,
+        buffers: *const *const u8,
+        nbuffers: usize,
+        copies: usize,
+        args: *const *const u8,
+        arg_lens: *const usize,
+        nargs: usize,
+        grid: *const usize,
+        groups: i32,
+        group: usize,
+        reps: usize,
+    ) -> f64;
+}
+
+pub(crate) struct Captured {
+    pipeline: *mut c_void,
+    buffers: Vec<*const u8>,
+    args: Vec<Vec<u8>>,
+    sizes: [usize; 3],
+    groups: bool,
+    group: usize,
+}
+
+impl Captured {
+    pub(crate) fn time(copies: &[&Captured], reps: usize) -> Result<f64, String> {
+        let first = copies[0];
+        let buffers: Vec<*const u8> = copies
+            .iter()
+            .flat_map(|c| c.buffers.iter().copied())
+            .collect();
+        let pointers: Vec<*const u8> = first.args.iter().map(|a| a.as_ptr()).collect();
+        let lens: Vec<usize> = first.args.iter().map(Vec::len).collect();
+        let Captured {
+            pipeline,
+            args,
+            sizes,
+            groups,
+            group,
+            ..
+        } = first;
+        let seconds = unsafe {
+            lumen_mps_time_pipeline(
+                *pipeline,
+                buffers.as_ptr(),
+                first.buffers.len(),
+                copies.len(),
+                pointers.as_ptr(),
+                lens.as_ptr(),
+                args.len(),
+                sizes.as_ptr(),
+                (*groups).into(),
+                *group,
+                reps,
+            )
+        };
+        match seconds {
+            s if s < 0.0 => Err("timing an MPS kernel failed".into()),
+            s => Ok(s),
+        }
+    }
+}
+
+thread_local! {
+    static CAPTURED: RefCell<Option<Vec<Captured>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn capture(
+    encode: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<Captured>, String> {
+    CAPTURED.with_borrow_mut(|c| *c = Some(Vec::new()));
+    let encoded = encode();
+    let captured = CAPTURED.with_borrow_mut(Option::take).unwrap_or_default();
+    encoded.map(|()| captured)
 }
 
 const MAX_ARGS: usize = 31;
@@ -248,9 +324,10 @@ pub(crate) fn launch(
     keep: Vec<Tensor>,
     name: &'static str,
 ) -> Result<(), String> {
-    let (sizes, groups) = match grid {
-        Grid::Threads(sizes) => (sizes, false),
-        Grid::Groups(sizes) => (sizes, true),
+    let (sizes, groups, group) = match grid {
+        Grid::Threads(sizes) => (sizes, false, 0),
+        Grid::Groups(sizes) => (sizes, true, 0),
+        Grid::Elementwise { threads, group } => ([threads, 1, 1], false, group),
     };
     if sizes.contains(&0) {
         crate::profiler::clear_next_launch();
@@ -261,6 +338,21 @@ pub(crate) fn launch(
         return Err(format!(
             "the MPS kernel {kernel} takes at most {MAX_ARGS} arguments"
         ));
+    }
+    let captured = CAPTURED.with_borrow_mut(|c| {
+        c.as_mut().map(|c| {
+            c.push(Captured {
+                pipeline,
+                buffers: buffers.to_vec(),
+                args: args.to_vec(),
+                sizes,
+                groups,
+                group,
+            })
+        })
+    });
+    if captured.is_some() {
+        return Ok(());
     }
     let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
     let mut lens = [0usize; MAX_ARGS];
@@ -279,6 +371,7 @@ pub(crate) fn launch(
             args.len(),
             sizes.as_ptr(),
             groups.into(),
+            group,
             timed.into(),
             done,
             context,

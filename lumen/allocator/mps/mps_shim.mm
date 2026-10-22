@@ -16,13 +16,12 @@ static id<MTLDevice> lumen_default_device(void) {
 }
 
 static std::map<char *, id<MTLBuffer> __strong> g_buffers;
+static std::map<char *, id<MTLBuffer> __strong> g_heaps;
 static std::mutex g_buffers_mu;
 
-id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset) {
-    char *p = static_cast<char *>(const_cast<void *>(ptr));
-    std::lock_guard<std::mutex> lock(g_buffers_mu);
-    auto it = g_buffers.upper_bound(p);
-    if (it == g_buffers.begin()) {
+static id<MTLBuffer> containing(const std::map<char *, id<MTLBuffer> __strong> &buffers, char *p, size_t *offset) {
+    auto it = buffers.upper_bound(p);
+    if (it == buffers.begin()) {
         return nil;
     }
     --it;
@@ -31,6 +30,13 @@ id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset) {
     }
     *offset = static_cast<size_t>(p - it->first);
     return it->second;
+}
+
+id<MTLBuffer> lumen_mps_buffer(const void *ptr, size_t *offset) {
+    char *p = static_cast<char *>(const_cast<void *>(ptr));
+    std::lock_guard<std::mutex> lock(g_buffers_mu);
+    id<MTLBuffer> buffer = containing(g_buffers, p, offset);
+    return buffer != nil ? buffer : containing(g_heaps, p, offset);
 }
 
 extern "C" {
@@ -65,7 +71,9 @@ void *lumen_mps_alloc(size_t nbytes) {
     if (device == nil) {
         return nullptr;
     }
-    id<MTLBuffer> buffer = [device newBufferWithLength:nbytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buffer =
+        [device newBufferWithLength:nbytes
+                            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
     if (buffer == nil) {
         return nullptr;
     }
@@ -83,5 +91,50 @@ void lumen_mps_free(void *contents) {
     }
     std::lock_guard<std::mutex> lock(g_buffers_mu);
     g_buffers.erase(static_cast<char *>(contents));
+    g_heaps.erase(static_cast<char *>(contents));
+}
+
+static constexpr MTLResourceOptions kPlaced = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;
+
+void *lumen_mps_alloc_heap(size_t nbytes) {
+    id<MTLDevice> device = lumen_default_device();
+    if (device == nil) {
+        return nullptr;
+    }
+    MTLHeapDescriptor *d = [MTLHeapDescriptor new];
+    d.type = MTLHeapTypePlacement;
+    d.storageMode = MTLStorageModeShared;
+    d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+    d.size = nbytes;
+    id<MTLHeap> heap = [device newHeapWithDescriptor:d];
+    id<MTLBuffer> whole = [heap newBufferWithLength:nbytes options:kPlaced offset:0];
+    if (whole == nil) {
+        return nullptr;
+    }
+    void *contents = whole.contents;
+    std::lock_guard<std::mutex> lock(g_buffers_mu);
+    g_heaps[static_cast<char *>(contents)] = whole;
+    return contents;
+}
+
+int lumen_mps_place(void *ptr, size_t nbytes) {
+    char *p = static_cast<char *>(ptr);
+    std::lock_guard<std::mutex> lock(g_buffers_mu);
+    size_t offset = 0;
+    id<MTLBuffer> whole = containing(g_heaps, p, &offset);
+    if (whole == nil) {
+        return -1;
+    }
+    id<MTLBuffer> placed = [whole.heap newBufferWithLength:nbytes options:kPlaced offset:whole.heapOffset + offset];
+    if (placed == nil) {
+        return -1;
+    }
+    g_buffers[p] = placed;
+    return 0;
+}
+
+void lumen_mps_unplace(void *ptr) {
+    std::lock_guard<std::mutex> lock(g_buffers_mu);
+    g_buffers.erase(static_cast<char *>(ptr));
 }
 }

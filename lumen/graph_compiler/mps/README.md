@@ -33,6 +33,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `horizontal.rs` | MPS's horizontal fusion `Target` (`../common/horizontal.rs`): which fusions join (no reductions, attention, atomic split-K or GEMM; at most 1M elements), keyed by element count (and shape for tiled transposes), within Metal's 30 buffers and the transpose tiles' heroes. |
 | `alone.rs` | Pass `alone`: every elementwise node, gather and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (none has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
+| `autotune.rs` | `MpsAutotuner`, MPS's `Autotuner` (`../common/autotune.rs`): steps whose generated kernel has candidates (`codegen::tunings_of`) and 64K to 16M output elements, keyed by kernel and length; candidates generated as Metal and compiled together; timed through `encode` under `capture` over zeroed buffers; the step renamed to the fastest. |
 | `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`. |
 | `tests.rs` | End-to-end MPS compiler tests against the reference executor (skip without Metal via `plan_tests::mps::available`). |
 
@@ -75,6 +76,41 @@ of any module). The order is load-bearing; the comments in
 | 15′ | `alone` | always | `alone.rs` | Each elementwise node, gather or concatenate left alone its own fusion; keeps a runtime scalar by value only if fusions alone read it. |
 | 16 | `codegen` | always | `kernel_codegen.rs` | Generate Metal for each pending fusion; unmark concatenates that can no longer be in place. |
 | 17 | `place_views` | always | `place_views.rs` | Mark slices dots read in place as views. |
+
+After the plan is built, `autotune` (flag `autotune`, on by default) picks
+each generated kernel's launch: see *Autotuning*.
+
+## Autotuning
+
+A generated kernel's launch (`codegen::Tuning`: a loop's elements per
+thread, strided or contiguous, and threadgroup size) is written into its source as constants, so
+dumped code shows what runs, and `encode` reads it from the kernel's entry
+in `LAUNCHES` (recorded with its launch kind). Codegen writes a default
+(`codegen::tuning_of`). With `autotune` on, the shared driver
+(`../common/autotune.rs`) runs `MpsAutotuner` (`autotune.rs`) over the
+plan: for each step whose kernel has candidates (`codegen::tunings_of`)
+and 64K to 16M output elements, each candidate is generated and all are
+compiled together, `encode` runs once per candidate under
+`kernels::mps::capture`, which records its launches instead of submitting
+them, and each recorded launch is timed on the GPU alone
+(`lumen_mps_time_pipeline`: one command buffer, the dispatch repeated over
+about 16M elements with a barrier before each, as the stream runs it, GPU
+start to end, best of two). The buffers are zeroed (zero indices are in
+range), outside the static allocator (`allocator::Scratch`, fewer copies or
+no tuning when Metal is short of memory), with enough copies of the inputs,
+about 64 MB, that the repeats read them cold, as a model's kernels do once
+their inputs are out of cache: timed hot, an 8 MB input stays in the GPU's
+cache and the candidates rank differently. The step takes the fastest
+candidate's kernel; the pick is cached per kernel and length, so a
+recompile re-times nothing. Only loops have candidates so far.
+
+`neg` per call on an M4 Pro, back to back on cold inputs, best of 3,
+`autotune` off → on: float32 64K 3.11 → 2.73 µs, 256K 7.53 → 7.01 µs,
+1M 26.8 → 24.5 µs; bfloat16 64K 2.82 → 2.05 µs, 256K 5.56 → 4.25 µs, 1M
+15.8 → 13.1 µs; from 16M every launch streams at DRAM's bandwidth.
+bfloat16 wants few threadgroups (4M elements: 39 µs in groups of 1024,
+100 µs in groups of 256, a thread 4 elements apart either way). Tuning
+adds 20 to 120 ms to a compile, once per kernel and length.
 
 Other flags are read inside passes rather than gating them:
 `contraction_epilogues` (flash attention's and GEMM epilogues in

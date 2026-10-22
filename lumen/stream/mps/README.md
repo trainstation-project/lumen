@@ -42,10 +42,26 @@ command buffer from outside (after a plan's custom-op call, and a Core ML
 step); `command_buffer()` ends the encoder and exposes the open
 `MTLCommandBuffer` for external encoding (Core ML, `lumen.Stream.command_buffer`).
 
+## Ordering
+
+lumen's buffers are untracked (`allocator/mps`), so Metal orders nothing by
+itself and the stream orders everything, with one `MTLEvent` (`order`):
+
+* Each dispatch is preceded by a buffer memory barrier (`kernels/mps/shim.mm`),
+  so within an encoder every kernel sees the writes of those before it.
+* A command buffer signals the next value at its end and the next one waits
+  for it first (`open_commands`), so command buffers run one after another.
+* A new encoder in a command buffer that has encoded since its last wait,
+  `command_buffer()` handing the buffer out, and `fence()` end the encoder,
+  signal and wait (`order_after_encoded`): what follows starts after
+  everything before, including Core ML's and a custom op's own encoders.
+
 ## Invariants & gotchas
 
 * The encoder/encoded pair brackets a held `os_unfair_lock`; always call
   `lumen_mps_stream_encoded` after a successful `lumen_mps_stream_encoder`.
+* External encoders run after lumen's work, and lumen's next encoder after
+  theirs, but between themselves they must order their own work.
 * Work is not submitted to the GPU until 32 ops accumulate or someone
   flushes/synchronizes; host reads must synchronize first.
 * Counter sample buffers are pooled (at most 24 in flight); if the device

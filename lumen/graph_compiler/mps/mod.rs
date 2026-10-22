@@ -1,5 +1,6 @@
 mod alone;
 pub(crate) mod ane;
+mod autotune;
 mod canonicalize_dots;
 mod diamonds;
 mod flash_attention_backward;
@@ -27,6 +28,7 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
+use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
@@ -74,6 +76,7 @@ struct MpsModule<'a> {
     scalars: Vec<usize>,
     kernels: Vec<Kernel>,
     sources: BTreeMap<String, String>,
+    tunable: BTreeMap<String, autotune::Tunable>,
 }
 
 impl Attentions for MpsModule<'_> {
@@ -213,6 +216,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         scalars: super::positions(&options.scalars),
         kernels: Vec::new(),
         sources: BTreeMap::new(),
+        tunable: BTreeMap::new(),
     };
     pipeline(config).run(&mut module)?;
     compile_kernels(std::mem::take(&mut module.sources))?;
@@ -221,6 +225,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         packed,
         interleaved,
         scalars,
+        tunable,
         ..
     } = module;
     let parameters = options.parameters.clone().map(|mut p| {
@@ -242,6 +247,14 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         layout: None,
     };
     let mut plan = Plan::compile_with(&fused, &plan);
+    if config.autotune {
+        let mut tuner = autotune::MpsAutotuner {
+            tunable: &tunable,
+            config,
+            sources: BTreeMap::new(),
+        };
+        super::common::autotune::autotune(&mut tuner, &mut plan)?;
+    }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
     for step in plan.steps_mut() {
@@ -310,7 +323,7 @@ enum Launch {
     Elementwise,
 }
 
-static LAUNCHES: Mutex<BTreeMap<String, Launch>> = Mutex::new(BTreeMap::new());
+static LAUNCHES: Mutex<BTreeMap<String, (Launch, Option<Tuning>)>> = Mutex::new(BTreeMap::new());
 
 fn launch_of(body: &Graph) -> Launch {
     if attention::of_body(body).is_some() {
@@ -332,20 +345,21 @@ fn launch_of(body: &Graph) -> Launch {
     }
 }
 
-pub(super) fn record_launch(name: &str, body: &Graph) {
-    let launch = launch_of(body);
+pub(super) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
+    let launch = (launch_of(body), tuning);
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     launches.insert(name.to_owned(), launch);
 }
 
-fn launch_kind(name: &str, body: &Graph) -> Launch {
+fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(&launch) = launches.get(name) {
         return launch;
     }
     let launch = launch_of(body);
-    launches.insert(name.to_owned(), launch);
-    launch
+    let tuning = codegen::tuning_of(body);
+    launches.insert(name.to_owned(), (launch, tuning));
+    (launch, tuning)
 }
 
 #[cfg(feature = "python")]
@@ -378,7 +392,7 @@ pub(crate) fn encode(
         }
     }
     let inputs = device.as_slice();
-    let kind = launch_kind(name, body);
+    let (kind, tuning) = launch_kind(name, body);
     let attention_buffers = |dropout: bool| -> Result<Vec<*const u8>, String> {
         let state = match (dropout, scalars.len()) {
             (false, _) | (true, 2) => 0,
@@ -576,7 +590,16 @@ pub(crate) fn encode(
     }
     let out = &step.output.1;
     let n = out.numel();
-    let grid = elementwise_grid(n, out.dtype);
+    let Some(Tuning::Loop {
+        per_thread, group, ..
+    }) = tuning
+    else {
+        unreachable!("a loop's tuning")
+    };
+    let grid = Grid::Elementwise {
+        threads: n.div_ceil(per_thread),
+        group,
+    };
     let buffers: Vec<*const u8> = inputs
         .iter()
         .copied()

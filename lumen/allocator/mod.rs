@@ -16,6 +16,8 @@ pub use cuda::CudaAllocator;
 pub use meta::MetaAllocator;
 #[cfg(lumen_mps_linked)]
 pub use mps::MpsAllocator;
+#[cfg(lumen_mps_linked)]
+pub(crate) use mps::Scratch;
 #[cfg(lumen_tpu_linked)]
 pub use tpu::TpuAllocator;
 

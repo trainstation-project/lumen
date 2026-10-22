@@ -33,11 +33,40 @@ pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Tuning {
+    Loop {
+        per_thread: usize,
+        group: usize,
+        contiguous: bool,
+    },
+}
+
+pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
+    is_loop(body).then(|| loop_tuning(body))
+}
+
+pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
+    match is_loop(body) {
+        true => loop_tunings(body),
+        false => Vec::new(),
+    }
+}
+
+fn is_loop(body: &Graph) -> bool {
+    row_dot(body).is_none()
+        && gemm_dot(body).is_none()
+        && row_reductions(body).is_empty()
+        && reduction_root(body).is_none()
+        && transpose_tiling(body).is_none()
+}
+
 pub(crate) fn kernel(
     body: &Graph,
     by_value: &[bool],
     config: &CompilerConfig,
     views: &HashMap<usize, (usize, Vec<usize>)>,
+    tuning: Option<Tuning>,
 ) -> (String, String) {
     if let Some(dot) = row_dot(body) {
         return gemm_row_kernel(body, by_value, dot, config);
@@ -55,7 +84,8 @@ pub(crate) fn kernel(
     if let Some(tiling) = transpose_tiling(body) {
         return transpose_kernel(body, by_value, &tiling, views);
     }
-    elementwise_kernel(body, by_value, views)
+    let tuning = tuning.unwrap_or_else(|| loop_tuning(body));
+    elementwise_kernel(body, by_value, views, tuning)
 }
 
 pub(crate) fn writes_views(body: &Graph) -> bool {

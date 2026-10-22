@@ -52,9 +52,15 @@ views*).
 
 ## Kernel kinds
 
-**Loop (elementwise).** One thread per output element, flat index `j`,
-using the `ELEMENTWISE_ARGS` / `FOR_EACH_ELEMENT` macros from
-`kernels/mps/kernels.metal`. Multi-output fusions write `out1`, `out2`, ... at
+**Loop (elementwise).** Each thread `per_thread` output elements, `threads`
+apart or, `contiguous`, adjacent (flat index `j`), in threadgroups of
+`group` threads, all written
+into the source (`Tuning::Loop`: a literal bound on the loop, and
+`[[max_total_threads_per_threadgroup(group)]]`); the arguments come from
+the `ELEMENTWISE_ARGS` macro in `kernels/mps/kernels.metal`. `loop_tuning`
+is the default (`n / 32K` elements a thread, at most 16 bytes' worth, in
+256s, strided), `loop_tunings` the autotuner's candidates (1 to 16 bytes'
+worth, strided or adjacent, threadgroups of 64 to 1024). Multi-output fusions write `out1`, `out2`, ... at
 the same index. Layout primitives (reshape, broadcast_in_dim, transpose,
 slice), gather, concatenate, iota, full and random_bits are computed by
 index arithmetic inside the loop, never materialized.

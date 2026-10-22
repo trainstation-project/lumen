@@ -19,6 +19,7 @@ class CompilerConfig:
     neural_engine: bool
     row_cache: int
     memory_limit: int
+    autotune: bool
     dump_to: Optional[str]
 
     def reset(self) -> None: ...

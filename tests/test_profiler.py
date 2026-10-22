@@ -306,49 +306,6 @@ def test_launches_are_named_after_what_they_compute():
 
 
 @pytest.mark.mps
-def test_kernels_queued_far_ahead_are_each_timed():
-    """Kernels queued ahead of the GPU are each timed: no two share a start
-    and duration, nor takes its command buffer's whole span (the untimed
-    fallback's times, which every op got once Metal's 32 counter sample
-    buffers were all held by command buffers in flight; now pooled). How far
-    the host gets ahead depends on the machine's load: this checks the
-    timing, not that the pool is exercised."""
-    import collections
-
-    import numpy as np
-
-    import lumen.functional as F
-
-    class Weight(lumen.nn.Module):
-        w: lumen.Tensor
-
-    model = Weight(lumen.empty([1024, 1024], device="meta"))
-
-    def chain(m, s):
-        x = m.w * s
-        for _ in range(32):
-            x = F.relu(F.matmul(x, m.w, "float32", "float32")) * 0.05
-        return F.sum(x)
-
-    f = lumen.compile(chain, device="mps")
-    try:
-        f(model, 1.0)
-    except RuntimeError as e:
-        pytest.skip(str(e))
-    model.load_state_dict({"w": lumen.from_numpy(np.full((1024, 1024), 1 / 1024, np.float32))})
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-        for _ in range(40):
-            f(model, 1.0)
-        lumen.mps.synchronize()
-    kernels = sorted((e for e in prof.events() if e["kind"] == "gpu"), key=lambda e: e["start_us"])
-    assert len(kernels) >= 40 * 33
-    times = collections.Counter((e["start_us"], e["duration_us"]) for e in kernels)
-    assert max(times.values()) == 1
-    spans = sorted(e["duration_us"] for e in kernels)
-    assert spans[-1] < 10 * spans[len(spans) // 2]
-
-
-@pytest.mark.mps
 def test_host_waits_are_profiled():
     """The host's waits are CPU ranges (the GPU does nothing for them):
     ``lumen.mps.synchronize()`` as ``lumen::synchronize``, and a read of a

@@ -667,7 +667,7 @@ impl Plan {
         &self.steps
     }
 
-    #[cfg(lumen_mps_linked)]
+    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
     pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
         &mut self.steps
     }

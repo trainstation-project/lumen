@@ -163,3 +163,32 @@ def test_custom_op_encodes_into_the_command_buffer():
     out = lumen.compile(step)(_mps([1, 2, 3], np.uint8))
     assert lumen.to_numpy(out).tolist() == [14, 14, 14]
     assert lumen.Stream("mps").command_buffer() != 0
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
+    """A loop the compiler autotunes computes what the untuned loop does, at
+    lengths that fill no thread evenly, and its dumped source carries the
+    elements per thread and threadgroup size it picked."""
+    if not lumen.mps.is_available():
+        pytest.skip("no MPS device")
+    compiler = lumen.config.compiler
+    try:
+        for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
+            x = (
+                lumen.from_numpy(np.random.default_rng(n).uniform(-1, 1, n).astype(np.float32))
+                .to("mps")
+                .to(dtype=dtype)
+            )
+            results = []
+            for autotune in (False, True):
+                compiler.autotune = autotune
+                y = lumen.compile(lambda x: -x * 2)(x)
+                results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
+            assert np.array_equal(results[0], results[1]), n
+        lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
+        source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.metal"))
+        assert "[[max_total_threads_per_threadgroup(" in source
+        assert "for (uint j = i" in source and "; k < " in source
+    finally:
+        compiler.autotune = True
