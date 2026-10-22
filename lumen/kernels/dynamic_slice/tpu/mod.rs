@@ -7,13 +7,9 @@ use crate::kernels::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
 
 const LANES: usize = 128;
-
 const STAGED: usize = 1 << 20;
-
 const STREAMED: usize = 1 << 18;
-
 const COPY_BYTES: usize = 2 << 20;
-
 const DEPTH: usize = 4;
 
 fn env(name: &str, default: usize) -> usize {
