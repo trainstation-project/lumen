@@ -614,6 +614,9 @@ pub(crate) fn encode(
         Primitive::Fusion { ref name, .. } if name == "reduction" => {
             crate::codegen::tpu::reduction::encode(index, step, inputs, output)
         }
+        Primitive::Fusion { ref name, .. } if name == "dot_row" => {
+            crate::codegen::tpu::gemm_row::encode(index, step, inputs, output)
+        }
         Primitive::Fusion { ref name, .. } if name == "row" => {
             crate::codegen::tpu::row::encode(index, step, inputs, output)
         }

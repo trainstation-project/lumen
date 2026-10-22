@@ -615,3 +615,54 @@ def test_32_bit_tables_are_gathered_on_the_sparse_core(dtype, width, ids, kernel
     np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu").to(dtype=exact)).view(np.uint8), want.view(np.uint8))
     (launched,) = f.dump_code(tmp_path)
     assert kernel in launched.name, launched.name
+
+
+def _rms(x, w):
+    return x / np.sqrt((x * x).mean(-1, keepdims=True) + np.finfo(np.float32).eps) * w
+
+
+@pytest.mark.parametrize(
+    "f, expected, dtype, shapes",
+    [
+        (
+            lambda x, a, w, r: F.rms_norm(F.matmul(x, a, "float32", "float32"), 1024, w),
+            lambda x, a, w, r: _rms(x @ a, w),
+            "float32",
+            ([512, 256], [256, 1024], [1024], [512, 1024]),
+        ),
+        (
+            lambda x, a, w, r: F.softmax(F.matmul(x, a.t(), "float32", "float32"), -1),
+            lambda x, a, w, r: _softmax(x @ a.T),
+            "float32",
+            ([256, 512], [2048, 512], [2048], [256, 2048]),
+        ),
+        (
+            lambda x, a, w, r: _layer_norm(F.matmul(x, a, "float32", "float32") + r.float(), w.float(), w.float()),
+            lambda x, a, w, r: (
+                lambda h: (h - h.mean(-1, keepdims=True)) / np.sqrt(h.var(-1, keepdims=True) + 1e-5) * w + w
+            )(x @ a + r),
+            "bfloat16",
+            ([2, 128, 1024], [1024, 768], [768], [2, 128, 768]),
+        ),
+    ],
+    ids=["rms_norm", "softmax", "layer_norm bfloat16"],
+)
+def test_a_dots_row_diamond_is_its_epilogue(f, expected, dtype, shapes):
+    rng = np.random.default_rng(0)
+    arrays = [rng.standard_normal(s, dtype=np.float32) / (8 if i == 1 else 1) for i, s in enumerate(shapes)]
+    metas = [lumen.empty(s, dtype, "meta") for s in shapes]
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+    assert step["label"].startswith("dot_general → "), step["label"]
+    got = floats(lumen.compile(f)(*(tpu(a, dtype) for a in arrays)))
+    rounded = [floats(tpu(a, dtype)) for a in arrays]
+    np.testing.assert_allclose(got, expected(*rounded), rtol=2e-2 if dtype == "bfloat16" else 1e-4, atol=1e-3)
+
+
+def test_a_dot_read_elsewhere_keeps_its_own_kernel():
+    def f(x, a, w):
+        y = F.matmul(x, a, "float32", "float32")
+        return F.rms_norm(y, 1024, w), y * 2.0
+
+    metas = [lumen.empty(s, "float32", "meta") for s in ([256, 256], [256, 1024], [1024])]
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()]
+    assert not any(label.startswith("dot_general → mul → reduce_sum") for label in labels), labels
