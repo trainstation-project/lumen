@@ -5,7 +5,7 @@ use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
+use crate::kernels::dot_general::tpu::{block, caps};
 use crate::kernels::tpu::{Launch, launch};
 
 const VMEM: usize = 88 << 20;
@@ -101,11 +101,13 @@ pub(crate) fn encode(
             .filter(|b| height.is_multiple_of(*b))
             .collect(),
     };
-    let bk = block(k, 128, 512)
-        .ok_or_else(|| failed(&format!("K ({k}) at most 512 or a multiple of 128")))?;
-    let bm = candidates(ROWS)
+    let cap = caps(lhs.dtype, k).2;
+    let bk = block(k, 128, cap)
+        .ok_or_else(|| failed(&format!("K ({k}) at most {cap} or a multiple of 128")))?;
+    let (bm, bk) = candidates(ROWS)
         .into_iter()
-        .find(|&bm| footprint(bm, bk) <= VMEM)
+        .flat_map(|bm| [bk, block(k, 128, 512).unwrap_or(bk)].map(|bk| (bm, bk)))
+        .find(|&(bm, bk)| footprint(bm, bk) <= VMEM)
         .ok_or_else(|| {
             failed(&format!(
                 "{height} rows of {n} have no block of whole tiles in VMEM"

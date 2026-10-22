@@ -82,7 +82,7 @@ pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
 
 const VMEM: usize = 88 << 20;
 
-fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
+pub(crate) fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     match dtype {
         DType::F32 => (2048, 1024, 1024),
         _ if k <= 4096 => (2048, 1024, k),
