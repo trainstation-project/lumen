@@ -39,8 +39,9 @@ pub(crate) fn encode(
     let tile = layout.rows;
     let (ur, uc) = (update.shape[rank - 2], update.shape[rank - 1]);
     let (urp, ucp) = (ur.div_ceil(tile) * tile, uc.div_ceil(LANES) * LANES);
+    let elems: usize = std::env::var("DUS_BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(BLOCK);
     let bn = block(ucp, LANES, 1024).unwrap_or(LANES);
-    let bm = block(urp, tile, (BLOCK / bn / tile * tile).max(tile)).unwrap_or(tile);
+    let bm = block(urp, tile, (elems / bn / tile * tile).max(tile)).unwrap_or(tile);
     let copy = inputs[0] != output.cast_const();
     let (rp, cp) = (
         operand.shape[rank - 2].div_ceil(tile) * tile,

@@ -8,6 +8,10 @@ LANES = 128
 
 SCALARS = 128
 
+import os
+
+SLOTS = int(os.environ.get("DUS_SLOTS", 3))
+
 
 def _up(n, m):
     return -(-n // m) * m
@@ -39,8 +43,8 @@ def program(spec):
         window = pl.scratch(pl.VMEM((wr, wc), dtype))
         block = pl.scratch(pl.VMEM((wr, wc), dtype))
         staged = block.at[pl.ds(0, bm), pl.ds(0, bn)]
-        slots = pl.scratch(pl.VMEM((2, bm, bn), dtype))
-        flights = pl.scratch(pl.SemaphoreType.DMA((2, 2)))
+        slots = pl.scratch(pl.VMEM((SLOTS, bm, bn), dtype))
+        flights = pl.scratch(pl.SemaphoreType.DMA((2, SLOTS)))
 
         def piece(k, i, j):
             a, b = pl.multiple_of(i * bm, tile), pl.multiple_of(j * bn, LANES)
@@ -129,26 +133,30 @@ def program(spec):
                 def load(t):
                     a, b = pl.multiple_of(t // across * bm, tile), pl.multiple_of(t % across * bn, LANES)
                     return pl.make_async_copy(
-                        u.at[k, pl.ds(a, bm), pl.ds(b, bn)], slots.at[t % 2], flights.at[0, t % 2]
+                        u.at[k, pl.ds(a, bm), pl.ds(b, bn)], slots.at[t % SLOTS], flights.at[0, t % SLOTS]
                     )
 
                 def store(t):
                     a, b = t // across * bm, t % across * bn
                     rows_at, cols_at = pl.multiple_of(r0 + a, tile), pl.multiple_of(c0 + b, LANES)
                     to = out.at[at, pl.ds(rows_at, bm), pl.ds(cols_at, bn)]
-                    return pl.make_async_copy(slots.at[t % 2], to, flights.at[1, t % 2])
+                    return pl.make_async_copy(slots.at[t % SLOTS], to, flights.at[1, t % SLOTS])
 
-                load(_int(0)).start()
+                for t in range(min(SLOTS, count)):
+                    load(_int(t)).start()
 
                 @pl.loop(0, count)
                 def _(t):
                     load(t).wait()
                     store(t).start()
 
-                    @pl.when(t + 1 < count)
+                    @pl.when(t + SLOTS < count)
                     def _():
-                        load(t + 1).start()
+                        store(t).wait()
+                        load(t + SLOTS).start()
 
+                @pl.loop(max(0, count - SLOTS), count)
+                def _(t):
                     store(t).wait()
 
             pl.when(~aligned)(blocks)
