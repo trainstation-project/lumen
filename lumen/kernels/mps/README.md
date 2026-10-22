@@ -25,7 +25,7 @@ the module is `pub(crate)`. Callers:
 | --- | --- |
 | `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`, `mark_event` (an `Event`'s timed marker kernel). |
 | `kernels.metal` | Shared Metal definitions (no kernels): dtype predicates and ranges, saturating conversions, the binary/unary functors, Philox, `FOR_EACH_ELEMENT`, strided `offset_of`/`offset_of32`, dtype X-macros, simdgroup-fragment helpers. |
-| `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_launch_kernel`. |
+| `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_pipeline` (a retained pipeline by name), `lumen_mps_launch_pipeline` and `lumen_mps_launch_kernel` (by name). |
 
 ## Routing (`encode`)
 
@@ -63,8 +63,14 @@ workspace its partials need (0 for everything else).
   (`tid.y * 16 + tid.x`).
 * A grid with a zero dimension launches nothing (and clears the profiler's
   pending launch).
+* A kernel's pipeline is looked up by name once (`lumen_mps_pipeline`,
+  retained) and kept in `launch`'s own map; later launches pass the
+  pipeline itself (`lumen_mps_launch_pipeline`), with no C string, lock or
+  allocation on the way. At most 31 buffers and arguments together, Metal's
+  limit.
 * `keep` holds the tensors (and workspace) alive until the GPU finishes;
-  `stream::mps::submit` turns it into the completion context.
+  `stream::mps::submit` turns it into the completion context. A plan keeps
+  each tensor's storage only (`Tensor::holding`: no shape or strides copied).
 * A non-zero shim status (unknown kernel name, a pointer that is not an MPS
   buffer, a grid dimension over `u32::MAX`) becomes `Err`.
 

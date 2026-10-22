@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
+use std::sync::{Mutex, PoisonError};
 
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
@@ -21,6 +23,39 @@ unsafe extern "C" {
         done: Completion,
         context: *mut c_void,
     ) -> i32;
+    fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
+    fn lumen_mps_launch_pipeline(
+        pipeline: *mut c_void,
+        buffers: *const *const u8,
+        nbuffers: usize,
+        args: *const *const u8,
+        arg_lens: *const usize,
+        nargs: usize,
+        grid: *const usize,
+        groups: i32,
+        timed: i32,
+        done: Completion,
+        context: *mut c_void,
+    ) -> i32;
+}
+
+const MAX_ARGS: usize = 31;
+
+fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
+    static PIPELINES: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+    let mut pipelines = PIPELINES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&pipeline) = pipelines.get(kernel) {
+        return Ok(pipeline as *mut c_void);
+    }
+    let name = CString::new(kernel).expect("kernel names have no NUL");
+    let pipeline = unsafe { lumen_mps_pipeline(name.as_ptr()) };
+    if pipeline.is_null() {
+        return Err(format!(
+            "the MPS kernel {kernel} could not run (no such kernel)"
+        ));
+    }
+    pipelines.insert(kernel.to_owned(), pipeline as usize);
+    Ok(pipeline)
 }
 
 pub(crate) fn encode(
@@ -221,13 +256,22 @@ pub(crate) fn launch(
         crate::profiler::clear_next_launch();
         return Ok(());
     }
-    let c_name = CString::new(kernel).expect("kernel names have no NUL");
-    let pointers: Vec<*const u8> = args.iter().map(|a| a.as_ptr()).collect();
-    let lens: Vec<usize> = args.iter().map(Vec::len).collect();
+    let pipeline = pipeline(kernel)?;
+    if args.len() > MAX_ARGS {
+        return Err(format!(
+            "the MPS kernel {kernel} takes at most {MAX_ARGS} arguments"
+        ));
+    }
+    let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
+    let mut lens = [0usize; MAX_ARGS];
+    for (k, a) in args.iter().enumerate() {
+        pointers[k] = a.as_ptr();
+        lens[k] = a.len();
+    }
     let (context, done, timed) = mps::submit(keep, name, kernel);
     let status = unsafe {
-        lumen_mps_launch_kernel(
-            c_name.as_ptr(),
+        lumen_mps_launch_pipeline(
+            pipeline,
             buffers.as_ptr(),
             buffers.len(),
             pointers.as_ptr(),

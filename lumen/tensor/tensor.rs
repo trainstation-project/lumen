@@ -202,6 +202,16 @@ impl Tensor {
         self.dtype
     }
 
+    pub(crate) fn holding(&self) -> Tensor {
+        Tensor {
+            storage: self.storage.clone(),
+            dtype: self.dtype,
+            shape: Vec::new(),
+            strides: Vec::new(),
+            offset: 0,
+        }
+    }
+
     pub fn storage(&self) -> &Storage {
         &self.storage
     }
