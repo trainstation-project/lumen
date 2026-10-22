@@ -23,9 +23,9 @@ the module is `pub(crate)`. Callers:
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`, `mark_event` (an `Event`'s timed marker kernel). |
+| `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`, `mark_event` (an `Event`'s timed marker kernel), `capture` (records the launches an encode makes instead of submitting them) and `Captured::time`. |
 | `kernels.metal` | Shared Metal definitions (no kernels): dtype predicates and ranges, saturating conversions, the binary/unary functors, Philox, `FOR_EACH_ELEMENT`, strided `offset_of`/`offset_of32`, dtype X-macros, simdgroup-fragment helpers. |
-| `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_pipeline` (a retained pipeline by name), `lumen_mps_launch_pipeline` and `lumen_mps_launch_kernel` (by name). |
+| `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_pipeline` (a retained pipeline by name), `lumen_mps_launch_pipeline` and `lumen_mps_launch_kernel` (by name), `lumen_mps_time_pipeline` (a launch repeated in a command buffer of its own, its GPU time). |
 
 ## Routing (`encode`)
 
@@ -58,6 +58,8 @@ workspace its partials need (0 for everything else).
   case: the step's inputs, then its output.
 * `Grid::Threads([x, y, z])` dispatches that many threads, threadgroups of
   up to 256 threads (capped by the pipeline's max) filling x first.
+  `Grid::Elementwise { threads, group }` dispatches `threads` threads in
+  threadgroups of `group`, a generated loop's tuned launch.
   `Grid::Groups([x, y, z])` dispatches that many threadgroups of
   **16 × 16** threads; kernels written for it assume 256 threads
   (`tid.y * 16 + tid.x`).

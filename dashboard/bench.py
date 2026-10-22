@@ -61,7 +61,6 @@ ROTATION_BYTES = 512 << 20
 
 def per_call(run, sets, sync, batches=3):
     reps = max(len(sets), 20)
-    outs = [None] * len(sets)
     for args in sets:
         run(*args)
     best = None
@@ -69,8 +68,7 @@ def per_call(run, sets, sync, batches=3):
         sync()
         start = time.perf_counter()
         for i in range(reps):
-            k = i % len(sets)
-            outs[k] = run(*sets[k])
+            run(*sets[i % len(sets)])
         sync()
         us = (time.perf_counter() - start) * 1e6 / reps
         best = us if best is None else min(best, us)

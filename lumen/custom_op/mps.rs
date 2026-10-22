@@ -4,6 +4,7 @@ use crate::{Device, Tensor};
 pub enum Grid {
     Threads([usize; 3]),
     Groups([usize; 3]),
+    Elementwise { threads: usize, group: usize },
 }
 
 pub struct MetalKernel {

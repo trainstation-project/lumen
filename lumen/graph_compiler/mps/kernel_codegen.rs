@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::alone::wrapped;
+use super::autotune::Tunable;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::graph::{Primitive, Var};
@@ -67,7 +68,13 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
             let (kernel, source) = match &m.kernels[k] {
                 Kernel::Loop(by_value) => {
                     let views = views.remove(&output).unwrap_or_default();
-                    codegen::kernel(body, by_value, config, &views)
+                    let (kernel, source) = codegen::kernel(body, by_value, config, &views, None);
+                    let tunable = Tunable {
+                        by_value: by_value.clone(),
+                        views,
+                    };
+                    m.tunable.insert(kernel.clone(), tunable);
+                    (kernel, source)
                 }
                 Kernel::Attention => {
                     let a = attention::of_body(body).expect("an attention");
@@ -80,7 +87,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     codegen::attention_backward_kernel(body, &b)
                 }
             };
-            super::record_launch(&kernel, body);
+            super::record_launch(&kernel, body, codegen::tuning_of(body));
             m.sources.insert(kernel.clone(), source);
             *name = kernel;
         }

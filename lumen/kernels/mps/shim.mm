@@ -132,6 +132,7 @@ static int launch(id<MTLComputePipelineState> pso,
                   size_t nargs,
                   const size_t *grid,
                   int groups,
+                  size_t group,
                   int timed,
                   lumen_mps_completion done,
                   void *context) {
@@ -169,7 +170,7 @@ static int launch(id<MTLComputePipelineState> pso,
         if (groups) {
             [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         } else {
-            NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, 256);
+            NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, group == 0 ? 256 : group);
             NSUInteger x = std::min<NSUInteger>(grid[0], total);
             NSUInteger y = std::min<NSUInteger>(grid[1], total / x);
             NSUInteger z = std::min<NSUInteger>(grid[2], total / (x * y));
@@ -193,6 +194,7 @@ int lumen_mps_launch_pipeline(void *pso,
                               size_t nargs,
                               const size_t *grid,
                               int groups,
+                              size_t group,
                               int timed,
                               lumen_mps_completion done,
                               void *context) {
@@ -204,9 +206,67 @@ int lumen_mps_launch_pipeline(void *pso,
                   nargs,
                   grid,
                   groups,
+                  group,
                   timed,
                   done,
                   context);
+}
+
+double lumen_mps_time_pipeline(void *pipeline,
+                               const void *const *buffers,
+                               size_t nbuffers,
+                               const void *const *args,
+                               const size_t *arg_lens,
+                               size_t nargs,
+                               const size_t *grid,
+                               int groups,
+                               size_t group,
+                               size_t reps) {
+    id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)pipeline;
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil || nbuffers + nargs > kMaxBuffers) {
+        return -1;
+    }
+    @autoreleasepool {
+        id<MTLBuffer> bound[kMaxBuffers];
+        size_t offsets[kMaxBuffers] = {0};
+        for (size_t i = 0; i < nbuffers; ++i) {
+            if (buffers[i] != nullptr) {
+                bound[i] = lumen_mps_buffer(buffers[i], &offsets[i]);
+                if (bound[i] == nil) {
+                    return -1;
+                }
+            }
+        }
+        id<MTLCommandBuffer> commands = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+        [encoder setComputePipelineState:pso];
+        for (size_t i = 0; i < nbuffers; ++i) {
+            [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
+        }
+        for (size_t j = 0; j < nargs; ++j) {
+            [encoder setBytes:args[j] length:arg_lens[j] atIndex:nbuffers + j];
+        }
+        MTLSize size = MTLSizeMake(grid[0], grid[1], grid[2]);
+        NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, group == 0 ? 256 : group);
+        NSUInteger x = std::min<NSUInteger>(grid[0], total);
+        NSUInteger y = std::min<NSUInteger>(grid[1], total / x);
+        NSUInteger z = std::min<NSUInteger>(grid[2], total / (x * y));
+        for (size_t r = 0; r < reps; ++r) {
+            if (groups) {
+                [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            } else {
+                [encoder dispatchThreads:size threadsPerThreadgroup:MTLSizeMake(x, y, z)];
+            }
+        }
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        if (commands.status != MTLCommandBufferStatusCompleted) {
+            return -1;
+        }
+        return (commands.GPUEndTime - commands.GPUStartTime) / reps;
+    }
 }
 
 int lumen_mps_launch_kernel(const char *name,
@@ -220,6 +280,6 @@ int lumen_mps_launch_kernel(const char *name,
                             int timed,
                             lumen_mps_completion done,
                             void *context) {
-    return launch(pipeline(name), buffers, nbuffers, args, arg_lens, nargs, grid, groups, timed, done, context);
+    return launch(pipeline(name), buffers, nbuffers, args, arg_lens, nargs, grid, groups, 0, timed, done, context);
 }
 }

@@ -14,7 +14,7 @@ calls the Python function back with real tensors.
 | --- | --- |
 | `__init__.py` | `custom_op(name, fn=None, *, mutates_args, overlappable=None)` decorator and the `CustomOp` class; re-exports `MetalKernel`. |
 | `mod.rs` | Declares `mps`, `python` (feature `python`) and `tests`. |
-| `mps.rs` | `MetalKernel` (compile Metal source, `launch` on MPS tensors) and `Grid` (`Threads` or `Groups`, 3-D). |
+| `mps.rs` | `MetalKernel` (compile Metal source, `launch` on MPS tensors) and `Grid` (`Threads` or `Groups`, 3-D; `Elementwise`, a generated loop's threads and threadgroup size). |
 | `python.rs` | The `MetalKernel` pyclass (in `lumen.custom_op._C`, re-exported by `__init__.py`) wrapping `mps::MetalKernel`; `register`. |
 | `_C.pyi` | Type stub for `MetalKernel`. |
 | `tests.rs` | Launches an `axpy` kernel into the MPS stream (skips without Metal). |

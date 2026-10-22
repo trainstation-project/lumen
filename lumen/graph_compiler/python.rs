@@ -66,6 +66,7 @@ flags! {
     memory_limit, set_memory_limit: usize;
     fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
     safe_kernels, set_safe_kernels: bool;
+    autotune, set_autotune: bool;
     dump_to, set_dump_to: Option<String>;
 }
 
