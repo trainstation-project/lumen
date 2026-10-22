@@ -54,10 +54,11 @@ def program(spec):
         out = pallas.view(result, refs[output], (math.prod(lead), rp, cp), dtype)
         slots = pl.scratch(pl.VMEM((SLOTS, bm, bn), dtype))
         flights = pl.scratch(pl.SemaphoreType.DMA((2, SLOTS)))
-        sources = pl.scratch(pl.VMEM((depth, gm, ucp), dtype))
-        windows = pl.scratch(pl.VMEM((depth, gm, width), dtype))
+        buffers = depth if small else 2
+        sources = pl.scratch(pl.VMEM((buffers, gm, ucp), dtype))
+        windows = pl.scratch(pl.VMEM((buffers, gm, width), dtype))
         edge = pl.scratch(pl.VMEM((tile, width), dtype))
-        loads, reads, stores = (pl.scratch(pl.SemaphoreType.DMA((depth,))) for _ in range(3))
+        loads, reads, stores = (pl.scratch(pl.SemaphoreType.DMA((buffers,))) for _ in range(3))
 
         def updated(m):
             return pallas.view(memory, refs[1 + m], (math.prod(ulead), urp, ucp), dtype)
@@ -288,7 +289,14 @@ def program(spec):
                     updated(m).at[0], kept_box.at[pl.ds(rows_at, urp), pl.ds(cols_at, ucp)], loads.at[0]
                 )
 
-            if direct:
+            if direct and lag == 0:
+
+                @pl.loop(0, count)
+                def _(m):
+                    placed_directly(m).start()
+                    placed_directly(m).wait()
+
+            elif direct:
 
                 @pl.loop(0, count)
                 def _(m):
@@ -297,6 +305,8 @@ def program(spec):
                 @pl.loop(0, count)
                 def _(m):
                     placed_directly(m).wait()
+
+            if direct:
 
                 pl.async_copy(kept_box, box, sem).wait()
                 return

@@ -131,8 +131,9 @@ pub(crate) fn encode(
             (at[rank - 2] as usize).is_multiple_of(tile)
                 && (at[rank - 1] as usize).is_multiple_of(LANES)
         });
-    let direct = fixed.is_some() && aligned && !ordered;
-    let resident = match fixed.is_some() && (ordered || direct) && small && one_slab {
+    let lone_update = update.shape[..rank - 2].iter().product::<usize>() == 1;
+    let direct = fixed.is_some() && aligned && lone_update;
+    let resident = match fixed.is_some() && (direct || ordered && small) && one_slab {
         true => {
             let (top, bottom) = windows.iter().fold((usize::MAX, 0), |(t, b), w| {
                 (t.min(w[rank - 2].0), b.max(w[rank - 2].1.min(rp)))
@@ -144,7 +145,8 @@ pub(crate) fn encode(
                 .map(|d| windows[0][d].0 * operand.shape[d + 1..rank - 2].iter().product::<usize>())
                 .sum();
             let bytes = (bottom - top) * (right - left) * layout.stored.size_of();
-            let covered = direct && windows.len() * urp * ucp == (bottom - top) * (right - left);
+            let covered =
+                direct && !ordered && windows.len() * urp * ucp == (bottom - top) * (right - left);
             (bytes <= RESIDENT).then_some((top, bottom, left, right, slab, covered))
         }
         false => None,
