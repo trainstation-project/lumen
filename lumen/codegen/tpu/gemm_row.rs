@@ -144,7 +144,7 @@ pub(crate) fn encode(
         })
         .collect();
     let spec = format!(
-        "\"rows\": {height}, \"n\": {n}, \"k\": {k}, \"transposed\": {transposed}, \"operands\": \"{}\", \"value\": \"{}\", \
+        "\"height\": {height}, \"n\": {n}, \"k\": {k}, \"transposed\": {transposed}, \"operands\": \"{}\", \"value\": \"{}\", \
          \"blocks\": [{bm}, {bk}], \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
         lhs.dtype.full_name(),
         value.full_name(),

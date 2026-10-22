@@ -4,7 +4,7 @@ from lumen.kernels.tpu import pallas
 
 
 def program(spec):
-    rows, n, k, t = spec["rows"], spec["n"], spec["k"], spec["transposed"]
+    rows, n, k, t = spec["height"], spec["n"], spec["k"], spec["transposed"]
     bm, bk = spec["blocks"]
     dtype, value = spec["operands"], spec["value"]
     inputs, outputs = spec["inputs"], spec["outputs"]
