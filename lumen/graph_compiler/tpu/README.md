@@ -13,6 +13,7 @@ fusion a folder per phase.
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention's backward as its `dq` and `dkv` fusions; their outputs laid out for the kernels (`merged_outputs`, `reshaped_outputs`), Δ computed inside them (`delta_inside`), and a check that every attention runs (`attentions`). |
 | `diamonds.rs` | Pass `normalization_diamonds`: each normalization diamond (`graph_compiler/common/diamonds.rs`) the row kernel can run one `row` fusion. |
 | `fusion/dot_rows.rs` | Pass `dot_rows` (`DotRows`): a plain dot (no batch, its rhs a matrix) whose only reader is a `row` fusion, reading it whole, joins it as one `dot_row` fusion: the dot, then the row (`codegen/tpu/gemm_row.rs`). |
+| `updates.rs` | Pass `dynamic_update_slices` (`Updates`): each chain of `dynamic_update_slice`s of one update shape at constant starts, each the only reader of the last, one `dynamic_update_slices` fusion (`kernels/dynamic_slice/tpu`); the plan writes it into its operand as it does an update. |
 | `place_concats.rs` | Pass `place_concats`: concatenates along the last dimension whose operands' kernels write them in place (`placeable`). |
 | `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`); re-exports `FuseDots`. |
 | `fusion/dot_epilogues.rs` | Pass `fuse_dots` (`FuseDots`): a dot and its column or row slices and elementwise consumers one `dot_general` fusion, the dot kernel's epilogue (members, together, in-place outputs). |
@@ -29,10 +30,11 @@ fusion a folder per phase.
 | 3 | `fold_dot_reshapes`, `simplify`, `dot_strength` | always | `../common/` |
 | 4 | `merge_dots` | `merge_dots` | `../common/merge_dots.rs` |
 | 5 | `normalization_diamonds`, `dot_rows` | `normalization_diamonds` (`dot_rows` with `contraction_epilogues`) | `diamonds.rs`, `fusion/dot_rows.rs` |
-| 6 | `fuse_dots` | always (epilogues with `contraction_epilogues`) | `fusion/dot_epilogues.rs` |
-| 7 | `place_concats` | always | `place_concats.rs` |
-| 8 | `loop_fusion` | always | `fusion/` |
-| 9 | `horizontal_fusion` | `horizontal_fusion` | `fusion/horizontal.rs` |
+| 6 | `dynamic_update_slices` | always | `updates.rs` |
+| 7 | `fuse_dots` | always (epilogues with `contraction_epilogues`) | `fusion/dot_epilogues.rs` |
+| 8 | `place_concats` | always | `place_concats.rs` |
+| 9 | `loop_fusion` | always | `fusion/` |
+| 10 | `horizontal_fusion` | `horizontal_fusion` | `fusion/horizontal.rs` |
 
 The frontend (`cse`, `simplify`) runs before, for every device; the plan's
 stages (scheduling, rematerialization, buffers) after.

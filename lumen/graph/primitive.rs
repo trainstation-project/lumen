@@ -4,8 +4,8 @@ use super::{Graph, TensorType};
 use crate::{DType, Scalar};
 
 pub const FUSION_SEPARATOR: &str = " → ";
-
 pub const NEURAL_ENGINE: &str = "coreml_";
+pub const UPDATES: &str = "dynamic_update_slices";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {

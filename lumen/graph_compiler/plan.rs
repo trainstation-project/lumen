@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::fmt;
 
 pub use crate::graph::View;
-use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, Var};
+use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, UPDATES, Var};
 use crate::kernels::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
@@ -244,9 +244,7 @@ impl Plan {
                 root[node.output] = root[node.inputs[0]];
             }
             let written: Vec<(Var, usize)> = match &node.primitive {
-                Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => {
-                    vec![(node.output, 0)]
-                }
+                p if updates_operand(p) => vec![(node.output, 0)],
                 Primitive::CustomCall { mutated, .. } => {
                     let mut written = vec![(node.output, mutated[0])];
                     for other in graph.nodes() {
@@ -298,11 +296,10 @@ impl Plan {
             let step = !neural_engine
                 && !in_place(node)
                 && !placed[node.output]
+                && !updates_operand(&node.primitive)
                 && !matches!(
                     node.primitive,
-                    Primitive::DynamicUpdateSlice
-                        | Primitive::ScatterAdd { .. }
-                        | Primitive::CustomCall { .. }
+                    Primitive::CustomCall { .. }
                         | Primitive::Reshape { .. }
                         | Primitive::Wait
                         | Primitive::FusionOutput { .. }
@@ -1153,6 +1150,14 @@ impl fmt::Display for Plan {
     }
 }
 
+fn updates_operand(p: &Primitive) -> bool {
+    match p {
+        Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => true,
+        Primitive::Fusion { name, .. } => name == UPDATES,
+        _ => false,
+    }
+}
+
 fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) -> bool {
     use Primitive::*;
     let elementwise = |p: &Primitive| {
@@ -1175,6 +1180,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
         )
     };
     match &node.primitive {
+        p if updates_operand(p) => node.inputs[1..].iter().all(|&v| root[v] != r),
         Fusion { body, .. } => node
             .inputs
             .iter()
@@ -1194,7 +1200,6 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
                 }
                 true
             }),
-        DynamicUpdateSlice | ScatterAdd { .. } => node.inputs[1..].iter().all(|&v| root[v] != r),
         CustomCall { mutated, .. } => {
             let k = graph.nodes().iter().find_map(|n| match n.primitive {
                 FusionOutput { index, .. } if n.output == out && n.inputs[0] == node.output => {
