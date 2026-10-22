@@ -43,6 +43,7 @@ pub enum Op {
     And,
     Or,
     MultipleOf(usize),
+    Roll(usize),
     Slice {
         starts: Vec<Option<usize>>,
         sizes: Vec<usize>,
@@ -263,6 +264,16 @@ impl Kernel {
                 if *b != a || !(a.dtype.is_int() || a.dtype == DType::Bool) {
                     return Err(format!(
                         "bit ops take two integer values of one type, got {a} and {b}"
+                    ));
+                }
+                a
+            }
+            Op::Roll(axis) => {
+                let shift =
+                    self.value(*inputs.get(1).ok_or("a roll takes a value and a shift")?)?;
+                if *axis >= a.shape.len() || *shift != TensorType::new(DType::I32, &[]) {
+                    return Err(format!(
+                        "roll takes a value with axis {axis} and an int32 shift, got {a} and {shift}"
                     ));
                 }
                 a
