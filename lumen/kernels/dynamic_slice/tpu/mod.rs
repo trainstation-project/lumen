@@ -10,7 +10,9 @@ const LANES: usize = 128;
 const STAGED: usize = 1 << 20;
 const STREAMED: usize = 1 << 18;
 const COPY_BYTES: usize = 2 << 20;
-const DEPTH: usize = 4;
+const DEPTH: usize = 8;
+
+const RESIDENT: usize = 8 << 20;
 
 fn env(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -119,6 +121,26 @@ pub(crate) fn encode(
         .enumerate()
         .any(|(i, p)| windows[i + 1..].iter().any(|q| overlap(p, q)));
     let depth = env("DUS_DEPTH", DEPTH).max(2);
+    let small = update.shape[..rank - 2].iter().product::<usize>() == 1 && gm == urp;
+    let one_slab = windows
+        .iter()
+        .all(|w| w[..rank - 2] == windows[0][..rank - 2]);
+    let resident = match ordered && small && one_slab {
+        true => {
+            let (top, bottom) = windows.iter().fold((usize::MAX, 0), |(t, b), w| {
+                (t.min(w[rank - 2].0), b.max(w[rank - 2].1.min(rp)))
+            });
+            let (left, right) = windows.iter().fold((usize::MAX, 0), |(l, r), w| {
+                (l.min(w[rank - 1].0), r.max(w[rank - 1].1))
+            });
+            let slab: usize = (0..rank - 2)
+                .map(|d| windows[0][d].0 * operand.shape[d + 1..rank - 2].iter().product::<usize>())
+                .sum();
+            let bytes = (bottom - top) * (right - left) * layout.stored.size_of();
+            (bytes <= RESIDENT).then(|| format!("[{top}, {bottom}, {left}, {right}, {slab}]"))
+        }
+        false => None,
+    };
     let copy = inputs[0] != output.cast_const();
     let copy_rows = block(
         rp,
@@ -127,11 +149,12 @@ pub(crate) fn encode(
     )
     .unwrap_or(tile);
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}, \"resident\": {}",
         operand.shape,
         update.shape,
         operand.dtype.full_name(),
-        fixed.is_some()
+        fixed.is_some(),
+        resident.as_deref().unwrap_or("null")
     );
     let n = step.inputs.len();
     let rows_of: Vec<*const u8> = inputs[..n]

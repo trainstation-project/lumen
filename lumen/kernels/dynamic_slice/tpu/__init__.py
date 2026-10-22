@@ -35,6 +35,7 @@ def program(spec):
     bm, bn, gm, width = spec["bm"], spec["bn"], spec["gm"], spec["width"]
     copied, cbm, count, fixed = spec["copy"], spec["copy_rows"], spec["count"], spec["static"]
     depth, lag = spec["depth"], 0 if spec["ordered"] else 1
+    resident = spec["resident"]
     rank = len(shape)
     (rows, cols), (ur, uc) = shape[-2:], update[-2:]
     rp, cp, urp, ucp = _up(rows, tile), _up(cols, LANES), _up(ur, tile), _up(uc, LANES)
@@ -268,6 +269,54 @@ def program(spec):
             @pl.when(j + depth < count)
             def _():
                 source(j + depth, 0, _int(0), j % depth).start()
+
+        if resident:
+            top, bottom, left, right, at = resident
+            height, across = bottom - top, right - left
+            tall, wide_as = min(urp + tile, height), min(width, across)
+            kept_box = pl.scratch(pl.VMEM((height, across), dtype))
+            box = out.at[at, pl.ds(top, height), pl.ds(left, across)]
+            pl.async_copy(box, kept_box, sem).wait()
+
+            def kept(m):
+                r0, c0 = start(m, rank - 2) - top, start(m, rank - 1) - left
+                ra = pl.multiple_of(prims.min(r0 // tile * tile, _int(height - tall)), tile)
+                cb = pl.multiple_of(prims.min(c0 // LANES * LANES, _int(across - wide_as)), LANES)
+                dr, dc = r0 - ra, c0 - cb
+                slot = m % depth
+                source(m, 0, _int(0), slot).wait()
+
+                def fast():
+                    rows_at, cols_at = pl.multiple_of(r0, tile), pl.multiple_of(c0, LANES)
+                    kept_box[pl.ds(rows_at, gm), pl.ds(cols_at, ucp)] = sources[slot, :, :]
+
+                def slow():
+                    v = sources[slot, :, :].to(wide)
+                    if tall > gm:
+                        v = prims.concatenate([v, prims.full((tall - gm, ucp), 0, wide)], 0)
+                    if wide_as > ucp:
+                        v = prims.concatenate([v, prims.full((tall, wide_as - ucp), 0, wide)], 1)
+                    v = pl.roll(pl.roll(v, dr, 0), dc, 1)
+                    g = pl.broadcasted_iota("int32", (tall, wide_as), 0)
+                    c = pl.broadcasted_iota("int32", (tall, wide_as), 1)
+                    inside = (g >= dr) & (g < dr + ur) & (c >= dc) & (c < dc + uc)
+                    window = kept_box.at[pl.ds(ra, tall), pl.ds(cb, wide_as)]
+                    window[...] = prims.select(inside, v, window[...].to(wide)).to(dtype)
+
+                if whole:
+                    aligned = (r0 % tile == 0) & (c0 % LANES == 0)
+                    pl.when(aligned)(fast)
+                    pl.when(~aligned)(slow)
+                else:
+                    slow()
+                refill(m)
+
+            @pl.loop(0, count)
+            def _(m):
+                kept(m)
+
+            pl.async_copy(kept_box, box, sem).wait()
+            return
 
         @pl.loop(0, count)
         def _(m):
