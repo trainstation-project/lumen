@@ -10,7 +10,7 @@ use crate::kernels::tpu::{Launch, launch};
 
 const VMEM: usize = 88 << 20;
 
-const ROWS: usize = 1024;
+const ROWS: usize = 256;
 
 fn row_part(body: &Graph) -> Graph {
     let nodes = body.nodes();
