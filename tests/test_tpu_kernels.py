@@ -651,7 +651,7 @@ def test_a_dots_row_diamond_is_its_epilogue(f, expected, dtype, shapes):
     rng = np.random.default_rng(0)
     arrays = [rng.standard_normal(s, dtype=np.float32) / (8 if i == 1 else 1) for i, s in enumerate(shapes)]
     metas = [lumen.empty(s, dtype, "meta") for s in shapes]
-    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+    step = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()[-1]
     assert step["label"].startswith("dot_general → "), step["label"]
     got = floats(lumen.compile(f)(*(tpu(a, dtype) for a in arrays)))
     rounded = [floats(tpu(a, dtype)) for a in arrays]
