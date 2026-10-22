@@ -14,6 +14,8 @@ const STREAMED: usize = 1 << 18;
 
 const COPY_BYTES: usize = 2 << 20;
 
+const DEPTH: usize = 4;
+
 fn env(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -93,6 +95,34 @@ pub(crate) fn encode(
         true => urp,
         false => block(urp, tile, (streamed / width / tile * tile).max(tile)).unwrap_or(tile),
     };
+    let whole = (ur.is_multiple_of(tile) || ur == rows) && (uc.is_multiple_of(LANES) || uc == cols);
+    let windows: Vec<Vec<(usize, usize)>> = fixed
+        .iter()
+        .flat_map(|starts| starts.chunks(rank))
+        .map(|at| {
+            let at: Vec<usize> = at.iter().map(|&s| s as usize).collect();
+            let (r0, c0) = (at[rank - 2], at[rank - 1]);
+            let mut ranges: Vec<(usize, usize)> = (0..rank - 2)
+                .map(|d| (at[d], at[d] + update.shape[d]))
+                .collect();
+            match whole && r0.is_multiple_of(tile) && c0.is_multiple_of(LANES) {
+                true => ranges.extend([(r0, r0 + urp), (c0, c0 + ucp)]),
+                false => {
+                    let (a, b) = (r0 / tile * tile, (c0 / LANES * LANES).min(cp - width));
+                    ranges.extend([(a, a + urp + tile), (b, b + width)]);
+                }
+            }
+            ranges
+        })
+        .collect();
+    let overlap = |p: &[(usize, usize)], q: &[(usize, usize)]| {
+        p.iter().zip(q).all(|(x, y)| x.0 < y.1 && y.0 < x.1)
+    };
+    let ordered = windows
+        .iter()
+        .enumerate()
+        .any(|(i, p)| windows[i + 1..].iter().any(|q| overlap(p, q)));
+    let depth = env("DUS_DEPTH", DEPTH).max(2);
     let copy = inputs[0] != output.cast_const();
     let copy_rows = block(
         rp,
@@ -101,7 +131,7 @@ pub(crate) fn encode(
     )
     .unwrap_or(tile);
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}",
         operand.shape,
         update.shape,
         operand.dtype.full_name(),

@@ -34,6 +34,7 @@ def program(spec):
     shape, update, dtype, tile = spec["shape"], spec["update"], spec["dtype"], spec["tile"]
     bm, bn, gm, width = spec["bm"], spec["bn"], spec["gm"], spec["width"]
     copied, cbm, count, fixed = spec["copy"], spec["copy_rows"], spec["count"], spec["static"]
+    depth, lag = spec["depth"], 0 if spec["ordered"] else 1
     rank = len(shape)
     (rows, cols), (ur, uc) = shape[-2:], update[-2:]
     rp, cp, urp, ucp = _up(rows, tile), _up(cols, LANES), _up(ur, tile), _up(uc, LANES)
@@ -52,10 +53,10 @@ def program(spec):
         out = pallas.view(result, refs[output], (math.prod(lead), rp, cp), dtype)
         slots = pl.scratch(pl.VMEM((SLOTS, bm, bn), dtype))
         flights = pl.scratch(pl.SemaphoreType.DMA((2, SLOTS)))
-        sources = pl.scratch(pl.VMEM((2, gm, ucp), dtype))
-        windows = pl.scratch(pl.VMEM((2, gm, width), dtype))
+        sources = pl.scratch(pl.VMEM((depth, gm, ucp), dtype))
+        windows = pl.scratch(pl.VMEM((depth, gm, width), dtype))
         edge = pl.scratch(pl.VMEM((tile, width), dtype))
-        loads, reads, stores = (pl.scratch(pl.SemaphoreType.DMA((2,))) for _ in range(3))
+        loads, reads, stores = (pl.scratch(pl.SemaphoreType.DMA((depth,))) for _ in range(3))
 
         def updated(m):
             return pallas.view(memory, refs[1 + m], (math.prod(ulead), urp, ucp), dtype)
@@ -65,7 +66,8 @@ def program(spec):
             return pl.make_async_copy(updated(m).at[k, pl.ds(rows_at, gm)], sources.at[slot], loads.at[slot])
 
         if small:
-            source(_int(0), 0, _int(0), _int(0)).start()
+            for j in range(min(depth, count)):
+                source(_int(j), 0, _int(0), _int(j)).start()
 
         if copied:
 
@@ -93,7 +95,7 @@ def program(spec):
             def start(m, d):
                 return prims.min(prims.max(held[m * rank + d, 0], _int(0)), _int(shape[d] - update[d]))
 
-        def one(m):
+        def one(m, waiting=False):
             starts = [start(m, d) for d in range(rank)]
             r0, c0 = starts[-2], starts[-1]
             a = pl.multiple_of(r0 // tile * tile, tile)
@@ -225,31 +227,29 @@ def program(spec):
                 edged(at, (blocks - 1) % 2)
 
             if small:
-                slot = m % 2
+                slot = m % depth
                 at = slab(0)
-
-                def prefetch():
-                    @pl.when(m + 1 < count)
-                    def _():
-                        source(m + 1, 0, _int(0), (m + 1) % 2).start()
-
-                def loaded():
-                    source(m, 0, _int(0), slot).wait()
-
-                def fast():
-                    loaded()
-                    prefetch()
-                    to = out.at[at, pl.ds(pl.multiple_of(r0, tile), gm), pl.ds(pl.multiple_of(c0, LANES), ucp)]
-                    pl.async_copy(sources.at[slot], to, stores.at[slot]).wait()
+                to = out.at[at, pl.ds(pl.multiple_of(r0, tile), gm), pl.ds(pl.multiple_of(c0, LANES), ucp)]
+                fast_store = pl.make_async_copy(sources.at[slot], to, stores.at[slot])
+                top = pl.multiple_of(a, tile)
+                slow_store = pl.make_async_copy(
+                    windows.at[slot], out.at[at, pl.ds(top, gm), pl.ds(b, width)], stores.at[slot]
+                )
+                if waiting:
+                    if whole:
+                        pl.when(aligned)(fast_store.wait)
+                        pl.when(~aligned)(slow_store.wait)
+                    else:
+                        slow_store.wait()
+                    return
 
                 def slow():
-                    written = block(at, _int(0), slot, 1 - slot, loaded, prefetch)
-                    written.start()
-                    written.wait()
+                    block(at, _int(0), slot, (m + 1) % depth, lambda: None, lambda: None).start()
                     edged(at, slot)
 
+                source(m, 0, _int(0), slot).wait()
                 if whole:
-                    pl.when(aligned)(fast)
+                    pl.when(aligned)(fast_store.start)
                     pl.when(~aligned)(slow)
                 else:
                     slow()
@@ -264,8 +264,27 @@ def program(spec):
                 pl.when(aligned)(lambda: staged(k, at))
                 pl.when(~aligned)(lambda: streamed(k, at))
 
+        def refill(j):
+            @pl.when(j + depth < count)
+            def _():
+                source(j + depth, 0, _int(0), j % depth).start()
+
         @pl.loop(0, count)
         def _(m):
             one(m)
+            if not small:
+                return
+            if lag == 0:
+                one(m, waiting=True)
+                refill(m)
+                return
+
+            @pl.when(m >= 1)
+            def _():
+                one(m - 1, waiting=True)
+                refill(m - 1)
+
+        if small and lag:
+            one(_int(count - 1), waiting=True)
 
     return pallas.program(kernel, spec)
