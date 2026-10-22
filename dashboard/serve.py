@@ -31,7 +31,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 data = bench.update(bench.load(), name, lambda row: self.line({"row": row}))
                 bench.save(data)
                 self.line({"data": data})
-            except Exception as e:
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
                 self.line({"error": f"{type(e).__name__}: {e}"})
         finally:
             running.release()

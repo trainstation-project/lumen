@@ -99,8 +99,6 @@
 
   <section id="support" role="tabpanel" class="lx-panel">
     <div class="lx-card">
-      <h2>Primitives by device</h2>
-      <p class="lx-note">Each primitive run as a compiled program on small inputs and checked against the CPU result: on an Apple M4 Pro GPU (MPS) and a TPU v6e, at commit 5def44c. CUDA from the code. An MPS cell with › opens that op's page.</p>
       <div class="lx-legend">
         <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
         <span><i class="lx-chip" data-v="partial">partial</i> some shapes only</span>
@@ -124,8 +122,6 @@
 
   <section id="fusion" role="tabpanel" class="lx-panel" hidden>
     <div class="lx-card">
-      <h2>Fusions by device</h2>
-      <p class="lx-note">What each backend's graph compiler fuses, from its pass pipeline. The CPU runs each primitive on its own, and CUDA plans take the CPU's path.</p>
       <div class="lx-scroll"><table id="fusion-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
@@ -471,7 +467,10 @@ runButton.addEventListener("click", async () => {
   derive();
   draw();
   try {
-    const r = await fetch(`api/benchmark/${encodeURIComponent(op)}`, { method: "POST" });
+    const url = new URL(`api/benchmark/${encodeURIComponent(op)}`, location.href);
+    const r = await fetch(url, { method: "POST" }).catch((e) => {
+      throw new Error(`Could not reach the benchmark server at ${url.origin} (${e.message}): is python dashboard/serve.py running?`);
+    });
     if (!r.headers.get("Content-Type")?.includes("json")) {
       throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
     }
@@ -561,7 +560,6 @@ function drawOp(op) {
     { key: "torch_us", label: "PyTorch", kind: "num", render: (r) => r.error ? "" : maybe(r.torch_us, fmt.us) },
     { key: "lumen_dram_us", label: "lumen, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.lumen_dram_us, fmt.us) },
     { key: "torch_dram_us", label: "PyTorch, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_dram_us, fmt.us) },
-    { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "✅" : "❌") },
   ], rows, opSort);
 }
 const opSort = { key: null, dir: 1, draw: () => drawOp(current.op) };
