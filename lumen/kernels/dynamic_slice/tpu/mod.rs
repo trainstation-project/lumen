@@ -12,7 +12,7 @@ const STREAMED: usize = 1 << 18;
 const COPY_BYTES: usize = 2 << 20;
 const DEPTH: usize = 8;
 
-const RESIDENT: usize = 8 << 20;
+const RESIDENT: usize = 48 << 20;
 
 fn env(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -125,7 +125,14 @@ pub(crate) fn encode(
     let one_slab = windows
         .iter()
         .all(|w| w[..rank - 2] == windows[0][..rank - 2]);
-    let resident = match ordered && small && one_slab {
+    let starts_of: Vec<&[i32]> = fixed.iter().flat_map(|s| s.chunks(rank)).collect();
+    let aligned = whole
+        && starts_of.iter().all(|at| {
+            (at[rank - 2] as usize).is_multiple_of(tile)
+                && (at[rank - 1] as usize).is_multiple_of(LANES)
+        });
+    let direct = aligned && !ordered;
+    let resident = match (ordered || direct) && small && one_slab {
         true => {
             let (top, bottom) = windows.iter().fold((usize::MAX, 0), |(t, b), w| {
                 (t.min(w[rank - 2].0), b.max(w[rank - 2].1.min(rp)))
@@ -137,7 +144,9 @@ pub(crate) fn encode(
                 .map(|d| windows[0][d].0 * operand.shape[d + 1..rank - 2].iter().product::<usize>())
                 .sum();
             let bytes = (bottom - top) * (right - left) * layout.stored.size_of();
-            (bytes <= RESIDENT).then(|| format!("[{top}, {bottom}, {left}, {right}, {slab}]"))
+            let covered = direct && windows.len() * urp * ucp == (bottom - top) * (right - left);
+            (bytes <= RESIDENT)
+                .then(|| format!("[{top}, {bottom}, {left}, {right}, {slab}, {covered}, {direct}]"))
         }
         false => None,
     };

@@ -66,7 +66,7 @@ def program(spec):
             rows_at = pl.multiple_of(i * gm, tile)
             return pl.make_async_copy(updated(m).at[k, pl.ds(rows_at, gm)], sources.at[slot], loads.at[slot])
 
-        if small:
+        if small and not (resident and resident[6]):
             for j in range(min(depth, count)):
                 source(_int(j), 0, _int(0), _int(j)).start()
 
@@ -271,12 +271,33 @@ def program(spec):
                 source(j + depth, 0, _int(0), j % depth).start()
 
         if resident:
-            top, bottom, left, right, at = resident
+            top, bottom, left, right, at, covered, direct = resident
             height, across = bottom - top, right - left
             tall, wide_as = min(urp + tile, height), min(width, across)
             kept_box = pl.scratch(pl.VMEM((height, across), dtype))
             box = out.at[at, pl.ds(top, height), pl.ds(left, across)]
-            pl.async_copy(box, kept_box, sem).wait()
+            if not covered:
+                pl.async_copy(box, kept_box, sem).wait()
+
+            def placed_directly(m):
+                rows_at = pl.multiple_of(start(m, rank - 2) - top, tile)
+                cols_at = pl.multiple_of(start(m, rank - 1) - left, LANES)
+                return pl.make_async_copy(
+                    updated(m).at[0], kept_box.at[pl.ds(rows_at, urp), pl.ds(cols_at, ucp)], loads.at[0]
+                )
+
+            if direct:
+
+                @pl.loop(0, count)
+                def _(m):
+                    placed_directly(m).start()
+
+                @pl.loop(0, count)
+                def _(m):
+                    placed_directly(m).wait()
+
+                pl.async_copy(kept_box, box, sem).wait()
+                return
 
             def kept(m):
                 r0, c0 = start(m, rank - 2) - top, start(m, rank - 1) - left
