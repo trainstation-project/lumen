@@ -86,8 +86,15 @@ def program(spec):
 
             @pl.when(aligned)
             def _():
-                a, b = pl.multiple_of(r0, tile), pl.multiple_of(c0, LANES)
-                pl.async_copy(u.at[k], out.at[at, pl.ds(a, urp), pl.ds(b, ucp)], sem).wait()
+                @pl.loop(0, urp // bm)
+                def _(i):
+                    @pl.loop(0, ucp // bn)
+                    def _(j):
+                        a, b = pl.multiple_of(i * bm, tile), pl.multiple_of(j * bn, LANES)
+                        staged = block.at[pl.ds(0, bm), pl.ds(0, bn)]
+                        pl.async_copy(u.at[k, pl.ds(a, bm), pl.ds(b, bn)], staged, sem).wait()
+                        to = out.at[at, pl.ds(pl.multiple_of(r0 + a, tile), bm), pl.ds(pl.multiple_of(c0 + b, LANES), bn)]
+                        pl.async_copy(staged, to, sem).wait()
 
             pl.when(~aligned)(blocks)
 
