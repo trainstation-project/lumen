@@ -52,6 +52,7 @@ pub(crate) struct SparseCore {
     pub(crate) width: usize,
     pub(crate) count: usize,
     pub(crate) indices: Vec<Indices>,
+    pub(crate) scalars: bool,
 }
 
 struct Hlo {
@@ -262,13 +263,23 @@ fn sparse_core_call(
     let t = h.transpose(&t, &tiles, &rows_t, "0, 2, 1, 3");
     let view = h.reshape(&t, &rows_t, &view_t);
     let offsets_t = format!("tensor<{}xi32>", sparse.count);
+    let scalars_t = format!("tensor<{count}xi32>");
+    let passed = sparse.scalars.then_some(scalars);
     let operand_types: Vec<String> = std::iter::once(view_t.clone())
         .chain(offsets.iter().map(|_| offsets_t.clone()))
+        .chain(passed.map(|_| scalars_t.clone()))
         .collect();
     let layouts: Vec<&str> = std::iter::once("dense<[1, 0]> : tensor<2xindex>")
-        .chain(offsets.iter().map(|_| "dense<0> : tensor<1xindex>"))
+        .chain(
+            operand_types[1..]
+                .iter()
+                .map(|_| "dense<0> : tensor<1xindex>"),
+        )
         .collect();
-    let operands: Vec<String> = std::iter::once(view).chain(offsets).collect();
+    let operands: Vec<String> = std::iter::once(view)
+        .chain(offsets)
+        .chain(passed.map(str::to_owned))
+        .collect();
     let called = h.op(
         &format!(
             "stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \"{{\\22custom_call_config\\22: \

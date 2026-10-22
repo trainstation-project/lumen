@@ -18,58 +18,48 @@ def _picked(values, shape):
 
 
 def _sparse_core(spec):
-    rows, width, count, k, slots = spec["rows_of_view"], spec["width"], spec["count"], spec["k"], spec["slots"]
+    rows, width, count, k, n = spec["rows_of_view"], spec["width"], spec["count"], spec["k"], spec["n"]
+    linear, scalars = spec["linear"], spec["scalars"]
     cores, subcores = spec["mesh"]
     per = count // (cores * subcores)
-    n = per // k
     view, offsets = ("uint32", (rows, width)), ("int32", (count,))
+    last = n // k * k
+    tail = -(-(n - last) // 8) * 8
 
-    def kernel(core, subcore, _, src, dst, region, to, *buffers):
-        at, block, sems = buffers[:slots], buffers[slots : 2 * slots], buffers[2 * slots :]
+    def kernel(core, subcore, _, src, dst_or_rows, region, at, block, sem, *buffers):
         first = (core * subcores + subcore) * per
+        if linear:
+            shared, scalar = buffers
+            pl.async_copy(dst_or_rows, shared, sem).wait()
+            pl.async_copy(shared, scalar, sem).wait()
+            base = scalar[spec["out"]] // (width // 128)
 
-        def start(i):
-            return pl.multiple_of(first + i * k, k)
+        @pl.loop(0, per // k)
+        def _(i):
+            start = pl.multiple_of(first + i * k, k)
+            pl.async_copy(src.at[pl.ds(start, k)], at, sem).wait()
+            pl.async_copy(region.at[at], block, sem).wait()
+            if not linear:
+                pl.async_copy(dst_or_rows.at[pl.ds(start, k)], at, sem).wait()
+                pl.async_copy(block, region.at[at], sem).wait()
+                return
+            row = pl.multiple_of(base + start, 8)
 
-        def fetch(i, slot):
-            pl.async_copy(src.at[pl.ds(start(i), k)], at[slot], sems[slot]).wait()
-            pl.async_copy(region.at[at[slot]], block[slot], sems[slot])
+            @pl.when(start + k <= n)
+            def _():
+                pl.async_copy(block, region.at[pl.ds(row, k)], sem).wait()
 
-        def finish(i, slot):
-            pl.make_async_copy(region.at[at[slot]], block[slot], sems[slot]).wait()
-            pl.async_copy(dst.at[pl.ds(start(i), k)], to, sems[slot]).wait()
-            pl.async_copy(block[slot], region.at[to], sems[slot]).wait()
+            if tail:
 
-        if slots == 1:
+                @pl.when(start == last)
+                def _():
+                    pl.async_copy(block.at[pl.ds(0, tail)], region.at[pl.ds(row, tail)], sem).wait()
 
-            @pl.loop(0, n)
-            def _(i):
-                fetch(i, 0)
-                finish(i, 0)
-
-            return
-        fetch(0, 0)
-
-        @pl.loop(0, (n - 1) // 2)
-        def _(j):
-            i = j * 2
-            fetch(i + 1, 1)
-            finish(i, 0)
-            fetch(i + 2, 0)
-            finish(i + 1, 1)
-
-        if (n - 1) % 2:
-            fetch(n - 1, 1)
-            finish(n - 2, 0)
-            finish(n - 1, 1)
-        else:
-            finish(n - 1, 0)
-
-    scratch = [pl.VMEM((k,), "int32")]
-    scratch += [pl.VMEM((k,), "int32") for _ in range(slots)]
-    scratch += [pl.VMEM((k, width), "uint32") for _ in range(slots)]
-    scratch += [pl.SemaphoreType.DMA for _ in range(slots)]
-    return pl.sparse_core_kernel(kernel, refs=[view, offsets, offsets, view], mesh=(cores, subcores), scratch=scratch)
+    second = ("int32", (scalars,)) if linear else offsets
+    scratch = [pl.VMEM((k,), "int32"), pl.VMEM((k, width), "uint32"), pl.SemaphoreType.DMA]
+    if linear:
+        scratch += [pl.VMEM_SHARED((scalars,), "int32"), pl.SMEM((scalars,), "int32")]
+    return pl.sparse_core_kernel(kernel, refs=[view, offsets, second, view], mesh=(cores, subcores), scratch=scratch)
 
 
 def program(spec):

@@ -13,7 +13,7 @@ const WINDOW: usize = 8192;
 
 const ROWS: usize = 64;
 
-const SPARSE_CORE_ROWS: usize = 160 << 10;
+const SPARSE_CORE_CHUNK: usize = 128 << 10;
 
 pub(crate) fn encode(
     index: usize,
@@ -96,13 +96,10 @@ fn sparse_core(
         32 if width.is_multiple_of(LANES) => width,
         _ => return Ok(false),
     };
-    let fits = |slots: usize| {
-        [64, 32, 16, 8]
-            .into_iter()
-            .find(|k| slots * k * words * 4 <= SPARSE_CORE_ROWS)
-            .map(|k| (k, slots))
-    };
-    let Some((k, slots)) = fits(2).or_else(|| fits(1)) else {
+    let Some(k) = [256, 128, 64, 32, 16, 8]
+        .into_iter()
+        .find(|k| k * words * 4 <= SPARSE_CORE_CHUNK)
+    else {
         return Ok(false);
     };
     let column = words / LANES;
@@ -116,31 +113,34 @@ fn sparse_core(
     }
     let n = ids.numel();
     let s = ids.shape[ids.shape.len() - 1];
+    let linear = n == s || s.is_multiple_of(8);
     let workers = SPARSE_CORE_MESH[0] * SPARSE_CORE_MESH[1];
     let count = n.next_multiple_of(k * workers);
     let spec = format!(
-        "\"sparse_core\": true, \"rows_of_view\": {}, \"width\": {words}, \"count\": {count}, \"k\": {k}, \"slots\": {slots}, \"mesh\": {SPARSE_CORE_MESH:?}",
+        "\"sparse_core\": true, \"rows_of_view\": {}, \"width\": {words}, \"count\": {count}, \"k\": {k}, \"n\": {n}, \"linear\": {linear}, \"scalars\": 3, \"out\": 2, \"mesh\": {SPARSE_CORE_MESH:?}",
         region * LANES / words
     );
+    let mut indices = vec![Indices {
+        values: Values::Rows {
+            scalar: 0,
+            shape: ids.shape.clone(),
+        },
+        base: 1,
+    }];
+    if !linear {
+        indices.push(Indices {
+            values: Values::Iota {
+                dims: vec![n / s, s],
+                strides: vec![s.div_ceil(8) * 8, 1],
+            },
+            base: 2,
+        });
+    }
     let sparse = SparseCore {
         width: words,
         count,
-        indices: vec![
-            Indices {
-                values: Values::Rows {
-                    scalar: 0,
-                    shape: ids.shape.clone(),
-                },
-                base: 1,
-            },
-            Indices {
-                values: Values::Iota {
-                    dims: vec![n / s, s],
-                    strides: vec![s.div_ceil(8) * 8, 1],
-                },
-                base: 2,
-            },
-        ],
+        indices,
+        scalars: linear,
     };
     let operands = [inputs[1], inputs[0], output.cast_const()];
     let launched = Launch {

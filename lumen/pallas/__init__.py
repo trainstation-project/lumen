@@ -26,6 +26,7 @@ __all__ = [
     "SemaphoreType",
     "ShapeDtypeStruct",
     "VMEM",
+    "VMEM_SHARED",
     "async_copy",
     "axis_index",
     "axis_size",
@@ -113,6 +114,11 @@ class VMEM:
     """A VMEM scratch buffer of ``shape`` and ``dtype`` (``pltpu.VMEM``);
     as a ``BlockSpec``'s ``memory_space``, an operand staged in VMEM."""
 
+    def __init__(self, shape, dtype):
+        self.shape, self.dtype = tuple(shape), dtype
+
+
+class VMEM_SHARED:
     def __init__(self, shape, dtype):
         self.shape, self.dtype = tuple(shape), dtype
 
@@ -376,6 +382,8 @@ def _alloc(k, s):
         return Ref(k, k.vmem(s.dtype, list(s.shape)))
     if isinstance(s, SMEM):
         return Ref(k, k.smem(s.dtype, list(s.shape)))
+    if isinstance(s, VMEM_SHARED):
+        return Ref(k, k.vmem_shared(s.dtype, list(s.shape)))
     return Ref(k, k.semaphores(list(s.shape)))
 
 

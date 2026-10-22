@@ -70,6 +70,7 @@ fn type_name(ty: &Type) -> String {
                 Space::Any => "any",
                 Space::Hbm => "hbm",
                 Space::Vmem => "vmem",
+                Space::VmemShared => "vmem_shared",
                 Space::Smem => "smem",
             };
             format!(

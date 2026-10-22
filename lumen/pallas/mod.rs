@@ -14,6 +14,7 @@ pub enum Space {
     Any,
     Hbm,
     Vmem,
+    VmemShared,
     Smem,
 }
 
@@ -184,7 +185,12 @@ impl Kernel {
     pub fn alloc(&mut self, ty: Type) -> Result<Var, String> {
         match ty {
             Type::Ref(_, Space::Vmem | Space::Smem) | Type::Semaphore(_) => {}
-            _ => return Err("scratch is VMEM, SMEM or DMA semaphores".into()),
+            Type::Ref(_, Space::VmemShared) if self.mesh.is_some() => {}
+            _ => {
+                return Err(
+                    "scratch is VMEM, SMEM or DMA semaphores (shared VMEM on a SparseCore)".into(),
+                );
+            }
         }
         let v = self.var(ty);
         self.scratch.push(v);
