@@ -202,6 +202,7 @@ impl Tensor {
         self.dtype
     }
 
+    #[cfg(lumen_mps_linked)]
     pub(crate) fn holding(&self) -> Tensor {
         Tensor {
             storage: self.storage.clone(),
