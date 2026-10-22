@@ -75,15 +75,15 @@ def kernel_time(f, args, flush, reps=20):
     for _ in range(10):
         flush.lumen()
     pairs = []
+    flush.lumen()
+    start, end = lumen.Event("mps", enable_timing=True), lumen.Event("mps", enable_timing=True)
+    start.record()
     for _ in range(reps):
-        flush.lumen()
-        start, end = lumen.Event("mps", enable_timing=True), lumen.Event("mps", enable_timing=True)
-        start.record()
         f(*args)
-        end.record()
-        pairs.append((start, end))
+    end.record()
+    pairs.append((start, end))
     pairs[-1][1].synchronize()
-    return min(start.elapsed_time(end) for start, end in pairs) * 1e3
+    return min(start.elapsed_time(end) for start, end in pairs) * 1e3 / reps
 
 
 ROTATION_BYTES = 512 << 20

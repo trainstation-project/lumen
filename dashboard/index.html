@@ -49,6 +49,7 @@
   .lx-legend span { display: inline-flex; gap: 6px; align-items: center; }
   .lx-swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
   .lx-swatch.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px) !important; height: 2px; }
+  .lx-swatch.dot { background: repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 5px) !important; height: 2px; }
   .lx-controls input, .lx-controls select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); min-width: 0; }
   .lx-count { margin-left: auto; font-variant-numeric: tabular-nums; }
   .lx-scroll { overflow: auto; max-height: 34rem; border-top: 1px solid var(--line); }
@@ -164,7 +165,7 @@
       </div>
       <div class="lx-card">
         <h2>Time per call</h2>
-        <p class="lx-note">Float32. Kernel time is one call on a cold cache; time per call is calls back to back on cold inputs, where launches and kernels overlap. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
+        <p class="lx-note">Kernel time is one call on a cold cache; time per call is calls back to back on cold inputs, where launches and kernels overlap. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
         <div class="lx-legend" id="op-time-legend"></div>
         <div class="lx-chart" id="op-time"></div>
       </div>
@@ -237,6 +238,7 @@ function detail(r, who, us, timing) {
   rows.push([`Time (${timing})`, fmt.us(us)]);
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
+const DTYPE_COLORS = [["float32", "var(--s1)"], ["bfloat16", "var(--s2)"]];
 const torchGbs = (r) => r.torch_call_us == null ? null : r.bytes / r.torch_call_us / 1e3;
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 const known = (a) => a.filter((v) => v != null && !Number.isNaN(v));
@@ -364,7 +366,7 @@ function chart(id, spec) {
   for (const line of spec.lines || []) {
     const pts = line.points.map(([x, y]) => `${sx(x)},${sy(clip(y, spec.y.domain))}`).join(" ");
     svg.append(svgEl("polyline", { points: pts, fill: "none", stroke: line.color, "stroke-width": line.width || 2,
-      "stroke-dasharray": line.dash ? "5 4" : "none", "stroke-linecap": "round", "stroke-linejoin": "round", opacity: line.opacity ?? 1 }));
+      "stroke-dasharray": line.dot ? "0.1 5" : line.dash ? "5 4" : "none", "stroke-linecap": "round", "stroke-linejoin": "round", opacity: line.opacity ?? 1 }));
     if (line.label) {
       const [x, y] = line.labelAt;
       const t = svgEl("text", { x: sx(x), y: sy(y) - 6, "text-anchor": line.anchor || "end" });
@@ -375,7 +377,8 @@ function chart(id, spec) {
   }
   for (const p of spec.points || []) {
     const cx = sx(p.x), cy = sy(clip(p.y, spec.y.domain));
-    const c = svgEl("circle", { cx, cy, r: p.r || 4, fill: p.color, stroke: "var(--panel)", "stroke-width": 1, opacity: p.opacity ?? 1, "pointer-events": "none" });
+    const c = svgEl("circle", { cx, cy, r: p.r || 4, fill: p.hollow ? "var(--panel)" : p.color, stroke: p.hollow ? p.color : "var(--panel)",
+      "stroke-width": p.hollow ? 1.5 : 1, opacity: p.opacity ?? 1, "pointer-events": "none" });
     const hit = svgEl("circle", { cx, cy, r: 9, fill: "transparent" });
     hit.addEventListener("mousemove", (e) => { showTip(e, p.tip); c.setAttribute("r", (p.r || 4) + 2); });
     hit.addEventListener("mouseleave", () => { hideTip(); c.setAttribute("r", p.r || 4); });
@@ -388,9 +391,9 @@ function chart(id, spec) {
 function legend(id, items) {
   const box = document.getElementById(id);
   box.replaceChildren();
-  for (const [label, color, dash] of items) {
+  for (const [label, color, style] of items) {
     const s = el("span");
-    const w = el("i", "lx-swatch" + (dash ? " dash" : ""));
+    const w = el("i", "lx-swatch" + (style === "dot" ? " dot" : style ? " dash" : ""));
     w.style.background = color;
     w.style.color = color;
     s.append(w, label);
@@ -554,38 +557,40 @@ function drawOp(op) {
   tile(tiles, "bfloat16", s.bf16.endsWith("GB/s") ? s.bf16.replace(" GB/s", "") : "—", s.bf16.endsWith("GB/s") ? "GB/s" : null,
     [[s.bf16 === "no kernel" ? "no bfloat16 kernel on MPS yet" : `at ${fmt.n(BIG)} elements`]]);
 
-  const series = [["lumen float32", "float32", "var(--s1)", (r) => r.gbs], ["lumen bfloat16", "bfloat16", "var(--s2)", (r) => r.gbs],
-    ["PyTorch float32", "float32", "var(--s3)", torchGbs], ["PyTorch bfloat16", "bfloat16", "var(--s4)", torchGbs]];
-  const lines = [], points = [], items = [];
-  for (const [name, dtype, color, val] of series) {
-    const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && val(r) != null);
-    if (!rs.length) continue;
-    items.push([name, color]);
-    lines.push({ points: rs.map((r) => [r.n, val(r)]), color });
-    const torch = name.startsWith("PyTorch");
-    for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color,
-      tip: torch ? detail(r, "PyTorch", r.torch_call_us, "per call") : detail(r, "lumen", r.device_us, "kernel") });
+  const dtypes = DTYPE_COLORS.filter(([dtype]) => OK_ROWS.some((r) => r.op === op && r.dtype === dtype));
+  const lines = [], points = [];
+  for (const [dtype, color] of dtypes) {
+    for (const torch of [false, true]) {
+      const val = torch ? torchGbs : (r) => r.gbs;
+      const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && val(r) != null);
+      if (!rs.length) continue;
+      lines.push({ points: rs.map((r) => [r.n, val(r)]), color, dot: torch, width: torch ? 2.5 : 2 });
+      for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color, hollow: torch,
+        tip: torch ? detail(r, "PyTorch", r.torch_call_us, "per call") : detail(r, "lumen", r.device_us, "kernel") });
+    }
   }
   lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
   chart("op-bw", { label: `${op} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: bandwidthAxis(points.map((p) => p.y)), lines, points });
-  legend("op-bw-legend", [...items, ["device bandwidth", "var(--roof)", true]]);
+  legend("op-bw-legend", [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"], ["device bandwidth", "var(--roof)", true]]);
 
-  const f32 = OK_ROWS.filter((r) => r.op === op && r.dtype === "float32");
-  const tseries = [["lumen kernel", "var(--s1)", (r) => r.device_us, "lumen", "kernel"], ["lumen per call", "var(--s2)", (r) => r.lumen_call_us, "lumen", "per call"],
-    ["PyTorch per call", "var(--s3)", (r) => r.torch_call_us, "PyTorch", "per call"]];
+  const mine = OK_ROWS.filter((r) => r.op === op);
+  const tseries = [[(r) => r.lumen_call_us, "lumen", "per call", {}], [(r) => r.torch_call_us, "PyTorch", "per call", { dot: true, hollow: true }],
+    [(r) => r.device_us, "lumen", "kernel", { dash: true }]];
   const tl = [], tp = [];
-  for (const [name, color, val, who, timing] of tseries) {
-    const have = f32.filter((r) => val(r) != null);
-    if (!have.length) continue;
-    tl.push({ points: have.map((r) => [r.n, val(r)]), color });
-    for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, tip: detail(r, who, val(r), timing) });
+  for (const [dtype, color] of dtypes) {
+    for (const [val, who, timing, style] of tseries) {
+      const have = mine.filter((r) => r.dtype === dtype && val(r) != null);
+      if (!have.length) continue;
+      tl.push({ points: have.map((r) => [r.n, val(r)]), color, dot: style.dot, dash: style.dash, width: style.dash ? 1.5 : 2 });
+      for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, hollow: style.hollow, tip: detail(r, who, val(r), timing) });
+    }
   }
-  const maxT = Math.max(...f32.flatMap((r) => known([r.device_us, r.lumen_call_us, r.torch_call_us])));
+  const maxT = Math.max(...mine.flatMap((r) => known([r.device_us, r.lumen_call_us, r.torch_call_us])));
   const tTop = 10 ** Math.ceil(Math.log10(maxT));
   chart("op-time", { label: `${op} time`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: { domain: [1, tTop], ticks: pow10(1, tTop), fmt: (v) => fmt.us(v), label: "time per call" }, lines: tl, points: tp });
-  legend("op-time-legend", tseries.map(([n, c]) => [n, c]));
+  legend("op-time-legend", [...dtypes, ["lumen per call", "var(--muted)"], ["PyTorch per call", "var(--muted)", "dot"], ["lumen kernel", "var(--muted)", true]]);
 
   const code = PERF.code[op];
   document.getElementById("op-kernel").textContent = code ? code.kernel : "Not captured for this op.";
