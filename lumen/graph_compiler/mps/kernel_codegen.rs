@@ -80,6 +80,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     codegen::attention_backward_kernel(body, &b)
                 }
             };
+            super::record_launch(&kernel, body);
             m.sources.insert(kernel.clone(), source);
             *name = kernel;
         }
