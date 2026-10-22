@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lumen backends</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --fg: #16181d; --muted: #5d6573; --line: #dde1e7;
+    --ok: #1f7a4d; --warn: #9a6400; --bad: #b4232c;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --serif: Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111317; --panel: #191c21; --fg: #e9ebef; --muted: #9aa2b1; --line: #2c313a;
+            --ok: #5cc28f; --warn: #e2b04a; --bad: #f0727a; color-scheme: dark; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+  .lx { display: flex; flex-direction: column; gap: 24px; max-width: 1280px; margin: 0 auto;
+        padding-block: 32px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .lx-head { display: flex; flex-direction: column; gap: 6px; }
+  h1 { font: 400 32px/1.1 var(--serif); margin: 0; }
+  .lx-take { color: var(--muted); margin: 0; max-width: 70ch; }
+  .lx-take b { color: var(--fg); font-weight: 600; }
+  .lx-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  .lx-tab { font: inherit; background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
+  .lx-tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
+  .lx-tab:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  .lx-panel { display: flex; flex-direction: column; gap: 24px; }
+  .lx-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); gap: 12px; }
+  .lx-tile, .lx-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .lx-tile h3 { margin: 0; font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+  .lx-big { font: 400 32px/1.1 var(--serif); font-variant-numeric: tabular-nums; }
+  .lx-of { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lx-of b { color: var(--fg); font-weight: 600; }
+  .lx-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); }
+  .lx-bar span { display: block; height: 100%; }
+  .lx-card h2 { margin: 0; font-size: 17px; font-weight: 500; }
+  .lx-note { margin: 0; color: var(--muted); font-size: 12px; max-width: 80ch; }
+  .lx-legend, .lx-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
+  .lx-legend span { display: inline-flex; gap: 6px; align-items: center; }
+  .lx-controls input, .lx-controls select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); min-width: 0; }
+  .lx-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .lx-scroll { overflow: auto; max-height: 34rem; border-top: 1px solid var(--line); }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--line); padding: 0; white-space: nowrap; z-index: 1; }
+  th button { font: inherit; color: inherit; background: none; border: 0; padding: 8px; cursor: pointer; width: 100%; text-align: inherit; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.lx-name { font-family: var(--mono); white-space: nowrap; }
+  td.lx-why { color: var(--muted); min-width: 14rem; }
+  .lx-dev { text-align: center; }
+  .lx-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; line-height: 1.5; border: 1px solid currentColor; white-space: nowrap; font-style: normal; }
+  .lx-chip[data-v="runs"] { color: var(--ok); }
+  .lx-chip[data-v="partial"] { color: var(--warn); }
+  .lx-chip[data-v="missing"], .lx-chip[data-v="wrong"] { color: var(--bad); }
+  @media (max-width: 40rem) { .lx-wide { display: none; } }
+</style>
+</head>
+<body>
+<div class="lx">
+  <header class="lx-head">
+    <h1>lumen backends</h1>
+    <p class="lx-take" id="lx-take"></p>
+  </header>
+  <div class="lx-tabs" role="tablist">
+    <button class="lx-tab" role="tab" id="tab-support" aria-selected="true" aria-controls="support">Support</button>
+  </div>
+  <section id="support" role="tabpanel" aria-labelledby="tab-support" class="lx-panel">
+    <div class="lx-tiles" id="lx-tiles"></div>
+    <div class="lx-card">
+      <h2>Primitives by device</h2>
+      <p class="lx-note">Each primitive run as a compiled program on small inputs and checked against the CPU result: on an Apple GPU (MPS) and a TPU v6e, at commit 5def44c. CUDA from the code. The kernel columns say what ran it.</p>
+      <div class="lx-legend">
+        <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
+        <span><i class="lx-chip" data-v="partial">partial</i> some shapes only</span>
+        <span><i class="lx-chip" data-v="missing">missing</i> no kernel</span>
+      </div>
+      <div class="lx-controls">
+        <input type="search" id="prim-search" placeholder="Search primitives" aria-label="Search primitives">
+        <select id="prim-kind" aria-label="Kind"><option value="">All kinds</option></select>
+        <select id="prim-gaps" aria-label="Gaps on">
+          <option value="">Every row</option>
+          <option value="mps">Missing on MPS</option>
+          <option value="tpu">Missing on TPU</option>
+          <option value="either">Missing on MPS or TPU</option>
+        </select>
+        <span class="lx-count" id="prim-count"></span>
+      </div>
+      <div class="lx-scroll"><table id="prim-table"><thead><tr></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="lx-card">
+      <h2>Fusions by device</h2>
+      <p class="lx-note">What each backend's graph compiler fuses, from its pass pipeline. The CPU runs each primitive on its own, and CUDA plans take the CPU's path.</p>
+      <div class="lx-scroll"><table id="fusion-table"><thead><tr></tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+</div>
+<script>
+const PRIMITIVES = [{"primitive": "neg", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "exp", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "log", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "sqrt", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "tanh", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "logistic", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "sin", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "cos", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "tan", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "asin", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.asin (failed to legalize)."}, {"primitive": "acos", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.acos (failed to legalize)."}, {"primitive": "atan", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.atan (failed to legalize)."}, {"primitive": "sinh", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.sinh (failed to legalize)."}, {"primitive": "cosh", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.cosh (failed to legalize)."}, {"primitive": "asinh", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.asinh (failed to legalize)."}, {"primitive": "acosh", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.acosh (failed to legalize)."}, {"primitive": "atanh", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.atanh (failed to legalize)."}, {"primitive": "floor", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "ceil", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "round", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "log1p", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "expm1", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.expm1 (failed to legalize)."}, {"primitive": "exp2", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "log2", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "rsqrt", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "cbrt", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "missing", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "", "mps_note": "No Metal codegen for it yet.", "tpu_note": "Mosaic cannot lower math.cbrt (failed to legalize)."}, {"primitive": "erf_inv", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "is_finite", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "abs", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "sign", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "not", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "population_count", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "clz", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "add", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "sub", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "mul", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "div", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "max", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "min", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "eq", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "lt", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "pow", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "rem", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "and", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "or", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "xor", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "shift_left", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "shift_right_logical", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "shift_right_arithmetic", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "nextafter", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "cast", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "select", "category": "elementwise", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "reduce_precision", "category": "elementwise", "cpu": "runs", "mps": "missing", "tpu": "runs", "cuda": "missing", "mps_kernel": "", "tpu_kernel": "generated loop", "mps_note": "No Metal codegen for it yet.", "tpu_note": ""}, {"primitive": "reduce_sum", "category": "reduction", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "reduction kernel", "tpu_kernel": "generated reduction", "mps_note": "", "tpu_note": ""}, {"primitive": "reduce_max", "category": "reduction", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "reduction kernel", "tpu_kernel": "generated reduction", "mps_note": "", "tpu_note": ""}, {"primitive": "cumsum", "category": "reduction", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "scan kernel", "tpu_kernel": "", "mps_note": "", "tpu_note": "No TPU kernel yet."}, {"primitive": "dot_general", "category": "contraction", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "GEMM template", "tpu_kernel": "GEMM template", "mps_note": "", "tpu_note": "float32 or bfloat16 operands accumulating in float32; batch dimensions leading."}, {"primitive": "linear_cross_entropy", "category": "contraction", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "fused linear-CE kernel", "tpu_kernel": "", "mps_note": "", "tpu_note": "No TPU kernel yet."}, {"primitive": "reshape", "category": "layout", "cpu": "runs", "mps": "runs", "tpu": "partial", "cuda": "missing", "mps_kernel": "layout kernel", "tpu_kernel": "", "mps_note": "", "tpu_note": "Only reshapes that split or merge the last dimension; this one moves elements between tiles."}, {"primitive": "broadcast_in_dim", "category": "layout", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "layout kernel", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "transpose", "category": "layout", "cpu": "runs", "mps": "runs", "tpu": "partial", "cuda": "missing", "mps_kernel": "layout kernel", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": "2-D and leading-dimension transposes run inside loops; ones that move the second-minor dimension (attention head merge) do not."}, {"primitive": "slice", "category": "layout", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "layout kernel", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "concatenate", "category": "layout", "cpu": "runs", "mps": "runs", "tpu": "partial", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "", "mps_note": "", "tpu_note": "Runs in place along the last dimension when its producers write their slot; a standalone concatenate has no kernel."}, {"primitive": "iota", "category": "factory", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "full", "category": "factory", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "generated loop", "mps_note": "", "tpu_note": ""}, {"primitive": "random_bits", "category": "factory", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "", "mps_note": "", "tpu_note": "Its uint64 seed and counter are not stored on a TPU."}, {"primitive": "dynamic_slice", "category": "indexing", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "dynamic-slice kernel", "tpu_kernel": "", "mps_note": "", "tpu_note": "No TPU kernel yet."}, {"primitive": "dynamic_update_slice", "category": "indexing", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop, dynamic-update-slice kernel", "tpu_kernel": "generated loop, dynamic-update-slice kernel", "mps_note": "", "tpu_note": "Rank 2 or more, 16- or 32-bit elements, int32 starts; chains at constant starts merge into one kernel."}, {"primitive": "gather", "category": "indexing", "cpu": "runs", "mps": "runs", "tpu": "runs", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "gather kernel", "mps_note": "", "tpu_note": "Axis-0 row gathers of a 2-D table at int32 ids; float32/int32 on the SparseCores, bfloat16 on the TensorCore."}, {"primitive": "take_along_axis", "category": "indexing", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "generated Metal loop", "tpu_kernel": "", "mps_note": "", "tpu_note": "No TPU kernel yet."}, {"primitive": "scatter_add", "category": "indexing", "cpu": "runs", "mps": "runs", "tpu": "missing", "cuda": "missing", "mps_kernel": "scatter-add kernel", "tpu_kernel": "", "mps_note": "", "tpu_note": "No TPU kernel yet."}];
+const FUSIONS = [{"fusion": "Elementwise loop fusion", "category": "elementwise", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Chains of elementwise ops become one generated kernel.", "pass": "loop_fusion"}, {"fusion": "Layout inside loops", "category": "elementwise", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Broadcasts, slices, transposes and iota become indexing inside a loop instead of copies.", "pass": "loop_fusion / codegen indexing"}, {"fusion": "Horizontal fusion", "category": "elementwise", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Independent small loops of one shape run as one multi-output kernel.", "pass": "horizontal_fusion"}, {"fusion": "Multi-output loop fusion", "category": "elementwise", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "A fusion also writes values its consumers outside need (vertical multi-output).", "pass": "loop_fusion (hosts)"}, {"fusion": "Reduction prologue and epilogue", "category": "reduction", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Elementwise work before and after a reduction runs in the reduction's kernel.", "pass": "loop_fusion"}, {"fusion": "Normalization diamond (row)", "category": "reduction", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "softmax, RMSNorm and LayerNorm: a row's reductions and the elementwise work around them, one kernel.", "pass": "normalization_diamonds"}, {"fusion": "Row partials (wide rows)", "category": "reduction", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "Column sums a row kernel adds up too, for rows wider than one block.", "pass": "normalization_diamonds"}, {"fusion": "GEMM epilogue", "category": "contraction", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Elementwise consumers (bias, activation, cast) of a matmul run as it writes its output.", "pass": "fuse_dots / dot_epilogues"}, {"fusion": "GEMM + normalization", "category": "contraction", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "A matmul and the norm diamond reading it: one kernel, the product never written to memory.", "pass": "dot_rows / row_dots"}, {"fusion": "Merged dots", "category": "contraction", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Matmuls sharing an operand (q/k/v, gate/up) run as one over packed weights, forward and backward.", "pass": "merge_dots, merge_dots_backward"}, {"fusion": "Split-K", "category": "contraction", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "Long-K matmuls with small M and N split K across threadgroups.", "pass": "split_k"}, {"fusion": "Flash attention", "category": "attention", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Attention forward and backward as tiled kernels; scores never materialized.", "pass": "flash_attention, flash_attention_backward"}, {"fusion": "Fused linear cross-entropy", "category": "loss", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "Logits h\u00b7w\u1d40 reduced to log-sum-exp and the target logit without storing them.", "pass": "linear_cross_entropy"}, {"fusion": "Chunked cross-entropy", "category": "loss", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "Cross-entropy's backward a chunk of rows at a time.", "pass": "chunked_cross_entropy"}, {"fusion": "take_along_axis as gather", "category": "indexing", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "take_along_axis rewritten as a gather of flat positions.", "pass": "take_along_axis"}, {"fusion": "In-place concatenate", "category": "memory", "cpu": "missing", "mps": "runs", "tpu": "runs", "cuda": "missing", "what": "Producers write straight into their slot of the result; no copy. TPU: along the last dimension.", "pass": "place_concats"}, {"fusion": "Strided operand views", "category": "memory", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "Slices a matmul reads are passed as strided views instead of copied.", "pass": "place_views"}, {"fusion": "Merged update chains", "category": "memory", "cpu": "missing", "mps": "missing", "tpu": "runs", "cuda": "missing", "what": "Chains of dynamic_update_slice at constant starts run as one kernel, VMEM-resident when they fit.", "pass": "dynamic_update_slices"}, {"fusion": "Neural Engine offload", "category": "device", "cpu": "missing", "mps": "runs", "tpu": "missing", "cuda": "missing", "what": "float16 regions on fixed weights offloaded to Apple's Neural Engine via Core ML.", "pass": "neural_engine"}, {"fusion": "SparseCore gather", "category": "device", "cpu": "missing", "mps": "missing", "tpu": "runs", "cuda": "missing", "what": "Embedding lookups of 32-bit tables run on the TPU's SparseCores.", "pass": "gather (kernel route)"}];
+const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
+const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
+const PRIM_COLUMNS = [["primitive", "Primitive", "name"], ["category", "Kind", "text"], ["cpu", "CPU", "dev"], ["mps", "MPS", "dev"],
+  ["tpu", "TPU", "dev"], ["cuda", "CUDA", "dev"], ["mps_kernel", "MPS kernel", "wide"], ["tpu_kernel", "TPU kernel", "wide"],
+  ["mps_note", "MPS gap", "why"], ["tpu_note", "TPU gap", "why"]];
+const FUS_COLUMNS = [["fusion", "Fusion", "text"], ["category", "Kind", "text"], ["cpu", "CPU", "dev"], ["mps", "MPS", "dev"],
+  ["tpu", "TPU", "dev"], ["cuda", "CUDA", "dev"], ["what", "What it does", "why"], ["pass", "Pass", "wide"]];
+
+const coverage = DEVICES.map(([key, device]) => ({
+  device,
+  runs: PRIMITIVES.filter((r) => r[key] === "runs").length,
+  partial: PRIMITIVES.filter((r) => r[key] === "partial").length,
+  fusions: FUSIONS.filter((r) => r[key] === "runs").length,
+}));
+const of = (device) => coverage.find((c) => c.device === device);
+
+const take = document.getElementById("lx-take");
+const bold = (n) => { const b = document.createElement("b"); b.textContent = String(n); return b; };
+take.append("TPU runs ", bold(of("TPU").runs), ` of ${PRIMITIVES.length} primitives and `, bold(of("TPU").fusions),
+  ` of ${FUSIONS.length} fusions; MPS runs `, bold(of("MPS").runs), " primitives and ", bold(of("MPS").fusions),
+  " fusions. CUDA plans have no kernels of their own yet.");
+
+const tiles = document.getElementById("lx-tiles");
+for (const c of coverage) {
+  const tile = document.createElement("div");
+  tile.className = "lx-tile";
+  const h = document.createElement("h3");
+  h.textContent = c.device;
+  const big = document.createElement("div");
+  big.className = "lx-big";
+  big.textContent = String(c.runs);
+  const line = document.createElement("div");
+  line.className = "lx-of";
+  line.append(`of ${PRIMITIVES.length} primitives run, ${c.partial} in part · `, bold(c.fusions), " fusions");
+  const bar = document.createElement("div");
+  bar.className = "lx-bar";
+  for (const [n, color] of [[c.runs, "var(--ok)"], [c.partial, "var(--warn)"]]) {
+    const s = document.createElement("span");
+    s.style.width = (100 * n / PRIMITIVES.length) + "%";
+    s.style.background = color;
+    bar.appendChild(s);
+  }
+  tile.append(h, big, line, bar);
+  tiles.appendChild(tile);
+}
+
+function table(id, columns, rows, sort) {
+  const el = document.getElementById(id);
+  const head = el.querySelector("thead tr");
+  if (!head.children.length) {
+    for (const [field, label, kind] of columns) {
+      const th = document.createElement("th");
+      if (kind === "dev") th.className = "lx-dev";
+      if (kind === "wide" || kind === "why") th.classList.add("lx-wide");
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        sort.dir = sort.key === field ? -sort.dir : 1;
+        sort.key = field;
+        sort.draw();
+      });
+      th.appendChild(b);
+      th.dataset.field = field;
+      head.appendChild(th);
+    }
+  }
+  const shown = rows.slice();
+  if (sort.key) shown.sort((a, b) => {
+    const x = a[sort.key] ?? "", y = b[sort.key] ?? "";
+    return (x in ORDER && y in ORDER ? ORDER[x] - ORDER[y] : String(x).localeCompare(String(y))) * sort.dir;
+  });
+  const body = el.querySelector("tbody");
+  body.replaceChildren();
+  for (const r of shown) {
+    const tr = document.createElement("tr");
+    for (const [field, , kind] of columns) {
+      const td = document.createElement("td");
+      if (kind === "dev") {
+        td.className = "lx-dev";
+        const chip = document.createElement("span");
+        chip.className = "lx-chip";
+        chip.dataset.v = r[field];
+        chip.textContent = r[field];
+        td.appendChild(chip);
+      } else {
+        if (kind === "name") td.className = "lx-name";
+        if (kind === "why") td.className = "lx-why";
+        if (kind === "wide" || kind === "why") td.classList.add("lx-wide");
+        td.textContent = r[field] ?? "";
+      }
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  head.querySelectorAll("th").forEach((th) => th.setAttribute("aria-sort",
+    sort.key === th.dataset.field ? (sort.dir > 0 ? "ascending" : "descending") : "none"));
+  return shown.length;
+}
+
+const search = document.getElementById("prim-search");
+const kind = document.getElementById("prim-kind");
+const gaps = document.getElementById("prim-gaps");
+for (const k of [...new Set(PRIMITIVES.map((r) => r.category))]) {
+  const o = document.createElement("option");
+  o.value = k;
+  o.textContent = k;
+  kind.appendChild(o);
+}
+const primSort = { key: null, dir: 1, draw: drawPrimitives };
+const fusSort = { key: null, dir: 1, draw: () => table("fusion-table", FUS_COLUMNS, FUSIONS, fusSort) };
+function drawPrimitives() {
+  const q = search.value.trim().toLowerCase();
+  const missing = (v) => v !== "runs";
+  const rows = PRIMITIVES.filter((r) =>
+    (!q || r.primitive.toLowerCase().includes(q)) &&
+    (!kind.value || r.category === kind.value) &&
+    (!gaps.value || (gaps.value === "either" ? missing(r.mps) || missing(r.tpu) : missing(r[gaps.value]))));
+  const n = table("prim-table", PRIM_COLUMNS, rows, primSort);
+  document.getElementById("prim-count").textContent = `${n} of ${PRIMITIVES.length}`;
+}
+search.addEventListener("input", drawPrimitives);
+kind.addEventListener("change", drawPrimitives);
+gaps.addEventListener("change", drawPrimitives);
+drawPrimitives();
+fusSort.draw();
+</script>
+</body>
+</html>
