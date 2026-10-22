@@ -1,8 +1,154 @@
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyBytes, PyList, PyTuple};
+use std::sync::Arc;
+use std::time::Duration;
 
-use super::DeviceMesh;
+use super::{DeviceMesh, TcpStore};
+
+fn duration(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Duration> {
+    let Some(timeout) = timeout.filter(|t| !t.is_none()) else {
+        return Ok(super::DEFAULT_TIMEOUT);
+    };
+    let seconds: f64 = match timeout.hasattr("total_seconds")? {
+        true => timeout.call_method0("total_seconds")?.extract()?,
+        false => timeout.extract()?,
+    };
+    Duration::try_from_secs_f64(seconds).map_err(|_| {
+        PyValueError::new_err(format!(
+            "timeout must be a non-negative duration, got {seconds}"
+        ))
+    })
+}
+
+fn index(name: &str, value: i64) -> PyResult<Option<usize>> {
+    match value {
+        -1 => Ok(None),
+        v if v >= 0 => Ok(Some(v as usize)),
+        v => Err(PyValueError::new_err(format!(
+            "{name} must not be negative, got {v}"
+        ))),
+    }
+}
+
+#[pyclass(name = "TCPStore", module = "lumen.distributed", frozen)]
+pub(crate) struct PyTcpStore {
+    store: Arc<TcpStore>,
+}
+
+#[pymethods]
+impl PyTcpStore {
+    #[new]
+    #[pyo3(signature = (host_name, port, *, is_master = false, timeout = None))]
+    fn new(
+        py: Python<'_>,
+        host_name: &str,
+        port: u16,
+        is_master: bool,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let timeout = duration(timeout)?;
+        let store = py
+            .detach(|| TcpStore::new(host_name, port, is_master, timeout))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyTcpStore {
+            store: Arc::new(store),
+        })
+    }
+
+    #[getter]
+    fn host(&self) -> &str {
+        self.store.host()
+    }
+
+    #[getter]
+    fn port(&self) -> u16 {
+        self.store.port()
+    }
+
+    fn set(&self, py: Python<'_>, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value: Vec<u8> = match value.extract::<String>() {
+            Ok(text) => text.into_bytes(),
+            Err(_) => value.extract()?,
+        };
+        py.detach(|| self.store.set(key, &value))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    fn get<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyBytes>> {
+        let value = py
+            .detach(|| self.store.get(key))
+            .map_err(PyRuntimeError::new_err)?;
+        Ok(PyBytes::new(py, &value))
+    }
+
+    fn add(&self, py: Python<'_>, key: &str, amount: i64) -> PyResult<i64> {
+        py.detach(|| self.store.add(key, amount))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    #[pyo3(signature = (keys, timeout = None))]
+    fn wait(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let timeout = match timeout.filter(|t| !t.is_none()) {
+            None => self.store.timeout(),
+            Some(t) => duration(Some(t))?,
+        };
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        py.detach(|| self.store.wait(&keys, timeout))
+            .map_err(PyRuntimeError::new_err)
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (*, init_method = None, timeout = None, world_size = -1, rank = -1, store = None))]
+fn init_process_group(
+    py: Python<'_>,
+    init_method: Option<&str>,
+    timeout: Option<&Bound<'_, PyAny>>,
+    world_size: i64,
+    rank: i64,
+    store: Option<&Bound<'_, PyTcpStore>>,
+) -> PyResult<()> {
+    let timeout = duration(timeout)?;
+    let (rank, world_size) = (index("rank", rank)?, index("world_size", world_size)?);
+    let (store, rank, world_size) = match (store, init_method) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "init_method and store are mutually exclusive",
+            ));
+        }
+        (Some(store), None) => {
+            let required = |name| PyValueError::new_err(format!("a store needs {name}"));
+            (
+                store.get().store.clone(),
+                rank.ok_or_else(|| required("rank"))?,
+                world_size.ok_or_else(|| required("world_size"))?,
+            )
+        }
+        (None, init_method) => py
+            .detach(|| {
+                super::rendezvous(init_method.unwrap_or("env://"), rank, world_size, timeout)
+            })
+            .map_err(PyValueError::new_err)?,
+    };
+    py.detach(|| super::init_process_group(store, rank, world_size))
+        .map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn destroy_process_group() -> PyResult<()> {
+    super::destroy_process_group().map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn is_initialized() -> bool {
+    super::is_initialized()
+}
 
 fn flatten_mesh(
     mesh: &Bound<'_, PyAny>,
@@ -231,6 +377,10 @@ fn get_world_size() -> PyResult<usize> {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDeviceMesh>()?;
+    m.add_class::<PyTcpStore>()?;
+    m.add_function(wrap_pyfunction!(init_process_group, m)?)?;
+    m.add_function(wrap_pyfunction!(destroy_process_group, m)?)?;
+    m.add_function(wrap_pyfunction!(is_initialized, m)?)?;
     m.add_function(wrap_pyfunction!(init_device_mesh, m)?)?;
     m.add_function(wrap_pyfunction!(get_rank, m)?)?;
     m.add_function(wrap_pyfunction!(get_world_size, m)?)
