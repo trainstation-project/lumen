@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
+use std::sync::{Mutex, PoisonError};
 
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
@@ -21,6 +23,39 @@ unsafe extern "C" {
         done: Completion,
         context: *mut c_void,
     ) -> i32;
+    fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
+    fn lumen_mps_launch_pipeline(
+        pipeline: *mut c_void,
+        buffers: *const *const u8,
+        nbuffers: usize,
+        args: *const *const u8,
+        arg_lens: *const usize,
+        nargs: usize,
+        grid: *const usize,
+        groups: i32,
+        timed: i32,
+        done: Completion,
+        context: *mut c_void,
+    ) -> i32;
+}
+
+const MAX_ARGS: usize = 31;
+
+fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
+    static PIPELINES: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+    let mut pipelines = PIPELINES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&pipeline) = pipelines.get(kernel) {
+        return Ok(pipeline as *mut c_void);
+    }
+    let name = CString::new(kernel).expect("kernel names have no NUL");
+    let pipeline = unsafe { lumen_mps_pipeline(name.as_ptr()) };
+    if pipeline.is_null() {
+        return Err(format!(
+            "the MPS kernel {kernel} could not run (no such kernel)"
+        ));
+    }
+    pipelines.insert(kernel.to_owned(), pipeline as usize);
+    Ok(pipeline)
 }
 
 pub(crate) fn encode(
@@ -152,13 +187,11 @@ pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
 }
 
 pub(crate) const BYTES_PER_THREAD: usize = 16;
+const GRID_THREADS: usize = 32 << 10;
 
 pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
-    Grid::Threads([
-        n.div_ceil((BYTES_PER_THREAD / dtype.size_of()).max(1)),
-        1,
-        1,
-    ])
+    let most = (BYTES_PER_THREAD / dtype.size_of()).max(1);
+    Grid::Threads([n.div_ceil((n / GRID_THREADS).clamp(1, most)), 1, 1])
 }
 
 pub(crate) use crate::custom_op::mps::Grid;
@@ -177,6 +210,36 @@ pub(crate) fn launch_step(
     launch(kernel, &buffers, args, grid, keep, step.label)
 }
 
+pub(crate) fn mark_event(
+    recorded: std::sync::Arc<crate::stream::event::Recorded>,
+) -> Result<(), String> {
+    let c_name = CString::new("event_marker").expect("kernel names have no NUL");
+    let (context, done) = mps::submit_event(recorded);
+    let sizes = [1usize, 1, 1];
+    mps::fence();
+    let status = unsafe {
+        lumen_mps_launch_kernel(
+            c_name.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            sizes.as_ptr(),
+            0,
+            1,
+            done,
+            context,
+        )
+    };
+    if status != 0 {
+        mps::cancel(context);
+        return Err(format!("recording an MPS event failed ({status})"));
+    }
+    mps::fence();
+    Ok(())
+}
+
 pub(crate) fn launch(
     kernel: &str,
     buffers: &[*const u8],
@@ -193,13 +256,22 @@ pub(crate) fn launch(
         crate::profiler::clear_next_launch();
         return Ok(());
     }
-    let c_name = CString::new(kernel).expect("kernel names have no NUL");
-    let pointers: Vec<*const u8> = args.iter().map(|a| a.as_ptr()).collect();
-    let lens: Vec<usize> = args.iter().map(Vec::len).collect();
+    let pipeline = pipeline(kernel)?;
+    if args.len() > MAX_ARGS {
+        return Err(format!(
+            "the MPS kernel {kernel} takes at most {MAX_ARGS} arguments"
+        ));
+    }
+    let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
+    let mut lens = [0usize; MAX_ARGS];
+    for (k, a) in args.iter().enumerate() {
+        pointers[k] = a.as_ptr();
+        lens[k] = a.len();
+    }
     let (context, done, timed) = mps::submit(keep, name, kernel);
     let status = unsafe {
-        lumen_mps_launch_kernel(
-            c_name.as_ptr(),
+        lumen_mps_launch_pipeline(
+            pipeline,
             buffers.as_ptr(),
             buffers.len(),
             pointers.as_ptr(),

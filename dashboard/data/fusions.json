@@ -1,0 +1,202 @@
+[
+ {
+  "fusion": "Elementwise loop fusion",
+  "category": "elementwise",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Chains of elementwise ops become one generated kernel.",
+  "pass": "loop_fusion"
+ },
+ {
+  "fusion": "Layout inside loops",
+  "category": "elementwise",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Broadcasts, slices, transposes and iota become indexing inside a loop instead of copies.",
+  "pass": "loop_fusion / codegen indexing"
+ },
+ {
+  "fusion": "Horizontal fusion",
+  "category": "elementwise",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Independent small loops of one shape run as one multi-output kernel.",
+  "pass": "horizontal_fusion"
+ },
+ {
+  "fusion": "Multi-output loop fusion",
+  "category": "elementwise",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "A fusion also writes values its consumers outside need (vertical multi-output).",
+  "pass": "loop_fusion (hosts)"
+ },
+ {
+  "fusion": "Reduction prologue and epilogue",
+  "category": "reduction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Elementwise work before and after a reduction runs in the reduction's kernel.",
+  "pass": "loop_fusion"
+ },
+ {
+  "fusion": "Normalization diamond (row)",
+  "category": "reduction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "softmax, RMSNorm and LayerNorm: a row's reductions and the elementwise work around them, one kernel.",
+  "pass": "normalization_diamonds"
+ },
+ {
+  "fusion": "Row partials (wide rows)",
+  "category": "reduction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "Column sums a row kernel adds up too, for rows wider than one block.",
+  "pass": "normalization_diamonds"
+ },
+ {
+  "fusion": "GEMM epilogue",
+  "category": "contraction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Elementwise consumers (bias, activation, cast) of a matmul run as it writes its output.",
+  "pass": "fuse_dots / dot_epilogues"
+ },
+ {
+  "fusion": "GEMM + normalization",
+  "category": "contraction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "A matmul and the norm diamond reading it: one kernel, the product never written to memory.",
+  "pass": "dot_rows / row_dots"
+ },
+ {
+  "fusion": "Merged dots",
+  "category": "contraction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Matmuls sharing an operand (q/k/v, gate/up) run as one over packed weights, forward and backward.",
+  "pass": "merge_dots, merge_dots_backward"
+ },
+ {
+  "fusion": "Split-K",
+  "category": "contraction",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "Long-K matmuls with small M and N split K across threadgroups.",
+  "pass": "split_k"
+ },
+ {
+  "fusion": "Flash attention",
+  "category": "attention",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Attention forward and backward as tiled kernels; scores never materialized.",
+  "pass": "flash_attention, flash_attention_backward"
+ },
+ {
+  "fusion": "Fused linear cross-entropy",
+  "category": "loss",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "Logits h·wᵀ reduced to log-sum-exp and the target logit without storing them.",
+  "pass": "linear_cross_entropy"
+ },
+ {
+  "fusion": "Chunked cross-entropy",
+  "category": "loss",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "Cross-entropy's backward a chunk of rows at a time.",
+  "pass": "chunked_cross_entropy"
+ },
+ {
+  "fusion": "take_along_axis as gather",
+  "category": "indexing",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "take_along_axis rewritten as a gather of flat positions.",
+  "pass": "take_along_axis"
+ },
+ {
+  "fusion": "In-place concatenate",
+  "category": "memory",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Producers write straight into their slot of the result; no copy. TPU: along the last dimension.",
+  "pass": "place_concats"
+ },
+ {
+  "fusion": "Strided operand views",
+  "category": "memory",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "Slices a matmul reads are passed as strided views instead of copied.",
+  "pass": "place_views"
+ },
+ {
+  "fusion": "Merged update chains",
+  "category": "memory",
+  "cpu": "missing",
+  "mps": "missing",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Chains of dynamic_update_slice at constant starts run as one kernel, VMEM-resident when they fit.",
+  "pass": "dynamic_update_slices"
+ },
+ {
+  "fusion": "Neural Engine offload",
+  "category": "device",
+  "cpu": "missing",
+  "mps": "runs",
+  "tpu": "missing",
+  "cuda": "missing",
+  "what": "float16 regions on fixed weights offloaded to Apple's Neural Engine via Core ML.",
+  "pass": "neural_engine"
+ },
+ {
+  "fusion": "SparseCore gather",
+  "category": "device",
+  "cpu": "missing",
+  "mps": "missing",
+  "tpu": "runs",
+  "cuda": "missing",
+  "what": "Embedding lookups of 32-bit tables run on the TPU's SparseCores.",
+  "pass": "gather (kernel route)"
+ }
+]

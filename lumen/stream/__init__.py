@@ -1,3 +1,3 @@
-from lumen.stream._C import Stream
+from lumen.stream._C import Event, Stream
 
-__all__ = ["Stream"]
+__all__ = ["Event", "Stream"]

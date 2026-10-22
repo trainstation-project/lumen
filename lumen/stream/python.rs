@@ -152,6 +152,63 @@ fn buffer_of(_t: &core::Tensor) -> PyResult<(usize, usize)> {
     Ok((0, 0))
 }
 
+#[pyclass(name = "Event", module = "lumen")]
+pub(crate) struct PyEvent {
+    inner: Box<dyn core::stream::Event>,
+}
+
+#[pymethods]
+impl PyEvent {
+    #[new]
+    #[pyo3(signature = (device = None, *, enable_timing = false))]
+    fn new(device: Option<&Bound<'_, PyAny>>, enable_timing: bool) -> PyResult<Self> {
+        let device = crate::device::python::resolve_device(device)?;
+        let inner =
+            core::stream::event_for(device, enable_timing).map_err(PyRuntimeError::new_err)?;
+        Ok(PyEvent { inner })
+    }
+
+    #[getter]
+    fn device(&self) -> crate::device::python::PyDevice {
+        crate::device::python::PyDevice::from_core(self.inner.device())
+    }
+
+    #[getter]
+    fn enable_timing(&self) -> bool {
+        self.inner.timing()
+    }
+
+    fn record(&mut self) -> PyResult<()> {
+        self.inner.record().map_err(PyRuntimeError::new_err)
+    }
+
+    fn query(&self) -> bool {
+        self.inner.query()
+    }
+
+    fn synchronize(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = &self.inner;
+        py.detach(|| inner.synchronize())
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    fn elapsed_time(&self, py: Python<'_>, end: PyRef<'_, PyEvent>) -> PyResult<f64> {
+        let (start, end) = (&self.inner, &end.inner);
+        py.detach(|| start.elapsed_time(end.as_ref()))
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "{}.Event(device='{}', enable_timing={})",
+            crate::LIBRARY_NAME,
+            self.inner.device(),
+            if self.inner.timing() { "True" } else { "False" }
+        )
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyStream>()
+    m.add_class::<PyStream>()?;
+    m.add_class::<PyEvent>()
 }

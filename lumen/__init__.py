@@ -20,7 +20,7 @@ from lumen.device._C import cpu, cuda, meta, mps, tpu
 from lumen.functional import cat
 from lumen.graph import compile, make_graph, prims
 from lumen.random import get_rng_state, initial_seed, manual_seed, rand, randint, randn, set_rng_state
-from lumen.stream import Stream
+from lumen.stream import Event, Stream
 from lumen.tensor import (
     Tensor,
     arange,
@@ -58,6 +58,7 @@ __all__ = [
     "custom_op",
     "device",
     "distributed",
+    "Event",
     "Stream",
     "graph",
     "graph_compiler",

@@ -455,10 +455,12 @@ def compile(fn, device=None):
     @functools.wraps(fn)
     def compiled(*args):
         if all(type(a) is Tensor for a in args):
-            hit = fast.get((tuple((a.dtype, tuple(a.shape), a.device) for a in args), _compiler_flags()))
+            hit = fast.get((tuple([a._signature for a in args]), _compiler_flags()))
             if hit is not None:
                 plan, workspace, out, to_host, key = hit
                 latest[:] = [key]
+                if to_host is None:
+                    return plan.run_in(workspace, list(args))[0]
                 outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
 
                 def returned(_):
@@ -494,8 +496,9 @@ def compile(fn, device=None):
             written, written_scalars, written_arguments = plans[latest[0]][2]
             plain = not (written or written_scalars or written_arguments or plans[latest[0]][3] is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
-                signature = tuple((a.dtype, tuple(a.shape), a.device) for a in args)
-                fast[signature, _compiler_flags()] = (plan, workspace, out, to_host, latest[0])
+                signature = tuple([a._signature for a in args])
+                lone = isinstance(out, TracedTensor) and to_host == [False]
+                fast[signature, _compiler_flags()] = (plan, workspace, out, None if lone else to_host, latest[0])
         if ran:
             weights = _weights(args)
             written, written_scalars, written_arguments = plans[latest[0]][2]

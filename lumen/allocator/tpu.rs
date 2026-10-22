@@ -145,6 +145,17 @@ impl TpuAllocator {
         }
     }
 
+    fn ready_event(&self) -> Result<Option<NonNull<c_void>>, String> {
+        let reserved = self.lock();
+        let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
+            return Ok(None);
+        };
+        match NonNull::new(unsafe { ffi::lumen_tpu_ready_event(buffer.as_ptr()) }) {
+            Some(event) => Ok(Some(event)),
+            None => Err(error()),
+        }
+    }
+
     fn rows(&self) -> usize {
         self.lock().as_ref().map_or(0, |r| r.size / ROW)
     }
@@ -212,6 +223,11 @@ pub(crate) fn rows_of(index: usize, ptrs: &[*const u8]) -> Result<Vec<i32>, Stri
 pub(crate) fn wait(index: usize) -> Result<(), String> {
     let allocator = allocators().get(&index).cloned();
     allocator.map_or(Ok(()), |a| a.wait())
+}
+
+pub(crate) fn ready_event(index: usize) -> Result<Option<NonNull<c_void>>, String> {
+    let allocator = allocators().get(&index).cloned();
+    allocator.map_or(Ok(None), |a| a.ready_event())
 }
 
 pub(crate) fn rows(index: usize) -> Result<usize, String> {

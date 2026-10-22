@@ -122,29 +122,30 @@ int lumen_mps_compile_kernel(const char *source, const char *name, const char *k
     return 0;
 }
 
-int lumen_mps_launch_kernel(const char *name,
-                            const void *const *buffers,
-                            size_t nbuffers,
-                            const void *const *args,
-                            const size_t *arg_lens,
-                            size_t nargs,
-                            const size_t *grid,
-                            int groups,
-                            int timed,
-                            lumen_mps_completion done,
-                            void *context) {
-    id<MTLComputePipelineState> pso = pipeline(name);
+static constexpr size_t kMaxBuffers = 31;
+
+static int launch(id<MTLComputePipelineState> pso,
+                  const void *const *buffers,
+                  size_t nbuffers,
+                  const void *const *args,
+                  const size_t *arg_lens,
+                  size_t nargs,
+                  const size_t *grid,
+                  int groups,
+                  int timed,
+                  lumen_mps_completion done,
+                  void *context) {
     for (int d = 0; d < 3; ++d) {
         if (grid[d] == 0 || grid[d] > UINT32_MAX) {
             return -2;
         }
     }
-    if (pso == nil) {
+    if (pso == nil || nbuffers + nargs > kMaxBuffers) {
         return -2;
     }
     @autoreleasepool {
-        std::vector<id<MTLBuffer>> bound(nbuffers);
-        std::vector<size_t> offsets(nbuffers, 0);
+        id<MTLBuffer> bound[kMaxBuffers];
+        size_t offsets[kMaxBuffers] = {0};
         for (size_t i = 0; i < nbuffers; ++i) {
             if (buffers[i] != nullptr) {
                 bound[i] = lumen_mps_buffer(buffers[i], &offsets[i]);
@@ -177,5 +178,48 @@ int lumen_mps_launch_kernel(const char *name,
         lumen_mps_stream_encoded(done, context);
     }
     return 0;
+}
+
+void *lumen_mps_pipeline(const char *name) {
+    id<MTLComputePipelineState> pso = pipeline(name);
+    return pso == nil ? nullptr : (__bridge_retained void *)pso;
+}
+
+int lumen_mps_launch_pipeline(void *pso,
+                              const void *const *buffers,
+                              size_t nbuffers,
+                              const void *const *args,
+                              const size_t *arg_lens,
+                              size_t nargs,
+                              const size_t *grid,
+                              int groups,
+                              int timed,
+                              lumen_mps_completion done,
+                              void *context) {
+    return launch((__bridge id<MTLComputePipelineState>)pso,
+                  buffers,
+                  nbuffers,
+                  args,
+                  arg_lens,
+                  nargs,
+                  grid,
+                  groups,
+                  timed,
+                  done,
+                  context);
+}
+
+int lumen_mps_launch_kernel(const char *name,
+                            const void *const *buffers,
+                            size_t nbuffers,
+                            const void *const *args,
+                            const size_t *arg_lens,
+                            size_t nargs,
+                            const size_t *grid,
+                            int groups,
+                            int timed,
+                            lumen_mps_completion done,
+                            void *context) {
+    return launch(pipeline(name), buffers, nbuffers, args, arg_lens, nargs, grid, groups, timed, done, context);
 }
 }

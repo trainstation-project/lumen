@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use crate::device::cuda::CUDA;
 
-mod ffi {
+pub(crate) mod ffi {
     use std::ffi::c_void;
 
     #[link(name = "cudart")]
@@ -13,6 +13,9 @@ mod ffi {
         pub fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
         pub fn cudaStreamWaitEvent(stream: *mut c_void, event: *mut c_void, flags: u32) -> i32;
         pub fn cudaEventDestroy(event: *mut c_void) -> i32;
+        pub fn cudaEventQuery(event: *mut c_void) -> i32;
+        pub fn cudaEventSynchronize(event: *mut c_void) -> i32;
+        pub fn cudaEventElapsedTime(ms: *mut f32, start: *mut c_void, end: *mut c_void) -> i32;
     }
 }
 

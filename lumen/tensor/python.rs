@@ -386,6 +386,18 @@ impl PyTensor {
     }
 
     #[getter]
+    fn _signature<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(&'static str, Bound<'py, pyo3::types::PyTuple>, String)> {
+        Ok((
+            dtype_name(self.inner.dtype()),
+            pyo3::types::PyTuple::new(py, self.inner.shape())?,
+            self.inner.device().to_string(),
+        ))
+    }
+
+    #[getter]
     fn strides(&self) -> Vec<usize> {
         self.inner.strides().to_vec()
     }

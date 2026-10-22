@@ -336,6 +336,45 @@ int lumen_tpu_wait(void *buffer) {
            awaited(ready.event, "waiting for a TPU program");
 }
 
+void *lumen_tpu_ready_event(void *buffer) {
+    PJRT_Buffer_ReadyEvent_Args ready = {.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE,
+                                         .buffer = (PJRT_Buffer *)buffer};
+    return failed(api->PJRT_Buffer_ReadyEvent(&ready), "recording a TPU event") ? NULL : ready.event;
+}
+
+typedef struct {
+    void (*done)(void *, int);
+    void *user;
+} ready_callback;
+
+static void on_ready(PJRT_Error *e, void *arg) {
+    ready_callback callback = *(ready_callback *)arg;
+    free(arg);
+    int ok = !failed(e, "a TPU event");
+    callback.done(callback.user, ok);
+}
+
+int lumen_tpu_on_ready(void *event, void (*done)(void *, int), void *user) {
+    if (!HAS(PJRT_Event_OnReady)) {
+        snprintf(error, sizeof error, "the PJRT API lacks PJRT_Event_OnReady");
+        return 1;
+    }
+    ready_callback *callback = malloc(sizeof *callback);
+    callback->done = done;
+    callback->user = user;
+    PJRT_Event_OnReady_Args args = {.struct_size = PJRT_Event_OnReady_Args_STRUCT_SIZE,
+                                    .event = (PJRT_Event *)event,
+                                    .callback = on_ready,
+                                    .user_arg = callback};
+    if (failed(api->PJRT_Event_OnReady(&args), "recording a TPU event")) {
+        free(callback);
+        return 1;
+    }
+    return 0;
+}
+
+void lumen_tpu_event_free(void *event) { awaited((PJRT_Event *)event, "freeing a TPU event"); }
+
 int lumen_tpu_memory(int index, int64_t *in_use, int64_t *limit) {
     if (lumen_tpu_device_count() <= index || index < 0 || !HAS(PJRT_Device_MemoryStats)) {
         snprintf(error, sizeof error, "no memory statistics for TPU device %d", index);

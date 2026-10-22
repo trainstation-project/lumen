@@ -1024,10 +1024,10 @@ impl Plan {
                         .iter()
                         .chain([&step.output])
                         .chain(&step.extra_outputs)
-                        .map(|&(b, _)| tensor(b).clone())
+                        .map(|&(b, _)| tensor(b).holding())
                         .collect();
                     if step.scratch.is_some() {
-                        keep.push(workspace.clone());
+                        keep.push(workspace.holding());
                     }
                     crate::kernels::mps::encode(step, &args, out, scratch, keep)?;
                 }

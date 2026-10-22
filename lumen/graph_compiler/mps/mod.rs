@@ -298,6 +298,56 @@ fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
 
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+#[derive(Clone, Copy, PartialEq)]
+enum Launch {
+    Attention,
+    AttentionBackward,
+    AtomicDot,
+    Gemm,
+    Rows,
+    Reduction,
+    Transpose,
+    Elementwise,
+}
+
+static LAUNCHES: Mutex<BTreeMap<String, Launch>> = Mutex::new(BTreeMap::new());
+
+fn launch_of(body: &Graph) -> Launch {
+    if attention::of_body(body).is_some() {
+        Launch::Attention
+    } else if attention::backward_of_body(body).is_some() {
+        Launch::AttentionBackward
+    } else if split_k::atomic_dot(body).is_some() {
+        Launch::AtomicDot
+    } else if codegen::gemm_dot(body).is_some() {
+        Launch::Gemm
+    } else if !codegen::row_reductions(body).is_empty() {
+        Launch::Rows
+    } else if codegen::reduction_root(body).is_some() {
+        Launch::Reduction
+    } else if codegen::transpose_tiling(body).is_some() {
+        Launch::Transpose
+    } else {
+        Launch::Elementwise
+    }
+}
+
+pub(super) fn record_launch(name: &str, body: &Graph) {
+    let launch = launch_of(body);
+    let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    launches.insert(name.to_owned(), launch);
+}
+
+fn launch_kind(name: &str, body: &Graph) -> Launch {
+    let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&launch) = launches.get(name) {
+        return launch;
+    }
+    let launch = launch_of(body);
+    launches.insert(name.to_owned(), launch);
+    launch
+}
+
 #[cfg(feature = "python")]
 pub(crate) fn fusion_source(name: &str) -> Option<String> {
     let sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -328,6 +378,7 @@ pub(crate) fn encode(
         }
     }
     let inputs = device.as_slice();
+    let kind = launch_kind(name, body);
     let attention_buffers = |dropout: bool| -> Result<Vec<*const u8>, String> {
         let state = match (dropout, scalars.len()) {
             (false, _) | (true, 2) => 0,
@@ -341,7 +392,8 @@ pub(crate) fn encode(
         buffers.extend(state);
         Ok(buffers)
     };
-    if let Some(a) = attention::of_body(body) {
+    if kind == Launch::Attention {
+        let a = attention::of_body(body).expect("an attention");
         let batch: usize = a.batch.iter().product();
         let queries = match codegen::decodes(&a) {
             true => a.sq,
@@ -351,7 +403,8 @@ pub(crate) fn encode(
         let grid = Grid::Groups([queries, batch, 1]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
-    if let Some(b) = attention::backward_of_body(body) {
+    if kind == Launch::AttentionBackward {
+        let b = attention::backward_of_body(body).expect("an attention backward");
         let batch: usize = b.batch.iter().product();
         let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let buffers = attention_buffers(b.dropout.is_some())?;
@@ -367,7 +420,8 @@ pub(crate) fn encode(
         let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
-    if let Some(dot) = split_k::atomic_dot(body) {
+    if kind == Launch::AtomicDot {
+        let dot = split_k::atomic_dot(body).expect("a split-K dot");
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
         let plan = crate::kernels::dot_general::mps::plan_matmul(
@@ -409,7 +463,8 @@ pub(crate) fn encode(
             step.label,
         );
     }
-    if let Some(dot) = codegen::gemm_dot(body) {
+    if kind == Launch::Gemm {
+        let dot = codegen::gemm_dot(body).expect("a matmul");
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
         let strides = |v: Var| {
@@ -478,7 +533,7 @@ pub(crate) fn encode(
         };
         return launch(&kernel, &buffers, &args, grid, keep, step.label);
     }
-    if !codegen::row_reductions(body).is_empty() {
+    if kind == Launch::Rows {
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
@@ -491,7 +546,8 @@ pub(crate) fn encode(
             step.label,
         );
     }
-    if let Some(root) = codegen::reduction_root(body) {
+    if kind == Launch::Reduction {
+        let root = codegen::reduction_root(body).expect("a reduction");
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
         let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));
@@ -511,7 +567,8 @@ pub(crate) fn encode(
             keep,
         );
     }
-    if let Some(tiling) = codegen::transpose_tiling(body) {
+    if kind == Launch::Transpose {
+        let tiling = codegen::transpose_tiling(body).expect("a tiled transpose");
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);

@@ -30,6 +30,13 @@ pub(crate) mod ffi {
             region: *mut *mut c_void,
         ) -> i32;
         pub fn lumen_tpu_wait(buffer: *mut c_void) -> i32;
+        pub fn lumen_tpu_ready_event(buffer: *mut c_void) -> *mut c_void;
+        pub fn lumen_tpu_on_ready(
+            event: *mut c_void,
+            done: unsafe extern "C" fn(*mut c_void, i32),
+            user: *mut c_void,
+        ) -> i32;
+        pub fn lumen_tpu_event_free(event: *mut c_void);
         pub fn lumen_tpu_profiler_start() -> i32;
         pub fn lumen_tpu_profiler_stop(data: *mut *const u8, size: *mut usize) -> i32;
         pub fn lumen_tpu_profiler_free();

@@ -1,9 +1,10 @@
 use std::ffi::c_void;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::Tensor;
 use crate::device::Device;
 use crate::profiler::GpuContext;
+use crate::stream::event::Recorded;
 
 unsafe extern "C" {
     fn lumen_mps_stream_flush() -> u64;
@@ -11,6 +12,11 @@ unsafe extern "C" {
     fn lumen_mps_stream_host_time() -> f64;
     fn lumen_mps_stream_command_buffer() -> *mut c_void;
     fn lumen_mps_stream_mark(done: Completion, context: *mut c_void);
+    fn lumen_mps_stream_fence();
+}
+
+pub(crate) fn fence() {
+    unsafe { lumen_mps_stream_fence() };
 }
 
 pub fn command_buffer() -> *mut c_void {
@@ -21,6 +27,7 @@ pub(crate) fn mark() {
     let submission = Box::new(Submission {
         _tensors: Vec::new(),
         profile: None,
+        event: None,
     });
     unsafe { lumen_mps_stream_mark(completed, Box::into_raw(submission).cast()) };
 }
@@ -55,6 +62,7 @@ impl super::Stream for MpsStream {
 struct Submission {
     _tensors: Vec<Tensor>,
     profile: Option<Profiled>,
+    event: Option<Arc<Recorded>>,
 }
 
 struct Profiled {
@@ -84,8 +92,18 @@ pub(crate) fn submit(
     let submission = Box::new(Submission {
         _tensors: tensors,
         profile,
+        event: None,
     });
     (Box::into_raw(submission).cast(), completed, timed)
+}
+
+pub(crate) fn submit_event(recorded: Arc<Recorded>) -> (*mut c_void, Completion) {
+    let submission = Box::new(Submission {
+        _tensors: Vec::new(),
+        profile: None,
+        event: Some(recorded),
+    });
+    (Box::into_raw(submission).cast(), completed)
 }
 
 pub(crate) fn cancel(context: *mut c_void) {
@@ -96,6 +114,9 @@ unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f6
     let submission = unsafe { Box::from_raw(context.cast::<Submission>()) };
     if ok == 0 {
         eprintln!("{}: an MPS command buffer failed", crate::LIBRARY_NAME);
+    }
+    if let Some(event) = &submission.event {
+        event.set(gpu_start, gpu_end, ok != 0);
     }
     if let Some(p) = &submission.profile {
         let to_ns = |t: f64| (p.profiler_ns as f64 + (t - p.host_seconds) * 1e9).max(0.0) as u64;

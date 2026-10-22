@@ -175,7 +175,31 @@ void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
     os_unfair_lock_unlock(&lock);
 }
 
+static id<MTLEvent> barrier = nil;
+static uint64_t barrier_value = 0;
+
 extern "C" {
+void lumen_mps_stream_fence(void) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil) {
+        return;
+    }
+    os_unfair_lock_lock(&lock);
+    if (commands == nil) {
+        commands = [queue commandBuffer];
+    }
+    if (encoder != nil) {
+        end_encoder();
+    }
+    if (barrier == nil) {
+        barrier = [queue.device newEvent];
+    }
+    ++barrier_value;
+    [commands encodeSignalEvent:barrier value:barrier_value];
+    [commands encodeWaitForEvent:barrier value:barrier_value];
+    os_unfair_lock_unlock(&lock);
+}
+
 uint64_t lumen_mps_stream_flush(void) {
     os_unfair_lock_lock(&lock);
     commit();

@@ -8,7 +8,7 @@ primitive dispatch in [`lumen/kernels/mps/mod.rs`](../../mps/mod.rs).
 
 | File | Contents |
 | --- | --- |
-| `kernels.metal` | `fill_<bytes>`, `iota_<dt>` and `random_bits` kernels. |
+| `kernels.metal` | `fill_<bytes>`, `iota_<dt>` and `random_bits` kernels, and `event_marker` (an empty kernel `lumen.Event` times on MPS, `kernels/mps::mark_event`). |
 | `mod.rs` | `encode`: one arm per primitive, building args and grid, then `launch_step`. |
 
 ## Kernels
