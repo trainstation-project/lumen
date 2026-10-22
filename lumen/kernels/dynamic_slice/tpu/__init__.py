@@ -124,19 +124,28 @@ def program(spec):
                 across = ucp // bn
                 count = urp // bm * across
 
-                def moved(t):
+                def load(t):
                     a, b = pl.multiple_of(t // across * bm, tile), pl.multiple_of(t % across * bn, LANES)
+                    return pl.make_async_copy(u.at[k, pl.ds(a, bm), pl.ds(b, bn)], slots.at[t % 2], flights.at[0, t % 2])
+
+                def store(t):
+                    a, b = t // across * bm, t % across * bn
                     rows_at, cols_at = pl.multiple_of(r0 + a, tile), pl.multiple_of(c0 + b, LANES)
                     to = out.at[at, pl.ds(rows_at, bm), pl.ds(cols_at, bn)]
-                    return pl.make_async_copy(u.at[k, pl.ds(a, bm), pl.ds(b, bn)], to, sem)
+                    return pl.make_async_copy(slots.at[t % 2], to, flights.at[1, t % 2])
+
+                load(_int(0)).start()
 
                 @pl.loop(0, count)
                 def _(t):
-                    moved(t).start()
+                    load(t).wait()
+                    store(t).start()
 
-                @pl.loop(0, count)
-                def _(t):
-                    moved(t).wait()
+                    @pl.when(t + 1 < count)
+                    def _():
+                        load(t + 1).start()
+
+                    store(t).wait()
 
             pl.when(~aligned)(blocks)
 
