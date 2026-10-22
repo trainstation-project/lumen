@@ -30,9 +30,10 @@ only `serve.py` runs benchmarks. Opened from disk, the page cannot load
 
 ## Notes
 
-* Bandwidth is bytes read plus written over device time. The memory roof is
-  the best bandwidth any op reaches at the largest size; at mid sizes data
-  stays in the GPU's cache and bandwidth can exceed it.
+* Bandwidth is bytes read plus written over device time, compared with the
+  device's memory bandwidth (its spec, `spec_memory_gbs`); at mid sizes data
+  stays in the GPU's cache and bandwidth can exceed it. Hovering a chart's
+  point shows its numbers.
 * Elementwise ops are memory-bound, so they get bandwidth charts, not a
   roofline; a roofline belongs to compute-bound ops.
 * `data/primitives.json` and `data/fusions.json` were measured and read at

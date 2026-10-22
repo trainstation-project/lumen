@@ -74,6 +74,10 @@
   .lx-chart text { fill: var(--muted); font: 11px var(--sans); }
   .lx-tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12); padding: 4px 8px; font-size: 12px; white-space: nowrap; z-index: 2; }
   .lx-tip[hidden] { display: none; }
+  .lx-tip-title { font-weight: 600; margin-bottom: 4px; }
+  .lx-tip table { width: auto; border-collapse: collapse; font-size: 12px; }
+  .lx-tip th { position: static; background: none; border: 0; padding: 1px 12px 1px 0; color: var(--muted); font-weight: 400; }
+  .lx-tip td { border: 0; padding: 1px 0; text-align: right; font-variant-numeric: tabular-nums; }
   .lx-back { font-size: 13px; text-decoration: none; }
   .lx-op-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
   .lx-op-title h2 { font: 400 28px/1.1 var(--mono); margin: 0; }
@@ -131,7 +135,7 @@
     <div class="lx-tiles" id="perf-tiles"></div>
     <div class="lx-card">
       <h2>Bandwidth by size</h2>
-      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over device time, float32. The memory roof is the best bandwidth measured at 64M elements, past the GPU's cache. Up to a few million elements the data stays in that cache, so bandwidth there can exceed DRAM's.</p>
+      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over device time, float32, against the device's memory bandwidth. Up to a few million elements the data stays in the GPU's cache, so bandwidth there can exceed it. Hover a point for its numbers; click it for the op's page.</p>
       <div class="lx-legend" id="bw-legend"></div>
       <div class="lx-chart" id="bw-size"></div>
     </div>
@@ -192,12 +196,12 @@ try {
 }
 const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
-let BIG, SMALL, ROOF_BW, BENCHED, OK_ROWS, SIZE_TICKS;
+let BIG, SMALL, DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS;
 function derive() {
   OK_ROWS = PERF.rows.filter((r) => !r.error);
   BIG = Math.max(...OK_ROWS.map((r) => r.n));
   SMALL = Math.min(...OK_ROWS.map((r) => r.n));
-  ROOF_BW = Math.max(...OK_ROWS.filter((r) => r.n === BIG).map((r) => r.gbs));
+  DEVICE_BW = PERF.spec_memory_gbs;
   BENCHED = [...new Set(PERF.rows.map((r) => r.op))];
   SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
   document.getElementById("torch-version").textContent = PERF.torch || "(not installed)";
@@ -216,6 +220,23 @@ const fmt = {
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const bold = (t) => el("b", null, String(t));
 const rowOf = (op, dtype, n) => OK_ROWS.find((r) => r.op === op && r.dtype === dtype && r.n === n);
+const ITEM = { float32: 4, bfloat16: 2, bool: 1 };
+function detail(r, who, us, timing) {
+  const loaded = r.n * r.inputs, stored = r.n;
+  const bytes = loaded * ITEM[r.dtype] + stored * ITEM[r.out_dtype];
+  const gbs = bytes / us / 1e3;
+  const rows = [
+    ["Elements loaded", fmt.int(loaded)],
+    ["Elements stored", fmt.int(stored)],
+    ["Bytes loaded", fmt.int(loaded * ITEM[r.dtype])],
+    ["Bytes stored", fmt.int(stored * ITEM[r.out_dtype])],
+    ["BW", fmt.gbs(gbs)],
+    ["BW %", `${fmt.pct(gbs / DEVICE_BW)} of ${DEVICE_BW} GB/s`],
+  ];
+  if (r.compute_bound) rows.push(["FLOPs", fmt.int(r.flops)], ["FLOP/s", `${(r.flops / us / 1e3).toFixed(1)} GFLOP/s`]);
+  rows.push([`Time (${timing})`, fmt.us(us)]);
+  return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
+}
 const torchGbs = (r) => r.torch_wall_us == null ? null : r.bytes / r.torch_wall_us / 1e3;
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 const known = (a) => a.filter((v) => v != null && !Number.isNaN(v));
@@ -286,9 +307,14 @@ function table(id, columns, rows, sort) {
 }
 
 const tip = document.getElementById("lx-tip");
-function showTip(evt, lines) {
-  tip.replaceChildren(...lines.map((l, i) => el("div", null, l)));
-  tip.firstChild.style.color = "var(--muted)";
+function showTip(evt, info) {
+  const t = el("table");
+  for (const [k, v] of info.rows) {
+    const tr = el("tr");
+    tr.append(el("th", null, k), el("td", null, v));
+    t.append(tr);
+  }
+  tip.replaceChildren(el("div", "lx-tip-title", info.title), t);
   tip.hidden = false;
   const pad = 12, w = tip.offsetWidth, h = tip.offsetHeight;
   let x = evt.pageX + pad, y = evt.pageY + pad;
@@ -341,11 +367,13 @@ function chart(id, spec) {
     }
   }
   for (const p of spec.points || []) {
-    const c = svgEl("circle", { cx: sx(p.x), cy: sy(clip(p.y, spec.y.domain)), r: p.r || 4, fill: p.color, stroke: "var(--panel)", "stroke-width": 1, opacity: p.opacity ?? 1 });
-    c.addEventListener("mousemove", (e) => showTip(e, p.tip));
-    c.addEventListener("mouseleave", hideTip);
-    if (p.href) { c.style.cursor = "pointer"; c.addEventListener("click", () => { location.hash = p.href; }); }
-    svg.append(c);
+    const cx = sx(p.x), cy = sy(clip(p.y, spec.y.domain));
+    const c = svgEl("circle", { cx, cy, r: p.r || 4, fill: p.color, stroke: "var(--panel)", "stroke-width": 1, opacity: p.opacity ?? 1, "pointer-events": "none" });
+    const hit = svgEl("circle", { cx, cy, r: 9, fill: "transparent" });
+    hit.addEventListener("mousemove", (e) => { showTip(e, p.tip); c.setAttribute("r", (p.r || 4) + 2); });
+    hit.addEventListener("mouseleave", () => { hideTip(); c.setAttribute("r", p.r || 4); });
+    if (p.href) { hit.style.cursor = "pointer"; hit.addEventListener("click", () => { location.hash = p.href; }); }
+    svg.append(c, hit);
   }
   box.append(svg);
 }
@@ -426,7 +454,7 @@ function opSummary(op) {
   const bf16 = PERF.rows.filter((r) => r.op === op && r.dtype === "bfloat16");
   return {
     op, formula: big.formula, kind: big.kind,
-    gbs: big.gbs, roof: big.gbs / ROOF_BW,
+    gbs: big.gbs, roof: big.gbs / DEVICE_BW,
     best: Math.max(...f32.map((r) => r.gbs)), bestAt: f32.reduce((a, r) => r.gbs > a.gbs ? r : a).n,
     vsTorch: big.torch_wall_us == null ? null : big.torch_wall_us / big.lumen_wall_us,
     smallLumen: small.lumen_wall_us, smallTorch: small.torch_wall_us,
@@ -438,9 +466,9 @@ function drawPerformance() {
   const sums = BENCHED.map(opSummary);
   const tiles = document.getElementById("perf-tiles");
   tiles.replaceChildren();
-  tile(tiles, "Memory roof", ROOF_BW.toFixed(0), "GB/s", [[`measured, ${fmt.pct(ROOF_BW / PERF.spec_memory_gbs)} of the ${PERF.spec_memory_gbs} GB/s spec`]]);
+  tile(tiles, "Device bandwidth", String(DEVICE_BW), "GB/s", [[`${PERF.device}'s memory bandwidth (spec)`]]);
   const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-  tile(tiles, "Median of roof", fmt.pct(median(sums.map((s) => s.roof))), null, [[`at ${fmt.n(BIG)} elements, float32, over `, bold(sums.length), " ops"]]);
+  tile(tiles, "Median of device", fmt.pct(median(sums.map((s) => s.roof))), null, [[`at ${fmt.n(BIG)} elements, float32, over `, bold(sums.length), " ops"]]);
   const compared = sums.filter((s) => s.vsTorch != null);
   if (compared.length) {
     const top = compared.reduce((a, s) => s.vsTorch > a.vsTorch ? s : a);
@@ -450,23 +478,22 @@ function drawPerformance() {
 
   const lines = BENCHED.map((op) => ({ points: OK_ROWS.filter((r) => r.op === op && r.dtype === "float32").map((r) => [r.n, r.gbs]), color: "var(--s3)", width: 1.5, opacity: .55 }));
   const pts = OK_ROWS.filter((r) => r.dtype === "float32").map((r) => ({ x: r.n, y: r.gbs, r: 3, color: "var(--s1)", opacity: .8, href: `op-${r.op}`,
-    tip: [`${r.op} · ${fmt.n(r.n)} elements`, fmt.gbs(r.gbs), fmt.us(r.device_us)] }));
+    tip: detail(r, "lumen", r.device_us, "device") }));
   chart("bw-size", {
     label: "Bandwidth by size", x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: { domain: [1, 1000], ticks: [1, 10, 100, 1000], fmt: fmt.num, label: "GB/s" },
     lines: [...lines,
-      { points: [[SIZE_TICKS[0], ROOF_BW], [SIZE_TICKS.at(-1), ROOF_BW]], color: "var(--roof)", width: 1.5, label: `${ROOF_BW.toFixed(0)} GB/s measured`, labelAt: [SIZE_TICKS[0], ROOF_BW], anchor: "start" },
-      { points: [[SIZE_TICKS[0], PERF.spec_memory_gbs], [SIZE_TICKS.at(-1), PERF.spec_memory_gbs]], color: "var(--faint)", width: 1.5, dash: true }],
+      { points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" }],
     points: pts,
   });
-  legend("bw-legend", [["one op", "var(--s3)"], ["measured memory roof", "var(--roof)"], ["spec, 273 GB/s", "var(--faint)", true]]);
+  legend("bw-legend", [["one op", "var(--s3)"], [`device bandwidth, ${DEVICE_BW} GB/s`, "var(--roof)", true]]);
 
   const ratio = (v) => { const s = el("span", v >= 1.05 ? "lx-good" : v <= 0.95 ? "lx-bad" : null, fmt.x(v)); return s; };
   table("perf-table", [
     { key: "op", label: "Op", kind: "name", render: (s) => { const a = el("a", null, s.op); a.href = `#op-${s.op}`; return a; } },
     { key: "formula", label: "Computes" },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (s) => fmt.gbs(s.gbs) },
-    { key: "roof", label: "Of roof", kind: "num", render: (s) => fmt.pct(s.roof) },
+    { key: "roof", label: "Of device", kind: "num", render: (s) => fmt.pct(s.roof) },
     { key: "best", label: "Best (in cache)", kind: "num", wide: true, render: (s) => `${fmt.gbs(s.best)} at ${fmt.n(s.bestAt)}` },
     { key: "vsTorch", label: "vs PyTorch", kind: "num", render: (s) => s.vsTorch == null ? "—" : ratio(s.vsTorch) },
     { key: "smallLumen", label: "Small call", kind: "num", wide: true, render: (s) => `${fmt.us(s.smallLumen)} vs ${maybe(s.smallTorch, fmt.us)}` },
@@ -513,7 +540,7 @@ function drawOp(op) {
   const tiles = document.getElementById("op-tiles");
   tiles.replaceChildren();
   const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL);
-  tile(tiles, "Bandwidth", s.gbs.toFixed(0), "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(fmt.pct(s.roof)), " of the measured roof"]]);
+  tile(tiles, "Bandwidth", s.gbs.toFixed(0), "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(fmt.pct(s.roof)), ` of the device's ${DEVICE_BW} GB/s`]]);
   tile(tiles, "Time", fmt.us(big.device_us), null, [[`device time for ${fmt.int(big.bytes)} bytes`]]);
   tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`wall time at ${fmt.n(BIG)}: ${fmt.us(big.lumen_wall_us)} vs ${maybe(big.torch_wall_us, fmt.us)}`]]);
   tile(tiles, "Small call", fmt.us(small.lumen_wall_us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small.torch_wall_us, fmt.us))]]);
@@ -528,12 +555,14 @@ function drawOp(op) {
     if (!rs.length) continue;
     items.push([name, color]);
     lines.push({ points: rs.map((r) => [r.n, val(r)]), color });
-    for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color, tip: [`${name} · ${fmt.n(r.n)}`, fmt.gbs(val(r))] });
+    const torch = name.startsWith("PyTorch");
+    for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color,
+      tip: torch ? detail(r, "PyTorch", r.torch_wall_us, "wall") : detail(r, "lumen", r.device_us, "device") });
   }
-  lines.push({ points: [[SIZE_TICKS[0], ROOF_BW], [SIZE_TICKS.at(-1), ROOF_BW]], color: "var(--roof)", width: 1.5, label: `${ROOF_BW.toFixed(0)} GB/s`, labelAt: [SIZE_TICKS[0], ROOF_BW], anchor: "start" });
+  lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
   chart("op-bw", { label: `${op} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: { domain: [1, 1000], ticks: [1, 10, 100, 1000], fmt: fmt.num, label: "GB/s" }, lines, points });
-  legend("op-bw-legend", [...items, ["measured roof", "var(--roof)"]]);
+  legend("op-bw-legend", [...items, ["device bandwidth", "var(--roof)", true]]);
 
   const f32 = OK_ROWS.filter((r) => r.op === op && r.dtype === "float32");
   const tseries = [["lumen device", "var(--s1)", (r) => r.device_us], ["lumen wall", "var(--s2)", (r) => r.lumen_wall_us], ["PyTorch wall", "var(--s3)", (r) => r.torch_wall_us]];
@@ -542,7 +571,8 @@ function drawOp(op) {
     const have = f32.filter((r) => val(r) != null);
     if (!have.length) continue;
     tl.push({ points: have.map((r) => [r.n, val(r)]), color });
-    for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, tip: [`${name} · ${fmt.n(r.n)}`, fmt.us(val(r))] });
+    const [who, timing] = name.split(" ");
+    for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, tip: detail(r, who, val(r), timing) });
   }
   const maxT = Math.max(...f32.flatMap((r) => known([r.device_us, r.lumen_wall_us, r.torch_wall_us])));
   const tTop = 10 ** Math.ceil(Math.log10(maxT));

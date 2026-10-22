@@ -148,13 +148,16 @@ def measure(name):
 
 def update(data, name):
     rows, code = measure(name)
-    data["rows"] = [r for r in data.get("rows", []) if r["op"] != name] + rows
+    order = list(OPS)
+    kept = [r for r in data.get("rows", []) if r["op"] != name] + rows
+    data["rows"] = sorted(kept, key=lambda r: order.index(r["op"]) if r["op"] in order else len(order))
     data.setdefault("code", {})[name] = code
     data.setdefault("measured_at", {})[name] = datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds"
     )
     data["device"] = device_name()
-    data["torch"] = torch.__version__ if torch is not None else None
+    if torch is not None:
+        data["torch"] = torch.__version__
     data["spec_memory_gbs"] = SPEC_MEMORY_GBS.get(data["device"], data.get("spec_memory_gbs"))
     return data
 
