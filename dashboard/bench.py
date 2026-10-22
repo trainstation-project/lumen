@@ -56,53 +56,23 @@ def device_name():
     return platform.processor() or platform.machine()
 
 
-FLUSH_BYTES = 256 << 20
-
-
-class Flush:
-    def __init__(self):
-        self.lumen_buffer = lumen.from_numpy(np.ones(FLUSH_BYTES // 4, np.float32)).to("mps")
-        self.lumen_fn = lumen.compile(lambda z: prims.add(prims.mul(z, z), z))
-        self.lumen_fn(self.lumen_buffer)
-        lumen.mps.synchronize()
-
-    def lumen(self):
-        self.lumen_fn(self.lumen_buffer)
-
-
-def kernel_time(f, args, flush, reps=20):
-    f(*args)
-    for _ in range(10):
-        flush.lumen()
-    pairs = []
-    flush.lumen()
-    start, end = lumen.Event("mps", enable_timing=True), lumen.Event("mps", enable_timing=True)
-    start.record()
-    for _ in range(reps):
-        f(*args)
-    end.record()
-    pairs.append((start, end))
-    pairs[-1][1].synchronize()
-    return min(start.elapsed_time(end) for start, end in pairs) * 1e3 / reps
-
-
 ROTATION_BYTES = 512 << 20
 
 
-def call_time(run, sets, sync, batches=3):
+def per_call(run, sets, sync, batches=3):
     reps = max(len(sets), 20)
     outs = [None] * len(sets)
     for args in sets:
         run(*args)
-    sync()
     best = None
     for _ in range(batches):
-        t = time.perf_counter()
+        sync()
+        start = time.perf_counter()
         for i in range(reps):
             k = i % len(sets)
             outs[k] = run(*sets[k])
         sync()
-        us = (time.perf_counter() - t) / reps * 1e6
+        us = (time.perf_counter() - start) * 1e6 / reps
         best = us if best is None else min(best, us)
     return best
 
@@ -120,12 +90,11 @@ def kernel_code(f, args):
     return {"kernel": kernel, "plan": files.get("plan.txt", "").strip()}
 
 
-def measure(name):
+def measure(name, measured=lambda row: None):
     kind, formula, lf, tf, arity = OPS[name]
     rng = np.random.default_rng(0)
     rows, code = [], None
     f = lumen.compile(lf)
-    flush = Flush()
     for dtype in DTYPES:
         if name == "cast" and dtype != "float32":
             continue
@@ -137,10 +106,11 @@ def measure(name):
                 out = f(*lt)
             except Exception as e:
                 rows.append({"op": name, "dtype": dtype, "n": n, "error": str(e).splitlines()[0][:200]})
+                measured(rows[-1])
                 continue
             out_dtype = "bool" if kind == "compare" else ("bfloat16" if name == "cast" else dtype)
-            per_call = n * (arity * ITEM[dtype] + ITEM[out_dtype])
-            sets = rotation(per_call)
+            nbytes = n * (arity * ITEM[dtype] + ITEM[out_dtype])
+            sets = rotation(nbytes)
             lumen_sets = [lt] + [
                 [lumen.from_numpy(a.copy()).to("mps").to(dtype=dtype) for a in arrays] for _ in range(sets - 1)
             ]
@@ -152,20 +122,19 @@ def measure(name):
                 "out_dtype": out_dtype,
                 "n": n,
                 "inputs": arity,
-                "bytes": per_call,
+                "bytes": nbytes,
                 "flops": n,
-                "device_us": round(kernel_time(f, lt, flush), 3),
-                "lumen_call_us": round(call_time(f, lumen_sets, lumen.mps.synchronize), 3),
-                "torch_call_us": None,
+                "lumen_us": round(per_call(f, lumen_sets, lumen.mps.synchronize), 3),
+                "torch_us": None,
                 "matches_torch": None,
                 "rotation": sets,
             }
             del lumen_sets
-            row["gbs"] = round(row["bytes"] / row["device_us"] / 1e3, 2)
+            row["gbs"] = round(row["bytes"] / row["lumen_us"] / 1e3, 2)
             if torch is not None:
                 tt = [torch.from_numpy(a).to("mps").to(getattr(torch, dtype)) for a in arrays]
                 torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
-                row["torch_call_us"] = round(call_time(tf, torch_sets, torch.mps.synchronize), 3)
+                row["torch_us"] = round(per_call(tf, torch_sets, torch.mps.synchronize), 3)
                 del torch_sets
                 torch.mps.empty_cache()
                 got = out.to("cpu")
@@ -176,14 +145,15 @@ def measure(name):
                     np.allclose(got.astype(np.float64), want.astype(np.float64), rtol=2e-2, atol=1e-2)
                 )
             rows.append(row)
+            measured(row)
             if code is None and dtype == "float32" and n == 1 << 20:
                 code = kernel_code(f, lt)
-            print(name, dtype, n, row["device_us"], row["gbs"], file=sys.stderr)
+            print(name, dtype, n, row["lumen_us"], row["torch_us"], row["gbs"], file=sys.stderr)
     return rows, code
 
 
-def update(data, name):
-    rows, code = measure(name)
+def update(data, name, measured=lambda row: None):
+    rows, code = measure(name, measured)
     order = list(OPS)
     kept = [r for r in data.get("rows", []) if r["op"] != name] + rows
     data["rows"] = sorted(kept, key=lambda r: order.index(r["op"]) if r["op"] in order else len(order))

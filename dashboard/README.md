@@ -23,20 +23,21 @@ only `serve.py` runs benchmarks. Opened from disk, the page cannot load
 | --- | --- |
 | `index.html` | The page: tabs, tables, charts (plain SVG) and an op's page (`#op-<name>`), drawn from `data/`. Its **Run benchmark** button posts to `serve.py`. |
 | `serve.py` | Serves this folder on `127.0.0.1` and `POST /api/benchmark/<op>`: runs `bench.update` for that op, saves `data/elementwise_mps.json` and returns it. One benchmark at a time. |
-| `bench.py` | The elementwise benchmark (`OPS`): each op at 4K to 64M elements in float32 and bfloat16, lumen's kernel time (one call after a 256 MB cache flush, between two `lumen.Event`s, best of 20, as PyTorch's Inductor benchmarks), time per call for lumen and PyTorch (back to back through enough separate inputs, 512 MiB a pass, that none is in cache), a check against PyTorch, and the generated Metal kernel and plan. `python dashboard/bench.py [op ...]` re-runs ops (all by default). |
+| `bench.py` | The elementwise benchmark (`OPS`): each op at 4K to 64M elements in float32 and bfloat16, time per call for lumen and PyTorch, both measured alike (back to back through enough separate inputs, 512 MiB a pass, that none is in cache, on the host clock between device synchronizes, launch cost included; best of 3 passes), a check against PyTorch, and the generated Metal kernel and plan. `python dashboard/bench.py [op ...]` re-runs ops (all by default). |
 | `data/primitives.json` | Each primitive's status on CPU, MPS, TPU and CUDA (`runs`, `partial`, `missing`), the kernel that ran it and why it is missing. |
 | `data/fusions.json` | The fusions each backend's graph compiler performs, with the pass that does it. |
-| `data/elementwise_mps.json` | The benchmark's rows (`op`, `dtype`, `n`, `bytes`, `device_us`, `gbs`, `lumen_call_us`, `torch_call_us`, `rotation`, ...), each op's kernel and plan (`code`) and when it was measured (`measured_at`). |
+| `data/elementwise_mps.json` | The benchmark's rows (`op`, `dtype`, `n`, `bytes`, `lumen_us`, `torch_us`, `gbs`, `rotation`, ...), each op's kernel and plan (`code`) and when it was measured (`measured_at`). |
 
 ## Notes
 
-* Bandwidth is bytes read plus written over kernel time on a cold cache,
+* Bandwidth is bytes read plus written over time per call on cold inputs,
   compared with the device's memory bandwidth (its spec, `spec_memory_gbs`).
   Nothing is timed on data left in cache, so no point exceeds DRAM's
-  bandwidth. PyTorch on MPS has no kernel timer (its profiler has no MPS
-  activity, and MPS events time command buffers, with a floor near 100 µs),
-  so it is compared by time per call. Hovering a chart's point shows its
-  numbers.
+  bandwidth. lumen and PyTorch are timed the same way, on the host clock
+  around a pass of calls. Not with device events: PyTorch's MPS events
+  only start when its command buffer is committed, at the end of the
+  pass, so they leave out its launch cost. Hovering a chart's point shows
+  its numbers.
 * Elementwise ops are memory-bound, so they get bandwidth charts, not a
   roofline; a roofline belongs to compute-bound ops.
 * `data/primitives.json` and `data/fusions.json` were measured and read at

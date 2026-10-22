@@ -136,13 +136,13 @@
     <div class="lx-tiles" id="perf-tiles"></div>
     <div class="lx-card">
       <h2>Bandwidth by size</h2>
-      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over kernel time on a cold cache, float32, against the device's memory bandwidth. Small calls are bound by launch and latency, not bytes; from about 4M elements every op runs near the same bandwidth. Hover a point for its numbers; click it for the op's page.</p>
+      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over time per call on cold inputs, float32, against the device's memory bandwidth. Small calls are bound by launch and latency, not bytes; from about 4M elements every op runs near the same bandwidth. Hover a point for its numbers; click it for the op's page.</p>
       <div class="lx-legend" id="bw-legend"></div>
       <div class="lx-chart" id="bw-size"></div>
     </div>
     <div class="lx-card">
       <h2>Elementwise ops on MPS</h2>
-      <p class="lx-note">At 64M elements unless noted. Bandwidth is from lumen's kernel time: one call on a cold cache (a 256 MB flush before it), timed with lumen.Event (the GPU's timestamp counters), best of 20, as PyTorch's Inductor benchmarks kernels. vs PyTorch compares time per call with PyTorch <span id="torch-version"></span> on MPS: calls back to back, rotating through enough separate inputs that none is in cache: above 1× lumen is faster. Small call is that time at 4,096 elements, where launch cost dominates.</p>
+      <p class="lx-note">At 64M elements unless noted. Times are per call, for lumen and PyTorch <span id="torch-version"></span> on MPS. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes. vs PyTorch above 1× is lumen faster. Small call is the time at 4,096 elements, where launch cost dominates.</p>
       <div class="lx-scroll"><table id="perf-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
@@ -159,13 +159,13 @@
     <div class="lx-grid2">
       <div class="lx-card">
         <h2>Bandwidth by size</h2>
-        <p class="lx-note">lumen from its kernel time on a cold cache. PyTorch has no MPS kernel timer, so its bandwidth is from its time per call: back to back on cold inputs, including its launch cost.</p>
+        <p class="lx-note">Bytes read and written over time per call, for lumen and PyTorch. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes.</p>
         <div class="lx-legend" id="op-bw-legend"></div>
         <div class="lx-chart" id="op-bw"></div>
       </div>
       <div class="lx-card">
         <h2>Time per call</h2>
-        <p class="lx-note">Kernel time is one call on a cold cache; time per call is calls back to back on cold inputs, where launches and kernels overlap. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
+        <p class="lx-note">Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
         <div class="lx-legend" id="op-time-legend"></div>
         <div class="lx-chart" id="op-time"></div>
       </div>
@@ -197,13 +197,15 @@ try {
 }
 const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
-let BIG, SMALL, DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS;
+let BIG, SMALL, DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
+const KNOWN = {};
 function derive() {
   OK_ROWS = PERF.rows.filter((r) => !r.error);
+  for (const r of PERF.rows) if (r.formula) KNOWN[r.op] = { formula: r.formula, kind: r.kind };
   BIG = Math.max(...OK_ROWS.map((r) => r.n));
   SMALL = Math.min(...OK_ROWS.map((r) => r.n));
   DEVICE_BW = PERF.spec_memory_gbs;
-  BENCHED = [...new Set(PERF.rows.map((r) => r.op))];
+  BENCHED = [...new Set([...PERF.rows.map((r) => r.op), ...Object.keys(PERF.measured_at || {}), ...(measuring ? [measuring] : [])])];
   SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
   document.getElementById("torch-version").textContent = PERF.torch || "(not installed)";
 }
@@ -239,7 +241,7 @@ function detail(r, who, us, timing) {
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
 const DTYPE_COLORS = [["float32", "var(--s1)"], ["bfloat16", "var(--s2)"]];
-const torchGbs = (r) => r.torch_call_us == null ? null : r.bytes / r.torch_call_us / 1e3;
+const torchGbs = (r) => r.torch_us == null ? null : r.bytes / r.torch_us / 1e3;
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 const known = (a) => a.filter((v) => v != null && !Number.isNaN(v));
 
@@ -459,21 +461,22 @@ kindSel.addEventListener("change", drawPrimitives);
 gaps.addEventListener("change", drawPrimitives);
 
 function opSummary(op) {
-  const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL);
+  const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL), bigBf16 = rowOf(op, "bfloat16", BIG);
   const f32 = OK_ROWS.filter((r) => r.op === op && r.dtype === "float32");
   const bf16 = PERF.rows.filter((r) => r.op === op && r.dtype === "bfloat16");
+  const known = KNOWN[op] || {};
   return {
-    op, formula: big.formula, kind: big.kind,
-    gbs: big.gbs, roof: big.gbs / DEVICE_BW,
-    best: Math.max(...f32.map((r) => r.gbs)), bestAt: f32.reduce((a, r) => r.gbs > a.gbs ? r : a).n,
-    vsTorch: big.torch_call_us == null ? null : big.torch_call_us / big.lumen_call_us,
-    smallLumen: small.lumen_call_us, smallTorch: small.torch_call_us,
-    bf16: !bf16.length ? "not measured" : bf16.some((r) => r.error) ? "no kernel" : fmt.gbs(rowOf(op, "bfloat16", BIG).gbs),
+    op, formula: known.formula ?? "", kind: known.kind ?? "",
+    gbs: big ? big.gbs : null, roof: big ? big.gbs / DEVICE_BW : null,
+    best: f32.length ? Math.max(...f32.map((r) => r.gbs)) : null, bestAt: f32.length ? f32.reduce((a, r) => r.gbs > a.gbs ? r : a).n : null,
+    vsTorch: big && big.torch_us != null ? big.torch_us / big.lumen_us : null,
+    smallLumen: small ? small.lumen_us : null, smallTorch: small ? small.torch_us : null,
+    bf16: bf16.some((r) => r.error) ? "no kernel" : bigBf16 ? fmt.gbs(bigBf16.gbs) : "not measured",
   };
 }
 
 function drawPerformance() {
-  const sums = BENCHED.map(opSummary);
+  const sums = BENCHED.filter((op) => rowOf(op, "float32", BIG)).map(opSummary);
   const tiles = document.getElementById("perf-tiles");
   tiles.replaceChildren();
   tile(tiles, "Device bandwidth", String(DEVICE_BW), "GB/s", [[`${PERF.device}'s memory bandwidth (spec)`]]);
@@ -488,7 +491,7 @@ function drawPerformance() {
 
   const lines = BENCHED.map((op) => ({ points: OK_ROWS.filter((r) => r.op === op && r.dtype === "float32").map((r) => [r.n, r.gbs]), color: "var(--s3)", width: 1.5, opacity: .55 }));
   const pts = OK_ROWS.filter((r) => r.dtype === "float32").map((r) => ({ x: r.n, y: r.gbs, r: 3, color: "var(--s1)", opacity: .8, href: `op-${r.op}`,
-    tip: detail(r, "lumen", r.device_us, "kernel") }));
+    tip: detail(r, "lumen", r.lumen_us, "per call") }));
   chart("bw-size", {
     label: "Bandwidth by size", x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: bandwidthAxis(pts.map((p) => p.y)),
@@ -517,23 +520,58 @@ const runStatus = document.getElementById("op-status");
 runButton.addEventListener("click", async () => {
   const op = current.op;
   const started = performance.now();
+  const previous = PERF;
+  const expected = (op === "cast" ? 1 : DTYPE_COLORS.length) * SIZE_TICKS.length;
+  let got = 0, final = null;
   runButton.disabled = true;
   runStatus.className = "lx-run-status";
-  runStatus.textContent = `Running ${op} on this machine's GPU at ${SIZE_TICKS.length} sizes in float32 and bfloat16; this takes about a minute.`;
+  runStatus.textContent = `Running ${op} on this machine's GPU: ${expected} measurements, about a minute.`;
+  measuring = op;
+  PERF = { ...PERF, rows: PERF.rows.filter((r) => r.op !== op) };
+  derive();
+  draw();
   try {
     const r = await fetch(`api/benchmark/${encodeURIComponent(op)}`, { method: "POST" });
-    const body = r.headers.get("Content-Type")?.includes("json") ? await r.json() : null;
-    if (!body) throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
-    if (!r.ok) throw new Error(body.error || `The server answered ${r.status}.`);
-    PERF = body;
-    derive();
-    draw();
+    if (!r.headers.get("Content-Type")?.includes("json")) {
+      throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
+    }
+    if (!r.ok) throw new Error((await r.json()).error || `The server answered ${r.status}.`);
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let at;
+      while ((at = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, at).trim();
+        buffered = buffered.slice(at + 1);
+        if (!line) continue;
+        const message = JSON.parse(line);
+        if (message.error) throw new Error(message.error);
+        if (message.data) final = message.data;
+        if (message.row) {
+          got += 1;
+          PERF.rows.push(message.row);
+          runStatus.textContent = `Measured ${got} of ${expected}: ${message.row.dtype} at ${fmt.n(message.row.n)} elements.`;
+          derive();
+          draw();
+        }
+      }
+    }
+    if (!final) throw new Error("The benchmark stopped before it finished; the saved data is unchanged.");
+    PERF = final;
     runStatus.textContent = `Done in ${((performance.now() - started) / 1000).toFixed(0)} s; the charts and tables show the new run.`;
   } catch (e) {
+    PERF = previous;
     runStatus.textContent = e.message;
     runStatus.classList.add("lx-bad");
   } finally {
+    measuring = null;
     runButton.disabled = false;
+    derive();
+    draw();
   }
 });
 
@@ -550,10 +588,10 @@ function drawOp(op) {
   const tiles = document.getElementById("op-tiles");
   tiles.replaceChildren();
   const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL);
-  tile(tiles, "Bandwidth", s.gbs.toFixed(0), "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(fmt.pct(s.roof)), ` of the device's ${DEVICE_BW} GB/s`]]);
-  tile(tiles, "Time", fmt.us(big.device_us), null, [[`device time for ${fmt.int(big.bytes)} bytes`]]);
-  tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`time per call at ${fmt.n(BIG)}: ${fmt.us(big.lumen_call_us)} vs ${maybe(big.torch_call_us, fmt.us)}`]]);
-  tile(tiles, "Small call", fmt.us(small.lumen_call_us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small.torch_call_us, fmt.us))]]);
+  tile(tiles, "Bandwidth", maybe(s.gbs, (v) => v.toFixed(0)), s.gbs == null ? null : "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(maybe(s.roof, fmt.pct)), ` of the device's ${DEVICE_BW} GB/s`]]);
+  tile(tiles, "Time", maybe(big?.lumen_us, fmt.us), null, [[big ? `per call for ${fmt.int(big.bytes)} bytes` : `float32 at ${fmt.n(BIG)} elements`]]);
+  tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`time per call at ${fmt.n(BIG)}: ${maybe(big?.lumen_us, fmt.us)} vs ${maybe(big?.torch_us, fmt.us)}`]]);
+  tile(tiles, "Small call", maybe(small?.lumen_us, fmt.us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small?.torch_us, fmt.us))]]);
   tile(tiles, "bfloat16", s.bf16.endsWith("GB/s") ? s.bf16.replace(" GB/s", "") : "—", s.bf16.endsWith("GB/s") ? "GB/s" : null,
     [[s.bf16 === "no kernel" ? "no bfloat16 kernel on MPS yet" : `at ${fmt.n(BIG)} elements`]]);
 
@@ -566,7 +604,7 @@ function drawOp(op) {
       if (!rs.length) continue;
       lines.push({ points: rs.map((r) => [r.n, val(r)]), color, dot: torch, width: torch ? 2.5 : 2 });
       for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color, hollow: torch,
-        tip: torch ? detail(r, "PyTorch", r.torch_call_us, "per call") : detail(r, "lumen", r.device_us, "kernel") });
+        tip: torch ? detail(r, "PyTorch", r.torch_us, "per call") : detail(r, "lumen", r.lumen_us, "per call") });
     }
   }
   lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
@@ -575,8 +613,7 @@ function drawOp(op) {
   legend("op-bw-legend", [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"], ["device bandwidth", "var(--roof)", true]]);
 
   const mine = OK_ROWS.filter((r) => r.op === op);
-  const tseries = [[(r) => r.lumen_call_us, "lumen", "per call", {}], [(r) => r.torch_call_us, "PyTorch", "per call", { dot: true, hollow: true }],
-    [(r) => r.device_us, "lumen", "kernel", { dash: true }]];
+  const tseries = [[(r) => r.lumen_us, "lumen", "per call", {}], [(r) => r.torch_us, "PyTorch", "per call", { dot: true, hollow: true }]];
   const tl = [], tp = [];
   for (const [dtype, color] of dtypes) {
     for (const [val, who, timing, style] of tseries) {
@@ -586,11 +623,11 @@ function drawOp(op) {
       for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, hollow: style.hollow, tip: detail(r, who, val(r), timing) });
     }
   }
-  const maxT = Math.max(...mine.flatMap((r) => known([r.device_us, r.lumen_call_us, r.torch_call_us])));
+  const maxT = Math.max(100, ...mine.flatMap((r) => known([r.lumen_us, r.torch_us])));
   const tTop = 10 ** Math.ceil(Math.log10(maxT));
   chart("op-time", { label: `${op} time`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: { domain: [1, tTop], ticks: pow10(1, tTop), fmt: (v) => fmt.us(v), label: "time per call" }, lines: tl, points: tp });
-  legend("op-time-legend", [...dtypes, ["lumen per call", "var(--muted)"], ["PyTorch per call", "var(--muted)", "dot"], ["lumen kernel", "var(--muted)", true]]);
+  legend("op-time-legend", [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"]]);
 
   const code = PERF.code[op];
   document.getElementById("op-kernel").textContent = code ? code.kernel : "Not captured for this op.";
@@ -599,10 +636,9 @@ function drawOp(op) {
   table("op-table", [
     { key: "dtype", label: "dtype" }, { key: "n", label: "Elements", kind: "num", render: (r) => fmt.int(r.n) },
     { key: "bytes", label: "Bytes", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.int(r.bytes) },
-    { key: "device_us", label: "Device", kind: "num", render: (r) => r.error ? "" : fmt.us(r.device_us) },
+    { key: "lumen_us", label: "lumen", kind: "num", render: (r) => r.error ? "" : fmt.us(r.lumen_us) },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (r) => r.error ? "" : fmt.gbs(r.gbs) },
-    { key: "lumen_call_us", label: "lumen per call", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.us(r.lumen_call_us) },
-    { key: "torch_call_us", label: "PyTorch per call", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_call_us, fmt.us) },
+    { key: "torch_us", label: "PyTorch", kind: "num", render: (r) => r.error ? "" : maybe(r.torch_us, fmt.us) },
     { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "yes" : "no") },
   ], rows, opSort);
 }

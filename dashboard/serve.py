@@ -24,13 +24,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not running.acquire(blocking=False):
             return self.reply(409, {"error": "a benchmark is already running; try again when it finishes"})
         try:
-            data = bench.update(bench.load(), name)
-            bench.save(data)
-            self.reply(200, data)
-        except Exception as e:
-            self.reply(500, {"error": f"{type(e).__name__}: {e}"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            try:
+                data = bench.update(bench.load(), name, lambda row: self.line({"row": row}))
+                bench.save(data)
+                self.line({"data": data})
+            except Exception as e:
+                self.line({"error": f"{type(e).__name__}: {e}"})
         finally:
             running.release()
+
+    def line(self, body):
+        self.wfile.write(json.dumps(body, ensure_ascii=False).encode() + b"\n")
+        self.wfile.flush()
 
     def reply(self, status, body):
         payload = json.dumps(body, ensure_ascii=False).encode()
