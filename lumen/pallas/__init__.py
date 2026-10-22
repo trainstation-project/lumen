@@ -569,6 +569,10 @@ def _bits(name, x, y):
     return TracedTensor(x.graph, x.graph.bits(name, [x.var, _like(x, y).var]))
 
 
+def roll(x, shift, axis):
+    return TracedTensor(x.graph, x.graph.bits("roll", [x.var, _i32(shift).var], axis=axis))
+
+
 def shift_left(x, y):
     return _bits("shift_left", x, y)
 

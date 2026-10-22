@@ -73,13 +73,14 @@ impl PyKernel {
         self.inner.apply(primitive, &inputs).map_err(err)
     }
 
-    #[pyo3(signature = (name, inputs, dtype = None, multiple = None))]
+    #[pyo3(signature = (name, inputs, dtype = None, multiple = None, axis = None))]
     fn bits(
         &mut self,
         name: &str,
         inputs: Vec<Var>,
         dtype: Option<&str>,
         multiple: Option<usize>,
+        axis: Option<usize>,
     ) -> PyResult<Var> {
         let op = match (name, dtype, multiple) {
             ("bitcast", Some(d), _) => Op::Bitcast(parse_dtype(d)?),
@@ -88,6 +89,7 @@ impl PyKernel {
             ("and", ..) => Op::And,
             ("or", ..) => Op::Or,
             ("multiple_of", _, Some(m)) => Op::MultipleOf(m),
+            ("roll", ..) => Op::Roll(axis.ok_or_else(|| err("roll takes an axis".to_string()))?),
             _ => return Err(err(format!("no TPU op {name} of these parameters"))),
         };
         self.inner.bits(op, &inputs).map_err(err)

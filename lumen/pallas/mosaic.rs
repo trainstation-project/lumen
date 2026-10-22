@@ -278,6 +278,10 @@ impl Emitter<'_> {
             Op::ShiftRight => self.op("arith.shrui", &refs(&ins), "", &out_types),
             Op::And => self.op("arith.andi", &refs(&ins), "", &out_types),
             Op::Or => self.op("arith.ori", &refs(&ins), "", &out_types),
+            Op::Roll(axis) => {
+                let attrs = format!("dimension = {axis} : si32");
+                self.op("tpu.dynamic_rotate", &refs(&ins), &attrs, &out_types)
+            }
             Op::MultipleOf(m) => {
                 let attrs = format!("multiple = {m} : i32");
                 self.op("tpu.assume_multiple", &refs(&ins), &attrs, &out_types)
