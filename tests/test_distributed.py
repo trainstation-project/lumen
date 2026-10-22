@@ -250,7 +250,9 @@ def one_chip(rank):
 @pytest.mark.tpu
 @pytest.mark.all_devices
 def test_a_process_per_tpu_chip():
-    if lumen.tpu.device_count() < 4:
+    count = "import lumen; print(lumen.tpu.device_count())"
+    chips = int(subprocess.run([sys.executable, "-c", count], capture_output=True, text=True, check=True).stdout)
+    if chips < 4:
         pytest.skip("needs 4 TPU chips")
     results = launch(TPU_PROGRAM, 4, one_chip)
     for rank, r in enumerate(results):

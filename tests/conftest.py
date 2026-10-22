@@ -14,7 +14,7 @@ def pytest_collection_modifyitems(config, items):
     is not available: those that plan for it without placing a tensor there
     would fail, not skip."""
     for device in ("mps", "cuda", "tpu"):
-        if getattr(lumen, device).is_available():
+        if available(config, device):
             continue
         skip = pytest.mark.skip(reason=f"{device} is not available")
         for item in items:
@@ -67,6 +67,14 @@ def device_counts(config):
         out = subprocess.run(run, capture_output=True, text=True, check=True).stdout
         config.device_counts = json.loads(out.splitlines()[-1])
     return config.device_counts
+
+
+def available(config, device):
+    if device not in PINNED:
+        return getattr(lumen, device).is_available()
+    worker = getattr(config, "workerinput", None)
+    counts = worker["device_counts"] if worker else device_counts(config)
+    return counts[device] > 0
 
 
 @pytest.hookimpl(optionalhook=True)
