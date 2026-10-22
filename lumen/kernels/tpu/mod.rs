@@ -625,6 +625,9 @@ pub(crate) fn encode(
         }
         Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
         Primitive::Gather { .. } => super::gather::tpu::encode(index, step, inputs, output),
+        Primitive::DynamicUpdateSlice => {
+            super::dynamic_slice::tpu::encode(index, step, inputs, output)
+        }
         Primitive::PallasCall { kernel, .. } => {
             let n = step.inputs.len();
             let rows: Vec<*const u8> = inputs[..n]
