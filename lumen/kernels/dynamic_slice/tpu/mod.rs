@@ -131,8 +131,8 @@ pub(crate) fn encode(
             (at[rank - 2] as usize).is_multiple_of(tile)
                 && (at[rank - 1] as usize).is_multiple_of(LANES)
         });
-    let direct = aligned && !ordered;
-    let resident = match (ordered || direct) && small && one_slab {
+    let direct = fixed.is_some() && aligned && !ordered;
+    let resident = match fixed.is_some() && (ordered || direct) && small && one_slab {
         true => {
             let (top, bottom) = windows.iter().fold((usize::MAX, 0), |(t, b), w| {
                 (t.min(w[rank - 2].0), b.max(w[rank - 2].1.min(rp)))
