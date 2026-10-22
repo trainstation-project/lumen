@@ -33,7 +33,7 @@ def _waited(copies):
 def program(spec):
     shape, update, dtype, tile = spec["shape"], spec["update"], spec["dtype"], spec["tile"]
     bm, bn, gm, width = spec["bm"], spec["bn"], spec["gm"], spec["width"]
-    copied, cbm, count, fixed = spec["copy"], spec["copy_rows"], spec["count"], spec["static"]
+    copied, count, fixed = spec["copy"], spec["count"], spec["static"]
     depth, lag = spec["depth"], 0 if spec["ordered"] else 1
     resident = spec["resident"]
     rank = len(shape)
@@ -75,10 +75,12 @@ def program(spec):
             def moved(i, o):
                 o[...] = i[...]
 
-            whole_rows = pl.BlockSpec((None, cbm, cp), lambda l, i: (l, i, 0))
-            pl.emit_pipeline(moved, grid=(math.prod(lead), rp // cbm), in_specs=[whole_rows], out_specs=[whole_rows])(
-                x, out
-            )
+            for first, length, step in spec["copied_rows"]:
+                rows_of = pl.BlockSpec((None, step, cp), lambda l, i: (l, i, 0))
+                within = (slice(None), pl.ds(first, length))
+                pl.emit_pipeline(moved, grid=(math.prod(lead), length // step), in_specs=[rows_of], out_specs=[rows_of])(
+                    x.at[within], out.at[within]
+                )
 
         if fixed:
 

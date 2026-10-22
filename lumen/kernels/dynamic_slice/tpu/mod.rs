@@ -8,7 +8,7 @@ use crate::tensor::scalar::Scalar;
 
 const LANES: usize = 128;
 const STAGED: usize = 1 << 20;
-const STREAMED: usize = 1 << 18;
+const STREAMED: usize = 1 << 19;
 const COPY_BYTES: usize = 2 << 20;
 const DEPTH: usize = 8;
 
@@ -145,25 +145,40 @@ pub(crate) fn encode(
                 .sum();
             let bytes = (bottom - top) * (right - left) * layout.stored.size_of();
             let covered = direct && windows.len() * urp * ucp == (bottom - top) * (right - left);
-            (bytes <= RESIDENT)
-                .then(|| format!("[{top}, {bottom}, {left}, {right}, {slab}, {covered}, {direct}]"))
+            (bytes <= RESIDENT).then_some((top, bottom, left, right, slab, covered))
         }
         false => None,
     };
     let copy = inputs[0] != output.cast_const();
-    let copy_rows = block(
-        rp,
-        tile,
-        (COPY_BYTES / (cp * layout.stored.size_of()) / tile * tile).max(tile),
-    )
-    .unwrap_or(tile);
+    let rows_block = |length: usize| {
+        let cap = (COPY_BYTES / (cp * layout.stored.size_of()) / tile * tile).max(tile);
+        block(length, tile, cap).unwrap_or(tile)
+    };
+    let lone = operand.shape[..rank - 2].iter().product::<usize>() == 1;
+    let ranges = match resident {
+        Some((top, bottom, 0, right, _, true)) if right == cp && lone => {
+            vec![(0, top), (bottom, rp - bottom)]
+        }
+        _ => vec![(0, rp)],
+    };
+    let copied_rows: Vec<String> = ranges
+        .into_iter()
+        .filter(|&(_, length)| length > 0)
+        .map(|(first, length)| format!("[{first}, {length}, {}]", rows_block(length)))
+        .collect();
+    let resident = resident.map_or(
+        "null".to_string(),
+        |(top, bottom, left, right, slab, covered)| {
+            format!("[{top}, {bottom}, {left}, {right}, {slab}, {covered}, {direct}]")
+        },
+    );
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}, \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}, \"resident\": {}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copied_rows\": [{}], \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}, \"resident\": {resident}",
         operand.shape,
         update.shape,
         operand.dtype.full_name(),
+        copied_rows.join(", "),
         fixed.is_some(),
-        resident.as_deref().unwrap_or("null")
     );
     let n = step.inputs.len();
     let rows_of: Vec<*const u8> = inputs[..n]

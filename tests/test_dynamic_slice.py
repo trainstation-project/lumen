@@ -85,10 +85,11 @@ def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
     "shape, update, starts",
     [
         ((512, 256), (32, 256), [(0, 0), (32, 0), (96, 0), (480, 0)]),
+        ((512, 256), (64, 256), [(64, 0), (128, 0), (192, 0), (256, 0)]),
         ((300, 700), (40, 300), [(13, 77), (0, 0), (290, 500), (64, 128)]),
         ((3, 70, 260), (1, 9, 130), [(1, 5, 3), (0, 0, 0), (2, 61, 130)]),
     ],
-    ids=["aligned", "unaligned", "lead"],
+    ids=["aligned", "tiled", "unaligned", "lead"],
 )
 @pytest.mark.parametrize("in_place", [True, False])
 def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
