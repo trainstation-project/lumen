@@ -356,5 +356,67 @@
  },
  "measured_at": {
   "neg": "2026-10-22T20:34:36+00:00"
+ },
+ "ops": {
+  "neg": {
+   "formula": "−x",
+   "kind": "unary"
+  },
+  "exp": {
+   "formula": "eˣ",
+   "kind": "unary"
+  },
+  "log": {
+   "formula": "ln x",
+   "kind": "unary"
+  },
+  "sqrt": {
+   "formula": "√x",
+   "kind": "unary"
+  },
+  "tanh": {
+   "formula": "tanh x",
+   "kind": "unary"
+  },
+  "logistic": {
+   "formula": "1 / (1 + e⁻ˣ)",
+   "kind": "unary"
+  },
+  "add": {
+   "formula": "x + y",
+   "kind": "binary"
+  },
+  "sub": {
+   "formula": "x − y",
+   "kind": "binary"
+  },
+  "mul": {
+   "formula": "x · y",
+   "kind": "binary"
+  },
+  "div": {
+   "formula": "x / y",
+   "kind": "binary"
+  },
+  "max": {
+   "formula": "max(x, y)",
+   "kind": "binary"
+  },
+  "eq": {
+   "formula": "x = y → bool",
+   "kind": "compare"
+  },
+  "lt": {
+   "formula": "x < y → bool",
+   "kind": "compare"
+  },
+  "select": {
+   "formula": "p < x ? x : y",
+   "kind": "ternary"
+  },
+  "cast": {
+   "formula": "float32 → bfloat16",
+   "kind": "convert"
+  }
  }
 }

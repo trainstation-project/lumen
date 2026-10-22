@@ -205,6 +205,7 @@ def load():
 
 
 def save(data):
+    data["ops"] = {name: {"formula": formula, "kind": kind} for name, (kind, formula, *_) in OPS.items()}
     DATA.parent.mkdir(parents=True, exist_ok=True)
     tmp = DATA.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")

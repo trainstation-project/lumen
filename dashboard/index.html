@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lumen backends</title>
+<title>Lumen</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --fg: #16181d; --muted: #5d6573; --line: #dde1e7; --grid: #eceff3;
@@ -12,12 +12,14 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     --serif: Georgia, "Times New Roman", serif;
     --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --hl-key: #a1287a; --hl-type: #1d6f8a; --hl-num: #9a5b00; --hl-com: #6a737d; --hl-attr: #6f42c1;
     color-scheme: light;
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #111317; --panel: #191c21; --fg: #e9ebef; --muted: #9aa2b1; --line: #2c313a; --grid: #23272e;
-            --ok: #5cc28f; --warn: #e2b04a; --bad: #f0727a; --link: #7fb0f5;
-            --s1: #6fa3f7; --s2: #f08a4b; --s3: #8a93a3; --s4: #c08bf0; --roof: #e9ebef; --faint: #3a404b; color-scheme: dark; }
+  :root[data-theme="dark"] {
+    --bg: #111317; --panel: #191c21; --fg: #e9ebef; --muted: #9aa2b1; --line: #2c313a; --grid: #23272e;
+    --ok: #5cc28f; --warn: #e2b04a; --bad: #f0727a; --link: #7fb0f5;
+    --s1: #6fa3f7; --s2: #f08a4b; --s3: #8a93a3; --s4: #c08bf0; --roof: #e9ebef; --faint: #3a404b; color-scheme: dark;
+    --hl-key: #f28bc6; --hl-type: #6cc7e0; --hl-num: #f0b46a; --hl-com: #8b949e; --hl-attr: #c4a5f5;
   }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
   [hidden] { display: none !important; }
@@ -25,24 +27,16 @@
   .lx { display: flex; flex-direction: column; gap: 24px; max-width: 1280px; margin: 0 auto;
         padding-block: 32px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
   .lx-head { display: flex; flex-direction: column; gap: 6px; }
+  .lx-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .lx-theme { font: inherit; font-size: 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
   h1 { font: 400 32px/1.1 var(--serif); margin: 0; }
   .lx-take { color: var(--muted); margin: 0; max-width: 75ch; }
-  .lx-take b { color: var(--fg); font-weight: 600; }
   .lx-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
   .lx-tab { font: inherit; background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; color: var(--muted); cursor: pointer; margin-bottom: -1px; text-decoration: none; }
   .lx-tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
   :focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
   .lx-panel { display: flex; flex-direction: column; gap: 24px; }
-  .lx-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: 12px; }
-  .lx-tile, .lx-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-  .lx-tile h3 { margin: 0; font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
-  .lx-big { font: 400 32px/1.1 var(--serif); font-variant-numeric: tabular-nums; }
-  .lx-big small { font: 14px var(--sans); color: var(--muted); }
-  .lx-of { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .lx-of b { color: var(--fg); font-weight: 600; }
-  .lx-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); }
-  .lx-bar span { display: block; height: 100%; }
-  .lx-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr)); gap: 12px; }
+  .lx-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   .lx-card h2 { margin: 0; font-size: 17px; font-weight: 500; }
   .lx-note { margin: 0; color: var(--muted); font-size: 12px; max-width: 80ch; }
   .lx-legend, .lx-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
@@ -68,7 +62,6 @@
   .lx-chip[data-v="missing"], .lx-chip[data-v="wrong"] { color: var(--bad); }
   a.lx-chip { background: color-mix(in srgb, var(--ok) 12%, transparent); }
   a.lx-chip::after { content: " ›"; }
-  .lx-good { color: var(--ok); }
   .lx-bad { color: var(--bad); }
   .lx-chart { position: relative; width: 100%; min-height: 280px; }
   .lx-chart svg { display: block; width: 100%; overflow: visible; }
@@ -87,6 +80,8 @@
   .lx-run button { font: inherit; font-size: 13px; color: var(--bg); background: var(--fg); border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   .lx-run button:disabled { opacity: .5; cursor: progress; }
   .lx-run-status { max-width: 70ch; }
+  .hl-key { color: var(--hl-key); } .hl-type { color: var(--hl-type); } .hl-num { color: var(--hl-num); }
+  .hl-com { color: var(--hl-com); font-style: italic; } .hl-attr { color: var(--hl-attr); }
   pre { margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; font: 12px/1.5 var(--mono); max-height: 26rem; }
   @media (max-width: 40rem) { .lx-wide { display: none; } }
 </style>
@@ -94,19 +89,18 @@
 <body>
 <div class="lx">
   <header class="lx-head">
-    <h1>lumen backends</h1>
+    <div class="lx-title"><h1>Lumen</h1><button class="lx-theme" id="lx-theme" type="button"></button></div>
     <p class="lx-take" id="lx-take"></p>
   </header>
   <nav class="lx-tabs" role="tablist" id="lx-tabs">
-    <a class="lx-tab" role="tab" id="tab-support" href="#support">Support</a>
-    <a class="lx-tab" role="tab" id="tab-performance" href="#performance">Performance (MPS)</a>
+    <a class="lx-tab" role="tab" id="tab-support" href="#support">Ops</a>
+    <a class="lx-tab" role="tab" id="tab-fusion" href="#fusion">Compiler Fusion</a>
   </nav>
 
   <section id="support" role="tabpanel" class="lx-panel">
-    <div class="lx-tiles" id="lx-tiles"></div>
     <div class="lx-card">
       <h2>Primitives by device</h2>
-      <p class="lx-note">Each primitive run as a compiled program on small inputs and checked against the CPU result: on an Apple M4 Pro GPU (MPS) and a TPU v6e, at commit 5def44c. CUDA from the code. An MPS cell with › opens that op's performance page.</p>
+      <p class="lx-note">Each primitive run as a compiled program on small inputs and checked against the CPU result: on an Apple M4 Pro GPU (MPS) and a TPU v6e, at commit 5def44c. CUDA from the code. An MPS cell with › opens that op's page.</p>
       <div class="lx-legend">
         <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
         <span><i class="lx-chip" data-v="partial">partial</i> some shapes only</span>
@@ -125,6 +119,10 @@
       </div>
       <div class="lx-scroll"><table id="prim-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
+  </section>
+
+
+  <section id="fusion" role="tabpanel" class="lx-panel" hidden>
     <div class="lx-card">
       <h2>Fusions by device</h2>
       <p class="lx-note">What each backend's graph compiler fuses, from its pass pipeline. The CPU runs each primitive on its own, and CUDA plans take the CPU's path.</p>
@@ -132,55 +130,33 @@
     </div>
   </section>
 
-  <section id="performance" role="tabpanel" class="lx-panel" hidden>
-    <div class="lx-tiles" id="perf-tiles"></div>
-    <div class="lx-card">
-      <h2>Bandwidth by size</h2>
-      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over time per call on cold inputs, float32, against the device's memory bandwidth. Small calls are bound by launch and latency, not bytes; from about 4M elements every op runs near the same bandwidth. Hover a point for its numbers; click it for the op's page.</p>
-      <div class="lx-legend" id="bw-legend"></div>
-      <div class="lx-chart" id="bw-size"></div>
-    </div>
-    <div class="lx-card">
-      <h2>Elementwise ops on MPS</h2>
-      <p class="lx-note">At 64M elements unless noted. Times are per call, for lumen and PyTorch <span id="torch-version"></span> on MPS. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best. vs PyTorch above 1× is lumen faster. Small call is the time at 4,096 elements, where launch cost dominates.</p>
-      <div class="lx-scroll"><table id="perf-table"><thead><tr></tr></thead><tbody></tbody></table></div>
-    </div>
-  </section>
-
   <section id="op" class="lx-panel" hidden>
-    <a class="lx-back" href="#performance">‹ All elementwise ops</a>
+    <a class="lx-back" href="#support">‹ Ops</a>
     <div class="lx-op-title"><h2 id="op-name"></h2><span id="op-formula"></span></div>
     <div class="lx-run">
       <button id="op-run" type="button">Run benchmark</button>
       <span id="op-measured"></span>
       <span id="op-status" class="lx-run-status" role="status"></span>
     </div>
-    <div class="lx-tiles" id="op-tiles"></div>
-    <div class="lx-grid2">
-      <div class="lx-card">
-        <h2>Bandwidth by size</h2>
-        <p class="lx-note">Bytes read and written over time per call, for lumen and PyTorch. A point can rise above the device's bandwidth: each call writes its output where the last did (lumen's into its plan, PyTorch's into the block its allocator just freed), so up to a few MB of output stays in the GPU's cache and its writes need not reach DRAM; only reads are cold. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best.</p>
-        <div class="lx-legend" id="op-bw-legend"></div>
-        <div class="lx-chart" id="op-bw"></div>
-      </div>
-      <div class="lx-card">
-        <h2>Time per call</h2>
-        <p class="lx-note">Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
-        <div class="lx-legend" id="op-time-legend"></div>
-        <div class="lx-chart" id="op-time"></div>
-      </div>
+    <div class="lx-card">
+      <div class="lx-legend" id="op-bw-legend"></div>
+      <div class="lx-chart" id="op-bw"></div>
     </div>
     <div class="lx-card">
       <h2>DRAM bandwidth</h2>
-      <p class="lx-note">As above, but each call writes a different output too: lumen's plan runs in a ring of workspaces and PyTorch's outputs are kept alive in a ring, as many as the inputs, so no output stays in the GPU's cache and every byte read and written goes through DRAM. No point can rise above the device's bandwidth. A real program reuses its outputs' memory, as the chart above does.</p>
       <div class="lx-legend" id="op-dram-legend"></div>
       <div class="lx-chart" id="op-dram"></div>
     </div>
     <div class="lx-card">
-      <h2>Generated kernel</h2>
-      <p class="lx-note">The Metal source lumen generates for this op on float32 (one-node loop fusion), then its plan.</p>
-      <pre id="op-kernel"></pre>
-      <pre id="op-plan"></pre>
+      <h2>Codegen</h2>
+      <div class="lx-tabs" role="tablist" id="code-tabs">
+        <button class="lx-tab" role="tab" type="button" aria-selected="true" aria-controls="op-kernel" id="code-tab-kernel">Code</button>
+        <button class="lx-tab" role="tab" type="button" aria-selected="false" aria-controls="op-graph" id="code-tab-graph">Graph</button>
+        <button class="lx-tab" role="tab" type="button" aria-selected="false" aria-controls="op-plan" id="code-tab-plan">Plan</button>
+      </div>
+      <pre id="op-kernel" role="tabpanel" aria-labelledby="code-tab-kernel"></pre>
+      <pre id="op-graph" role="tabpanel" aria-labelledby="code-tab-graph" hidden></pre>
+      <pre id="op-plan" role="tabpanel" aria-labelledby="code-tab-plan" hidden></pre>
     </div>
     <div class="lx-card">
       <h2>Measurements</h2>
@@ -190,6 +166,57 @@
 </div>
 <div class="lx-tip" id="lx-tip" hidden></div>
 <script>
+const METAL_KEYWORDS = new Set(["kernel", "device", "constant", "threadgroup", "thread", "const", "for", "if", "else", "return",
+  "while", "break", "continue", "using", "namespace", "template", "typename", "struct", "inline", "static", "constexpr", "auto"]);
+const METAL_TYPE = /^(?:void|bool|u?char|u?short|u?int|u?long|half|bfloat|float|size_t|vec|array)\d?$/;
+const TOKENS = /(\/\/[^\n]*)|(\[\[[^\]]*\]\])|(^[ \t]*#[^\n]*)|(\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?[uUfFlL]*\b)|(\b[A-Za-z_]\w*\b)/gm;
+function graphAndKernel(source) {
+  const lines = source.split("\n");
+  const body = lines.findIndex((line) => line.trim() && !line.startsWith("//"));
+  const head = lines.slice(0, body < 0 ? lines.length : body);
+  const graph = head.filter((line) => line.startsWith("//")).map((line) => line.replace(/^\/\/ ?/, "")).join("\n");
+  return [graph, lines.slice(head.length).join("\n")];
+}
+
+function highlighted(source) {
+  const out = [];
+  let at = 0;
+  for (const m of source.matchAll(TOKENS)) {
+    const [text, comment, attribute, directive, number, word] = m;
+    const kind = comment || directive ? "hl-com" : attribute ? "hl-attr" : number ? "hl-num"
+      : word && METAL_KEYWORDS.has(word) ? "hl-key" : word && METAL_TYPE.test(word) ? "hl-type" : null;
+    if (!kind) continue;
+    if (m.index > at) out.push(source.slice(at, m.index));
+    const span = document.createElement("span");
+    span.className = kind;
+    span.textContent = text;
+    out.push(span);
+    at = m.index + text.length;
+  }
+  out.push(source.slice(at));
+  return out;
+}
+
+for (const tab of document.querySelectorAll("#code-tabs .lx-tab")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll("#code-tabs .lx-tab")) {
+      const selected = other === tab;
+      other.setAttribute("aria-selected", String(selected));
+      document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
+    }
+  });
+}
+
+const themeButton = document.getElementById("lx-theme");
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  themeButton.textContent = theme === "dark" ? "Light mode" : "Dark mode";
+  try { localStorage.setItem("lx-theme", theme); } catch {}
+}
+let savedTheme = null;
+try { savedTheme = localStorage.getItem("lx-theme"); } catch {}
+setTheme(savedTheme === "dark" ? "dark" : "light");
+themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 (async () => {
 const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(`data/${name}.json: ${r.status}`); return r.json(); });
 let PRIMITIVES, FUSIONS, PERF;
@@ -203,17 +230,15 @@ try {
 }
 const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
-let BIG, SMALL, DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
+let DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
 const KNOWN = {};
 function derive() {
   OK_ROWS = PERF.rows.filter((r) => !r.error);
+  for (const [op, o] of Object.entries(PERF.ops || {})) KNOWN[op] = o;
   for (const r of PERF.rows) if (r.formula) KNOWN[r.op] = { formula: r.formula, kind: r.kind };
-  BIG = Math.max(...OK_ROWS.map((r) => r.n));
-  SMALL = Math.min(...OK_ROWS.map((r) => r.n));
   DEVICE_BW = PERF.spec_memory_gbs;
   BENCHED = [...new Set([...PERF.rows.map((r) => r.op), ...Object.keys(PERF.measured_at || {}), ...(measuring ? [measuring] : [])])];
   SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
-  document.getElementById("torch-version").textContent = PERF.torch || "(not installed)";
 }
 derive();
 
@@ -222,12 +247,10 @@ const fmt = {
   n: (n) => n >= 1 << 20 ? `${n / (1 << 20)}M` : n >= 1024 ? `${n / 1024}K` : String(n),
   gbs: (v) => `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} GB/s`,
   us: (v) => v >= 1000 ? `${(v / 1000).toFixed(2)} ms` : `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} µs`,
-  x: (v) => `${v.toFixed(2)}×`,
   pct: (v) => `${(100 * v).toFixed(0)}%`,
   num: (v) => v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}K` : v >= 1 ? v.toFixed(0) : v.toPrecision(1),
 };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const bold = (t) => el("b", null, String(t));
 const rowOf = (op, dtype, n) => OK_ROWS.find((r) => r.op === op && r.dtype === dtype && r.n === n);
 const ITEM = { float32: 4, bfloat16: 2, bool: 1 };
 function detail(r, who, us, timing) {
@@ -247,20 +270,7 @@ function detail(r, who, us, timing) {
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
 const DTYPE_COLORS = [["float32", "var(--s1)"], ["bfloat16", "var(--s2)"]];
-const torchGbs = (r) => r.torch_us == null ? null : r.bytes / r.torch_us / 1e3;
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
-const known = (a) => a.filter((v) => v != null && !Number.isNaN(v));
-
-function tile(box, title, big, unit, lines) {
-  const t = el("div", "lx-tile");
-  t.append(el("h3", null, title));
-  const b = el("div", "lx-big", big);
-  if (unit) { b.append(" "); b.append(el("small", null, unit)); }
-  t.append(b);
-  for (const l of lines) { const d = el("div", "lx-of"); d.append(...l); t.append(d); }
-  box.append(t);
-  return t;
-}
 
 function chip(value, href) {
   const c = el(href ? "a" : "span", "lx-chip", value);
@@ -409,36 +419,13 @@ function legend(id, items) {
   }
 }
 
-const pow10 = (lo, hi) => { const out = []; for (let k = Math.ceil(Math.log10(lo)); 10 ** k <= hi; k++) out.push(10 ** k); return out; };
 
 
-function drawSupport() {
-  const take = document.getElementById("lx-take");
-  const cov = DEVICES.map(([k, d]) => ({ d, runs: PRIMITIVES.filter((r) => r[k] === "runs").length,
-    partial: PRIMITIVES.filter((r) => r[k] === "partial").length, fusions: FUSIONS.filter((r) => r[k] === "runs").length }));
-  const of = (d) => cov.find((c) => c.d === d);
-  take.replaceChildren("TPU runs ", bold(of("TPU").runs), ` of ${PRIMITIVES.length} primitives and `, bold(of("TPU").fusions),
-    ` of ${FUSIONS.length} fusions; MPS runs `, bold(of("MPS").runs), " primitives and ", bold(of("MPS").fusions),
-    " fusions. CUDA plans have no kernels of their own yet.");
-  const tiles = document.getElementById("lx-tiles");
-  tiles.replaceChildren();
-  for (const c of cov) {
-    const t = tile(tiles, c.d, String(c.runs), null, [[`of ${PRIMITIVES.length} primitives run, ${c.partial} in part · `, bold(c.fusions), " fusions"]]);
-    const bar = el("div", "lx-bar");
-    for (const [n, color] of [[c.runs, "var(--ok)"], [c.partial, "var(--warn)"]]) {
-      const s = el("span");
-      s.style.width = (100 * n / PRIMITIVES.length) + "%";
-      s.style.background = color;
-      bar.append(s);
-    }
-    t.append(bar);
-  }
-}
 
 const PRIM_COLUMNS = [
   { key: "primitive", label: "Primitive", kind: "name" }, { key: "category", label: "Kind" },
   { key: "cpu", label: "CPU", kind: "dev", render: (r) => chip(r.cpu) },
-  { key: "mps", label: "MPS", kind: "dev", render: (r) => chip(r.mps, r.mps === "runs" && BENCHED.includes(r.primitive) ? `#op-${r.primitive}` : null) },
+  { key: "mps", label: "MPS", kind: "dev", render: (r) => chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null) },
   { key: "tpu", label: "TPU", kind: "dev", render: (r) => chip(r.tpu) },
   { key: "cuda", label: "CUDA", kind: "dev", render: (r) => chip(r.cuda) },
   { key: "mps_kernel", label: "MPS kernel", wide: true }, { key: "tpu_kernel", label: "TPU kernel", wide: true },
@@ -466,60 +453,7 @@ search.addEventListener("input", drawPrimitives);
 kindSel.addEventListener("change", drawPrimitives);
 gaps.addEventListener("change", drawPrimitives);
 
-function opSummary(op) {
-  const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL), bigBf16 = rowOf(op, "bfloat16", BIG);
-  const f32 = OK_ROWS.filter((r) => r.op === op && r.dtype === "float32");
-  const bf16 = PERF.rows.filter((r) => r.op === op && r.dtype === "bfloat16");
-  const known = KNOWN[op] || {};
-  return {
-    op, formula: known.formula ?? "", kind: known.kind ?? "",
-    gbs: big ? big.gbs : null, roof: big ? big.gbs / DEVICE_BW : null,
-    best: f32.length ? Math.max(...f32.map((r) => r.gbs)) : null, bestAt: f32.length ? f32.reduce((a, r) => r.gbs > a.gbs ? r : a).n : null,
-    vsTorch: big && big.torch_us != null ? big.torch_us / big.lumen_us : null,
-    smallLumen: small ? small.lumen_us : null, smallTorch: small ? small.torch_us : null,
-    bf16: bf16.some((r) => r.error) ? "no kernel" : bigBf16 ? fmt.gbs(bigBf16.gbs) : "not measured",
-  };
-}
 
-function drawPerformance() {
-  const sums = BENCHED.filter((op) => rowOf(op, "float32", BIG)).map(opSummary);
-  const tiles = document.getElementById("perf-tiles");
-  tiles.replaceChildren();
-  tile(tiles, "Device bandwidth", String(DEVICE_BW), "GB/s", [[`${PERF.device}'s memory bandwidth (spec)`]]);
-  const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-  tile(tiles, "Median of device", fmt.pct(median(sums.map((s) => s.roof))), null, [[`at ${fmt.n(BIG)} elements, float32, over `, bold(sums.length), " ops"]]);
-  const compared = sums.filter((s) => s.vsTorch != null);
-  if (compared.length) {
-    const top = compared.reduce((a, s) => s.vsTorch > a.vsTorch ? s : a);
-    tile(tiles, "vs PyTorch, large", fmt.x(median(compared.map((s) => s.vsTorch))), null, [[`median at ${fmt.n(BIG)} elements; best `, bold(fmt.x(top.vsTorch)), ` (${top.op})`]]);
-    tile(tiles, "vs PyTorch, small", fmt.x(median(known(sums.map((s) => s.smallTorch / s.smallLumen)))), null, [[`median at ${fmt.n(SMALL)} elements, where launch cost dominates`]]);
-  }
-
-  const lines = BENCHED.map((op) => ({ points: OK_ROWS.filter((r) => r.op === op && r.dtype === "float32").map((r) => [r.n, r.gbs]), color: "var(--s3)", width: 1.5, opacity: .55 }));
-  const pts = OK_ROWS.filter((r) => r.dtype === "float32").map((r) => ({ x: r.n, y: r.gbs, r: 3, color: "var(--s1)", opacity: .8, href: `op-${r.op}`,
-    tip: detail(r, "lumen", r.lumen_us, "per call") }));
-  chart("bw-size", {
-    label: "Bandwidth by size", x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-    y: bandwidthAxis(pts.map((p) => p.y)),
-    lines: [...lines,
-      { points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" }],
-    points: pts,
-  });
-  legend("bw-legend", [["one op", "var(--s3)"], [`device bandwidth, ${DEVICE_BW} GB/s`, "var(--roof)", true]]);
-
-  const ratio = (v) => { const s = el("span", v >= 1.05 ? "lx-good" : v <= 0.95 ? "lx-bad" : null, fmt.x(v)); return s; };
-  table("perf-table", [
-    { key: "op", label: "Op", kind: "name", render: (s) => { const a = el("a", null, s.op); a.href = `#op-${s.op}`; return a; } },
-    { key: "formula", label: "Computes" },
-    { key: "gbs", label: "Bandwidth", kind: "num", render: (s) => fmt.gbs(s.gbs) },
-    { key: "roof", label: "Of device", kind: "num", render: (s) => fmt.pct(s.roof) },
-    { key: "best", label: "Best", kind: "num", wide: true, render: (s) => `${fmt.gbs(s.best)} at ${fmt.n(s.bestAt)}` },
-    { key: "vsTorch", label: "vs PyTorch", kind: "num", render: (s) => s.vsTorch == null ? "—" : ratio(s.vsTorch) },
-    { key: "smallLumen", label: "Small call", kind: "num", wide: true, render: (s) => `${fmt.us(s.smallLumen)} vs ${maybe(s.smallTorch, fmt.us)}` },
-    { key: "bf16", label: "bfloat16", kind: "num", wide: true },
-  ], sums, perfSort);
-}
-const perfSort = { key: null, dir: 1, draw: drawPerformance };
 
 const runButton = document.getElementById("op-run");
 const runStatus = document.getElementById("op-status");
@@ -585,21 +519,14 @@ function drawOp(op) {
   const at = PERF.measured_at?.[op];
   document.getElementById("op-measured").textContent = at
     ? `Measured ${new Date(at).toLocaleString()} on ${PERF.device}.`
-    : `Measured on ${PERF.device}, in the first snapshot.`;
+    : PERF.rows.some((r) => r.op === op)
+      ? `Measured on ${PERF.device}, in the first snapshot.`
+      : "Not measured yet: Run benchmark measures it on this machine.";
   if (!runButton.disabled && runStatus.dataset.op !== op) { runStatus.textContent = ""; runStatus.className = "lx-run-status"; }
   runStatus.dataset.op = op;
-  const s = opSummary(op);
+  const known = KNOWN[op] || {};
   document.getElementById("op-name").textContent = op;
-  document.getElementById("op-formula").textContent = `${s.formula} · ${s.kind}`;
-  const tiles = document.getElementById("op-tiles");
-  tiles.replaceChildren();
-  const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL);
-  tile(tiles, "Bandwidth", maybe(s.gbs, (v) => v.toFixed(0)), s.gbs == null ? null : "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(maybe(s.roof, fmt.pct)), ` of the device's ${DEVICE_BW} GB/s`]]);
-  tile(tiles, "Time", maybe(big?.lumen_us, fmt.us), null, [[big ? `per call for ${fmt.int(big.bytes)} bytes` : `float32 at ${fmt.n(BIG)} elements`]]);
-  tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`time per call at ${fmt.n(BIG)}: ${maybe(big?.lumen_us, fmt.us)} vs ${maybe(big?.torch_us, fmt.us)}`]]);
-  tile(tiles, "Small call", maybe(small?.lumen_us, fmt.us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small?.torch_us, fmt.us))]]);
-  tile(tiles, "bfloat16", s.bf16.endsWith("GB/s") ? s.bf16.replace(" GB/s", "") : "—", s.bf16.endsWith("GB/s") ? "GB/s" : null,
-    [[s.bf16 === "no kernel" ? "no bfloat16 kernel on MPS yet" : `at ${fmt.n(BIG)} elements`]]);
+  document.getElementById("op-formula").textContent = known.formula ? `${known.formula} · ${known.kind}` : "";
 
   const dtypes = DTYPE_COLORS.filter(([dtype]) => OK_ROWS.some((r) => r.op === op && r.dtype === dtype));
   const bandwidthChart = (id, label, lumenUs, torchUs, timing) => {
@@ -620,25 +547,10 @@ function drawOp(op) {
   bandwidthChart("op-bw", `${op} bandwidth`, (r) => r.lumen_us, (r) => r.torch_us, "per call");
   bandwidthChart("op-dram", `${op} DRAM bandwidth`, (r) => r.lumen_dram_us, (r) => r.torch_dram_us, "per call, outputs rotated");
 
-  const mine = OK_ROWS.filter((r) => r.op === op);
-  const tseries = [[(r) => r.lumen_us, "lumen", "per call", {}], [(r) => r.torch_us, "PyTorch", "per call", { dot: true, hollow: true }]];
-  const tl = [], tp = [];
-  for (const [dtype, color] of dtypes) {
-    for (const [val, who, timing, style] of tseries) {
-      const have = mine.filter((r) => r.dtype === dtype && val(r) != null);
-      if (!have.length) continue;
-      tl.push({ points: have.map((r) => [r.n, val(r)]), color, dot: style.dot, dash: style.dash, width: style.dash ? 1.5 : 2 });
-      for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, hollow: style.hollow, tip: detail(r, who, val(r), timing) });
-    }
-  }
-  const maxT = Math.max(100, ...mine.flatMap((r) => known([r.lumen_us, r.torch_us])));
-  const tTop = 10 ** Math.ceil(Math.log10(maxT));
-  chart("op-time", { label: `${op} time`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-    y: { domain: [1, tTop], ticks: pow10(1, tTop), fmt: (v) => fmt.us(v), label: "time per call" }, lines: tl, points: tp });
-  legend("op-time-legend", [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"]]);
-
   const code = PERF.code[op];
-  document.getElementById("op-kernel").textContent = code ? code.kernel : "Not captured for this op.";
+  const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];
+  document.getElementById("op-graph").textContent = graph;
+  document.getElementById("op-kernel").replaceChildren(...highlighted(kernel));
   document.getElementById("op-plan").textContent = code ? code.plan : "";
   const rows = PERF.rows.filter((r) => r.op === op);
   table("op-table", [
@@ -658,24 +570,23 @@ const current = { view: "support", op: null };
 function route() {
   const h = location.hash.slice(1);
   const op = h.startsWith("op-") ? h.slice(3) : null;
-  current.view = op && BENCHED.includes(op) ? "op" : h === "performance" ? "performance" : "support";
+  current.view = op && (KNOWN[op] || BENCHED.includes(op)) ? "op" : h === "fusion" ? "fusion" : "support";
   current.op = current.view === "op" ? op : null;
-  for (const id of ["support", "performance", "op"]) document.getElementById(id).hidden = id !== current.view;
-  document.getElementById("tab-support").setAttribute("aria-selected", String(current.view === "support"));
-  document.getElementById("tab-performance").setAttribute("aria-selected", String(current.view !== "support"));
+  for (const id of ["support", "fusion", "op"]) document.getElementById(id).hidden = id !== current.view;
+  document.getElementById("tab-support").setAttribute("aria-selected", String(current.view !== "fusion"));
+  document.getElementById("tab-fusion").setAttribute("aria-selected", String(current.view === "fusion"));
   draw();
   if (current.view === "op") window.scrollTo(0, 0);
 }
 function draw() {
   hideTip();
-  if (current.view === "support") { drawSupport(); drawPrimitives(); fusSort.draw(); }
-  if (current.view === "performance") drawPerformance();
+  if (current.view === "support") drawPrimitives();
+  if (current.view === "fusion") fusSort.draw();
   if (current.view === "op") drawOp(current.op);
 }
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(draw, 150); });
 window.addEventListener("hashchange", route);
-drawSupport();
 route();
 })();
 </script>
