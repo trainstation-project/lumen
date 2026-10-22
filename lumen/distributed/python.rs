@@ -221,8 +221,9 @@ impl PyDeviceMesh {
         ranks: Vec<usize>,
         mesh_dim_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
+        let backend = super::mesh_backend(device_type).map_err(PyValueError::new_err)?;
         let (rank, world_size) = py
-            .detach(|| super::mesh_world(device_type, ranks.len()))
+            .detach(|| backend.world(ranks.len()))
             .map_err(PyRuntimeError::new_err)?;
         let mesh = DeviceMesh::new(device_type, shape, ranks, mesh_dim_names, rank, world_size)
             .map_err(PyValueError::new_err)?;

@@ -98,14 +98,16 @@ def test_equality_and_repr():
     assert repr(init_device_mesh("cpu", (1,))) == "DeviceMesh('cpu', [0])"
 
 
+@pytest.mark.mps
 def test_an_mps_mesh_is_the_one_device_without_a_rendezvous():
     mesh = init_device_mesh("mps", (1,), mesh_dim_names=("dp",))
     assert (mesh.get_coordinate(), mesh.get_local_rank()) == ([0], 0)
-    with pytest.raises(RuntimeError, match="one MPS device, got 2"):
+    with pytest.raises(RuntimeError, match="the 1 MPS device, got 2"):
         init_device_mesh("mps", (2,))
     assert not is_initialized()
 
 
+@pytest.mark.mps
 def test_an_mps_mesh_runs_in_one_process(monkeypatch):
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "2")

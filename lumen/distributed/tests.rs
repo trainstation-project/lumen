@@ -78,10 +78,28 @@ fn invalid_meshes_are_rejected() {
 }
 
 #[test]
-fn an_mps_mesh_is_one_device_in_one_process() {
-    assert_eq!(super::mesh_world("mps", 1), Ok((0, 1)));
-    let err = super::mesh_world("mps", 2).unwrap_err();
-    assert!(err.contains("one MPS device"), "{err}");
+fn an_mps_mesh_is_the_one_device_in_one_process() {
+    let mps = super::mesh_backend("mps").unwrap();
+    if !mps.is_available() {
+        assert!(mps.world(1).is_err());
+        return;
+    }
+    assert_eq!(mps.world(1), Ok((0, 1)));
+    let err = mps.world(2).unwrap_err();
+    assert!(err.contains("the 1 MPS device, got 2"), "{err}");
+}
+
+#[test]
+fn every_device_type_has_a_mesh_backend() {
+    for name in ["cpu", "mps", "cuda", "tpu", "meta"] {
+        assert_eq!(super::mesh_backend(name).unwrap().name(), name);
+    }
+    assert!(
+        super::mesh_backend("gpu")
+            .err()
+            .unwrap()
+            .contains("device_type")
+    );
 }
 
 mod store {
