@@ -1,9 +1,11 @@
 mod dot_epilogues;
+mod dot_rows;
 mod emit;
 mod groups;
 mod horizontal;
 
 pub(super) use dot_epilogues::FuseDots;
+pub(super) use dot_rows::DotRows;
 pub(super) use horizontal::HorizontalFusion;
 
 use super::TpuModule;

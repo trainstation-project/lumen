@@ -3,6 +3,8 @@ pub(crate) mod attention;
 mod elementwise;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod gemm;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod gemm_row;
 pub(crate) mod indexing;
 pub(crate) mod reduction;
 pub(crate) mod row;

@@ -30,6 +30,7 @@ slices and reshapes that move elements between tiles are not yet generated.
 | `row.rs` | Rows: `fusible`, `kinds` (each value's kind, from the dataflow), `readable`, `fits` (what the diamonds pass asks) and `encode`, for `kernels/row/tpu`. |
 | `reduction.rs` | Reductions: `layout` (rows, columns or total), `reducible` and `encode` (prologue, reduce, epilogue), for `kernels/reduce/tpu`. |
 | `gemm.rs` | The dot's epilogue (`Epilogue::of`): its members' widths, extra inputs, nodes and outputs, for `kernels/dot_general/tpu`. |
+| `gemm_row.rs` | A dot and the row reading it (`dot_row`, from `dot_rows`): `encode`, the row's spec with the dot's product its first value, blocks of whole rows and of k, for `kernels/dot_general/tpu/row.py`. |
 | `attention.rs` | Attention's forward and backward specs (`forward`, `backward`): each operand's view of its heads, the score chain, the outputs' layout (`written`) and the epilogue, for `kernels/attention/tpu`; `graph_compiler/tpu` asks them at compile time. |
 
 ## Spec
@@ -50,6 +51,13 @@ a broadcast onto the last axis reads `lanes`, otherwise a broadcast reads
 `row`), not its shape alone: `[n]` and `[rows]` look alike when `n` is the
 row count. Its kernel name is `row_<rows>x<n>_<block>`.
 
+A `dot_row`'s spec is a row's, its first value the dot's product (`[rows,
+n]`, cast to the dot's dtype), with `k`, `transposed` (a `[n, k]` rhs), the
+`operands`' and `value`'s dtypes and `blocks` (`[bm, bk]`): each step adds
+`x[bm, bk] · y[bk, n]` into a float32 block of whole rows, the last runs the
+row on it. Rows of up to 1024 blocks, k's as the dot's (`caps`), within VMEM.
+Its kernel name is `matmul_row_<dtype>_<rows>x<n>x<k>_<bm>x<bk>`.
+
 ## Invariants & gotchas
 
 * A fusion has one output, and every operand has the output's shape or is
@@ -66,7 +74,7 @@ row count. Its kernel name is `row_<rows>x<n>_<block>`.
 
 ## Related
 
-* [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` (rows, before the dots take their epilogues) and `loop_fusion` (loops and reductions, after).
+* [`../../graph_compiler/tpu/`](../../graph_compiler/tpu/) — `diamonds` and `dot_rows` (rows, and the dots they read whole, before the dots take their epilogues) and `loop_fusion` (loops and reductions, after).
 * [`../../kernels/reduce/tpu/`](../../kernels/reduce/tpu/) — the reduction template.
 * [`../../graph_compiler/common/diamonds.rs`](../../graph_compiler/common/diamonds.rs) — the diamond matcher, shared with MPS.
 * [`../../kernels/tpu/`](../../kernels/tpu/README.md) — routes a `loop` fusion's step here.
