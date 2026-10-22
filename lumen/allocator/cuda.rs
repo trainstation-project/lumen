@@ -11,8 +11,6 @@ use super::{Allocator, Region};
 use crate::device::Device;
 
 #[cfg(lumen_cuda_linked)]
-use crate::device::DeviceBackend;
-#[cfg(lumen_cuda_linked)]
 use crate::device::cuda::CUDA;
 
 #[cfg(lumen_cuda_linked)]

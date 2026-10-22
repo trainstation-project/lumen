@@ -67,7 +67,14 @@ re-export them.
 ## Build and test
 
 Requires a Rust toolchain, Python >= 3.10 in an active virtualenv, and
-`maturin`, `pytest`, `pytest-xdist`, `numpy` (what CI installs).
+`maturin`, `pytest`, `pytest-xdist`, `numpy` (what CI installs):
+
+```bash
+curl https://sh.rustup.rs -sSf | sh   # Rust, if `rustc` is not on PATH
+uv venv && source .venv/bin/activate
+uv pip install maturin pytest pytest-xdist numpy
+make test
+```
 
 | Command | What it does |
 | --- | --- |
