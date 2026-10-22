@@ -1,5 +1,4 @@
 import math
-import os
 
 from lumen import pallas as pl
 from lumen.graph import prims
@@ -42,7 +41,7 @@ def program(spec):
     rp, cp, urp, ucp = _up(rows, tile), _up(cols, LANES), _up(ur, tile), _up(uc, LANES)
     lead, ulead = shape[:-2], update[:-2]
     whole = (ur % tile == 0 or ur == rows) and (uc % LANES == 0 or uc == cols)
-    wide = os.environ.get("DUS_WIDE") or ("float32" if dtype.startswith("bfloat") or dtype.startswith("float") else "int32")
+    wide = "float32" if dtype.startswith("bfloat") or dtype.startswith("float") else "int32"
     small = math.prod(ulead) == 1 and gm == urp
     spanned = uc == cols
     strips = not spanned and width > 2 * STRIP

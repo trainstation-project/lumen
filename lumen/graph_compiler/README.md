@@ -104,8 +104,8 @@ Within one order (`compile_in_order`):
   marked `view` is a strided view of its operand; operands of a concatenate
   marked `in_place` are written at their slot of the result. All come from
   `Graph::placements()`; steps record them in `views` / `output_views`.
-- **In-place reuse**: `dynamic_update_slice`, `scatter_add` and custom ops
-  write over their operand where it dies; other steps may take a dying
+- **In-place reuse**: `dynamic_update_slice` (and TPU's `dynamic_update_slices`
+  fusions), `scatter_add` and custom ops write over their operand where it dies; other steps may take a dying
   operand's bytes when they read it elementwise (XLA's
   `CanShareOperandBufferWithUser`). Core ML steps never do.
 - **Donation**: an output takes a donated input's buffer (same type, nothing

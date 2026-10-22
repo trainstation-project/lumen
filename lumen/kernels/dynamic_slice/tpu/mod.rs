@@ -14,13 +14,6 @@ const DEPTH: usize = 8;
 
 const RESIDENT: usize = 48 << 20;
 
-fn env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -81,9 +74,8 @@ pub(crate) fn encode(
     let (ur, uc) = (update.shape[rank - 2], update.shape[rank - 1]);
     let (rp, cp) = (rows.div_ceil(tile) * tile, cols.div_ceil(LANES) * LANES);
     let (urp, ucp) = (ur.div_ceil(tile) * tile, uc.div_ceil(LANES) * LANES);
-    let (staged, streamed) = (env("DUS_STAGED", STAGED), env("DUS_STREAMED", STREAMED));
-    let bn = block(ucp, LANES, (staged / tile).max(LANES)).unwrap_or(LANES);
-    let bm = block(urp, tile, (staged / bn / tile * tile).max(tile)).unwrap_or(tile);
+    let bn = block(ucp, LANES, (STAGED / tile).max(LANES)).unwrap_or(LANES);
+    let bm = block(urp, tile, (STAGED / bn / tile * tile).max(tile)).unwrap_or(tile);
     let single = update.shape[..rank - 2].iter().product::<usize>() == 1 && urp == bm && ucp == bn;
     let width = match uc == cols {
         true => ucp,
@@ -91,7 +83,7 @@ pub(crate) fn encode(
     };
     let gm = match single {
         true => urp,
-        false => block(urp, tile, (streamed / width / tile * tile).max(tile)).unwrap_or(tile),
+        false => block(urp, tile, (STREAMED / width / tile * tile).max(tile)).unwrap_or(tile),
     };
     let whole = (ur.is_multiple_of(tile) || ur == rows) && (uc.is_multiple_of(LANES) || uc == cols);
     let windows: Vec<Vec<(usize, usize)>> = fixed
@@ -120,7 +112,6 @@ pub(crate) fn encode(
         .iter()
         .enumerate()
         .any(|(i, p)| windows[i + 1..].iter().any(|q| overlap(p, q)));
-    let depth = env("DUS_DEPTH", DEPTH).max(2);
     let small = update.shape[..rank - 2].iter().product::<usize>() == 1 && gm == urp;
     let one_slab = windows
         .iter()
@@ -175,7 +166,7 @@ pub(crate) fn encode(
         },
     );
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copied_rows\": [{}], \"count\": {count}, \"static\": {}, \"depth\": {depth}, \"ordered\": {ordered}, \"resident\": {resident}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copied_rows\": [{}], \"count\": {count}, \"static\": {}, \"depth\": {DEPTH}, \"ordered\": {ordered}, \"resident\": {resident}",
         operand.shape,
         update.shape,
         operand.dtype.full_name(),
