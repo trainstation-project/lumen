@@ -12,19 +12,45 @@ use crate::device::Device;
 mod ffi {
     unsafe extern "C" {
         pub fn lumen_mps_alloc(nbytes: usize) -> *mut u8;
+        pub fn lumen_mps_alloc_heap(nbytes: usize) -> *mut u8;
+        pub fn lumen_mps_place(ptr: *mut u8, nbytes: usize) -> i32;
+        pub fn lumen_mps_unplace(ptr: *mut u8);
         pub fn lumen_mps_free(ptr: *mut u8);
     }
 }
 
 #[cfg(lumen_mps_linked)]
-fn malloc(nbytes: usize) -> NonNull<u8> {
-    NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })
+fn heap(nbytes: usize) -> NonNull<u8> {
+    NonNull::new(unsafe { ffi::lumen_mps_alloc_heap(nbytes) })
         .unwrap_or_else(|| panic!("Metal out of memory: failed to allocate {nbytes} bytes"))
 }
 
 #[cfg(lumen_mps_linked)]
 unsafe fn free(ptr: NonNull<u8>) {
     unsafe { ffi::lumen_mps_free(ptr.as_ptr()) }
+}
+
+#[cfg(lumen_mps_linked)]
+pub(crate) struct Scratch(NonNull<u8>);
+
+#[cfg(lumen_mps_linked)]
+impl Scratch {
+    pub(crate) fn zeroed(nbytes: usize) -> Option<Self> {
+        let data = NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })?;
+        unsafe { std::ptr::write_bytes(data.as_ptr(), 0, nbytes) };
+        Some(Scratch(data))
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut u8 {
+        self.0.as_ptr()
+    }
+}
+
+#[cfg(lumen_mps_linked)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        unsafe { free(self.0) }
+    }
 }
 
 #[cfg(lumen_mps_linked)]
@@ -44,11 +70,17 @@ impl MpsAllocator {
 #[cfg(lumen_mps_linked)]
 impl Allocator for MpsAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        self.region
-            .take(nbytes, malloc, crate::stream::mps::synchronize)
+        let data = self
+            .region
+            .take(nbytes, heap, crate::stream::mps::synchronize);
+        if unsafe { ffi::lumen_mps_place(data.as_ptr(), nbytes.max(1)) } != 0 {
+            panic!("Metal could not place a buffer of {nbytes} bytes in its heap");
+        }
+        data
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        unsafe { ffi::lumen_mps_unplace(ptr.as_ptr()) };
         self.region.give(ptr, nbytes)
     }
 }

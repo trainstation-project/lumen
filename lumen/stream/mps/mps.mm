@@ -40,6 +40,34 @@ static void end_encoder(void) {
     encoder = nil;
 }
 
+static id<MTLEvent> order = nil;
+static uint64_t ordered = 0;
+static bool waited = false;
+
+static void open_commands(id<MTLCommandQueue> queue) {
+    if (commands != nil) {
+        return;
+    }
+    commands = [queue commandBuffer];
+    if (order == nil) {
+        order = [queue.device newEvent];
+    }
+    if (ordered > 0) {
+        [commands encodeWaitForEvent:order value:ordered];
+    }
+    waited = true;
+}
+
+static void order_after_encoded(void) {
+    if (encoder != nil) {
+        end_encoder();
+    }
+    ++ordered;
+    [commands encodeSignalEvent:order value:ordered];
+    [commands encodeWaitForEvent:order value:ordered];
+    waited = true;
+}
+
 static constexpr long kSampleBuffers = 24;
 static os_unfair_lock pool_lock = OS_UNFAIR_LOCK_INIT;
 static NSMutableArray<id<MTLCounterSampleBuffer>> *free_samples = nil;
@@ -97,6 +125,8 @@ static void commit(void) {
     if (encoder != nil) {
         end_encoder();
     }
+    ++ordered;
+    [commands encodeSignalEvent:order value:ordered];
     id<MTLCounterSampleBuffer> timestamps = samples;
     std::vector<Op> committed = std::move(ops);
     ops.clear();
@@ -138,9 +168,7 @@ id<MTLComputeCommandEncoder> lumen_mps_stream_encoder(bool timed) {
         return nil;
     }
     os_unfair_lock_lock(&lock);
-    if (commands == nil) {
-        commands = [queue commandBuffer];
-    }
+    open_commands(queue);
     if (timed && samples == nil) {
         samples = new_samples(queue.device);
     }
@@ -149,6 +177,10 @@ id<MTLComputeCommandEncoder> lumen_mps_stream_encoder(bool timed) {
         end_encoder();
     }
     if (encoder == nil) {
+        if (!waited) {
+            order_after_encoded();
+        }
+        waited = false;
         if (timed) {
             MTLComputePassDescriptor *pass = [MTLComputePassDescriptor computePassDescriptor];
             pass.sampleBufferAttachments[0].sampleBuffer = samples;
@@ -175,9 +207,6 @@ void lumen_mps_stream_encoded(lumen_mps_completion done, void *context) {
     os_unfair_lock_unlock(&lock);
 }
 
-static id<MTLEvent> barrier = nil;
-static uint64_t barrier_value = 0;
-
 extern "C" {
 void lumen_mps_stream_fence(void) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
@@ -185,18 +214,8 @@ void lumen_mps_stream_fence(void) {
         return;
     }
     os_unfair_lock_lock(&lock);
-    if (commands == nil) {
-        commands = [queue commandBuffer];
-    }
-    if (encoder != nil) {
-        end_encoder();
-    }
-    if (barrier == nil) {
-        barrier = [queue.device newEvent];
-    }
-    ++barrier_value;
-    [commands encodeSignalEvent:barrier value:barrier_value];
-    [commands encodeWaitForEvent:barrier value:barrier_value];
+    open_commands(queue);
+    order_after_encoded();
     os_unfair_lock_unlock(&lock);
 }
 
@@ -221,12 +240,9 @@ void *lumen_mps_stream_command_buffer(void) {
         return nullptr;
     }
     os_unfair_lock_lock(&lock);
-    if (commands == nil) {
-        commands = [queue commandBuffer];
-    }
-    if (encoder != nil) {
-        end_encoder();
-    }
+    open_commands(queue);
+    order_after_encoded();
+    waited = false;
     void *buffer = (__bridge void *)commands;
     os_unfair_lock_unlock(&lock);
     return buffer;
@@ -235,9 +251,7 @@ void *lumen_mps_stream_command_buffer(void) {
 void lumen_mps_stream_mark(lumen_mps_completion done, void *context) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
     os_unfair_lock_lock(&lock);
-    if (commands == nil) {
-        commands = [queue commandBuffer];
-    }
+    open_commands(queue);
     ops.push_back({done, context, -1});
     ++encoded_total;
     if (ops.size() >= kOpsPerCommit) {

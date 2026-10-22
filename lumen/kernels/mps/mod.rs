@@ -43,6 +43,7 @@ unsafe extern "C" {
         pipeline: *mut c_void,
         buffers: *const *const u8,
         nbuffers: usize,
+        copies: usize,
         args: *const *const u8,
         arg_lens: *const usize,
         nargs: usize,
@@ -63,20 +64,34 @@ pub(crate) struct Captured {
 }
 
 impl Captured {
-    pub(crate) fn time(&self, reps: usize) -> Result<f64, String> {
-        let pointers: Vec<*const u8> = self.args.iter().map(|a| a.as_ptr()).collect();
-        let lens: Vec<usize> = self.args.iter().map(Vec::len).collect();
+    pub(crate) fn time(copies: &[&Captured], reps: usize) -> Result<f64, String> {
+        let first = copies[0];
+        let buffers: Vec<*const u8> = copies
+            .iter()
+            .flat_map(|c| c.buffers.iter().copied())
+            .collect();
+        let pointers: Vec<*const u8> = first.args.iter().map(|a| a.as_ptr()).collect();
+        let lens: Vec<usize> = first.args.iter().map(Vec::len).collect();
+        let Captured {
+            pipeline,
+            args,
+            sizes,
+            groups,
+            group,
+            ..
+        } = first;
         let seconds = unsafe {
             lumen_mps_time_pipeline(
-                self.pipeline,
-                self.buffers.as_ptr(),
-                self.buffers.len(),
+                *pipeline,
+                buffers.as_ptr(),
+                first.buffers.len(),
+                copies.len(),
                 pointers.as_ptr(),
                 lens.as_ptr(),
-                self.args.len(),
-                self.sizes.as_ptr(),
-                self.groups.into(),
-                self.group,
+                args.len(),
+                sizes.as_ptr(),
+                (*groups).into(),
+                *group,
                 reps,
             )
         };

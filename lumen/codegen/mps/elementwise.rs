@@ -14,6 +14,7 @@ pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
     Tuning::Loop {
         per_thread: (n / GRID_THREADS).clamp(1, most_per_thread(body)),
         group: LOOP_GROUP,
+        contiguous: false,
     }
 }
 
@@ -21,7 +22,19 @@ pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
     let most = most_per_thread(body);
     let per_threads = (0..).map(|k| 1 << k).take_while(|&p| p <= most);
     per_threads
-        .flat_map(|per_thread| LOOP_GROUPS.map(|group| Tuning::Loop { per_thread, group }))
+        .flat_map(|per_thread| {
+            let contiguous = match per_thread {
+                1 => &[false][..],
+                _ => &[false, true][..],
+            };
+            contiguous.iter().flat_map(move |&contiguous| {
+                LOOP_GROUPS.map(|group| Tuning::Loop {
+                    per_thread,
+                    group,
+                    contiguous,
+                })
+            })
+        })
         .collect()
 }
 
@@ -31,7 +44,17 @@ pub(super) fn elementwise_kernel(
     views: &HashMap<usize, (usize, Vec<usize>)>,
     tuning: Tuning,
 ) -> (String, String) {
-    let Tuning::Loop { per_thread, group } = tuning;
+    let Tuning::Loop {
+        per_thread,
+        group,
+        contiguous,
+    } = tuning;
+    let each = match contiguous {
+        true => {
+            format!("for (uint j = i * {per_thread}u, k = 0; k < {per_thread}u && j < n; ++k, ++j)")
+        }
+        false => format!("for (uint j = i, k = 0; k < {per_thread}u && j < n; ++k, j += threads)"),
+    };
     let mut emitter = Emitter::new(body, by_value);
     let out = body.outputs()[0];
     let result = emitter.value(out, "j".into());
@@ -47,7 +70,7 @@ pub(super) fn elementwise_kernel(
         "
         [[max_total_threads_per_threadgroup({group})]]
         kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
-            for (uint j = i, k = 0; k < {per_thread}u && j < n; ++k, j += threads) {{
+            {each} {{
                 {lines}{writes}
             }}
         }}

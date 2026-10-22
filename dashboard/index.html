@@ -142,7 +142,7 @@
     </div>
     <div class="lx-card">
       <h2>Elementwise ops on MPS</h2>
-      <p class="lx-note">At 64M elements unless noted. Times are per call, for lumen and PyTorch <span id="torch-version"></span> on MPS. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes. vs PyTorch above 1× is lumen faster. Small call is the time at 4,096 elements, where launch cost dominates.</p>
+      <p class="lx-note">At 64M elements unless noted. Times are per call, for lumen and PyTorch <span id="torch-version"></span> on MPS. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best. vs PyTorch above 1× is lumen faster. Small call is the time at 4,096 elements, where launch cost dominates.</p>
       <div class="lx-scroll"><table id="perf-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
@@ -159,16 +159,22 @@
     <div class="lx-grid2">
       <div class="lx-card">
         <h2>Bandwidth by size</h2>
-        <p class="lx-note">Bytes read and written over time per call, for lumen and PyTorch. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes.</p>
+        <p class="lx-note">Bytes read and written over time per call, for lumen and PyTorch. A point can rise above the device's bandwidth: each call writes its output where the last did (lumen's into its plan, PyTorch's into the block its allocator just freed), so up to a few MB of output stays in the GPU's cache and its writes need not reach DRAM; only reads are cold. Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best.</p>
         <div class="lx-legend" id="op-bw-legend"></div>
         <div class="lx-chart" id="op-bw"></div>
       </div>
       <div class="lx-card">
         <h2>Time per call</h2>
-        <p class="lx-note">Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; best of 3 passes. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
+        <p class="lx-note">Both are timed the same way: the op back to back on rotating inputs, 512 MiB of them a pass so none is in cache, on the host clock from one device synchronize to the next, divided by the calls, so launch cost counts; lumen and PyTorch alternate for 3 rounds of 3 passes, each keeping its best. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
         <div class="lx-legend" id="op-time-legend"></div>
         <div class="lx-chart" id="op-time"></div>
       </div>
+    </div>
+    <div class="lx-card">
+      <h2>DRAM bandwidth</h2>
+      <p class="lx-note">As above, but each call writes a different output too: lumen's plan runs in a ring of workspaces and PyTorch's outputs are kept alive in a ring, as many as the inputs, so no output stays in the GPU's cache and every byte read and written goes through DRAM. No point can rise above the device's bandwidth. A real program reuses its outputs' memory, as the chart above does.</p>
+      <div class="lx-legend" id="op-dram-legend"></div>
+      <div class="lx-chart" id="op-dram"></div>
     </div>
     <div class="lx-card">
       <h2>Generated kernel</h2>
@@ -596,21 +602,23 @@ function drawOp(op) {
     [[s.bf16 === "no kernel" ? "no bfloat16 kernel on MPS yet" : `at ${fmt.n(BIG)} elements`]]);
 
   const dtypes = DTYPE_COLORS.filter(([dtype]) => OK_ROWS.some((r) => r.op === op && r.dtype === dtype));
-  const lines = [], points = [];
-  for (const [dtype, color] of dtypes) {
-    for (const torch of [false, true]) {
-      const val = torch ? torchGbs : (r) => r.gbs;
-      const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && val(r) != null);
-      if (!rs.length) continue;
-      lines.push({ points: rs.map((r) => [r.n, val(r)]), color, dot: torch, width: torch ? 2.5 : 2 });
-      for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color, hollow: torch,
-        tip: torch ? detail(r, "PyTorch", r.torch_us, "per call") : detail(r, "lumen", r.lumen_us, "per call") });
+  const bandwidthChart = (id, label, lumenUs, torchUs, timing) => {
+    const lines = [], points = [];
+    for (const [dtype, color] of dtypes) {
+      for (const [torch, us, who] of [[false, lumenUs, "lumen"], [true, torchUs, "PyTorch"]]) {
+        const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && us(r) != null);
+        if (!rs.length) continue;
+        lines.push({ points: rs.map((r) => [r.n, r.bytes / us(r) / 1e3]), color, dot: torch, width: torch ? 2.5 : 2 });
+        for (const r of rs) points.push({ x: r.n, y: r.bytes / us(r) / 1e3, r: 3, color, hollow: torch, tip: detail(r, who, us(r), timing) });
+      }
     }
-  }
-  lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
-  chart("op-bw", { label: `${op} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-    y: bandwidthAxis(points.map((p) => p.y)), lines, points });
-  legend("op-bw-legend", [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"], ["device bandwidth", "var(--roof)", true]]);
+    lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
+    chart(id, { label, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
+      y: bandwidthAxis(points.map((p) => p.y)), lines, points });
+    legend(`${id}-legend`, [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"], ["device bandwidth", "var(--roof)", true]]);
+  };
+  bandwidthChart("op-bw", `${op} bandwidth`, (r) => r.lumen_us, (r) => r.torch_us, "per call");
+  bandwidthChart("op-dram", `${op} DRAM bandwidth`, (r) => r.lumen_dram_us, (r) => r.torch_dram_us, "per call, outputs rotated");
 
   const mine = OK_ROWS.filter((r) => r.op === op);
   const tseries = [[(r) => r.lumen_us, "lumen", "per call", {}], [(r) => r.torch_us, "PyTorch", "per call", { dot: true, hollow: true }]];
@@ -639,6 +647,8 @@ function drawOp(op) {
     { key: "lumen_us", label: "lumen", kind: "num", render: (r) => r.error ? "" : fmt.us(r.lumen_us) },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (r) => r.error ? "" : fmt.gbs(r.gbs) },
     { key: "torch_us", label: "PyTorch", kind: "num", render: (r) => r.error ? "" : maybe(r.torch_us, fmt.us) },
+    { key: "lumen_dram_us", label: "lumen, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.lumen_dram_us, fmt.us) },
+    { key: "torch_dram_us", label: "PyTorch, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_dram_us, fmt.us) },
     { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "✅" : "❌") },
   ], rows, opSort);
 }

@@ -8,17 +8,11 @@ pub(crate) trait Autotuner {
     type Config: Copy;
 
     fn device(&self) -> &'static str;
-
     fn key(&self, step: &Step) -> Option<String>;
-
     fn candidates(&self, step: &Step) -> Vec<Self::Config>;
-
     fn generate(&mut self, step: &Step, config: Self::Config) -> String;
-
     fn compile(&mut self) -> Result<(), String>;
-
     fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String>;
-
     fn apply(&self, step: &mut Step, kernel: &str, config: Self::Config);
 }
 
@@ -84,9 +78,11 @@ pub(crate) fn autotune<T: Autotuner>(tuner: &mut T, plan: &mut Plan) -> Result<(
                         *best = best.min(t);
                     }
                 }
-                (0..seconds.len())
-                    .min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]))
-                    .expect("candidates")
+                let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));
+                match fastest {
+                    Some(k) if seconds[k].is_finite() => k,
+                    _ => continue,
+                }
             }
         };
         let (k, config) = job.candidates[fastest];

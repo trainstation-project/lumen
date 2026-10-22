@@ -3,12 +3,12 @@ use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, encode, record_launch};
+use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::Autotuner;
 use crate::graph_compiler::plan::{Buffer, Step};
-use crate::kernels::mps::capture;
-use crate::{DType, Device, Tensor, TensorOptions};
+use crate::kernels::mps::{Captured, capture};
 
 pub(super) struct Tunable {
     pub by_value: Vec<bool>,
@@ -73,7 +73,9 @@ impl Autotuner for MpsAutotuner<'_> {
 
     fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
         let reps = (TIMED_ELEMENTS / step.output.1.numel()).clamp(4, 256);
-        let buffers = Buffers::new(step);
+        let Some(buffers) = Buffers::new(step) else {
+            return Ok(Vec::new());
+        };
         kernels
             .iter()
             .map(|kernel| {
@@ -95,9 +97,12 @@ impl Autotuner for MpsAutotuner<'_> {
     }
 }
 
+const COLD_BYTES: usize = 64 << 20;
+const MOST_COPIES: usize = 256;
+
 struct Buffers {
-    memory: Tensor,
-    inputs: Vec<*const u8>,
+    _memory: Scratch,
+    copies: Vec<Vec<*const u8>>,
     output: *mut u8,
     scratch: *mut u8,
 }
@@ -119,53 +124,77 @@ fn extent(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
     }
 }
 
+fn aligned(bytes: usize) -> usize {
+    bytes.div_ceil(ALIGNMENT).max(1) * ALIGNMENT
+}
+
 impl Buffers {
-    fn new(step: &Step) -> Self {
-        let inputs = step
+    fn new(step: &Step) -> Option<Self> {
+        let inputs: Vec<usize> = step
             .inputs
             .iter()
             .zip(&step.views)
             .map(|((b, ty), view)| match b {
                 Buffer::Scalar(_) => ty.dtype.size_of(),
                 _ => extent(ty, view.as_ref(), false),
-            });
-        let outputs = std::iter::once(&step.output)
+            })
+            .map(aligned)
+            .collect();
+        let outputs: Vec<usize> = std::iter::once(&step.output)
             .chain(&step.extra_outputs)
             .enumerate()
-            .map(|(k, (_, ty))| {
-                extent(ty, step.output_views.get(k).and_then(Option::as_ref), true)
-            });
-        let scratch = step.scratch.map_or(0, |(_, bytes)| bytes);
-        let sizes: Vec<usize> = inputs.chain(outputs).chain([scratch]).collect();
-        let mut at = Vec::with_capacity(sizes.len());
-        let mut total = 0;
-        for size in &sizes {
-            at.push(total);
-            total += size.div_ceil(ALIGNMENT).max(1) * ALIGNMENT;
-        }
-        let options = TensorOptions::new().dtype(DType::U8).device(Device::Mps(0));
-        let memory = Tensor::zeros(&[total], options);
-        crate::stream::mps::synchronize();
-        let base = memory.data_ptr();
-        let pointer = |k: usize| base.wrapping_add(at[k]);
-        let ninputs = step.inputs.len();
-        let inputs = (0..ninputs)
-            .chain(ninputs + 1..ninputs + 1 + step.extra_outputs.len())
-            .map(|k| pointer(k).cast_const())
+            .map(|(k, (_, ty))| extent(ty, step.output_views.get(k).and_then(Option::as_ref), true))
+            .map(aligned)
             .collect();
-        Buffers {
-            output: pointer(ninputs),
-            scratch: pointer(sizes.len() - 1),
-            memory,
-            inputs,
+        let scratch = aligned(step.scratch.map_or(0, |(_, bytes)| bytes));
+        let read: usize = inputs.iter().sum();
+        let written: usize = outputs.iter().sum();
+        let mut copies = COLD_BYTES.div_ceil(read).clamp(1, MOST_COPIES);
+        let memory = loop {
+            match Scratch::zeroed(read * copies + written + scratch) {
+                Some(memory) => break memory,
+                None if copies > 1 => copies /= 2,
+                None => return None,
+            }
+        };
+        let base = memory.as_ptr();
+        let mut at = read * copies;
+        let mut outs = Vec::with_capacity(outputs.len());
+        for size in &outputs {
+            outs.push(base.wrapping_add(at));
+            at += size;
         }
+        let copies = (0..copies)
+            .map(|c| {
+                let mut at = c * read;
+                let ins = inputs.iter().map(|size| {
+                    let p = base.wrapping_add(at).cast_const();
+                    at += size;
+                    p
+                });
+                ins.chain(outs[1..].iter().map(|p| p.cast_const()))
+                    .collect()
+            })
+            .collect();
+        Some(Buffers {
+            output: outs[0],
+            scratch: base.wrapping_add(at),
+            _memory: memory,
+            copies,
+        })
     }
 
     fn run(&self, step: &Step, reps: usize) -> Result<f64, String> {
-        let launches = capture(|| {
-            let keep = vec![self.memory.clone()];
-            encode(step, &self.inputs, self.output, self.scratch, keep)
-        })?;
-        launches.iter().map(|l| l.time(reps)).sum()
+        let launches = self
+            .copies
+            .iter()
+            .map(|inputs| capture(|| encode(step, inputs, self.output, self.scratch, Vec::new())))
+            .collect::<Result<Vec<_>, String>>()?;
+        (0..launches[0].len())
+            .map(|l| {
+                let copies: Vec<&Captured> = launches.iter().map(|c| &c[l]).collect();
+                Captured::time(&copies, reps.max(copies.len()))
+            })
+            .sum()
     }
 }

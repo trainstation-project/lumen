@@ -57,6 +57,7 @@ def device_name():
 
 
 ROTATION_BYTES = 512 << 20
+ROUNDS = 3
 
 
 def per_call(run, sets, sync, batches=3):
@@ -73,6 +74,15 @@ def per_call(run, sets, sync, batches=3):
         us = (time.perf_counter() - start) * 1e6 / reps
         best = us if best is None else min(best, us)
     return best
+
+
+def rotating(run, sets):
+    outs = [None] * len(sets)
+
+    def call(k):
+        outs[k] = run(k, *sets[k])
+
+    return call, [[k] for k in range(len(sets))]
 
 
 def rotation(per_call):
@@ -122,18 +132,42 @@ def measure(name, measured=lambda row: None):
                 "inputs": arity,
                 "bytes": nbytes,
                 "flops": n,
-                "lumen_us": round(per_call(f, lumen_sets, lumen.mps.synchronize), 3),
+                "lumen_us": None,
                 "torch_us": None,
+                "lumen_dram_us": None,
+                "torch_dram_us": None,
                 "matches_torch": None,
                 "rotation": sets,
             }
-            del lumen_sets
-            row["gbs"] = round(row["bytes"] / row["lumen_us"] / 1e3, 2)
             if torch is not None:
                 tt = [torch.from_numpy(a).to("mps").to(getattr(torch, dtype)) for a in arrays]
                 torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
-                row["torch_us"] = round(per_call(tf, torch_sets, torch.mps.synchronize), 3)
-                del torch_sets
+            plan = lumen.graph_compiler.Plan(lumen.make_graph(lf)(*lt), "mps", parameters=list(range(arity)))
+            workspaces = [
+                lumen.Tensor.empty([plan.workspace_bytes], "uint8", "mps", alignment=plan.workspace_alignment)
+                for _ in range(sets)
+            ]
+            lumen_dram = rotating(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets)
+            torch_dram = rotating(lambda k, *args: tf(*args), torch_sets) if torch is not None else None
+            times = {}
+            for _ in range(ROUNDS):
+                timed = [
+                    ("lumen_us", f, lumen_sets, lumen.mps.synchronize),
+                    ("lumen_dram_us", *lumen_dram, lumen.mps.synchronize),
+                ]
+                if torch is not None:
+                    timed += [
+                        ("torch_us", tf, torch_sets, torch.mps.synchronize),
+                        ("torch_dram_us", *torch_dram, torch.mps.synchronize),
+                    ]
+                for key, run, args, sync in timed:
+                    times[key] = min(times.get(key, float("inf")), per_call(run, args, sync))
+            del timed, lumen_sets, workspaces, lumen_dram
+            for key, us in times.items():
+                row[key] = round(us, 3)
+            row["gbs"] = round(row["bytes"] / row["lumen_us"] / 1e3, 2)
+            if torch is not None:
+                del torch_sets, torch_dram
                 torch.mps.empty_cache()
                 got = out.to("cpu")
                 got = lumen.to_numpy(got.to(dtype="float32") if out_dtype == "bfloat16" else got)

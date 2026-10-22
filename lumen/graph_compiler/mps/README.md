@@ -83,7 +83,7 @@ each generated kernel's launch: see *Autotuning*.
 ## Autotuning
 
 A generated kernel's launch (`codegen::Tuning`: a loop's elements per
-thread and threadgroup size) is written into its source as constants, so
+thread, strided or contiguous, and threadgroup size) is written into its source as constants, so
 dumped code shows what runs, and `encode` reads it from the kernel's entry
 in `LAUNCHES` (recorded with its launch kind). Codegen writes a default
 (`codegen::tuning_of`). With `autotune` on, the shared driver
@@ -94,16 +94,23 @@ compiled together, `encode` runs once per candidate under
 `kernels::mps::capture`, which records its launches instead of submitting
 them, and each recorded launch is timed on the GPU alone
 (`lumen_mps_time_pipeline`: one command buffer, the dispatch repeated over
-about 16M elements, GPU start to end, best of two) over zeroed buffers of
-the step's sizes (zero indices are in range). The step takes the fastest
+about 16M elements with a barrier before each, as the stream runs it, GPU
+start to end, best of two). The buffers are zeroed (zero indices are in
+range), outside the static allocator (`allocator::Scratch`, fewer copies or
+no tuning when Metal is short of memory), with enough copies of the inputs,
+about 64 MB, that the repeats read them cold, as a model's kernels do once
+their inputs are out of cache: timed hot, an 8 MB input stays in the GPU's
+cache and the candidates rank differently. The step takes the fastest
 candidate's kernel; the pick is cached per kernel and length, so a
 recompile re-times nothing. Only loops have candidates so far.
 
 `neg` per call on an M4 Pro, back to back on cold inputs, best of 3,
-`autotune` off → on: float32 64K 3.12 → 2.73 µs; bfloat16 64K 2.82 →
-2.10 µs, 256K 5.57 → 4.91 µs, 1M 14.7 → 13.9 µs, 4M 55.8 → 52.6 µs; from
-16M every launch streams at DRAM's bandwidth. Tuning adds 20 to 100 ms to
-a compile, once per kernel and length.
+`autotune` off → on: float32 64K 3.11 → 2.73 µs, 256K 7.53 → 7.01 µs,
+1M 26.8 → 24.5 µs; bfloat16 64K 2.82 → 2.05 µs, 256K 5.56 → 4.25 µs, 1M
+15.8 → 13.1 µs; from 16M every launch streams at DRAM's bandwidth.
+bfloat16 wants few threadgroups (4M elements: 39 µs in groups of 1024,
+100 µs in groups of 256, a thread 4 elements apart either way). Tuning
+adds 20 to 120 ms to a compile, once per kernel and length.
 
 Other flags are read inside passes rather than gating them:
 `contraction_epilogues` (flash attention's and GEMM epilogues in

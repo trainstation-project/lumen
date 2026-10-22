@@ -63,6 +63,9 @@ workspace its partials need (0 for everything else).
   `Grid::Groups([x, y, z])` dispatches that many threadgroups of
   **16 × 16** threads; kernels written for it assume 256 threads
   (`tid.y * 16 + tid.x`).
+* Each dispatch follows a buffer memory barrier: lumen's buffers are
+  untracked (`allocator/mps`), so the barrier is what orders a kernel after
+  the writes of those before it in the encoder (see `stream/mps`).
 * A grid with a zero dimension launches nothing (and clears the profiler's
   pending launch).
 * A kernel's pipeline is looked up by name once (`lumen_mps_pipeline`,

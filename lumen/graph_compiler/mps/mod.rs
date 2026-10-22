@@ -590,7 +590,10 @@ pub(crate) fn encode(
     }
     let out = &step.output.1;
     let n = out.numel();
-    let Some(Tuning::Loop { per_thread, group }) = tuning else {
+    let Some(Tuning::Loop {
+        per_thread, group, ..
+    }) = tuning
+    else {
         unreachable!("a loop's tuning")
     };
     let grid = Grid::Elementwise {

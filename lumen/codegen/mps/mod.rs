@@ -35,7 +35,11 @@ pub(crate) use transpose::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tuning {
-    Loop { per_thread: usize, group: usize },
+    Loop {
+        per_thread: usize,
+        group: usize,
+        contiguous: bool,
+    },
 }
 
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {

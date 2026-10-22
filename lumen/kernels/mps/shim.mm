@@ -167,6 +167,7 @@ static int launch(id<MTLComputePipelineState> pso,
             [encoder setBytes:args[j] length:arg_lens[j] atIndex:nbuffers + j];
         }
         MTLSize size = MTLSizeMake(grid[0], grid[1], grid[2]);
+        [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
         if (groups) {
             [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         } else {
@@ -215,6 +216,7 @@ int lumen_mps_launch_pipeline(void *pso,
 double lumen_mps_time_pipeline(void *pipeline,
                                const void *const *buffers,
                                size_t nbuffers,
+                               size_t copies,
                                const void *const *args,
                                const size_t *arg_lens,
                                size_t nargs,
@@ -228,9 +230,9 @@ double lumen_mps_time_pipeline(void *pipeline,
         return -1;
     }
     @autoreleasepool {
-        id<MTLBuffer> bound[kMaxBuffers];
-        size_t offsets[kMaxBuffers] = {0};
-        for (size_t i = 0; i < nbuffers; ++i) {
+        std::vector<id<MTLBuffer>> bound(nbuffers * copies);
+        std::vector<size_t> offsets(nbuffers * copies, 0);
+        for (size_t i = 0; i < nbuffers * copies; ++i) {
             if (buffers[i] != nullptr) {
                 bound[i] = lumen_mps_buffer(buffers[i], &offsets[i]);
                 if (bound[i] == nil) {
@@ -241,9 +243,6 @@ double lumen_mps_time_pipeline(void *pipeline,
         id<MTLCommandBuffer> commands = [queue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
         [encoder setComputePipelineState:pso];
-        for (size_t i = 0; i < nbuffers; ++i) {
-            [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
-        }
         for (size_t j = 0; j < nargs; ++j) {
             [encoder setBytes:args[j] length:arg_lens[j] atIndex:nbuffers + j];
         }
@@ -253,6 +252,11 @@ double lumen_mps_time_pipeline(void *pipeline,
         NSUInteger y = std::min<NSUInteger>(grid[1], total / x);
         NSUInteger z = std::min<NSUInteger>(grid[2], total / (x * y));
         for (size_t r = 0; r < reps; ++r) {
+            size_t copy = (r % copies) * nbuffers;
+            for (size_t i = 0; i < nbuffers; ++i) {
+                [encoder setBuffer:bound[copy + i] offset:offsets[copy + i] atIndex:i];
+            }
+            [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
             if (groups) {
                 [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             } else {
