@@ -11,7 +11,7 @@ find each other (`init_process_group`). Collectives come later.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | The default process group: `rendezvous` (`env://`, `tcp://host:port`), `init_process_group` (a barrier on the store), `destroy_process_group`, `is_initialized`; `get_rank` / `get_world_size` (the group's, else the launcher's `RANK` / `WORLD_SIZE`, defaulting to one process); and `DeviceMesh`: a device type, a row-major array of global ranks, optional dimension names and this process's rank; `coordinate`, `local_rank`, `slice`. |
+| `mod.rs` | The default process group: `rendezvous` (`env://`, `tcp://host:port`), `init_process_group` (a barrier on the store), `destroy_process_group`, `is_initialized`, `mesh_world` (the rank and world a new mesh is built in: rendezvous if needed, none for MPS); `get_rank` / `get_world_size` (the group's, else the launcher's `RANK` / `WORLD_SIZE`, defaulting to one process); and `DeviceMesh`: a device type, a row-major array of global ranks, optional dimension names and this process's rank; `coordinate`, `local_rank`, `slice`. |
 | `store.rs` | `TcpStore`, PyTorch's `TCPStore`: a key-value store served by one process (the master, a thread per connection) that every process connects to; `set`, `get` (waits for the key), `add` (a counter), `wait`. |
 | `python.rs` | Bindings into `lumen.distributed._C`: `DeviceMesh`, `init_device_mesh`, `TCPStore`, `init_process_group`, `destroy_process_group`, `is_initialized`, `get_rank`, `get_world_size`. |
 | `__init__.py` | The `lumen.distributed` package. |
@@ -29,7 +29,13 @@ lumen.distributed.init_process_group(store=store, rank=r, world_size=n)
 As in PyTorch, rank 0 serves a `TCPStore` at the master's address and every
 rank connects to it (retrying until the timeout, 30 minutes by default, so
 processes may start in any order). `init_process_group` counts the ranks in
-on the store and returns once all `world_size` have arrived. The store is
+on the store and returns once all `world_size` have arrived.
+
+A mesh rendezvous by itself, as PyTorch's does: building one in a process
+of a world of several (`WORLD_SIZE` > 1) with no process group yet runs
+`init_process_group()` (`env://`). In a world of one there is no one to
+meet. An `"mps"` mesh never rendezvous: a Mac has one MPS device, so the
+mesh must hold exactly one, in a world of one process. The store is
 what later rendezvous build on: PJRT's distributed runtime is to read and write
 its keys through it. Collective backends (`backend=`) come with the
 collectives.

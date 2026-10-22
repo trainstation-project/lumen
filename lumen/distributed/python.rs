@@ -215,20 +215,17 @@ pub(crate) struct PyDeviceMesh {
 
 impl PyDeviceMesh {
     fn build(
+        py: Python<'_>,
         device_type: &str,
         shape: Vec<usize>,
         ranks: Vec<usize>,
         mesh_dim_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        let mesh = DeviceMesh::new(
-            device_type,
-            shape,
-            ranks,
-            mesh_dim_names,
-            get_rank()?,
-            get_world_size()?,
-        )
-        .map_err(PyValueError::new_err)?;
+        let (rank, world_size) = py
+            .detach(|| super::mesh_world(device_type, ranks.len()))
+            .map_err(PyRuntimeError::new_err)?;
+        let mesh = DeviceMesh::new(device_type, shape, ranks, mesh_dim_names, rank, world_size)
+            .map_err(PyValueError::new_err)?;
         Ok(PyDeviceMesh { mesh })
     }
 
@@ -263,13 +260,14 @@ impl PyDeviceMesh {
     #[new]
     #[pyo3(signature = (device_type, mesh, *, mesh_dim_names = None))]
     fn new(
+        py: Python<'_>,
         device_type: &str,
         mesh: &Bound<'_, PyAny>,
         mesh_dim_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let (mut shape, mut ranks) = (Vec::new(), Vec::new());
         flatten_mesh(mesh, 0, &mut shape, &mut ranks)?;
-        Self::build(device_type, shape, ranks, mesh_dim_names)
+        Self::build(py, device_type, shape, ranks, mesh_dim_names)
     }
 
     #[getter]
@@ -352,12 +350,14 @@ impl PyDeviceMesh {
 #[pyfunction]
 #[pyo3(signature = (device_type, mesh_shape, *, mesh_dim_names = None))]
 fn init_device_mesh(
+    py: Python<'_>,
     device_type: &str,
     mesh_shape: Vec<usize>,
     mesh_dim_names: Option<Vec<String>>,
 ) -> PyResult<PyDeviceMesh> {
     let count = mesh_shape.iter().product();
     PyDeviceMesh::build(
+        py,
         device_type,
         mesh_shape,
         (0..count).collect(),

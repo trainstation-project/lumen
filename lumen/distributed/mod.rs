@@ -129,6 +129,28 @@ pub fn init_process_group(
     Ok(())
 }
 
+pub fn mesh_world(device_type: &str, mesh_size: usize) -> Result<(usize, usize), String> {
+    if device_type == "mps" {
+        if mesh_size != 1 {
+            return Err(format!(
+                "an MPS mesh holds the one MPS device, got {mesh_size} devices"
+            ));
+        }
+        let world_size = get_world_size()?;
+        if world_size != 1 {
+            return Err(format!(
+                "MPS runs in one process, but WORLD_SIZE is {world_size}"
+            ));
+        }
+        return Ok((0, 1));
+    }
+    if !is_initialized() && get_world_size()? > 1 {
+        let (store, rank, world_size) = rendezvous("env://", None, None, DEFAULT_TIMEOUT)?;
+        init_process_group(store, rank, world_size)?;
+    }
+    Ok((get_rank()?, get_world_size()?))
+}
+
 pub fn destroy_process_group() -> Result<(), String> {
     world()
         .take()

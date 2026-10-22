@@ -77,6 +77,13 @@ fn invalid_meshes_are_rejected() {
     assert!(mesh_2x4(0).slice(&names(&["dp", "dp"])).is_err());
 }
 
+#[test]
+fn an_mps_mesh_is_one_device_in_one_process() {
+    assert_eq!(super::mesh_world("mps", 1), Ok((0, 1)));
+    let err = super::mesh_world("mps", 2).unwrap_err();
+    assert!(err.contains("one MPS device"), "{err}");
+}
+
 mod store {
     use std::thread;
     use std::time::Duration;
