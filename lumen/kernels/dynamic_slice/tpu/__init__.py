@@ -19,7 +19,7 @@ def _int(n):
 
 def program(spec):
     shape, update, dtype, tile = spec["shape"], spec["update"], spec["dtype"], spec["tile"]
-    bm, bn, copied = spec["bm"], spec["bn"], spec["copy"]
+    bm, bn, copied, cbm = spec["bm"], spec["bn"], spec["copy"], spec["copy_rows"]
     rank = len(shape)
     (rows, cols), (ur, uc) = shape[-2:], update[-2:]
     rp, cp, urp, ucp = _up(rows, tile), _up(cols, LANES), _up(ur, tile), _up(uc, LANES)
@@ -39,6 +39,8 @@ def program(spec):
         window = pl.scratch(pl.VMEM((wr, wc), dtype))
         block = pl.scratch(pl.VMEM((wr, wc), dtype))
         staged = block.at[pl.ds(0, bm), pl.ds(0, bn)]
+        slots = pl.scratch(pl.VMEM((2, bm, bn), dtype))
+        flights = pl.scratch(pl.SemaphoreType.DMA((2, 2)))
 
         def piece(k, i, j):
             a, b = pl.multiple_of(i * bm, tile), pl.multiple_of(j * bn, LANES)
@@ -57,7 +59,14 @@ def program(spec):
             c.wait()
 
         if copied:
-            pl.async_copy(x, out, sem).wait()
+
+            def moved(i, o):
+                o[...] = i[...]
+
+            whole_rows = pl.BlockSpec((None, cbm, cp), lambda l, i: (l, i, 0))
+            pl.emit_pipeline(moved, grid=(math.prod(lead), rp // cbm), in_specs=[whole_rows], out_specs=[whole_rows])(
+                x, out
+            )
         held = pl.scratch(pl.SMEM((rank, SCALARS), "int32"))
         fetched = [pl.async_copy(pallas.view(memory, refs[2 + d], (SCALARS,), "int32"), held.at[d], sem) for d in range(rank)]
         for c in fetched:
@@ -107,14 +116,36 @@ def program(spec):
 
             @pl.when(aligned)
             def _():
-                @pl.loop(0, urp // bm)
-                def _(i):
-                    @pl.loop(0, ucp // bn)
-                    def _(j):
-                        loaded(k, i, j)
-                        a, b = i * bm, j * bn
-                        to = out.at[at, pl.ds(pl.multiple_of(r0 + a, tile), bm), pl.ds(pl.multiple_of(c0 + b, LANES), bn)]
-                        pl.async_copy(staged, to, sem).wait()
+                if single:
+                    loaded(k, 0, 0)
+                    to = out.at[at, pl.ds(pl.multiple_of(r0, tile), bm), pl.ds(pl.multiple_of(c0, LANES), bn)]
+                    pl.async_copy(staged, to, sem).wait()
+                    return
+                across = ucp // bn
+                count = urp // bm * across
+
+                def load(t):
+                    a, b = pl.multiple_of(t // across * bm, tile), pl.multiple_of(t % across * bn, LANES)
+                    return pl.make_async_copy(u.at[k, pl.ds(a, bm), pl.ds(b, bn)], slots.at[t % 2], flights.at[0, t % 2])
+
+                def store(t):
+                    a, b = t // across * bm, t % across * bn
+                    rows_at, cols_at = pl.multiple_of(r0 + a, tile), pl.multiple_of(c0 + b, LANES)
+                    to = out.at[at, pl.ds(rows_at, bm), pl.ds(cols_at, bn)]
+                    return pl.make_async_copy(slots.at[t % 2], to, flights.at[1, t % 2])
+
+                load(_int(0)).start()
+
+                @pl.loop(0, count)
+                def _(t):
+                    load(t).wait()
+                    store(t).start()
+
+                    @pl.when(t + 1 < count)
+                    def _():
+                        load(t + 1).start()
+
+                    store(t).wait()
 
             pl.when(~aligned)(blocks)
 

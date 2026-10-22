@@ -8,6 +8,8 @@ const LANES: usize = 128;
 
 const BLOCK: usize = 1 << 19;
 
+const COPY_BYTES: usize = 2 << 20;
+
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -40,8 +42,18 @@ pub(crate) fn encode(
     let bn = block(ucp, LANES, 1024).unwrap_or(LANES);
     let bm = block(urp, tile, (BLOCK / bn / tile * tile).max(tile)).unwrap_or(tile);
     let copy = inputs[0] != output.cast_const();
+    let (rp, cp) = (
+        operand.shape[rank - 2].div_ceil(tile) * tile,
+        operand.shape[rank - 1].div_ceil(LANES) * LANES,
+    );
+    let copy_rows = block(
+        rp,
+        tile,
+        (COPY_BYTES / (cp * layout.stored.size_of()) / tile * tile).max(tile),
+    )
+    .unwrap_or(tile);
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"copy\": {copy}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"copy\": {copy}, \"copy_rows\": {copy_rows}",
         operand.shape,
         update.shape,
         operand.dtype.full_name()
