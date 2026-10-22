@@ -36,8 +36,9 @@ def program(spec):
         if copied:
             pl.async_copy(x, out, sem).wait()
         held = pl.scratch(pl.SMEM((rank, SCALARS), "int32"))
-        for d in range(rank):
-            pl.async_copy(pallas.view(memory, refs[2 + d], (SCALARS,), "int32"), held.at[d], sem).wait()
+        fetched = [pl.async_copy(pallas.view(memory, refs[2 + d], (SCALARS,), "int32"), held.at[d], sem) for d in range(rank)]
+        for c in fetched:
+            c.wait()
         starts = [prims.min(prims.max(held[d, 0], _int(0)), _int(shape[d] - update[d])) for d in range(rank)]
         r0, c0 = starts[-2], starts[-1]
         window = pl.scratch(pl.VMEM((wr, wc), dtype))
