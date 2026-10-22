@@ -1,13 +1,36 @@
+pub mod backend;
 #[cfg(feature = "python")]
 pub(crate) mod python;
+pub mod store;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::Device;
+pub use backend::{MeshBackend, mesh_backend};
+pub use store::TcpStore;
 
-fn env_index(name: &str, default: usize) -> Result<usize, String> {
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+const JOINED: &str = "init_process_group/joined";
+const READY: &str = "init_process_group/ready";
+
+struct World {
+    rank: usize,
+    world_size: usize,
+    store: Arc<TcpStore>,
+}
+
+static WORLD: Mutex<Option<World>> = Mutex::new(None);
+
+fn world() -> std::sync::MutexGuard<'static, Option<World>> {
+    WORLD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub(crate) fn env_index(name: &str, default: usize) -> Result<usize, String> {
     match std::env::var(name) {
         Err(_) => Ok(default),
         Ok(value) => value
@@ -16,12 +39,103 @@ fn env_index(name: &str, default: usize) -> Result<usize, String> {
     }
 }
 
+fn required_env(name: &str) -> Result<String, String> {
+    std::env::var(name).map_err(|_| format!("env:// rendezvous: {name} is not set"))
+}
+
+fn required_env_index(name: &str) -> Result<usize, String> {
+    required_env(name)?;
+    env_index(name, 0)
+}
+
 pub fn get_rank() -> Result<usize, String> {
-    env_index("RANK", 0)
+    match &*world() {
+        Some(world) => Ok(world.rank),
+        None => env_index("RANK", 0),
+    }
 }
 
 pub fn get_world_size() -> Result<usize, String> {
-    env_index("WORLD_SIZE", 1)
+    match &*world() {
+        Some(world) => Ok(world.world_size),
+        None => env_index("WORLD_SIZE", 1),
+    }
+}
+
+pub fn is_initialized() -> bool {
+    world().is_some()
+}
+
+pub fn default_store() -> Option<Arc<TcpStore>> {
+    world().as_ref().map(|w| w.store.clone())
+}
+
+pub fn rendezvous(
+    init_method: &str,
+    rank: Option<usize>,
+    world_size: Option<usize>,
+    timeout: Duration,
+) -> Result<(Arc<TcpStore>, usize, usize), String> {
+    let (host, port, rank, world_size) = match init_method {
+        "env://" => {
+            let rank = rank.map_or_else(|| required_env_index("RANK"), Ok)?;
+            let world_size = world_size.map_or_else(|| required_env_index("WORLD_SIZE"), Ok)?;
+            let port = required_env("MASTER_PORT")?;
+            (required_env("MASTER_ADDR")?, port, rank, world_size)
+        }
+        url => {
+            let address = url.strip_prefix("tcp://").ok_or_else(|| {
+                format!("init_method must be env:// or tcp://host:port, got '{url}'")
+            })?;
+            let (host, port) = address
+                .rsplit_once(':')
+                .ok_or_else(|| format!("tcp:// rendezvous: '{url}' has no port"))?;
+            let missing = |name| format!("tcp:// rendezvous needs {name}");
+            (
+                host.to_owned(),
+                port.to_owned(),
+                rank.ok_or_else(|| missing("rank"))?,
+                world_size.ok_or_else(|| missing("world_size"))?,
+            )
+        }
+    };
+    let port = port
+        .parse()
+        .map_err(|_| format!("the store's port must be a number, got '{port}'"))?;
+    let store = TcpStore::new(&host, port, rank == 0, timeout)?;
+    Ok((Arc::new(store), rank, world_size))
+}
+
+pub fn init_process_group(
+    store: Arc<TcpStore>,
+    rank: usize,
+    world_size: usize,
+) -> Result<(), String> {
+    if is_initialized() {
+        return Err("the default process group is already initialized".into());
+    }
+    if rank >= world_size {
+        return Err(format!(
+            "rank {rank} is outside the world of size {world_size}"
+        ));
+    }
+    if store.add(JOINED, 1)? == world_size as i64 {
+        store.set(READY, b"")?;
+    }
+    store.wait(&[READY], store.timeout())?;
+    *world() = Some(World {
+        rank,
+        world_size,
+        store,
+    });
+    Ok(())
+}
+
+pub fn destroy_process_group() -> Result<(), String> {
+    world()
+        .take()
+        .map(drop)
+        .ok_or_else(|| "the default process group is not initialized".into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
