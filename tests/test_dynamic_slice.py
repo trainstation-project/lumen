@@ -48,6 +48,37 @@ def test_dynamic_slices(device, index_dtype, dtype, starts):
     np.testing.assert_array_equal(lumen.to_numpy(dus.to(dtype="float32")), want)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "shape, update, starts",
+    [
+        ((512, 1024), (64, 1024), (64, 0)),
+        ((512, 1024), (64, 1024), (37, 0)),
+        ((300, 700), (40, 300), (13, 77)),
+        ((2048, 2048), (1500, 1300), (7, 900)),
+        ((3, 70, 260), (2, 9, 130), (1, 5, 3)),
+        ((4, 64, 256), (1, 64, 256), (2, 0, 0)),
+    ],
+    ids=["aligned", "rows", "unaligned", "blocks", "lead", "slab"],
+)
+@pytest.mark.parametrize("in_place", [True, False])
+def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
+    """The update lands at its (clamped) starts, the rest of the operand
+    kept, whether it is written into the operand's memory (an intermediate)
+    or into a copy of it (an argument)."""
+    rng = np.random.default_rng(0)
+    xt = _tensor(rng.standard_normal(shape).astype(np.float32), device, dtype)
+    ut = _tensor(rng.standard_normal(update).astype(np.float32), device, dtype)
+    x, u = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, ut))
+    idx = [_tensor(np.array([s], np.int32), device) for s in starts]
+    operand = (lambda x: x * 2.0) if in_place else (lambda x: x)
+    got = lumen.compile(lambda x, u, *i: prims.dynamic_update_slice(operand(x), u, _scalars(*i)))(xt, ut, *idx)
+    want = 2 * x if in_place else x.copy()
+    want[_block(shape, starts, update)] = u
+    np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
+
+
 def test_start_indices():
     """Python ints are constants of the traced indices' dtype; indices must
     be int32 or int64 scalars of one dtype, and the block inside."""
