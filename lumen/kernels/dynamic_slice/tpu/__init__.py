@@ -43,7 +43,8 @@ def program(spec):
     whole = (ur % tile == 0 or ur == rows) and (uc % LANES == 0 or uc == cols)
     wide = "float32" if dtype.startswith("bfloat") or dtype.startswith("float") else "int32"
     small = math.prod(ulead) == 1 and gm == urp
-    strips = uc != cols and width > 2 * STRIP
+    spanned = uc == cols
+    strips = not spanned and width > 2 * STRIP
     blocks = urp // gm
     indices = 0 if fixed else count * rank
     output = 1 + count + indices
@@ -153,11 +154,13 @@ def program(spec):
                 v = prims.concatenate([tail, current], 0).to(wide)
                 if width > ucp:
                     v = prims.concatenate([v, prims.full((tile + rows_of, width - ucp), 0, wide)], 1)
-                v = pl.roll(pl.roll(v, dr, 0), dc, 1)
+                v = pl.roll(v, dr, 0) if spanned else pl.roll(pl.roll(v, dr, 0), dc, 1)
                 return prims.slice(v, (tile, 0), (tile + rows_of, width))
 
             def inside(top, rows_of):
                 g = top + pl.broadcasted_iota("int32", (rows_of, width), 0)
+                if spanned:
+                    return (g >= r0) & (g < r0 + ur)
                 c = pl.broadcasted_iota("int32", (rows_of, width), 1)
                 return (g >= r0) & (g < r0 + ur) & (c >= dc) & (c < dc + uc)
 
@@ -329,10 +332,12 @@ def program(spec):
                         v = prims.concatenate([v, prims.full((tall - gm, ucp), 0, wide)], 0)
                     if wide_as > ucp:
                         v = prims.concatenate([v, prims.full((tall, wide_as - ucp), 0, wide)], 1)
-                    v = pl.roll(pl.roll(v, dr, 0), dc, 1)
+                    v = pl.roll(v, dr, 0) if spanned else pl.roll(pl.roll(v, dr, 0), dc, 1)
                     g = pl.broadcasted_iota("int32", (tall, wide_as), 0)
                     c = pl.broadcasted_iota("int32", (tall, wide_as), 1)
-                    inside = (g >= dr) & (g < dr + ur) & (c >= dc) & (c < dc + uc)
+                    inside = (g >= dr) & (g < dr + ur)
+                    if not spanned:
+                        inside = inside & (c >= dc) & (c < dc + uc)
                     window = kept_box.at[pl.ds(ra, tall), pl.ds(cb, wide_as)]
                     window[...] = prims.select(inside, v, window[...].to(wide)).to(dtype)
 
