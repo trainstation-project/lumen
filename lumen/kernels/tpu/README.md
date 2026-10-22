@@ -5,7 +5,8 @@ executor `Device::Tpu`) goes to `encode`, which routes on the step's
 `Primitive`; so far `dot_general` ([`../dot_general/`](../dot_general/README.md)),
 loop, row and reduction fusions (generated: [`../../codegen/tpu/`](../../codegen/tpu/README.md);
 reductions on the template in [`../reduce/tpu/`](../reduce/tpu/)) and
-`gather` ([`../gather/`](../gather/README.md)) have kernels, and any other step errors
+`gather` ([`../gather/`](../gather/README.md)) and `dynamic_update_slice`
+([`../dynamic_slice/`](../dynamic_slice/README.md)) have kernels, and any other step errors
 (`<primitive> does not run on TPU yet`). The host-to-TPU copy
 (`../device_transfer/tpu/mod.rs`) is a kernel too.
 
