@@ -16,6 +16,7 @@ evaluates it with `kernels/reference.rs`.
 | `mod.rs` | Module doc and the `#[cfg(lumen_mps_linked)] mod mps;` and `#[cfg(lumen_tpu_linked)] mod tpu;` hooks. |
 | `tpu/mod.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec, its epilogue's from `codegen/tpu/gemm.rs`; see *TPU* below. |
 | `tpu/__init__.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
+| `cuda.py` | `matmul(a, b)`: a standalone Triton GEMM on CUDA tensors (`[M, K] · [K, N]`, any strides, float32 accumulation), called directly, not from a plan. |
 
 ## TPU
 
