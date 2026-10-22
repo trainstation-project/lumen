@@ -57,32 +57,72 @@ def device_name():
     return platform.processor() or platform.machine()
 
 
-def best(run, sync, reps, batches=3):
-    for _ in range(3):
-        run()
+FLUSH_BYTES = 256 << 20
+
+
+class Flush:
+    def __init__(self):
+        self.lumen_buffer = lumen.from_numpy(np.ones(FLUSH_BYTES // 4, np.float32)).to("mps")
+        self.lumen_fn = lumen.compile(lambda z: prims.add(prims.mul(z, z), z))
+        self.lumen_fn(self.lumen_buffer)
+        lumen.mps.synchronize()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+            self.lumen()
+            lumen.mps.synchronize()
+        self.lumen_kernels = {e["name"] for e in prof.events() if e["kind"] == "gpu"}
+
+    def lumen(self):
+        self.lumen_fn(self.lumen_buffer)
+
+
+def kernel_time(f, args, flush, reps=20):
+    f(*args)
+    for _ in range(10):
+        flush.lumen()
+    lumen.mps.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+        for _ in range(reps):
+            flush.lumen()
+            f(*args)
+        lumen.mps.synchronize()
+    calls, current = [], None
+    for e in prof.events():
+        if e["kind"] != "gpu":
+            continue
+        if e["name"] in flush.lumen_kernels:
+            if current:
+                calls.append(current)
+            current = 0.0
+        elif current is not None:
+            current += e["duration_us"]
+    if current:
+        calls.append(current)
+    return min(calls)
+
+
+ROTATION_BYTES = 512 << 20
+
+
+def call_time(run, sets, sync, batches=3):
+    reps = max(len(sets), 20)
+    outs = [None] * len(sets)
+    for args in sets:
+        run(*args)
     sync()
-    times = []
+    best = None
     for _ in range(batches):
         t = time.perf_counter()
-        for _ in range(reps):
-            run()
+        for i in range(reps):
+            k = i % len(sets)
+            outs[k] = run(*sets[k])
         sync()
-        times.append((time.perf_counter() - t) / reps * 1e6)
-    return min(times)
+        us = (time.perf_counter() - t) / reps * 1e6
+        best = us if best is None else min(best, us)
+    return best
 
 
-def device_time(f, args, reps=20, batches=3):
-    for _ in range(3):
-        f(*args)
-    lumen.mps.synchronize()
-    times = []
-    for _ in range(batches):
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-            for _ in range(reps):
-                f(*args)
-            lumen.mps.synchronize()
-        times.append(sum(e.self_device_time_total for e in prof.key_averages()) / reps)
-    return min(times)
+def rotation(per_call):
+    return min(max(-(-ROTATION_BYTES // per_call), 2), 4096)
 
 
 def kernel_code(f, args):
@@ -99,6 +139,7 @@ def measure(name):
     rng = np.random.default_rng(0)
     rows, code = [], None
     f = lumen.compile(lf)
+    flush = Flush()
     for dtype in DTYPES:
         if name == "cast" and dtype != "float32":
             continue
@@ -112,7 +153,11 @@ def measure(name):
                 rows.append({"op": name, "dtype": dtype, "n": n, "error": str(e).splitlines()[0][:200]})
                 continue
             out_dtype = "bool" if kind == "compare" else ("bfloat16" if name == "cast" else dtype)
-            reps = 200 if n <= 1 << 18 else 50
+            per_call = n * (arity * ITEM[dtype] + ITEM[out_dtype])
+            sets = rotation(per_call)
+            lumen_sets = [lt] + [
+                [lumen.from_numpy(a.copy()).to("mps").to(dtype=dtype) for a in arrays] for _ in range(sets - 1)
+            ]
             row = {
                 "op": name,
                 "kind": kind,
@@ -121,17 +166,22 @@ def measure(name):
                 "out_dtype": out_dtype,
                 "n": n,
                 "inputs": arity,
-                "bytes": n * (arity * ITEM[dtype] + ITEM[out_dtype]),
+                "bytes": per_call,
                 "flops": n,
-                "device_us": round(device_time(f, lt), 3),
-                "lumen_wall_us": round(best(lambda: f(*lt), lumen.mps.synchronize, reps), 3),
-                "torch_wall_us": None,
+                "device_us": round(kernel_time(f, lt, flush), 3),
+                "lumen_call_us": round(call_time(f, lumen_sets, lumen.mps.synchronize), 3),
+                "torch_call_us": None,
                 "matches_torch": None,
+                "rotation": sets,
             }
+            del lumen_sets
             row["gbs"] = round(row["bytes"] / row["device_us"] / 1e3, 2)
             if torch is not None:
                 tt = [torch.from_numpy(a).to("mps").to(getattr(torch, dtype)) for a in arrays]
-                row["torch_wall_us"] = round(best(lambda: tf(*tt), torch.mps.synchronize, reps), 3)
+                torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
+                row["torch_call_us"] = round(call_time(tf, torch_sets, torch.mps.synchronize), 3)
+                del torch_sets
+                torch.mps.empty_cache()
                 got = out.to("cpu")
                 got = lumen.to_numpy(got.to(dtype="float32") if out_dtype == "bfloat16" else got)
                 want = tf(*tt).to("cpu")
@@ -174,7 +224,7 @@ def save(data):
 
 
 if __name__ == "__main__":
-    lumen.config.static_allocator_bytes = 24 << 30
+    lumen.config.static_allocator_bytes = 4 << 30
     data = load()
     for name in sys.argv[1:] or OPS:
         data = update(data, name)

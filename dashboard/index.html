@@ -135,13 +135,13 @@
     <div class="lx-tiles" id="perf-tiles"></div>
     <div class="lx-card">
       <h2>Bandwidth by size</h2>
-      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over device time, float32, against the device's memory bandwidth. Up to a few million elements the data stays in the GPU's cache, so bandwidth there can exceed it. Hover a point for its numbers; click it for the op's page.</p>
+      <p class="lx-note">Elementwise ops are memory-bound, so bandwidth is their measure: bytes read and written over kernel time on a cold cache, float32, against the device's memory bandwidth. Small calls are bound by launch and latency, not bytes; from about 4M elements every op runs near the same bandwidth. Hover a point for its numbers; click it for the op's page.</p>
       <div class="lx-legend" id="bw-legend"></div>
       <div class="lx-chart" id="bw-size"></div>
     </div>
     <div class="lx-card">
       <h2>Elementwise ops on MPS</h2>
-      <p class="lx-note">At 64M elements unless noted. vs PyTorch compares wall time per call, back to back, with PyTorch <span id="torch-version"></span> on MPS: above 1× lumen is faster. Small-call time is wall time per call at 4,096 elements, where launch overhead dominates.</p>
+      <p class="lx-note">At 64M elements unless noted. Bandwidth is from lumen's kernel time: one call on a cold cache (a 256 MB flush before it), timed by the profiler, best of 20, as PyTorch's Inductor benchmarks kernels. vs PyTorch compares time per call with PyTorch <span id="torch-version"></span> on MPS: calls back to back, rotating through enough separate inputs that none is in cache: above 1× lumen is faster. Small call is that time at 4,096 elements, where launch cost dominates.</p>
       <div class="lx-scroll"><table id="perf-table"><thead><tr></tr></thead><tbody></tbody></table></div>
     </div>
   </section>
@@ -158,13 +158,13 @@
     <div class="lx-grid2">
       <div class="lx-card">
         <h2>Bandwidth by size</h2>
-        <p class="lx-note">lumen from device time; PyTorch from wall time per call back to back, so it includes its launch cost.</p>
+        <p class="lx-note">lumen from its kernel time on a cold cache. PyTorch has no MPS kernel timer, so its bandwidth is from its time per call: back to back on cold inputs, including its launch cost.</p>
         <div class="lx-legend" id="op-bw-legend"></div>
         <div class="lx-chart" id="op-bw"></div>
       </div>
       <div class="lx-card">
         <h2>Time per call</h2>
-        <p class="lx-note">Float32. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
+        <p class="lx-note">Float32. Kernel time is one call on a cold cache; time per call is calls back to back on cold inputs, where launches and kernels overlap. The flat start is the cost of a launch; the slope is the cost of the bytes.</p>
         <div class="lx-legend" id="op-time-legend"></div>
         <div class="lx-chart" id="op-time"></div>
       </div>
@@ -237,7 +237,7 @@ function detail(r, who, us, timing) {
   rows.push([`Time (${timing})`, fmt.us(us)]);
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
-const torchGbs = (r) => r.torch_wall_us == null ? null : r.bytes / r.torch_wall_us / 1e3;
+const torchGbs = (r) => r.torch_call_us == null ? null : r.bytes / r.torch_call_us / 1e3;
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 const known = (a) => a.filter((v) => v != null && !Number.isNaN(v));
 
@@ -327,6 +327,13 @@ const hideTip = () => { tip.hidden = true; };
 const NS = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
 const logScale = ([lo, hi], [a, b]) => (v) => a + (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * (b - a);
+const linearScale = ([lo, hi], [a, b]) => (v) => a + (v - lo) / (hi - lo) * (b - a);
+function bandwidthAxis(values) {
+  const top = Math.ceil(Math.max(DEVICE_BW, ...values) * 1.05 / 50) * 50;
+  const ticks = [];
+  for (let t = 0; t <= top; t += 50) ticks.push(t);
+  return { domain: [0, top], ticks, fmt: (v) => String(v), label: "GB/s", linear: true };
+}
 
 function chart(id, spec) {
   const box = document.getElementById(id);
@@ -334,7 +341,7 @@ function chart(id, spec) {
   const W = Math.max(280, box.clientWidth), H = 280;
   const m = { l: 56, r: 16, t: 12, b: 40 };
   const sx = logScale(spec.x.domain, [m.l, W - m.r]);
-  const sy = logScale(spec.y.domain, [H - m.b, m.t]);
+  const sy = (spec.y.linear ? linearScale : logScale)(spec.y.domain, [H - m.b, m.t]);
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": spec.label });
   for (const t of spec.x.ticks) {
     svg.append(svgEl("line", { x1: sx(t), x2: sx(t), y1: m.t, y2: H - m.b, stroke: "var(--grid)" }));
@@ -456,8 +463,8 @@ function opSummary(op) {
     op, formula: big.formula, kind: big.kind,
     gbs: big.gbs, roof: big.gbs / DEVICE_BW,
     best: Math.max(...f32.map((r) => r.gbs)), bestAt: f32.reduce((a, r) => r.gbs > a.gbs ? r : a).n,
-    vsTorch: big.torch_wall_us == null ? null : big.torch_wall_us / big.lumen_wall_us,
-    smallLumen: small.lumen_wall_us, smallTorch: small.torch_wall_us,
+    vsTorch: big.torch_call_us == null ? null : big.torch_call_us / big.lumen_call_us,
+    smallLumen: small.lumen_call_us, smallTorch: small.torch_call_us,
     bf16: !bf16.length ? "not measured" : bf16.some((r) => r.error) ? "no kernel" : fmt.gbs(rowOf(op, "bfloat16", BIG).gbs),
   };
 }
@@ -478,10 +485,10 @@ function drawPerformance() {
 
   const lines = BENCHED.map((op) => ({ points: OK_ROWS.filter((r) => r.op === op && r.dtype === "float32").map((r) => [r.n, r.gbs]), color: "var(--s3)", width: 1.5, opacity: .55 }));
   const pts = OK_ROWS.filter((r) => r.dtype === "float32").map((r) => ({ x: r.n, y: r.gbs, r: 3, color: "var(--s1)", opacity: .8, href: `op-${r.op}`,
-    tip: detail(r, "lumen", r.device_us, "device") }));
+    tip: detail(r, "lumen", r.device_us, "kernel") }));
   chart("bw-size", {
     label: "Bandwidth by size", x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-    y: { domain: [1, 1000], ticks: [1, 10, 100, 1000], fmt: fmt.num, label: "GB/s" },
+    y: bandwidthAxis(pts.map((p) => p.y)),
     lines: [...lines,
       { points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" }],
     points: pts,
@@ -494,7 +501,7 @@ function drawPerformance() {
     { key: "formula", label: "Computes" },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (s) => fmt.gbs(s.gbs) },
     { key: "roof", label: "Of device", kind: "num", render: (s) => fmt.pct(s.roof) },
-    { key: "best", label: "Best (in cache)", kind: "num", wide: true, render: (s) => `${fmt.gbs(s.best)} at ${fmt.n(s.bestAt)}` },
+    { key: "best", label: "Best", kind: "num", wide: true, render: (s) => `${fmt.gbs(s.best)} at ${fmt.n(s.bestAt)}` },
     { key: "vsTorch", label: "vs PyTorch", kind: "num", render: (s) => s.vsTorch == null ? "—" : ratio(s.vsTorch) },
     { key: "smallLumen", label: "Small call", kind: "num", wide: true, render: (s) => `${fmt.us(s.smallLumen)} vs ${maybe(s.smallTorch, fmt.us)}` },
     { key: "bf16", label: "bfloat16", kind: "num", wide: true },
@@ -542,8 +549,8 @@ function drawOp(op) {
   const big = rowOf(op, "float32", BIG), small = rowOf(op, "float32", SMALL);
   tile(tiles, "Bandwidth", s.gbs.toFixed(0), "GB/s", [[`float32 at ${fmt.n(BIG)} elements, `, bold(fmt.pct(s.roof)), ` of the device's ${DEVICE_BW} GB/s`]]);
   tile(tiles, "Time", fmt.us(big.device_us), null, [[`device time for ${fmt.int(big.bytes)} bytes`]]);
-  tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`wall time at ${fmt.n(BIG)}: ${fmt.us(big.lumen_wall_us)} vs ${maybe(big.torch_wall_us, fmt.us)}`]]);
-  tile(tiles, "Small call", fmt.us(small.lumen_wall_us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small.torch_wall_us, fmt.us))]]);
+  tile(tiles, "vs PyTorch", maybe(s.vsTorch, fmt.x), null, [[`time per call at ${fmt.n(BIG)}: ${fmt.us(big.lumen_call_us)} vs ${maybe(big.torch_call_us, fmt.us)}`]]);
+  tile(tiles, "Small call", fmt.us(small.lumen_call_us), null, [[`at ${fmt.n(SMALL)} elements; PyTorch `, bold(maybe(small.torch_call_us, fmt.us))]]);
   tile(tiles, "bfloat16", s.bf16.endsWith("GB/s") ? s.bf16.replace(" GB/s", "") : "—", s.bf16.endsWith("GB/s") ? "GB/s" : null,
     [[s.bf16 === "no kernel" ? "no bfloat16 kernel on MPS yet" : `at ${fmt.n(BIG)} elements`]]);
 
@@ -557,24 +564,24 @@ function drawOp(op) {
     lines.push({ points: rs.map((r) => [r.n, val(r)]), color });
     const torch = name.startsWith("PyTorch");
     for (const r of rs) points.push({ x: r.n, y: val(r), r: 3, color,
-      tip: torch ? detail(r, "PyTorch", r.torch_wall_us, "wall") : detail(r, "lumen", r.device_us, "device") });
+      tip: torch ? detail(r, "PyTorch", r.torch_call_us, "per call") : detail(r, "lumen", r.device_us, "kernel") });
   }
   lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
   chart("op-bw", { label: `${op} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-    y: { domain: [1, 1000], ticks: [1, 10, 100, 1000], fmt: fmt.num, label: "GB/s" }, lines, points });
+    y: bandwidthAxis(points.map((p) => p.y)), lines, points });
   legend("op-bw-legend", [...items, ["device bandwidth", "var(--roof)", true]]);
 
   const f32 = OK_ROWS.filter((r) => r.op === op && r.dtype === "float32");
-  const tseries = [["lumen device", "var(--s1)", (r) => r.device_us], ["lumen wall", "var(--s2)", (r) => r.lumen_wall_us], ["PyTorch wall", "var(--s3)", (r) => r.torch_wall_us]];
+  const tseries = [["lumen kernel", "var(--s1)", (r) => r.device_us, "lumen", "kernel"], ["lumen per call", "var(--s2)", (r) => r.lumen_call_us, "lumen", "per call"],
+    ["PyTorch per call", "var(--s3)", (r) => r.torch_call_us, "PyTorch", "per call"]];
   const tl = [], tp = [];
-  for (const [name, color, val] of tseries) {
+  for (const [name, color, val, who, timing] of tseries) {
     const have = f32.filter((r) => val(r) != null);
     if (!have.length) continue;
     tl.push({ points: have.map((r) => [r.n, val(r)]), color });
-    const [who, timing] = name.split(" ");
     for (const r of have) tp.push({ x: r.n, y: val(r), r: 3, color, tip: detail(r, who, val(r), timing) });
   }
-  const maxT = Math.max(...f32.flatMap((r) => known([r.device_us, r.lumen_wall_us, r.torch_wall_us])));
+  const maxT = Math.max(...f32.flatMap((r) => known([r.device_us, r.lumen_call_us, r.torch_call_us])));
   const tTop = 10 ** Math.ceil(Math.log10(maxT));
   chart("op-time", { label: `${op} time`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
     y: { domain: [1, tTop], ticks: pow10(1, tTop), fmt: (v) => fmt.us(v), label: "time per call" }, lines: tl, points: tp });
@@ -589,8 +596,8 @@ function drawOp(op) {
     { key: "bytes", label: "Bytes", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.int(r.bytes) },
     { key: "device_us", label: "Device", kind: "num", render: (r) => r.error ? "" : fmt.us(r.device_us) },
     { key: "gbs", label: "Bandwidth", kind: "num", render: (r) => r.error ? "" : fmt.gbs(r.gbs) },
-    { key: "lumen_wall_us", label: "lumen wall", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.us(r.lumen_wall_us) },
-    { key: "torch_wall_us", label: "PyTorch wall", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_wall_us, fmt.us) },
+    { key: "lumen_call_us", label: "lumen per call", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.us(r.lumen_call_us) },
+    { key: "torch_call_us", label: "PyTorch per call", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_call_us, fmt.us) },
     { key: "matches_torch", label: "Matches PyTorch", render: (r) => r.error || (r.matches_torch == null ? "—" : r.matches_torch ? "yes" : "no") },
   ], rows, opSort);
 }

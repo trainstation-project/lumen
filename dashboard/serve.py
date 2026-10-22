@@ -45,7 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description="Serve the lumen dashboard and run its benchmarks on this machine.")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    lumen.config.static_allocator_bytes = 24 << 30
+    lumen.config.static_allocator_bytes = 4 << 30
     handler = functools.partial(Handler, directory=str(ROOT))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"lumen dashboard on http://127.0.0.1:{args.port}")
