@@ -7,7 +7,7 @@ mod tests;
 
 use diamonds::Diamonds;
 use flash_attention_backward::FlashAttentionBackward;
-use fusion::{FuseDots, HorizontalFusion, LoopFusion};
+use fusion::{DotRows, FuseDots, HorizontalFusion, LoopFusion};
 use place_concats::PlaceConcats;
 
 use super::common::attention;
@@ -111,7 +111,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         });
     }
     if options.config.normalization_diamonds {
-        pipeline.add(Diamonds);
+        pipeline.add(Diamonds).add(DotRows);
     }
     pipeline.add(FuseDots).add(PlaceConcats).add(LoopFusion);
     if options.config.horizontal_fusion {

@@ -12,6 +12,7 @@ fusion a folder per phase.
 | `mod.rs` | `TpuModule` (its `Attentions`: epilogues reading scalars, the raw output with heads merged), the TPU layout's sizes (`LAYOUT`), `compile` (the pipeline below, then `Plan::compile_with`). |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention's backward as its `dq` and `dkv` fusions; their outputs laid out for the kernels (`merged_outputs`, `reshaped_outputs`), Δ computed inside them (`delta_inside`), and a check that every attention runs (`attentions`). |
 | `diamonds.rs` | Pass `normalization_diamonds`: each normalization diamond (`graph_compiler/common/diamonds.rs`) the row kernel can run one `row` fusion. |
+| `fusion/dot_rows.rs` | Pass `dot_rows` (`DotRows`): a plain dot (no batch, its rhs a matrix) whose only reader is a `row` fusion, reading it whole, joins it as one `dot_row` fusion: the dot, then the row (`codegen/tpu/gemm_row.rs`). |
 | `place_concats.rs` | Pass `place_concats`: concatenates along the last dimension whose operands' kernels write them in place (`placeable`). |
 | `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`); re-exports `FuseDots`. |
 | `fusion/dot_epilogues.rs` | Pass `fuse_dots` (`FuseDots`): a dot and its column or row slices and elementwise consumers one `dot_general` fusion, the dot kernel's epilogue (members, together, in-place outputs). |
@@ -27,7 +28,7 @@ fusion a folder per phase.
 | 2 | `flash_attention`, `flash_attention_backward` | `flash_attention` | `../common/flash_attention.rs`, `flash_attention_backward.rs` |
 | 3 | `fold_dot_reshapes`, `simplify`, `dot_strength` | always | `../common/` |
 | 4 | `merge_dots` | `merge_dots` | `../common/merge_dots.rs` |
-| 5 | `normalization_diamonds` | `normalization_diamonds` | `diamonds.rs` |
+| 5 | `normalization_diamonds`, `dot_rows` | `normalization_diamonds` (`dot_rows` with `contraction_epilogues`) | `diamonds.rs`, `fusion/dot_rows.rs` |
 | 6 | `fuse_dots` | always (epilogues with `contraction_epilogues`) | `fusion/dot_epilogues.rs` |
 | 7 | `place_concats` | always | `place_concats.rs` |
 | 8 | `loop_fusion` | always | `fusion/` |
@@ -38,5 +39,5 @@ stages (scheduling, rematerialization, buffers) after.
 
 ## Related
 
-* [`../../codegen/tpu/`](../../codegen/tpu/README.md) — the generated kernels of `loop`, `row` and `reduction` fusions.
+* [`../../codegen/tpu/`](../../codegen/tpu/README.md) — the generated kernels of `loop`, `row`, `dot_row` and `reduction` fusions.
 * [`../../kernels/tpu/`](../../kernels/tpu/README.md) — routes each step to its kernel.

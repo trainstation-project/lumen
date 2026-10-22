@@ -22,7 +22,7 @@ pub(crate) enum Kind {
 
 impl Kind {
     #[cfg(lumen_tpu_linked)]
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::Full => "full",
             Kind::PerRow => "row",
@@ -200,7 +200,7 @@ pub(crate) fn fits(body: &Graph) -> bool {
 }
 
 #[cfg(lumen_tpu_linked)]
-fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
+pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
     let named = |params: String| {
         format!(
             "{{\"name\": \"{}\", \"params\": {{{params}}}, \"args\": {args:?}, \"kind\": \"{}\"}}",
