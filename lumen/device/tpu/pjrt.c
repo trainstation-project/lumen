@@ -1,6 +1,7 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@ static PJRT_Device *const *devices;
 static size_t device_count;
 static char error[1024];
 static pthread_once_t once = PTHREAD_ONCE_INIT;
+static atomic_int opened;
 
 void lumen_tpu_free(void *buffer);
 
@@ -45,6 +47,7 @@ static int awaited(PJRT_Event *event, const char *what) {
 }
 
 static void initialize(void) {
+    atomic_store(&opened, 1);
     const char *path = getenv("TPU_LIBRARY_PATH");
     if (!path || !*path) {
         path = "libtpu.so";
@@ -94,6 +97,8 @@ static void initialize(void) {
     devices = addressable.addressable_devices;
     device_count = addressable.num_addressable_devices;
 }
+
+int lumen_tpu_opened(void) { return atomic_load(&opened); }
 
 int lumen_tpu_device_count(void) {
     pthread_once(&once, initialize);

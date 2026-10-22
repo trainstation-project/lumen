@@ -7,6 +7,7 @@ pub(crate) mod ffi {
     use std::ffi::{c_char, c_void};
 
     unsafe extern "C" {
+        pub fn lumen_tpu_opened() -> i32;
         pub fn lumen_tpu_device_count() -> i32;
         pub fn lumen_tpu_error() -> *const c_char;
         pub fn lumen_tpu_alloc(index: i32, nbytes: usize, address: *mut usize) -> *mut c_void;
@@ -58,6 +59,19 @@ pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 pub struct Tpu;
 pub static TPU: &dyn DeviceBackend = &Tpu;
+
+impl Tpu {
+    pub fn opened(&self) -> bool {
+        #[cfg(lumen_tpu_linked)]
+        {
+            unsafe { ffi::lumen_tpu_opened() != 0 }
+        }
+        #[cfg(not(lumen_tpu_linked))]
+        {
+            false
+        }
+    }
+}
 
 impl DeviceBackend for Tpu {
     fn name(&self) -> &'static str {

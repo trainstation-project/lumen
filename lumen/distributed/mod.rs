@@ -30,7 +30,7 @@ fn world() -> std::sync::MutexGuard<'static, Option<World>> {
     WORLD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn env_index(name: &str, default: usize) -> Result<usize, String> {
+pub(crate) fn env_index(name: &str, default: usize) -> Result<usize, String> {
     match std::env::var(name) {
         Err(_) => Ok(default),
         Ok(value) => value

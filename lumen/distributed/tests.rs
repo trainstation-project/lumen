@@ -102,6 +102,45 @@ fn every_device_type_has_a_mesh_backend() {
     );
 }
 
+#[test]
+fn a_tpu_process_joins_its_slice_with_its_chip() {
+    let addresses = "localhost:9000,localhost:9001,localhost:9002,localhost:9003";
+    let env = super::backend::tpu_slice_env("2,2,1", addresses, 6, 2, 8, "--flag=1").unwrap_err();
+    assert!(env.contains("several TPU slices"), "{env}");
+    let env: std::collections::HashMap<_, _> =
+        super::backend::tpu_slice_env("2,2,1", addresses, 2, 2, 4, "--flag=1")
+            .unwrap()
+            .into_iter()
+            .collect();
+    assert_eq!(env["CLOUD_TPU_TASK_ID"], "2");
+    assert_eq!(env["TPU_VISIBLE_CHIPS"], "2");
+    assert_eq!(env["TPU_VISIBLE_DEVICES"], "2");
+    assert_eq!(env["TPU_PROCESS_BOUNDS"], "2,2,1");
+    assert_eq!(env["TPU_HOST_BOUNDS"], "2,2,1");
+    assert_eq!(env["TPU_CHIPS_PER_PROCESS_BOUNDS"], "1,1,1");
+    assert_eq!(env["TPU_CHIPS_PER_HOST_BOUNDS"], "1,1,1");
+    assert_eq!(env["TPU_PROCESS_PORT"], "9002");
+    assert_eq!(env["TPU_PROCESS_ADDRESSES"], addresses);
+    assert_eq!(
+        env["LIBTPU_INIT_ARGS"],
+        "--flag=1 --slicebuilder_use_insecure_grpc=true"
+    );
+    let four_d = super::backend::tpu_slice_env(
+        "2,2,1,2",
+        addresses,
+        0,
+        0,
+        4,
+        "--slicebuilder_use_insecure_grpc=false",
+    )
+    .unwrap();
+    assert!(four_d.contains(&("TPU_CHIPS_PER_PROCESS_BOUNDS", "1,1,1,1".into())));
+    assert!(four_d.contains(&(
+        "LIBTPU_INIT_ARGS",
+        "--slicebuilder_use_insecure_grpc=false".into()
+    )));
+}
+
 mod store {
     use std::thread;
     use std::time::Duration;

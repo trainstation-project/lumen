@@ -12,10 +12,11 @@ find each other (`init_process_group`). Collectives come later.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | The default process group: `rendezvous` (`env://`, `tcp://host:port`), `init_process_group` (a barrier on the store), `destroy_process_group`, `is_initialized`; `get_rank` / `get_world_size` (the group's, else the launcher's `RANK` / `WORLD_SIZE`, defaulting to one process); and `DeviceMesh`: a device type, a row-major array of global ranks, optional dimension names and this process's rank; `coordinate`, `local_rank`, `slice`. |
-| `backend.rs` | `MeshBackend`, a device's part in a mesh, implemented by each `DeviceBackend` (`Cpu`, `Mps`, `Cuda`, `Tpu`, `Meta`): `world(mesh_size)`, the rank and world a new mesh is built in. By default it rendezvous when the world has several processes; `Mps` overrides it. `mesh_backend(device_type)` picks one. |
+| `backend.rs` | `MeshBackend`, a device's part in a mesh, implemented by each `DeviceBackend` (`Cpu`, `Mps`, `Cuda`, `Tpu`, `Meta`): `world(mesh_size)`, the rank and world a new mesh is built in. By default it rendezvous when the world has several processes; `Mps` overrides it, and `Tpu` first joins its process to the TPU slice (`tpu_slice_env`). `mesh_backend(device_type)` picks one. |
 | `store.rs` | `TcpStore`, PyTorch's `TCPStore`: a key-value store served by one process (the master, a thread per connection) that every process connects to; `set`, `get` (waits for the key), `add` (a counter), `wait`. |
 | `python.rs` | Bindings into `lumen.distributed._C`: `DeviceMesh`, `init_device_mesh`, `TCPStore`, `init_process_group`, `destroy_process_group`, `is_initialized`, `get_rank`, `get_world_size`. |
-| `__init__.py` | The `lumen.distributed` package. |
+| `__init__.py` | The `lumen.distributed` package, and `set_tpu_launch_env`, the launcher's step for TPUs. |
+| `__main__.py` | `python -m lumen.distributed`: `set_tpu_launch_env()`'s variables, as `NAME="value"` lines to export before `torchrun`. |
 | `_C.pyi` | Type stub for `python.rs`. |
 | `tests.rs` | Rust tests for coordinates, slicing, validation and the store. Python tests are `tests/test_distributed.py`. |
 
@@ -44,6 +45,38 @@ collectives.
 
 The wire format is lumen's own (length-prefixed keys and values), not
 c10d's: a lumen store talks to lumen processes.
+
+## TPUs: a process per chip, one slice
+
+As in [torch_tpu](https://github.com/google-pytorch/torch_tpu)
+(`docs/distributed_support.md`, `csrc/common/environment.cc`). A TPU chip
+is a VFIO device a single process can open, and libtpu opens every chip it
+sees, so each process sees only its own (`TPU_VISIBLE_CHIPS`): it is that
+process's `tpu:0`. But the processes form one slice, not a TPU each: libtpu
+is told the slice's shape (`TPU_PROCESS_BOUNDS`, e.g. `2,2,1` for a v6e-4),
+one chip per process, and every process's address
+(`TPU_PROCESS_ADDRESSES`), and its slice builder connects them when the
+client is created (each waits for all). Programs then run on the slice's
+devices, which collectives over ICI need.
+
+The processes must agree on the slice, so the launcher decides it once:
+
+```bash
+eval $(python -m lumen.distributed | sed 's/^/export /')
+torchrun --nproc-per-node $WORLD_SIZE train.py
+```
+
+`set_tpu_launch_env(nproc_per_node=None)` (what that prints) sets
+`LUMEN_TPU_TOPOLOGY` (a single host's: 1, 4 or 8 chips are `1,1,1`,
+`2,2,1`, `2,4,1`; others must be given) and
+`LUMEN_TPU_SLICEBUILDER_ADDRESSES` (`localhost:<free port>` per process),
+counting the chips in a child process so the launcher holds none, and
+keeps what is already set. In each worker, the first `"tpu"` mesh of a
+world of several turns them, with `RANK` and `LOCAL_RANK`, into libtpu's
+variables before the rendezvous. So the mesh comes before anything else
+touches the TPU; a process that opened it first gets an error, since its
+libtpu already runs on its own. A world larger than the addresses (several
+slices, over DCN) is not supported yet.
 
 ## The mesh
 

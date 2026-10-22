@@ -35,6 +35,7 @@ def launch(program, world_size, env=lambda rank: {}):
                 "MASTER_ADDR": "127.0.0.1",
                 "MASTER_PORT": str(port),
                 "RANK": str(rank),
+                "LOCAL_RANK": str(rank),
                 "WORLD_SIZE": str(world_size),
                 **env(rank),
             },
@@ -227,8 +228,8 @@ import numpy as np
 import lumen
 from lumen.distributed import init_device_mesh
 
-chips = lumen.tpu.device_count()
 mesh = init_device_mesh("tpu", (2, 2), mesh_dim_names=("dp", "tp"))
+chips = lumen.tpu.device_count()
 f = lumen.compile(lambda x: x + mesh.get_rank(), device="tpu")
 y = f(lumen.from_numpy(np.zeros((8, 128), np.float32)))
 print(json.dumps({
@@ -240,23 +241,39 @@ print(json.dumps({
 """
 
 
-def one_chip(rank):
-    return {
-        "TPU_VISIBLE_CHIPS": str(rank),
-        "TPU_CHIPS_PER_PROCESS_BOUNDS": "1,1,1",
-        "TPU_PROCESS_BOUNDS": "1,1,1",
-        "TPU_PROCESS_PORT": str(8476 + rank),
+def test_tpu_launch_env(monkeypatch):
+    monkeypatch.setattr(os, "environ", {"LUMEN_TPU_SLICEBUILDER_ADDRESSES": "h:1,h:2,h:3,h:4"})
+    env = lumen.distributed.set_tpu_launch_env(nproc_per_node=4)
+    assert env == {
+        "LUMEN_TPU_TOPOLOGY": "2,2,1",
+        "LUMEN_TPU_SLICEBUILDER_ADDRESSES": "h:1,h:2,h:3,h:4",
+        "WORLD_SIZE": "4",
     }
+    monkeypatch.setattr(os, "environ", {})
+    addresses = lumen.distributed.set_tpu_launch_env(nproc_per_node=8)["LUMEN_TPU_SLICEBUILDER_ADDRESSES"].split(",")
+    assert len(set(addresses)) == 8 and all(a.startswith("localhost:") for a in addresses)
+    monkeypatch.setattr(os, "environ", {})
+    with pytest.raises(ValueError, match="set LUMEN_TPU_TOPOLOGY"):
+        lumen.distributed.set_tpu_launch_env(nproc_per_node=3)
+
+
+def tpu_launch_env():
+    out = subprocess.run(
+        [sys.executable, "-m", "lumen.distributed"], capture_output=True, text=True, check=True
+    ).stdout
+    return dict(line.replace('"', "").split("=", 1) for line in out.splitlines())
 
 
 @pytest.mark.tpu
 @pytest.mark.all_devices
-def test_a_process_per_tpu_chip():
+def test_a_process_per_tpu_chip_in_one_slice():
     count = "import lumen; print(lumen.tpu.device_count())"
     chips = int(subprocess.run([sys.executable, "-c", count], capture_output=True, text=True, check=True).stdout)
-    if chips < 4:
-        pytest.skip("needs 4 TPU chips")
-    results = launch(TPU_PROGRAM, 4, one_chip)
+    if chips != 4:
+        pytest.skip("needs a host of 4 TPU chips")
+    env = tpu_launch_env()
+    assert env["LUMEN_TPU_TOPOLOGY"] == "2,2,1" and env["WORLD_SIZE"] == "4"
+    results = launch(TPU_PROGRAM, 4, lambda rank: env)
     for rank, r in enumerate(results):
         assert r["chips"] == 1
         assert r["coordinate"] == list(divmod(rank, 2))
