@@ -6,9 +6,18 @@ use crate::kernels::tpu::{Launch, launch};
 
 const LANES: usize = 128;
 
-const BLOCK: usize = 1 << 19;
+const STAGED: usize = 1 << 20;
+
+const STREAMED: usize = 1 << 18;
 
 const COPY_BYTES: usize = 2 << 20;
+
+fn env(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 pub(crate) fn encode(
     index: usize,
@@ -37,16 +46,23 @@ pub(crate) fn encode(
         return Ok(());
     }
     let tile = layout.rows;
+    let (rows, cols) = (operand.shape[rank - 2], operand.shape[rank - 1]);
     let (ur, uc) = (update.shape[rank - 2], update.shape[rank - 1]);
+    let (rp, cp) = (rows.div_ceil(tile) * tile, cols.div_ceil(LANES) * LANES);
     let (urp, ucp) = (ur.div_ceil(tile) * tile, uc.div_ceil(LANES) * LANES);
-    let elems: usize = std::env::var("DUS_BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(BLOCK);
-    let bn = block(ucp, LANES, 1024).unwrap_or(LANES);
-    let bm = block(urp, tile, (elems / bn / tile * tile).max(tile)).unwrap_or(tile);
+    let (staged, streamed) = (env("DUS_STAGED", STAGED), env("DUS_STREAMED", STREAMED));
+    let bn = block(ucp, LANES, (staged / tile).max(LANES)).unwrap_or(LANES);
+    let bm = block(urp, tile, (staged / bn / tile * tile).max(tile)).unwrap_or(tile);
+    let single = update.shape[..rank - 2].iter().product::<usize>() == 1 && urp == bm && ucp == bn;
+    let width = match uc == cols {
+        true => ucp,
+        false => (ucp + LANES).min(cp),
+    };
+    let gm = match single {
+        true => urp,
+        false => block(urp, tile, (streamed / width / tile * tile).max(tile)).unwrap_or(tile),
+    };
     let copy = inputs[0] != output.cast_const();
-    let (rp, cp) = (
-        operand.shape[rank - 2].div_ceil(tile) * tile,
-        operand.shape[rank - 1].div_ceil(LANES) * LANES,
-    );
     let copy_rows = block(
         rp,
         tile,
@@ -54,22 +70,22 @@ pub(crate) fn encode(
     )
     .unwrap_or(tile);
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"copy\": {copy}, \"copy_rows\": {copy_rows}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copy_rows\": {copy_rows}",
         operand.shape,
         update.shape,
         operand.dtype.full_name()
     );
     let n = step.inputs.len();
-    let rows: Vec<*const u8> = inputs[..n]
+    let rows_of: Vec<*const u8> = inputs[..n]
         .iter()
         .copied()
         .chain([output.cast_const()])
         .collect();
     let launched = Launch {
         module: "lumen.kernels.dynamic_slice.tpu",
-        kernel: format!("dynamic_update_slice_{}_{bm}x{bn}", operand.dtype),
+        kernel: format!("dynamic_update_slice_{}_{bm}x{bn}_{gm}", operand.dtype),
         spec,
-        rows: &rows,
+        rows: &rows_of,
         scalars: &[],
         host: &[],
         sparse: None,
