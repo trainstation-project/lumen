@@ -254,13 +254,6 @@ OPS = {
         sizes=SQUARE_SIZES,
         flops=lambda n: 2 * n * EMBEDDING,
     ),
-    "reshape": Op(
-        "layout",
-        f"[n] → [n / {ROW}, {ROW}], a view",
-        lambda x: prims.reshape(x, (rows(x.shape[0]), ROW)),
-        lambda x: x.reshape(-1, ROW),
-        uniform(-1.0, 1.0),
-    ),
     "broadcast_in_dim": Op(
         "layout",
         f"a row of {ROW} repeated to n",

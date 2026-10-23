@@ -754,19 +754,6 @@
   "tpu_note": "No TPU kernel yet."
  },
  {
-  "primitive": "reshape",
-  "category": "layout",
-  "cpu": "runs",
-  "mps": "runs",
-  "tpu": "partial",
-  "cuda": "missing",
-  "triton": "runs",
-  "mps_kernel": "layout kernel",
-  "tpu_kernel": "",
-  "mps_note": "",
-  "tpu_note": "Only reshapes that split or merge the last dimension; this one moves elements between tiles."
- },
- {
   "primitive": "broadcast_in_dim",
   "category": "layout",
   "cpu": "runs",

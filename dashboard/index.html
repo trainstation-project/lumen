@@ -439,10 +439,7 @@ function throughputAxis(values, label) {
 }
 
 function bandwidthAxis(values) {
-  const top = Math.ceil(Math.max(DEVICE_BW, ...values) * 1.05 / 50) * 50;
-  const ticks = [];
-  for (let t = 0; t <= top; t += 50) ticks.push(t);
-  return { domain: [0, top], ticks, fmt: (v) => String(v), label: "GB/s", linear: true };
+  return throughputAxis([DEVICE_BW, ...values], "GB/s");
 }
 
 function chart(id, spec) {
@@ -756,6 +753,7 @@ function drawBench(op, runnable) {
   const compute = OK_ROWS.some((r) => r.op === op && r.compute_bound);
   const value = (r, us) => compute ? r.flops / us / 1e6 : r.bytes / us / 1e3;
   document.getElementById("op-bw-title").textContent = compute ? "Throughput" : "Bandwidth";
+
   const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
   const bandwidthChart = (id, dtype) => {
     const lines = [], points = [];

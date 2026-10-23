@@ -1035,24 +1035,6 @@
     16777216
    ]
   },
-  "reshape": {
-   "formula": "[n] → [n / 1024, 1024], a view",
-   "kind": "layout",
-   "dtypes": [
-    "float32",
-    "bfloat16"
-   ],
-   "sizes": [
-    4096,
-    16384,
-    65536,
-    262144,
-    1048576,
-    4194304,
-    16777216,
-    67108864
-   ]
-  },
   "broadcast_in_dim": {
    "formula": "a row of 1024 repeated to n",
    "kind": "layout",
