@@ -149,6 +149,10 @@ impl Tensor {
         if let Device::Cpu(_) = self.device() {
             return dispatch_dtype!(self.dtype, T => self.fill_host(T::from_scalar(value)));
         }
+        if let Device::Cuda(_) = self.device() {
+            return crate::graph_compiler::triton::fill(self, value)
+                .unwrap_or_else(|e| panic!("fill_: {e}"));
+        }
         let host = unsafe { Self::empty(&self.shape, self.dtype) };
         host.fill(value);
         self.copy_(&host).unwrap_or_else(|e| panic!("fill_: {e}"));

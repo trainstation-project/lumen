@@ -15,7 +15,7 @@ use super::pass::{GraphModule, Pipeline};
 use super::plan::{Buffer, Step};
 use super::{Options, Plan, cpu};
 use crate::graph::{Graph, Primitive};
-use crate::{Device, Tensor};
+use crate::{DType, Device, Scalar, Tensor};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -75,12 +75,25 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
-        (_, Some(kernel)) => {
-            let launch = LOOP.get().ok_or(
-                "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
-            )?;
-            launch(kernel, inputs, out)
-        }
+        (_, Some(kernel)) => launch(kernel, inputs, out),
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
+}
+
+pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
+    let (name, source) = crate::codegen::triton::fill(t.dtype(), t.shape(), t.strides());
+    let bits = crate::codegen::triton::bits(t.dtype(), value);
+    let kernel = Kernel {
+        name,
+        source,
+        by_value: vec![true],
+    };
+    launch(&kernel, &[Tensor::from_slice(&[bits], DType::U64)], t)
+}
+
+fn launch(kernel: &Kernel, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {
+    let launch = LOOP.get().ok_or(
+        "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
+    )?;
+    launch(kernel, inputs, out)
 }

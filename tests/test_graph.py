@@ -186,15 +186,6 @@ def placed(shape, dtype, device, seed=0):
     return lumen.from_numpy(a).to(dtype=dtype).to(device)
 
 
-@pytest.fixture
-def triton_on_cuda(device):
-    """``use_triton_backend`` on for CUDA, whose plans run their GEMMs with
-    lumen.kernels.dot_general.triton."""
-    lumen.config.compiler.use_triton_backend = device == "cuda"
-    yield
-    lumen.config.compiler.use_triton_backend = False
-
-
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
 @pytest.mark.parametrize(
     "lhs, rhs, dtype, transposed, output",

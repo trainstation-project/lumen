@@ -41,7 +41,7 @@ def test_the_stream_is_the_only_api():
         pytest.param("cuda", marks=pytest.mark.cuda),
     ],
 )
-def test_events_time_the_work_between_them(device):
+def test_events_time_the_work_between_them(device, triton_on_cuda):
     """Two events with ``enable_timing`` around a compiled program:
     ``elapsed_time`` is the device time between them in milliseconds,
     longer for more work, and ``query`` holds once the later is done."""

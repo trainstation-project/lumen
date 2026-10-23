@@ -15,7 +15,7 @@ mod stages;
 #[cfg(test)]
 mod tests;
 mod tpu;
-mod triton;
+pub(crate) mod triton;
 
 use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};

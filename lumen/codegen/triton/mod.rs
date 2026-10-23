@@ -85,10 +85,53 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
         params.concat(),
         emitter.lines,
     );
+    named("fusion", source)
+}
+
+pub(crate) fn fill(dtype: DType, shape: &[usize], strides: &[usize]) -> (String, String) {
+    let value = match dtype {
+        DType::Bool => "bits != 0".to_string(),
+        _ => format!(
+            "tl.full([], bits, {}).to({}, bitcast=True)",
+            raw_type(dtype),
+            triton_type(dtype).expect("a Triton dtype")
+        ),
+    };
+    let at = match strides == contiguous_strides(shape) {
+        true => "j".to_string(),
+        false => gather_index("j", shape, strides),
+    };
+    let source = format!(
+        "@triton.jit\n\
+         def NAME(bits, out, n, BLOCK: tl.constexpr):\n    \
+             j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
+             tl.store(out + {at}, {value}, mask=j < n)\n"
+    );
+    named("fill", source)
+}
+
+pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
+    let bytes = dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec());
+    bytes
+        .iter()
+        .rev()
+        .fold(0u64, |acc, &b| (acc << 8) | b as u64)
+}
+
+fn named(kind: &str, source: String) -> (String, String) {
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
-    let name = format!("fusion_{:016x}", hasher.finish());
+    let name = format!("{kind}_{:016x}", hasher.finish());
     (name.clone(), source.replace("NAME", &name))
+}
+
+fn raw_type(dtype: DType) -> &'static str {
+    match dtype.size_of() {
+        1 => "tl.uint8",
+        2 => "tl.uint16",
+        4 => "tl.uint32",
+        _ => "tl.uint64",
+    }
 }
 
 struct Emitter<'a> {
@@ -263,17 +306,7 @@ impl Emitter<'_> {
 }
 
 fn constant(dtype: DType, value: Scalar) -> String {
-    let bytes = dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec());
-    let bits = bytes
-        .iter()
-        .rev()
-        .fold(0u64, |acc, &b| (acc << 8) | b as u64);
-    let raw = match bytes.len() {
-        1 => "tl.uint8",
-        2 => "tl.uint16",
-        4 => "tl.uint32",
-        _ => "tl.uint64",
-    };
+    let (bits, raw) = (bits(dtype, value), raw_type(dtype));
     match dtype {
         DType::Bool => format!("tl.full([], {}, tl.int1)", (bits != 0) as u8),
         _ => format!(
