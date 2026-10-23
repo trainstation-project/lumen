@@ -250,6 +250,78 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
         np.testing.assert_allclose(out, lumen.to_numpy(scaled(on_cpu[0], s).to(dtype="float32")), rtol=tol)
 
 
+@pytest.mark.parametrize("device", [CUDA])
+def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
+    """With ``use_triton_backend``, a transposed, narrowed or permuted CUDA
+    input is read where it is, through a generated load prologue (a loop's
+    ``LOAD``, the GEMM's ``PROLOGUE_A``/``PROLOGUE_B``), not copied first;
+    ``contiguous`` and ``copy_`` between strided views run on the GPU."""
+    import lumen.codegen.triton as triton
+
+    a, b, c = rand(64, 96), rand(96, 64, seed=1), rand(2, 3, 96, seed=2)
+    try:
+        x, w, z = (lumen.from_numpy(v).to(device) for v in (a, b, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
+    dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
+
+    def strided(kind, run):
+        before = set(triton.kernels)
+        out = lumen.to_numpy(run())
+        new = [triton.compiled(name, None) for name in set(triton.kernels) - before if name.startswith(kind)]
+        assert any("//" in f.src or "*" in f.src for f in new)
+        return out
+
+    tol = {"rtol": 1e-5, "atol": 1e-5}
+    out = strided("load_", lambda: loop(x.transpose(0, 1), w))
+    np.testing.assert_allclose(out, np.exp(a.T) * 2 + b, **tol)
+    out = loop(x.narrow(1, 8, 32), w.narrow(0, 8, 64).narrow(1, 0, 32))
+    np.testing.assert_allclose(lumen.to_numpy(out), np.exp(a[:, 8:40]) * 2 + b[8:72, :32], **tol)
+    out = strided("prologue_", lambda: dot(x.transpose(0, 1), x))
+    np.testing.assert_allclose(out, a.T @ a, rtol=1e-4, atol=1e-4)
+    out = strided("prologue_", lambda: dot(z.transpose(0, 1), w))
+    np.testing.assert_allclose(out, c.transpose(1, 0, 2) @ b, rtol=1e-4, atol=1e-4)
+    t = x.transpose(0, 1).contiguous()
+    assert t.is_contiguous() and lumen.to_numpy(t).tolist() == a.T.tolist()
+    y = lumen.zeros([96, 64], device=device)
+    y.transpose(0, 1).copy_(x)
+    assert lumen.to_numpy(y).tolist() == a.T.tolist()
+
+
+@pytest.mark.mps
+def test_mps_reads_strided_inputs_in_place():
+    """A transposed or narrowed MPS input is read where it is, not copied
+    first: its step's kernel is compiled again with that input's load
+    prologue through its strides, once a layout. ``contiguous``, ``copy_``
+    and ``fill_`` of strided views are loops on the GPU, not host copies."""
+    a, b = rand(64, 96), rand(96, 64, seed=1)
+    x, w = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")
+    loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
+    norm = lumen.compile(lambda u: u / F.sqrt(F.mean(u * u, -1, keepdim=True) + 1e-6))
+    tol = {"rtol": 1e-5, "atol": 1e-5}
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        out = loop(x.transpose(0, 1), w)
+        np.testing.assert_allclose(lumen.to_numpy(out), np.exp(a.T) * 2 + b, **tol)
+        out = loop(x.narrow(1, 8, 32), w.narrow(0, 8, 64).narrow(1, 0, 32))
+        np.testing.assert_allclose(lumen.to_numpy(out), np.exp(a[:, 8:40]) * 2 + b[8:72, :32], **tol)
+        out = norm(x.transpose(0, 1))
+        expected = a.T / np.sqrt((a.T.astype(np.float64) ** 2).mean(-1, keepdims=True) + 1e-6)
+        np.testing.assert_allclose(lumen.to_numpy(out), expected, **tol)
+    assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
+    y = lumen.zeros([96, 64], device="mps")
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        t = x.transpose(0, 1).contiguous()
+        y.transpose(0, 1).copy_(x)
+        y.transpose(0, 1)[3].fill_(-2.0)
+    host = {"lumen::to_vec", "lumen::copy_h2d", "lumen::copy_d2h"}
+    assert not [e for e in prof.events() if e["name"] in host]
+    assert t.is_contiguous() and lumen.to_numpy(t).tolist() == a.T.tolist()
+    expected = a.T.copy()
+    expected[:, 3] = -2.0
+    assert lumen.to_numpy(y).tolist() == expected.tolist()
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):
@@ -1829,7 +1901,7 @@ def test_upcast_rms_norm_is_one_kernel(n):
     assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
     cached = n <= 8 * 256
     assert ("float kept0[" in source) == cached
-    assert source.count("in0[j]") == (1 if cached else 2), source
+    assert source.count("_load0(in0, j)") == (1 if cached else 2), source
     x, w = rand(8, n), rand(n, seed=1)
     out = {}
     for device in ("cpu", "mps"):

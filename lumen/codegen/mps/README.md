@@ -160,14 +160,27 @@ are compiled once (the `codegen` pass shares one kernel among fusions with
 the same source). Second launches are suffixed (`NAME_final`, `NAME_mid`,
 `NAME_small`).
 
-## Output views
+## Loads and stores: prologues and epilogues
+
+Generated code reads a fused input only through its load prologue and
+loop and transpose kernels write only through store epilogues, so no
+generator knows a layout. The `Emitter` reads input `k` at a flat index as
+`NAME_load{k}(in{k}, i)` (`load`); `named` prepends each load the source
+calls, `template <typename T, typename I> inline T NAME_load{k}(device const
+T *p, I i) { return p[i]; }`, on one line. `strided_load` rewrites that line
+to read through a layout's strides: `graph_compiler/mps`'s `encode` runs a
+step whose input is a strided view (an argument the plan reads in place,
+`loads_strided`) as that variant, compiled once a layout. `read_staged`
+rewrites a row kernel's loads of the dot's product to its staged tile.
 
 `writes_views(body)` is true for loop and transpose-tiled kernels (each
 element written at its own flat index `j`), not for GEMM, row or reduction
 kernels. For those, `views` lets an output be written at an offset and
 strides inside a larger buffer — an operand of an in-place `concatenate`
-(see `Graph::placements` in [`lumen/graph`](../../graph/README.md)).
-`written` turns `j` into that strided address.
+(see `Graph::placements` in [`lumen/graph`](../../graph/README.md)), or a
+strided view `copy_` and `fill_` write. `written` returns each output's
+store epilogue, `NAME_store{k}(p, i, v)`, `i` through that view's strides,
+and the calls writing through them.
 
 ## Buffer ABI (`io_params`)
 

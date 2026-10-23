@@ -9,7 +9,7 @@ A `Tensor` here *holds data*; it does not compute. lumen always runs inside
 (`lumen/graph/tracer.py`), records primitives into a `Graph`, and the
 compiled `Plan` reads and writes these tensors. What a `Tensor` can do on
 its own is metadata, views, element access, copies between devices, and
-fills (on the host, then copied in; on CUDA a generated Triton kernel); even a dtype conversion (`to_dtype`) builds a one-node `Cast` graph
+fills (on the host, then copied in; on CUDA and MPS a generated kernel); even a dtype conversion (`to_dtype`) builds a one-node `Cast` graph
 and runs it through `graph_compiler::compile`.
 
 ## Files
@@ -17,7 +17,7 @@ and runs it through `graph_compiler::compile`.
 | File | Contents |
 | --- | --- |
 | `mod.rs` | Module wiring; re-exports `Tensor` (path `lumen::tensor::Tensor`) and crate-internal stride helpers. |
-| `tensor.rs` | `Tensor { storage: Arc<Storage>, dtype, shape, strides, offset }`: factories (`zeros`, `ones`, `full`, `arange`, `from_slice`, unsafe `empty`), views (`reshape`, `narrow`, `select`, `transpose`, `permute`, `squeeze_dim`, `unsqueeze`), `contiguous`, `to(device)`, `to_dtype`, `to_vec`, `get`/`set`, `fill_`, `copy_`, `zero_`, `wait_`, `Display`; `contiguous_strides`, `flat_offset`, `for_each_index`. `fill_`, `zeros` and `ones` fill a host tensor and `copy_` it in, except on CUDA, where a generated Triton kernel fills it on the GPU (`graph_compiler/triton`'s `fill`). |
+| `tensor.rs` | `Tensor { storage: Arc<Storage>, dtype, shape, strides, offset }`: factories (`zeros`, `ones`, `full`, `arange`, `from_slice`, unsafe `empty`), views (`reshape`, `narrow`, `select`, `transpose`, `permute`, `squeeze_dim`, `unsqueeze`), `contiguous`, `to(device)`, `to_dtype`, `to_vec`, `get`/`set`, `fill_`, `copy_`, `zero_`, `wait_`, `Display`; `contiguous_strides`, `flat_offset`, `for_each_index`. `fill_`, `zeros` and `ones` fill a host tensor and `copy_` it in, except on CUDA and MPS, where a generated kernel fills it on the GPU (`graph_compiler/triton`'s and `graph_compiler/mps`'s `fill`); there `copy_` from the same GPU and `contiguous` are a generated copy, any strides on either side (their `copy`): a load prologue and a store epilogue. |
 | `storage.rs` | `Storage`: an owning byte buffer on a device (`DataPtr` from the device's allocator), a unique `id`, and the meta-tensor `Parameter` state. |
 | `dtype.rs` | `DType` (Bool, U8–U64, I8–I64, F16, BF16, F32, F64, and JAX's narrow I2/I4/U2/U4, F8E4M3FN, F8E5M2, F8E4M3B11FNUZ), the `Element` trait for the Rust element types (`half::f16`/`bf16` re-exported; the narrow ones a byte each, as `ml_dtypes` keeps them: `i4`, `f8e4m3fn`, ...), and the `dispatch_dtype!` macro. |
 | `scalar.rs` | `Scalar { Bool, Int, Float }` (`c10::Scalar`): `full`'s value and `arange`'s end; `inferred_dtype` (bool / int64 / float32). |

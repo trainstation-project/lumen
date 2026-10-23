@@ -109,8 +109,53 @@ pub(super) fn formatted(source: &str) -> String {
     out
 }
 
+pub(super) fn load(k: usize) -> String {
+    format!("NAME_load{k}(in{k}, ")
+}
+
+fn loads(source: &str) -> String {
+    let mut ks: Vec<usize> = source
+        .match_indices("NAME_load")
+        .filter_map(|(at, _)| {
+            let digits: String = source[at + "NAME_load".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .collect();
+    ks.sort_unstable();
+    ks.dedup();
+    ks.iter()
+        .map(|k| {
+            format!(
+                "template <typename T, typename I> inline T NAME_load{k}(device const T *p, I i) {{ return p[i]; }}\n"
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn strided_load(
+    source: &str,
+    name: &str,
+    k: usize,
+    shape: &[usize],
+    strides: &[usize],
+) -> Option<String> {
+    let index = gather_index("i", shape, strides);
+    let plain = format!(
+        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[i]; }}"
+    );
+    let strided = format!(
+        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[{index}]; }}"
+    );
+    source
+        .contains(&plain)
+        .then(|| source.replace(&plain, &strided))
+}
+
 pub(super) fn named(source: String) -> (String, String) {
-    let source = formatted(&source);
+    let source = formatted(&format!("{}{source}", loads(&source)));
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());

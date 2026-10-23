@@ -17,7 +17,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode`, `fusion_scratch_bytes`. |
+| `mod.rs` | `MpsModule`, `Kernel`, `PENDING`/`request`, `pipeline()`, `compile`, `compile_kernels` (+ `PRELUDE`, `SOURCES`, `fusion_source`), `encode` (a step with a strided input runs `strided_variant`: its kernel with that input's load prologue through its strides, compiled once a layout, `VARIANTS`), `fusion_scratch_bytes`; `copy` and `fill`, an MPS tensor's `copy_` / `contiguous` and `fill_` as one loop on the GPU (a load prologue and a store epilogue in the bytes' unsigned type, so any dtype). |
 | `flash_attention_backward.rs` | Pass `flash_attention_backward`: attention backward as two fusions, or one with dQ added atomically unless `deterministic`. |
 | `split_k.rs` | Pass `split_k`: splits the K of small-M/N, long-K float dots into chunks (XLA `SplitKRewriter`); `atomic_dot` for the atomic variant. |
 | `canonicalize_dots.rs` | Pass `canonicalize_dots`: transposes dot operands into matmul form as a separate step. |
@@ -34,7 +34,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `alone.rs` | Pass `alone`: every elementwise node, gather and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (none has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
 | `autotune.rs` | `MpsAutotuner`, MPS's `Autotuner` (`../common/autotune.rs`): steps whose generated kernel has candidates (`codegen::tunings_of`) and 64K to 16M output elements, keyed by kernel and length; candidates generated as Metal and compiled together; timed through `encode` under `capture` over zeroed buffers; the step renamed to the fastest. |
-| `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`. |
+| `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`; `loads_strided` (an input only the load prologues read, not a dot's or attention's operand: any strides). |
 | `tests.rs` | End-to-end MPS compiler tests against the reference executor (skip without Metal via `plan_tests::mps::available`). |
 
 ## Subfolders
