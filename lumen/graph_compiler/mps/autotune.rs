@@ -125,20 +125,21 @@ impl Kernels for Gemms {
         };
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
-        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
-            match &step.primitive {
-                Primitive::Fusion { name: fusion, .. } => super::encode_with(
-                    step,
-                    fusion,
-                    Some((&name, config)),
-                    inputs,
-                    output,
-                    scratch,
-                    keep,
-                ),
-                _ => gemm::encode_tuned(step, &name, config, inputs, output, keep),
-            }
-        });
+        let encode: Encode =
+            Box::new(
+                move |step, inputs, output, scratch, keep| match &step.primitive {
+                    Primitive::Fusion { name: fusion, .. } => super::encode_with(
+                        step,
+                        fusion,
+                        Some((&name, config)),
+                        inputs,
+                        output,
+                        scratch,
+                        keep,
+                    ),
+                    _ => gemm::encode_tuned(step, &name, config, inputs, output, keep),
+                },
+            );
         Tuned::new(kernel, encode)
     }
 

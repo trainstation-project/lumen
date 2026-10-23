@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GemmConfig {
     pub bm: usize,
@@ -88,4 +87,3 @@ pub(crate) const DEFAULT_CONFIGS: [(&str, GemmConfig); 3] = [
         },
     ),
 ];
-

@@ -73,7 +73,8 @@ impl<T: Timer> Autotuner<T> {
                     trial.tuned = Some(candidate.clone());
                     if reps[k] == 0 {
                         let warm = self.timer.time(&buffers, &trial, 1)?;
-                        reps[k] = ((BUDGET_SECONDS / warm) as usize).clamp(*REPS.start(), *REPS.end());
+                        reps[k] =
+                            ((BUDGET_SECONDS / warm) as usize).clamp(*REPS.start(), *REPS.end());
                     }
                     seconds[k] = seconds[k].min(self.timer.time(&buffers, &trial, reps[k])?);
                 }

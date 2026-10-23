@@ -30,12 +30,12 @@ use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
-use crate::kernels::dot_general::mps::GemmConfig;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
+use crate::kernels::dot_general::mps::GemmConfig;
 use crate::kernels::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };

@@ -8,7 +8,6 @@ use crate::graph_compiler::plan::{Step, Tuned};
 use crate::stream::event::event_for;
 use crate::{DType, Device, Tensor, TensorOptions};
 
-
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
@@ -79,7 +78,8 @@ impl Kernels for Gemms {
     }
 
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
-        let run: Run = Box::new(move |step, lhs, rhs, out| gemm(lhs, rhs, out, &step.primitive, &config));
+        let run: Run =
+            Box::new(move |step, lhs, rhs, out| gemm(lhs, rhs, out, &step.primitive, &config));
         Tuned::new(format!("{config:?}"), run)
     }
 }
