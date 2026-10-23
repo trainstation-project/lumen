@@ -18,7 +18,7 @@ try:
 except ImportError:
     torch = None
 
-DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps.json"
+DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps"
 SIZES = [1 << k for k in range(12, 27, 2)]
 DTYPES = ["float32", "bfloat16"]
 ITEM = {"float32": 4, "bfloat16": 2, "bool": 1}
@@ -201,15 +201,39 @@ def update(data, name, measured=lambda row: None):
 
 
 def load():
-    return json.loads(DATA.read_text()) if DATA.exists() else {"rows": [], "code": {}, "measured_at": {}}
+    meta = DATA / "meta.json"
+    data = {**(json.loads(meta.read_text()) if meta.exists() else {}), "rows": [], "code": {}, "measured_at": {}}
+    for name in OPS:
+        path = DATA / f"{name}.json"
+        if not path.exists():
+            continue
+        op = json.loads(path.read_text())
+        data["rows"] += op["rows"]
+        if op.get("code"):
+            data["code"][name] = op["code"]
+        if op.get("measured_at"):
+            data["measured_at"][name] = op["measured_at"]
+    return data
 
 
-def save(data):
+def write(path, value):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n")
+    shutil.move(tmp, path)
+
+
+def save(data, names=None):
     data["ops"] = {name: {"formula": formula, "kind": kind} for name, (kind, formula, *_) in OPS.items()}
-    DATA.parent.mkdir(parents=True, exist_ok=True)
-    tmp = DATA.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
-    shutil.move(tmp, DATA)
+    DATA.mkdir(parents=True, exist_ok=True)
+    write(DATA / "meta.json", {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops") if key in data})
+    for name in names or OPS:
+        op = {
+            "rows": [r for r in data.get("rows", []) if r["op"] == name],
+            "code": data.get("code", {}).get(name),
+            "measured_at": data.get("measured_at", {}).get(name),
+        }
+        if op["rows"] or op["code"]:
+            write(DATA / f"{name}.json", op)
 
 
 if __name__ == "__main__":
@@ -217,4 +241,4 @@ if __name__ == "__main__":
     data = load()
     for name in sys.argv[1:] or OPS:
         data = update(data, name)
-        save(data)
+        save(data, [name])

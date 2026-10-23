@@ -1,0 +1,201 @@
+{
+ "rows": [
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4096,
+   "inputs": 1,
+   "bytes": 32768,
+   "flops": 4096,
+   "lumen_us": 2.127,
+   "torch_us": 2.131,
+   "lumen_dram_us": 1.688,
+   "torch_dram_us": 2.552,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 15.41
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 16384,
+   "inputs": 1,
+   "bytes": 131072,
+   "flops": 16384,
+   "lumen_us": 2.227,
+   "torch_us": 2.518,
+   "lumen_dram_us": 2.054,
+   "torch_dram_us": 2.926,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 58.86
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 65536,
+   "inputs": 1,
+   "bytes": 524288,
+   "flops": 65536,
+   "lumen_us": 2.839,
+   "torch_us": 3.703,
+   "lumen_dram_us": 3.71,
+   "torch_dram_us": 4.804,
+   "matches_torch": true,
+   "rotation": 1024,
+   "gbs": 184.67
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 262144,
+   "inputs": 1,
+   "bytes": 2097152,
+   "flops": 262144,
+   "lumen_us": 7.201,
+   "torch_us": 8.37,
+   "lumen_dram_us": 10.327,
+   "torch_dram_us": 11.387,
+   "matches_torch": true,
+   "rotation": 256,
+   "gbs": 291.23
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 1048576,
+   "inputs": 1,
+   "bytes": 8388608,
+   "flops": 1048576,
+   "lumen_us": 25.41,
+   "torch_us": 25.494,
+   "lumen_dram_us": 40.492,
+   "torch_dram_us": 42.071,
+   "matches_torch": true,
+   "rotation": 64,
+   "gbs": 330.13
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 4194304,
+   "inputs": 1,
+   "bytes": 33554432,
+   "flops": 4194304,
+   "lumen_us": 134.3,
+   "torch_us": 136.24,
+   "lumen_dram_us": 154.129,
+   "torch_dram_us": 153.74,
+   "matches_torch": true,
+   "rotation": 16,
+   "gbs": 249.85
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 16777216,
+   "inputs": 1,
+   "bytes": 134217728,
+   "flops": 16777216,
+   "lumen_us": 589.696,
+   "torch_us": 602.458,
+   "lumen_dram_us": 581.627,
+   "torch_dram_us": 601.042,
+   "matches_torch": true,
+   "rotation": 4,
+   "gbs": 227.6
+  },
+  {
+   "op": "log",
+   "kind": "unary",
+   "formula": "ln x",
+   "dtype": "float32",
+   "out_dtype": "float32",
+   "n": 67108864,
+   "inputs": 1,
+   "bytes": 536870912,
+   "flops": 67108864,
+   "lumen_us": 2413.242,
+   "torch_us": 2480.127,
+   "lumen_dram_us": 2326.898,
+   "torch_dram_us": 2321.244,
+   "matches_torch": true,
+   "rotation": 2,
+   "gbs": 222.47
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[4096]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[16384]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[65536]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[262144]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[1048576]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[4194304]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[16777216]: convert to float32 first (x.to(dtype=float32))"
+  },
+  {
+   "op": "log",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "log: has no bfloat16 kernel on MPS, got bf16[67108864]: convert to float32 first (x.to(dtype=float32))"
+  }
+ ],
+ "code": {
+  "kernel": "// step 0: log\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = log %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(64)]]\nkernel void fusion_74b2cc322b5c7e9b(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = Log::apply(v0);\n        out[j] = v1;\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_74b2cc322b5c7e9b body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = log %0\n  in (%1) }] in0"
+ },
+ "measured_at": "2026-10-22T21:30:09+00:00"
+}

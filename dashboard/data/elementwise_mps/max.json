@@ -1,0 +1,8 @@
+{
+ "rows": [],
+ "code": {
+  "kernel": "// step 0: max\n// { lambda %0:f32[1048576] %1:f32[1048576]. let\n//     %2:f32[1048576] = max %0 %1\n//   in (%2) }\n\nkernel void fusion_d3764bab9fa523cd(device const float *in0 [[buffer(0)]], device const float *in1 [[buffer(1)]], device float *out [[buffer(2)]], ELEMENTWISE_ARGS(3)) {\n    FOR_EACH_ELEMENT(j, float) {\n        float v0 = in0[j];\n        float v1 = in1[j];\n        float v2 = Max::apply(v0, v1);\n        out[j] = v2;\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_d3764bab9fa523cd body={ lambda %0:f32[1048576] %1:f32[1048576]. let\n    %2:f32[1048576] = max %0 %1\n  in (%2) }] in0 in1"
+ },
+ "measured_at": null
+}

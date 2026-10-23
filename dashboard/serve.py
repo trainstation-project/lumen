@@ -29,7 +29,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             try:
                 data = bench.update(bench.load(), name, lambda row: self.line({"row": row}))
-                bench.save(data)
+                bench.save(data, [name])
                 self.line({"data": data})
             except (KeyboardInterrupt, SystemExit):
                 raise

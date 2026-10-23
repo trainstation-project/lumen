@@ -28,7 +28,12 @@
         padding-block: 32px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
   .lx-head { display: flex; flex-direction: column; gap: 6px; }
   .lx-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .lx-theme { font: inherit; font-size: 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .lx-theme { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; flex: 0 0 auto;
+              border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); cursor: pointer; }
+  .lx-theme:hover { border-color: var(--link); color: var(--link); }
+  .lx-theme .icon-moon { display: none; }
+  :root[data-theme="dark"] .lx-theme .icon-sun { display: none; }
+  :root[data-theme="dark"] .lx-theme .icon-moon { display: inline; }
   h1 { font: 400 32px/1.1 var(--serif); margin: 0; }
   .lx-take { color: var(--muted); margin: 0; max-width: 75ch; }
   .lx-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
@@ -89,7 +94,15 @@
 <body>
 <div class="lx">
   <header class="lx-head">
-    <div class="lx-title"><h1>Lumen</h1><button class="lx-theme" id="lx-theme" type="button"></button></div>
+    <div class="lx-title"><h1>Lumen</h1><button class="lx-theme" id="lx-theme" type="button" aria-label="Toggle dark mode">
+      <svg class="icon-sun" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"></circle>
+        <path d="M12 2.5v2.4M12 19.1v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"></path>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5z"></path>
+      </svg>
+    </button></div>
     <p class="lx-take" id="lx-take"></p>
   </header>
   <nav class="lx-tabs" role="tablist" id="lx-tabs">
@@ -206,7 +219,6 @@ for (const tab of document.querySelectorAll("#code-tabs .lx-tab")) {
 const themeButton = document.getElementById("lx-theme");
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  themeButton.textContent = theme === "dark" ? "Light mode" : "Dark mode";
   try { localStorage.setItem("lx-theme", theme); } catch {}
 }
 let savedTheme = null;
@@ -217,7 +229,17 @@ themeButton.addEventListener("click", () => setTheme(document.documentElement.da
 const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(`data/${name}.json: ${r.status}`); return r.json(); });
 let PRIMITIVES, FUSIONS, PERF;
 try {
-  [PRIMITIVES, FUSIONS, PERF] = await Promise.all(["primitives", "fusions", "elementwise_mps"].map(load));
+  let meta;
+  [PRIMITIVES, FUSIONS, meta] = await Promise.all(["primitives", "fusions", "elementwise_mps/meta"].map(load));
+  const ops = await Promise.all(Object.keys(meta.ops || {}).map((op) =>
+    fetch(`data/elementwise_mps/${op}.json`).then((r) => r.ok ? r.json() : null).then((d) => [op, d])));
+  PERF = { ...meta, rows: [], code: {}, measured_at: {} };
+  for (const [op, d] of ops) {
+    if (!d) continue;
+    PERF.rows.push(...d.rows);
+    if (d.code) PERF.code[op] = d.code;
+    if (d.measured_at) PERF.measured_at[op] = d.measured_at;
+  }
 } catch (e) {
   const take = document.getElementById("lx-take");
   take.textContent = `Could not load the data files (${e.message}). Serve this folder, for example with python3 -m http.server in dashboard/, then open http://localhost:8000.`;
