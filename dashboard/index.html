@@ -752,7 +752,9 @@ function drawBench(op, runnable) {
   const dtypes = [...new Set(OK_ROWS.filter((r) => r.op === op).map((r) => r.dtype))].map((dtype) => [dtype]);
   const compute = OK_ROWS.some((r) => r.op === op && r.compute_bound);
   const value = (r, us) => compute ? r.flops / us / 1e6 : r.bytes / us / 1e3;
-  document.getElementById("op-bw-title").textContent = compute ? "Throughput" : "Bandwidth";
+  document.getElementById("op-bw-title").textContent = compute ? "Roofline" : "Bandwidth";
+  const PEAK = PERF.spec_tflops;
+  const intensity = (r) => r.flops / r.bytes;
 
   const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
   const bandwidthChart = (id, dtype) => {
@@ -760,13 +762,28 @@ function drawBench(op, runnable) {
     for (const [us, who, color] of IMPLS) {
       const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && us(r) != null);
       if (!rs.length) continue;
-      lines.push({ points: rs.map((r) => [r.n, value(r, us(r))]), color, width: 2 });
-      for (const r of rs) points.push({ x: r.n, y: value(r, us(r)), r: 3, color, tip: detail(r, who, us(r), "per call") });
+      const at = (r) => compute ? intensity(r) : r.n;
+      lines.push({ points: rs.map((r) => [at(r), value(r, us(r))]).sort((a, b) => a[0] - b[0]), color, width: 2 });
+      for (const r of rs) points.push({ x: at(r), y: value(r, us(r)), r: 3, color, tip: detail(r, who, us(r), "per call") });
     }
-    if (!compute) lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
     const values = points.map((p) => p.y);
-    chart(id, { label: `${op} ${dtype} ${compute ? "throughput" : "bandwidth"}`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-      y: compute ? throughputAxis(values, "TFLOP/s") : bandwidthAxis(values), lines, points });
+    if (!compute) {
+      lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
+      chart(id, { label: `${op} ${dtype} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
+        y: bandwidthAxis(values), lines, points });
+      return;
+    }
+    const xs = points.map((p) => p.x);
+    const lo = 2 ** Math.floor(Math.log2(Math.min(...xs) / 1.5)), hi = 2 ** Math.ceil(Math.log2(Math.max(...xs) * 1.5));
+    const ticks = [];
+    for (let t = lo; t <= hi; t *= 4) ticks.push(t);
+    if (PEAK) {
+      const ridge = PEAK * 1e3 / DEVICE_BW;
+      const roof = [[lo, lo * DEVICE_BW / 1e3], ...(ridge > lo && ridge < hi ? [[ridge, PEAK]] : []), [hi, Math.min(PEAK, hi * DEVICE_BW / 1e3)]];
+      lines.push({ points: roof, color: "var(--roof)", width: 1.5, dash: true, label: `${PEAK} TFLOP/s, ${DEVICE_BW} GB/s`, labelAt: [hi, Math.min(PEAK, hi * DEVICE_BW / 1e3)], anchor: "end" });
+    }
+    chart(id, { label: `${op} ${dtype} roofline`, x: { domain: [lo, hi], ticks, fmt: (v) => String(v), label: "FLOPs per byte" },
+      y: throughputAxis([...values, PEAK || 0], "TFLOP/s"), lines, points });
   };
   const charts = dtypes.map(([dtype]) => [dtype, el("div", "lx-chart")]);
   document.getElementById("op-bw").replaceChildren(...charts.flatMap(([dtype, box]) => {
@@ -774,7 +791,7 @@ function drawBench(op, runnable) {
     return [el("h3", "lx-chart-title", dtype), box];
   }));
   for (const [dtype, box] of charts) bandwidthChart(box.id, dtype);
-  legend("op-bw-legend", [...IMPLS.map(([, who, color]) => [who, color]), ...(compute ? [] : [["device bandwidth", "var(--roof)", true]])]);
+  legend("op-bw-legend", [...IMPLS.map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
 
   const code = PERF.code[op];
   const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];

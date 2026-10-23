@@ -3,6 +3,7 @@ import json
 import math
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,8 @@ SQUARE_SIZES = tuple(1 << k for k in range(12, 25, 2))
 FLOATS = ("float32", "bfloat16")
 INTEGERS = ("int32",)
 SPEC_MEMORY_GBS = {"Apple M4 Pro": 273}
+GPU_GHZ = {"Apple M4 Pro": 1.578}
+LANES_PER_CORE = 128
 ROW = 1024
 EMBEDDING = 512
 DOT = (((1,), (0,)), ((), ()))
@@ -349,6 +352,19 @@ OPS = {
 }
 
 
+def gpu_cores():
+    if platform.system() != "Darwin":
+        return None
+    out = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True).stdout
+    found = re.search(r"Total Number of Cores: (\d+)", out)
+    return int(found.group(1)) if found else None
+
+
+def peak_tflops(device):
+    cores, ghz = gpu_cores(), GPU_GHZ.get(device)
+    return round(cores * LANES_PER_CORE * 2 * ghz / 1e3, 2) if cores and ghz else None
+
+
 def device_name():
     if platform.system() == "Darwin":
         out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
@@ -522,6 +538,7 @@ def update(data, name, measured=lambda row: None):
     if torch is not None:
         data["torch"] = torch.__version__
     data["spec_memory_gbs"] = SPEC_MEMORY_GBS.get(data["device"], data.get("spec_memory_gbs"))
+    data["spec_tflops"] = peak_tflops(data["device"]) or data.get("spec_tflops")
     return data
 
 
@@ -556,7 +573,11 @@ def save(data, names=None):
     data["sizes"] = SIZES
     write(
         DATA / "meta.json",
-        {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops", "sizes") if key in data},
+        {
+            key: data[key]
+            for key in ("device", "torch", "spec_memory_gbs", "spec_tflops", "ops", "sizes")
+            if key in data
+        },
     )
     for name in OPS if names is None else names:
         op = {

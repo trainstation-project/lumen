@@ -13,11 +13,11 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 3.49,
-   "torch_us": 5.963,
+   "lumen_us": 4.105,
+   "torch_us": 6.04,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 11.74
+   "gbs": 9.98
   },
   {
    "op": "dynamic_update_slice",
@@ -32,11 +32,11 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 4.263,
-   "torch_us": 7.046,
+   "lumen_us": 4.759,
+   "torch_us": 7.149,
    "matches_torch": true,
    "rotation": 3277,
-   "gbs": 38.43
+   "gbs": 34.43
   },
   {
    "op": "dynamic_update_slice",
@@ -51,11 +51,11 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 8.462,
-   "torch_us": 9.394,
+   "lumen_us": 7.667,
+   "torch_us": 9.343,
    "matches_torch": true,
    "rotation": 820,
-   "gbs": 77.45
+   "gbs": 85.48
   },
   {
    "op": "dynamic_update_slice",
@@ -70,11 +70,11 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 24.127,
-   "torch_us": 16.977,
+   "lumen_us": 16.755,
+   "torch_us": 18.187,
    "matches_torch": true,
    "rotation": 205,
-   "gbs": 108.65
+   "gbs": 156.46
   },
   {
    "op": "dynamic_update_slice",
@@ -89,11 +89,11 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 86.966,
-   "torch_us": 53.998,
+   "lumen_us": 55.029,
+   "torch_us": 54.593,
    "matches_torch": true,
    "rotation": 52,
-   "gbs": 120.57
+   "gbs": 190.55
   },
   {
    "op": "dynamic_update_slice",
@@ -108,11 +108,11 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 360.069,
-   "torch_us": 216.692,
+   "lumen_us": 223.9,
+   "torch_us": 225.204,
    "matches_torch": true,
    "rotation": 13,
-   "gbs": 116.49
+   "gbs": 187.33
   },
   {
    "op": "dynamic_update_slice",
@@ -127,11 +127,11 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 1405.742,
-   "torch_us": 884.652,
+   "lumen_us": 873.69,
+   "torch_us": 891.277,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 119.35
+   "gbs": 192.03
   },
   {
    "op": "dynamic_update_slice",
@@ -146,11 +146,11 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 5595.402,
-   "torch_us": 3418.927,
+   "lumen_us": 3483.321,
+   "torch_us": 3450.844,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 119.94
+   "gbs": 192.66
   },
   {
    "op": "dynamic_update_slice",
@@ -165,11 +165,11 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 3.389,
-   "torch_us": 5.652,
+   "lumen_us": 4.345,
+   "torch_us": 5.629,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 6.04
+   "gbs": 4.71
   },
   {
    "op": "dynamic_update_slice",
@@ -184,11 +184,11 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 4.128,
-   "torch_us": 7.236,
+   "lumen_us": 4.689,
+   "torch_us": 6.992,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 19.85
+   "gbs": 17.47
   },
   {
    "op": "dynamic_update_slice",
@@ -203,11 +203,11 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 7.75,
-   "torch_us": 8.022,
+   "lumen_us": 6.59,
+   "torch_us": 7.901,
    "matches_torch": true,
    "rotation": 1639,
-   "gbs": 42.28
+   "gbs": 49.72
   },
   {
    "op": "dynamic_update_slice",
@@ -222,11 +222,11 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 21.259,
-   "torch_us": 12.745,
+   "lumen_us": 11.959,
+   "torch_us": 11.898,
    "matches_torch": true,
    "rotation": 410,
-   "gbs": 61.66
+   "gbs": 109.6
   },
   {
    "op": "dynamic_update_slice",
@@ -241,11 +241,11 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 72.811,
-   "torch_us": 30.743,
+   "lumen_us": 30.179,
+   "torch_us": 29.172,
    "matches_torch": true,
    "rotation": 103,
-   "gbs": 72.01
+   "gbs": 173.73
   },
   {
    "op": "dynamic_update_slice",
@@ -260,11 +260,11 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 278.029,
-   "torch_us": 107.521,
+   "lumen_us": 111.763,
+   "torch_us": 106.394,
    "matches_torch": true,
    "rotation": 26,
-   "gbs": 75.43
+   "gbs": 187.64
   },
   {
    "op": "dynamic_update_slice",
@@ -279,11 +279,11 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 1100.825,
-   "torch_us": 432.867,
+   "lumen_us": 442.406,
+   "torch_us": 436.927,
    "matches_torch": true,
    "rotation": 7,
-   "gbs": 76.2
+   "gbs": 189.61
   },
   {
    "op": "dynamic_update_slice",
@@ -298,16 +298,16 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 4364.502,
-   "torch_us": 1711.735,
+   "lumen_us": 1751.579,
+   "torch_us": 1730.863,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 76.88
+   "gbs": 191.57
   }
  ],
  "code": {
   "kernel": "// step 0: dynamic_update_slice\n// dynamic_update_slice\n\n// dynamic_slice/mps/kernels.metal\n#define DS_COPY(NAME, E)                                                                      \\\n    kernel void dynamic_slice_copy_##NAME(                                                    \\\n        device const E *in [[buffer(0)]], device E *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) { \\\n        FOR_EACH_ELEMENT(k, E) { out[k] = in[k]; }                                            \\\n    }",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = dynamic_update_slice in0 in1 in2"
  },
- "measured_at": "2026-10-23T17:21:29+00:00"
+ "measured_at": "2026-10-23T18:01:23+00:00"
 }

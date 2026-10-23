@@ -36,6 +36,12 @@ inline void reduce(In in,
         reduce<FN, A>(in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, i); \
     }
 
+template <typename A> inline A lane_xor(A v, ushort m) { return simd_shuffle_xor(v, m); }
+inline bfloat lane_xor(bfloat v, ushort m) { return bfloat(simd_shuffle_xor(float(v), m)); }
+inline bool lane_xor(bool v, ushort m) { return simd_shuffle_xor(uint(v), m) != 0; }
+inline long lane_xor(long v, ushort m) { return as_type<long>(simd_shuffle_xor(as_type<uint2>(v), m)); }
+inline ulong lane_xor(ulong v, ushort m) { return as_type<ulong>(simd_shuffle_xor(as_type<uint2>(v), m)); }
+
 template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_grouped(In in,
                            device O *out,
@@ -57,9 +63,43 @@ inline void reduce_grouped(In in,
     A r = init;
     if (i < outputs) {
         ulong base = offset_of(i, nk, ksizes, kstrides);
-        for (uint j = lane; j < count; j += lanes) {
-            r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));
+        if (nr == 1 && rstrides[0] == 1) {
+            constexpr uint V = sizeof(decltype(in[0])) >= 4 ? 1 : 4 / sizeof(decltype(in[0]));
+            uint j = lane * V;
+            for (; j + V <= count; j += lanes * V) {
+                for (uint v = 0; v < V; ++v) {
+                    r = Op::apply(r, A(in[base + j + v]));
+                }
+            }
+            for (; j < count; ++j) {
+                r = Op::apply(r, A(in[base + j]));
+            }
+        } else {
+            for (uint j = lane; j < count; j += lanes) {
+                r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));
+            }
         }
+    }
+    if (lanes >= 32) {
+        for (ushort m = 16; m > 0; m /= 2) {
+            r = Op::apply(r, lane_xor(r, m));
+        }
+        uint simds = lanes / 32;
+        if (simds > 1) {
+            if (t % 32 == 0) {
+                shared[t / 32] = r;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane == 0) {
+                for (uint k = 1; k < simds; ++k) {
+                    r = Op::apply(r, shared[t / 32 + k]);
+                }
+            }
+        }
+        if (lane == 0 && i < outputs) {
+            out[i] = epi(r);
+        }
+        return;
     }
     shared[t] = r;
     for (uint s = lanes / 2; s > 0; s /= 2) {
