@@ -18,7 +18,7 @@ fusion a folder per phase.
 | `fusion/mod.rs` | Pass `loop_fusion` (`LoopFusion`); re-exports `FuseDots`. |
 | `fusion/dot_epilogues.rs` | Pass `fuse_dots` (`FuseDots`): a dot and its column or row slices and elementwise consumers one `dot_general` fusion, the dot kernel's epilogue (members, together, in-place outputs). |
 | `fusion/groups.rs` | Loop fusion's groups: each fusible node joins the group of its readers (`groups`); a reduction one a group, layout only where `codegen/tpu/indexing.rs` plans it (`planned`). |
-| `fusion/emit.rs` | Each group as a `loop` or `reduction` fusion (`members`, `body`, `loop_fusion`). |
+| `fusion/emit.rs` | Each group as a `loop` or `reduction` fusion (`loop_fusion`, through `common/loops.rs`). |
 | `fusion/horizontal.rs` | Pass `horizontal_fusion` (`HorizontalFusion`): independent small elementwise loops of one shape as one multi-output loop (`../common/horizontal.rs`, with the TPU's `Target`: up to 1M elements, 32 streams, none a concatenate writes in place). A TPU kernel costs ~2–8 µs besides its bytes. |
 
 ## Pipeline

@@ -66,6 +66,7 @@ flags! {
     memory_limit, set_memory_limit: usize;
     fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
     safe_kernels, set_safe_kernels: bool;
+    use_triton_backend, set_use_triton_backend: bool;
     autotune, set_autotune: bool;
     dump_to, set_dump_to: Option<String>;
 }
@@ -248,7 +249,72 @@ fn _captured_launches() -> Vec<Captured> {
         .collect()
 }
 
+fn triton_gemm(
+    lhs: &crate::Tensor,
+    rhs: &crate::Tensor,
+    out: &crate::Tensor,
+    dot: &Primitive,
+    config: &super::triton::Config,
+) -> Result<(), String> {
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        accum_dtype,
+        ..
+    } = dot
+    else {
+        unreachable!("a dot_general")
+    };
+    Python::attach(|py| {
+        let tensors = [lhs, rhs, out].map(|t| PyTensor::wrap(t.clone()));
+        py.import("lumen.kernels.dot_general.triton")?
+            .getattr("dot_general")?
+            .call1((
+                tensors,
+                (lhs_contracting.clone(), rhs_contracting.clone()),
+                (lhs_batch.clone(), rhs_batch.clone()),
+                dtype_name(*accum_dtype),
+                (
+                    config.block_m,
+                    config.block_n,
+                    config.block_k,
+                    config.group_m,
+                    config.stages,
+                    config.warps,
+                ),
+            ))
+            .map(|_| ())
+    })
+    .map_err(|e| e.to_string())
+}
+
+fn triton_loop(
+    kernel: &super::triton::Kernel,
+    inputs: &[crate::Tensor],
+    out: &crate::Tensor,
+) -> Result<(), String> {
+    Python::attach(|py| {
+        let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
+        let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| kernel.by_value[k]).collect();
+        py.import("lumen.codegen.triton")?
+            .getattr("launch")?
+            .call1((
+                kernel.name.as_str(),
+                kernel.source.as_str(),
+                inputs,
+                scalars,
+                PyTensor::wrap(out.clone()),
+            ))
+            .map(|_| ())
+    })
+    .map_err(|e| e.to_string())
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    super::triton::set_gemm(triton_gemm);
+    super::triton::set_loop(triton_loop);
     m.add_class::<PyCompilerConfig>()?;
     m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;

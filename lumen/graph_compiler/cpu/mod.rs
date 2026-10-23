@@ -12,6 +12,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Pipeline::new("cpu")
         .add(Simplify { matched: true })
         .run(&mut module)?;
+    Ok(plan(&module.graph, options))
+}
+
+pub(crate) fn plan(graph: &Graph, options: &Options) -> Plan {
     let plan = PlanOptions {
         scratch: None,
         donate: options.donate.clone(),
@@ -22,5 +26,5 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         blocks: Vec::new(),
         layout: None,
     };
-    Ok(Plan::compile_with(&module.graph, &plan))
+    Plan::compile_with(graph, &plan)
 }

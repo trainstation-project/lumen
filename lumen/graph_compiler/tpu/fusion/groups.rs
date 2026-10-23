@@ -1,8 +1,8 @@
-use super::emit::{body, members};
 use crate::codegen::tpu::fusible;
 use crate::codegen::tpu::indexing::{layout, plan};
 use crate::codegen::tpu::reduction::reducible;
 use crate::graph::{Graph, Primitive};
+use crate::graph_compiler::common::loops::{body, members};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Join {

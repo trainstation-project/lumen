@@ -15,6 +15,7 @@ mod stages;
 #[cfg(test)]
 mod tests;
 mod tpu;
+mod triton;
 
 use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
@@ -73,6 +74,9 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
 
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
+        Device::Cuda(_) if options.config.use_triton_backend => {
+            triton::compile(graph, device, options)
+        }
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
         Device::Tpu(_) => tpu::compile(graph, options),

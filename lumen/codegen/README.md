@@ -8,15 +8,15 @@ anything: the device's graph compiler calls in here (for MPS, the `codegen`
 pass in `graph_compiler/mps/kernel_codegen.rs`; for TPU, the step's encoder
 in `kernels/tpu`) and hands the result to the runtime.
 
-Two backends: Apple's (Metal kernels for the GPU, Core ML programs for the
-Neural Engine) and TPU's (lumen's Pallas programs, elementwise loops so
-far).
+Three backends: Apple's (Metal kernels for the GPU, Core ML programs for the
+Neural Engine), TPU's (lumen's Pallas programs, elementwise loops so
+far) and Triton's (CUDA loops, with `use_triton_backend`).
 
 ## Files
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | Declares `mps`, compiled only under `cfg(lumen_mps_linked)` (set by `build.rs` when the Metal shim builds), and `tpu`. |
+| `mod.rs` | Declares `mps`, compiled only under `cfg(lumen_mps_linked)` (set by `build.rs` when the Metal shim builds), `tpu` and `triton`. |
 
 ## Subfolders
 
@@ -25,6 +25,8 @@ row, reduction, GEMM-epilogue and attention fusions; its
 [`ane/`](mps/ane/README.md) lowers fusions to Core ML programs.
 
 [`tpu/`](tpu/README.md) — Pallas programs for TPU loop fusions.
+
+[`triton/`](triton/README.md) — Triton kernels for CUDA loop fusions.
 
 ## Invariants & gotchas
 

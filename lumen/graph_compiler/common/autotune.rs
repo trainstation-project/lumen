@@ -25,6 +25,10 @@ fn picked(key: &str) -> Option<usize> {
     picked.as_ref()?.get(key).copied()
 }
 
+pub(crate) fn picked_for(device: &str, key: &str) -> Option<usize> {
+    picked(&format!("{device}/{key}"))
+}
+
 fn pick(key: String, k: usize) {
     let mut picked = PICKED.lock().unwrap_or_else(PoisonError::into_inner);
     picked.get_or_insert_with(HashMap::new).insert(key, k);

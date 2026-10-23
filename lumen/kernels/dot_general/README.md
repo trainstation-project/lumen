@@ -16,7 +16,7 @@ evaluates it with `kernels/reference.rs`.
 | `mod.rs` | Module doc and the `#[cfg(lumen_mps_linked)] mod mps;` and `#[cfg(lumen_tpu_linked)] mod tpu;` hooks. |
 | `tpu/mod.rs` | `dot_general` on TPU: its form (`form`: batch, then `[M, K] · [K, N]` or `[N, K]`), block choice (`block`), and its kernel's spec, its epilogue's from `codegen/tpu/gemm.rs`; see *TPU* below. |
 | `tpu/__init__.py` | The kernel of a dot on TPU, in lumen's Pallas (`program(spec, epilogue)`). |
-| `cuda.py` | `matmul(a, b)`: a standalone Triton GEMM on CUDA tensors (`[M, K] · [K, N]`, any strides, float32 accumulation), called directly, not from a plan. |
+| `triton.py` | The Triton backend's GEMM template (`use_triton_backend`), from open-lm-engine/accelerated-model-architectures's `bmm_triton` (dropped there in #345): `gemm_kernel`, `L` batches of `[M, K] · [K, N]` read through any strides, tiled by one of 7 configurations (`graph_compiler/triton/gemm.rs`'s `CONFIGS`, which its `TritonAutotuner` times per dot with lumen's CUDA events when `autotune` is on), `GROUP_SIZE_M` row-blocks at a time so a group's tiles reuse the same columns of B from cache, accumulated in `ACCUM_DTYPE` (exactly: no TF32) with int64 offsets, and an `EPILOGUE` (`no_epilogue` by default: where `beta · C` was) applied to each tile before it is rounded to the output's dtype. `dot_general(tensors, contracting, batch, accum_dtype, config, epilogue)` merges a dot's batch, free and contracting dimensions into one strided run each (or raises) and launches it; a CUDA plan's executor calls it for each `dot_general` step (`graph_compiler/triton/`). |
 
 ## TPU
 

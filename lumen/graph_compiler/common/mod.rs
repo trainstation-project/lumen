@@ -6,6 +6,7 @@ pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod fold_dot_reshapes;
 pub(crate) mod horizontal;
+pub(crate) mod loops;
 pub(crate) mod simplify;
 
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]

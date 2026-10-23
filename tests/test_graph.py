@@ -186,7 +186,16 @@ def placed(shape, dtype, device, seed=0):
     return lumen.from_numpy(a).to(dtype=dtype).to(device)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.fixture
+def triton_on_cuda(device):
+    """``use_triton_backend`` on for CUDA, whose plans run their GEMMs with
+    lumen.kernels.dot_general.triton."""
+    lumen.config.compiler.use_triton_backend = device == "cuda"
+    yield
+    lumen.config.compiler.use_triton_backend = False
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
 @pytest.mark.parametrize(
     "lhs, rhs, dtype, transposed, output",
     [
@@ -202,7 +211,7 @@ def placed(shape, dtype, device, seed=0):
         ([8, 1024], [512, 1024], "bfloat16", True, "float32"),
     ],
 )
-def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output):
+def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, triton_on_cuda):
     """A dot, in float32 on the operands as placed, within its operands'
     dtype's precision of its largest output (float32's when it writes
     float32)."""
@@ -215,6 +224,39 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output):
     assert list(y.shape) == list(expected.shape)
     tol = 1e-5 if out == "float32" else 1e-2
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
+    """With ``use_triton_backend``, each loop fusion on CUDA (elementwise
+    ops, broadcasts, transposes, slices, iota and constants) is one generated
+    Triton kernel computing what the CPU does."""
+    a, b = rand(48, 80), rand(80, 48, seed=1)
+    fns = [
+        lambda x, y: F.exp(x) * 2.0 + F.tanh(y.t()),
+        lambda x, y: F.where(x > y.t(), F.sqrt(F.relu(x)), F.sigmoid(-x)) / (F.maximum(x, y.t()) + 3.0),
+        lambda x, y: F.log(x * x + 1.0)[:, 8:40] - y.t()[:, :32] + prims.iota(x.dtype, (48, 32), 1),
+        lambda x, y: (x < y.t(), (x * 4.0).to(dtype="int32")),
+    ]
+    tol = {"float32": 1e-5, "bfloat16": 2**-7}[dtype]
+    for f in fns:
+        on_cpu = [lumen.from_numpy(v).to(dtype=dtype) for v in (a, b)]
+        try:
+            on_device = [v.to(device) for v in on_cpu]
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        expected, got = lumen.compile(f)(*on_cpu), lumen.compile(f)(*on_device)
+        for e, g in zip(*(r if isinstance(r, tuple) else (r,) for r in (expected, got))):
+            assert g.device == f"{device}:0" and g.dtype == e.dtype
+            e, g = (lumen.to_numpy(r.to(dtype="float32")) for r in (e, g))
+            np.testing.assert_allclose(g, e, rtol=tol, atol=tol)
+    plan = lumen.graph_compiler.Plan(lumen.make_graph(fns[1])(*on_device), device)
+    assert len(plan.steps()) == 1
+    scaled = lumen.compile(lambda x, s: x * s + 1.0)
+    for s in (0.5, -3.0):
+        out = lumen.to_numpy(scaled(on_device[0], s).to(dtype="float32"))
+        np.testing.assert_allclose(out, lumen.to_numpy(scaled(on_cpu[0], s).to(dtype="float32")), rtol=tol)
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU])
@@ -314,7 +356,7 @@ def test_shape_methods():
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
-def test_results_on_input_device(device):
+def test_results_on_input_device(device, triton_on_cuda):
     try:
         x = lumen.tensor([[1.0, 2.0], [3.0, 4.0]], device=device)
     except RuntimeError as e:
@@ -1640,8 +1682,8 @@ def test_rms_norm(device):
     np.testing.assert_allclose(lumen.to_numpy(step(norm, X)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_sqrt(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
+def test_sqrt(device, triton_on_cuda):
     """sqrt is a primitive (rsqrt is not: write 1 / F.sqrt(x)); on MPS a fused
     division by a fused sqrt stays a sqrt and a division, as traced."""
     x = rand(8, 16) ** 2 + 0.1

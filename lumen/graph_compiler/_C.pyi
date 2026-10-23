@@ -19,6 +19,7 @@ class CompilerConfig:
     neural_engine: bool
     row_cache: int
     memory_limit: int
+    use_triton_backend: bool
     autotune: bool
     dump_to: Optional[str]
 

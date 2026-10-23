@@ -19,6 +19,7 @@ pub struct CompilerConfig {
     pub memory_limit: usize,
     pub fused_linear_cross_entropy_chunk_size: Option<usize>,
     pub safe_kernels: bool,
+    pub use_triton_backend: bool,
     pub autotune: bool,
     pub dump_to: Option<String>,
 }
@@ -49,6 +50,7 @@ impl Default for CompilerConfig {
             memory_limit: 0,
             fused_linear_cross_entropy_chunk_size: None,
             safe_kernels: false,
+            use_triton_backend: false,
             autotune: true,
             dump_to: None,
         }
