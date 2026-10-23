@@ -248,6 +248,10 @@ fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     Ok(pipeline)
 }
 
+pub(crate) type Encode = Box<
+    dyn Fn(&Step, &[*const u8], *mut u8, *mut u8, Vec<Tensor>) -> Result<(), String> + Send + Sync,
+>;
+
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -264,6 +268,9 @@ pub(crate) fn encode(
         ));
     }
 
+    if let Some(encode) = step.launch::<Encode>() {
+        return encode(step, inputs, output, scratch, keep);
+    }
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }

@@ -51,14 +51,14 @@ pub struct Step {
 #[derive(Clone)]
 pub struct Tuned {
     pub kernel: String,
-    config: Arc<dyn Any + Send + Sync>,
+    launch: Arc<dyn Any + Send + Sync>,
 }
 
 impl Tuned {
-    pub(crate) fn new<C: Send + Sync + 'static>(kernel: String, config: C) -> Self {
+    pub(crate) fn new<L: Send + Sync + 'static>(kernel: String, launch: L) -> Self {
         Tuned {
             kernel,
-            config: Arc::new(config),
+            launch: Arc::new(launch),
         }
     }
 }
@@ -70,9 +70,8 @@ impl fmt::Debug for Tuned {
 }
 
 impl Step {
-    pub(crate) fn tuned<C: Copy + 'static>(&self) -> Option<(&str, C)> {
-        let tuned = self.tuned.as_ref()?;
-        Some((&tuned.kernel, *tuned.config.downcast_ref::<C>()?))
+    pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
+        self.tuned.as_ref()?.launch.downcast_ref::<L>()
     }
 
     pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {

@@ -4,7 +4,7 @@ use super::Function;
 use crate::codegen::triton::{CONFIGS, Config, UNTUNED};
 use crate::graph::Primitive;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
-use crate::graph_compiler::plan::Step;
+use crate::graph_compiler::plan::{Step, Tuned};
 use crate::stream::event::event_for;
 use crate::{DType, Device, Tensor, TensorOptions};
 
@@ -57,9 +57,13 @@ fn gemm(
     )
 }
 
+type Run = Box<dyn Fn(&Step, &Tensor, &Tensor, &Tensor) -> Result<(), String> + Send + Sync>;
+
 pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {
-    let config = step.tuned::<Config>().map_or(CONFIGS[UNTUNED], |(_, c)| c);
-    gemm(lhs, rhs, out, &step.primitive, &config)
+    match step.launch::<Run>() {
+        Some(run) => run(step, lhs, rhs, out),
+        None => gemm(lhs, rhs, out, &step.primitive, &CONFIGS[UNTUNED]),
+    }
 }
 
 pub(crate) struct Gemms;
@@ -74,8 +78,9 @@ impl Kernels for Gemms {
         }
     }
 
-    fn build(&mut self, _: &Step, _: Config) -> String {
-        String::new()
+    fn build(&mut self, _: &Step, config: Config) -> Tuned {
+        let run: Run = Box::new(move |step, lhs, rhs, out| gemm(lhs, rhs, out, &step.primitive, &config));
+        Tuned::new(format!("{config:?}"), run)
     }
 }
 

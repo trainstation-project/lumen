@@ -5,10 +5,10 @@ use crate::graph_compiler::Plan;
 use crate::graph_compiler::plan::{Step, Tuned};
 
 pub(crate) trait Kernels {
-    type Config: Copy + Send + Sync + 'static;
+    type Config;
 
     fn configs(&self, step: &Step) -> Vec<Self::Config>;
-    fn build(&mut self, step: &Step, config: Self::Config) -> String;
+    fn build(&mut self, step: &Step, config: Self::Config) -> Tuned;
     fn compile(&mut self) -> Result<(), String> {
         Ok(())
     }
@@ -50,7 +50,7 @@ impl<T: Timer> Autotuner<T> {
             let candidates: Vec<Tuned> = kernels
                 .configs(step)
                 .into_iter()
-                .map(|config| Tuned::new(kernels.build(step, config), config))
+                .map(|config| kernels.build(step, config))
                 .collect();
             if !candidates.is_empty() {
                 same.insert(key(step), jobs.len());

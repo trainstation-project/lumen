@@ -178,9 +178,6 @@ pub(crate) fn encode(
     output: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    if let Some(tuned) = step.tuned::<GemmConfig>().filter(|_| step.views.iter().all(Option::is_none)) {
-        return encode_tuned(step, inputs, output, keep, tuned);
-    }
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
     let name = step.label;
     let strides = |k: usize| {
@@ -219,12 +216,13 @@ pub(crate) fn encode(
     )
 }
 
-fn encode_tuned(
+pub(crate) fn encode_tuned(
     step: &Step,
+    kernel: &str,
+    config: GemmConfig,
     inputs: &[*const u8],
     output: *mut u8,
     keep: Vec<Tensor>,
-    (kernel, config): (&str, GemmConfig),
 ) -> Result<(), String> {
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
     let (ls, rs) = (

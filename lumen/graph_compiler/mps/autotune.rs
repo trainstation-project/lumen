@@ -7,9 +7,9 @@ use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
-use crate::graph_compiler::plan::{Buffer, Step};
+use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
-use crate::kernels::mps::{Captured, capture};
+use crate::kernels::mps::{Captured, Encode, capture};
 
 pub(super) struct Tunable {
     pub by_value: Vec<bool>,
@@ -47,7 +47,7 @@ impl Kernels for Loops<'_> {
         }
     }
 
-    fn build(&mut self, step: &Step, tuning: Tuning) -> String {
+    fn build(&mut self, step: &Step, tuning: Tuning) -> Tuned {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             unreachable!("a fusion")
         };
@@ -56,7 +56,11 @@ impl Kernels for Loops<'_> {
             codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);
-        kernel
+        let name = kernel.clone();
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            super::encode_with(step, &name, None, inputs, output, scratch, keep)
+        });
+        Tuned::new(kernel, encode)
     }
 
     fn compile(&mut self) -> Result<(), String> {
@@ -97,7 +101,7 @@ impl Kernels for Gemms {
         }
     }
 
-    fn build(&mut self, step: &Step, config: GemmConfig) -> String {
+    fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
         let (kernel, source) = match &step.primitive {
             Primitive::Fusion { body, .. } => {
                 let by_value: Vec<bool> = step
@@ -120,7 +124,22 @@ impl Kernels for Gemms {
             }
         };
         self.sources.insert(kernel.clone(), source);
-        kernel
+        let name = kernel.clone();
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            match &step.primitive {
+                Primitive::Fusion { name: fusion, .. } => super::encode_with(
+                    step,
+                    fusion,
+                    Some((&name, config)),
+                    inputs,
+                    output,
+                    scratch,
+                    keep,
+                ),
+                _ => gemm::encode_tuned(step, &name, config, inputs, output, keep),
+            }
+        });
+        Tuned::new(kernel, encode)
     }
 
     fn compile(&mut self) -> Result<(), String> {

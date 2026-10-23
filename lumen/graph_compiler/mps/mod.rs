@@ -30,6 +30,7 @@ use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
+use crate::kernels::dot_general::mps::GemmConfig;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
@@ -552,10 +553,24 @@ pub(crate) fn encode(
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let Primitive::Fusion { name, body, .. } = &step.primitive else {
+    let Primitive::Fusion { name, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
-    let name = step.tuned::<Tuning>().map_or(name.as_str(), |(kernel, _)| kernel);
+    encode_with(step, name, None, inputs, output, scratch, keep)
+}
+
+pub(super) fn encode_with(
+    step: &Step,
+    name: &str,
+    gemm: Option<(&str, GemmConfig)>,
+    inputs: &[*const u8],
+    output: *mut u8,
+    scratch: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        unreachable!("a fusion")
+    };
     let variant = strided_variant(step, name, body)?;
     let name = variant.as_deref().unwrap_or(name);
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
@@ -670,7 +685,7 @@ pub(crate) fn encode(
             )
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
-        let tuned = step.tuned::<crate::kernels::dot_general::mps::GemmConfig>();
+        let tuned = gemm;
         let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
