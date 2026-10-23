@@ -67,7 +67,10 @@
   .lx-chip[data-v="missing"], .lx-chip[data-v="wrong"] { color: var(--bad); }
   a.lx-chip { background: color-mix(in srgb, var(--ok) 12%, transparent); }
   a.lx-chip::after { content: " ›"; }
-  a.lx-chip.lx-progress { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 40%, transparent) var(--done), color-mix(in srgb, var(--ok) 12%, transparent) var(--done)); }
+  @property --done { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+  a.lx-chip.lx-progress { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 35%, transparent) var(--done), color-mix(in srgb, var(--bad) 22%, transparent) var(--done));
+                          transition: --done .8s ease-out, color .3s; }
+  a.lx-chip.lx-progress.lx-pending { color: var(--bad); }
   .lx-bad { color: var(--bad); }
   .lx-chart { position: relative; width: 100%; min-height: 280px; }
   .lx-chart svg { display: block; width: 100%; overflow: visible; }
@@ -86,6 +89,11 @@
   .lx-run button { font: inherit; font-size: 13px; color: var(--bg); background: var(--fg); border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   .lx-run button:disabled { opacity: .5; cursor: progress; }
   .lx-run-status { max-width: 70ch; }
+  .lx-global { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); order: 2; }
+  .lx-global[hidden] { display: none; }
+  .lx-global-bar { flex: 1; height: 8px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--bad) 30%, transparent); }
+  .lx-global-bar span { display: block; height: 100%; width: 0; background: var(--ok); transition: width .8s ease-out; }
+  .lx-global-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .lx-run select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
   .hl-key { color: var(--hl-key); } .hl-type { color: var(--hl-type); } .hl-num { color: var(--hl-num); }
   .hl-com { color: var(--hl-com); font-style: italic; } .hl-attr { color: var(--hl-attr); }
@@ -96,6 +104,10 @@
 <body>
 <div class="lx">
   <header class="lx-head">
+    <div class="lx-global" id="lx-global" hidden>
+      <div class="lx-global-bar"><span id="lx-global-fill"></span></div>
+      <span class="lx-global-text" id="lx-global-text"></span>
+    </div>
     <div class="lx-title"><h1>Lumen</h1><button class="lx-theme" id="lx-theme" type="button" aria-label="Toggle dark mode">
       <svg class="icon-sun" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
         <circle cx="12" cy="12" r="4.2"></circle>
@@ -260,6 +272,7 @@ const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
 let DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
 const KNOWN = {};
+const SEEN_SIZES = new Set();
 function derive() {
   OK_ROWS = PERF.rows.filter((r) => !r.error);
   for (const [op, o] of Object.entries(PERF.ops || {})) KNOWN[op] = o;
@@ -267,6 +280,7 @@ function derive() {
   DEVICE_BW = PERF.spec_memory_gbs;
   BENCHED = [...new Set([...PERF.rows.map((r) => r.op), ...Object.keys(PERF.measured_at || {}), ...(measuring ? [measuring] : [])])];
   SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
+  for (const n of SIZE_TICKS) SEEN_SIZES.add(n);
 }
 derive();
 
@@ -304,9 +318,15 @@ const PROGRESS = {};
 function progressed(c, op) {
   if (PROGRESS[op] == null) return c;
   c.classList.add("lx-progress");
+  c.classList.toggle("lx-pending", PROGRESS[op] < 1);
   c.style.setProperty("--done", `${(100 * PROGRESS[op]).toFixed(1)}%`);
   c.title = PROGRESS[op] < 1 ? `benchmarking: ${(100 * PROGRESS[op]).toFixed(0)}%` : "benchmarked";
   return c;
+}
+
+function advance(op, done) {
+  PROGRESS[op] = done;
+  for (const c of document.querySelectorAll(`#prim-table a.lx-chip[href="#op-${CSS.escape(op)}"]`)) progressed(c, op);
 }
 
 function chip(value, href) {
@@ -465,8 +485,6 @@ const PRIM_COLUMNS = [
   { key: "mps", label: "MPS", kind: "dev", render: (r) => progressed(chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null), r.primitive) },
   { key: "tpu", label: "TPU", kind: "dev", render: (r) => chip(r.tpu) },
   { key: "cuda", label: "CUDA", kind: "dev", render: (r) => chip(r.cuda) },
-  { key: "mps_kernel", label: "MPS kernel", wide: true }, { key: "tpu_kernel", label: "TPU kernel", wide: true },
-  { key: "mps_note", label: "MPS gap", kind: "why", wide: true }, { key: "tpu_note", label: "TPU gap", kind: "why", wide: true },
 ];
 const FUS_COLUMNS = [
   { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },
@@ -529,14 +547,21 @@ async function runBenchmark(op, device, measured) {
   return final;
 }
 
-const expectedRows = (op) => (op === "cast" ? 1 : DTYPE_COLORS.length) * SIZE_TICKS.length;
+const expectedRows = (op) => (op === "cast" ? 1 : DTYPE_COLORS.length) * (PERF.sizes?.length || SEEN_SIZES.size);
 
 function measuringOp(op) {
   measuring = op;
-  PROGRESS[op] = 0;
+  advance(op, 0);
   PERF = { ...PERF, rows: PERF.rows.filter((r) => r.op !== op) };
   derive();
   draw();
+}
+
+const globalBar = document.getElementById("lx-global");
+function overall(done, text) {
+  globalBar.hidden = false;
+  document.getElementById("lx-global-fill").style.width = `${(100 * Math.min(done, 1)).toFixed(1)}%`;
+  document.getElementById("lx-global-text").textContent = text;
 }
 
 function busy(running) {
@@ -552,17 +577,19 @@ runButton.addEventListener("click", async () => {
   busy(true);
   runStatus.className = "lx-run-status";
   runStatus.textContent = `Running ${op} on this machine's GPU: ${expected} measurements, about a minute.`;
+  overall(0, `${op}: starting`);
   measuringOp(op);
   try {
     PERF = await runBenchmark(op, "mps", (row) => {
       got += 1;
-      PROGRESS[op] = Math.min(got / expected, 1);
+      advance(op, Math.min(got / expected, 1));
+      overall(got / expected, `${op}: ${got} of ${expected} measured`);
       PERF.rows.push(row);
       runStatus.textContent = `Measured ${got} of ${expected}: ${row.dtype} at ${fmt.n(row.n)} elements.`;
       derive();
       draw();
     });
-    PROGRESS[op] = 1;
+    advance(op, 1);
     runStatus.textContent = `Done in ${((performance.now() - started) / 1000).toFixed(0)} s; the charts and tables show the new run.`;
   } catch (e) {
     PERF = previous;
@@ -571,6 +598,7 @@ runButton.addEventListener("click", async () => {
     runStatus.classList.add("lx-bad");
   } finally {
     measuring = null;
+    globalBar.hidden = true;
     busy(false);
     derive();
     draw();
@@ -588,26 +616,37 @@ allButton.addEventListener("click", async () => {
   }
   const started = performance.now();
   const failed = [];
+  const before = PERF;
+  const pending = new Set(ops);
+  const hidePending = () => { PERF = { ...PERF, rows: PERF.rows.filter((r) => !pending.has(r.op)) }; };
   busy(true);
   allStatus.className = "lx-run-status";
+  for (const op of ops) PROGRESS[op] = 0;
+  hidePending();
+  derive();
+  draw();
   for (const [k, op] of ops.entries()) {
-    const previous = PERF;
     const expected = expectedRows(op);
     let got = 0;
     allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}…`;
+    overall(k / ops.length, `${k} of ${ops.length} ops · running ${op}`);
     measuringOp(op);
     try {
       PERF = await runBenchmark(op, device, (row) => {
         got += 1;
-        PROGRESS[op] = Math.min(got / expected, 1);
+        advance(op, Math.min(got / expected, 1));
+        overall((k + Math.min(got / expected, 1)) / ops.length, `${k} of ${ops.length} ops · running ${op}`);
         PERF.rows.push(row);
         allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}: ${got} of ${expected} measured.`;
         derive();
-        draw();
+        if (current.view !== "support") draw();
       });
-      PROGRESS[op] = 1;
+      advance(op, 1);
+      pending.delete(op);
+      hidePending();
     } catch (e) {
-      PERF = previous;
+      pending.delete(op);
+      PERF = { ...PERF, rows: [...PERF.rows.filter((r) => r.op !== op), ...before.rows.filter((r) => r.op === op)] };
       delete PROGRESS[op];
       failed.push(`${op} (${e.message})`);
     }
@@ -615,6 +654,7 @@ allButton.addEventListener("click", async () => {
     derive();
     draw();
   }
+  globalBar.hidden = true;
   busy(false);
   const took = `${((performance.now() - started) / 60000).toFixed(1)} min`;
   allStatus.textContent = failed.length

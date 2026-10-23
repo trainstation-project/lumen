@@ -225,8 +225,12 @@ def write(path, value):
 def save(data, names=None):
     data["ops"] = {name: {"formula": formula, "kind": kind} for name, (kind, formula, *_) in OPS.items()}
     DATA.mkdir(parents=True, exist_ok=True)
-    write(DATA / "meta.json", {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops") if key in data})
-    for name in names or OPS:
+    data["sizes"] = SIZES
+    write(
+        DATA / "meta.json",
+        {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops", "sizes") if key in data},
+    )
+    for name in OPS if names is None else names:
         op = {
             "rows": [r for r in data.get("rows", []) if r["op"] == name],
             "code": data.get("code", {}).get(name),
