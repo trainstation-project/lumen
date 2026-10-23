@@ -824,6 +824,17 @@ impl Plan {
     }
 
     fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {
+        if self.triton.is_some() {
+            let at = Buffer::Input(i);
+            return !self.outputs_at.contains(&at)
+                && self.steps.iter().all(|s| {
+                    s.inputs.iter().enumerate().all(|(k, &(b, ref ty))| {
+                        b != at
+                            || ty.shape == self.inputs[i].shape
+                                && super::triton::reads_strided(s, k, strides)
+                    })
+                });
+        }
         #[cfg(lumen_mps_linked)]
         {
             let at = Buffer::Input(i);
@@ -948,6 +959,7 @@ impl Plan {
             _ => tensor(buffer).data_ptr(),
         };
         if executor != Device::Mps(0)
+            && self.triton.is_none()
             && self
                 .steps
                 .iter()
@@ -1050,7 +1062,15 @@ impl Plan {
                         _ => tensor(buffer).view_bytes(0, ty.dtype, &ty.shape),
                     };
                     let kernels = self.triton.as_deref().unwrap_or_default();
-                    let inputs: Vec<Tensor> = step.inputs.iter().map(view).collect();
+                    let inputs: Vec<Tensor> = step
+                        .inputs
+                        .iter()
+                        .zip(&step.views)
+                        .map(|(input, strided)| match strided {
+                            Some(_) => tensor(input.0).clone(),
+                            None => view(input),
+                        })
+                        .collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
                     super::triton::run(kernel, step, &inputs, &view(&step.output))?;
                 }

@@ -51,7 +51,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
                 .iter()
                 .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
                 .collect();
-            let (name, source) = crate::codegen::triton::kernel(body, &by_value);
+            let (name, source) = crate::codegen::triton::kernel(body, &by_value, &[]);
             Some(Kernel {
                 name,
                 source,
@@ -75,7 +75,22 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
-        (_, Some(kernel)) => launch(kernel, inputs, out),
+        (Primitive::Fusion { body, .. }, Some(kernel)) => {
+            let strides: Vec<Option<Vec<usize>>> = inputs
+                .iter()
+                .map(|t| (!t.is_contiguous()).then(|| t.strides().to_vec()))
+                .collect();
+            if strides.iter().all(Option::is_none) {
+                return launch(kernel, inputs, out);
+            }
+            let (name, source) = crate::codegen::triton::kernel(body, &kernel.by_value, &strides);
+            let strided = Kernel {
+                name,
+                source,
+                by_value: kernel.by_value.clone(),
+            };
+            launch(&strided, inputs, out)
+        }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
 }
@@ -89,6 +104,24 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
         by_value: vec![true],
     };
     launch(&kernel, &[Tensor::from_slice(&[bits], DType::U64)], t)
+}
+
+pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
+    let (name, source) = crate::codegen::triton::copy(dst.shape(), src.strides(), dst.strides());
+    let kernel = Kernel {
+        name,
+        source,
+        by_value: vec![false],
+    };
+    launch(&kernel, std::slice::from_ref(src), dst)
+}
+
+pub(crate) fn reads_strided(step: &Step, k: usize, strides: &[usize]) -> bool {
+    match &step.primitive {
+        Primitive::DotGeneral { .. } => gemm::reads_strided(step, k, strides),
+        Primitive::Fusion { .. } => true,
+        _ => false,
+    }
 }
 
 fn launch(kernel: &Kernel, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {

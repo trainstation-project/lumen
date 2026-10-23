@@ -428,6 +428,11 @@ impl Tensor {
         if self.device() == Device::Meta(0) {
             return recorded(op, unsafe { self.empty_like() });
         }
+        if let Device::Cuda(_) = self.device() {
+            let t = unsafe { self.empty_like() };
+            t.copy_(self).unwrap_or_else(|e| panic!("contiguous: {e}"));
+            return recorded(op, t);
+        }
         let values = self.to_vec::<T>();
         let t = unsafe { self.empty_like() };
         t.write(&values);
@@ -610,6 +615,14 @@ impl Tensor {
         }
         if self.device() == Device::Meta(0) {
             self.copy_into_placements(src)?;
+            return Ok(self);
+        }
+        if let Device::Cuda(_) = self.device()
+            && src.device() == self.device()
+        {
+            if self.numel() > 0 {
+                crate::graph_compiler::triton::copy(self, src)?;
+            }
             return Ok(self);
         }
 

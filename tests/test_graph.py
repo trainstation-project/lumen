@@ -250,6 +250,37 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
         np.testing.assert_allclose(out, lumen.to_numpy(scaled(on_cpu[0], s).to(dtype="float32")), rtol=tol)
 
 
+@pytest.mark.parametrize("device", [CUDA])
+def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
+    """With ``use_triton_backend``, a transposed or narrowed CUDA input is
+    read where it is by the generated loops and the GEMM, not copied first;
+    ``contiguous`` and ``copy_`` between strided views run on the GPU."""
+    import lumen.codegen.triton as triton
+
+    a, b = rand(64, 96), rand(96, 64, seed=1)
+    try:
+        x, w = lumen.from_numpy(a).to(device), lumen.from_numpy(b).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
+    dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
+    copies = {name for name in triton.kernels if name.startswith("copy_")}
+    tol = {"rtol": 1e-5, "atol": 1e-5}
+    np.testing.assert_allclose(lumen.to_numpy(loop(x.transpose(0, 1), w)), np.exp(a.T) * 2 + b, **tol)
+    np.testing.assert_allclose(
+        lumen.to_numpy(loop(x.narrow(1, 8, 32), w.narrow(0, 8, 64).narrow(1, 0, 32))),
+        np.exp(a[:, 8:40]) * 2 + b[8:72, :32],
+        **tol,
+    )
+    np.testing.assert_allclose(lumen.to_numpy(dot(x.transpose(0, 1), x)), a.T @ a, rtol=1e-4, atol=1e-4)
+    assert {name for name in triton.kernels if name.startswith("copy_")} == copies
+    t = x.transpose(0, 1).contiguous()
+    assert t.is_contiguous() and lumen.to_numpy(t).tolist() == a.T.tolist()
+    y = lumen.zeros([96, 64], device=device)
+    y.transpose(0, 1).copy_(x)
+    assert lumen.to_numpy(y).tolist() == a.T.tolist()
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):

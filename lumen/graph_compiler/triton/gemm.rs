@@ -89,6 +89,33 @@ fn key(step: &Step) -> Option<String> {
     ))
 }
 
+pub(crate) fn reads_strided(step: &Step, k: usize, strides: &[usize]) -> bool {
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        ..
+    } = &step.primitive
+    else {
+        return false;
+    };
+    let (contracting, batch) = match k {
+        0 => (lhs_contracting, lhs_batch),
+        _ => (rhs_contracting, rhs_batch),
+    };
+    let shape = &step.inputs[k].1.shape;
+    let free: Vec<usize> = (0..shape.len())
+        .filter(|d| !contracting.contains(d) && !batch.contains(d))
+        .collect();
+    let merged = |dims: &[usize]| {
+        let wide: Vec<usize> = dims.iter().copied().filter(|&d| shape[d] != 1).collect();
+        wide.windows(2)
+            .all(|w| strides[w[0]] == strides[w[1]] * shape[w[1]])
+    };
+    merged(batch) && merged(contracting) && merged(&free)
+}
+
 pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {
     let picked = key(step).and_then(|key| picked_for(TUNER, &key));
     gemm(

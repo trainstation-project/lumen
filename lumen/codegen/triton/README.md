@@ -9,7 +9,7 @@ at (`Emitter`, the MPS emitter's index arithmetic, written in Python).
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | `fusible` (what a loop holds: elementwise ops, casts, select, reshape, broadcast_in_dim, transpose, slice, full and iota, on dtypes Triton has), `kernel` (a body's source and name, `fusion_<hash>`), `fill` (a CUDA tensor's `fill_`, `fill_<hash>`: the value's bits a runtime argument, so one kernel a dtype; a strided view's strides in its store), `bits`, `triton_type`. |
+| `mod.rs` | `fusible` (what a loop holds: elementwise ops, casts, select, reshape, broadcast_in_dim, transpose, slice, full and iota, on dtypes Triton has), `kernel` (a body's source and name, `fusion_<hash>`), `fill` (a CUDA tensor's `fill_`, `fill_<hash>`: the value's bits a runtime argument, so one kernel a dtype; a strided view's strides in its store), `copy` (`copy_` and `contiguous` between CUDA tensors, `copy_<hash>`: each side's strides in its load or store), `bits`, `triton_type`. A loop reads each strided input through its strides (`kernel`'s `strides`): the plan's contiguous kernel otherwise, a variant per layout when an input is a view. |
 | `__init__.py` | `launch(name, source, inputs, scalars, out)`: compiles a kernel's source once (registered with `linecache`, as Triton reads a function's source) and launches it over `out`, runtime scalars passed by value. |
 
 ## Invariants & gotchas

@@ -57,10 +57,15 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
-pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
+pub(crate) fn kernel(
+    body: &Graph,
+    by_value: &[bool],
+    strides: &[Option<Vec<usize>>],
+) -> (String, String) {
     let mut emitter = Emitter {
         body,
         by_value,
+        strides,
         producer: body
             .nodes()
             .iter()
@@ -110,6 +115,25 @@ pub(crate) fn fill(dtype: DType, shape: &[usize], strides: &[usize]) -> (String,
     named("fill", source)
 }
 
+pub(crate) fn copy(
+    shape: &[usize],
+    src_strides: &[usize],
+    dst_strides: &[usize],
+) -> (String, String) {
+    let at = |strides: &[usize]| match strides == contiguous_strides(shape) {
+        true => "j".to_string(),
+        false => gather_index("j", shape, strides),
+    };
+    let (from, to) = (at(src_strides), at(dst_strides));
+    let source = format!(
+        "@triton.jit\n\
+         def NAME(src, out, n, BLOCK: tl.constexpr):\n    \
+             j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
+             tl.store(out + {to}, tl.load(src + {from}, mask=j < n), mask=j < n)\n"
+    );
+    named("copy", source)
+}
+
 pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
     let bytes = dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec());
     bytes
@@ -137,6 +161,7 @@ fn raw_type(dtype: DType) -> &'static str {
 struct Emitter<'a> {
     body: &'a Graph,
     by_value: &'a [bool],
+    strides: &'a [Option<Vec<usize>>],
     producer: HashMap<Var, usize>,
     lines: String,
     values: HashMap<(Var, String), String>,
@@ -212,6 +237,12 @@ impl Emitter<'_> {
         let expr = match self.producer.get(&v) {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
+                let idx = match self.strides.get(k).and_then(Option::as_ref) {
+                    Some(strides) if idx != "0" => {
+                        self.index(gather_index(&idx, &ty.shape, strides))
+                    }
+                    _ => idx,
+                };
                 match (self.by_value[k], idx.as_str()) {
                     (true, _) => format!("tl.full([], in{k}, {t})"),
                     (false, "0") => format!("tl.load(in{k})"),

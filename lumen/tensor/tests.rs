@@ -670,9 +670,7 @@ mod cuda {
         assert_eq!(on_gpu.device(), Device::Cuda(0));
         assert!(!on_gpu.is_contiguous(), "layout is kept");
         assert_eq!(on_gpu.to_vec::<i64>(), vec![1, 3, 2, 4]);
-        let contiguous = on_gpu.contiguous::<i64>();
-        assert_eq!(contiguous.device(), Device::Cuda(0));
-        let back = contiguous.to(Device::Cpu(0));
+        let back = on_gpu.to(Device::Cpu(0));
         assert_eq!(back.device(), Device::Cpu(0));
         assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
     }
