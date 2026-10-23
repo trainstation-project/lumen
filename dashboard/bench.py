@@ -351,6 +351,7 @@ OPS = {
         lambda x, i, u: prims.scatter_add(x, i, u, 0),
         lambda x, i, u: x.index_add(0, i.long(), u),
         lookup(updates=True),
+        sizes=SIZES[:-1],
     ),
 }
 

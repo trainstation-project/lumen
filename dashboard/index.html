@@ -271,6 +271,7 @@ async function loadPerf(dir) {
 let PRIMITIVES, FUSIONS, PERF;
 try {
   [PRIMITIVES, FUSIONS, PERF] = await Promise.all([load("primitives"), load("fusions"), loadPerf("elementwise_mps")]);
+  PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
   if (!PERF) throw new Error("data/elementwise_mps/meta.json: not found");
 } catch (e) {
   const take = document.getElementById("lx-take");
