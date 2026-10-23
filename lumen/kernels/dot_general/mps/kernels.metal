@@ -133,7 +133,8 @@ template <typename T> struct Pair {
 #define SG_BK 16
 #define SMALL_BK 32
 #define SG_COLS 2
-#define SG_LT(BM, BK, T, A) (BM * BK > 8 * 64 * sizeof(A) / sizeof(T) ? BM * BK : 8 * 64 * sizeof(A) / sizeof(T))
+#define SG_LT(BM, BK, T, A) SG_LT_OF(BM, BK, T, A, 8)
+#define SG_LT_OF(BM, BK, T, A, S) (BM * BK > S * 64 * sizeof(A) / sizeof(T) ? BM * BK : S * 64 * sizeof(A) / sizeof(T))
 template <typename T,
           typename A,
           typename O,
@@ -147,7 +148,9 @@ template <typename T,
           bool EXPANDED = false,
           bool TILE = false,
           bool INTERLEAVED = false,
-          bool REGIONS = false>
+          bool REGIONS = false,
+          uint THREADS = 256,
+          uint COLS = SG_COLS>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -159,9 +162,10 @@ inline void matmul_sg_impl(device const T *lhs,
                            uint sg,
                            uint lane,
                            Epi epi = Epi()) {
-    constexpr uint FM = BM / (8 / SG_COLS) / 8, FN = BN / SG_COLS / 8;
-    constexpr uint LA = BM * BK / 256, LB = BK * BN / 256;
-    constexpr uint RA = 256 / BK, RB = 256 / BN;
+    constexpr uint SIMDS = THREADS / 32;
+    constexpr uint FM = BM / (SIMDS / COLS) / 8, FN = BN / COLS / 8;
+    constexpr uint LA = BM * BK / THREADS, LB = BK * BN / THREADS;
+    constexpr uint RA = THREADS / BK, RB = THREADS / BN;
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;
@@ -190,7 +194,7 @@ inline void matmul_sg_impl(device const T *lhs,
             }
         }
     };
-    const uint sy = sg / SG_COLS, sx = sg % SG_COLS;
+    const uint sy = sg / COLS, sx = sg % COLS;
     simdgroup_matrix<A, 8, 8> c[FM][FN];
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }

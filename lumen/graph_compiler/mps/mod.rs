@@ -284,6 +284,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             sources: BTreeMap::new(),
         };
         super::common::autotune::autotune(&mut tuner, &mut plan)?;
+        super::common::autotune::autotune(&mut autotune::GemmAutotuner::default(), &mut plan)?;
     }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
@@ -620,6 +621,7 @@ pub(crate) fn encode(
             &contiguous_strides(&lhs.shape),
             &contiguous_strides(&rhs.shape),
             step.label,
+            None,
         )?;
         let Grid::Groups([_, _, chunks]) = plan.grid else {
             unreachable!("a matmul's grid")
@@ -663,6 +665,7 @@ pub(crate) fn encode(
             )
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
+        let tuned = crate::kernels::dot_general::mps::tuned(step);
         let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
@@ -671,10 +674,12 @@ pub(crate) fn encode(
             &ls,
             &rs,
             step.label,
+            tuned.as_ref().map(|(_, c)| (c.bm, c.bn)),
         )?;
-        let kernel = match (plan.small, plan.mid) {
-            (true, _) => format!("{name}_small"),
-            (_, true) => format!("{name}_mid"),
+        let kernel = match (&tuned, plan.small, plan.mid) {
+            (Some((tuned, _)), ..) => tuned.clone(),
+            (None, true, _) => format!("{name}_small"),
+            (None, _, true) => format!("{name}_mid"),
             _ => name.clone(),
         };
         let mut buffers = inputs.to_vec();
@@ -717,7 +722,16 @@ pub(crate) fn encode(
                 name.clone(),
                 Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
             ),
-            None => (kernel, plan.grid),
+            None => match (&tuned, plan.grid) {
+                (Some((_, c)), Grid::Groups(groups)) => (
+                    kernel,
+                    Grid::GroupsOf {
+                        groups,
+                        threads: c.threads,
+                    },
+                ),
+                (_, grid) => (kernel, grid),
+            },
         };
         return launch(&kernel, &buffers, &args, grid, keep, step.label);
     }

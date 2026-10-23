@@ -8,8 +8,10 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
+mod config;
 mod gemm;
 
+pub(crate) use config::{CONFIGS, Config, UNTUNED};
 pub(crate) use gemm::gemm;
 
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {

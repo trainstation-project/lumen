@@ -1,3 +1,7 @@
+mod config;
+
+pub(crate) use config::*;
+
 use crate::Tensor;
 use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
@@ -12,6 +16,26 @@ const SMALL_TILE: (usize, usize) = (32, 32);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
+
+pub(crate) fn matmul_source(t: &str, a: &str, o: &str, c: GemmConfig) -> (String, String) {
+    let GemmConfig {
+        bm,
+        bn,
+        bk,
+        threads,
+        cols,
+    } = c;
+    let name = format!("matmul_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{cols}");
+    let simds = threads / 32;
+    let source = format!(
+        "[[max_total_threads_per_threadgroup({threads})]]\n\
+         kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {{\n    \
+             threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];\n    \
+             matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o}, Same, false, false, false, false, false, false, {threads}, {cols}>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);\n\
+         }}\n"
+    );
+    (name, source)
+}
 
 pub(crate) struct MatmulOrder {
     pub lhs: Vec<usize>,
@@ -98,6 +122,7 @@ pub(crate) struct MatmulLaunch {
     pub p: [usize; 9],
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_matmul(
     prim: &Primitive,
     lhs: &TensorType,
@@ -106,6 +131,7 @@ pub(crate) fn plan_matmul(
     lhs_strides: &[usize],
     rhs_strides: &[usize],
     name: &str,
+    tile: Option<(usize, usize)>,
 ) -> Result<MatmulLaunch, String> {
     let order = matmul_order(prim, lhs.shape.len(), rhs.shape.len());
     let not_matmul = || {
@@ -128,7 +154,10 @@ pub(crate) fn plan_matmul(
         size(rhs, &order.rhs[order.rhs_split.1..]),
     );
     let float = out.dtype.is_float();
-    let (small, mid, tile) = float_tiles(b, m, n);
+    let (small, mid, tile) = match tile {
+        None => float_tiles(b, m, n),
+        Some(tile) => (false, false, tile),
+    };
     let (small, mid) = (float && small, float && mid);
     let (tm, tn) = match float {
         true => tile,
@@ -149,6 +178,9 @@ pub(crate) fn encode(
     output: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
+    if let Some(tuned) = tuned(step).filter(|_| step.views.iter().all(Option::is_none)) {
+        return encode_tuned(step, inputs, output, keep, tuned);
+    }
     let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
     let name = step.label;
     let strides = |k: usize| {
@@ -165,6 +197,7 @@ pub(crate) fn encode(
         &strides(0),
         &strides(1),
         name,
+        None,
     )?;
     let float = match (lhs.dtype, out.dtype) {
         (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
@@ -183,6 +216,38 @@ pub(crate) fn encode(
         launch_.grid,
         keep,
         name,
+    )
+}
+
+fn encode_tuned(
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+    keep: Vec<Tensor>,
+    (kernel, config): (String, GemmConfig),
+) -> Result<(), String> {
+    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+    let (ls, rs) = (
+        contiguous_strides(&lhs.shape),
+        contiguous_strides(&rhs.shape),
+    );
+    let tile = Some((config.bm, config.bn));
+    let launch_ = plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, tile)?;
+    let Grid::Groups(groups) = launch_.grid else {
+        unreachable!("a matmul's grid")
+    };
+    let grid = Grid::GroupsOf {
+        groups,
+        threads: config.threads,
+    };
+    let buffers = [inputs[0], inputs[1], output.cast_const()];
+    launch(
+        &kernel,
+        &buffers,
+        &[dims_arg(launch_.p)],
+        grid,
+        keep,
+        step.label,
     )
 }
 

@@ -438,6 +438,7 @@ pub(crate) fn launch(
     let (sizes, groups, group) = match grid {
         Grid::Threads(sizes) => (sizes, false, 0),
         Grid::Groups(sizes) => (sizes, true, 0),
+        Grid::GroupsOf { groups, threads } => (groups, true, threads),
         Grid::Elementwise { threads, group } => ([threads, 1, 1], false, group),
     };
     if sizes.contains(&0) {

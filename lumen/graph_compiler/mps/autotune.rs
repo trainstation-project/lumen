@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
-use super::{SOURCES, Tuning, codegen, compile_kernels, encode, record_launch};
+use super::{SOURCES, Tuning, codegen, compile_kernels, record_launch};
 use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::Autotuner;
 use crate::graph_compiler::plan::{Buffer, Step};
+use crate::kernels::dot_general::mps as gemm;
 use crate::kernels::mps::{Captured, capture};
 
 pub(super) struct Tunable {
@@ -95,6 +96,97 @@ impl Autotuner for MpsAutotuner<'_> {
         };
         *name = kernel.to_owned();
     }
+}
+
+#[derive(Default)]
+pub(super) struct GemmAutotuner {
+    sources: BTreeMap<String, String>,
+    configs: HashMap<String, usize>,
+}
+
+const TUNED_OUTPUTS: usize = 64 << 10;
+
+fn tiled_gemm(step: &Step) -> bool {
+    let float = step.output.1.dtype.is_float() && step.output.1.numel() >= TUNED_OUTPUTS;
+    let whole = step.views.iter().all(Option::is_none);
+    let tiled = match &step.primitive {
+        Primitive::DotGeneral { .. } => true,
+        Primitive::Fusion { name, body, .. } => {
+            !name.starts_with(crate::graph::NEURAL_ENGINE)
+                && super::launch_of(body) == super::Launch::Gemm
+                && codegen::row_dot(body).is_none()
+                && codegen::tile_scratch(body).is_none()
+        }
+        _ => false,
+    };
+    float && whole && tiled
+}
+
+impl Autotuner for GemmAutotuner {
+    type Config = usize;
+
+    fn device(&self) -> &'static str {
+        gemm::TUNER
+    }
+
+    fn key(&self, step: &Step) -> Option<String> {
+        tiled_gemm(step).then(|| gemm::tile_key(step))
+    }
+
+    fn candidates(&self, _: &Step) -> Vec<usize> {
+        (0..gemm::configs().len()).collect()
+    }
+
+    fn generate(&mut self, step: &Step, config: usize) -> String {
+        let c = gemm::configs()[config];
+        let (kernel, source) = match &step.primitive {
+            Primitive::Fusion { body, .. } => {
+                let by_value: Vec<bool> = step
+                    .inputs
+                    .iter()
+                    .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+                    .collect();
+                codegen::gemm_variant(body, &by_value, c)
+            }
+            p => {
+                let Primitive::DotGeneral { accum_dtype, .. } = p else {
+                    unreachable!("a matmul")
+                };
+                let (t, a, o) = (
+                    codegen::metal_type(step.inputs[0].1.dtype),
+                    codegen::metal_type(*accum_dtype),
+                    codegen::metal_type(step.output.1.dtype),
+                );
+                gemm::matmul_source(t, a, o, c)
+            }
+        };
+        gemm::name_config(step, config, &kernel);
+        self.configs.insert(kernel.clone(), config);
+        self.sources.insert(kernel.clone(), source);
+        kernel
+    }
+
+    fn compile(&mut self) -> Result<(), String> {
+        let mut sources = std::mem::take(&mut self.sources);
+        {
+            let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+            sources.retain(|name, _| !compiled.contains_key(name));
+        }
+        compile_kernels(sources)
+    }
+
+    fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
+        let reps = (TIMED_ELEMENTS / step.output.1.numel()).clamp(2, 64);
+        let Some(buffers) = Buffers::new(step) else {
+            return Ok(Vec::new());
+        };
+        kernels
+            .iter()
+            .map(|kernel| gemm::trying(self.configs[kernel], || buffers.run(step, reps)))
+            .collect()
+    }
+
+    fn apply(&self, _: &mut Step, _: &str, _: usize) {}
 }
 
 const COLD_BYTES: usize = 64 << 20;
@@ -188,7 +280,11 @@ impl Buffers {
         let launches = self
             .copies
             .iter()
-            .map(|inputs| capture(|| encode(step, inputs, self.output, self.scratch, Vec::new())))
+            .map(|inputs| {
+                capture(|| {
+                    crate::kernels::mps::encode(step, inputs, self.output, self.scratch, Vec::new())
+                })
+            })
             .collect::<Result<Vec<_>, String>>()?;
         (0..launches[0].len())
             .map(|l| {

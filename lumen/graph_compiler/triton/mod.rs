@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
-pub use gemm::Config;
+pub(crate) use crate::codegen::triton::Config;
 #[cfg(feature = "python")]
 pub(crate) use gemm::set_gemm;
 

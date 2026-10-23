@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernels::dot_general::mps::{DEFAULT_CONFIGS, GemmConfig};
 
 pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
     body.nodes()
@@ -292,6 +293,7 @@ pub(super) fn gemm_regions_kernel(
     by_value: &[bool],
     dot: &Node,
     regions: &[Columns],
+    variants: &[(&str, GemmConfig)],
 ) -> (String, String) {
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
@@ -383,17 +385,16 @@ pub(super) fn gemm_regions_kernel(
         }};
         "
     );
-    for (suffix, bm, bn, bk) in [
-        ("", 128, 64, "SG_BK"),
-        ("_mid", 64, 64, "SG_BK"),
-        ("_small", 32, 32, "SMALL_BK"),
-    ] {
+    for &(suffix, c) in variants {
+        let (bm, bn, bk, threads, cols, simds) =
+            (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         writedoc!(
             source,
             "
+            [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
-                threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true, {threads}, {cols}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
             }}
             "
         )
@@ -403,8 +404,26 @@ pub(super) fn gemm_regions_kernel(
 }
 
 pub(super) fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) {
+    gemm_kernel_with(body, by_value, dot, &DEFAULT_CONFIGS)
+}
+
+pub(crate) fn gemm_variant(
+    body: &Graph,
+    by_value: &[bool],
+    config: GemmConfig,
+) -> (String, String) {
+    let dot = gemm_dot(body).expect("a matmul");
+    gemm_kernel_with(body, by_value, dot, &[("", config)])
+}
+
+fn gemm_kernel_with(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    variants: &[(&str, GemmConfig)],
+) -> (String, String) {
     if let Some(regions) = gemm_regions(body, dot) {
-        return gemm_regions_kernel(body, by_value, dot, &regions);
+        return gemm_regions_kernel(body, by_value, dot, &regions, variants);
     }
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
@@ -507,17 +526,18 @@ pub(super) fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (Strin
         }};
         "
     );
-    for (suffix, bm, bn, bk) in [
-        ("", 128, 64, "SG_BK"),
-        ("_mid", 64, 64, "SG_BK"),
-        ("_small", 32, 32, "SMALL_BK"),
-    ] {
+    let flags = 6 - paired.matches(',').count();
+    let paired = format!("{paired}{}", ", false".repeat(flags));
+    for &(suffix, c) in variants {
+        let (bm, bn, bk, threads, cols, simds) =
+            (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         writedoc!(
             source,
             "
+            [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
-                threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}, {threads}, {cols}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
             }}
             "
         )

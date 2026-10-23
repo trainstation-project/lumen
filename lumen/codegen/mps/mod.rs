@@ -16,6 +16,7 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 mod attention;
+mod config;
 mod elementwise;
 mod emitter;
 mod gemm;
@@ -25,6 +26,7 @@ mod row;
 mod transpose;
 
 pub(crate) use attention::*;
+pub(crate) use config::*;
 use elementwise::*;
 use emitter::*;
 pub(crate) use gemm::*;
@@ -32,15 +34,6 @@ pub(crate) use gemm_row::*;
 pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Tuning {
-    Loop {
-        per_thread: usize,
-        group: usize,
-        contiguous: bool,
-    },
-}
 
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
     is_loop(body).then(|| loop_tuning(body))
