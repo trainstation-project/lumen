@@ -125,23 +125,59 @@ struct Logistic {
 };
 
 template <typename A> struct bits_of;
-template <> struct bits_of<bool> { typedef uchar type; typedef char signed_type; };
-template <> struct bits_of<uchar> { typedef uchar type; typedef char signed_type; };
-template <> struct bits_of<char> { typedef uchar type; typedef char signed_type; };
-template <> struct bits_of<ushort> { typedef ushort type; typedef short signed_type; };
-template <> struct bits_of<short> { typedef ushort type; typedef short signed_type; };
-template <> struct bits_of<uint> { typedef uint type; typedef int signed_type; };
-template <> struct bits_of<int> { typedef uint type; typedef int signed_type; };
-template <> struct bits_of<ulong> { typedef ulong type; typedef long signed_type; };
-template <> struct bits_of<long> { typedef ulong type; typedef long signed_type; };
-template <> struct bits_of<half> { typedef ushort type; typedef short signed_type; };
-template <> struct bits_of<bfloat> { typedef ushort type; typedef short signed_type; };
-template <> struct bits_of<float> { typedef uint type; typedef int signed_type; };
+template <> struct bits_of<bool> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<uchar> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<char> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<ushort> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<short> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<uint> {
+    typedef uint type;
+    typedef int signed_type;
+};
+template <> struct bits_of<int> {
+    typedef uint type;
+    typedef int signed_type;
+};
+template <> struct bits_of<ulong> {
+    typedef ulong type;
+    typedef long signed_type;
+};
+template <> struct bits_of<long> {
+    typedef ulong type;
+    typedef long signed_type;
+};
+template <> struct bits_of<half> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<bfloat> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<float> {
+    typedef uint type;
+    typedef int signed_type;
+};
 
-#define FLOAT_UNARY(NAME, EXPR)                                      \
-    template <typename A> inline A NAME##_op(A a) {                  \
-        float x = float(a);                                          \
-        return A(EXPR);                                              \
+#define FLOAT_UNARY(NAME, EXPR)                     \
+    template <typename A> inline A NAME##_op(A a) { \
+        float x = float(a);                         \
+        return A(EXPR);                             \
     }
 
 FLOAT_UNARY(sin, sin(x))
