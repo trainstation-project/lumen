@@ -64,7 +64,11 @@ const PRELUDE: &str = concat!(
         "
     ),
     include_str!("../../kernels/reduce/mps/kernels.metal"),
-    include_str!("../../kernels/dot_general/mps/kernels.metal"),
+    include_str!("../../kernels/dot_general/mps/matmul.metal"),
+    include_str!("../../kernels/dot_general/mps/matmul_wide.metal"),
+    include_str!("../../kernels/dot_general/mps/matmul_sg.metal"),
+    include_str!("../../kernels/dot_general/mps/matmul_atomic.metal"),
+    include_str!("../../kernels/dot_general/mps/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
     include_str!("../../kernels/attention/mps/backward.metal"),
 );

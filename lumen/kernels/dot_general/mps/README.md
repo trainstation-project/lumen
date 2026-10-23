@@ -13,7 +13,13 @@ instantiate the `matmul_sg_impl` template with an epilogue.
 | --- | --- |
 | `mod.rs` | Matmul form (`matmul_order`, `collapsed`, `reads_strided`), tile choice (`float_tiles`, `float_groups`; `encode_tuned`, the launch of a tuned config's kernel), `plan_matmul` → `MatmulLaunch`, `encode`, and `linear_cross_entropy`'s `encode_linear_cross_entropy` / `linear_cross_entropy_scratch`. |
 | `config.rs` | GEMM tuning: `GemmConfig` (tile M, N and K step, threads, SIMD-group columns), `configs` (the valid candidates: whole 8×8 fragments per SIMD group, 4 to 16 of them and roughly square, even loads, within 32 KB of threadgroup memory), `DEFAULT_CONFIGS` (the three precompiled variants). |
-| `kernels.metal` | `matmul_impl` (8–32-bit ints), `matmul_wide_impl` (64-bit ints), `matmul_sg_impl` (floats on simdgroup matrices, with `ATOMIC`/`PAIRED`/`EXPANDED`/`TILE` modes), `LceRows`, and the kernel instantiations incl. `lce_combine`. |
+| `matmul.metal` | `matmul_impl` (8–32-bit ints), the shared `MATMUL_ARGS`, and its kernels. |
+| `matmul_wide.metal` | `matmul_wide_impl` (64-bit ints) and its kernels. |
+| `matmul_sg.metal` | `matmul_sg_impl` (floats on simdgroup matrices, with `ATOMIC`/`PAIRED`/`EXPANDED`/`TILE` modes), its threadgroup sizes (`SG_LT`, `SG_LT_OF`) and the float kernels (`matmul_`, `_mid_`, `_small_`, widened). |
+| `matmul_atomic.metal` | `matmul_atomic_`, the split-K kernel accumulating float partials with atomics. |
+| `linear_cross_entropy.metal` | `LceRows`, the `lce_partials` kernels and `lce_combine`. |
+
+The files are concatenated in that order (`build.rs`, and `graph_compiler/mps`'s prelude for generated kernels), so each may use the ones before it.
 
 ## Matmul form
 
