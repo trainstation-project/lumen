@@ -13,11 +13,11 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 1.522,
-   "torch_us": 2.902,
+   "lumen_us": 1.693,
+   "torch_us": 2.697,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 21.53
+   "gbs": 19.35
   },
   {
    "op": "not",
@@ -32,11 +32,11 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 2.02,
-   "torch_us": 3.122,
+   "lumen_us": 1.981,
+   "torch_us": 3.062,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 64.89
+   "gbs": 66.16
   },
   {
    "op": "not",
@@ -51,11 +51,11 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 3.978,
-   "torch_us": 5.273,
+   "lumen_us": 3.585,
+   "torch_us": 4.778,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 131.8
+   "gbs": 146.24
   },
   {
    "op": "not",
@@ -70,11 +70,11 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 11.134,
-   "torch_us": 12.582,
+   "lumen_us": 9.785,
+   "torch_us": 11.347,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 188.36
+   "gbs": 214.32
   },
   {
    "op": "not",
@@ -89,11 +89,11 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 42.951,
-   "torch_us": 44.128,
+   "lumen_us": 40.868,
+   "torch_us": 41.236,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 195.31
+   "gbs": 205.26
   },
   {
    "op": "not",
@@ -108,11 +108,11 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 160.033,
-   "torch_us": 156.475,
+   "lumen_us": 154.765,
+   "torch_us": 152.581,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 209.67
+   "gbs": 216.81
   },
   {
    "op": "not",
@@ -127,11 +127,11 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 572.14,
-   "torch_us": 572.446,
+   "lumen_us": 605.54,
+   "torch_us": 618.052,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 234.59
+   "gbs": 221.65
   },
   {
    "op": "not",
@@ -146,16 +146,16 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 2294.167,
-   "torch_us": 2345.333,
+   "lumen_us": 2293.006,
+   "torch_us": 2325.298,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 234.02
+   "gbs": 234.13
   }
  ],
  "code": {
-  "kernel": "// step 0: not\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = not %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_3cc311232b6ab267_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_3cc311232b6ab267_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(64)]]\nkernel void fusion_3cc311232b6ab267(device const int *in0 [[buffer(0)]], device int *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        int v0 = fusion_3cc311232b6ab267_load0(in0, j);\n        int v1 = not_op(v0);\n        fusion_3cc311232b6ab267_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_3cc311232b6ab267 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = not %0\n  in (%1) }] in0"
+  "kernel": "// step 0: not\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = not %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_b45d28fba828c947_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_b45d28fba828c947_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_b45d28fba828c947(device const int *in0 [[buffer(0)]], device int *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        int v0 = fusion_b45d28fba828c947_load0(in0, j);\n        int v1 = not_op(v0);\n        fusion_b45d28fba828c947_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_b45d28fba828c947 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = not %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T16:10:49+00:00"
+ "measured_at": "2026-10-23T17:00:09+00:00"
 }
