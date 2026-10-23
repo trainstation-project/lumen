@@ -249,13 +249,13 @@ try { savedTheme = localStorage.getItem("lx-theme"); } catch {}
 setTheme(savedTheme === "dark" ? "dark" : "light");
 themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 (async () => {
-const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(`data/${name}.json: ${r.status}`); return r.json(); });
+const load = (name) => fetch(`data/${name}.json`, { cache: "no-store" }).then((r) => { if (!r.ok) throw new Error(`data/${name}.json: ${r.status}`); return r.json(); });
 let PRIMITIVES, FUSIONS, PERF;
 try {
   let meta;
   [PRIMITIVES, FUSIONS, meta] = await Promise.all(["primitives", "fusions", "elementwise_mps/meta"].map(load));
   const ops = await Promise.all(Object.keys(meta.ops || {}).map((op) =>
-    fetch(`data/elementwise_mps/${op}.json`).then((r) => r.ok ? r.json() : null).then((d) => [op, d])));
+    fetch(`data/elementwise_mps/${op}.json`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((d) => [op, d])));
   PERF = { ...meta, rows: [], code: {}, measured_at: {} };
   for (const [op, d] of ops) {
     if (!d) continue;
@@ -269,7 +269,7 @@ try {
   take.style.color = "var(--bad)";
   return;
 }
-const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
+const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"], ["triton", "Triton"]];
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
 let DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
 const KNOWN = {};
@@ -486,6 +486,7 @@ const PRIM_COLUMNS = [
   { key: "mps", label: "MPS", kind: "dev", render: (r) => progressed(chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null), r.primitive) },
   { key: "tpu", label: "TPU", kind: "dev", render: (r) => chip(r.tpu) },
   { key: "cuda", label: "CUDA", kind: "dev", render: (r) => chip(r.cuda) },
+  { key: "triton", label: "Triton", kind: "dev", render: (r) => chip(r.triton) },
 ];
 const FUS_COLUMNS = [
   { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },

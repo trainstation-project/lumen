@@ -6,6 +6,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "runs",
   "what": "Chains of elementwise ops become one generated kernel.",
   "pass": "loop_fusion"
  },
@@ -16,6 +17,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "runs",
   "what": "Broadcasts, slices, transposes and iota become indexing inside a loop instead of copies.",
   "pass": "loop_fusion / codegen indexing"
  },
@@ -26,6 +28,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Independent small loops of one shape run as one multi-output kernel.",
   "pass": "horizontal_fusion"
  },
@@ -36,6 +39,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "A fusion also writes values its consumers outside need (vertical multi-output).",
   "pass": "loop_fusion (hosts)"
  },
@@ -46,6 +50,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Elementwise work before and after a reduction runs in the reduction's kernel.",
   "pass": "loop_fusion"
  },
@@ -56,6 +61,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "softmax, RMSNorm and LayerNorm: a row's reductions and the elementwise work around them, one kernel.",
   "pass": "normalization_diamonds"
  },
@@ -66,6 +72,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Column sums a row kernel adds up too, for rows wider than one block.",
   "pass": "normalization_diamonds"
  },
@@ -76,6 +83,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Elementwise consumers (bias, activation, cast) of a matmul run as it writes its output.",
   "pass": "fuse_dots / dot_epilogues"
  },
@@ -86,6 +94,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "A matmul and the norm diamond reading it: one kernel, the product never written to memory.",
   "pass": "dot_rows / row_dots"
  },
@@ -96,6 +105,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Matmuls sharing an operand (q/k/v, gate/up) run as one over packed weights, forward and backward.",
   "pass": "merge_dots, merge_dots_backward"
  },
@@ -106,6 +116,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Long-K matmuls with small M and N split K across threadgroups.",
   "pass": "split_k"
  },
@@ -116,6 +127,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Attention forward and backward as tiled kernels; scores never materialized.",
   "pass": "flash_attention, flash_attention_backward"
  },
@@ -126,6 +138,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Logits h·wᵀ reduced to log-sum-exp and the target logit without storing them.",
   "pass": "linear_cross_entropy"
  },
@@ -136,6 +149,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Cross-entropy's backward a chunk of rows at a time.",
   "pass": "chunked_cross_entropy"
  },
@@ -146,6 +160,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "take_along_axis rewritten as a gather of flat positions.",
   "pass": "take_along_axis"
  },
@@ -156,6 +171,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Producers write straight into their slot of the result; no copy. TPU: along the last dimension.",
   "pass": "place_concats"
  },
@@ -166,6 +182,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Slices a matmul reads are passed as strided views instead of copied.",
   "pass": "place_views"
  },
@@ -176,6 +193,7 @@
   "mps": "missing",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Chains of dynamic_update_slice at constant starts run as one kernel, VMEM-resident when they fit.",
   "pass": "dynamic_update_slices"
  },
@@ -186,6 +204,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
+  "triton": "missing",
   "what": "float16 regions on fixed weights offloaded to Apple's Neural Engine via Core ML.",
   "pass": "neural_engine"
  },
@@ -196,6 +215,7 @@
   "mps": "missing",
   "tpu": "runs",
   "cuda": "missing",
+  "triton": "missing",
   "what": "Embedding lookups of 32-bit tables run on the TPU's SparseCores.",
   "pass": "gather (kernel route)"
  }
