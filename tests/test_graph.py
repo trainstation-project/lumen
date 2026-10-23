@@ -293,7 +293,8 @@ def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
 def test_mps_reads_strided_inputs_in_place():
     """A transposed or narrowed MPS input is read where it is, not copied
     first: its step's kernel is compiled again with that input's load
-    prologue through its strides, once a layout."""
+    prologue through its strides, once a layout. ``contiguous``, ``copy_``
+    and ``fill_`` of strided views are loops on the GPU, not host copies."""
     a, b = rand(64, 96), rand(96, 64, seed=1)
     x, w = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")
     loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
@@ -308,6 +309,17 @@ def test_mps_reads_strided_inputs_in_place():
         expected = a.T / np.sqrt((a.T.astype(np.float64) ** 2).mean(-1, keepdims=True) + 1e-6)
         np.testing.assert_allclose(lumen.to_numpy(out), expected, **tol)
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
+    y = lumen.zeros([96, 64], device="mps")
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        t = x.transpose(0, 1).contiguous()
+        y.transpose(0, 1).copy_(x)
+        y.transpose(0, 1)[3].fill_(-2.0)
+    host = {"lumen::to_vec", "lumen::copy_h2d", "lumen::copy_d2h"}
+    assert not [e for e in prof.events() if e["name"] in host]
+    assert t.is_contiguous() and lumen.to_numpy(t).tolist() == a.T.tolist()
+    expected = a.T.copy()
+    expected[:, 3] = -2.0
+    assert lumen.to_numpy(y).tolist() == expected.tolist()
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU])

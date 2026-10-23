@@ -371,15 +371,25 @@ pub(crate) fn fusion_source(name: &str) -> Option<String> {
 
 static VARIANTS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+fn carried(t: &Tensor) -> TensorType {
+    let carrier = match t.dtype().size_of() {
+        1 => DType::U8,
+        2 => DType::U16,
+        4 => DType::U32,
+        _ => DType::U64,
+    };
+    TensorType::new(carrier, t.shape())
+}
+
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     let mut body = Graph::new();
-    let x = body.input(dst.ty());
+    let x = body.input(carried(dst));
     body.set_outputs(&[x]).expect("the copied value");
     run_loop(body, "copy_", dst, src, false)
 }
 
 pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
-    let ty = dst.ty();
+    let ty = carried(dst);
     let mut body = Graph::new();
     let x = body.input(TensorType::new(ty.dtype, &[]));
     let broadcast = Primitive::BroadcastInDim {
@@ -388,7 +398,13 @@ pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
     };
     let v = body.apply(broadcast, &[x])?;
     body.set_outputs(&[v]).expect("the filled value");
-    let scalar = Tensor::full(&[], value, ty.dtype);
+    let bits = crate::codegen::triton::bits(dst.dtype(), value);
+    let scalar = match ty.dtype {
+        DType::U8 => Tensor::from_slice(&[bits as u8], ty.dtype),
+        DType::U16 => Tensor::from_slice(&[bits as u16], ty.dtype),
+        DType::U32 => Tensor::from_slice(&[bits as u32], ty.dtype),
+        _ => Tensor::from_slice(&[bits], ty.dtype),
+    };
     run_loop(body, "fill_", dst, &scalar, true)
 }
 
@@ -414,6 +430,8 @@ fn run_loop(
         record_launch(&name, &body, codegen::tuning_of(&body));
     }
     let strided = !by_value && !src.is_contiguous();
+    let input = body.type_of(body.inputs()[0]).clone();
+    let output = body.type_of(body.outputs()[0]).clone();
     let step = Step {
         primitive: Primitive::Fusion { name, label, body },
         label,
@@ -422,13 +440,13 @@ fn run_loop(
                 true => Buffer::Scalar(0),
                 false => Buffer::Input(0),
             },
-            src.ty(),
+            input,
         )],
         views: vec![strided.then(|| View {
             offset: 0,
             strides: src.strides().to_vec(),
         })],
-        output: (Buffer::Output(0), dst.ty()),
+        output: (Buffer::Output(0), output),
         extra_outputs: Vec::new(),
         output_views: vec![None],
         scratch: None,
