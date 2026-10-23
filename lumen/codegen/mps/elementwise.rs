@@ -64,10 +64,11 @@ pub(super) fn elementwise_kernel(
         .collect();
     let out_type = metal_type(body.type_of(out).dtype);
     let (params, args) = io_params(body, by_value, out_type, &[]);
-    let writes = written(body, views, &result, &extra);
+    let (stores, writes) = written(body, views, &result, &extra);
     let lines = &emitter.lines;
     named(formatdoc!(
         "
+        {stores}
         [[max_total_threads_per_threadgroup({group})]]
         kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
             {each} {{
@@ -83,8 +84,8 @@ pub(super) fn written(
     views: &HashMap<usize, (usize, Vec<usize>)>,
     result: &str,
     extra: &[String],
-) -> String {
-    let mut writes = String::new();
+) -> (String, String) {
+    let (mut stores, mut writes) = (String::new(), String::new());
     for (k, value) in std::iter::once(result)
         .chain(extra.iter().map(String::as_str))
         .enumerate()
@@ -103,8 +104,8 @@ pub(super) fn written(
                         continue;
                     }
                     let mut idx = match inner {
-                        1 => "j".to_string(),
-                        _ => format!("(j / {inner}u)"),
+                        1 => "i".to_string(),
+                        _ => format!("(i / {inner}u)"),
                     };
                     if d > 0 && shape[..d].iter().any(|&m| m != 1) {
                         idx = format!("({idx} % {n}u)");
@@ -114,9 +115,14 @@ pub(super) fn written(
                 }
                 at
             }
-            None => "j".to_string(),
+            None => "i".to_string(),
         };
-        writeln!(writes, "{out}[{at}] = {value};").unwrap();
+        writeln!(
+            stores,
+            "template <typename T, typename I, typename V> inline void NAME_store{k}(device T *p, I i, V v) {{ p[{at}] = v; }}"
+        )
+        .unwrap();
+        writeln!(writes, "NAME_store{k}({out}, j, {value});").unwrap();
     }
-    writes
+    (stores, writes)
 }

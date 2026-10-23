@@ -5,6 +5,7 @@ use pyo3::types::PyDict;
 use super::Plan;
 use super::config::{self, CompilerConfig};
 use super::plan::Buffer;
+use crate::DType;
 use crate::device::python::resolve_device;
 use crate::graph::python::{PyGraph, primitive_dict, scope_names};
 use crate::graph::{Primitive, TensorType};
@@ -249,33 +250,28 @@ fn _captured_launches() -> Vec<Captured> {
         .collect()
 }
 
+fn triton_functions(functions: &[super::triton::Function]) -> Vec<(&str, &str, &str)> {
+    functions
+        .iter()
+        .map(|f| (f.param.as_str(), f.name.as_str(), f.source.as_str()))
+        .collect()
+}
+
 fn triton_gemm(
-    lhs: &crate::Tensor,
-    rhs: &crate::Tensor,
-    out: &crate::Tensor,
-    dot: &Primitive,
+    tensors: [&crate::Tensor; 3],
+    sizes: [usize; 4],
+    accum_dtype: DType,
     config: &super::triton::Config,
+    functions: &[super::triton::Function],
 ) -> Result<(), String> {
-    let Primitive::DotGeneral {
-        lhs_contracting,
-        rhs_contracting,
-        lhs_batch,
-        rhs_batch,
-        accum_dtype,
-        ..
-    } = dot
-    else {
-        unreachable!("a dot_general")
-    };
     Python::attach(|py| {
-        let tensors = [lhs, rhs, out].map(|t| PyTensor::wrap(t.clone()));
+        let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
         py.import("lumen.kernels.dot_general.triton")?
             .getattr("dot_general")?
             .call1((
                 tensors,
-                (lhs_contracting.clone(), rhs_contracting.clone()),
-                (lhs_batch.clone(), rhs_batch.clone()),
-                dtype_name(*accum_dtype),
+                sizes,
+                dtype_name(accum_dtype),
                 (
                     config.block_m,
                     config.block_n,
@@ -284,6 +280,7 @@ fn triton_gemm(
                     config.stages,
                     config.warps,
                 ),
+                triton_functions(functions),
             ))
             .map(|_| ())
     })
@@ -292,6 +289,7 @@ fn triton_gemm(
 
 fn triton_loop(
     kernel: &super::triton::Kernel,
+    functions: &[super::triton::Function],
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
 ) -> Result<(), String> {
@@ -306,6 +304,7 @@ fn triton_loop(
                 inputs,
                 scalars,
                 PyTensor::wrap(out.clone()),
+                triton_functions(functions),
             ))
             .map(|_| ())
     })

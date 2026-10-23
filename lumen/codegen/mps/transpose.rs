@@ -171,10 +171,11 @@ pub(super) fn transpose_kernel(
         .iter()
         .map(|&v| emitter.value(v, "j".into()))
         .collect();
-    let writes = written(body, views, &result, &extra);
+    let (stores, writes) = written(body, views, &result, &extra);
     source.push_str(&each(&format!("{}{writes}", emitter.lines), "b", "a"));
     named(formatdoc!(
         "
+        {stores}
         kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{
             {source}
         }}

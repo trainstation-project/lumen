@@ -224,7 +224,7 @@ pub(super) fn gemm_row_kernel(
 }
 
 pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
-    let name = format!("in{k}[");
+    let name = load(k);
     let (mut out, mut rest) = (String::new(), source);
     while let Some(at) = rest.find(&name) {
         let ident = rest[..at]
@@ -237,14 +237,14 @@ pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> Strin
             .char_indices()
             .find(|&(_, c)| {
                 depth += match c {
-                    '[' => 1,
-                    ']' => -1,
+                    '(' => 1,
+                    ')' => -1,
                     _ => 0,
                 };
                 depth == 0
             })
             .map(|(i, _)| i)
-            .expect("a closing bracket");
+            .expect("a closing parenthesis");
         out.push_str(&rest[..at]);
         match ident {
             true => out.push_str(&rest[at..at + name.len() + end + 1]),

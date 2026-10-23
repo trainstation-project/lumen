@@ -14,7 +14,8 @@ use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
 use super::plan::{Buffer, Step};
 use super::{Options, Plan, cpu};
-use crate::graph::{Graph, Primitive};
+use crate::codegen::triton as codegen;
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::{DType, Device, Scalar, Tensor};
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,30 @@ pub struct Kernel {
     pub by_value: Vec<bool>,
 }
 
-pub type Loop = fn(kernel: &Kernel, inputs: &[Tensor], out: &Tensor) -> Result<(), String>;
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub struct Function {
+    pub param: String,
+    pub name: String,
+    pub source: String,
+}
+
+impl Function {
+    fn new(param: impl Into<String>, (name, source): (String, String)) -> Self {
+        Function {
+            param: param.into(),
+            name,
+            source,
+        }
+    }
+}
+
+pub type Loop = fn(
+    kernel: &Kernel,
+    functions: &[Function],
+    inputs: &[Tensor],
+    out: &Tensor,
+) -> Result<(), String>;
 
 static LOOP: OnceLock<Loop> = OnceLock::new();
 
@@ -51,7 +75,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
                 .iter()
                 .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
                 .collect();
-            let (name, source) = crate::codegen::triton::kernel(body, &by_value, &[]);
+            let (name, source) = crate::codegen::triton::kernel(body, &by_value);
             Some(Kernel {
                 name,
                 source,
@@ -75,58 +99,69 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
-        (Primitive::Fusion { body, .. }, Some(kernel)) => {
-            let strides: Vec<Option<Vec<usize>>> = inputs
+        (Primitive::Fusion { .. }, Some(kernel)) => {
+            let mut functions: Vec<Function> = inputs
                 .iter()
-                .map(|t| (!t.is_contiguous()).then(|| t.strides().to_vec()))
+                .enumerate()
+                .filter(|&(k, _)| !kernel.by_value[k])
+                .map(|(k, t)| {
+                    Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides()))
+                })
                 .collect();
-            if strides.iter().all(Option::is_none) {
-                return launch(kernel, inputs, out);
-            }
-            let (name, source) = crate::codegen::triton::kernel(body, &kernel.by_value, &strides);
-            let strided = Kernel {
-                name,
-                source,
-                by_value: kernel.by_value.clone(),
-            };
-            launch(&strided, inputs, out)
+            functions.push(Function::new(
+                "STORE",
+                codegen::store(out.shape(), out.strides()),
+            ));
+            launch(kernel, &functions, inputs, out)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
 }
 
 pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
-    let (name, source) = crate::codegen::triton::fill(t.dtype(), t.shape(), t.strides());
-    let bits = crate::codegen::triton::bits(t.dtype(), value);
+    let (name, source) = codegen::fill(t.dtype());
     let kernel = Kernel {
         name,
         source,
         by_value: vec![true],
     };
-    launch(&kernel, &[Tensor::from_slice(&[bits], DType::U64)], t)
+    let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
+    let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
+    launch(&kernel, &[store], &[bits], t)
 }
 
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
-    let (name, source) = crate::codegen::triton::copy(dst.shape(), src.strides(), dst.strides());
+    let mut body = Graph::new();
+    let x = body.input(TensorType::new(src.dtype(), src.shape()));
+    body.set_outputs(&[x]).expect("the copied value");
+    let (name, source) = codegen::kernel(&body, &[false]);
     let kernel = Kernel {
         name,
         source,
         by_value: vec![false],
     };
-    launch(&kernel, std::slice::from_ref(src), dst)
+    let functions = [
+        Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
+        Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
+    ];
+    launch(&kernel, &functions, std::slice::from_ref(src), dst)
 }
 
-pub(crate) fn reads_strided(step: &Step, k: usize, strides: &[usize]) -> bool {
-    match &step.primitive {
-        Primitive::DotGeneral { .. } => gemm::reads_strided(step, k, strides),
-        Primitive::Fusion { .. } => true,
-        _ => false,
-    }
+pub(crate) fn reads_strided(step: &Step) -> bool {
+    matches!(
+        step.primitive,
+        Primitive::DotGeneral { .. } | Primitive::Fusion { .. }
+    )
 }
 
-fn launch(kernel: &Kernel, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {
+fn launch(
+    kernel: &Kernel,
+    functions: &[Function],
+    inputs: &[Tensor],
+    out: &Tensor,
+) -> Result<(), String> {
     let launch = LOOP.get().ok_or(
         "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
     )?;
-    launch(kernel, inputs, out)
+    launch(kernel, functions, inputs, out)
 }

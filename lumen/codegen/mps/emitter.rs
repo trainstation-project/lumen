@@ -128,7 +128,7 @@ impl<'a> Emitter<'a> {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
                 match self.by_value.get(k) == Some(&true) {
                     true => format!("in{k}"),
-                    false => format!("in{k}[{idx}]"),
+                    false => format!("{}{idx})", load(k)),
                 }
             }
             Some(&i) => {

@@ -153,6 +153,11 @@ impl Tensor {
             return crate::graph_compiler::triton::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
+        #[cfg(lumen_mps_linked)]
+        if let Device::Mps(_) = self.device() {
+            return crate::graph_compiler::mps::fill(self, value)
+                .unwrap_or_else(|e| panic!("fill_: {e}"));
+        }
         let host = unsafe { Self::empty(&self.shape, self.dtype) };
         host.fill(value);
         self.copy_(&host).unwrap_or_else(|e| panic!("fill_: {e}"));
@@ -428,7 +433,7 @@ impl Tensor {
         if self.device() == Device::Meta(0) {
             return recorded(op, unsafe { self.empty_like() });
         }
-        if let Device::Cuda(_) = self.device() {
+        if let Device::Cuda(_) | Device::Mps(_) = self.device() {
             let t = unsafe { self.empty_like() };
             t.copy_(self).unwrap_or_else(|e| panic!("contiguous: {e}"));
             return recorded(op, t);
@@ -636,6 +641,13 @@ impl Tensor {
                 let (from, to) = (src.data_ptr().cast_const(), self.data_ptr());
                 let keep = vec![src.clone(), self.clone()];
                 crate::kernels::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
+            }
+            return Ok(self);
+        }
+        #[cfg(lumen_mps_linked)]
+        if self.device() == Device::Mps(0) && src.device() == Device::Mps(0) {
+            if self.numel() > 0 {
+                crate::graph_compiler::mps::copy(self, src)?;
             }
             return Ok(self);
         }

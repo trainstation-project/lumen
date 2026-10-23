@@ -1,5 +1,6 @@
 use super::{MpsModule, codegen};
 use crate::graph::{Graph, Primitive, Var};
+use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 use crate::kernels::dot_general::mps::reads_strided;
 use crate::tensor::contiguous_strides;
@@ -51,6 +52,19 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
         }
     }
     views
+}
+
+pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
+    let Some(&v) = body.inputs().get(k) else {
+        return false;
+    };
+    let template = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
+        && !body
+            .nodes()
+            .iter()
+            .any(|n| template(&n.primitive) && n.inputs.contains(&v))
 }
 
 pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {

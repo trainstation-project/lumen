@@ -19,9 +19,14 @@ def compiled(name, source):
     return kernels[name]
 
 
-def launch(name, source, inputs, scalars, out):
+def functions(specs):
+    return {param: compiled(name, source) for param, name, source in specs}
+
+
+def launch(name, source, inputs, scalars, out, specs):
     n = math.prod(out.shape)
     if n == 0:
         return
     args = [x.item() if k in scalars else x for k, x in enumerate(inputs)]
-    compiled(name, source)[(triton.cdiv(n, BLOCK),)](*args, out, n, BLOCK=BLOCK, enable_fp_fusion=False)
+    kernel = compiled(name, source)
+    kernel[(triton.cdiv(n, BLOCK),)](*args, out, n, **functions(specs), BLOCK=BLOCK, enable_fp_fusion=False)

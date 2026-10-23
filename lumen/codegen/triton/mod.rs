@@ -8,6 +8,10 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
+mod gemm;
+
+pub(crate) use gemm::gemm;
+
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
     use DType::*;
     Some(match dtype {
@@ -57,15 +61,10 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
-pub(crate) fn kernel(
-    body: &Graph,
-    by_value: &[bool],
-    strides: &[Option<Vec<usize>>],
-) -> (String, String) {
+pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     let mut emitter = Emitter {
         body,
         by_value,
-        strides,
         producer: body
             .nodes()
             .iter()
@@ -78,22 +77,27 @@ pub(crate) fn kernel(
         locals: 0,
     };
     let result = emitter.value(body.outputs()[0], "j".into());
-    let params: Vec<String> = (0..body.inputs().len())
+    let inputs: Vec<String> = (0..body.inputs().len())
         .map(|k| format!("in{k}, "))
+        .collect();
+    let loads: Vec<String> = (0..body.inputs().len())
+        .filter(|&k| !by_value[k])
+        .map(|k| format!("LOAD{k}: tl.constexpr, "))
         .collect();
     let source = format!(
         "@triton.jit\n\
-         def NAME({}out, n, BLOCK: tl.constexpr):\n    \
+         def NAME({}out, n, {}STORE: tl.constexpr, BLOCK: tl.constexpr):\n    \
              j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
              mask = j < n\n\
-         {}    tl.store(out + j, {result}, mask=mask)\n",
-        params.concat(),
+         {}    STORE(out, j, {result}, mask)\n",
+        inputs.concat(),
+        loads.concat(),
         emitter.lines,
     );
     named("fusion", source)
 }
 
-pub(crate) fn fill(dtype: DType, shape: &[usize], strides: &[usize]) -> (String, String) {
+pub(crate) fn fill(dtype: DType) -> (String, String) {
     let value = match dtype {
         DType::Bool => "bits != 0".to_string(),
         _ => format!(
@@ -102,36 +106,43 @@ pub(crate) fn fill(dtype: DType, shape: &[usize], strides: &[usize]) -> (String,
             triton_type(dtype).expect("a Triton dtype")
         ),
     };
-    let at = match strides == contiguous_strides(shape) {
-        true => "j".to_string(),
-        false => gather_index("j", shape, strides),
-    };
     let source = format!(
         "@triton.jit\n\
-         def NAME(bits, out, n, BLOCK: tl.constexpr):\n    \
+         def NAME(bits, out, n, STORE: tl.constexpr, BLOCK: tl.constexpr):\n    \
              j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
-             tl.store(out + {at}, {value}, mask=j < n)\n"
+             STORE(out, j, {value}, j < n)\n"
     );
     named("fill", source)
 }
 
-pub(crate) fn copy(
-    shape: &[usize],
-    src_strides: &[usize],
-    dst_strides: &[usize],
-) -> (String, String) {
-    let at = |strides: &[usize]| match strides == contiguous_strides(shape) {
-        true => "j".to_string(),
-        false => gather_index("j", shape, strides),
-    };
-    let (from, to) = (at(src_strides), at(dst_strides));
+pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
     let source = format!(
         "@triton.jit\n\
-         def NAME(src, out, n, BLOCK: tl.constexpr):\n    \
-             j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
-             tl.store(out + {to}, tl.load(src + {from}, mask=j < n), mask=j < n)\n"
+         def NAME(ptr, i, mask):\n    \
+             return tl.load(ptr + {}, mask=mask)\n",
+        at("i", shape, strides)
     );
-    named("copy", source)
+    named("load", source)
+}
+
+pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
+    let source = format!(
+        "@triton.jit\n\
+         def NAME(ptr, i, value, mask):\n    \
+             tl.store(ptr + {}, value, mask=mask)\n",
+        at("i", shape, strides)
+    );
+    named("store", source)
+}
+
+fn at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+    match strides == contiguous_strides(shape) {
+        true => idx.to_string(),
+        false => match gather_index(idx, shape, strides).as_str() {
+            "0" => format!("{idx} * 0"),
+            offset => offset.to_string(),
+        },
+    }
 }
 
 pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
@@ -161,7 +172,6 @@ fn raw_type(dtype: DType) -> &'static str {
 struct Emitter<'a> {
     body: &'a Graph,
     by_value: &'a [bool],
-    strides: &'a [Option<Vec<usize>>],
     producer: HashMap<Var, usize>,
     lines: String,
     values: HashMap<(Var, String), String>,
@@ -237,16 +247,10 @@ impl Emitter<'_> {
         let expr = match self.producer.get(&v) {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
-                let idx = match self.strides.get(k).and_then(Option::as_ref) {
-                    Some(strides) if idx != "0" => {
-                        self.index(gather_index(&idx, &ty.shape, strides))
-                    }
-                    _ => idx,
-                };
                 match (self.by_value[k], idx.as_str()) {
                     (true, _) => format!("tl.full([], in{k}, {t})"),
-                    (false, "0") => format!("tl.load(in{k})"),
-                    (false, _) => format!("tl.load(in{k} + {idx}, mask=mask)"),
+                    (false, "0") => format!("LOAD{k}(in{k}, 0, None)"),
+                    (false, _) => format!("LOAD{k}(in{k}, {idx}, mask)"),
                 }
             }
             Some(&i) => {

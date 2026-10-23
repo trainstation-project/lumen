@@ -1,10 +1,11 @@
 use std::sync::OnceLock;
 
+use super::Function;
 use crate::graph::Primitive;
 use crate::graph_compiler::common::autotune::{Autotuner, picked_for};
 use crate::graph_compiler::plan::Step;
 use crate::stream::event::event_for;
-use crate::{Device, Tensor, TensorOptions};
+use crate::{DType, Device, Tensor, TensorOptions};
 
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -49,11 +50,11 @@ const TUNER: &str = "triton";
 const REPS: usize = 10;
 
 pub type Gemm = fn(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    out: &Tensor,
-    dot: &Primitive,
+    tensors: [&Tensor; 3],
+    sizes: [usize; 4],
+    accum_dtype: DType,
     config: &Config,
+    functions: &[Function],
 ) -> Result<(), String>;
 
 static GEMM: OnceLock<Gemm> = OnceLock::new();
@@ -70,10 +71,30 @@ fn gemm(
     dot: &Primitive,
     config: &Config,
 ) -> Result<(), String> {
-    let gemm = GEMM
+    let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
-    gemm(lhs, rhs, out, dot, config)
+    let Primitive::DotGeneral { accum_dtype, .. } = dot else {
+        unreachable!("a dot_general")
+    };
+    let code = crate::codegen::triton::gemm(
+        dot,
+        (lhs.shape(), lhs.strides()),
+        (rhs.shape(), rhs.strides()),
+        (out.shape(), out.strides()),
+    );
+    let functions = [
+        Function::new("PROLOGUE_A", code.prologue_a),
+        Function::new("PROLOGUE_B", code.prologue_b),
+        Function::new("EPILOGUE", code.epilogue),
+    ];
+    launch(
+        [lhs, rhs, out],
+        code.sizes,
+        *accum_dtype,
+        config,
+        &functions,
+    )
 }
 
 fn key(step: &Step) -> Option<String> {
@@ -87,33 +108,6 @@ fn key(step: &Step) -> Option<String> {
         step.primitive,
         step.output.1
     ))
-}
-
-pub(crate) fn reads_strided(step: &Step, k: usize, strides: &[usize]) -> bool {
-    let Primitive::DotGeneral {
-        lhs_contracting,
-        rhs_contracting,
-        lhs_batch,
-        rhs_batch,
-        ..
-    } = &step.primitive
-    else {
-        return false;
-    };
-    let (contracting, batch) = match k {
-        0 => (lhs_contracting, lhs_batch),
-        _ => (rhs_contracting, rhs_batch),
-    };
-    let shape = &step.inputs[k].1.shape;
-    let free: Vec<usize> = (0..shape.len())
-        .filter(|d| !contracting.contains(d) && !batch.contains(d))
-        .collect();
-    let merged = |dims: &[usize]| {
-        let wide: Vec<usize> = dims.iter().copied().filter(|&d| shape[d] != 1).collect();
-        wide.windows(2)
-            .all(|w| strides[w[0]] == strides[w[1]] * shape[w[1]])
-    };
-    merged(batch) && merged(contracting) && merged(&free)
 }
 
 pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {

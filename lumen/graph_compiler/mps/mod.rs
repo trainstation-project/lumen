@@ -13,8 +13,9 @@ mod split_k;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, c_char};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, PoisonError};
 
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
@@ -29,7 +30,7 @@ use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::plan::{Buffer, Step};
@@ -47,7 +48,7 @@ use flash_attention_backward::FlashAttentionBackward;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
-pub(crate) use place_views::fusion_reads_strided;
+pub(crate) use place_views::{fusion_reads_strided, loads_strided};
 
 unsafe extern "C" {
     fn lumen_mps_compile_kernels(source: *const c_char) -> i32;
@@ -368,6 +369,127 @@ pub(crate) fn fusion_source(name: &str) -> Option<String> {
     sources.get(name).cloned()
 }
 
+static VARIANTS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
+    let mut body = Graph::new();
+    let x = body.input(dst.ty());
+    body.set_outputs(&[x]).expect("the copied value");
+    run_loop(body, "copy_", dst, src, false)
+}
+
+pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
+    let ty = dst.ty();
+    let mut body = Graph::new();
+    let x = body.input(TensorType::new(ty.dtype, &[]));
+    let broadcast = Primitive::BroadcastInDim {
+        shape: ty.shape.clone(),
+        broadcast_dimensions: Vec::new(),
+    };
+    let v = body.apply(broadcast, &[x])?;
+    body.set_outputs(&[v]).expect("the filled value");
+    let scalar = Tensor::full(&[], value, ty.dtype);
+    run_loop(body, "fill_", dst, &scalar, true)
+}
+
+fn run_loop(
+    body: Graph,
+    label: &'static str,
+    dst: &Tensor,
+    src: &Tensor,
+    by_value: bool,
+) -> Result<(), String> {
+    let views = match dst.is_contiguous() {
+        true => HashMap::new(),
+        false => HashMap::from([(0, (0, dst.strides().to_vec()))]),
+    };
+    let config = super::config::config();
+    let (name, source) = codegen::kernel(&body, &[by_value], &config, &views, None);
+    let compiled = SOURCES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains_key(&name);
+    if !compiled {
+        compile_kernels(BTreeMap::from([(name.clone(), source)]))?;
+        record_launch(&name, &body, codegen::tuning_of(&body));
+    }
+    let strided = !by_value && !src.is_contiguous();
+    let step = Step {
+        primitive: Primitive::Fusion { name, label, body },
+        label,
+        inputs: vec![(
+            match by_value {
+                true => Buffer::Scalar(0),
+                false => Buffer::Input(0),
+            },
+            src.ty(),
+        )],
+        views: vec![strided.then(|| View {
+            offset: 0,
+            strides: src.strides().to_vec(),
+        })],
+        output: (Buffer::Output(0), dst.ty()),
+        extra_outputs: Vec::new(),
+        output_views: vec![None],
+        scratch: None,
+        scope: &[],
+        sources: Vec::new(),
+    };
+    let keep = vec![src.holding(), dst.holding()];
+    let inputs = [src.data_ptr().cast_const()];
+    encode(&step, &inputs, dst.data_ptr(), std::ptr::null_mut(), keep)
+}
+
+fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<String>, String> {
+    let strided: Vec<(usize, &[usize])> = step
+        .views
+        .iter()
+        .enumerate()
+        .filter_map(|(k, view)| view.as_ref().map(|view| (k, view.strides.as_slice())))
+        .filter(|&(k, _)| loads_strided(body, k))
+        .collect();
+    if strided.is_empty() {
+        return Ok(None);
+    }
+    let key = format!("{name}{strided:?}");
+    if let Some(variant) = VARIANTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(Some(variant.clone()));
+    }
+    let Some(mut source) = SOURCES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(name)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    for &(k, strides) in &strided {
+        let shape = &step.inputs[k].1.shape;
+        if let Some(rewritten) = codegen::strided_load(&source, name, k, shape, strides) {
+            source = rewritten;
+        }
+    }
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    let variant = format!("fusion_{:016x}", hasher.finish());
+    let source = source.replace(name, &variant);
+    compile_kernels(BTreeMap::from([(variant.clone(), source)]))?;
+    let launch = launch_kind(name, body);
+    LAUNCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(variant.clone(), launch);
+    VARIANTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, variant.clone());
+    Ok(Some(variant))
+}
+
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -378,6 +500,8 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    let variant = strided_variant(step, name, body)?;
+    let name = variant.as_ref().unwrap_or(name);
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
         return ane::encode(step, inputs, output, keep);
     }

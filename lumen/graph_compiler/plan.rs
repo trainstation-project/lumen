@@ -828,10 +828,9 @@ impl Plan {
             let at = Buffer::Input(i);
             return !self.outputs_at.contains(&at)
                 && self.steps.iter().all(|s| {
-                    s.inputs.iter().enumerate().all(|(k, &(b, ref ty))| {
+                    s.inputs.iter().all(|&(b, ref ty)| {
                         b != at
-                            || ty.shape == self.inputs[i].shape
-                                && super::triton::reads_strided(s, k, strides)
+                            || ty.shape == self.inputs[i].shape && super::triton::reads_strided(s)
                     })
                 });
         }
@@ -858,9 +857,9 @@ impl Plan {
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
                                 && s.inputs[k].1.shape == self.inputs[i].shape
-                                && crate::graph_compiler::mps::fusion_reads_strided(
+                                && (crate::graph_compiler::mps::fusion_reads_strided(
                                     body, k, strides,
-                                )
+                                ) || crate::graph_compiler::mps::loads_strided(body, k))
                         }
                         _ => false,
                     })
