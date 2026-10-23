@@ -67,6 +67,7 @@
   .lx-chip[data-v="missing"], .lx-chip[data-v="wrong"] { color: var(--bad); }
   a.lx-chip { background: color-mix(in srgb, var(--ok) 12%, transparent); }
   a.lx-chip::after { content: " ›"; }
+  a.lx-chip.lx-progress { background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 40%, transparent) var(--done), color-mix(in srgb, var(--ok) 12%, transparent) var(--done)); }
   .lx-bad { color: var(--bad); }
   .lx-chart { position: relative; width: 100%; min-height: 280px; }
   .lx-chart svg { display: block; width: 100%; overflow: visible; }
@@ -85,6 +86,7 @@
   .lx-run button { font: inherit; font-size: 13px; color: var(--bg); background: var(--fg); border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   .lx-run button:disabled { opacity: .5; cursor: progress; }
   .lx-run-status { max-width: 70ch; }
+  .lx-run select { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
   .hl-key { color: var(--hl-key); } .hl-type { color: var(--hl-type); } .hl-num { color: var(--hl-num); }
   .hl-com { color: var(--hl-com); font-style: italic; } .hl-attr { color: var(--hl-attr); }
   pre { margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; font: 12px/1.5 var(--mono); max-height: 26rem; }
@@ -111,6 +113,14 @@
   </nav>
 
   <section id="support" role="tabpanel" class="lx-panel">
+    <div class="lx-run">
+      <select id="all-mode" aria-label="What to benchmark">
+        <option value="mps all">MPS (all ops)</option>
+        <option value="mps missing">MPS (missing ops)</option>
+      </select>
+      <button id="all-run" type="button">Run benchmarks</button>
+      <span id="all-status" class="lx-run-status" role="status"></span>
+    </div>
     <div class="lx-card">
       <div class="lx-legend">
         <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
@@ -290,6 +300,15 @@ function detail(r, who, us, timing) {
 const DTYPE_COLORS = [["float32", "var(--s1)"], ["bfloat16", "var(--s2)"]];
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 
+const PROGRESS = {};
+function progressed(c, op) {
+  if (PROGRESS[op] == null) return c;
+  c.classList.add("lx-progress");
+  c.style.setProperty("--done", `${(100 * PROGRESS[op]).toFixed(1)}%`);
+  c.title = PROGRESS[op] < 1 ? `benchmarking: ${(100 * PROGRESS[op]).toFixed(0)}%` : "benchmarked";
+  return c;
+}
+
 function chip(value, href) {
   const c = el(href ? "a" : "span", "lx-chip", value);
   c.dataset.v = value;
@@ -443,7 +462,7 @@ function legend(id, items) {
 const PRIM_COLUMNS = [
   { key: "primitive", label: "Primitive", kind: "name" }, { key: "category", label: "Kind" },
   { key: "cpu", label: "CPU", kind: "dev", render: (r) => chip(r.cpu) },
-  { key: "mps", label: "MPS", kind: "dev", render: (r) => chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null) },
+  { key: "mps", label: "MPS", kind: "dev", render: (r) => progressed(chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null), r.primitive) },
   { key: "tpu", label: "TPU", kind: "dev", render: (r) => chip(r.tpu) },
   { key: "cuda", label: "CUDA", kind: "dev", render: (r) => chip(r.cuda) },
   { key: "mps_kernel", label: "MPS kernel", wide: true }, { key: "tpu_kernel", label: "TPU kernel", wide: true },
@@ -475,65 +494,133 @@ gaps.addEventListener("change", drawPrimitives);
 
 const runButton = document.getElementById("op-run");
 const runStatus = document.getElementById("op-status");
+const allButton = document.getElementById("all-run");
+const allStatus = document.getElementById("all-status");
+const allMode = document.getElementById("all-mode");
+
+async function runBenchmark(op, device, measured) {
+  const url = new URL(`api/benchmark/${encodeURIComponent(op)}?device=${encodeURIComponent(device)}`, location.href);
+  const r = await fetch(url, { method: "POST" }).catch((e) => {
+    throw new Error(`Could not reach the benchmark server at ${url.origin} (${e.message}): is python dashboard/serve.py running?`);
+  });
+  if (!r.headers.get("Content-Type")?.includes("json")) {
+    throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
+  }
+  if (!r.ok) throw new Error((await r.json()).error || `The server answered ${r.status}.`);
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "", final = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let at;
+    while ((at = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, at).trim();
+      buffered = buffered.slice(at + 1);
+      if (!line) continue;
+      const message = JSON.parse(line);
+      if (message.error) throw new Error(message.error);
+      if (message.data) final = message.data;
+      if (message.row) measured(message.row);
+    }
+  }
+  if (!final) throw new Error("The benchmark stopped before it finished; the saved data is unchanged.");
+  return final;
+}
+
+const expectedRows = (op) => (op === "cast" ? 1 : DTYPE_COLORS.length) * SIZE_TICKS.length;
+
+function measuringOp(op) {
+  measuring = op;
+  PROGRESS[op] = 0;
+  PERF = { ...PERF, rows: PERF.rows.filter((r) => r.op !== op) };
+  derive();
+  draw();
+}
+
+function busy(running) {
+  runButton.disabled = allButton.disabled = running;
+}
+
 runButton.addEventListener("click", async () => {
   const op = current.op;
   const started = performance.now();
   const previous = PERF;
-  const expected = (op === "cast" ? 1 : DTYPE_COLORS.length) * SIZE_TICKS.length;
-  let got = 0, final = null;
-  runButton.disabled = true;
+  const expected = expectedRows(op);
+  let got = 0;
+  busy(true);
   runStatus.className = "lx-run-status";
   runStatus.textContent = `Running ${op} on this machine's GPU: ${expected} measurements, about a minute.`;
-  measuring = op;
-  PERF = { ...PERF, rows: PERF.rows.filter((r) => r.op !== op) };
-  derive();
-  draw();
+  measuringOp(op);
   try {
-    const url = new URL(`api/benchmark/${encodeURIComponent(op)}`, location.href);
-    const r = await fetch(url, { method: "POST" }).catch((e) => {
-      throw new Error(`Could not reach the benchmark server at ${url.origin} (${e.message}): is python dashboard/serve.py running?`);
+    PERF = await runBenchmark(op, "mps", (row) => {
+      got += 1;
+      PROGRESS[op] = Math.min(got / expected, 1);
+      PERF.rows.push(row);
+      runStatus.textContent = `Measured ${got} of ${expected}: ${row.dtype} at ${fmt.n(row.n)} elements.`;
+      derive();
+      draw();
     });
-    if (!r.headers.get("Content-Type")?.includes("json")) {
-      throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
-    }
-    if (!r.ok) throw new Error((await r.json()).error || `The server answered ${r.status}.`);
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buffered = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffered += decoder.decode(value, { stream: true });
-      let at;
-      while ((at = buffered.indexOf("\n")) >= 0) {
-        const line = buffered.slice(0, at).trim();
-        buffered = buffered.slice(at + 1);
-        if (!line) continue;
-        const message = JSON.parse(line);
-        if (message.error) throw new Error(message.error);
-        if (message.data) final = message.data;
-        if (message.row) {
-          got += 1;
-          PERF.rows.push(message.row);
-          runStatus.textContent = `Measured ${got} of ${expected}: ${message.row.dtype} at ${fmt.n(message.row.n)} elements.`;
-          derive();
-          draw();
-        }
-      }
-    }
-    if (!final) throw new Error("The benchmark stopped before it finished; the saved data is unchanged.");
-    PERF = final;
+    PROGRESS[op] = 1;
     runStatus.textContent = `Done in ${((performance.now() - started) / 1000).toFixed(0)} s; the charts and tables show the new run.`;
   } catch (e) {
     PERF = previous;
+    delete PROGRESS[op];
     runStatus.textContent = e.message;
     runStatus.classList.add("lx-bad");
   } finally {
     measuring = null;
-    runButton.disabled = false;
+    busy(false);
     derive();
     draw();
   }
+});
+
+allButton.addEventListener("click", async () => {
+  const [device, which] = allMode.value.split(" ");
+  const measured = (op) => PERF.rows.some((r) => r.op === op);
+  const ops = Object.keys(KNOWN).filter((op) => which === "all" || !measured(op));
+  if (!ops.length) {
+    allStatus.className = "lx-run-status";
+    allStatus.textContent = "Every op is measured already; choose MPS (all ops) to measure them again.";
+    return;
+  }
+  const started = performance.now();
+  const failed = [];
+  busy(true);
+  allStatus.className = "lx-run-status";
+  for (const [k, op] of ops.entries()) {
+    const previous = PERF;
+    const expected = expectedRows(op);
+    let got = 0;
+    allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}…`;
+    measuringOp(op);
+    try {
+      PERF = await runBenchmark(op, device, (row) => {
+        got += 1;
+        PROGRESS[op] = Math.min(got / expected, 1);
+        PERF.rows.push(row);
+        allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}: ${got} of ${expected} measured.`;
+        derive();
+        draw();
+      });
+      PROGRESS[op] = 1;
+    } catch (e) {
+      PERF = previous;
+      delete PROGRESS[op];
+      failed.push(`${op} (${e.message})`);
+    }
+    measuring = null;
+    derive();
+    draw();
+  }
+  busy(false);
+  const took = `${((performance.now() - started) / 60000).toFixed(1)} min`;
+  allStatus.textContent = failed.length
+    ? `Ran ${ops.length - failed.length} of ${ops.length} ops in ${took}; failed: ${failed.join("; ")}`
+    : `Ran ${ops.length} ops in ${took}; their pages show the new numbers.`;
+  if (failed.length) allStatus.classList.add("lx-bad");
 });
 
 function drawOp(op) {
