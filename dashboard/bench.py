@@ -24,13 +24,18 @@ DTYPES = ["float32", "bfloat16"]
 ITEM = {"float32": 4, "bfloat16": 2, "bool": 1}
 SPEC_MEMORY_GBS = {"Apple M4 Pro": 273}
 
+
+def in_float32(op):
+    return lambda x: op(x.to(dtype="float32")).to(dtype=x.dtype)
+
+
 OPS = {
     "neg": ("unary", "−x", lambda x: prims.neg(x), lambda x: torch.neg(x), 1),
-    "exp": ("unary", "eˣ", lambda x: prims.exp(x), lambda x: torch.exp(x), 1),
-    "log": ("unary", "ln x", lambda x: prims.log(x), lambda x: torch.log(x), 1),
-    "sqrt": ("unary", "√x", lambda x: prims.sqrt(x), lambda x: torch.sqrt(x), 1),
-    "tanh": ("unary", "tanh x", lambda x: prims.tanh(x), lambda x: torch.tanh(x), 1),
-    "logistic": ("unary", "1 / (1 + e⁻ˣ)", lambda x: prims.logistic(x), lambda x: torch.sigmoid(x), 1),
+    "exp": ("unary", "eˣ", in_float32(prims.exp), lambda x: torch.exp(x), 1),
+    "log": ("unary", "ln x", in_float32(prims.log), lambda x: torch.log(x), 1),
+    "sqrt": ("unary", "√x", in_float32(prims.sqrt), lambda x: torch.sqrt(x), 1),
+    "tanh": ("unary", "tanh x", in_float32(prims.tanh), lambda x: torch.tanh(x), 1),
+    "logistic": ("unary", "1 / (1 + e⁻ˣ)", in_float32(prims.logistic), lambda x: torch.sigmoid(x), 1),
     "add": ("binary", "x + y", lambda x, y: prims.add(x, y), lambda x, y: torch.add(x, y), 2),
     "sub": ("binary", "x − y", lambda x, y: prims.sub(x, y), lambda x, y: torch.sub(x, y), 2),
     "mul": ("binary", "x · y", lambda x, y: prims.mul(x, y), lambda x, y: torch.mul(x, y), 2),

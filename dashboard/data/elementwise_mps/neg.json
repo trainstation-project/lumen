@@ -10,13 +10,13 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "lumen_us": 2.257,
-   "torch_us": 2.166,
-   "lumen_dram_us": 1.681,
-   "torch_dram_us": 2.446,
+   "lumen_us": 2.181,
+   "torch_us": 2.176,
+   "lumen_dram_us": 1.662,
+   "torch_dram_us": 2.641,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 14.52
+   "gbs": 15.02
   },
   {
    "op": "neg",
@@ -28,13 +28,13 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "lumen_us": 2.236,
-   "torch_us": 2.48,
-   "lumen_dram_us": 1.988,
-   "torch_dram_us": 2.936,
+   "lumen_us": 2.196,
+   "torch_us": 2.379,
+   "lumen_dram_us": 2.002,
+   "torch_dram_us": 2.905,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 58.62
+   "gbs": 59.69
   },
   {
    "op": "neg",
@@ -46,13 +46,13 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "lumen_us": 2.884,
-   "torch_us": 3.667,
-   "lumen_dram_us": 3.703,
-   "torch_dram_us": 4.751,
+   "lumen_us": 2.934,
+   "torch_us": 3.866,
+   "lumen_dram_us": 3.836,
+   "torch_dram_us": 4.893,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 181.79
+   "gbs": 178.69
   },
   {
    "op": "neg",
@@ -64,13 +64,13 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "lumen_us": 7.194,
-   "torch_us": 8.395,
-   "lumen_dram_us": 10.176,
-   "torch_dram_us": 11.238,
+   "lumen_us": 7.341,
+   "torch_us": 8.303,
+   "lumen_dram_us": 10.572,
+   "torch_dram_us": 11.531,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 291.51
+   "gbs": 285.68
   },
   {
    "op": "neg",
@@ -82,13 +82,13 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "lumen_us": 25.248,
-   "torch_us": 24.631,
-   "lumen_dram_us": 40.311,
-   "torch_dram_us": 42.087,
+   "lumen_us": 24.539,
+   "torch_us": 24.531,
+   "lumen_dram_us": 40.417,
+   "torch_dram_us": 42.031,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 332.25
+   "gbs": 341.85
   },
   {
    "op": "neg",
@@ -100,13 +100,13 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "lumen_us": 132.173,
-   "torch_us": 130.694,
-   "lumen_dram_us": 150.69,
-   "torch_dram_us": 153.3,
+   "lumen_us": 141.206,
+   "torch_us": 142.375,
+   "lumen_dram_us": 153.954,
+   "torch_dram_us": 156.733,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 253.87
+   "gbs": 237.63
   },
   {
    "op": "neg",
@@ -118,13 +118,13 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "lumen_us": 580.696,
-   "torch_us": 593.471,
-   "lumen_dram_us": 578.433,
-   "torch_dram_us": 594.152,
+   "lumen_us": 595.173,
+   "torch_us": 608.306,
+   "lumen_dram_us": 584.323,
+   "torch_dram_us": 608.783,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 231.13
+   "gbs": 225.51
   },
   {
    "op": "neg",
@@ -136,13 +136,13 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "lumen_us": 2385.265,
-   "torch_us": 2485.071,
-   "lumen_dram_us": 2309.173,
-   "torch_dram_us": 2328.365,
+   "lumen_us": 2402.515,
+   "torch_us": 2520.481,
+   "lumen_dram_us": 2321.569,
+   "torch_dram_us": 2319.51,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 225.08
+   "gbs": 223.46
   },
   {
    "op": "neg",
@@ -154,13 +154,13 @@
    "inputs": 1,
    "bytes": 16384,
    "flops": 4096,
-   "lumen_us": 2.159,
-   "torch_us": 2.151,
-   "lumen_dram_us": 1.598,
-   "torch_dram_us": 2.419,
+   "lumen_us": 2.076,
+   "torch_us": 2.135,
+   "lumen_dram_us": 1.657,
+   "torch_dram_us": 2.527,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 7.59
+   "gbs": 7.89
   },
   {
    "op": "neg",
@@ -172,13 +172,13 @@
    "inputs": 1,
    "bytes": 65536,
    "flops": 16384,
-   "lumen_us": 2.153,
-   "torch_us": 2.27,
-   "lumen_dram_us": 1.868,
-   "torch_dram_us": 2.704,
+   "lumen_us": 2.34,
+   "torch_us": 2.309,
+   "lumen_dram_us": 1.88,
+   "torch_dram_us": 2.7,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 30.44
+   "gbs": 28.01
   },
   {
    "op": "neg",
@@ -190,13 +190,13 @@
    "inputs": 1,
    "bytes": 262144,
    "flops": 65536,
-   "lumen_us": 2.274,
-   "torch_us": 3.198,
-   "lumen_dram_us": 2.452,
-   "torch_dram_us": 3.791,
+   "lumen_us": 2.219,
+   "torch_us": 3.093,
+   "lumen_dram_us": 2.496,
+   "torch_dram_us": 3.85,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 115.28
+   "gbs": 118.14
   },
   {
    "op": "neg",
@@ -208,13 +208,13 @@
    "inputs": 1,
    "bytes": 1048576,
    "flops": 262144,
-   "lumen_us": 4.427,
-   "torch_us": 5.262,
-   "lumen_dram_us": 5.888,
-   "torch_dram_us": 6.914,
+   "lumen_us": 4.649,
+   "torch_us": 5.52,
+   "lumen_dram_us": 6.139,
+   "torch_dram_us": 7.277,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 236.86
+   "gbs": 225.55
   },
   {
    "op": "neg",
@@ -226,13 +226,13 @@
    "inputs": 1,
    "bytes": 4194304,
    "flops": 1048576,
-   "lumen_us": 13.204,
-   "torch_us": 13.848,
-   "lumen_dram_us": 20.065,
-   "torch_dram_us": 20.249,
+   "lumen_us": 12.783,
+   "torch_us": 13.464,
+   "lumen_dram_us": 19.99,
+   "torch_dram_us": 20.717,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 317.65
+   "gbs": 328.12
   },
   {
    "op": "neg",
@@ -244,13 +244,13 @@
    "inputs": 1,
    "bytes": 16777216,
    "flops": 4194304,
-   "lumen_us": 45.637,
-   "torch_us": 44.704,
-   "lumen_dram_us": 76.573,
-   "torch_dram_us": 76.585,
+   "lumen_us": 49.264,
+   "torch_us": 46.904,
+   "lumen_dram_us": 77.255,
+   "torch_dram_us": 77.813,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 367.62
+   "gbs": 340.56
   },
   {
    "op": "neg",
@@ -262,13 +262,13 @@
    "inputs": 1,
    "bytes": 67108864,
    "flops": 16777216,
-   "lumen_us": 276.89,
-   "torch_us": 278.744,
-   "lumen_dram_us": 292.592,
-   "torch_dram_us": 294.977,
+   "lumen_us": 299.304,
+   "torch_us": 299.185,
+   "lumen_dram_us": 297.308,
+   "torch_dram_us": 303.615,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 242.37
+   "gbs": 224.22
   },
   {
    "op": "neg",
@@ -280,18 +280,18 @@
    "inputs": 1,
    "bytes": 268435456,
    "flops": 67108864,
-   "lumen_us": 1182.092,
-   "torch_us": 1194.152,
-   "lumen_dram_us": 1149.469,
-   "torch_dram_us": 1168.519,
+   "lumen_us": 1220.131,
+   "torch_us": 1213.74,
+   "lumen_dram_us": 1167.375,
+   "torch_dram_us": 1193.75,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 227.09
+   "gbs": 220.01
   }
  ],
  "code": {
-  "kernel": "// step 0: neg\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = neg %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_12d80cf7d001d7b9(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = -v0;\n        out[j] = v1;\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_12d80cf7d001d7b9 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = neg %0\n  in (%1) }] in0"
+  "kernel": "// step 0: neg\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = neg %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(64)]]\nkernel void fusion_71aad259182c919a(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = -v0;\n        out[j] = v1;\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_71aad259182c919a body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = neg %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T00:43:51+00:00"
+ "measured_at": "2026-10-23T01:23:51+00:00"
 }

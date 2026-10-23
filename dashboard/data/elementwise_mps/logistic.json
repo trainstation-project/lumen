@@ -10,13 +10,13 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "lumen_us": 2.156,
-   "torch_us": 2.341,
-   "lumen_dram_us": 1.781,
-   "torch_dram_us": 2.641,
+   "lumen_us": 2.375,
+   "torch_us": 2.339,
+   "lumen_dram_us": 1.832,
+   "torch_dram_us": 2.69,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 15.2
+   "gbs": 13.8
   },
   {
    "op": "logistic",
@@ -28,13 +28,13 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "lumen_us": 2.087,
-   "torch_us": 2.555,
-   "lumen_dram_us": 1.996,
-   "torch_dram_us": 3.027,
+   "lumen_us": 2.183,
+   "torch_us": 2.737,
+   "lumen_dram_us": 2.159,
+   "torch_dram_us": 3.104,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 62.8
+   "gbs": 60.04
   },
   {
    "op": "logistic",
@@ -46,13 +46,13 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "lumen_us": 2.821,
-   "torch_us": 3.718,
-   "lumen_dram_us": 3.684,
-   "torch_dram_us": 4.662,
+   "lumen_us": 2.968,
+   "torch_us": 3.827,
+   "lumen_dram_us": 3.818,
+   "torch_dram_us": 5.04,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 185.85
+   "gbs": 176.65
   },
   {
    "op": "logistic",
@@ -64,13 +64,13 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "lumen_us": 7.419,
-   "torch_us": 8.423,
-   "lumen_dram_us": 10.046,
-   "torch_dram_us": 11.314,
+   "lumen_us": 7.694,
+   "torch_us": 8.497,
+   "lumen_dram_us": 10.854,
+   "torch_dram_us": 11.91,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 282.67
+   "gbs": 272.57
   },
   {
    "op": "logistic",
@@ -82,13 +82,13 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "lumen_us": 25.138,
-   "torch_us": 24.622,
-   "lumen_dram_us": 40.176,
-   "torch_dram_us": 41.814,
+   "lumen_us": 25.96,
+   "torch_us": 25.702,
+   "lumen_dram_us": 42.183,
+   "torch_dram_us": 43.303,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 333.7
+   "gbs": 323.14
   },
   {
    "op": "logistic",
@@ -100,13 +100,13 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "lumen_us": 128.715,
-   "torch_us": 135.992,
-   "lumen_dram_us": 151.206,
-   "torch_dram_us": 153.829,
+   "lumen_us": 138.629,
+   "torch_us": 143.185,
+   "lumen_dram_us": 161.156,
+   "torch_dram_us": 164.996,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 260.69
+   "gbs": 242.04
   },
   {
    "op": "logistic",
@@ -118,13 +118,13 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "lumen_us": 581.348,
-   "torch_us": 596.085,
-   "lumen_dram_us": 576.423,
-   "torch_dram_us": 597.217,
+   "lumen_us": 595.69,
+   "torch_us": 616.45,
+   "lumen_dram_us": 590.235,
+   "torch_dram_us": 600.863,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 230.87
+   "gbs": 225.31
   },
   {
    "op": "logistic",
@@ -136,66 +136,162 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "lumen_us": 2381.494,
-   "torch_us": 2474.74,
-   "lumen_dram_us": 2304.21,
-   "torch_dram_us": 2293.829,
+   "lumen_us": 2382.971,
+   "torch_us": 2491.325,
+   "lumen_dram_us": 2310.633,
+   "torch_dram_us": 2425.137,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 225.43
+   "gbs": 225.29
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 4096,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[4096]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 16384,
+   "flops": 4096,
+   "lumen_us": 2.192,
+   "torch_us": 2.221,
+   "lumen_dram_us": 1.68,
+   "torch_dram_us": 2.656,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 7.47
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 16384,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[16384]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 65536,
+   "flops": 16384,
+   "lumen_us": 2.352,
+   "torch_us": 2.384,
+   "lumen_dram_us": 1.914,
+   "torch_dram_us": 2.832,
+   "matches_torch": true,
+   "rotation": 4096,
+   "gbs": 27.86
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 65536,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[65536]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 262144,
+   "flops": 65536,
+   "lumen_us": 2.211,
+   "torch_us": 3.349,
+   "lumen_dram_us": 2.554,
+   "torch_dram_us": 4.086,
+   "matches_torch": true,
+   "rotation": 2048,
+   "gbs": 118.56
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 262144,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[262144]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 1048576,
+   "flops": 262144,
+   "lumen_us": 4.919,
+   "torch_us": 5.539,
+   "lumen_dram_us": 6.215,
+   "torch_dram_us": 7.222,
+   "matches_torch": true,
+   "rotation": 512,
+   "gbs": 213.17
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 1048576,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[1048576]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 4194304,
+   "flops": 1048576,
+   "lumen_us": 13.742,
+   "torch_us": 13.423,
+   "lumen_dram_us": 19.543,
+   "torch_dram_us": 20.683,
+   "matches_torch": true,
+   "rotation": 128,
+   "gbs": 305.22
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 4194304,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[4194304]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 16777216,
+   "flops": 4194304,
+   "lumen_us": 50.669,
+   "torch_us": 49.706,
+   "lumen_dram_us": 77.525,
+   "torch_dram_us": 77.98,
+   "matches_torch": true,
+   "rotation": 32,
+   "gbs": 331.11
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 16777216,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[16777216]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 67108864,
+   "flops": 16777216,
+   "lumen_us": 287.033,
+   "torch_us": 290.475,
+   "lumen_dram_us": 305.698,
+   "torch_dram_us": 302.035,
+   "matches_torch": true,
+   "rotation": 8,
+   "gbs": 233.8
   },
   {
    "op": "logistic",
+   "kind": "unary",
+   "formula": "1 / (1 + e⁻ˣ)",
    "dtype": "bfloat16",
+   "out_dtype": "bfloat16",
    "n": 67108864,
-   "error": "logistic: has no bfloat16 kernel on MPS, got bf16[67108864]: convert to float32 first (x.to(dtype=float32))"
+   "inputs": 1,
+   "bytes": 268435456,
+   "flops": 67108864,
+   "lumen_us": 1213.379,
+   "torch_us": 1210.065,
+   "lumen_dram_us": 1170.648,
+   "torch_dram_us": 1183.49,
+   "matches_torch": true,
+   "rotation": 2,
+   "gbs": 221.23
   }
  ],
  "code": {
-  "kernel": "// step 0: logistic\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = logistic %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_bafa1a9e5a7ea435(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = Logistic::apply(v0);\n        out[j] = v1;\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_bafa1a9e5a7ea435 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = logistic %0\n  in (%1) }] in0"
+  "kernel": "// step 0: logistic\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = logistic %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_4d2b7cbe3ad6f99b(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i, k = 0; k < 1u && j < n; ++k, j += threads) {\n        float v0 = in0[j];\n        float v1 = Logistic::apply(v0);\n        out[j] = v1;\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_4d2b7cbe3ad6f99b body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = logistic %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T00:45:18+00:00"
+ "measured_at": "2026-10-23T01:27:01+00:00"
 }
