@@ -1,8 +1,5 @@
-use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::OnceLock;
 
-use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,40 +92,6 @@ pub(crate) const DEFAULT_CONFIGS: [(&str, GemmConfig); 3] = [
     ),
 ];
 
-thread_local! {
-    static TRIED: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-static NAMES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
-
-pub(crate) fn trying<T>(config: usize, f: impl FnOnce() -> T) -> T {
-    TRIED.set(Some(config));
-    let result = f();
-    TRIED.set(None);
-    result
-}
-
-pub(crate) fn tile_key(step: &Step) -> String {
-    let name = match &step.primitive {
-        Primitive::Fusion { name, .. } => name.clone(),
-        p => p.to_string(),
-    };
-    let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
-    format!("{name} {} -> {}", types.join(" "), step.output.1)
-}
-
-pub(crate) fn name_config(step: &Step, config: usize, kernel: &str) {
-    let key = format!("{}#{config}", tile_key(step));
-    let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
-    names.insert(key, kernel.to_owned());
-}
-
 pub(crate) fn tuned(step: &Step) -> Option<(String, GemmConfig)> {
-    let key = tile_key(step);
-    let config = TRIED
-        .get()
-        .or_else(|| crate::graph_compiler::common::autotune::picked_for(TUNER, &key))?;
-    let names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
-    let name = names.get(&format!("{key}#{config}"))?.clone();
-    Some((name, configs()[config]))
+    crate::graph_compiler::common::autotune::tuned(TUNER, step)
 }

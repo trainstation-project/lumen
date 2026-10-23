@@ -11,8 +11,8 @@ instantiate the `matmul_sg_impl` template with an epilogue.
 
 | File | Contents |
 | --- | --- |
-| `mod.rs` | Matmul form (`matmul_order`, `collapsed`, `reads_strided`), tile choice (`float_tiles`, `float_groups`; a tuned `Tile` from `tile_for`, the `GemmAutotuner`'s pick or the one being timed, `trying`), `plan_matmul` → `MatmulLaunch`, `encode`, and `linear_cross_entropy`'s `encode_linear_cross_entropy` / `linear_cross_entropy_scratch`. |
-| `config.rs` | GEMM tuning: `GemmConfig` (tile M, N and K step, threads, SIMD-group columns), `configs` (the valid candidates: whole 8×8 fragments per SIMD group, 4 to 16 of them and roughly square, even loads, within 32 KB of threadgroup memory), `DEFAULT_CONFIGS` (the three precompiled variants), and the tuned pick's lookup (`tile_key`, `name_config`, `tuned`; `trying` while one is timed). |
+| `mod.rs` | Matmul form (`matmul_order`, `collapsed`, `reads_strided`), tile choice (`float_tiles`, `float_groups`; a tuned config's kernel and tile from `tuned`), `plan_matmul` → `MatmulLaunch`, `encode`, and `linear_cross_entropy`'s `encode_linear_cross_entropy` / `linear_cross_entropy_scratch`. |
+| `config.rs` | GEMM tuning: `GemmConfig` (tile M, N and K step, threads, SIMD-group columns), `configs` (the valid candidates: whole 8×8 fragments per SIMD group, 4 to 16 of them and roughly square, even loads, within 32 KB of threadgroup memory), `DEFAULT_CONFIGS` (the three precompiled variants), and `tuned`, the pick's lookup (`mps-gemm` in `graph_compiler/common/autotune.rs`). |
 | `kernels.metal` | `matmul_impl` (8–32-bit ints), `matmul_wide_impl` (64-bit ints), `matmul_sg_impl` (floats on simdgroup matrices, with `ATOMIC`/`PAIRED`/`EXPANDED`/`TILE` modes), `LceRows`, and the kernel instantiations incl. `lce_combine`. |
 
 ## Matmul form

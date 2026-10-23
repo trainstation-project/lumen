@@ -3,13 +3,12 @@ use std::sync::OnceLock;
 use super::Function;
 use crate::codegen::triton::{CONFIGS, Config, UNTUNED};
 use crate::graph::Primitive;
-use crate::graph_compiler::common::autotune::{Autotuner, picked_for};
+use crate::graph_compiler::common::autotune::{Kernels, Timer, tuned};
 use crate::graph_compiler::plan::Step;
 use crate::stream::event::event_for;
 use crate::{DType, Device, Tensor, TensorOptions};
 
 const TUNER: &str = "triton";
-const REPS: usize = 10;
 
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
@@ -59,86 +58,60 @@ fn gemm(
     )
 }
 
-fn key(step: &Step) -> Option<String> {
-    let Primitive::DotGeneral { .. } = step.primitive else {
-        return None;
-    };
-    let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
-    Some(format!(
-        "{} {} -> {}",
-        types.join(" "),
-        step.primitive,
-        step.output.1
-    ))
-}
-
 pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {
-    let picked = key(step).and_then(|key| picked_for(TUNER, &key));
-    gemm(
-        lhs,
-        rhs,
-        out,
-        &step.primitive,
-        &CONFIGS[picked.unwrap_or(UNTUNED)],
-    )
+    let config = tuned::<Config>(TUNER, step).map_or(CONFIGS[UNTUNED], |(_, c)| c);
+    gemm(lhs, rhs, out, &step.primitive, &config)
 }
 
-pub(crate) struct TritonAutotuner {
+pub(crate) struct Gemms;
+
+impl Kernels for Gemms {
+    type Config = Config;
+
+    const NAME: &'static str = TUNER;
+
+    fn configs(&self, step: &Step) -> Vec<Config> {
+        match step.primitive {
+            Primitive::DotGeneral { .. } => CONFIGS.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn build(&mut self, _: &Step, _: Config) -> String {
+        String::new()
+    }
+}
+
+pub(crate) struct Events {
     pub device: Device,
 }
 
-impl Autotuner for TritonAutotuner {
-    type Config = usize;
+impl Timer for Events {
+    type Buffers = [Tensor; 3];
 
-    fn device(&self) -> &'static str {
-        TUNER
-    }
-
-    fn key(&self, step: &Step) -> Option<String> {
-        key(step)
-    }
-
-    fn candidates(&self, _: &Step) -> Vec<usize> {
-        (0..CONFIGS.len()).collect()
-    }
-
-    fn generate(&mut self, _: &Step, config: usize) -> String {
-        config.to_string()
-    }
-
-    fn compile(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
+    fn buffers(&self, step: &Step) -> Result<Option<[Tensor; 3]>, String> {
         let zeros = |ty: &crate::graph::TensorType| {
             Tensor::zeros(
                 &ty.shape,
                 TensorOptions::new().dtype(ty.dtype).device(self.device),
             )
         };
-        let (lhs, rhs, out) = (
+        Ok(Some([
             zeros(&step.inputs[0].1),
             zeros(&step.inputs[1].1),
             zeros(&step.output.1),
-        );
-        kernels
-            .iter()
-            .map(|kernel| {
-                let config = &CONFIGS[kernel.parse::<usize>().expect("a config's index")];
-                gemm(&lhs, &rhs, &out, &step.primitive, config)?;
-                let mut start = event_for(self.device, true)?;
-                let mut end = event_for(self.device, true)?;
-                start.record()?;
-                for _ in 0..REPS {
-                    gemm(&lhs, &rhs, &out, &step.primitive, config)?;
-                }
-                end.record()?;
-                end.synchronize()?;
-                Ok(start.elapsed_time(end.as_ref())? / 1e3 / REPS as f64)
-            })
-            .collect()
+        ]))
     }
 
-    fn apply(&self, _: &mut Step, _: &str, _: usize) {}
+    fn time(&self, [lhs, rhs, out]: &[Tensor; 3], step: &Step, reps: usize) -> Result<f64, String> {
+        let mut start = event_for(self.device, true)?;
+        let mut end = event_for(self.device, true)?;
+        start.record()?;
+        for _ in 0..reps {
+            run(step, lhs, rhs, out)?;
+        }
+        end.record()?;
+        end.synchronize()?;
+        Ok(start.elapsed_time(end.as_ref())? / 1e3 / reps as f64)
+    }
 }

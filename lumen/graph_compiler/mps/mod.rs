@@ -278,13 +278,16 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     if config.autotune {
-        let mut tuner = autotune::MpsAutotuner {
+        let tuner = super::common::autotune::Autotuner {
+            timer: autotune::Mps,
+        };
+        let mut loops = autotune::Loops {
             tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
-        super::common::autotune::autotune(&mut tuner, &mut plan)?;
-        super::common::autotune::autotune(&mut autotune::GemmAutotuner::default(), &mut plan)?;
+        tuner.tune(&mut loops, &plan)?;
+        tuner.tune(&mut autotune::Gemms::default(), &plan)?;
     }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
@@ -551,6 +554,8 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
+    let tuned = super::common::autotune::tuned::<Tuning>(autotune::LOOPS, step);
+    let name = tuned.as_ref().map_or(name, |(kernel, _)| kernel);
     let variant = strided_variant(step, name, body)?;
     let name = variant.as_ref().unwrap_or(name);
     if name.starts_with(crate::graph::NEURAL_ENGINE) {

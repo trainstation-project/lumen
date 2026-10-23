@@ -6,9 +6,9 @@ use super::{SOURCES, Tuning, codegen, compile_kernels, record_launch};
 use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::common::autotune::Autotuner;
+use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step};
-use crate::kernels::dot_general::mps as gemm;
+use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
 use crate::kernels::mps::{Captured, capture};
 
 pub(super) struct Tunable {
@@ -17,44 +17,44 @@ pub(super) struct Tunable {
 }
 
 const TUNED_ELEMENTS: RangeInclusive<usize> = (64 << 10)..=(16 << 20);
-const TIMED_ELEMENTS: usize = 16 << 20;
 const ALIGNMENT: usize = 256;
 
-pub(super) struct MpsAutotuner<'a> {
+pub(super) const LOOPS: &str = "mps-loop";
+
+pub(super) struct Loops<'a> {
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a CompilerConfig,
     pub sources: BTreeMap<String, String>,
 }
 
-fn fusion(step: &Step) -> (&String, &crate::graph::Graph) {
-    let Primitive::Fusion { name, body, .. } = &step.primitive else {
-        unreachable!("a fusion")
-    };
-    (name, body)
+fn compile(sources: &mut BTreeMap<String, String>) -> Result<(), String> {
+    let mut sources = std::mem::take(sources);
+    {
+        let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+        sources.retain(|name, _| !compiled.contains_key(name));
+    }
+    compile_kernels(sources)
 }
 
-impl Autotuner for MpsAutotuner<'_> {
+impl Kernels for Loops<'_> {
     type Config = Tuning;
 
-    fn device(&self) -> &'static str {
-        "mps"
-    }
+    const NAME: &'static str = LOOPS;
 
-    fn key(&self, step: &Step) -> Option<String> {
-        let Primitive::Fusion { name, .. } = &step.primitive else {
-            return None;
+    fn configs(&self, step: &Step) -> Vec<Tuning> {
+        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+            return Vec::new();
         };
-        let n = step.output.1.numel();
-        (self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&n))
-            .then(|| format!("{name}/{n}"))
+        match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+            true => codegen::tunings_of(body),
+            false => Vec::new(),
+        }
     }
 
-    fn candidates(&self, step: &Step) -> Vec<Tuning> {
-        codegen::tunings_of(fusion(step).1)
-    }
-
-    fn generate(&mut self, step: &Step, tuning: Tuning) -> String {
-        let (name, body) = fusion(step);
+    fn build(&mut self, step: &Step, tuning: Tuning) -> String {
+        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+            unreachable!("a fusion")
+        };
         let t = &self.tunable[name];
         let (kernel, source) =
             codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
@@ -64,44 +64,13 @@ impl Autotuner for MpsAutotuner<'_> {
     }
 
     fn compile(&mut self) -> Result<(), String> {
-        let mut sources = std::mem::take(&mut self.sources);
-        {
-            let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
-            sources.retain(|name, _| !compiled.contains_key(name));
-        }
-        compile_kernels(sources)
-    }
-
-    fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
-        let reps = (TIMED_ELEMENTS / step.output.1.numel()).clamp(4, 256);
-        let Some(buffers) = Buffers::new(step) else {
-            return Ok(Vec::new());
-        };
-        kernels
-            .iter()
-            .map(|kernel| {
-                let mut timed = step.clone();
-                let Primitive::Fusion { name, .. } = &mut timed.primitive else {
-                    unreachable!("a fusion")
-                };
-                name.clone_from(kernel);
-                buffers.run(&timed, reps)
-            })
-            .collect()
-    }
-
-    fn apply(&self, step: &mut Step, kernel: &str, _: Tuning) {
-        let Primitive::Fusion { name, .. } = &mut step.primitive else {
-            unreachable!("a fusion")
-        };
-        *name = kernel.to_owned();
+        compile(&mut self.sources)
     }
 }
 
 #[derive(Default)]
-pub(super) struct GemmAutotuner {
+pub(super) struct Gemms {
     sources: BTreeMap<String, String>,
-    configs: HashMap<String, usize>,
 }
 
 const TUNED_OUTPUTS: usize = 64 << 10;
@@ -122,23 +91,19 @@ fn tiled_gemm(step: &Step) -> bool {
     float && whole && tiled
 }
 
-impl Autotuner for GemmAutotuner {
-    type Config = usize;
+impl Kernels for Gemms {
+    type Config = GemmConfig;
 
-    fn device(&self) -> &'static str {
-        gemm::TUNER
+    const NAME: &'static str = gemm::TUNER;
+
+    fn configs(&self, step: &Step) -> Vec<GemmConfig> {
+        match tiled_gemm(step) {
+            true => gemm::configs().to_vec(),
+            false => Vec::new(),
+        }
     }
 
-    fn key(&self, step: &Step) -> Option<String> {
-        tiled_gemm(step).then(|| gemm::tile_key(step))
-    }
-
-    fn candidates(&self, _: &Step) -> Vec<usize> {
-        (0..gemm::configs().len()).collect()
-    }
-
-    fn generate(&mut self, step: &Step, config: usize) -> String {
-        let c = gemm::configs()[config];
+    fn build(&mut self, step: &Step, config: GemmConfig) -> String {
         let (kernel, source) = match &step.primitive {
             Primitive::Fusion { body, .. } => {
                 let by_value: Vec<bool> = step
@@ -146,7 +111,7 @@ impl Autotuner for GemmAutotuner {
                     .iter()
                     .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
                     .collect();
-                codegen::gemm_variant(body, &by_value, c)
+                codegen::gemm_variant(body, &by_value, config)
             }
             p => {
                 let Primitive::DotGeneral { accum_dtype, .. } = p else {
@@ -157,42 +122,36 @@ impl Autotuner for GemmAutotuner {
                     codegen::metal_type(*accum_dtype),
                     codegen::metal_type(step.output.1.dtype),
                 );
-                gemm::matmul_source(t, a, o, c)
+                gemm::matmul_source(t, a, o, config)
             }
         };
-        gemm::name_config(step, config, &kernel);
-        self.configs.insert(kernel.clone(), config);
         self.sources.insert(kernel.clone(), source);
         kernel
     }
 
     fn compile(&mut self) -> Result<(), String> {
-        let mut sources = std::mem::take(&mut self.sources);
-        {
-            let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
-            sources.retain(|name, _| !compiled.contains_key(name));
-        }
-        compile_kernels(sources)
+        compile(&mut self.sources)
+    }
+}
+
+pub(super) struct Mps;
+
+impl Timer for Mps {
+    type Buffers = Buffers;
+
+    fn buffers(&self, step: &Step) -> Result<Option<Buffers>, String> {
+        Ok(Buffers::new(step))
     }
 
-    fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
-        let reps = (TIMED_ELEMENTS / step.output.1.numel()).clamp(2, 64);
-        let Some(buffers) = Buffers::new(step) else {
-            return Ok(Vec::new());
-        };
-        kernels
-            .iter()
-            .map(|kernel| gemm::trying(self.configs[kernel], || buffers.run(step, reps)))
-            .collect()
+    fn time(&self, buffers: &Buffers, step: &Step, reps: usize) -> Result<f64, String> {
+        buffers.run(step, reps)
     }
-
-    fn apply(&self, _: &mut Step, _: &str, _: usize) {}
 }
 
 const COLD_BYTES: usize = 64 << 20;
 const MOST_COPIES: usize = 256;
 
-struct Buffers {
+pub(super) struct Buffers {
     _memory: Scratch,
     copies: Vec<Vec<*const u8>>,
     output: *mut u8,

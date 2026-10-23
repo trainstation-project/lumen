@@ -9,7 +9,7 @@ pub(crate) use crate::codegen::triton::Config;
 #[cfg(feature = "python")]
 pub(crate) use gemm::set_gemm;
 
-use super::common::autotune::autotune;
+use super::common::autotune::Autotuner;
 use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
 use super::plan::{Buffer, Step};
@@ -86,7 +86,10 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     });
     plan.triton = Some(kernels.collect());
     if options.config.autotune {
-        autotune(&mut gemm::TritonAutotuner { device }, &mut plan)?;
+        let tuner = Autotuner {
+            timer: gemm::Events { device },
+        };
+        tuner.tune(&mut gemm::Gemms, &plan)?;
     }
     Ok(plan)
 }
