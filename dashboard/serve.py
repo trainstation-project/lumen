@@ -4,6 +4,7 @@ import http.server
 import json
 import pathlib
 import threading
+import urllib.parse
 
 import bench
 
@@ -11,14 +12,19 @@ import lumen
 
 ROOT = pathlib.Path(__file__).parent
 running = threading.Lock()
+DEVICES = ("mps",)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         prefix = "/api/benchmark/"
-        if not self.path.startswith(prefix):
-            return self.reply(404, {"error": f"no endpoint {self.path}"})
-        name = self.path[len(prefix) :]
+        url = urllib.parse.urlsplit(self.path)
+        if not url.path.startswith(prefix):
+            return self.reply(404, {"error": f"no endpoint {url.path}"})
+        name = url.path[len(prefix) :]
+        device = urllib.parse.parse_qs(url.query).get("device", ["mps"])[0]
+        if device not in DEVICES:
+            return self.reply(400, {"error": f"no benchmark on {device!r} yet; there is one on {', '.join(DEVICES)}"})
         if name not in bench.OPS:
             return self.reply(404, {"error": f"no benchmark for {name!r}; there are {', '.join(bench.OPS)}"})
         if not running.acquire(blocking=False):
@@ -29,9 +35,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             try:
                 data = bench.update(bench.load(), name, lambda row: self.line({"row": row}))
-                bench.save(data)
+                bench.save(data, [name])
                 self.line({"data": data})
-            except Exception as e:
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
                 self.line({"error": f"{type(e).__name__}: {e}"})
         finally:
             running.release()

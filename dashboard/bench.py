@@ -18,19 +18,24 @@ try:
 except ImportError:
     torch = None
 
-DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps.json"
+DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps"
 SIZES = [1 << k for k in range(12, 27, 2)]
 DTYPES = ["float32", "bfloat16"]
 ITEM = {"float32": 4, "bfloat16": 2, "bool": 1}
 SPEC_MEMORY_GBS = {"Apple M4 Pro": 273}
 
+
+def in_float32(op):
+    return lambda x: op(x.to(dtype="float32")).to(dtype=x.dtype)
+
+
 OPS = {
     "neg": ("unary", "−x", lambda x: prims.neg(x), lambda x: torch.neg(x), 1),
-    "exp": ("unary", "eˣ", lambda x: prims.exp(x), lambda x: torch.exp(x), 1),
-    "log": ("unary", "ln x", lambda x: prims.log(x), lambda x: torch.log(x), 1),
-    "sqrt": ("unary", "√x", lambda x: prims.sqrt(x), lambda x: torch.sqrt(x), 1),
-    "tanh": ("unary", "tanh x", lambda x: prims.tanh(x), lambda x: torch.tanh(x), 1),
-    "logistic": ("unary", "1 / (1 + e⁻ˣ)", lambda x: prims.logistic(x), lambda x: torch.sigmoid(x), 1),
+    "exp": ("unary", "eˣ", in_float32(prims.exp), lambda x: torch.exp(x), 1),
+    "log": ("unary", "ln x", in_float32(prims.log), lambda x: torch.log(x), 1),
+    "sqrt": ("unary", "√x", in_float32(prims.sqrt), lambda x: torch.sqrt(x), 1),
+    "tanh": ("unary", "tanh x", in_float32(prims.tanh), lambda x: torch.tanh(x), 1),
+    "logistic": ("unary", "1 / (1 + e⁻ˣ)", in_float32(prims.logistic), lambda x: torch.sigmoid(x), 1),
     "add": ("binary", "x + y", lambda x, y: prims.add(x, y), lambda x, y: torch.add(x, y), 2),
     "sub": ("binary", "x − y", lambda x, y: prims.sub(x, y), lambda x, y: torch.sub(x, y), 2),
     "mul": ("binary", "x · y", lambda x, y: prims.mul(x, y), lambda x, y: torch.mul(x, y), 2),
@@ -201,14 +206,43 @@ def update(data, name, measured=lambda row: None):
 
 
 def load():
-    return json.loads(DATA.read_text()) if DATA.exists() else {"rows": [], "code": {}, "measured_at": {}}
+    meta = DATA / "meta.json"
+    data = {**(json.loads(meta.read_text()) if meta.exists() else {}), "rows": [], "code": {}, "measured_at": {}}
+    for name in OPS:
+        path = DATA / f"{name}.json"
+        if not path.exists():
+            continue
+        op = json.loads(path.read_text())
+        data["rows"] += op["rows"]
+        if op.get("code"):
+            data["code"][name] = op["code"]
+        if op.get("measured_at"):
+            data["measured_at"][name] = op["measured_at"]
+    return data
 
 
-def save(data):
-    DATA.parent.mkdir(parents=True, exist_ok=True)
-    tmp = DATA.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
-    shutil.move(tmp, DATA)
+def write(path, value):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n")
+    shutil.move(tmp, path)
+
+
+def save(data, names=None):
+    data["ops"] = {name: {"formula": formula, "kind": kind} for name, (kind, formula, *_) in OPS.items()}
+    DATA.mkdir(parents=True, exist_ok=True)
+    data["sizes"] = SIZES
+    write(
+        DATA / "meta.json",
+        {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops", "sizes") if key in data},
+    )
+    for name in OPS if names is None else names:
+        op = {
+            "rows": [r for r in data.get("rows", []) if r["op"] == name],
+            "code": data.get("code", {}).get(name),
+            "measured_at": data.get("measured_at", {}).get(name),
+        }
+        if op["rows"] or op["code"]:
+            write(DATA / f"{name}.json", op)
 
 
 if __name__ == "__main__":
@@ -216,4 +250,4 @@ if __name__ == "__main__":
     data = load()
     for name in sys.argv[1:] or OPS:
         data = update(data, name)
-        save(data)
+        save(data, [name])
