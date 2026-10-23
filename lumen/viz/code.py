@@ -92,6 +92,7 @@ def dump_code(graph, plan, run, device, directory):
     steps = plan.steps()
     index, written = [], []
     templates = set()
+    launches = [launch for launch in launches if launch[0] < len(steps)]
     for n, (at, label, kernel, code, template) in enumerate(launches):
         text, ext = _launch_code(steps[at], kernel, code)
         name = f"{n:04d}-{_slug(label)}-{_slug(kernel)}.{ext}"
