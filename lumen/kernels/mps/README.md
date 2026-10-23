@@ -24,7 +24,7 @@ the module is `pub(crate)`. Callers:
 | File | Contents |
 | --- | --- |
 | `mod.rs` | `encode` (per-`Primitive` routing), `scratch_bytes`, argument packers (`u32_arg`, `u64_arg`, `dims_arg`, `dims32_arg`, `element_arg`), `BYTES_PER_THREAD`, `elementwise_grid`, `launch_step`, `launch`, `mark_event` (an `Event`'s timed marker kernel), `capture` (records the launches an encode makes instead of submitting them) and `Captured::time`. |
-| `kernels.metal` | Shared Metal definitions (no kernels): dtype predicates and ranges, saturating conversions, the binary/unary functors, Philox, `FOR_EACH_ELEMENT`, strided `offset_of`/`offset_of32`, dtype X-macros, simdgroup-fragment helpers. |
+| `kernels.metal` | Shared Metal definitions (no kernels): dtype predicates and ranges, saturating conversions, the binary/unary functors, the `unary` and `binary` primitives' `<name>_op` functions (float ones compute in `float` and round once to their dtype, as the reference rounds its float64 once; `bits_of` maps a type to its unsigned and signed bit types for the shifts and `nextafter`), Philox, `FOR_EACH_ELEMENT`, strided `offset_of`/`offset_of32`, dtype X-macros, simdgroup-fragment helpers. |
 | `shim.mm` | Objective-C++: compiles the embedded primitive library once, caches pipelines by name, and exports `lumen_mps_compile_kernels`, `lumen_mps_compile_kernel`, `lumen_mps_pipeline` (a retained pipeline by name), `lumen_mps_launch_pipeline` and `lumen_mps_launch_kernel` (by name), `lumen_mps_time_pipeline` (a launch repeated in a command buffer of its own, its GPU time). |
 
 ## Routing (`encode`)

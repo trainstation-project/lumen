@@ -107,6 +107,8 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
             | Logistic
             | Cast { .. }
             | Select
+            | Unary(_)
+            | Binary(_)
     )
 }
 

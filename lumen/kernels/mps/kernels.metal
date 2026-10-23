@@ -124,6 +124,253 @@ struct Logistic {
     template <typename A> static A apply(A x) { return A(1) / (A(1) + exp(-x)); }
 };
 
+template <typename A> struct bits_of;
+template <> struct bits_of<bool> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<uchar> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<char> {
+    typedef uchar type;
+    typedef char signed_type;
+};
+template <> struct bits_of<ushort> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<short> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<uint> {
+    typedef uint type;
+    typedef int signed_type;
+};
+template <> struct bits_of<int> {
+    typedef uint type;
+    typedef int signed_type;
+};
+template <> struct bits_of<ulong> {
+    typedef ulong type;
+    typedef long signed_type;
+};
+template <> struct bits_of<long> {
+    typedef ulong type;
+    typedef long signed_type;
+};
+template <> struct bits_of<half> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<bfloat> {
+    typedef ushort type;
+    typedef short signed_type;
+};
+template <> struct bits_of<float> {
+    typedef uint type;
+    typedef int signed_type;
+};
+
+#define FLOAT_UNARY(NAME, EXPR)                     \
+    template <typename A> inline A NAME##_op(A a) { \
+        float x = float(a);                         \
+        return A(EXPR);                             \
+    }
+
+FLOAT_UNARY(sin, sin(x))
+FLOAT_UNARY(cos, cos(x))
+FLOAT_UNARY(tan, tan(x))
+FLOAT_UNARY(asin, asin(x))
+FLOAT_UNARY(acos, acos(x))
+FLOAT_UNARY(atan, atan(x))
+FLOAT_UNARY(sinh, sinh(x))
+FLOAT_UNARY(cosh, cosh(x))
+FLOAT_UNARY(asinh, asinh(x))
+FLOAT_UNARY(acosh, acosh(x))
+FLOAT_UNARY(atanh, atanh(x))
+FLOAT_UNARY(floor, floor(x))
+FLOAT_UNARY(ceil, ceil(x))
+FLOAT_UNARY(round, rint(x))
+FLOAT_UNARY(exp2, exp2(x))
+FLOAT_UNARY(log2, log2(x))
+FLOAT_UNARY(rsqrt, 1.0f / sqrt(x))
+
+template <typename A> inline A log1p_op(A a) {
+    float x = float(a), u = 1.0f + x;
+    if (u == 1.0f || u == INFINITY) {
+        return A(u == 1.0f ? x : u);
+    }
+    return A(log(u) * (x / (u - 1.0f)));
+}
+
+template <typename A> inline A expm1_op(A a) {
+    float x = float(a), u = exp(x);
+    if (u == 1.0f || isinf(u)) {
+        return A(u == 1.0f ? x : u);
+    }
+    float m = u - 1.0f;
+    return A(m == -1.0f ? -1.0f : m * (x / log(u)));
+}
+
+template <typename A> inline A cbrt_op(A a) {
+    float x = float(a), m = fabs(x);
+    if (m == 0.0f || isinf(m) || isnan(m)) {
+        return a;
+    }
+    float y = pow(m, 1.0f / 3.0f);
+    y -= (y * y * y - m) / (3.0f * y * y);
+    return A(copysign(y, x));
+}
+
+template <typename A> inline A erf_inv_op(A a) {
+    float x = float(a);
+    if (fabs(x) == 1.0f) {
+        return A(x * INFINITY);
+    }
+    float w = -log((1.0f - x) * (1.0f + x)), p;
+    if (w < 5.0f) {
+        w -= 2.5f;
+        p = 2.81022636e-08f;
+        p = 3.43273939e-07f + p * w;
+        p = -3.5233877e-06f + p * w;
+        p = -4.39150654e-06f + p * w;
+        p = 0.00021858087f + p * w;
+        p = -0.00125372503f + p * w;
+        p = -0.00417768164f + p * w;
+        p = 0.246640727f + p * w;
+        p = 1.50140941f + p * w;
+    } else {
+        w = sqrt(w) - 3.0f;
+        p = -0.000200214257f;
+        p = 0.000100950558f + p * w;
+        p = 0.00134934322f + p * w;
+        p = -0.00367342844f + p * w;
+        p = 0.00573950773f + p * w;
+        p = -0.0076224613f + p * w;
+        p = 0.00943887047f + p * w;
+        p = 1.00167406f + p * w;
+        p = 2.83297682f + p * w;
+    }
+    return A(p * x);
+}
+
+template <typename A> inline bool is_finite_op(A a) { return isfinite(float(a)); }
+
+template <typename A> inline A abs_op(A a) {
+    if (is_float_t<A>()) {
+        return A(fabs(float(a)));
+    }
+    return a < A(0) ? A(A(0) - a) : a;
+}
+
+template <typename A> inline A sign_op(A a) {
+    if (is_float_t<A>()) {
+        float x = float(a);
+        return x == 0.0f || isnan(x) ? a : A(copysign(1.0f, x));
+    }
+    return A((a > A(0)) - (a < A(0)));
+}
+
+inline bool not_op(bool a) { return !a; }
+template <typename A> inline A not_op(A a) { return A(~a); }
+
+template <typename A> inline A population_count_op(A a) { return A(popcount(a)); }
+template <typename A> inline A clz_op(A a) { return A(clz(a)); }
+
+template <typename A> inline A reduce_precision_op(A a, uint exponent_bits, uint mantissa_bits) {
+    float x = float(a);
+    if (isnan(x)) {
+        return a;
+    }
+    uint b = as_type<uint>(x);
+    if (mantissa_bits < 23) {
+        uint last = 1u << (23 - mantissa_bits);
+        uint bias = (last >> 1) - 1 + ((b & last) >> (23 - mantissa_bits));
+        b = (b + bias) & ~(last - 1);
+    }
+    if (exponent_bits <= 8) {
+        uint reduced = (1u << (exponent_bits - 1)) - 1;
+        uint exponent = b & 0x7F800000u, sign = b & 0x80000000u;
+        if (exponent > ((127u + reduced) << 23)) {
+            b = sign | 0x7F800000u;
+        } else if (exponent <= ((127u - reduced) << 23)) {
+            b = sign;
+        }
+    }
+    return A(as_type<float>(b));
+}
+
+template <typename A> inline A min_op(A x, A y) { return x != x || y != y ? x + y : (y < x ? y : x); }
+
+template <typename A, typename B> inline A pow_op(A a, B b) {
+    float x = float(a), y = float(b);
+    if (x < 0.0f && y == trunc(y)) {
+        float r = pow(-x, y);
+        return A(fmod(fabs(y), 2.0f) == 1.0f ? -r : r);
+    }
+    return A(pow(x, y));
+}
+
+inline float rem_op(float x, float y) { return fmod(x, y); }
+inline half rem_op(half x, half y) { return half(fmod(float(x), float(y))); }
+inline bfloat rem_op(bfloat x, bfloat y) { return bfloat(fmod(float(x), float(y))); }
+template <typename A> inline A rem_op(A x, A y) {
+    if (y == A(0)) {
+        return x;
+    }
+    if (A(-1) < A(0) && y == A(-1)) {
+        return A(0);
+    }
+    return A(x % y);
+}
+
+template <typename A> inline A and_op(A x, A y) { return A(x & y); }
+template <typename A> inline A or_op(A x, A y) { return A(x | y); }
+template <typename A> inline A xor_op(A x, A y) { return A(x ^ y); }
+
+template <typename A> inline bool shift_out(A y) {
+    return ulong(typename bits_of<A>::signed_type(y)) >= ulong(sizeof(A) * 8);
+}
+
+template <typename A> inline A shift_left_op(A x, A y) {
+    typedef typename bits_of<A>::type U;
+    return shift_out(y) ? A(0) : A(U(x) << U(y));
+}
+
+template <typename A> inline A shift_right_logical_op(A x, A y) {
+    typedef typename bits_of<A>::type U;
+    return shift_out(y) ? A(0) : A(U(x) >> U(y));
+}
+
+template <typename A> inline A shift_right_arithmetic_op(A x, A y) {
+    typedef typename bits_of<A>::signed_type S;
+    if (shift_out(y)) {
+        return S(x) < S(0) ? A(-1) : A(0);
+    }
+    return A(S(x) >> S(y));
+}
+
+template <typename A> inline A nextafter_op(A x, A y) {
+    typedef typename bits_of<A>::type U;
+    float fx = float(x), fy = float(y);
+    if (isnan(fx) || isnan(fy)) {
+        return A(NAN);
+    }
+    if (fx == fy) {
+        return y;
+    }
+    U sign = U(1) << (sizeof(A) * 8 - 1);
+    U b = as_type<U>(x);
+    bool up = fy > fx;
+    if ((b & ~sign) == 0) {
+        return as_type<A>(U((up ? U(0) : sign) | U(1)));
+    }
+    return as_type<A>(U(up == ((b & sign) == 0) ? b + 1 : b - 1));
+}
+
 template <typename D, typename S> inline D convert_value(S x) { return from_int<D>(x); }
 template <typename D> inline D convert_value(half x) { return from_float<D>(float(x)); }
 template <typename D> inline D convert_value(bfloat x) { return from_float<D>(float(x)); }

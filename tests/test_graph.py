@@ -322,6 +322,29 @@ def test_mps_reads_strided_inputs_in_place():
     assert lumen.to_numpy(y).tolist() == expected.tolist()
 
 
+@pytest.mark.mps
+def test_mps_steps_replay_on_each_calls_buffers():
+    """An MPS plan's steps are encoded once and replayed after: each later
+    call computes on its own inputs and workspace (a strided call between
+    them too), as the first did."""
+    f = lumen.compile(lambda x, w: F.sum(F.relu(F.matmul(x, w, "float32", "float32")), -1))
+    expected = lambda a, b: np.maximum(a @ b, 0).sum(-1)  # noqa: E731
+    for seed in range(3):
+        a, b = rand(32, 64, seed=seed), rand(64, 48, seed=seed + 10)
+        x, w = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")
+        np.testing.assert_allclose(lumen.to_numpy(f(x, w)), expected(a, b), rtol=1e-4, atol=1e-4)
+        t = lumen.from_numpy(np.ascontiguousarray(b.T)).to("mps").transpose(0, 1)
+        np.testing.assert_allclose(lumen.to_numpy(f(x, t)), expected(a, b), rtol=1e-4, atol=1e-4)
+    a = rand(4096)
+    graph = lumen.make_graph(lambda u: F.exp(u) * 2.0 + 1.0)(lumen.from_numpy(a).to("mps"))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[0])
+    workspaces = [lumen.Tensor.empty([plan.workspace_bytes], "uint8", "mps") for _ in range(2)]
+    for k in range(4):
+        v = a + k
+        (out,) = plan.run_in(workspaces[k % 2], [lumen.from_numpy(v).to("mps")])
+        np.testing.assert_allclose(lumen.to_numpy(out), np.exp(v) * 2 + 1, rtol=1e-5)
+
+
 @pytest.mark.parametrize("device", ["cpu", MPS, TPU])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):

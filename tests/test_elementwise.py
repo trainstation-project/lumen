@@ -211,16 +211,88 @@ def test_the_operands_must_fit():
         lumen.make_graph(prims.shift_left)(m([2], "float32"), m([2], "float32"))
 
 
-@pytest.mark.parametrize("device", [MPS])
-def test_mps_refuses_them(device):
-    """MPS has no kernels for them yet: compiling one says so."""
+SPECIALS = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], np.float32)
+
+
+def on(device, f, *arrays, dtype=None):
+    """``f`` compiled on ``device`` and on the CPU, on ``arrays`` as
+    ``dtype``: both values as numpy."""
     try:
-        x = tensor(np.ones(4, np.float32), device=device)
+        args = [tensor(a, dtype, device) for a in arrays]
     except RuntimeError as e:
         pytest.skip(str(e))
-    for f in [prims.sin, prims.floor, lambda a: prims.pow(a, a)]:
-        with pytest.raises(Exception, match="does not run on MPS yet"):
-            lumen.compile(f, device=device)(x).wait_()
+    return host(lumen.compile(f, device=device)(*args)), run(f, *[tensor(a, dtype) for a in arrays])
+
+
+@pytest.mark.parametrize("device", [MPS])
+@pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
+def test_mps_float_functions_agree_with_the_cpu(device, name, prim, ref, values):
+    """Each float function in float32 on MPS, infinities, NaN and signed
+    zeros included: the CPU's value within float32's rounding."""
+    got, expected = on(device, prim, np.concatenate([values, SPECIALS]).astype(np.float32))
+    np.testing.assert_allclose(got, expected, rtol=4e-7, atol=0)
+
+
+@pytest.mark.parametrize("device", [MPS])
+def test_mps_float_functions_with_parameters_agree_with_the_cpu(device):
+    """erf_inv, is_finite, reduce_precision and the binary float functions
+    (min, pow of negative bases too, rem, nextafter) on MPS: the CPU's."""
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(200).astype(np.float32) * 3 for _ in range(2))
+    b[:4] = [0.0, np.nan, np.inf, -0.0]
+    cases = [
+        (prims.erf_inv, [np.linspace(-0.999, 0.999, 101, dtype=np.float32)], 4e-7),
+        (prims.is_finite, [np.concatenate([SPAN, SPECIALS]).astype(np.float32)], 0),
+        (lambda x: prims.reduce_precision(x, 5, 10), [np.concatenate([SPAN * 1e4, SPECIALS]).astype(np.float32)], 0),
+        (lambda x: prims.reduce_precision(x, 8, 7), [np.concatenate([SPAN, SPECIALS]).astype(np.float32)], 0),
+        (prims.min, [a, b], 0),
+        (prims.pow, [np.abs(a) + 0.1, b], 4e-7),
+        (prims.pow, [a, np.round(b)], 4e-7),
+        (prims.rem, [a, b], 0),
+        (prims.nextafter, [a, b], 0),
+    ]
+    for f, arrays, rtol in cases:
+        got, expected = on(device, f, *arrays)
+        np.testing.assert_allclose(got, expected, rtol=rtol, atol=0)
+
+
+@pytest.mark.parametrize("device", [MPS])
+def test_mps_exact_bfloat16_functions_agree_with_the_cpu(device):
+    """The functions whose value is exact in its dtype run in bfloat16 on
+    MPS, bit for bit the CPU's; bfloat16 sin, as exp, has no MPS kernel."""
+    rng = np.random.default_rng(1)
+    x = np.concatenate([SPAN, SPECIALS]).astype(np.float32)
+    a, b = (rng.standard_normal(100).astype(np.float32) * 3 for _ in range(2))
+    for f in [prims.floor, prims.ceil, prims.round, prims.abs, prims.sign, prims.is_finite]:
+        got, expected = on(device, f, x, dtype="bfloat16")
+        np.testing.assert_array_equal(got, expected)
+    for f in [prims.min, prims.rem, prims.nextafter]:
+        got, expected = on(device, f, a, b, dtype="bfloat16")
+        np.testing.assert_array_equal(got, expected)
+    with pytest.raises(RuntimeError, match="convert to float32"):
+        on(device, prims.sin, a, dtype="bfloat16")
+
+
+@pytest.mark.parametrize("device", [MPS])
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int8", "uint8"])
+def test_mps_integer_functions_agree_with_the_cpu(device, dtype):
+    """not, population_count, clz, abs, sign, min, rem (by 0 and -1 too),
+    and/or/xor and the shifts (out of range too) on MPS: the CPU's."""
+    rng = np.random.default_rng(2)
+    low = 0 if dtype.startswith("u") else -100
+    x, y = rng.integers(low, 100, 300), rng.integers(low, 100, 300)
+    y[:2] = [0, -1 if low else 1]
+    s = rng.integers(0 if low == 0 else -3, 40, 300)
+    unary = [prims.not_, prims.population_count, prims.clz, prims.abs, prims.sign]
+    binary = [prims.min, prims.rem, prims.and_, prims.or_, prims.xor]
+    shifts = [prims.shift_left, prims.shift_right_logical, prims.shift_right_arithmetic]
+    for f, arrays in [(f, [x]) for f in unary] + [(f, [x, y]) for f in binary] + [(f, [x, s]) for f in shifts]:
+        got, expected = on(device, f, *[np.asarray(v).astype(dtype) for v in arrays])
+        np.testing.assert_array_equal(got, expected)
+    bools = rng.integers(0, 2, 50).astype(bool)
+    for f, arrays in [(prims.not_, [bools]), (prims.and_, [bools, bools[::-1]]), (prims.xor, [bools, bools[::-1]])]:
+        got, expected = on(device, f, *arrays)
+        np.testing.assert_array_equal(got, expected)
 
 
 def test_functional_float_functions():

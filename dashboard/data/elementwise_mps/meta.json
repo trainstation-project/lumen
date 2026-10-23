@@ -5,63 +5,1247 @@
  "ops": {
   "neg": {
    "formula": "−x",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "exp": {
    "formula": "eˣ",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "log": {
    "formula": "ln x",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "sqrt": {
    "formula": "√x",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "tanh": {
    "formula": "tanh x",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "logistic": {
    "formula": "1 / (1 + e⁻ˣ)",
-   "kind": "unary"
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "sin": {
+   "formula": "sin x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "cos": {
+   "formula": "cos x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "tan": {
+   "formula": "tan x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "asin": {
+   "formula": "asin x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "acos": {
+   "formula": "acos x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "atan": {
+   "formula": "atan x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "sinh": {
+   "formula": "sinh x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "cosh": {
+   "formula": "cosh x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "asinh": {
+   "formula": "asinh x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "acosh": {
+   "formula": "acosh x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "atanh": {
+   "formula": "atanh x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "floor": {
+   "formula": "⌊x⌋",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "ceil": {
+   "formula": "⌈x⌉",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "round": {
+   "formula": "x to the nearest integer, halves to even",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "log1p": {
+   "formula": "ln(1 + x)",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "expm1": {
+   "formula": "eˣ − 1",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "exp2": {
+   "formula": "2ˣ",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "log2": {
+   "formula": "log₂ x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "rsqrt": {
+   "formula": "1 / √x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "cbrt": {
+   "formula": "∛x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "erf_inv": {
+   "formula": "erf⁻¹ x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "is_finite": {
+   "formula": "x finite → bool",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "abs": {
+   "formula": "|x|",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "sign": {
+   "formula": "sign x",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "reduce_precision": {
+   "formula": "x rounded to 5 exponent and 2 mantissa bits",
+   "kind": "unary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "not": {
+   "formula": "~x",
+   "kind": "unary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "population_count": {
+   "formula": "bits set in x",
+   "kind": "unary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "clz": {
+   "formula": "leading zero bits of x",
+   "kind": "unary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "add": {
    "formula": "x + y",
-   "kind": "binary"
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "sub": {
    "formula": "x − y",
-   "kind": "binary"
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "mul": {
    "formula": "x · y",
-   "kind": "binary"
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "div": {
    "formula": "x / y",
-   "kind": "binary"
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "max": {
    "formula": "max(x, y)",
-   "kind": "binary"
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "min": {
+   "formula": "min(x, y)",
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "pow": {
+   "formula": "xʸ",
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "rem": {
+   "formula": "x mod y, truncated",
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "nextafter": {
+   "formula": "the next float after x toward y",
+   "kind": "binary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "eq": {
    "formula": "x = y → bool",
-   "kind": "compare"
+   "kind": "compare",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "lt": {
    "formula": "x < y → bool",
-   "kind": "compare"
+   "kind": "compare",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "and": {
+   "formula": "x & y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "or": {
+   "formula": "x | y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "xor": {
+   "formula": "x ^ y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "shift_left": {
+   "formula": "x << y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "shift_right_logical": {
+   "formula": "x >>> y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "shift_right_arithmetic": {
+   "formula": "x >> y",
+   "kind": "binary",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "select": {
    "formula": "p < x ? x : y",
-   "kind": "ternary"
+   "kind": "ternary",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
   },
   "cast": {
    "formula": "float32 → bfloat16",
-   "kind": "convert"
+   "kind": "convert",
+   "dtypes": [
+    "float32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "reduce_sum": {
+   "formula": "Σ of each row of 1024, in float32",
+   "kind": "reduction",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "reduce_max": {
+   "formula": "max of each row of 1024",
+   "kind": "reduction",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "cumsum": {
+   "formula": "running Σ along each row of 1024, in float32",
+   "kind": "scan",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "dot_general": {
+   "formula": "A · B, square, accumulated in float32",
+   "kind": "contraction",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "linear_cross_entropy": {
+   "formula": "cross entropy of h · wᵀ (√n rows, √n classes, 512 features) without its logits",
+   "kind": "contraction",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "broadcast_in_dim": {
+   "formula": "a row of 1024 repeated to n",
+   "kind": "layout",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "transpose": {
+   "formula": "square Aᵀ",
+   "kind": "layout",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "slice": {
+   "formula": "the first half of each row of 1024",
+   "kind": "layout",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "concatenate": {
+   "formula": "two halves joined",
+   "kind": "layout",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "iota": {
+   "formula": "0, 1, …, n − 1",
+   "kind": "factory",
+   "dtypes": [
+    "int32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "full": {
+   "formula": "n copies of 2.5",
+   "kind": "factory",
+   "dtypes": [
+    "float32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "random_bits": {
+   "formula": "n random 32-bit words (Philox)",
+   "kind": "factory",
+   "dtypes": [
+    "uint32"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "dynamic_slice": {
+   "formula": "n / 2 elements from index 1",
+   "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "dynamic_update_slice": {
+   "formula": "n / 2 elements written from index 1",
+   "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "gather": {
+   "formula": "n / 1024 rows of 1024 picked from 4× as many",
+   "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "take_along_axis": {
+   "formula": "an element of each row of 1024 per index",
+   "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "scatter_add": {
+   "formula": "n / 1024 rows of 1024 added into 4× as many",
+   "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
   }
  },
  "sizes": [

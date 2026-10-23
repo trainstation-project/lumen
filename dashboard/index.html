@@ -85,6 +85,7 @@
   .lx-op-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
   .lx-op-title h2 { font: 400 28px/1.1 var(--mono); margin: 0; }
   .lx-op-title span { color: var(--muted); font-size: 16px; }
+  .lx-chart-title { margin: 12px 0 0; font-size: 13px; font-weight: 500; font-family: var(--mono); color: var(--muted); }
   .lx-subtabs .lx-tab { font-size: 12px; padding: 6px 10px; }
   .lx-device { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; color: var(--muted); font-size: 13px; }
   .lx-run { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
@@ -177,13 +178,9 @@
       <span id="op-status" class="lx-run-status" role="status"></span>
     </div>
     <div class="lx-card">
+      <h2 id="op-bw-title">Bandwidth</h2>
       <div class="lx-legend" id="op-bw-legend"></div>
-      <div class="lx-chart" id="op-bw"></div>
-    </div>
-    <div class="lx-card">
-      <h2>DRAM bandwidth</h2>
-      <div class="lx-legend" id="op-dram-legend"></div>
-      <div class="lx-chart" id="op-dram"></div>
+      <div id="op-bw"></div>
     </div>
     <div class="lx-card">
       <h2>Codegen</h2>
@@ -274,6 +271,7 @@ async function loadPerf(dir) {
 let PRIMITIVES, FUSIONS, PERF;
 try {
   [PRIMITIVES, FUSIONS, PERF] = await Promise.all([load("primitives"), load("fusions"), loadPerf("elementwise_mps")]);
+  PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
   if (!PERF) throw new Error("data/elementwise_mps/meta.json: not found");
 } catch (e) {
   const take = document.getElementById("lx-take");
@@ -303,6 +301,7 @@ const fmt = {
   int: (n) => n.toLocaleString("en"),
   n: (n) => n >= 1 << 20 ? `${n / (1 << 20)}M` : n >= 1024 ? `${n / 1024}K` : String(n),
   gbs: (v) => `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} GB/s`,
+  tflops: (v) => `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} TFLOP/s`,
   us: (v) => v >= 1000 ? `${(v / 1000).toFixed(2)} ms` : `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} µs`,
   pct: (v) => `${(100 * v).toFixed(0)}%`,
   num: (v) => v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}K` : v >= 1 ? v.toFixed(0) : v.toPrecision(1),
@@ -311,22 +310,19 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 const rowOf = (op, dtype, n) => OK_ROWS.find((r) => r.op === op && r.dtype === dtype && r.n === n);
 const ITEM = { float32: 4, bfloat16: 2, bool: 1 };
 function detail(r, who, us, timing) {
-  const loaded = r.n * r.inputs, stored = r.n;
-  const bytes = loaded * ITEM[r.dtype] + stored * ITEM[r.out_dtype];
-  const gbs = bytes / us / 1e3;
+  const loaded = r.loaded_bytes ?? r.n * r.inputs * ITEM[r.dtype];
+  const stored = r.stored_bytes ?? r.n * ITEM[r.out_dtype];
+  const gbs = (loaded + stored) / us / 1e3;
   const rows = [
-    ["Elements loaded", fmt.int(loaded)],
-    ["Elements stored", fmt.int(stored)],
-    ["Bytes loaded", fmt.int(loaded * ITEM[r.dtype])],
-    ["Bytes stored", fmt.int(stored * ITEM[r.out_dtype])],
+    ["Bytes loaded", fmt.int(loaded)],
+    ["Bytes stored", fmt.int(stored)],
     ["BW", fmt.gbs(gbs)],
     ["BW %", `${fmt.pct(gbs / DEVICE_BW)} of ${DEVICE_BW} GB/s`],
   ];
-  if (r.compute_bound) rows.push(["FLOPs", fmt.int(r.flops)], ["FLOP/s", `${(r.flops / us / 1e3).toFixed(1)} GFLOP/s`]);
+  if (r.compute_bound) rows.push(["FLOPs", fmt.int(r.flops)], ["FLOP/s", fmt.tflops(r.flops / us / 1e6)]);
   rows.push([`Time (${timing})`, fmt.us(us)]);
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
-const DTYPE_COLORS = [["float32", "var(--s1)"], ["bfloat16", "var(--s2)"]];
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
 
 const PROGRESS = {};
@@ -433,11 +429,17 @@ const NS = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
 const logScale = ([lo, hi], [a, b]) => (v) => a + (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * (b - a);
 const linearScale = ([lo, hi], [a, b]) => (v) => a + (v - lo) / (hi - lo) * (b - a);
-function bandwidthAxis(values) {
-  const top = Math.ceil(Math.max(DEVICE_BW, ...values) * 1.05 / 50) * 50;
+function throughputAxis(values, label) {
+  const max = Math.max(...values, 1e-9);
+  const unit = [1, 2, 5, 10].map((m) => m * 10 ** Math.floor(Math.log10(max / 4))).find((u) => max / u <= 6);
+  const top = Math.ceil(max * 1.05 / unit) * unit;
   const ticks = [];
-  for (let t = 0; t <= top; t += 50) ticks.push(t);
-  return { domain: [0, top], ticks, fmt: (v) => String(v), label: "GB/s", linear: true };
+  for (let t = 0; t <= top + unit / 2; t += unit) ticks.push(+t.toPrecision(6));
+  return { domain: [0, top], ticks, fmt: (v) => String(v), label, linear: true };
+}
+
+function bandwidthAxis(values) {
+  return throughputAxis([DEVICE_BW, ...values], "GB/s");
 }
 
 function chart(id, spec) {
@@ -572,7 +574,7 @@ async function runBenchmark(op, device, measured) {
   return final;
 }
 
-const expectedRows = (op) => (op === "cast" ? 1 : DTYPE_COLORS.length) * (PERF.sizes?.length || SEEN_SIZES.size);
+const expectedRows = (op) => (KNOWN[op]?.dtypes?.length || 2) * (KNOWN[op]?.sizes?.length || PERF.sizes?.length || SEEN_SIZES.size);
 
 function measuringOp(op) {
   measuring = op;
@@ -747,24 +749,32 @@ function drawBench(op, runnable) {
   runButton.hidden = !runnable;
   if (!runButton.disabled && runStatus.dataset.op !== op) { runStatus.textContent = ""; runStatus.className = "lx-run-status"; }
   runStatus.dataset.op = op;
-  const dtypes = DTYPE_COLORS.filter(([dtype]) => OK_ROWS.some((r) => r.op === op && r.dtype === dtype));
-  const bandwidthChart = (id, label, lumenUs, torchUs, timing) => {
+  const dtypes = [...new Set(OK_ROWS.filter((r) => r.op === op).map((r) => r.dtype))].map((dtype) => [dtype]);
+  const compute = OK_ROWS.some((r) => r.op === op && r.compute_bound);
+  const value = (r, us) => compute ? r.flops / us / 1e6 : r.bytes / us / 1e3;
+  document.getElementById("op-bw-title").textContent = compute ? "Throughput" : "Bandwidth";
+
+  const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
+  const bandwidthChart = (id, dtype) => {
     const lines = [], points = [];
-    for (const [dtype, color] of dtypes) {
-      for (const [torch, us, who] of [[false, lumenUs, "lumen"], [true, torchUs, "PyTorch"]]) {
-        const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && us(r) != null);
-        if (!rs.length) continue;
-        lines.push({ points: rs.map((r) => [r.n, r.bytes / us(r) / 1e3]), color, dot: torch, width: torch ? 2.5 : 2 });
-        for (const r of rs) points.push({ x: r.n, y: r.bytes / us(r) / 1e3, r: 3, color, hollow: torch, tip: detail(r, who, us(r), timing) });
-      }
+    for (const [us, who, color] of IMPLS) {
+      const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && us(r) != null);
+      if (!rs.length) continue;
+      lines.push({ points: rs.map((r) => [r.n, value(r, us(r))]), color, width: 2 });
+      for (const r of rs) points.push({ x: r.n, y: value(r, us(r)), r: 3, color, tip: detail(r, who, us(r), "per call") });
     }
-    lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
-    chart(id, { label, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-      y: bandwidthAxis(points.map((p) => p.y)), lines, points });
-    legend(`${id}-legend`, [...dtypes, ["lumen", "var(--muted)"], ["PyTorch", "var(--muted)", "dot"], ["device bandwidth", "var(--roof)", true]]);
+    if (!compute) lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
+    const values = points.map((p) => p.y);
+    chart(id, { label: `${op} ${dtype} ${compute ? "throughput" : "bandwidth"}`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
+      y: compute ? throughputAxis(values, "TFLOP/s") : bandwidthAxis(values), lines, points });
   };
-  bandwidthChart("op-bw", `${op} bandwidth`, (r) => r.lumen_us, (r) => r.torch_us, "per call");
-  bandwidthChart("op-dram", `${op} DRAM bandwidth`, (r) => r.lumen_dram_us, (r) => r.torch_dram_us, "per call, outputs rotated");
+  const charts = dtypes.map(([dtype]) => [dtype, el("div", "lx-chart")]);
+  document.getElementById("op-bw").replaceChildren(...charts.flatMap(([dtype, box]) => {
+    box.id = `op-bw-${dtype}`;
+    return [el("h3", "lx-chart-title", dtype), box];
+  }));
+  for (const [dtype, box] of charts) bandwidthChart(box.id, dtype);
+  legend("op-bw-legend", [...IMPLS.map(([, who, color]) => [who, color]), ...(compute ? [] : [["device bandwidth", "var(--roof)", true]])]);
 
   const code = PERF.code[op];
   const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];
@@ -774,14 +784,13 @@ function drawBench(op, runnable) {
   const rows = PERF.rows.filter((r) => r.op === op);
   table("op-table", [
     { key: "dtype", label: "dtype" }, { key: "n", label: "Elements", kind: "num", render: (r) => fmt.int(r.n) },
-    { key: "bytes", label: "Bytes", kind: "num", wide: true, render: (r) => r.error ? "" : fmt.int(r.bytes) },
-    { key: "lumen_us", label: "lumen", kind: "num", render: (r) => r.error ? "" : fmt.us(r.lumen_us) },
-    { key: "gbs", label: "Bandwidth", kind: "num", render: (r) => r.error ? "" : fmt.gbs(r.gbs) },
-    { key: "torch_us", label: "PyTorch", kind: "num", render: (r) => r.error ? "" : maybe(r.torch_us, fmt.us) },
-    { key: "lumen_dram_us", label: "lumen, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.lumen_dram_us, fmt.us) },
-    { key: "torch_dram_us", label: "PyTorch, DRAM", kind: "num", wide: true, render: (r) => r.error ? "" : maybe(r.torch_dram_us, fmt.us) },
+    { key: "gbs", label: "Throughput", kind: "num", sort: (r) => r.compute_bound ? r.flops / r.lumen_us : r.gbs,
+      render: (r) => r.error ? "" : r.compute_bound ? fmt.tflops(r.flops / r.lumen_us / 1e6) : fmt.gbs(r.gbs) },
+    { key: "speedup", label: "Speedup over PyTorch", kind: "num", sort: speedup,
+      render: (r) => r.error ? "" : maybe(speedup(r), (v) => `${v.toFixed(2)}×`) },
   ], rows, opSort);
 }
+const speedup = (r) => r.torch_us && r.lumen_us ? r.torch_us / r.lumen_us : null;
 const opSort = { key: null, dir: 1, draw: () => drawOp(current.op) };
 
 const current = { view: "support", op: null, device: "mps", gpu: GPUS[0][0] };
