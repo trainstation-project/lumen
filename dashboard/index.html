@@ -65,10 +65,9 @@
   .lx-chip[data-v="runs"] { color: var(--ok); }
   .lx-chip[data-v="partial"] { color: var(--warn); }
   .lx-chip[data-v="missing"], .lx-chip[data-v="wrong"] { color: var(--bad); }
-  a.lx-chip { background: color-mix(in srgb, var(--ok) 12%, transparent); }
-  a.lx-chip::after { content: " ›"; }
+  a.lx-op { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
   @property --done { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
-  a.lx-chip.lx-progress { color: transparent; border-color: transparent; transition: --done .8s ease-out;
+  .lx-chip.lx-progress { color: transparent; border-color: transparent; transition: --done .8s ease-out;
                           background-image: linear-gradient(90deg, var(--ok) var(--done), var(--bad) var(--done)), linear-gradient(var(--panel), var(--panel)),
                                             linear-gradient(90deg, var(--ok) var(--done), var(--bad) var(--done));
                           background-origin: border-box; -webkit-background-clip: text, padding-box, border-box; background-clip: text, padding-box, border-box; }
@@ -86,6 +85,8 @@
   .lx-op-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
   .lx-op-title h2 { font: 400 28px/1.1 var(--mono); margin: 0; }
   .lx-op-title span { color: var(--muted); font-size: 16px; }
+  .lx-subtabs .lx-tab { font-size: 12px; padding: 6px 10px; }
+  .lx-device { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; color: var(--muted); font-size: 13px; }
   .lx-run { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
   .lx-run button { font: inherit; font-size: 13px; color: var(--bg); background: var(--fg); border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   .lx-run button:disabled { opacity: .5; cursor: progress; }
@@ -165,6 +166,11 @@
   <section id="op" class="lx-panel" hidden>
     <a class="lx-back" href="#support">‹ Ops</a>
     <div class="lx-op-title"><h2 id="op-name"></h2><span id="op-formula"></span></div>
+    <nav class="lx-tabs" role="tablist" id="op-devices"></nav>
+    <nav class="lx-tabs lx-subtabs" role="tablist" id="op-gpus" hidden></nav>
+    <div class="lx-device" id="op-device"></div>
+    <p class="lx-note" id="op-none" hidden></p>
+    <div id="op-bench" class="lx-panel">
     <div class="lx-run">
       <button id="op-run" type="button">Run benchmark</button>
       <span id="op-measured"></span>
@@ -193,6 +199,7 @@
     <div class="lx-card">
       <h2>Measurements</h2>
       <div class="lx-scroll"><table id="op-table"><thead><tr></tr></thead><tbody></tbody></table></div>
+    </div>
     </div>
   </section>
 </div>
@@ -250,19 +257,24 @@ setTheme(savedTheme === "dark" ? "dark" : "light");
 themeButton.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 (async () => {
 const load = (name) => fetch(`data/${name}.json`, { cache: "no-store" }).then((r) => { if (!r.ok) throw new Error(`data/${name}.json: ${r.status}`); return r.json(); });
-let PRIMITIVES, FUSIONS, PERF;
-try {
-  let meta;
-  [PRIMITIVES, FUSIONS, meta] = await Promise.all(["primitives", "fusions", "elementwise_mps/meta"].map(load));
-  const ops = await Promise.all(Object.keys(meta.ops || {}).map((op) =>
-    fetch(`data/elementwise_mps/${op}.json`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((d) => [op, d])));
-  PERF = { ...meta, rows: [], code: {}, measured_at: {} };
+const loaded = (path) => fetch(path, { cache: "no-store" }).then((r) => r.ok ? r.json() : null);
+async function loadPerf(dir) {
+  const meta = await loaded(`data/${dir}/meta.json`);
+  if (!meta) return null;
+  const ops = await Promise.all(Object.keys(meta.ops || {}).map((op) => loaded(`data/${dir}/${op}.json`).then((d) => [op, d])));
+  const perf = { ...meta, rows: [], code: {}, measured_at: {} };
   for (const [op, d] of ops) {
     if (!d) continue;
-    PERF.rows.push(...d.rows);
-    if (d.code) PERF.code[op] = d.code;
-    if (d.measured_at) PERF.measured_at[op] = d.measured_at;
+    perf.rows.push(...d.rows);
+    if (d.code) perf.code[op] = d.code;
+    if (d.measured_at) perf.measured_at[op] = d.measured_at;
   }
+  return perf;
+}
+let PRIMITIVES, FUSIONS, PERF;
+try {
+  [PRIMITIVES, FUSIONS, PERF] = await Promise.all([load("primitives"), load("fusions"), loadPerf("elementwise_mps")]);
+  if (!PERF) throw new Error("data/elementwise_mps/meta.json: not found");
 } catch (e) {
   const take = document.getElementById("lx-take");
   take.textContent = `Could not load the data files (${e.message}). Serve this folder, for example with python3 -m http.server in dashboard/, then open http://localhost:8000.`;
@@ -270,6 +282,8 @@ try {
   return;
 }
 const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"], ["triton", "Triton"]];
+const GPUS = [["a100", "A100"], ["h100", "H100"], ["h200", "H200"], ["b200", "B200"], ["b300", "B300"], ["r200", "R200"]];
+const PERFS = {};
 const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
 let DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
 const KNOWN = {};
@@ -327,7 +341,20 @@ function progressed(c, op) {
 
 function advance(op, done) {
   PROGRESS[op] = done;
-  for (const c of document.querySelectorAll(`#prim-table a.lx-chip[href="#op-${CSS.escape(op)}"]`)) progressed(c, op);
+  for (const c of document.querySelectorAll(`#prim-table .lx-chip[data-device="mps"][data-op="${CSS.escape(op)}"]`)) progressed(c, op);
+}
+
+function opChip(r, device) {
+  const c = chip(r[device]);
+  c.dataset.device = device;
+  c.dataset.op = r.primitive;
+  return device === "mps" ? progressed(c, r.primitive) : c;
+}
+
+function opLink(op) {
+  const a = el("a", "lx-op", op);
+  a.href = `#op-${op}`;
+  return a;
 }
 
 function chip(value, href) {
@@ -481,12 +508,8 @@ function legend(id, items) {
 
 
 const PRIM_COLUMNS = [
-  { key: "primitive", label: "Primitive", kind: "name" }, { key: "category", label: "Kind" },
-  { key: "cpu", label: "CPU", kind: "dev", render: (r) => chip(r.cpu) },
-  { key: "mps", label: "MPS", kind: "dev", render: (r) => progressed(chip(r.mps, r.mps === "runs" && (KNOWN[r.primitive] || BENCHED.includes(r.primitive)) ? `#op-${r.primitive}` : null), r.primitive) },
-  { key: "tpu", label: "TPU", kind: "dev", render: (r) => chip(r.tpu) },
-  { key: "cuda", label: "CUDA", kind: "dev", render: (r) => chip(r.cuda) },
-  { key: "triton", label: "Triton", kind: "dev", render: (r) => chip(r.triton) },
+  { key: "primitive", label: "Primitive", kind: "name", render: (r) => opLink(r.primitive) }, { key: "category", label: "Kind" },
+  ...DEVICES.map(([k, d]) => ({ key: k, label: d, kind: "dev", render: (r) => opChip(r, k) })),
 ];
 const FUS_COLUMNS = [
   { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },
@@ -566,8 +589,11 @@ function overall(done, text) {
   document.getElementById("lx-global-text").textContent = text;
 }
 
+let benchmarking = false;
 function busy(running) {
+  benchmarking = running;
   runButton.disabled = allButton.disabled = running;
+  if (!running && current.op) runButton.disabled = !KNOWN[current.op] || current.device !== "mps";
 }
 
 runButton.addEventListener("click", async () => {
@@ -665,19 +691,62 @@ allButton.addEventListener("click", async () => {
   if (failed.length) allStatus.classList.add("lx-bad");
 });
 
+function deviceTab(href, label, selected) {
+  const a = el("a", "lx-tab", label);
+  a.href = href;
+  a.setAttribute("role", "tab");
+  a.setAttribute("aria-selected", String(selected));
+  return a;
+}
+
 function drawOp(op) {
+  const { device, gpu } = current;
+  const known = KNOWN[op] || {};
+  document.getElementById("op-name").textContent = op;
+  document.getElementById("op-formula").textContent = known.formula ? `${known.formula} · ${known.kind}` : "";
+  document.getElementById("op-devices").replaceChildren(...DEVICES.map(([k, label]) =>
+    deviceTab(k === "triton" ? `#op-${op}/triton/${gpu}` : `#op-${op}/${k}`, label, k === device)));
+  const gpus = document.getElementById("op-gpus");
+  gpus.hidden = device !== "triton";
+  gpus.replaceChildren(...GPUS.map(([k, label]) => deviceTab(`#op-${op}/triton/${k}`, label, k === gpu)));
+  const row = PRIMITIVES.find((r) => r.primitive === op);
+  const status = row?.[device];
+  const facts = [row?.[`${device}_kernel`], row?.[`${device}_note`]].filter(Boolean).map((t) => el("span", null, t));
+  document.getElementById("op-device").replaceChildren(...(status ? [chip(status)] : []), ...facts);
+  const source = device === "triton" ? `triton/${gpu}` : device;
+  const perf = device === "mps" ? PERF : PERFS[source];
+  const where = device === "triton" ? `Triton · ${GPUS.find(([k]) => k === gpu)[1]}` : DEVICES.find(([k]) => k === device)[1];
+  const none = document.getElementById("op-none");
+  none.hidden = !!perf;
+  none.textContent = device === "triton" && !(source in PERFS) ? "Loading…" : `Not benchmarked on ${where} yet.`;
+  document.getElementById("op-bench").hidden = !perf;
+  if (!perf) return;
+  if (perf === PERF) return drawBench(op, true);
+  const saved = [PERF, OK_ROWS, DEVICE_BW, SIZE_TICKS];
+  PERF = perf;
+  OK_ROWS = perf.rows.filter((r) => !r.error);
+  DEVICE_BW = perf.spec_memory_gbs;
+  SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
+  try {
+    drawBench(op, false);
+  } finally {
+    [PERF, OK_ROWS, DEVICE_BW, SIZE_TICKS] = saved;
+  }
+}
+
+function drawBench(op, runnable) {
   const at = PERF.measured_at?.[op];
   document.getElementById("op-measured").textContent = at
     ? `Measured ${new Date(at).toLocaleString()} on ${PERF.device}.`
     : PERF.rows.some((r) => r.op === op)
       ? `Measured on ${PERF.device}, in the first snapshot.`
-      : "Not measured yet: Run benchmark measures it on this machine.";
+      : runnable && KNOWN[op]
+        ? "Not measured yet: Run benchmark measures it on this machine."
+        : "No benchmark for this op yet.";
+  if (!benchmarking) runButton.disabled = !runnable || !KNOWN[op];
+  runButton.hidden = !runnable;
   if (!runButton.disabled && runStatus.dataset.op !== op) { runStatus.textContent = ""; runStatus.className = "lx-run-status"; }
   runStatus.dataset.op = op;
-  const known = KNOWN[op] || {};
-  document.getElementById("op-name").textContent = op;
-  document.getElementById("op-formula").textContent = known.formula ? `${known.formula} · ${known.kind}` : "";
-
   const dtypes = DTYPE_COLORS.filter(([dtype]) => OK_ROWS.some((r) => r.op === op && r.dtype === dtype));
   const bandwidthChart = (id, label, lumenUs, torchUs, timing) => {
     const lines = [], points = [];
@@ -715,12 +784,22 @@ function drawOp(op) {
 }
 const opSort = { key: null, dir: 1, draw: () => drawOp(current.op) };
 
-const current = { view: "support", op: null };
+const current = { view: "support", op: null, device: "mps", gpu: GPUS[0][0] };
 function route() {
   const h = location.hash.slice(1);
-  const op = h.startsWith("op-") ? h.slice(3) : null;
-  current.view = op && (KNOWN[op] || BENCHED.includes(op)) ? "op" : h === "fusion" ? "fusion" : "support";
+  const [op, device, gpu] = h.startsWith("op-") ? h.slice(3).split("/") : [null];
+  const listed = PRIMITIVES.some((r) => r.primitive === op);
+  current.view = op && (listed || KNOWN[op] || BENCHED.includes(op)) ? "op" : h === "fusion" ? "fusion" : "support";
   current.op = current.view === "op" ? op : null;
+  current.device = DEVICES.some(([k]) => k === device) ? device : "mps";
+  current.gpu = GPUS.some(([k]) => k === gpu) ? gpu : GPUS[0][0];
+  const source = `triton/${current.gpu}`;
+  if (current.view === "op" && current.device === "triton" && !(source in PERFS)) {
+    loadPerf(`elementwise_triton/${current.gpu}`).catch(() => null).then((perf) => {
+      PERFS[source] = perf;
+      if (current.view === "op") draw();
+    });
+  }
   for (const id of ["support", "fusion", "op"]) document.getElementById(id).hidden = id !== current.view;
   document.getElementById("tab-support").setAttribute("aria-selected", String(current.view !== "fusion"));
   document.getElementById("tab-fusion").setAttribute("aria-selected", String(current.view === "fusion"));
