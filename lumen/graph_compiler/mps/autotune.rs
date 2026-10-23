@@ -19,8 +19,6 @@ pub(super) struct Tunable {
 const TUNED_ELEMENTS: RangeInclusive<usize> = (64 << 10)..=(16 << 20);
 const ALIGNMENT: usize = 256;
 
-pub(super) const LOOPS: &str = "mps-loop";
-
 pub(super) struct Loops<'a> {
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a CompilerConfig,
@@ -38,8 +36,6 @@ fn compile(sources: &mut BTreeMap<String, String>) -> Result<(), String> {
 
 impl Kernels for Loops<'_> {
     type Config = Tuning;
-
-    const NAME: &'static str = LOOPS;
 
     fn configs(&self, step: &Step) -> Vec<Tuning> {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
@@ -93,8 +89,6 @@ fn tiled_gemm(step: &Step) -> bool {
 
 impl Kernels for Gemms {
     type Config = GemmConfig;
-
-    const NAME: &'static str = gemm::TUNER;
 
     fn configs(&self, step: &Step) -> Vec<GemmConfig> {
         match tiled_gemm(step) {

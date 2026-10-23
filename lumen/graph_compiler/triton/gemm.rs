@@ -3,12 +3,11 @@ use std::sync::OnceLock;
 use super::Function;
 use crate::codegen::triton::{CONFIGS, Config, UNTUNED};
 use crate::graph::Primitive;
-use crate::graph_compiler::common::autotune::{Kernels, Timer, tuned};
+use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::Step;
 use crate::stream::event::event_for;
 use crate::{DType, Device, Tensor, TensorOptions};
 
-const TUNER: &str = "triton";
 
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
@@ -59,7 +58,7 @@ fn gemm(
 }
 
 pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {
-    let config = tuned::<Config>(TUNER, step).map_or(CONFIGS[UNTUNED], |(_, c)| c);
+    let config = step.tuned::<Config>().map_or(CONFIGS[UNTUNED], |(_, c)| c);
     gemm(lhs, rhs, out, &step.primitive, &config)
 }
 
@@ -67,8 +66,6 @@ pub(crate) struct Gemms;
 
 impl Kernels for Gemms {
     type Config = Config;
-
-    const NAME: &'static str = TUNER;
 
     fn configs(&self, step: &Step) -> Vec<Config> {
         match step.primitive {

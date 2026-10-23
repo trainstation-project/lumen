@@ -89,7 +89,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         let tuner = Autotuner {
             timer: gemm::Events { device },
         };
-        tuner.tune(&mut gemm::Gemms, &plan)?;
+        tuner.tune(&mut gemm::Gemms, &mut plan)?;
     }
     Ok(plan)
 }

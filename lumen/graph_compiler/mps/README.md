@@ -33,7 +33,7 @@ rewrites, most named after their XLA counterpart in their `//!` doc.
 | `horizontal.rs` | MPS's horizontal fusion `Target` (`../common/horizontal.rs`): which fusions join (no reductions, attention, atomic split-K or GEMM; at most 1M elements), keyed by element count (and shape for tiled transposes), within Metal's 30 buffers and the transpose tiles' heroes. |
 | `alone.rs` | Pass `alone`: every elementwise node, gather and concatenate left outside a fusion becomes a one-node fusion, run by a generated loop kernel (none has a primitive kernel on MPS); `wrapped` (also used by `Codegen`). |
 | `kernel_codegen.rs` | Pass `codegen` (`Codegen`): generates Metal source for every `pending#k` fusion and renames it to its kernel. |
-| `autotune.rs` | MPS's two kernel families and its timer for the shared `Autotuner` (`../common/autotune.rs`). `Loops` (`mps-loop`): steps whose generated kernel has candidates (`codegen::tunings_of`) and 64K to 16M output elements, each candidate generated as Metal; encode launches the pick in place of the step's kernel. `Gemms` (`mps-gemm`): each float matmul with 64K or more outputs and no strided operand (a `dot_general` step, or a fusion launched as a GEMM), a kernel per `GemmConfig` (`kernels/dot_general/mps/config.rs`: tile, K step, threads, SIMD-group columns) from `dot_general::mps::matmul_source` or the fusion's own `codegen::gemm_variant`; encode launches the pick with its threads (`Grid::GroupsOf`). `Mps`, the timer: `encode` under `capture` over zeroed cold `Buffers`, each launch timed on the GPU. |
+| `autotune.rs` | MPS's two kernel families and its timer for the shared `Autotuner` (`../common/autotune.rs`). `Loops`: steps whose generated kernel has candidates (`codegen::tunings_of`) and 64K to 16M output elements, each candidate generated as Metal; encode launches the pick in place of the step's kernel. `Gemms`: each float matmul with 64K or more outputs and no strided operand (a `dot_general` step, or a fusion launched as a GEMM), a kernel per `GemmConfig` (`kernels/dot_general/mps/config.rs`: tile, K step, threads, SIMD-group columns) from `dot_general::mps::matmul_source` or the fusion's own `codegen::gemm_variant`; encode launches the pick with its threads (`Grid::GroupsOf`). `Mps`, the timer: `encode` under `capture` over zeroed cold `Buffers`, each launch timed on the GPU. |
 | `place_views.rs` | Pass `place_views`: marks slices that dots read in place as strided views; `fusion_reads_strided`; `loads_strided` (an input only the load prologues read, not a dot's or attention's operand: any strides). |
 | `tests.rs` | End-to-end MPS compiler tests against the reference executor (skip without Metal via `plan_tests::mps::available`). |
 
@@ -101,8 +101,8 @@ no tuning when Metal is short of memory), with enough copies of the inputs,
 about 64 MB, that the repeats read them cold, as a model's kernels do once
 their inputs are out of cache: timed hot, an 8 MB input stays in the GPU's
 cache and the candidates rank differently. Encode launches the fastest
-candidate's kernel (`tuned`); the pick is cached per kernel and types, so
-a recompile re-times nothing. Loops and GEMMs have candidates so far.
+candidate's kernel, set on the plan's step (`Step::tuned`); steps of the
+same kernel and types are timed once. Loops and GEMMs have candidates so far.
 
 `neg` per call on an M4 Pro, back to back on cold inputs, best of 3,
 `autotune` off → on: float32 64K 3.11 → 2.73 µs, 256K 7.53 → 7.01 µs,

@@ -286,8 +286,8 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             config,
             sources: BTreeMap::new(),
         };
-        tuner.tune(&mut loops, &plan)?;
-        tuner.tune(&mut autotune::Gemms::default(), &plan)?;
+        tuner.tune(&mut loops, &mut plan)?;
+        tuner.tune(&mut autotune::Gemms::default(), &mut plan)?;
     }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
@@ -485,6 +485,7 @@ fn run_loop(
         scratch: None,
         scope: &[],
         sources: Vec::new(),
+        tuned: None,
     };
     let keep = vec![src.holding(), dst.holding()];
     let inputs = [src.data_ptr().cast_const()];
@@ -554,10 +555,9 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
-    let tuned = super::common::autotune::tuned::<Tuning>(autotune::LOOPS, step);
-    let name = tuned.as_ref().map_or(name, |(kernel, _)| kernel);
+    let name = step.tuned::<Tuning>().map_or(name.as_str(), |(kernel, _)| kernel);
     let variant = strided_variant(step, name, body)?;
-    let name = variant.as_ref().unwrap_or(name);
+    let name = variant.as_deref().unwrap_or(name);
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
         return ane::encode(step, inputs, output, keep);
     }
@@ -670,7 +670,7 @@ pub(crate) fn encode(
             )
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
-        let tuned = crate::kernels::dot_general::mps::tuned(step);
+        let tuned = step.tuned::<crate::kernels::dot_general::mps::GemmConfig>();
         let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
@@ -682,10 +682,10 @@ pub(crate) fn encode(
             tuned.as_ref().map(|(_, c)| (c.bm, c.bn)),
         )?;
         let kernel = match (&tuned, plan.small, plan.mid) {
-            (Some((tuned, _)), ..) => tuned.clone(),
+            (Some((tuned, _)), ..) => tuned.to_string(),
             (None, true, _) => format!("{name}_small"),
             (None, _, true) => format!("{name}_mid"),
-            _ => name.clone(),
+            _ => name.to_owned(),
         };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
@@ -724,7 +724,7 @@ pub(crate) fn encode(
         }
         let (kernel, grid) = match codegen::row_dot(body) {
             Some(_) => (
-                name.clone(),
+                name.to_owned(),
                 Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
             ),
             None => match (&tuned, plan.grid) {

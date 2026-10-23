@@ -21,7 +21,7 @@ and *where it lives in memory*.
 | `mod.rs` | `Options`, `compile` / `compile_with` (frontend pipeline, stage split, per-device dispatch), and shared helpers `elementwise` and `constant`. |
 | `config.rs` | `CompilerConfig` (every compiler flag, with defaults) and the process-wide `config()` / `update()` snapshot. |
 | `pass.rs` | XLA-style pass infrastructure: `Module`, `GraphModule`, the `CompilerPass` trait, `Pipeline` (profiling ranges and `dump_to`). |
-| `plan.rs` | `Plan`, `PlanOptions`, `Step`, `Buffer`, `Staged`/`Stage`/`Source`; buffer assignment, donation, in-place reuse, workspace packing, running (`run`, `run_on`, `run_in`), `Display`. |
+| `plan.rs` | `Plan`, `PlanOptions`, `Step` (with its autotuned kernel and config, `Tuned`, read by `Step::tuned`), `Buffer`, `Staged`/`Stage`/`Source`; buffer assignment, donation, in-place reuse, workspace packing, running (`run`, `run_on`, `run_in`), `Display`. |
 | `schedule.rs` | Memory-reducing topological orders: `list` (XLA `ListScheduler`), `dfs` (XLA `DFSMemoryScheduler`), and `Graph::reordered`. |
 | `remat.rs` | Rematerialization under `memory_limit` (XLA `hlo_rematerialization`). |
 | `stages.rs` | Splits a program with `to_host` values into alternating device/host stages; `without_transfers` strips `ToHost`/`ToDevice`. |

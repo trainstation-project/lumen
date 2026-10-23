@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use crate::graph_compiler::plan::Step;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GemmConfig {
@@ -10,8 +9,6 @@ pub(crate) struct GemmConfig {
     pub threads: usize,
     pub cols: usize,
 }
-
-pub(crate) const TUNER: &str = "mps-gemm";
 
 const MAX_THREADGROUP_BYTES: usize = 32 << 10;
 
@@ -92,6 +89,3 @@ pub(crate) const DEFAULT_CONFIGS: [(&str, GemmConfig); 3] = [
     ),
 ];
 
-pub(crate) fn tuned(step: &Step) -> Option<(String, GemmConfig)> {
-    crate::graph_compiler::common::autotune::tuned(TUNER, step)
-}
