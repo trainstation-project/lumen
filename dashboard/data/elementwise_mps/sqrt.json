@@ -10,11 +10,11 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "lumen_us": 1.846,
-   "torch_us": 2.609,
+   "lumen_us": 1.758,
+   "torch_us": 2.539,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 17.75
+   "gbs": 18.64
   },
   {
    "op": "sqrt",
@@ -26,11 +26,11 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "lumen_us": 1.994,
-   "torch_us": 2.884,
+   "lumen_us": 2.032,
+   "torch_us": 2.912,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 65.73
+   "gbs": 64.5
   },
   {
    "op": "sqrt",
@@ -42,11 +42,11 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "lumen_us": 3.706,
-   "torch_us": 4.691,
+   "lumen_us": 3.733,
+   "torch_us": 4.873,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 141.47
+   "gbs": 140.45
   },
   {
    "op": "sqrt",
@@ -58,11 +58,11 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "lumen_us": 10.411,
-   "torch_us": 11.185,
+   "lumen_us": 10.364,
+   "torch_us": 11.465,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 201.44
+   "gbs": 202.35
   },
   {
    "op": "sqrt",
@@ -74,11 +74,11 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "lumen_us": 40.176,
-   "torch_us": 42.87,
+   "lumen_us": 40.395,
+   "torch_us": 42.402,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 208.8
+   "gbs": 207.66
   },
   {
    "op": "sqrt",
@@ -90,11 +90,11 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "lumen_us": 153.919,
-   "torch_us": 153.292,
+   "lumen_us": 153.625,
+   "torch_us": 154.513,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 218.0
+   "gbs": 218.42
   },
   {
    "op": "sqrt",
@@ -106,11 +106,11 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "lumen_us": 579.41,
-   "torch_us": 602.304,
+   "lumen_us": 579.012,
+   "torch_us": 595.644,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 231.65
+   "gbs": 231.8
   },
   {
    "op": "sqrt",
@@ -122,11 +122,11 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "lumen_us": 2310.84,
-   "torch_us": 2306.427,
+   "lumen_us": 2281.827,
+   "torch_us": 2310.79,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 232.33
+   "gbs": 235.28
   },
   {
    "op": "sqrt",
@@ -138,11 +138,11 @@
    "inputs": 1,
    "bytes": 16384,
    "flops": 4096,
-   "lumen_us": 1.737,
-   "torch_us": 2.529,
+   "lumen_us": 1.652,
+   "torch_us": 2.513,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.43
+   "gbs": 9.92
   },
   {
    "op": "sqrt",
@@ -154,11 +154,11 @@
    "inputs": 1,
    "bytes": 65536,
    "flops": 16384,
-   "lumen_us": 1.91,
-   "torch_us": 2.827,
+   "lumen_us": 1.885,
+   "torch_us": 2.692,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 34.31
+   "gbs": 34.77
   },
   {
    "op": "sqrt",
@@ -170,11 +170,11 @@
    "inputs": 1,
    "bytes": 262144,
    "flops": 65536,
-   "lumen_us": 2.417,
-   "torch_us": 3.834,
+   "lumen_us": 2.508,
+   "torch_us": 3.717,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 108.46
+   "gbs": 104.52
   },
   {
    "op": "sqrt",
@@ -186,11 +186,11 @@
    "inputs": 1,
    "bytes": 1048576,
    "flops": 262144,
-   "lumen_us": 6.044,
-   "torch_us": 7.128,
+   "lumen_us": 6.13,
+   "torch_us": 7.006,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 173.49
+   "gbs": 171.06
   },
   {
    "op": "sqrt",
@@ -202,11 +202,11 @@
    "inputs": 1,
    "bytes": 4194304,
    "flops": 1048576,
-   "lumen_us": 20.5,
-   "torch_us": 20.807,
+   "lumen_us": 20.322,
+   "torch_us": 20.773,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 204.6
+   "gbs": 206.39
   },
   {
    "op": "sqrt",
@@ -218,11 +218,11 @@
    "inputs": 1,
    "bytes": 16777216,
    "flops": 4194304,
-   "lumen_us": 76.77,
-   "torch_us": 75.803,
+   "lumen_us": 77.602,
+   "torch_us": 77.958,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 218.54
+   "gbs": 216.2
   },
   {
    "op": "sqrt",
@@ -234,11 +234,11 @@
    "inputs": 1,
    "bytes": 67108864,
    "flops": 16777216,
-   "lumen_us": 295.738,
-   "torch_us": 301.096,
+   "lumen_us": 293.962,
+   "torch_us": 307.302,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 226.92
+   "gbs": 228.29
   },
   {
    "op": "sqrt",
@@ -250,16 +250,16 @@
    "inputs": 1,
    "bytes": 268435456,
    "flops": 67108864,
-   "lumen_us": 1156.067,
-   "torch_us": 1171.715,
+   "lumen_us": 1160.702,
+   "torch_us": 1213.129,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 232.2
+   "gbs": 231.27
   }
  ],
  "code": {
-  "kernel": "// step 0: sqrt\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = sqrt %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_0a063bbacbfdc411(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = Sqrt::apply(v0);\n        out[j] = v1;\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_0a063bbacbfdc411 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = sqrt %0\n  in (%1) }] in0"
+  "kernel": "// step 0: sqrt\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = sqrt %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_16064c6f1641031e_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_16064c6f1641031e_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_16064c6f1641031e(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = fusion_16064c6f1641031e_load0(in0, j);\n        float v1 = Sqrt::apply(v0);\n        fusion_16064c6f1641031e_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_16064c6f1641031e body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = sqrt %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T01:25:43+00:00"
+ "measured_at": "2026-10-23T07:53:36+00:00"
 }

@@ -3,7 +3,7 @@
 
 export RUSTFLAGS := -D warnings
 
-.PHONY: all ci test fmt fmt-check clang-format clang-format-check clippy miri clean
+.PHONY: all ci install test fmt fmt-check clang-format clang-format-check clippy miri clean
 
 ## ci: every CI job (rustfmt, clang-format, clippy, tests, miri), in that
 ## order.
@@ -37,16 +37,22 @@ TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$(python -c '
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
+## install: lumen built in release mode and installed into the active
+## virtualenv (maturin develop --release), with the device features of the
+## machine's hardware. Benchmarks and the dashboard measure this build.
+install:
+	maturin develop --release $(MATURIN_FEATURES)
+
 ## test: every test: the unit and doc tests, then the Python tests. CPU
 ## tests always run; MPS, CUDA and TPU ones run where the device is
-## available. The wheel is built first: it installs the device extras the
-## tests load (libtpu). On a TPU machine where lumen sees no TPU, it fails
+## available. The release wheel is installed first (`install`): it installs
+## the device extras the tests load (libtpu), and never leaves a debug build
+## behind for a benchmark to measure. On a TPU machine where lumen sees no TPU, it fails
 ## rather than skip the TPU tests. The Python tests run in parallel
 ## (pytest-xdist): a worker per TPU or CUDA chip, each seeing its own, or
 ## a worker per CPU core (tests/conftest.py); then, serially, the tests
 ## needing every device (`all_devices`).
-test:
-	maturin develop $(MATURIN_FEATURES)
+test: install
 	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
 	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
 	cargo test --doc

@@ -10,11 +10,11 @@
    "inputs": 1,
    "bytes": 24576,
    "flops": 4096,
-   "lumen_us": 1.801,
-   "torch_us": 3.346,
+   "lumen_us": 1.807,
+   "torch_us": 3.377,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 13.65
+   "gbs": 13.6
   },
   {
    "op": "cast",
@@ -26,11 +26,11 @@
    "inputs": 1,
    "bytes": 98304,
    "flops": 16384,
-   "lumen_us": 1.948,
-   "torch_us": 3.729,
+   "lumen_us": 1.936,
+   "torch_us": 3.602,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 50.46
+   "gbs": 50.78
   },
   {
    "op": "cast",
@@ -42,11 +42,11 @@
    "inputs": 1,
    "bytes": 393216,
    "flops": 65536,
-   "lumen_us": 3.327,
-   "torch_us": 5.4,
+   "lumen_us": 3.165,
+   "torch_us": 5.447,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 118.19
+   "gbs": 124.24
   },
   {
    "op": "cast",
@@ -58,11 +58,11 @@
    "inputs": 1,
    "bytes": 1572864,
    "flops": 262144,
-   "lumen_us": 8.61,
-   "torch_us": 11.129,
+   "lumen_us": 9.067,
+   "torch_us": 10.925,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 182.68
+   "gbs": 173.47
   },
   {
    "op": "cast",
@@ -74,11 +74,11 @@
    "inputs": 1,
    "bytes": 6291456,
    "flops": 1048576,
-   "lumen_us": 32.217,
-   "torch_us": 33.441,
+   "lumen_us": 30.694,
+   "torch_us": 32.602,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 195.28
+   "gbs": 204.97
   },
   {
    "op": "cast",
@@ -90,11 +90,11 @@
    "inputs": 1,
    "bytes": 25165824,
    "flops": 4194304,
-   "lumen_us": 115.449,
-   "torch_us": 117.958,
+   "lumen_us": 117.138,
+   "torch_us": 119.71,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 217.98
+   "gbs": 214.84
   },
   {
    "op": "cast",
@@ -106,11 +106,11 @@
    "inputs": 1,
    "bytes": 100663296,
    "flops": 16777216,
-   "lumen_us": 434.656,
-   "torch_us": 442.775,
+   "lumen_us": 443.494,
+   "torch_us": 442.962,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 231.59
+   "gbs": 226.98
   },
   {
    "op": "cast",
@@ -122,16 +122,16 @@
    "inputs": 1,
    "bytes": 402653184,
    "flops": 67108864,
-   "lumen_us": 1807.506,
-   "torch_us": 1790.871,
+   "lumen_us": 1738.519,
+   "torch_us": 1722.871,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 222.77
+   "gbs": 231.61
   }
  ],
  "code": {
-  "kernel": "// step 0: cast(float32 -> bfloat16)\n// { lambda %0:f32[1048576]. let\n//     %1:bf16[1048576] = cast[new_dtype=bf16] %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_08a91c7577ee5296(device const float *in0 [[buffer(0)]], device bfloat *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        bfloat v1 = convert_value<bfloat>(v0);\n        out[j] = v1;\n    }\n}",
-  "plan": "plan (workspace 2097152 bytes)\n    ws+0:bf16[1048576] = fusion[name=fusion_08a91c7577ee5296 body={ lambda %0:f32[1048576]. let\n    %1:bf16[1048576] = cast[new_dtype=bf16] %0\n  in (%1) }] in0"
+  "kernel": "// step 0: cast(float32 -> bfloat16)\n// { lambda %0:f32[1048576]. let\n//     %1:bf16[1048576] = cast[new_dtype=bf16] %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_65ab965d46d4c309_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_65ab965d46d4c309_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_65ab965d46d4c309(device const float *in0 [[buffer(0)]], device bfloat *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i, k = 0; k < 1u && j < n; ++k, j += threads) {\n        float v0 = fusion_65ab965d46d4c309_load0(in0, j);\n        bfloat v1 = convert_value<bfloat>(v0);\n        fusion_65ab965d46d4c309_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 2097152 bytes)\n    ws+0:bf16[1048576] = fusion[name=fusion_65ab965d46d4c309 body={ lambda %0:f32[1048576]. let\n    %1:bf16[1048576] = cast[new_dtype=bf16] %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T01:35:18+00:00"
+ "measured_at": "2026-10-23T08:02:07+00:00"
 }

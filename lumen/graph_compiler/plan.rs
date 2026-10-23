@@ -1,5 +1,7 @@
 use std::cmp::Reverse;
 use std::fmt;
+#[cfg(lumen_mps_linked)]
+use std::sync::OnceLock;
 
 pub use crate::graph::View;
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, UPDATES, Var};
@@ -143,6 +145,43 @@ pub struct Plan {
     pub(crate) interleaved: Vec<Vec<usize>>,
     pub(crate) staged: Option<Box<Staged>>,
     pub(crate) triton: Option<Vec<Option<super::triton::Kernel>>>,
+    #[cfg(lumen_mps_linked)]
+    launches: Launches,
+}
+
+#[cfg(lumen_mps_linked)]
+type Launches = OnceLock<Vec<OnceLock<Option<crate::kernels::mps::Prepared>>>>;
+
+#[cfg(lumen_mps_linked)]
+fn replayable(step: &Step) -> bool {
+    use Primitive::*;
+    let launches = match &step.primitive {
+        Fusion { name, .. } => !name.starts_with(crate::graph::NEURAL_ENGINE),
+        Wait | ToHost | ToDevice | CustomCall { .. } | PallasCall { .. } => false,
+        _ => true,
+    };
+    launches
+        && !step
+            .inputs
+            .iter()
+            .any(|(b, _)| matches!(b, Buffer::Scalar(_)))
+}
+
+#[cfg(lumen_mps_linked)]
+fn extent(ty: &TensorType, view: Option<&View>) -> usize {
+    let size = ty.dtype.size_of();
+    match view {
+        None => ty.numel() * size,
+        Some(view) => {
+            let last: usize = ty
+                .shape
+                .iter()
+                .zip(&view.strides)
+                .map(|(&n, &stride)| n.saturating_sub(1) * stride)
+                .sum();
+            (last + 1) * size
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -578,6 +617,8 @@ impl Plan {
             interleaved: Vec::new(),
             staged: None,
             triton: None,
+            #[cfg(lumen_mps_linked)]
+            launches: OnceLock::new(),
         }
     }
 
@@ -604,6 +645,8 @@ impl Plan {
             interleaved,
             staged: Some(Box::new(staged)),
             triton: None,
+            #[cfg(lumen_mps_linked)]
+            launches: OnceLock::new(),
         }
     }
 
@@ -672,6 +715,10 @@ impl Plan {
 
     #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
     pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
+        #[cfg(lumen_mps_linked)]
+        {
+            self.launches = OnceLock::new();
+        }
         &mut self.steps
     }
 
@@ -994,7 +1041,8 @@ impl Plan {
                 _ => None,
             };
             let with_views;
-            let step = if step.inputs.iter().any(|s| strided(s).is_some()) {
+            let viewed = step.inputs.iter().any(|s| strided(s).is_some());
+            let step = if viewed {
                 let mut s = step.clone();
                 for (k, input) in step.inputs.iter().enumerate() {
                     if let Some(i) = strided(input) {
@@ -1045,7 +1093,52 @@ impl Plan {
                     if step.scratch.is_some() {
                         keep.push(workspace.holding());
                     }
-                    crate::kernels::mps::encode(step, &args, out, scratch, keep)?;
+                    use crate::kernels::mps::{
+                        Pointers, Unprepared, capture, encode, prepare, replay,
+                    };
+                    let replayed = !viewed && !crate::profiler::is_enabled() && replayable(step);
+                    let Some(cell) = replayed.then(|| {
+                        let steps = self
+                            .launches
+                            .get_or_init(|| self.steps.iter().map(|_| OnceLock::new()).collect());
+                        &steps[at]
+                    }) else {
+                        encode(step, &args, out, scratch, keep)?;
+                        continue;
+                    };
+                    let sizes = step
+                        .inputs
+                        .iter()
+                        .zip(&step.views)
+                        .map(|(s, v)| extent(&s.1, v.as_ref()))
+                        .chain(step.extra_outputs.iter().map(|s| extent(&s.1, None)));
+                    let operands: Vec<(*const u8, usize)> =
+                        args.iter().copied().zip(sizes).collect();
+                    let pointers = Pointers {
+                        workspace: (workspace.data_ptr().cast_const(), workspace.nbytes()),
+                        operands: &operands,
+                        output: (out.cast_const(), extent(&step.output.1, None)),
+                    };
+                    match cell.get() {
+                        Some(Some(prepared)) => replay(prepared, &pointers, keep)?,
+                        Some(None) => encode(step, &args, out, scratch, keep)?,
+                        None => {
+                            let captured =
+                                capture(|| encode(step, &args, out, scratch, Vec::new()))?;
+                            match prepare(captured, &pointers) {
+                                Ok(prepared) => {
+                                    replay(&prepared, &pointers, keep)?;
+                                    let _ = cell.set(Some(prepared));
+                                }
+                                Err(unprepared) => {
+                                    if let Unprepared::Unplaced = unprepared {
+                                        let _ = cell.set(None);
+                                    }
+                                    encode(step, &args, out, scratch, keep)?;
+                                }
+                            }
+                        }
+                    }
                 }
                 #[cfg(lumen_tpu_linked)]
                 Device::Tpu(index) => {

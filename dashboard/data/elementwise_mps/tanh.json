@@ -10,11 +10,11 @@
    "inputs": 1,
    "bytes": 32768,
    "flops": 4096,
-   "lumen_us": 1.961,
-   "torch_us": 2.912,
+   "lumen_us": 1.784,
+   "torch_us": 2.976,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 16.71
+   "gbs": 18.37
   },
   {
    "op": "tanh",
@@ -26,11 +26,11 @@
    "inputs": 1,
    "bytes": 131072,
    "flops": 16384,
-   "lumen_us": 2.786,
-   "torch_us": 3.26,
+   "lumen_us": 2.818,
+   "torch_us": 3.311,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 47.05
+   "gbs": 46.51
   },
   {
    "op": "tanh",
@@ -42,11 +42,11 @@
    "inputs": 1,
    "bytes": 524288,
    "flops": 65536,
-   "lumen_us": 4.109,
-   "torch_us": 5.205,
+   "lumen_us": 4.197,
+   "torch_us": 5.128,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 127.6
+   "gbs": 124.92
   },
   {
    "op": "tanh",
@@ -58,11 +58,11 @@
    "inputs": 1,
    "bytes": 2097152,
    "flops": 262144,
-   "lumen_us": 10.41,
-   "torch_us": 11.625,
+   "lumen_us": 10.885,
+   "torch_us": 11.737,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 201.46
+   "gbs": 192.66
   },
   {
    "op": "tanh",
@@ -74,11 +74,11 @@
    "inputs": 1,
    "bytes": 8388608,
    "flops": 1048576,
-   "lumen_us": 41.289,
-   "torch_us": 42.872,
+   "lumen_us": 42.464,
+   "torch_us": 42.956,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 203.17
+   "gbs": 197.55
   },
   {
    "op": "tanh",
@@ -90,11 +90,11 @@
    "inputs": 1,
    "bytes": 33554432,
    "flops": 4194304,
-   "lumen_us": 153.56,
-   "torch_us": 154.198,
+   "lumen_us": 161.175,
+   "torch_us": 156.252,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 218.51
+   "gbs": 208.19
   },
   {
    "op": "tanh",
@@ -106,11 +106,11 @@
    "inputs": 1,
    "bytes": 134217728,
    "flops": 16777216,
-   "lumen_us": 592.11,
-   "torch_us": 610.523,
+   "lumen_us": 588.86,
+   "torch_us": 609.19,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 226.68
+   "gbs": 227.93
   },
   {
    "op": "tanh",
@@ -122,11 +122,11 @@
    "inputs": 1,
    "bytes": 536870912,
    "flops": 67108864,
-   "lumen_us": 2299.533,
-   "torch_us": 2341.738,
+   "lumen_us": 2362.26,
+   "torch_us": 2358.95,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 233.47
+   "gbs": 227.27
   },
   {
    "op": "tanh",
@@ -138,11 +138,11 @@
    "inputs": 1,
    "bytes": 16384,
    "flops": 4096,
-   "lumen_us": 1.684,
-   "torch_us": 2.866,
+   "lumen_us": 1.708,
+   "torch_us": 2.993,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.73
+   "gbs": 9.59
   },
   {
    "op": "tanh",
@@ -154,11 +154,11 @@
    "inputs": 1,
    "bytes": 65536,
    "flops": 16384,
-   "lumen_us": 2.591,
-   "torch_us": 3.114,
+   "lumen_us": 2.637,
+   "torch_us": 3.196,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 25.29
+   "gbs": 24.85
   },
   {
    "op": "tanh",
@@ -170,11 +170,11 @@
    "inputs": 1,
    "bytes": 262144,
    "flops": 65536,
-   "lumen_us": 3.173,
-   "torch_us": 4.546,
+   "lumen_us": 3.439,
+   "torch_us": 4.418,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 82.62
+   "gbs": 76.23
   },
   {
    "op": "tanh",
@@ -186,11 +186,11 @@
    "inputs": 1,
    "bytes": 1048576,
    "flops": 262144,
-   "lumen_us": 7.729,
-   "torch_us": 8.308,
+   "lumen_us": 7.699,
+   "torch_us": 8.072,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 135.67
+   "gbs": 136.2
   },
   {
    "op": "tanh",
@@ -202,11 +202,11 @@
    "inputs": 1,
    "bytes": 4194304,
    "flops": 1048576,
-   "lumen_us": 23.289,
-   "torch_us": 21.937,
+   "lumen_us": 23.372,
+   "torch_us": 22.194,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 180.1
+   "gbs": 179.46
   },
   {
    "op": "tanh",
@@ -218,11 +218,11 @@
    "inputs": 1,
    "bytes": 16777216,
    "flops": 4194304,
-   "lumen_us": 81.345,
-   "torch_us": 78.564,
+   "lumen_us": 80.227,
+   "torch_us": 79.267,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 206.25
+   "gbs": 209.12
   },
   {
    "op": "tanh",
@@ -234,11 +234,11 @@
    "inputs": 1,
    "bytes": 67108864,
    "flops": 16777216,
-   "lumen_us": 301.469,
-   "torch_us": 297.729,
+   "lumen_us": 305.723,
+   "torch_us": 317.36,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 222.61
+   "gbs": 219.51
   },
   {
    "op": "tanh",
@@ -250,16 +250,16 @@
    "inputs": 1,
    "bytes": 268435456,
    "flops": 67108864,
-   "lumen_us": 1161.837,
-   "torch_us": 1178.558,
+   "lumen_us": 1195.629,
+   "torch_us": 1230.583,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 231.04
+   "gbs": 224.51
   }
  ],
  "code": {
-  "kernel": "// step 0: tanh\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = tanh %0\n//   in (%1) }\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_ccd0312f0425f0c8(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = Tanh::apply(v0);\n        out[j] = v1;\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_ccd0312f0425f0c8 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = tanh %0\n  in (%1) }] in0"
+  "kernel": "// step 0: tanh\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = tanh %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_14c4d6721d29f08b_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_14c4d6721d29f08b_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_14c4d6721d29f08b(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = fusion_14c4d6721d29f08b_load0(in0, j);\n        float v1 = Tanh::apply(v0);\n        fusion_14c4d6721d29f08b_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_14c4d6721d29f08b body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = tanh %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T01:26:21+00:00"
+ "measured_at": "2026-10-23T07:54:10+00:00"
 }

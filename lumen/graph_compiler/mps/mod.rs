@@ -488,6 +488,9 @@ fn run_loop(
 }
 
 fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<String>, String> {
+    if step.views.iter().all(Option::is_none) {
+        return Ok(None);
+    }
     let strided: Vec<(usize, &[usize])> = step
         .views
         .iter()

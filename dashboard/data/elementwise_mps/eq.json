@@ -10,11 +10,11 @@
    "inputs": 2,
    "bytes": 36864,
    "flops": 4096,
-   "lumen_us": 2.11,
-   "torch_us": 2.834,
+   "lumen_us": 2.093,
+   "torch_us": 2.859,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 17.47
+   "gbs": 17.61
   },
   {
    "op": "eq",
@@ -26,11 +26,11 @@
    "inputs": 2,
    "bytes": 147456,
    "flops": 16384,
-   "lumen_us": 2.113,
-   "torch_us": 3.618,
+   "lumen_us": 1.974,
+   "torch_us": 3.431,
    "matches_torch": true,
    "rotation": 3641,
-   "gbs": 69.79
+   "gbs": 74.7
   },
   {
    "op": "eq",
@@ -42,11 +42,11 @@
    "inputs": 2,
    "bytes": 589824,
    "flops": 65536,
-   "lumen_us": 4.141,
-   "torch_us": 5.388,
+   "lumen_us": 4.081,
+   "torch_us": 5.335,
    "matches_torch": true,
    "rotation": 911,
-   "gbs": 142.44
+   "gbs": 144.53
   },
   {
    "op": "eq",
@@ -58,11 +58,11 @@
    "inputs": 2,
    "bytes": 2359296,
    "flops": 262144,
-   "lumen_us": 11.954,
-   "torch_us": 14.284,
+   "lumen_us": 11.894,
+   "torch_us": 13.741,
    "matches_torch": true,
    "rotation": 228,
-   "gbs": 197.36
+   "gbs": 198.36
   },
   {
    "op": "eq",
@@ -74,11 +74,11 @@
    "inputs": 2,
    "bytes": 9437184,
    "flops": 1048576,
-   "lumen_us": 46.594,
-   "torch_us": 47.48,
+   "lumen_us": 42.988,
+   "torch_us": 44.42,
    "matches_torch": true,
    "rotation": 57,
-   "gbs": 202.54
+   "gbs": 219.53
   },
   {
    "op": "eq",
@@ -90,11 +90,11 @@
    "inputs": 2,
    "bytes": 37748736,
    "flops": 4194304,
-   "lumen_us": 173.531,
-   "torch_us": 178.465,
+   "lumen_us": 163.012,
+   "torch_us": 164.012,
    "matches_torch": true,
    "rotation": 15,
-   "gbs": 217.53
+   "gbs": 231.57
   },
   {
    "op": "eq",
@@ -106,11 +106,11 @@
    "inputs": 2,
    "bytes": 150994944,
    "flops": 16777216,
-   "lumen_us": 629.25,
-   "torch_us": 644.092,
+   "lumen_us": 611.231,
+   "torch_us": 612.229,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 239.96
+   "gbs": 247.03
   },
   {
    "op": "eq",
@@ -122,11 +122,11 @@
    "inputs": 2,
    "bytes": 603979776,
    "flops": 67108864,
-   "lumen_us": 2610.015,
-   "torch_us": 2601.298,
+   "lumen_us": 2468.681,
+   "torch_us": 2434.431,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 231.41
+   "gbs": 244.66
   },
   {
    "op": "eq",
@@ -138,11 +138,11 @@
    "inputs": 2,
    "bytes": 20480,
    "flops": 4096,
-   "lumen_us": 1.864,
-   "torch_us": 2.69,
+   "lumen_us": 1.714,
+   "torch_us": 2.609,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 10.99
+   "gbs": 11.95
   },
   {
    "op": "eq",
@@ -154,11 +154,11 @@
    "inputs": 2,
    "bytes": 81920,
    "flops": 16384,
-   "lumen_us": 1.826,
-   "torch_us": 3.233,
+   "lumen_us": 1.796,
+   "torch_us": 3.189,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 44.86
+   "gbs": 45.61
   },
   {
    "op": "eq",
@@ -170,11 +170,11 @@
    "inputs": 2,
    "bytes": 327680,
    "flops": 65536,
-   "lumen_us": 2.933,
-   "torch_us": 4.579,
+   "lumen_us": 2.916,
+   "torch_us": 4.395,
    "matches_torch": true,
    "rotation": 1639,
-   "gbs": 111.72
+   "gbs": 112.37
   },
   {
    "op": "eq",
@@ -186,11 +186,11 @@
    "inputs": 2,
    "bytes": 1310720,
    "flops": 262144,
-   "lumen_us": 7.348,
-   "torch_us": 8.832,
+   "lumen_us": 7.226,
+   "torch_us": 8.73,
    "matches_torch": true,
    "rotation": 410,
-   "gbs": 178.38
+   "gbs": 181.39
   },
   {
    "op": "eq",
@@ -202,11 +202,11 @@
    "inputs": 2,
    "bytes": 5242880,
    "flops": 1048576,
-   "lumen_us": 25.496,
-   "torch_us": 27.302,
+   "lumen_us": 25.197,
+   "torch_us": 26.434,
    "matches_torch": true,
    "rotation": 103,
-   "gbs": 205.64
+   "gbs": 208.08
   },
   {
    "op": "eq",
@@ -218,11 +218,11 @@
    "inputs": 2,
    "bytes": 20971520,
    "flops": 4194304,
-   "lumen_us": 96.346,
-   "torch_us": 95.957,
+   "lumen_us": 92.524,
+   "torch_us": 93.237,
    "matches_torch": true,
    "rotation": 26,
-   "gbs": 217.67
+   "gbs": 226.66
   },
   {
    "op": "eq",
@@ -234,11 +234,11 @@
    "inputs": 2,
    "bytes": 83886080,
    "flops": 16777216,
-   "lumen_us": 367.223,
-   "torch_us": 369.785,
+   "lumen_us": 353.073,
+   "torch_us": 351.442,
    "matches_torch": true,
    "rotation": 7,
-   "gbs": 228.43
+   "gbs": 237.59
   },
   {
    "op": "eq",
@@ -250,16 +250,16 @@
    "inputs": 2,
    "bytes": 335544320,
    "flops": 67108864,
-   "lumen_us": 1484.227,
-   "torch_us": 1470.019,
+   "lumen_us": 1486.327,
+   "torch_us": 1516.096,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 226.07
+   "gbs": 225.75
   }
  ],
  "code": {
-  "kernel": "// step 0: eq\n// { lambda %0:f32[1048576] %1:f32[1048576]. let\n//     %2:bool[1048576] = eq %0 %1\n//   in (%2) }\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_28568604cb7d756a(device const float *in0 [[buffer(0)]], device const float *in1 [[buffer(1)]], device bool *out [[buffer(2)]], ELEMENTWISE_ARGS(3)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = in0[j];\n        float v1 = in1[j];\n        bool v2 = Eq::apply(v0, v1);\n        out[j] = v2;\n    }\n}",
-  "plan": "plan (workspace 1048576 bytes)\n    ws+0:bool[1048576] = fusion[name=fusion_28568604cb7d756a body={ lambda %0:f32[1048576] %1:f32[1048576]. let\n    %2:bool[1048576] = eq %0 %1\n  in (%2) }] in0 in1"
+  "kernel": "// step 0: eq\n// { lambda %0:f32[1048576] %1:f32[1048576]. let\n//     %2:bool[1048576] = eq %0 %1\n//   in (%2) }\n\ntemplate <typename T, typename I> inline T fusion_2ff0dede8b7fccad_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I> inline T fusion_2ff0dede8b7fccad_load1(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_2ff0dede8b7fccad_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_2ff0dede8b7fccad(device const float *in0 [[buffer(0)]], device const float *in1 [[buffer(1)]], device bool *out [[buffer(2)]], ELEMENTWISE_ARGS(3)) {\n    for (uint j = i, k = 0; k < 1u && j < n; ++k, j += threads) {\n        float v0 = fusion_2ff0dede8b7fccad_load0(in0, j);\n        float v1 = fusion_2ff0dede8b7fccad_load1(in1, j);\n        bool v2 = Eq::apply(v0, v1);\n        fusion_2ff0dede8b7fccad_store0(out, j, v2);\n    }\n}",
+  "plan": "plan (workspace 1048576 bytes)\n    ws+0:bool[1048576] = fusion[name=fusion_2ff0dede8b7fccad body={ lambda %0:f32[1048576] %1:f32[1048576]. let\n    %2:bool[1048576] = eq %0 %1\n  in (%2) }] in0 in1"
  },
- "measured_at": "2026-10-23T01:32:44+00:00"
+ "measured_at": "2026-10-23T07:59:49+00:00"
 }

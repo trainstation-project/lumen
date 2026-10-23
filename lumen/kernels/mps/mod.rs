@@ -61,6 +61,120 @@ pub(crate) struct Captured {
     sizes: [usize; 3],
     groups: bool,
     group: usize,
+    kernel: String,
+    label: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Null,
+    Workspace(usize),
+    Operand(usize, usize),
+    Output(usize),
+}
+
+#[derive(Debug, Clone)]
+struct Replay {
+    pipeline: usize,
+    buffers: Vec<Slot>,
+    args: Vec<Vec<u8>>,
+    sizes: [usize; 3],
+    groups: bool,
+    group: usize,
+    kernel: String,
+    label: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Prepared(Vec<Replay>);
+
+pub(crate) struct Pointers<'a> {
+    pub(crate) workspace: (*const u8, usize),
+    pub(crate) operands: &'a [(*const u8, usize)],
+    pub(crate) output: (*const u8, usize),
+}
+
+impl Pointers<'_> {
+    fn slot(&self, p: *const u8) -> Result<Slot, Unprepared> {
+        let within = |(base, len): (*const u8, usize)| {
+            let at = (p as usize).wrapping_sub(base as usize);
+            (at < len.max(1)).then_some(at)
+        };
+        if p.is_null() {
+            return Ok(Slot::Null);
+        }
+        if let Some(at) = within(self.workspace) {
+            return Ok(Slot::Workspace(at));
+        }
+        let mut found = self
+            .operands
+            .iter()
+            .enumerate()
+            .filter_map(|(k, &operand)| within(operand).map(|at| Slot::Operand(k, at)))
+            .chain(within(self.output).map(Slot::Output));
+        match (found.next(), found.next()) {
+            (Some(slot), None) => Ok(slot),
+            (Some(_), Some(_)) => Err(Unprepared::Ambiguous),
+            (None, _) => Err(Unprepared::Unplaced),
+        }
+    }
+
+    fn pointer(&self, slot: Slot) -> *const u8 {
+        match slot {
+            Slot::Null => std::ptr::null(),
+            Slot::Workspace(at) => self.workspace.0.wrapping_add(at),
+            Slot::Operand(k, at) => self.operands[k].0.wrapping_add(at),
+            Slot::Output(at) => self.output.0.wrapping_add(at),
+        }
+    }
+}
+
+pub(crate) enum Unprepared {
+    Ambiguous,
+    Unplaced,
+}
+
+pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared, Unprepared> {
+    let launches = captured.into_iter().map(|c| {
+        let buffers = c
+            .buffers
+            .iter()
+            .map(|&p| at.slot(p))
+            .collect::<Result<_, _>>()?;
+        Ok(Replay {
+            pipeline: c.pipeline as usize,
+            buffers,
+            args: c.args,
+            sizes: c.sizes,
+            groups: c.groups,
+            group: c.group,
+            kernel: c.kernel,
+            label: c.label,
+        })
+    });
+    launches.collect::<Result<_, _>>().map(Prepared)
+}
+
+pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> Result<(), String> {
+    let Some((last, first)) = prepared.0.split_last() else {
+        return Ok(());
+    };
+    let mut buffers = Vec::new();
+    for (r, keep) in first.iter().map(|r| (r, Vec::new())).chain([(last, keep)]) {
+        buffers.clear();
+        buffers.extend(r.buffers.iter().map(|&slot| at.pointer(slot)));
+        let launch = (r.sizes, r.groups, r.group);
+        dispatch(
+            r.pipeline as *mut c_void,
+            &buffers,
+            &r.args,
+            launch,
+            keep,
+            r.label,
+            &r.kernel,
+        )?;
+    }
+    Ok(())
 }
 
 impl Captured {
@@ -345,12 +459,34 @@ pub(crate) fn launch(
                 sizes,
                 groups,
                 group,
+                kernel: kernel.to_owned(),
+                label: name,
             })
         })
     });
     if captured.is_some() {
         return Ok(());
     }
+    dispatch(
+        pipeline,
+        buffers,
+        args,
+        (sizes, groups, group),
+        keep,
+        name,
+        kernel,
+    )
+}
+
+fn dispatch(
+    pipeline: *mut c_void,
+    buffers: &[*const u8],
+    args: &[Vec<u8>],
+    (sizes, groups, group): ([usize; 3], bool, usize),
+    keep: Vec<Tensor>,
+    name: &'static str,
+    kernel: &str,
+) -> Result<(), String> {
     let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
     let mut lens = [0usize; MAX_ARGS];
     for (k, a) in args.iter().enumerate() {
