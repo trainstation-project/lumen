@@ -9,12 +9,15 @@
    "n": 4096,
    "inputs": 1,
    "bytes": 32768,
+   "loaded_bytes": 16384,
+   "stored_bytes": 16384,
    "flops": 4096,
-   "lumen_us": 1.618,
-   "torch_us": 2.493,
+   "compute_bound": false,
+   "lumen_us": 1.535,
+   "torch_us": 2.451,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 20.25
+   "gbs": 21.35
   },
   {
    "op": "neg",
@@ -25,12 +28,15 @@
    "n": 16384,
    "inputs": 1,
    "bytes": 131072,
+   "loaded_bytes": 65536,
+   "stored_bytes": 65536,
    "flops": 16384,
-   "lumen_us": 2.005,
-   "torch_us": 2.83,
+   "compute_bound": false,
+   "lumen_us": 2.004,
+   "torch_us": 2.929,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 65.37
+   "gbs": 65.41
   },
   {
    "op": "neg",
@@ -41,12 +47,15 @@
    "n": 65536,
    "inputs": 1,
    "bytes": 524288,
+   "loaded_bytes": 262144,
+   "stored_bytes": 262144,
    "flops": 65536,
-   "lumen_us": 3.713,
-   "torch_us": 4.893,
+   "compute_bound": false,
+   "lumen_us": 3.711,
+   "torch_us": 4.907,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 141.2
+   "gbs": 141.28
   },
   {
    "op": "neg",
@@ -57,12 +66,15 @@
    "n": 262144,
    "inputs": 1,
    "bytes": 2097152,
+   "loaded_bytes": 1048576,
+   "stored_bytes": 1048576,
    "flops": 262144,
-   "lumen_us": 10.535,
-   "torch_us": 11.694,
+   "compute_bound": false,
+   "lumen_us": 10.135,
+   "torch_us": 10.993,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 199.07
+   "gbs": 206.92
   },
   {
    "op": "neg",
@@ -73,12 +85,15 @@
    "n": 1048576,
    "inputs": 1,
    "bytes": 8388608,
+   "loaded_bytes": 4194304,
+   "stored_bytes": 4194304,
    "flops": 1048576,
-   "lumen_us": 40.484,
-   "torch_us": 42.514,
+   "compute_bound": false,
+   "lumen_us": 39.108,
+   "torch_us": 40.518,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 207.21
+   "gbs": 214.5
   },
   {
    "op": "neg",
@@ -89,12 +104,15 @@
    "n": 4194304,
    "inputs": 1,
    "bytes": 33554432,
+   "loaded_bytes": 16777216,
+   "stored_bytes": 16777216,
    "flops": 4194304,
-   "lumen_us": 158.36,
-   "torch_us": 155.071,
+   "compute_bound": false,
+   "lumen_us": 159.212,
+   "torch_us": 156.777,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 211.89
+   "gbs": 210.75
   },
   {
    "op": "neg",
@@ -105,12 +123,15 @@
    "n": 16777216,
    "inputs": 1,
    "bytes": 134217728,
+   "loaded_bytes": 67108864,
+   "stored_bytes": 67108864,
    "flops": 16777216,
-   "lumen_us": 584.515,
-   "torch_us": 601.448,
+   "compute_bound": false,
+   "lumen_us": 581.842,
+   "torch_us": 592.16,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 229.62
+   "gbs": 230.68
   },
   {
    "op": "neg",
@@ -121,12 +142,15 @@
    "n": 67108864,
    "inputs": 1,
    "bytes": 536870912,
+   "loaded_bytes": 268435456,
+   "stored_bytes": 268435456,
    "flops": 67108864,
-   "lumen_us": 2358.85,
-   "torch_us": 2380.921,
+   "compute_bound": false,
+   "lumen_us": 2375.5,
+   "torch_us": 2460.875,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 227.6
+   "gbs": 226.0
   },
   {
    "op": "neg",
@@ -137,12 +161,15 @@
    "n": 4096,
    "inputs": 1,
    "bytes": 16384,
+   "loaded_bytes": 8192,
+   "stored_bytes": 8192,
    "flops": 4096,
-   "lumen_us": 1.553,
-   "torch_us": 2.47,
+   "compute_bound": false,
+   "lumen_us": 1.621,
+   "torch_us": 2.598,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 10.55
+   "gbs": 10.11
   },
   {
    "op": "neg",
@@ -153,12 +180,15 @@
    "n": 16384,
    "inputs": 1,
    "bytes": 65536,
+   "loaded_bytes": 32768,
+   "stored_bytes": 32768,
    "flops": 16384,
-   "lumen_us": 1.865,
-   "torch_us": 2.698,
+   "compute_bound": false,
+   "lumen_us": 1.859,
+   "torch_us": 2.684,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 35.14
+   "gbs": 35.25
   },
   {
    "op": "neg",
@@ -169,12 +199,15 @@
    "n": 65536,
    "inputs": 1,
    "bytes": 262144,
+   "loaded_bytes": 131072,
+   "stored_bytes": 131072,
    "flops": 65536,
-   "lumen_us": 2.449,
-   "torch_us": 3.584,
+   "compute_bound": false,
+   "lumen_us": 2.459,
+   "torch_us": 3.774,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 107.04
+   "gbs": 106.61
   },
   {
    "op": "neg",
@@ -185,12 +218,15 @@
    "n": 262144,
    "inputs": 1,
    "bytes": 1048576,
+   "loaded_bytes": 524288,
+   "stored_bytes": 524288,
    "flops": 262144,
-   "lumen_us": 6.066,
-   "torch_us": 7.097,
+   "compute_bound": false,
+   "lumen_us": 6.021,
+   "torch_us": 7.048,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 172.86
+   "gbs": 174.15
   },
   {
    "op": "neg",
@@ -201,12 +237,15 @@
    "n": 1048576,
    "inputs": 1,
    "bytes": 4194304,
+   "loaded_bytes": 2097152,
+   "stored_bytes": 2097152,
    "flops": 1048576,
-   "lumen_us": 20.279,
-   "torch_us": 20.813,
+   "compute_bound": false,
+   "lumen_us": 21.008,
+   "torch_us": 21.301,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 206.83
+   "gbs": 199.65
   },
   {
    "op": "neg",
@@ -217,12 +256,15 @@
    "n": 4194304,
    "inputs": 1,
    "bytes": 16777216,
+   "loaded_bytes": 8388608,
+   "stored_bytes": 8388608,
    "flops": 4194304,
-   "lumen_us": 77.928,
-   "torch_us": 77.155,
+   "compute_bound": false,
+   "lumen_us": 78.229,
+   "torch_us": 78.345,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 215.29
+   "gbs": 214.46
   },
   {
    "op": "neg",
@@ -233,12 +275,15 @@
    "n": 16777216,
    "inputs": 1,
    "bytes": 67108864,
+   "loaded_bytes": 33554432,
+   "stored_bytes": 33554432,
    "flops": 16777216,
-   "lumen_us": 298.281,
-   "torch_us": 310.175,
+   "compute_bound": false,
+   "lumen_us": 305.542,
+   "torch_us": 318.896,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 224.99
+   "gbs": 219.64
   },
   {
    "op": "neg",
@@ -249,17 +294,20 @@
    "n": 67108864,
    "inputs": 1,
    "bytes": 268435456,
+   "loaded_bytes": 134217728,
+   "stored_bytes": 134217728,
    "flops": 67108864,
-   "lumen_us": 1166.546,
-   "torch_us": 1220.037,
+   "compute_bound": false,
+   "lumen_us": 1193.252,
+   "torch_us": 1209.873,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 230.11
+   "gbs": 224.96
   }
  ],
  "code": {
-  "kernel": "// step 0: neg\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = neg %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_9d1eec8a55febb8f_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_9d1eec8a55febb8f_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(64)]]\nkernel void fusion_9d1eec8a55febb8f(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = fusion_9d1eec8a55febb8f_load0(in0, j);\n        float v1 = -v0;\n        fusion_9d1eec8a55febb8f_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_9d1eec8a55febb8f body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = neg %0\n  in (%1) }] in0"
+  "kernel": "// step 0: neg\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = neg %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_e95bcfa662ba1772_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_e95bcfa662ba1772_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_e95bcfa662ba1772(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = fusion_e95bcfa662ba1772_load0(in0, j);\n        float v1 = -v0;\n        fusion_e95bcfa662ba1772_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_e95bcfa662ba1772 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = neg %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T07:51:55+00:00"
+ "measured_at": "2026-10-23T08:16:11+00:00"
 }

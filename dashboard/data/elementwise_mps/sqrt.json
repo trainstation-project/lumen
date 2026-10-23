@@ -9,12 +9,15 @@
    "n": 4096,
    "inputs": 1,
    "bytes": 32768,
+   "loaded_bytes": 16384,
+   "stored_bytes": 16384,
    "flops": 4096,
-   "lumen_us": 1.758,
-   "torch_us": 2.539,
+   "compute_bound": false,
+   "lumen_us": 1.416,
+   "torch_us": 2.556,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 18.64
+   "gbs": 23.14
   },
   {
    "op": "sqrt",
@@ -25,12 +28,15 @@
    "n": 16384,
    "inputs": 1,
    "bytes": 131072,
+   "loaded_bytes": 65536,
+   "stored_bytes": 65536,
    "flops": 16384,
-   "lumen_us": 2.032,
-   "torch_us": 2.912,
+   "compute_bound": false,
+   "lumen_us": 2.003,
+   "torch_us": 2.81,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 64.5
+   "gbs": 65.44
   },
   {
    "op": "sqrt",
@@ -41,12 +47,15 @@
    "n": 65536,
    "inputs": 1,
    "bytes": 524288,
+   "loaded_bytes": 262144,
+   "stored_bytes": 262144,
    "flops": 65536,
-   "lumen_us": 3.733,
-   "torch_us": 4.873,
+   "compute_bound": false,
+   "lumen_us": 3.655,
+   "torch_us": 4.646,
    "matches_torch": true,
    "rotation": 1024,
-   "gbs": 140.45
+   "gbs": 143.44
   },
   {
    "op": "sqrt",
@@ -57,12 +66,15 @@
    "n": 262144,
    "inputs": 1,
    "bytes": 2097152,
+   "loaded_bytes": 1048576,
+   "stored_bytes": 1048576,
    "flops": 262144,
-   "lumen_us": 10.364,
-   "torch_us": 11.465,
+   "compute_bound": false,
+   "lumen_us": 10.128,
+   "torch_us": 11.048,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 202.35
+   "gbs": 207.06
   },
   {
    "op": "sqrt",
@@ -73,12 +85,15 @@
    "n": 1048576,
    "inputs": 1,
    "bytes": 8388608,
+   "loaded_bytes": 4194304,
+   "stored_bytes": 4194304,
    "flops": 1048576,
-   "lumen_us": 40.395,
-   "torch_us": 42.402,
+   "compute_bound": false,
+   "lumen_us": 39.285,
+   "torch_us": 40.69,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 207.66
+   "gbs": 213.53
   },
   {
    "op": "sqrt",
@@ -89,12 +104,15 @@
    "n": 4194304,
    "inputs": 1,
    "bytes": 33554432,
+   "loaded_bytes": 16777216,
+   "stored_bytes": 16777216,
    "flops": 4194304,
-   "lumen_us": 153.625,
-   "torch_us": 154.513,
+   "compute_bound": false,
+   "lumen_us": 150.419,
+   "torch_us": 148.875,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 218.42
+   "gbs": 223.07
   },
   {
    "op": "sqrt",
@@ -105,12 +123,15 @@
    "n": 16777216,
    "inputs": 1,
    "bytes": 134217728,
+   "loaded_bytes": 67108864,
+   "stored_bytes": 67108864,
    "flops": 16777216,
-   "lumen_us": 579.012,
-   "torch_us": 595.644,
+   "compute_bound": false,
+   "lumen_us": 573.692,
+   "torch_us": 582.287,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 231.8
+   "gbs": 233.95
   },
   {
    "op": "sqrt",
@@ -121,12 +142,15 @@
    "n": 67108864,
    "inputs": 1,
    "bytes": 536870912,
+   "loaded_bytes": 268435456,
+   "stored_bytes": 268435456,
    "flops": 67108864,
-   "lumen_us": 2281.827,
-   "torch_us": 2310.79,
+   "compute_bound": false,
+   "lumen_us": 2290.481,
+   "torch_us": 2378.385,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 235.28
+   "gbs": 234.39
   },
   {
    "op": "sqrt",
@@ -137,12 +161,15 @@
    "n": 4096,
    "inputs": 1,
    "bytes": 16384,
+   "loaded_bytes": 8192,
+   "stored_bytes": 8192,
    "flops": 4096,
-   "lumen_us": 1.652,
-   "torch_us": 2.513,
+   "compute_bound": false,
+   "lumen_us": 1.321,
+   "torch_us": 2.413,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 9.92
+   "gbs": 12.4
   },
   {
    "op": "sqrt",
@@ -153,12 +180,15 @@
    "n": 16384,
    "inputs": 1,
    "bytes": 65536,
+   "loaded_bytes": 32768,
+   "stored_bytes": 32768,
    "flops": 16384,
-   "lumen_us": 1.885,
-   "torch_us": 2.692,
+   "compute_bound": false,
+   "lumen_us": 1.847,
+   "torch_us": 2.705,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 34.77
+   "gbs": 35.48
   },
   {
    "op": "sqrt",
@@ -169,12 +199,15 @@
    "n": 65536,
    "inputs": 1,
    "bytes": 262144,
+   "loaded_bytes": 131072,
+   "stored_bytes": 131072,
    "flops": 65536,
-   "lumen_us": 2.508,
-   "torch_us": 3.717,
+   "compute_bound": false,
+   "lumen_us": 2.353,
+   "torch_us": 3.761,
    "matches_torch": true,
    "rotation": 2048,
-   "gbs": 104.52
+   "gbs": 111.41
   },
   {
    "op": "sqrt",
@@ -185,12 +218,15 @@
    "n": 262144,
    "inputs": 1,
    "bytes": 1048576,
+   "loaded_bytes": 524288,
+   "stored_bytes": 524288,
    "flops": 262144,
-   "lumen_us": 6.13,
-   "torch_us": 7.006,
+   "compute_bound": false,
+   "lumen_us": 5.862,
+   "torch_us": 6.701,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 171.06
+   "gbs": 178.88
   },
   {
    "op": "sqrt",
@@ -201,12 +237,15 @@
    "n": 1048576,
    "inputs": 1,
    "bytes": 4194304,
+   "loaded_bytes": 2097152,
+   "stored_bytes": 2097152,
    "flops": 1048576,
-   "lumen_us": 20.322,
-   "torch_us": 20.773,
+   "compute_bound": false,
+   "lumen_us": 19.571,
+   "torch_us": 20.016,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 206.39
+   "gbs": 214.31
   },
   {
    "op": "sqrt",
@@ -217,12 +256,15 @@
    "n": 4194304,
    "inputs": 1,
    "bytes": 16777216,
+   "loaded_bytes": 8388608,
+   "stored_bytes": 8388608,
    "flops": 4194304,
-   "lumen_us": 77.602,
-   "torch_us": 77.958,
+   "compute_bound": false,
+   "lumen_us": 75.049,
+   "torch_us": 74.437,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 216.2
+   "gbs": 223.55
   },
   {
    "op": "sqrt",
@@ -233,12 +275,15 @@
    "n": 16777216,
    "inputs": 1,
    "bytes": 67108864,
+   "loaded_bytes": 33554432,
+   "stored_bytes": 33554432,
    "flops": 16777216,
-   "lumen_us": 293.962,
-   "torch_us": 307.302,
+   "compute_bound": false,
+   "lumen_us": 293.696,
+   "torch_us": 309.748,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 228.29
+   "gbs": 228.5
   },
   {
    "op": "sqrt",
@@ -249,17 +294,20 @@
    "n": 67108864,
    "inputs": 1,
    "bytes": 268435456,
+   "loaded_bytes": 134217728,
+   "stored_bytes": 134217728,
    "flops": 67108864,
-   "lumen_us": 1160.702,
-   "torch_us": 1213.129,
+   "compute_bound": false,
+   "lumen_us": 1149.467,
+   "torch_us": 1161.192,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 231.27
+   "gbs": 233.53
   }
  ],
  "code": {
   "kernel": "// step 0: sqrt\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = sqrt %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_16064c6f1641031e_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_16064c6f1641031e_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_16064c6f1641031e(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = fusion_16064c6f1641031e_load0(in0, j);\n        float v1 = Sqrt::apply(v0);\n        fusion_16064c6f1641031e_store0(out, j, v1);\n    }\n}",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_16064c6f1641031e body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = sqrt %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-23T07:53:36+00:00"
+ "measured_at": "2026-10-23T08:17:52+00:00"
 }
