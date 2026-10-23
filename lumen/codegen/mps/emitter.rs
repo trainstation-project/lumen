@@ -153,6 +153,23 @@ impl<'a> Emitter<'a> {
                     Cast { .. } => {
                         format!("convert_value<{t}>({})", self.value(node.inputs[0], idx))
                     }
+                    Unary(op) => {
+                        let x = self.value(node.inputs[0], idx);
+                        match op {
+                            UnaryOp::ReducePrecision {
+                                exponent_bits,
+                                mantissa_bits,
+                            } => format!(
+                                "reduce_precision_op({x}, {exponent_bits}u, {mantissa_bits}u)"
+                            ),
+                            op => format!("{}_op({x})", op.name()),
+                        }
+                    }
+                    Binary(op) => {
+                        let x = self.value(node.inputs[0], idx.clone());
+                        let y = self.value(node.inputs[1], idx);
+                        format!("{}_op({x}, {y})", op.name())
+                    }
                     Select => {
                         let p = self.value(node.inputs[0], idx.clone());
                         let x = self.value(node.inputs[1], idx.clone());

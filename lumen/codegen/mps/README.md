@@ -147,8 +147,9 @@ index through a layout primitive (XLA's indexing maps), using
 Fields `invariant` / `row_locals` / `hoisted` let callers pin a value to a
 name computed once (a row's reduction, a GEMM's `r`, a transpose tile
 slot). Elementwise ops map to functors in `kernels/mps/kernels.metal`
-(`functor`); constants are emitted from the exact bits `full` would fill
-(`constant`). Anything else hits `unreachable!("... is not loop-fusible")`.
+(`functor`), and `unary` and `binary` primitives to its `<name>_op`
+functions (`reduce_precision_op` takes the bit counts); constants are
+emitted from the exact bits `full` would fill (`constant`). Anything else hits `unreachable!("... is not loop-fusible")`.
 
 ## Naming: `named`
 

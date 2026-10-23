@@ -6,7 +6,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::{formatdoc, writedoc};
 
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph_compiler::mps::fusion;
