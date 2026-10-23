@@ -158,6 +158,7 @@ mod store {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
     fn clients_share_the_masters_values() {
         let master = master();
         let client = client(&master);
@@ -168,6 +169,7 @@ mod store {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
     fn get_waits_for_the_key() {
         let master = master();
         let port = master.port();
@@ -183,6 +185,7 @@ mod store {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
     fn add_counts_across_clients() {
         let master = master();
         let port = master.port();
@@ -204,6 +207,7 @@ mod store {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
     fn waiting_too_long_is_an_error() {
         let master = TcpStore::new("127.0.0.1", 0, true, Duration::from_millis(50)).unwrap();
         assert!(master.get("never").unwrap_err().contains("timed out"));
@@ -216,6 +220,7 @@ mod store {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
     fn connecting_to_no_store_times_out() {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

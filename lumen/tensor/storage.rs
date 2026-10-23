@@ -72,7 +72,6 @@ impl Storage {
     }
 }
 
-#[cfg(lumen_mps_linked)]
 pub(crate) fn as_bytes<T: super::dtype::Element>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), size_of_val(data)) }
 }

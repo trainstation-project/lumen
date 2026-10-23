@@ -18,6 +18,7 @@ cuda = [
     "cuda-python; sys_platform == 'linux'",
     # Its compiled kernels are called from Rust through TVM-FFI's C ABI.
     "apache-tvm-ffi; sys_platform == 'linux'",
+    "triton; sys_platform == 'linux'",
 ]
 # A TPU's runtime: libtpu.so, which lumen/device/tpu loads at run time and
 # which compiles lumen's kernels (`make test` points TPU_LIBRARY_PATH at

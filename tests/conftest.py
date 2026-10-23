@@ -96,3 +96,12 @@ def pytest_configure(config):
     for device, count in worker["device_counts"].items():
         if count:
             os.environ.update(PINNED[device](k % count, k))
+
+
+@pytest.fixture
+def triton_on_cuda(device):
+    """``use_triton_backend`` on for CUDA, whose plans run with Triton: its
+    GEMM and generated loops."""
+    lumen.config.compiler.use_triton_backend = device == "cuda"
+    yield
+    lumen.config.compiler.use_triton_backend = False

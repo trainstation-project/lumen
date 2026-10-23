@@ -142,6 +142,7 @@ pub struct Plan {
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
     pub(crate) interleaved: Vec<Vec<usize>>,
     pub(crate) staged: Option<Box<Staged>>,
+    pub(crate) triton: Option<Vec<Option<super::triton::Kernel>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +577,7 @@ impl Plan {
             packed: Vec::new(),
             interleaved: Vec::new(),
             staged: None,
+            triton: None,
         }
     }
 
@@ -601,6 +603,7 @@ impl Plan {
             packed,
             interleaved,
             staged: Some(Box::new(staged)),
+            triton: None,
         }
     }
 
@@ -881,7 +884,9 @@ impl Plan {
     fn executor(&self, device: Device) -> Result<Device, String> {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
-        } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_)) {
+        } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_))
+            || self.triton.is_some() && matches!(device, Device::Cuda(_))
+        {
             device
         } else {
             Device::Cpu(0)
@@ -1035,6 +1040,19 @@ impl Plan {
                 Device::Tpu(index) => {
                     let _ = scratch;
                     crate::kernels::tpu::encode(index, step, &args, out)?;
+                }
+                Device::Cuda(_) => {
+                    let _ = scratch;
+                    let view = |&(buffer, ref ty): &(Buffer, TensorType)| match buffer {
+                        Buffer::Workspace(offset) => {
+                            workspace.view_bytes(offset, ty.dtype, &ty.shape)
+                        }
+                        _ => tensor(buffer).view_bytes(0, ty.dtype, &ty.shape),
+                    };
+                    let kernels = self.triton.as_deref().unwrap_or_default();
+                    let inputs: Vec<Tensor> = step.inputs.iter().map(view).collect();
+                    let kernel = kernels.get(at).and_then(Option::as_ref);
+                    super::triton::run(kernel, step, &inputs, &view(&step.output))?;
                 }
                 _ => {
                     let _ = scratch;

@@ -136,7 +136,7 @@ def test_cuda_fill_launches_on_the_tensors_device():
         pytest.skip("needs two CUDA devices")
     for device, other in (("cuda:0", "cuda:1"), ("cuda:1", "cuda:0")):
         t = lumen.zeros([1 << 16], device=device)
-        lumen.cuda.synchronize(f"cuda:{other}")
+        lumen.cuda.synchronize(other)
         t.fill_(5.0)
         assert t.tolist() == [5.0] * (1 << 16)
 

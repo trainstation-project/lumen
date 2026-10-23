@@ -37,6 +37,7 @@ and *where it lives in memory*.
 - [`cpu/`](cpu/README.md) — the host compiler (one `simplify` pass, then plan).
 - [`mps/`](mps/README.md) — the MPS compiler: fusion passes, Metal codegen driving, `encode`.
 - [`mps/ane/`](mps/ane/README.md) — optional Apple Neural Engine offload through Core ML.
+- [`triton/`](triton/README.md) — the CUDA compiler with `use_triton_backend`: loop fusion into generated Triton kernels, and the Triton GEMM.
 
 ## Compile flow
 
@@ -45,6 +46,7 @@ compile_with(graph, device, options)
   ├─ Pipeline "frontend": cse → simplify            (every device)
   ├─ device != Cpu(0) and the graph has host values → stages::compile → staged Plan
   └─ device_compile(without_transfers(graph))
+       ├─ Device::Cuda, use_triton_backend → triton::compile
        ├─ Device::Mps → mps::compile                 (only with cfg lumen_mps_linked)
        └─ otherwise   → cpu::compile
 ```

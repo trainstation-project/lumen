@@ -616,7 +616,9 @@ mod cuda {
         let htod = one(&p, "Memcpy HtoD");
         within(htod, one(&p, "lumen::from_slice"), 1_000_000);
         let dtoh = one(&p, "Memcpy DtoH");
-        assert_eq!(dtoh.parent, Some(one(&p, "lumen::to_vec").id));
+        let copy = one(&p, "lumen::copy_d2h");
+        assert_eq!(dtoh.parent, Some(copy.id));
+        assert_eq!(copy.parent, Some(one(&p, "lumen::to_vec").id));
         for e in [htod, dtoh] {
             assert_eq!((e.kind, e.device), (EventKind::Gpu, Device::Cuda(0)));
         }
