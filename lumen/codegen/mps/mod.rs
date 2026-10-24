@@ -100,19 +100,51 @@ pub(crate) fn writes_views(body: &Graph) -> bool {
 
 pub(super) fn formatted(source: &str) -> String {
     let mut out = String::new();
-    let mut depth = 0usize;
+    let mut open: Vec<(char, usize)> = Vec::new();
+    let mut statement = 0;
     for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let code = line.split("//").next().unwrap_or("");
-        let closing = code
-            .chars()
-            .take_while(|c| matches!(c, '}' | ')' | '>'))
-            .count();
-        let level = depth.saturating_sub(closing);
-        writeln!(out, "{}{line}", "    ".repeat(level)).unwrap();
-        let opened = code.matches(['{', '(']).count() + usize::from(code.ends_with('<'));
-        let closed = code.matches(['}', ')']).count() + usize::from(code.starts_with('>'));
-        depth = (depth + opened).saturating_sub(closed);
-        if depth == 0 && code.ends_with(['}', ';']) && closing > 0 {
+        let indent = match open.last() {
+            Some(&('{', column)) if line.starts_with('}') => column - 4,
+            Some(&(_, column)) => column,
+            None => 0,
+        };
+        if !matches!(open.last(), Some(&(b, _)) if b != '{') {
+            statement = indent;
+        }
+        writeln!(out, "{}{line}", " ".repeat(indent)).unwrap();
+        let chars: Vec<char> = line.chars().collect();
+        let code = chars
+            .windows(2)
+            .position(|w| w == ['/', '/'])
+            .unwrap_or(chars.len());
+        let aligned = |k: usize| match chars[k + 1..code].iter().all(|c| c.is_whitespace()) {
+            true => statement + 4,
+            false => indent + k + 1,
+        };
+        let mut quoted = false;
+        for (k, &c) in chars[..code].iter().enumerate() {
+            let after_name = k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_');
+            match c {
+                '"' => quoted = !quoted,
+                _ if quoted => {}
+                '{' => open.push((c, statement + 4)),
+                '(' | '[' => open.push((c, aligned(k))),
+                '<' if after_name && !matches!(chars.get(k + 1), Some('<' | '=' | ' ')) => {
+                    open.push((c, aligned(k)))
+                }
+                '>' if matches!(open.last(), Some(('<', _))) => {
+                    open.pop();
+                }
+                ')' | ']' | '}' => {
+                    while matches!(open.last(), Some(('<', _))) {
+                        open.pop();
+                    }
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        if open.is_empty() && line.starts_with('}') {
             writeln!(out).unwrap();
         }
     }
@@ -166,11 +198,11 @@ pub(crate) fn strided_load(
 }
 
 pub(super) fn named(source: String) -> (String, String) {
-    let source = formatted(&format!("{}{source}", loads(&source)));
+    let source = format!("{}{source}", loads(&source));
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());
-    (name.clone(), source.replace("NAME", &name))
+    (name.clone(), formatted(&source.replace("NAME", &name)))
 }
 
 pub(super) fn io_params(
