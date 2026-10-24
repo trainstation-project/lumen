@@ -4,7 +4,7 @@ use crate as core;
 use crate::Device;
 use crate::device::python::resolve_device;
 use crate::graph_compiler::config::{
-    self, Configs, PyCpuConfig, PyCudaConfig, PyMpsConfig, PyTpuConfig,
+    self, Configs, PyCompilerConfig, PyCpuConfig, PyCudaConfig, PyMpsConfig, PyTpuConfig,
 };
 
 #[pyclass(name = "Config", module = "lumen")]
@@ -42,32 +42,32 @@ struct PyCompilerConfigs;
 #[pymethods]
 impl PyCompilerConfigs {
     #[getter]
-    fn cpu(&self) -> PyCpuConfig {
-        PyCpuConfig
+    fn cpu(&self, py: Python<'_>) -> PyResult<Py<PyCpuConfig>> {
+        PyCpuConfig::object(py)
     }
 
     #[getter]
-    fn cuda(&self) -> PyCudaConfig {
-        PyCudaConfig
+    fn cuda(&self, py: Python<'_>) -> PyResult<Py<PyCudaConfig>> {
+        PyCudaConfig::object(py)
     }
 
     #[getter]
-    fn mps(&self) -> PyMpsConfig {
-        PyMpsConfig
+    fn mps(&self, py: Python<'_>) -> PyResult<Py<PyMpsConfig>> {
+        PyMpsConfig::object(py)
     }
 
     #[getter]
-    fn tpu(&self) -> PyTpuConfig {
-        PyTpuConfig
+    fn tpu(&self, py: Python<'_>) -> PyResult<Py<PyTpuConfig>> {
+        PyTpuConfig::object(py)
     }
 
     fn of<'py>(&self, device: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = device.py();
         Ok(match resolve_device(Some(device))? {
-            Device::Cpu(_) | Device::Meta(_) => Bound::new(py, PyCpuConfig)?.into_any(),
-            Device::Cuda(_) => Bound::new(py, PyCudaConfig)?.into_any(),
-            Device::Mps(_) => Bound::new(py, PyMpsConfig)?.into_any(),
-            Device::Tpu(_) => Bound::new(py, PyTpuConfig)?.into_any(),
+            Device::Cpu(_) | Device::Meta(_) => PyCpuConfig::object(py)?.into_bound(py).into_any(),
+            Device::Cuda(_) => PyCudaConfig::object(py)?.into_bound(py).into_any(),
+            Device::Mps(_) => PyMpsConfig::object(py)?.into_bound(py).into_any(),
+            Device::Tpu(_) => PyTpuConfig::object(py)?.into_bound(py).into_any(),
         })
     }
 
@@ -94,6 +94,7 @@ impl PyCompilerConfigs {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Config>()?;
     m.add_class::<PyCompilerConfigs>()?;
+    m.add_class::<PyCompilerConfig>()?;
     m.add_class::<PyCpuConfig>()?;
     m.add_class::<PyCudaConfig>()?;
     m.add_class::<PyMpsConfig>()?;

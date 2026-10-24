@@ -1,14 +1,9 @@
 use super::{CompilerConfig, device_config};
 
 device_config! {
-    CudaConfig, PyCudaConfig, "CudaConfig", cuda {
-        merge_dots, set_merge_dots: bool = true;
-        flash_attention, set_flash_attention: bool = true;
-        fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize> = None;
+    CudaConfig, PyCudaConfig, "CudaConfig", cuda, crate::Device::Cuda(0), {
         use_triton_backend, set_use_triton_backend: bool = false;
         autotune, set_autotune: bool = true;
-        memory_limit, set_memory_limit: usize = 0;
-        dump_to, set_dump_to: Option<String> = None;
     }
 }
 

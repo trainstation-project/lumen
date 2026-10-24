@@ -3,6 +3,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
+from lumen.config._C import CompilerConfig
 
 
 @pytest.fixture
@@ -30,7 +31,8 @@ def test_compiler_flags_defaults(compiler):
     holds one per device; ``of`` picks a device's, the meta device's the
     CPU's): every program runs as traced, but for online softmax, flash
     attention, fused linear cross entropy and split-K (on). A device's
-    settings hold only the flags its compiler reads."""
+    settings hold only the flags its compiler reads, the ones every device
+    has from their base class (``CompilerConfig``)."""
     configs = lumen.config.compiler
     for device in (configs.cpu, configs.cuda, configs.mps, configs.tpu):
         assert (device.merge_dots, device.flash_attention, device.memory_limit) == (True, True, 0)
@@ -46,7 +48,8 @@ def test_compiler_flags_defaults(compiler):
     tpu = configs.tpu
     assert (tpu.normalization_diamonds, tpu.contraction_epilogues, tpu.horizontal_fusion) == (True, True, True)
     assert tpu.safe_kernels is False
-    assert repr(compiler).startswith("lumen.config.compiler.mps(fuse=True, merge_dots=True")
+    assert repr(compiler).startswith("lumen.config.compiler.mps(merge_dots=True, flash_attention=True")
+    assert all(isinstance(c, CompilerConfig) for c in (configs.cpu, configs.cuda, compiler, tpu))
     assert "online_softmax=True" in repr(compiler)
     assert type(configs.of("mps")).__name__ == "MpsConfig" and type(configs.of("meta")).__name__ == "CpuConfig"
     compiler.online_softmax, compiler.row_cache = False, 4

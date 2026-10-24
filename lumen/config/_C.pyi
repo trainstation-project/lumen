@@ -2,38 +2,31 @@ from typing import Optional
 
 from lumen.device._C import DeviceLike
 
-class CpuConfig:
+class CompilerConfig:
+    """A device compiler's settings: the flags every device's compiler has
+    (each device's class adds its own)."""
+
+    merge_dots: bool
+    flash_attention: bool
+    fused_linear_cross_entropy_chunk_size: Optional[int]
+    memory_limit: int
+    dump_to: Optional[str]
+
+    def reset(self) -> None:
+        """This device's settings back to their defaults."""
+
+class CpuConfig(CompilerConfig):
     """The CPU compiler's settings (``lumen.config.compiler.cpu``)."""
 
-    merge_dots: bool
-    flash_attention: bool
-    fused_linear_cross_entropy_chunk_size: Optional[int]
-    memory_limit: int
-    dump_to: Optional[str]
-
-    def reset(self) -> None: ...
-
-class CudaConfig:
+class CudaConfig(CompilerConfig):
     """The CUDA compiler's settings (``lumen.config.compiler.cuda``)."""
 
-    merge_dots: bool
-    flash_attention: bool
-    fused_linear_cross_entropy_chunk_size: Optional[int]
-    memory_limit: int
-    dump_to: Optional[str]
     use_triton_backend: bool
     autotune: bool
 
-    def reset(self) -> None: ...
-
-class MpsConfig:
+class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""
 
-    merge_dots: bool
-    flash_attention: bool
-    fused_linear_cross_entropy_chunk_size: Optional[int]
-    memory_limit: int
-    dump_to: Optional[str]
     fuse: bool
     normalization_diamonds: bool
     reduction_epilogues: bool
@@ -49,22 +42,13 @@ class MpsConfig:
     safe_kernels: bool
     autotune: bool
 
-    def reset(self) -> None: ...
-
-class TpuConfig:
+class TpuConfig(CompilerConfig):
     """The TPU compiler's settings (``lumen.config.compiler.tpu``)."""
 
-    merge_dots: bool
-    flash_attention: bool
-    fused_linear_cross_entropy_chunk_size: Optional[int]
-    memory_limit: int
-    dump_to: Optional[str]
     normalization_diamonds: bool
     contraction_epilogues: bool
     horizontal_fusion: bool
     safe_kernels: bool
-
-    def reset(self) -> None: ...
 
 class CompilerConfigs:
     """Each device's compiler settings (``lumen.config.compiler``)."""

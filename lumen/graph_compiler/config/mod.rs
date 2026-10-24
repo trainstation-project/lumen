@@ -50,25 +50,43 @@ impl Configs {
 }
 
 macro_rules! device_config {
-    ($name:ident, $py:ident, $label:literal, $field:ident {
+    ($name:ident, $py:ident, $label:literal, $field:ident, $device:expr, {
         $($flag:ident, $set:ident: $ty:ty = $default:expr;)*
     }) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub struct $name {
+            pub merge_dots: bool,
+            pub flash_attention: bool,
+            pub fused_linear_cross_entropy_chunk_size: Option<usize>,
+            pub memory_limit: usize,
+            pub dump_to: Option<String>,
             $(pub $flag: $ty,)*
         }
 
         impl Default for $name {
             fn default() -> Self {
                 $name {
+                    merge_dots: true,
+                    flash_attention: true,
+                    fused_linear_cross_entropy_chunk_size: None,
+                    memory_limit: 0,
+                    dump_to: None,
                     $($flag: $default,)*
                 }
             }
         }
 
         #[cfg(feature = "python")]
-        #[pyo3::pyclass(name = $label, module = "lumen")]
+        #[pyo3::pyclass(name = $label, module = "lumen", extends = super::PyCompilerConfig)]
         pub(crate) struct $py;
+
+        #[cfg(feature = "python")]
+        impl $py {
+            pub(crate) fn object(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<$py>> {
+                let base = super::PyCompilerConfig { device: $device };
+                pyo3::Py::new(py, pyo3::PyClassInitializer::from(base).add_subclass($py))
+            }
+        }
 
         #[cfg(feature = "python")]
         #[pyo3::pymethods]
@@ -85,13 +103,17 @@ macro_rules! device_config {
                 }
             )*
 
-            fn reset(&self) {
-                super::update(|c| c.$field = $name::default());
-            }
-
             pub(crate) fn __repr__(&self) -> String {
                 let c = super::configs().$field;
                 let flags: Vec<String> = vec![
+                    format!("merge_dots={}", super::py_value(&c.merge_dots)),
+                    format!("flash_attention={}", super::py_value(&c.flash_attention)),
+                    format!(
+                        "fused_linear_cross_entropy_chunk_size={}",
+                        super::py_value(&c.fused_linear_cross_entropy_chunk_size)
+                    ),
+                    format!("memory_limit={}", super::py_value(&c.memory_limit)),
+                    format!("dump_to={}", super::py_value(&c.dump_to)),
                     $(format!("{}={}", stringify!($flag), super::py_value(&c.$flag))),*
                 ];
                 format!(
@@ -106,6 +128,61 @@ macro_rules! device_config {
 }
 
 pub(crate) use device_config;
+
+#[cfg(feature = "python")]
+#[pyo3::pyclass(name = "CompilerConfig", module = "lumen", subclass)]
+pub(crate) struct PyCompilerConfig {
+    device: Device,
+}
+
+#[cfg(feature = "python")]
+macro_rules! shared_flags {
+    ($($flag:ident, $set:ident: $ty:ty;)*) => {
+        #[pyo3::pymethods]
+        impl PyCompilerConfig {
+            $(
+                #[getter]
+                fn $flag(&self) -> $ty {
+                    let c = configs();
+                    match self.device {
+                        Device::Cpu(_) | Device::Meta(_) => c.cpu.$flag,
+                        Device::Cuda(_) => c.cuda.$flag,
+                        Device::Mps(_) => c.mps.$flag,
+                        Device::Tpu(_) => c.tpu.$flag,
+                    }
+                }
+
+                #[setter]
+                fn $set(&self, value: $ty) {
+                    update(|c| match self.device {
+                        Device::Cpu(_) | Device::Meta(_) => c.cpu.$flag = value,
+                        Device::Cuda(_) => c.cuda.$flag = value,
+                        Device::Mps(_) => c.mps.$flag = value,
+                        Device::Tpu(_) => c.tpu.$flag = value,
+                    });
+                }
+            )*
+
+            fn reset(&self) {
+                update(|c| match self.device {
+                    Device::Cpu(_) | Device::Meta(_) => c.cpu = CpuConfig::default(),
+                    Device::Cuda(_) => c.cuda = CudaConfig::default(),
+                    Device::Mps(_) => c.mps = MpsConfig::default(),
+                    Device::Tpu(_) => c.tpu = TpuConfig::default(),
+                });
+            }
+        }
+    };
+}
+
+#[cfg(feature = "python")]
+shared_flags! {
+    merge_dots, set_merge_dots: bool;
+    flash_attention, set_flash_attention: bool;
+    fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
+    memory_limit, set_memory_limit: usize;
+    dump_to, set_dump_to: Option<String>;
+}
 
 #[cfg(feature = "python")]
 fn py_value(value: &dyn std::fmt::Debug) -> String {
