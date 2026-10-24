@@ -192,3 +192,36 @@ def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
         assert "for (uint j = i" in source and "; k < " in source
     finally:
         compiler.autotune = True
+
+
+@pytest.mark.parametrize(
+    "dtype, accum, out",
+    [
+        (dtype, accum, out)
+        for dtype, accums in [
+            ("int8", ["int8", "int32"]),
+            ("uint8", ["uint8", "int32"]),
+            ("int16", ["int16", "int32"]),
+            ("uint16", ["uint16", "int32"]),
+            ("int32", ["int32"]),
+            ("uint32", ["uint32"]),
+            ("int64", ["int64"]),
+        ]
+        for accum in accums
+        for out in sorted({dtype, accum})
+    ],
+)
+def test_integer_matmul_accumulates_and_outputs_as_asked(dtype, accum, out):
+    """An integer matmul accumulates in its ``accum_dtype`` and writes its
+    ``output_dtype`` (int8 operands summed in int32, written as int32 or
+    wrapped to int8): the exact products' sum, wrapped to the output's
+    width, as numpy computes it, partial tiles too."""
+    rng = np.random.default_rng(0)
+    info = np.iinfo(dtype)
+    low, high = max(info.min, -100), min(info.max, 100) + 1
+    f = lumen.compile(lambda x, y: F.matmul(x, y, accum, out), device="mps")
+    for m, k, n in [(3, 4, 2), (70, 33, 65)]:
+        a, b = rng.integers(low, high, (m, k)).astype(dtype), rng.integers(low, high, (k, n)).astype(dtype)
+        got = lumen.to_numpy(f(lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")))
+        assert got.dtype == np.dtype(out)
+        np.testing.assert_array_equal(got, (a.astype(np.int64) @ b.astype(np.int64)).astype(out))

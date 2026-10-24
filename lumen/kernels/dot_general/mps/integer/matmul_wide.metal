@@ -73,6 +73,6 @@ inline void matmul_wide_impl(device const T *lhs,
     }
 
 #ifndef TEMPLATES_ONLY
-MATMUL_WIDE(u64, ulong)
-MATMUL_WIDE(i64, long)
+MATMUL_WIDE(u64_u64_u64, ulong)
+MATMUL_WIDE(i64_i64_i64, long)
 #endif

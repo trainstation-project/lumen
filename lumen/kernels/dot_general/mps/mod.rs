@@ -184,8 +184,11 @@ pub(crate) fn encode(
         name,
         None,
     )?;
+    let Primitive::DotGeneral { accum_dtype, .. } = &step.primitive else {
+        unreachable!("a dot_general")
+    };
     launch(
-        &format!("matmul_{}", out.dtype),
+        &format!("matmul_{}_{accum_dtype}_{}", lhs.dtype, out.dtype),
         &[inputs[0], inputs[1], output.cast_const()],
         &[dims_arg(launch_.p)],
         launch_.grid,
