@@ -144,15 +144,13 @@ pub(super) fn gemm_tiles(
             // matrix), rounded to the dot's dtype: staged, and written to
             // the dot's value inside it.
             template <uint FM, uint FN>
-            void tile(
-                thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
-                ulong m0,
-                ulong n0,
-                uint sy,
-                uint sx,
-                uint flat,
-                uint lane
-            ) {{
+            void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+                      ulong m0,
+                      ulong n0,
+                      uint sy,
+                      uint sx,
+                      uint flat,
+                      uint lane) {{
                 const uint fr = frag_row(lane), fc = frag_col(lane);
                 UNROLL for (uint i = 0; i < FM; ++i) {{
                     UNROLL for (uint j = 0; j < FN; ++j) {{
@@ -170,21 +168,16 @@ pub(super) fn gemm_tiles(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME_tiles(
-            {params}constant ulong *p [[buffer({first_arg})]],
-            {THREAD_ARGS}
-        ) {{
+        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+                               {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {tile}];
-            matmul_sg_impl<
-                {t}, float, {o}, {tile}, {tile}, SG_BK, {o},
-                NAME_tiles_staging, false, false, false, true
-            >(
+            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+                           NAME_tiles_staging, false, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
-                NAME_tiles_staging{{staged, dotv, p[0], p[1]}}
-            );
+                NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
             const ulong m0 = ulong(group.y) * {tile}, n0 = ulong(group.x) * {tile};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = uint(m0) + rr;
@@ -294,15 +287,13 @@ pub(super) fn gemm_rows(
             // matrix), rounded to the dot's dtype, at their place in the
             // tile; the columns past the rows' none.
             template <uint FM, uint FN>
-            void tile(
-                thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
-                ulong m0,
-                ulong n0,
-                uint sy,
-                uint sx,
-                uint flat,
-                uint lane
-            ) {{
+            void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+                      ulong m0,
+                      ulong n0,
+                      uint sy,
+                      uint sx,
+                      uint flat,
+                      uint lane) {{
                 const uint fr = frag_row(lane), fc = frag_col(lane);
                 UNROLL for (uint i = 0; i < FM; ++i) {{
                     UNROLL for (uint j = 0; j < FN; ++j) {{
@@ -319,21 +310,16 @@ pub(super) fn gemm_rows(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME(
-            {params}constant ulong *p [[buffer({first})]],
-            {THREAD_ARGS}
-        ) {{
+        kernel void NAME({params}constant ulong *p [[buffer({first})]],
+                         {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {n}];
-            matmul_sg_impl<
-                {t}, float, {o}, {tile}, {tile}, SG_BK, {o},
-                NAME_staging, false, false, false, true
-            >(
+            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+                           NAME_staging, false, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
-                NAME_staging{{staged}}
-            );
+                NAME_staging{{staged}});
             const ulong m0n = ulong(group.y) * {tile} * {n};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = group.y * {tile}u + rr, t = lane;

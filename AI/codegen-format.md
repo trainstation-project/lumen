@@ -39,7 +39,8 @@ aligned after its `<`.
 ```metal
 reduce_rows<Add, float>(input, out, count, chunk, shared,
                         group, groups.x, tid.y * size.x + tid.x);
-matmul_sg_impl<bfloat, float, float, 128, 64, SG_BK, bfloat, fusion_677f59485dbff223_epi, false, true>(
+matmul_sg_impl<bfloat, float, float, 128, 64, SG_BK, bfloat,
+               fusion_677f59485dbff223_epi, false, true>(
     in0, in1, out, p,
     lt, rt,
     group, tid.y * 16 + tid.x, sg, lane,

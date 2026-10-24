@@ -70,9 +70,7 @@ pub(super) fn elementwise_kernel(
         "
         {stores}
         [[max_total_threads_per_threadgroup({group})]]
-        kernel void NAME(
-            {params}ELEMENTWISE_ARGS({args})
-        ) {{
+        kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
             {each} {{
                 {lines}{writes}
             }}

@@ -178,10 +178,8 @@ pub(super) fn transpose_kernel(
     named(formatdoc!(
         "
         {stores}
-        kernel void NAME(
-            {params}uint3 group [[threadgroup_position_in_grid]],
-            uint3 tid [[thread_position_in_threadgroup]]
-        ) {{
+        kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]],
+                         uint3 tid [[thread_position_in_threadgroup]]) {{
             {source}
         }}
         "

@@ -403,20 +403,15 @@ pub(super) fn gemm_regions_kernel(
         writedoc!(
             source,
             "
-            kernel void NAME{suffix}(
-                {params}constant ulong *p [[buffer({first})]],
-                {THREAD_ARGS}
-            ) {{
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
+                                     {THREAD_ARGS}) {{
                 threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
-                matmul_sg_impl<
-                    {t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
-                    NAME_epi, false, true, false, false, true, true
-                >(
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                               NAME_epi, false, true, false, false, true, true>(
                     {lhs}, {rhs}, out, p,
                     lt, rt,
                     group, tid.y * 16 + tid.x, sg, lane,
-                    NAME_epi{{{members}}}
-                );
+                    NAME_epi{{{members}}});
             }}
             "
         )
@@ -537,20 +532,15 @@ pub(super) fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (Strin
         writedoc!(
             source,
             "
-            kernel void NAME{suffix}(
-                {params}constant ulong *p [[buffer({first})]],
-                {THREAD_ARGS}
-            ) {{
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
+                                     {THREAD_ARGS}) {{
                 threadgroup {t} lt[SG_LT({bm}, {bk}, {t}, {a})], rt[{bk} * {bn}];
-                matmul_sg_impl<
-                    {t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
-                    {paired}
-                >(
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                               {paired}>(
                     {lhs}, {rhs}, out, p,
                     lt, rt,
                     group, tid.y * 16 + tid.x, sg, lane,
-                    NAME_epi{{{members}}}
-                );
+                    NAME_epi{{{members}}});
             }}
             "
         )

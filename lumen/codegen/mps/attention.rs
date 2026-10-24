@@ -97,40 +97,32 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         true => formatdoc!(
             "
             threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];
-            attention_decode<
-                {t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse},
-                NAME_ix, NAME_score, {w}
-            >(
+            attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse},
+                             NAME_ix, NAME_score, {w}>(
                 {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
                 NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
                 maxima, sums, os,
-                group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi}
-            );"
+                group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
         ),
         false => {
             let bk = key_block(a);
             formatdoc!(
                 "
                 threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];
-                flash_attention<
-                    {t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse},
-                    NAME_ix, NAME_score, {w}
-                >(
+                flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse},
+                                NAME_ix, NAME_score, {w}>(
                     {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
                     NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
                     ks, vs,
-                    group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi}
-                );"
+                    group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
             )
         }
     };
     let params = params.join(",\n");
     named(formatdoc!(
         "
-        {ix}{score}{epilogue}{drop}kernel void NAME(
-            {params},
-            {THREAD_ARGS}
-        ) {{
+        {ix}{score}{epilogue}{drop}kernel void NAME({params},
+                         {THREAD_ARGS}) {{
             {call}
         }}
         "
@@ -316,57 +308,46 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
             threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
             threadgroup {t} ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];
             threadgroup float lses[{rows}], deltas[{rows}];
-            flash_attention_dkdv<
-                {t}, {h}u, {hv}u, {rows}u, {causal}, true,
-                NAME_ix, NAME_score, {dk_t}, {dv_t}
-            >(
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true,
+                                 NAME_ix, NAME_score, {dk_t}, {dv_t}>(
                 {q}, {k}, {v}, {g}, {lse}, {delta},
                 dk, dv, dq,
                 NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                 qs, gs, lses, deltas, ks, dss,
                 group.x, group.y, sg, lane, tid.y * 16 + tid.x,
-                NAME_score(){drop_arg}
-            );"
+                NAME_score(){drop_arg});"
         ),
         (true, false) => formatdoc!(
             "
             threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
             threadgroup float lses[{rows}], deltas[{rows}];
-            flash_attention_dkdv<
-                {t}, {h}u, {hv}u, {rows}u, {causal}, false,
-                NAME_ix, NAME_score, {dk_t}, {dv_t}
-            >(
+            flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false,
+                                 NAME_ix, NAME_score, {dk_t}, {dv_t}>(
                 {q}, {k}, {v}, {g}, {lse}, {delta},
                 dk, dv, nullptr,
                 NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                 qs, gs, lses, deltas, qs, qs,
                 group.x, group.y, sg, lane, tid.y * 16 + tid.x,
-                NAME_score(){drop_arg}
-            );"
+                NAME_score(){drop_arg});"
         ),
         (false, _) => formatdoc!(
             "
             threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];
-            flash_attention_dq<
-                {t}, {h}u, {hv}u, {rows}u, {causal},
-                NAME_ix, NAME_score, {dq_t}
-            >(
+            flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal},
+                               NAME_ix, NAME_score, {dq_t}>(
                 {q}, {k}, {v}, {g}, {lse}, {delta},
                 dq,
                 NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                 ks, vs,
                 group.x, group.y, sg, lane, tid.y * 16 + tid.x,
-                NAME_score(){drop_arg}
-            );"
+                NAME_score(){drop_arg});"
         ),
     };
     let params = params.join(",\n");
     named(formatdoc!(
         "
-        {ix}{score}{drop}kernel void NAME(
-            {params},
-            {THREAD_ARGS}
-        ) {{
+        {ix}{score}{drop}kernel void NAME({params},
+                         {THREAD_ARGS}) {{
             {call}
         }}
         "

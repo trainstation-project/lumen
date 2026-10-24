@@ -473,12 +473,7 @@ pub(super) fn row_kernel(
         false => Vec::new(),
     };
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
-    let signature = formatdoc!(
-        "
-        kernel void NAME(
-            {params}{THREAD_ARGS}
-        )"
-    );
+    let signature = format!("kernel void NAME({params}{THREAD_ARGS})");
     let staged = body.inputs().len() - 1;
     let prelude = match tile {
         Some((real, by_value, dot)) if !wide => {
