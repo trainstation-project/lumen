@@ -13,11 +13,12 @@
    "stored_bytes": 16384,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.18,
-   "torch_us": 13.369,
+   "lumen_us": 3.201,
+   "torch_us": 14.259,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 15.46
+   "chained": true,
+   "gbs": 15.36
   },
   {
    "op": "dot_general",
@@ -32,11 +33,12 @@
    "stored_bytes": 65536,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 4.739,
-   "torch_us": 13.449,
+   "lumen_us": 4.817,
+   "torch_us": 14.361,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 41.49
+   "chained": true,
+   "gbs": 40.82
   },
   {
    "op": "dot_general",
@@ -51,11 +53,12 @@
    "stored_bytes": 262144,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 11.428,
-   "torch_us": 16.516,
+   "lumen_us": 12.895,
+   "torch_us": 17.502,
    "matches_torch": true,
    "rotation": 683,
-   "gbs": 68.82
+   "chained": true,
+   "gbs": 60.99
   },
   {
    "op": "dot_general",
@@ -70,11 +73,12 @@
    "stored_bytes": 1048576,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 53.518,
-   "torch_us": 45.111,
+   "lumen_us": 54.455,
+   "torch_us": 53.805,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 58.78
+   "chained": true,
+   "gbs": 57.77
   },
   {
    "op": "dot_general",
@@ -89,11 +93,12 @@
    "stored_bytes": 4194304,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 335.356,
-   "torch_us": 323.047,
+   "lumen_us": 341.395,
+   "torch_us": 343.436,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 37.52
+   "chained": true,
+   "gbs": 36.86
   },
   {
    "op": "dot_general",
@@ -108,11 +113,12 @@
    "stored_bytes": 16777216,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2513.269,
-   "torch_us": 2535.269,
+   "lumen_us": 2584.925,
+   "torch_us": 2610.277,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 20.03
+   "chained": true,
+   "gbs": 19.47
   },
   {
    "op": "dot_general",
@@ -127,11 +133,12 @@
    "stored_bytes": 67108864,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 19710.973,
-   "torch_us": 20067.433,
+   "lumen_us": 21441.323,
+   "torch_us": 20612.469,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 10.21
+   "chained": true,
+   "gbs": 9.39
   },
   {
    "op": "dot_general",
@@ -146,11 +153,12 @@
    "stored_bytes": 8192,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.08,
-   "torch_us": 13.933,
+   "lumen_us": 3.148,
+   "torch_us": 14.468,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 7.98
+   "chained": true,
+   "gbs": 7.81
   },
   {
    "op": "dot_general",
@@ -165,11 +173,12 @@
    "stored_bytes": 32768,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 4.214,
-   "torch_us": 13.752,
+   "lumen_us": 4.259,
+   "torch_us": 15.509,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 23.33
+   "chained": true,
+   "gbs": 23.08
   },
   {
    "op": "dot_general",
@@ -184,11 +193,12 @@
    "stored_bytes": 131072,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 9.678,
-   "torch_us": 16.066,
+   "lumen_us": 9.61,
+   "torch_us": 16.171,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 40.63
+   "chained": true,
+   "gbs": 40.92
   },
   {
    "op": "dot_general",
@@ -203,11 +213,12 @@
    "stored_bytes": 524288,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 46.431,
-   "torch_us": 38.774,
+   "lumen_us": 44.592,
+   "torch_us": 45.743,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 33.88
+   "chained": true,
+   "gbs": 35.27
   },
   {
    "op": "dot_general",
@@ -222,11 +233,12 @@
    "stored_bytes": 2097152,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 309.611,
-   "torch_us": 293.511,
+   "lumen_us": 309.18,
+   "torch_us": 300.172,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 20.32
+   "chained": true,
+   "gbs": 20.35
   },
   {
    "op": "dot_general",
@@ -241,11 +253,12 @@
    "stored_bytes": 8388608,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2282.347,
-   "torch_us": 2282.964,
+   "lumen_us": 2282.86,
+   "torch_us": 2290.646,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 11.03
+   "chained": true,
+   "gbs": 11.02
   },
   {
    "op": "dot_general",
@@ -260,16 +273,17 @@
    "stored_bytes": 33554432,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 17853.521,
-   "torch_us": 18231.663,
+   "lumen_us": 17914.969,
+   "torch_us": 18269.631,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 5.64
+   "chained": true,
+   "gbs": 5.62
   }
  ],
  "code": {
-  "kernel": "// step 0: dot_general\n// dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32]\n\n// dot_general/mps/matmul.metal\ninline void matmul_impl(device const T *lhs,\n                        device const T *rhs,\n                        device T *out,\n                        constant ulong *p,\n                        threadgroup T *lt,\n                        threadgroup T *rt,\n                        uint3 group,\n                        uint2 tid) {\n    constexpr uint F = MM_TILE / 16;\n    constexpr uint L = MM_TILE * MM_TK / 256, RA = 256 / MM_TK, RB = 256 / MM_TILE;\n    const ulong M = p[0], N = p[1], K = p[2];\n    const ulong sm = p[4], sk = p[5], rk = p[7];\n    const ulong m0 = ulong(group.y) * MM_TILE, n0 = ulong(group.x) * MM_TILE;\n    const uint flat = tid.y * 16 + tid.x;\n    const uint ac = flat % MM_TK, ar = flat / MM_TK, bc = flat % MM_TILE, br = flat / MM_TILE;\n    device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;\n    device const T *r = rhs + group.z * p[6] + ulong(br) * rk + (n0 + bc) * p[8];\n    const bool full_m = m0 + MM_TILE <= M, full_n = n0 + MM_TILE <= N;\n    T ra[L], rb[L];\n    auto fetch = [&](ulong k0) {\n        bool full_k = k0 + MM_TK <= K;\n        if (full_m && full_k) {\n            UNROLL for (uint t = 0; t < L; ++t) { ra[t] = l[k0 * sk + ulong(RA * t) * sm]; }\n        } else {\n            UNROLL for (uint t = 0; t < L; ++t) {\n                bool in = m0 + ar + RA * t < M && k0 + ac < K;\n                ra[t] = in ? l[k0 * sk + ulong(RA * t) * sm] : T(0);\n            }\n        }\n        if (full_n && full_k) {\n            UNROLL for (uint t = 0; t < L; ++t) { rb[t] = r[(k0 + RB * t) * rk]; }\n        } else {\n            UNROLL for (uint t = 0; t < L; ++t) {\n                bool in = k0 + br + RB * t < K && n0 + bc < N;\n                rb[t] = in ? r[(k0 + RB * t) * rk] : T(0);\n            }\n        }\n    };\n    T sum[F][F];\n    UNROLL for (uint i = 0; i < F; ++i) {\n        UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] = T(0); }\n    }\n    fetch(0);\n    for (ulong k0 = 0; k0 < K; k0 += MM_TK) {\n        UNROLL for (uint t = 0; t < L; ++t) {\n            lt[(ar + RA * t) * MM_TK + ac] = ra[t];\n            rt[(br + RB * t) * MM_TILE + bc] = rb[t];\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (k0 + MM_TK < K) {\n            fetch(k0 + MM_TK);\n        }\n        UNROLL for (uint kk = 0; kk < MM_TK; ++kk) {\n            T a[F], b[F];\n            UNROLL for (uint i = 0; i < F; ++i) {\n                a[i] = lt[(tid.y + 16 * i) * MM_TK + kk];\n                b[i] = rt[kk * MM_TILE + tid.x + 16 * i];\n            }\n            UNROLL for (uint i = 0; i < F; ++i) {\n                UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] += a[i] * b[j]; }\n            }\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n    device T *o = out + group.z * M * N;\n    UNROLL for (uint i = 0; i < F; ++i) {\n        UNROLL for (uint j = 0; j < F; ++j) {\n            ulong m = m0 + tid.y + 16 * i, n = n0 + tid.x + 16 * j;\n            if (m < M && n < N) {\n                o[m * N + n] = sum[i][j];\n            }\n        }\n    }\n}",
+  "kernel": "// step 0: dot_general\n// dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32]\n\n[[max_total_threads_per_threadgroup(64)]]\nkernel void matmul_mpp_float_float_float_64x32x64_64_00(device const float *lhs [[buffer(0)]],\n                                                        device const float *rhs [[buffer(1)]],\n                                                        device float *out [[buffer(2)]],\n                                                        constant ulong *p [[buffer(3)]],\n                                                        uint3 group [[threadgroup_position_in_grid]],\n                                                        uint3 tid [[thread_position_in_threadgroup]],\n                                                        uint sg [[simdgroup_index_in_threadgroup]],\n                                                        uint lane [[thread_index_in_simdgroup]]) {\n    matmul_mpp<float, float, 64, 32, 64, 2, false, false>(lhs, rhs, out, p, group);\n}",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] in0 in1"
  },
- "measured_at": "2026-10-24T02:54:41+00:00"
+ "measured_at": "2026-10-24T06:06:18+00:00"
 }
