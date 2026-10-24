@@ -105,8 +105,10 @@ pub(crate) fn merge_dots(
         Some((x, chain))
     };
     let mut read_in_place = vec![true; graph.types.len()];
-    for &v in graph.outputs() {
-        read_in_place[v] = false;
+    if !target.views {
+        for &v in graph.outputs() {
+            read_in_place[v] = false;
+        }
     }
     let in_place = |node: &&Node| {
         (target.reads)(graph, node) || matches!(node.primitive, Primitive::DotGeneral { .. })

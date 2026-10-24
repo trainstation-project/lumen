@@ -1001,7 +1001,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
     value): one matmul of their block whose epilogue computes the gate (its
     tile holding each pair's columns side by side, ``PAIRED``), neither
     projection written out; the values the CPU's. One whose gate is an
-    output too is not paired (its dots unmerged), its values the CPU's."""
+    output too is paired as well, the epilogue writing the gate out
+    beside the product; its values the CPU's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1026,10 +1027,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
                 graph = lumen.make_graph(f)(model, meta(m, d))
                 steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
                 dots = [s["label"] for s in steps if "dot_general" in s["label"]]
-                if gate:
-                    assert len(dots) == 2, dots
-                else:
-                    assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
+                assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
+                if not gate:
                     assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
                     (merged,) = [s for s in steps if s["label"].startswith("2x")]
                     code = open(__file__).read().splitlines()
@@ -1723,6 +1722,64 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step)
             assert np.isfinite(alone).all()
             np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
     assert plans[0] == plans[1]
+
+
+class Returned(lumen.nn.Module):
+    ws: list
+    summed: bool
+    left: bool = False
+
+    def __call__(self, x):
+        if self.left:
+            p = [F.matmul(w, x, "float32", "float32") for w in self.ws]
+        else:
+            p = [F.matmul(x, w.t(), "float32", "float32") for w in self.ws]
+        return (p[0] + p[1], *p[2:]) if self.summed else tuple(p)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
+@pytest.mark.parametrize(
+    "n, summed, interleaved",
+    [(4, True, [[2, 1, 1]]), (2, False, [[1, 1]])],
+    ids=["y = Ax + Bx, Cx, Dx", "Cx, Dx"],
+)
+def test_returned_dots_merge(n, summed, interleaved, left):
+    """Dots whose results are returned merge too: one matmul whose
+    epilogue writes each returned result into its own contiguous output
+    (``y = Ax + Bx`` from the interleaved pair, ``Cx`` and ``Dx`` from
+    regions of their own), no copy after it. The values the unmerged
+    program's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    h, d, m = 64, 32, 24
+    shape = (d, m) if left else (m, d)
+    params = list(range(1, n + 1))
+    make = lambda: Returned([meta(h, d) for _ in range(n)], summed, left)
+    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+    assert plan.interleaved == interleaved
+    labels = [s["label"] for s in plan.steps()]
+    assert len(labels) == 1 and labels[0].startswith(f"{n}x dot_general"), labels
+    values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1)) for k in range(n)}
+    x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.merge_dots = merge
+            model = make()
+            f = lumen.compile(lambda model, x: model(x), device="mps")
+            f(model, meta(*shape))
+            model.load_state_dict(values)
+            out = f(model, x)
+            assert all(t.is_contiguous() for t in out)
+            got.append([lumen.to_numpy(t) for t in out])
+    finally:
+        lumen.config.compiler.reset()
+    for merged, alone in zip(*got):
+        np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
 
 @pytest.mark.mps
