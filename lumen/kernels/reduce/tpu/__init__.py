@@ -12,7 +12,20 @@ def _identity(name, dtype, shape):
         return lumen.full(shape, 0, dtype)
     if dtype in ("float32", "bfloat16", "float16"):
         return lumen.full(shape, float("-inf"), dtype)
+    if dtype.startswith("uint"):
+        return lumen.full(shape, 0, dtype)
     return lumen.full(shape, -(2 ** (8 * {"int8": 1, "int16": 2}.get(dtype, 4) - 1)), dtype)
+
+
+def _exact_max(x, axes, dtype):
+    """``x``'s 32-bit integers' maximum over ``axes`` through float32
+    maxima of their 16-bit halves (each exact in float32): the high
+    halves' maximum, then the low halves' among the values holding it."""
+    high, low = x >> 16, x & 0xFFFF
+    top = F.amax(high.to("float32"), axes)
+    at_top = high.to("float32") == top
+    rest = F.amax(F.where(at_top, low.to("float32"), -1.0), axes)
+    return (top.to(dtype) << 16) | rest.to(dtype)
 
 
 def _schedule(spec):
@@ -89,6 +102,8 @@ def program(spec):
     def reduce(x):
         if name == "sum":
             r = F.sum(x.to(accum), s["axes"])
+        elif total and accum in ("int32", "uint32"):
+            r = _exact_max(x, s["axes"], accum)
         elif total and accum != "float32":
             r = F.amax(x.to("float32"), s["axes"]).to(accum)
         else:

@@ -447,6 +447,37 @@ def test_a_reduction_is_one_kernel(op, shape, dims, dtype):
     np.testing.assert_allclose(got, want(floats(x)), rtol=1e-2 if dtype == "bfloat16" else 1e-5, atol=1e-2)
 
 
+@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+@pytest.mark.parametrize("shape, dims", [([512, 1024], (0, 1)), ([4096], 0)], ids=["total", "total 1d"])
+def test_an_integer_maximum_over_everything_is_exact(shape, dims, dtype):
+    """A 32-bit integer's maximum over every axis is exact, though the
+    kernel reduces through float32 (each 16-bit half of a value exact in
+    float32): 16777217 is not taken for 16777216, nor the largest value
+    for a neighbour; an unsigned maximum starts from 0."""
+    info = np.iinfo(dtype)
+    rng = np.random.default_rng(0)
+    for low, high in [(info.min, info.max), (0, 1 << 20)]:
+        a = rng.integers(low, high, shape, dtype=dtype)
+        a.flat[:2] = [16777216, 16777217] if high > 16777217 else [5, 7]
+        got = lumen.to_numpy(lumen.compile(lambda x: F.amax(x, dims))(lumen.from_numpy(a).to("tpu")))
+        assert got == a.max(), (got, a.max())
+
+
+def test_an_integer_power_keeps_its_exponents_parity():
+    """``x ** n`` of a bfloat16 or float32 ``x`` and an int32 ``n`` takes
+    its sign from ``n``'s parity: ``(-1) ** 257`` is -1 (257 is 256 in
+    bfloat16), ``(-0.0) ** -1`` is -inf; its magnitude ``|x| ** n``
+    rounded once."""
+    n = np.array([257, 256, 3, 2, -1, -3, 0, 1 << 25 | 1] * 128, dtype=np.int32)
+    x = np.array([-1.0, -1.0, -2.0, -2.0, -0.0, -0.5, -3.0, -1.0] * 128, dtype=np.float32)
+    for dtype in ("float32", "bfloat16"):
+        got = floats(lumen.compile(lambda x, n: x**n)(tpu(x, dtype), tpu(n, "int32")))
+        exact = np.power(x.astype(np.float64), n.astype(np.float64)).astype(np.float32)
+        want = floats(lumen.from_numpy(exact).to(dtype=dtype))
+        np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
+        np.testing.assert_allclose(got, want, rtol=1e-2 if dtype == "bfloat16" else 1e-6)
+
+
 def test_a_reductions_prologue_and_epilogue_are_its_kernel():
     """``mean(x * x) * 2`` over rows: the product read in blocks, the mean's
     division and the scale on the results, one kernel."""
