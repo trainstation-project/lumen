@@ -391,7 +391,7 @@ fn ops_on_host_and_device_values_raise() {
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::common::cse::Cse;
     use super::pass::{CompilerPass, GraphModule, Pipeline};
-    use super::{CompilerConfig, Options};
+    use super::{CpuConfig, Options};
 
     struct Negate;
     impl CompilerPass<GraphModule<'_>> for Negate {
@@ -415,14 +415,18 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     g.set_outputs(&[s]).unwrap();
     let dir = std::env::temp_dir().join(format!("lumen-passes-{}", std::process::id()));
     let options = Options {
-        config: CompilerConfig {
-            dump_to: Some(dir.to_string_lossy().into_owned()),
-            ..CompilerConfig::default()
+        config: super::Configs {
+            cpu: CpuConfig {
+                dump_to: Some(dir.to_string_lossy().into_owned()),
+                ..CpuConfig::default()
+            },
+            ..Default::default()
         },
         ..Options::default()
     };
     let mut module = GraphModule {
         graph: g,
+        device: crate::Device::Cpu(0),
         options: &options,
     };
     Pipeline::new("test")

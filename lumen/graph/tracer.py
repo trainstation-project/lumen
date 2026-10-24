@@ -9,7 +9,7 @@ import sys
 import warnings
 
 from lumen import nn
-from lumen.allocator._C import config
+from lumen.config._C import config
 from lumen.graph import prims
 from lumen.graph._C import Graph
 from lumen.graph_compiler._C import Plan
@@ -183,6 +183,12 @@ def tracing(graph, device=None, sources=None, tape=None, leaves=None):
         _PRODUCERS.pop()
         _TAPES.pop()
         _BACKWARD.pop()
+
+
+def compiler_config():
+    """The compiler settings of the device being traced for
+    (``lumen.config.compiler.of``)."""
+    return config.compiler.of(_DEVICES[-1] if _DEVICES and _DEVICES[-1] is not None else "cpu")
 
 
 def current_graph():
@@ -385,7 +391,7 @@ def compile(fn, device=None):
     of that signature runs, in the order it runs them, a file each
     (``lumen.viz.dump_code``).
 
-    With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
+    With ``lumen.config.compiler.mps.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
     float16 work after them) on the Apple Neural Engine, their values baked
     into Core ML programs: compiled again once a weight is written

@@ -3,86 +3,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::Plan;
-use super::config::{self, CompilerConfig};
 use super::plan::Buffer;
 use crate::DType;
 use crate::device::python::resolve_device;
 use crate::graph::python::{PyGraph, primitive_dict, scope_names};
 use crate::graph::{Primitive, TensorType};
 use crate::tensor::python::{PyTensor, dtype_name};
-
-#[pyclass(name = "CompilerConfig", module = "lumen")]
-pub(crate) struct PyCompilerConfig;
-
-macro_rules! flags {
-    ($($(#[$doc:meta])* $name:ident, $set:ident: $ty:ty;)*) => {
-        #[pymethods]
-        impl PyCompilerConfig {
-            $(
-                $(#[$doc])*
-                #[getter]
-                fn $name(&self) -> $ty {
-                    config::config().$name
-                }
-
-                #[setter]
-                fn $set(&self, value: $ty) {
-                    config::update(|c| c.$name = value);
-                }
-            )*
-
-            fn reset(&self) {
-                config::update(|c| *c = CompilerConfig::default());
-            }
-
-            #[getter]
-            fn _version(&self) -> u64 {
-                config::version()
-            }
-
-            fn __repr__(&self) -> String {
-                let c = config::config();
-                let flags: Vec<String> = vec![$(format!("{}={}", stringify!($name), py_value(&c.$name))),*];
-                format!("{}.config.compiler({})", crate::LIBRARY_NAME, flags.join(", "))
-            }
-        }
-    };
-}
-
-flags! {
-    fuse, set_fuse: bool;
-    merge_dots, set_merge_dots: bool;
-    normalization_diamonds, set_normalization_diamonds: bool;
-    reduction_epilogues, set_reduction_epilogues: bool;
-    contraction_epilogues, set_contraction_epilogues: bool;
-    multi_output_fusion, set_multi_output_fusion: bool;
-    horizontal_fusion, set_horizontal_fusion: bool;
-    online_softmax, set_online_softmax: bool;
-    flash_attention, set_flash_attention: bool;
-    fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool;
-    split_k, set_split_k: bool;
-    deterministic, set_deterministic: bool;
-    neural_engine, set_neural_engine: bool;
-    row_cache, set_row_cache: usize;
-    memory_limit, set_memory_limit: usize;
-    fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
-    safe_kernels, set_safe_kernels: bool;
-    use_triton_backend, set_use_triton_backend: bool;
-    autotune, set_autotune: bool;
-    dump_to, set_dump_to: Option<String>;
-}
-
-fn py_value(value: &dyn std::fmt::Debug) -> String {
-    match format!("{value:?}").as_str() {
-        "true" => "True".into(),
-        "false" => "False".into(),
-        v => v
-            .strip_prefix("Some(")
-            .and_then(|v| v.strip_suffix(')'))
-            .unwrap_or(v)
-            .into(),
-    }
-}
 
 #[pyclass(name = "Plan", module = "lumen", frozen)]
 struct PyPlan {
@@ -117,8 +43,8 @@ impl PyPlan {
             )));
         }
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
-        let mut config = crate::graph_compiler::config::config();
-        config.fuse = fuse.unwrap_or(config.fuse);
+        let mut config = crate::graph_compiler::config::configs();
+        config.mps.fuse = fuse.unwrap_or(config.mps.fuse);
         let options = crate::graph_compiler::Options {
             config,
             donate,
@@ -325,7 +251,6 @@ fn triton_loop(
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     super::triton::set_gemm(triton_gemm);
     super::triton::set_loop(triton_loop);
-    m.add_class::<PyCompilerConfig>()?;
     m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_kernel_source, m)?)?;

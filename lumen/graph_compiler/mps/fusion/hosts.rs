@@ -3,7 +3,7 @@ use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
 use super::{elementwise, expensive, is_reduction};
 use crate::graph::{Graph, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) fn roots(
@@ -47,7 +47,7 @@ pub(super) fn roots(
 pub(super) fn hosts(
     a: &Analysis,
     rows: &[Row],
-    config: &CompilerConfig,
+    config: &MpsConfig,
     root: &[bool],
     reductions: &ReductionEpilogues,
     dots: &DotEpilogues,

@@ -210,7 +210,7 @@ def test_rematerialized_dropout_draws_the_same_mask():
     same numbers (the same state and offset; Philox is a function of
     them), so the result is the same bit for bit, with the mask computed
     twice and a value less of workspace."""
-    lumen.config.compiler.memory_limit = 0
+    lumen.config.compiler.mps.memory_limit = 0
     meta = [lumen.empty([512, 512], device="meta")] * 2
     rng = np.random.default_rng(0)
     try:
@@ -222,7 +222,7 @@ def test_rematerialized_dropout_draws_the_same_mask():
     results = []
     try:
         for limit in (0, 1):
-            lumen.config.compiler.memory_limit = limit
+            lumen.config.compiler.mps.memory_limit = limit
             plan = lumen.graph_compiler.Plan(lumen.make_graph(_dropout_read_early_and_late)(*meta), "mps")
             draws = sum("random_bits" in s["label"] for s in plan.steps())
             lumen.manual_seed(7)

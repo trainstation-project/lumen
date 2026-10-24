@@ -93,8 +93,8 @@ def test_every_mps_kernel_dumps_its_source(tmp_path):
     flash attention, the chunked cross entropy's update slices, matmuls,
     each a generated GEMM): each a file of Metal, none the step's text in
     its place."""
-    lumen.config.compiler.fused_linear_cross_entropy = True
-    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 32
+    lumen.config.compiler.mps.fused_linear_cross_entropy = True
+    lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size = 32
     try:
         f = lumen.compile(_step)
         f(*_step_args("mps"))

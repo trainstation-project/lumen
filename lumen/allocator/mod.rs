@@ -3,8 +3,6 @@ mod cpu;
 mod cuda;
 mod meta;
 mod mps;
-#[cfg(feature = "python")]
-pub(crate) mod python;
 #[cfg(test)]
 mod tests;
 #[cfg(lumen_tpu_linked)]

@@ -172,7 +172,7 @@ def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
     elements per thread and threadgroup size it picked."""
     if not lumen.mps.is_available():
         pytest.skip("no MPS device")
-    compiler = lumen.config.compiler
+    compiler = lumen.config.compiler.mps
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
             x = (

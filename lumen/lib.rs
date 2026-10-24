@@ -14,6 +14,7 @@ pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;
 pub(crate) mod codegen;
+mod config;
 pub mod custom_op;
 pub mod device;
 pub mod distributed;

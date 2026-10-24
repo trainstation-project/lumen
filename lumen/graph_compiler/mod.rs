@@ -22,14 +22,14 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
 use common::cse::Cse;
 use common::simplify::Simplify;
-pub use config::CompilerConfig;
+pub use config::{CompilerConfig, Configs, CpuConfig, CudaConfig, MpsConfig, TpuConfig};
 use pass::{GraphModule, Pipeline};
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub config: CompilerConfig,
+    pub config: Configs,
     pub donate: Vec<usize>,
     pub donate_into: Vec<(usize, usize)>,
     pub parameters: Option<Vec<bool>>,
@@ -40,7 +40,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            config: config::config(),
+            config: config::configs(),
             donate: Vec::new(),
             donate_into: Vec::new(),
             parameters: None,
@@ -57,6 +57,7 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
+        device,
         options,
     };
     Pipeline::new("frontend")
@@ -74,13 +75,13 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
 
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
-        Device::Cuda(_) if options.config.use_triton_backend => {
+        Device::Cuda(_) if options.config.cuda.use_triton_backend => {
             triton::compile(graph, device, options)
         }
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
         Device::Tpu(_) => tpu::compile(graph, options),
-        _ => cpu::compile(graph, options),
+        _ => cpu::compile(graph, device, options),
     }
 }
 

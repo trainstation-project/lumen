@@ -11,9 +11,9 @@ DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu"
 @pytest.fixture(autouse=True)
 def safe_kernels():
     """Each test with its indices clamped (out of range here too)."""
-    lumen.config.compiler.safe_kernels = True
+    lumen.config.compiler.mps.safe_kernels = lumen.config.compiler.tpu.safe_kernels = True
     yield
-    lumen.config.compiler.safe_kernels = False
+    lumen.config.compiler.mps.safe_kernels = lumen.config.compiler.tpu.safe_kernels = False
 
 
 def _tensor(a, device, dtype=None):

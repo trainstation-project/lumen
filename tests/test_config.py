@@ -7,8 +7,9 @@ import lumen.functional as F
 
 @pytest.fixture
 def compiler():
-    """``lumen.config.compiler``, reset to its defaults after the test."""
-    yield lumen.config.compiler
+    """``lumen.config.compiler.mps``, every device's settings reset to their
+    defaults after the test."""
+    yield lumen.config.compiler.mps
     lumen.config.compiler.reset()
 
 
@@ -25,23 +26,37 @@ def _labels(f, *args, device="mps"):
 
 
 def test_compiler_flags_defaults(compiler):
-    """Every program runs as traced, but for online softmax, flash
-    attention, fused linear cross entropy and split-K (on)."""
-    assert (compiler.fuse, compiler.merge_dots, compiler.normalization_diamonds) == (True, True, True)
+    """Each device's compiler has its own settings (``lumen.config.compiler``
+    holds one per device; ``of`` picks a device's, the meta device's the
+    CPU's): every program runs as traced, but for online softmax, flash
+    attention, fused linear cross entropy and split-K (on). A device's
+    settings hold only the flags its compiler reads."""
+    configs = lumen.config.compiler
+    for device in (configs.cpu, configs.cuda, configs.mps, configs.tpu):
+        assert (device.merge_dots, device.flash_attention, device.memory_limit) == (True, True, 0)
+        assert device.fused_linear_cross_entropy_chunk_size is None and device.dump_to is None
+    assert (compiler.fuse, compiler.normalization_diamonds) == (True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
-    assert compiler.online_softmax is True and compiler.flash_attention is True and compiler.row_cache == 8
-    assert compiler.split_k is True and compiler.deterministic is False and compiler.memory_limit == 0
-    assert compiler.fused_linear_cross_entropy is True and compiler.fused_linear_cross_entropy_chunk_size is None
-    assert compiler.safe_kernels is False and compiler.dump_to is None
-    assert compiler.use_triton_backend is False
-    assert compiler.autotune is True
-    assert repr(compiler).startswith("lumen.config.compiler(fuse=True, merge_dots=True")
+    assert compiler.online_softmax is True and compiler.row_cache == 8
+    assert compiler.split_k is True and compiler.deterministic is False
+    assert compiler.fused_linear_cross_entropy is True and compiler.safe_kernels is False
+    assert compiler.autotune is True and compiler.neural_engine is False
+    assert (configs.cuda.use_triton_backend, configs.cuda.autotune) == (False, True)
+    tpu = configs.tpu
+    assert (tpu.normalization_diamonds, tpu.contraction_epilogues, tpu.horizontal_fusion) == (True, True, True)
+    assert tpu.safe_kernels is False
+    assert repr(compiler).startswith("lumen.config.compiler.mps(fuse=True, merge_dots=True")
     assert "online_softmax=True" in repr(compiler)
+    assert type(configs.of("mps")).__name__ == "MpsConfig" and type(configs.of("meta")).__name__ == "CpuConfig"
     compiler.online_softmax, compiler.row_cache = False, 4
-    assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
+    assert not configs.of("mps").online_softmax and configs.mps.row_cache == 4
+    configs.cpu.merge_dots = False
+    assert configs.mps.merge_dots and not configs.of("cpu").merge_dots
     compiler.reset()
-    assert lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 8
+    assert configs.mps.online_softmax and configs.mps.row_cache == 8 and not configs.cpu.merge_dots
+    configs.reset()
+    assert configs.cpu.merge_dots
     compiler.fused_linear_cross_entropy_chunk_size = 128
     assert "fused_linear_cross_entropy_chunk_size=128" in repr(compiler)
     compiler.fused_linear_cross_entropy_chunk_size = None
@@ -52,6 +67,8 @@ def test_compiler_flags_defaults(compiler):
         compiler.row_cache = -1
     with pytest.raises(AttributeError):
         compiler.fast = True
+    with pytest.raises(AttributeError):
+        configs.cpu.split_k = False
 
 
 @pytest.mark.mps
@@ -124,7 +141,7 @@ def test_dump_to_writes_each_pass(compiler, tmp_path):
     kernels, then place the slices read in place."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
-    compiler.dump_to = str(tmp_path)
+    lumen.config.compiler.cpu.dump_to = compiler.dump_to = str(tmp_path)
     devices = ["cpu"] + (["mps"] if lumen.mps.is_available() else [])
     for device in devices:
         lumen.graph_compiler.Plan(graph, device)
@@ -138,7 +155,7 @@ def test_dump_to_writes_each_pass(compiler, tmp_path):
         assert (
             "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-2]))).read_text()
         )
-    compiler.reset()
+    lumen.config.compiler.reset()
     count = len(list(tmp_path.iterdir()))
     lumen.graph_compiler.Plan(graph, "cpu")
     assert len(list(tmp_path.iterdir())) == count

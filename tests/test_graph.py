@@ -870,7 +870,7 @@ def test_attention_projections_merge_into_one_matmul():
     merged, attention = plan.steps()
     assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
     assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
-    lumen.config.compiler.flash_attention = False
+    lumen.config.compiler.mps.flash_attention = False
     try:
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     finally:
@@ -1249,8 +1249,8 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
         F.sum(y * y).backward()
         return model.w0.grad, model.wq.grad, model.wk.grad, model.wv.grad
 
-    before = lumen.config.compiler.deterministic
-    lumen.config.compiler.deterministic = deterministic
+    before = lumen.config.compiler.mps.deterministic
+    lumen.config.compiler.mps.deterministic = deterministic
     try:
         grads = {}
         for device in ("cpu", "mps"):
@@ -1265,7 +1265,7 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
         graph = lumen.make_graph(step)(model, meta(m, d))
         steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     finally:
-        lumen.config.compiler.deterministic = before
+        lumen.config.compiler.mps.deterministic = before
     for got, want in zip(grads["mps"], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
     labels = [s["label"] for s in steps]
@@ -1393,7 +1393,7 @@ def test_projections_of_several_inputs_each_read_one_block(module):
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.merge_dots = merge
+            lumen.config.compiler.mps.merge_dots = merge
             model = module(meta(64, 64), meta(64, 64), meta(64, 64))
             g = lumen.compile(f, device="mps")
             g(model, meta(32, 64), meta(32, 64))
@@ -1449,7 +1449,7 @@ def test_gated_pairs_weights_are_interleaved():
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.merge_dots = merge
+            lumen.config.compiler.mps.merge_dots = merge
             model = GatedPair(meta(64, 32), meta(64, 32))
             f = lumen.compile(lambda m, x: m(x), device="mps")
             f(model, meta(16, 32))
@@ -1504,7 +1504,7 @@ def test_gated_pairs_backward_is_interleaved():
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.merge_dots = merge
+            lumen.config.compiler.mps.merge_dots = merge
             model = make()
             f = lumen.compile(step, device="mps")
             f(model, meta(m, d))
@@ -1600,7 +1600,7 @@ def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, i
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.merge_dots = merge
+            lumen.config.compiler.mps.merge_dots = merge
             model = make()
             f = lumen.compile(lambda model, x: model(x), device="mps")
             f(model, meta(*shape))
@@ -1707,7 +1707,7 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step)
         got = []
         try:
             for merge in (True, False):
-                lumen.config.compiler.merge_dots = merge
+                lumen.config.compiler.mps.merge_dots = merge
                 model = make()
                 f = lumen.compile(step, device="mps")
                 f(model, meta(*shape))
@@ -1768,7 +1768,7 @@ def test_returned_dots_merge(n, summed, interleaved, left):
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.merge_dots = merge
+            lumen.config.compiler.mps.merge_dots = merge
             model = make()
             f = lumen.compile(lambda model, x: model(x), device="mps")
             f(model, meta(*shape))
@@ -1811,7 +1811,7 @@ def test_trained_projections_merge_into_one_matmul(module):
     values = {n: lumen.from_numpy(rand(32, 32, seed=i + 1) / 4) for i, n in enumerate(("wq", "wk", "wv"))}
     trained = {}
     for merge in (True, False):
-        lumen.config.compiler.merge_dots = merge
+        lumen.config.compiler.mps.merge_dots = merge
         try:
             model = module(meta(32, 32), meta(32, 32), meta(32, 32))
             f = lumen.compile(step, device="mps")
@@ -2398,7 +2398,7 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
 )
 def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
     """A cross entropy of a matmul's logits trained with
-    ``lumen.config.compiler.fused_linear_cross_entropy_chunk_size``
+    ``lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size``
     (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
     a time (4 of 16 rows of 64; 8 of 128 rows of 1000, the last one
     short; 32 of 32 rows of 1024, more than a kernel binds, its losses
@@ -2445,12 +2445,12 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
         pytest.skip(str(e))
     H, W = H.to(dtype="bfloat16"), W.to(dtype=head)
     step = trained(unfused)
-    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
+    lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size = chunk
     try:
         plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(H, W, T, C), "mps")
         got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
     finally:
-        lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+        lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size = None
     sizes = [min(chunk, n - start) for start in range(0, n, chunk)]
     steps = plan.steps()
     labels = [s["label"] for s in steps]
@@ -2670,7 +2670,7 @@ def test_matmul_epilogues_fuse(f, shapes, dtype):
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
-    lumen.config.compiler.contraction_epilogues = False
+    lumen.config.compiler.mps.contraction_epilogues = False
     try:
         assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
@@ -2726,7 +2726,7 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
     assert len(rows) == (not wide or f is not _softmax_block), [s["label"] for s in steps]
     flatten = lambda out: [lumen.to_numpy(t) for t in (out if isinstance(out, tuple) else [out])]
     fused = flatten(lumen.compile(f)(*args))
-    lumen.config.compiler.contraction_epilogues = False
+    lumen.config.compiler.mps.contraction_epilogues = False
     try:
         unfused = flatten(lumen.compile(f)(*args))
     finally:
@@ -2789,7 +2789,7 @@ def test_trained_matmul_epilogue_normalizes_its_rows():
     fused = [label for label in labels if label.startswith("dot_general → add") and "reduce_sum" in label]
     assert len(fused) == 1, labels
     got = run()
-    lumen.config.compiler.contraction_epilogues = False
+    lumen.config.compiler.mps.contraction_epilogues = False
     try:
         want = run()
     finally:
@@ -2826,7 +2826,7 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
         return F.relu(plain(a, b))
 
     for tuned in (False, True):
-        lumen.config.compiler.autotune = tuned
+        lumen.config.compiler.mps.autotune = tuned
         try:
             for f, want in ((plain, product), (fused, np.maximum(product, 0))):
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
@@ -2940,7 +2940,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     def dots(f, *args):
         return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
-    lumen.config.compiler.contraction_epilogues = False
+    lumen.config.compiler.mps.contraction_epilogues = False
     try:
         (dot,) = dots(rounded, x, w)
         assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
@@ -2954,7 +2954,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     want = lumen.to_numpy(lumen.compile(both)(x, w)[0].to(dtype="float32"))
     np.testing.assert_array_equal(got, want)
     half = lambda x, w: F.matmul(x, w, "float32", "float32").half()  # noqa: E731
-    lumen.config.compiler.contraction_epilogues = False
+    lumen.config.compiler.mps.contraction_epilogues = False
     try:
         assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast(float32 -> float16)"]
     finally:
@@ -3192,7 +3192,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads():
 
     results = []
     for epilogues in (True, False):
-        lumen.config.compiler.contraction_epilogues = epilogues
+        lumen.config.compiler.mps.contraction_epilogues = epilogues
         try:
             model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
             f = lumen.compile(step, device="mps")

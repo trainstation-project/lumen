@@ -10,7 +10,7 @@ const MPS: Target = Target {
 use super::{codegen, fusion};
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
@@ -23,7 +23,7 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 }
 
 fn fuse(g: &Graph) -> Graph {
-    let config = CompilerConfig::default();
+    let config = MpsConfig::default();
     fusion::fuse(
         g,
         &super::diamonds::diamonds(g),
@@ -64,14 +64,7 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
         let index = g.input(ty(DType::I32, &[8]));
         let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
         g.set_outputs(&[out]).unwrap();
-        codegen::kernel(
-            &g,
-            &[],
-            &CompilerConfig::default(),
-            &Default::default(),
-            None,
-        )
-        .1
+        codegen::kernel(&g, &[], &MpsConfig::default(), &Default::default(), None).1
     };
     let (narrow, wide) = (source(1000), source(1 << 31));
     assert!(
@@ -427,14 +420,8 @@ fn transposes_in_fusions_are_tiled() {
                 panic!("{fused}")
             };
             assert_eq!(fused.nodes().len(), 1, "{fused}");
-            let source = codegen::kernel(
-                body,
-                &[],
-                &CompilerConfig::default(),
-                &Default::default(),
-                None,
-            )
-            .1;
+            let source =
+                codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
             assert_eq!(
                 codegen::transpose_tiling(body).is_some(),
                 tiled,
@@ -476,14 +463,7 @@ fn reductions_are_normalized() {
         let Fusion { body, .. } = &fused.nodes()[0].primitive else {
             panic!("{fused}")
         };
-        let source = codegen::kernel(
-            body,
-            &[],
-            &CompilerConfig::default(),
-            &Default::default(),
-            None,
-        )
-        .1;
+        let source = codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
         assert!(
             source.contains(&format!("{kernel}<")),
             "{shape:?} {axes:?}: {source}"
@@ -530,14 +510,8 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let Fusion { body, .. } = &fused.nodes()[0].primitive else {
                     panic!("{fused}")
                 };
-                let source = codegen::kernel(
-                    body,
-                    &[],
-                    &CompilerConfig::default(),
-                    &Default::default(),
-                    None,
-                )
-                .1;
+                let source =
+                    codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
                 match accum_dtype {
                     DType::F32 => {
                         let (t, a) = (metal_type(dtype), "float");
@@ -587,14 +561,8 @@ fn hierarchical_reductions_keep_their_dtype() {
     let fused = fuse(&g);
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source = codegen::kernel(
-                body,
-                &[],
-                &CompilerConfig::default(),
-                &Default::default(),
-                None,
-            )
-            .1;
+            let source =
+                codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
             assert!(!mentions(&source, "float"), "{source}");
         }
     }
@@ -1041,14 +1009,7 @@ fn dots_fuse_their_epilogue() {
         panic!("{fused}")
     };
     assert!(label.starts_with("dot_general"), "{label}");
-    let source = codegen::kernel(
-        body,
-        &[],
-        &CompilerConfig::default(),
-        &Default::default(),
-        None,
-    )
-    .1;
+    let source = codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
     assert!(
         source.contains("matmul_sg_impl") && source.contains("_small("),
         "{source}"
@@ -1057,9 +1018,9 @@ fn dots_fuse_their_epilogue() {
         fused_primitives(&build(true), &inputs),
         ["fusion", "fusion_output"]
     );
-    let config = CompilerConfig {
+    let config = MpsConfig {
         contraction_epilogues: false,
-        ..CompilerConfig::default()
+        ..MpsConfig::default()
     };
     let unfused = fusion::fuse(
         &g,
@@ -1242,14 +1203,8 @@ fn reductions_apply_their_epilogue() {
                 panic!("{fused}")
             };
             assert!(super::codegen::has_epilogue(body));
-            let source = codegen::kernel(
-                body,
-                &[],
-                &CompilerConfig::default(),
-                &Default::default(),
-                None,
-            )
-            .1;
+            let source =
+                codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
             assert!(source.contains("operator()(float r)"), "{source}");
             assert_eq!(source.contains("_final("), split, "{source}");
             if available() {
@@ -1278,14 +1233,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
             panic!("{fused}")
         };
         assert!(super::codegen::has_epilogue(body));
-        let source = codegen::kernel(
-            body,
-            &[],
-            &CompilerConfig::default(),
-            &Default::default(),
-            None,
-        )
-        .1;
+        let source = codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
         assert_eq!(source.contains("_final("), split, "{source}");
         if available() {
             let slack = shape[1] as f64 * 2.0 * f64::from(f32::EPSILON);
@@ -1565,14 +1513,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(
-        body,
-        &[],
-        &CompilerConfig::default(),
-        &Default::default(),
-        None,
-    )
-    .1;
+    let source = codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
@@ -1599,14 +1540,7 @@ fn division_by_sqrt_is_as_traced() {
     let Fusion { body, .. } = &fused.nodes()[0].primitive else {
         panic!("{fused}")
     };
-    let source = codegen::kernel(
-        body,
-        &[],
-        &CompilerConfig::default(),
-        &Default::default(),
-        None,
-    )
-    .1;
+    let source = codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
         "{source}"
@@ -1898,7 +1832,7 @@ fn every_gemm_candidate_matches_the_reference() {
         (&[5, 1000], &[1000, 300], 1, 0),
     ];
     let mut options = crate::graph_compiler::Options::default();
-    options.config.autotune = false;
+    options.config.mps.autotune = false;
     for dtype in [DType::F32, DType::BF16] {
         for (lhs, rhs, lc, rc) in cases {
             for fused in [false, true] {
@@ -1988,7 +1922,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
     let (pairs, plain, other, k) = (40, 24, 69, 96);
     let extent = 2 * pairs + plain;
     let mut options = crate::graph_compiler::Options::default();
-    options.config.autotune = false;
+    options.config.mps.autotune = false;
     let along = |g: &mut Graph, v: Var, shape: &[usize], at: usize, start: usize, end: usize| {
         let mut limit = shape.to_vec();
         let mut first = vec![0; shape.len()];

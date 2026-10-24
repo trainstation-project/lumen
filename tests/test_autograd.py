@@ -407,7 +407,7 @@ def test_attention_gradient_is_flash_attentions(attention, shapes):
     m = [lumen.empty(list(s), device="meta") for s in shapes]
     assert "log" in str(lumen.make_graph(grad)(*m))
     got = lumen.compile(grad)(*map(lumen.from_numpy, xs))
-    lumen.config.compiler.flash_attention = False
+    lumen.config.compiler.cpu.flash_attention = False
     try:
         assert "log" not in str(lumen.make_graph(grad)(*m))
         want = lumen.compile(grad)(*map(lumen.from_numpy, xs))
@@ -461,7 +461,7 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device):
     x = rng.standard_normal((8, 32)).astype(np.float32)
     results = []
     for merge in (True, False):
-        lumen.config.compiler.merge_dots = merge
+        lumen.config.compiler.of(device).merge_dots = merge
         try:
             model = _QKV(*(lumen.empty([32, 16], device="meta") for _ in range(3)))
             f = lumen.compile(_qkv_step, device=device)
@@ -472,7 +472,7 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device):
             model.load_state_dict(dict(zip(["wq", "wk", "wv"], map(lumen.from_numpy, ws))))
             loss, gx, gw = f(model, lumen.from_numpy(x).to(device))
             results.append([lumen.to_numpy(t) for t in (loss, gx, *gw)])
-            graph = str(lumen.make_graph(_qkv_step)(model, lumen.from_numpy(x)))
+            graph = str(lumen.make_graph(_qkv_step)(model, lumen.from_numpy(x).to(device)))
             assert ("concatenate" in graph) == merge
         finally:
             lumen.config.compiler.reset()
@@ -535,7 +535,7 @@ def test_projections_backward_writes_cotangents_side_by_side():
     x = rng.standard_normal((32, 64)).astype(np.float32)
     results = []
     for merge in (True, False):
-        lumen.config.compiler.merge_dots = merge
+        lumen.config.compiler.mps.merge_dots = merge
         try:
             model = _Projections(*(lumen.empty([64, 64], device="meta") for _ in range(3)))
             f = lumen.compile(_projections_step, device="mps")

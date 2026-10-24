@@ -16,7 +16,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     }
 
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config;
+        let config = &m.options.config.mps;
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {

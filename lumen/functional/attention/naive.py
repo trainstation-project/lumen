@@ -30,7 +30,7 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
     Traced as its primitives: the scores (accumulated, and the softmax
     computed, in float32 or wider), the softmax, then the probabilities in
     the inputs' dtype times ``value``. The MPS compiler runs them as one
-    flash-attention kernel (``lumen.config.compiler.flash_attention``), as
+    flash-attention kernel (``lumen.config.compiler.<device>.flash_attention``), as
     it does attention written out."""
 
     q = _lift(query)
