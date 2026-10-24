@@ -1628,7 +1628,7 @@ class SharedOperand(lumen.nn.Module):
             q, k = p[k : k + g], k + g
             v = q[0] * F.sigmoid(q[0])
             for r in q[1:]:
-                v = v * r
+                v = v + r
             out.append(v)
         return out
 
@@ -1653,14 +1653,36 @@ def _gated_training(model, x):
 
 @pytest.mark.mps
 @pytest.mark.parametrize(
-    "groups, h",
-    [([2], 64), ([2, 2], 64), ([3], 64), ([2, 1], 64), ([2], 10)],
-    ids=["pair", "two pairs", "three", "pair and one", "pair apart"],
+    "groups, h, interleaved",
+    [
+        ([1, 1, 1], 64, [[1, 1, 1]]),
+        ([2], 64, [[2]]),
+        ([4], 64, [[4]]),
+        ([8], 64, [[8]]),
+        ([2, 2], 64, [[2, 2]]),
+        ([4, 4], 32, [[4, 4]]),
+        ([8, 4, 2, 1], 32, [[8, 4, 2, 1]]),
+        ([3], 64, [[1, 1, 1]]),
+        ([2, 1], 64, [[2, 1]]),
+        ([2], 10, [[1, 1]]),
+    ],
+    ids=[
+        "ones",
+        "pair",
+        "four",
+        "eight",
+        "two pairs",
+        "two fours",
+        "eight four two one",
+        "three",
+        "pair and one",
+        "pair apart",
+    ],
 )
 @pytest.mark.parametrize(
     "step", [_gated_inference, _gated_gradients, _gated_training], ids=["inference", "gradients", "training"]
 )
-def test_weights_shared_on_either_side_merge_alike(groups, h, step):
+def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step):
     """Dots sharing their operand merge the same whether the weights are
     the right operand (``x @ w.T``) or the left (``w @ x``): the same
     block layout and the same kernels, forward and backward, the left
@@ -1679,7 +1701,8 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, step):
         make = lambda: SharedOperand([meta(h, d) for _ in range(n)], groups, left)
         graph = lumen.make_graph(step)(make(), meta(*shape))
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
-        plans.append((plan.interleaved, sorted(s["label"] for s in plan.steps())))
+        assert plan.interleaved == interleaved
+        plans.append(sorted(s["label"] for s in plan.steps()))
         values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
         x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
         got = []
@@ -1697,7 +1720,8 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, step):
         finally:
             lumen.config.compiler.reset()
         for merged, alone in zip(*got):
-            np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-4)
+            assert np.isfinite(alone).all()
+            np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
     assert plans[0] == plans[1]
 
 

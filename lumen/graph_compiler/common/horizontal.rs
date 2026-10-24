@@ -198,12 +198,13 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
                 None => nodes[w].inputs.iter().all(|&v| ready[v]),
             }) {
                 let w = waiting.remove(w);
-                let made = match group_of[w] {
-                    Some(k) => groups[k].members.clone(),
-                    None => vec![w],
-                };
-                for m in made {
-                    values[m].iter().for_each(|&v| ready[v] = true);
+                match group_of[w] {
+                    Some(k) => {
+                        for &m in &groups[k].members {
+                            values[m].iter().for_each(|&v| ready[v] = true);
+                        }
+                    }
+                    None => ready[nodes[w].output] = true,
                 }
                 order.push(w);
             }
