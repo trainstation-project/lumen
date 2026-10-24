@@ -51,7 +51,7 @@ Everything per element is generated from the fusion's body.
    generates them, as it does elementwise loops; don't add more.
 2. **A new hand-written kernel needs a reason codegen can't meet:** a
    schedule, the matrix unit, or a measured win over the generated kernel.
-   Put the measurement in its README.
+   Put the measurement in the commit message or PR description.
 3. **Hand-written kernels stay fusion-agnostic.** Fused work reaches them
    through the spec or a generated functor, so a new epilogue never means
    editing the kernel.
@@ -71,6 +71,6 @@ Everything per element is generated from the fusion's body.
 ## Checklist
 
 - [ ] Is this per element? Then it belongs in codegen.
-- [ ] If hand-written: a scheduling reason or a measurement, recorded in the README.
+- [ ] If hand-written: a scheduling reason or a measurement, recorded in the commit message or PR.
 - [ ] Fused work comes in through the spec or a generated functor, not edits to the kernel.
 - [ ] Files: `lumen/kernels/<op>/<device>/` for hand-written, `lumen/codegen/<device>/` for generated.
