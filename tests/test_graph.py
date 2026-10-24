@@ -1663,23 +1663,25 @@ class Linear(lumen.nn.Module):
 def test_packed_weights_are_read_in_place_elsewhere():
     """A weight another function packed into a block (a strided view of it)
     is read in place by the matmuls of a function using it alone, at its
-    strides: no copy per call."""
+    strides: no copy per call. Large enough to be tuned (a few rows, the
+    skinny kernels), the tuned kernel, which assumes whole operands, is
+    not used for the strided one."""
     from lumen.profiler import ProfilerActivity, profile
 
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
-    gated = Gated(meta(32, 64), meta(32, 64))
+    x, w1v, w3v = rand(16, 1024), rand(1024, 1024, seed=1), rand(1024, 1024, seed=2)
+    gated = Gated(meta(1024, 1024), meta(1024, 1024))
     run = lumen.compile(lambda model, x: model(x), device="mps")
-    run(gated, meta(16, 32))
+    run(gated, meta(16, 1024))
     gated.load_state_dict({"w1": lumen.from_numpy(w1v), "w3": lumen.from_numpy(w3v)})
     alone = Linear(gated.w1)
     run(alone, lumen.from_numpy(x))
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         out = run(alone, lumen.from_numpy(x))
-    np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-4, atol=1e-4)
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}
 
 
@@ -2657,6 +2659,33 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
                 np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-3)
         finally:
             lumen.config.compiler.reset()
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
+@pytest.mark.parametrize("m, k, n", [(512, 256, 512), (300, 200, 260), (5, 4096, 1000), (1, 4096, 4096)])
+def test_tuned_matmul_matches_numpy_in_every_layout(dtype, lhs_k, rhs_k, m, k, n):
+    """Tuned, a float matmul of 64K or more outputs, or of a few rows,
+    runs on whichever candidate was fastest: lumen's simdgroup kernels,
+    where Metal Performance Primitives compile ``matmul_mpp``, and for a
+    few rows ``matmul_skinny``. Either operand may be transposed
+    (contracting its first dimension rather than its last, or its last
+    rather than its first), tiles may be left partial at the edges (300 x
+    260 of 64-wide tiles, 5 rows of 8-row ones), and the result may round
+    to bfloat16. Each matches NumPy."""
+    rng = np.random.default_rng(0)
+    shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
+    try:
+        a, b = (lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+    want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
+    dims = (((lhs_k,), (rhs_k,)), ((), ()))
+    got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32", dtype))(a, b)
+    rtol = 1e-4 if dtype == "float32" else 2**-6
+    np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
 
 
 def _silu(h):

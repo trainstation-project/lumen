@@ -1,6 +1,23 @@
 template <typename T> struct Pair {
     T first, second;
 };
+template <uint N> struct Bytes;
+template <> struct Bytes<16> {
+    using type = uint4;
+};
+template <> struct Bytes<8> {
+    using type = uint2;
+};
+template <> struct Bytes<4> {
+    using type = uint;
+};
+template <> struct Bytes<2> {
+    using type = ushort;
+};
+template <> struct Bytes<1> {
+    using type = uchar;
+};
+
 #define SG_BK 16
 #define SMALL_BK 32
 #define SG_COLS 2
@@ -21,7 +38,8 @@ template <typename T,
           bool INTERLEAVED = false,
           bool REGIONS = false,
           uint THREADS = 256,
-          uint COLS = SG_COLS>
+          uint COLS = SG_COLS,
+          bool PREFETCH = true>
 inline void matmul_sg_impl(device const T *lhs,
                            device const T *rhs,
                            device Out *out,
@@ -70,23 +88,85 @@ inline void matmul_sg_impl(device const T *lhs,
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }
     }
-    fetch(0);
-    for (ulong k0 = 0; k0 < K; k0 += BK) {
-        UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }
-        UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * BN + bc] = rb[t]; }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (k0 + BK < K) {
-            fetch(k0 + BK);
-        }
+    auto mma = [&]() {
         UNROLL for (uint kk = 0; kk < BK; kk += 8) {
             simdgroup_matrix<T, 8, 8> a[FM], b[FN];
+            simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * BK + kk, BK); }
+            simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * BN + sx * FN * 8 + j * 8, BN); }
+            simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) {
-                UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_multiply_accumulate(c[i][j], a[i], b[j], c[i][j]); }
+                UNROLL for (uint j = 0; j < FN; ++j) {
+                    const uint s = i % 2 ? FN - 1 - j : j;
+                    simdgroup_multiply_accumulate(c[i][s], a[i], b[s], c[i][s]);
+                }
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    };
+    constexpr uint W = 16 / sizeof(T);
+    constexpr uint WA = LA < W ? LA : W, WB = LB < W ? LB : W;
+    constexpr uint TA = BK / WA, TB = BN / WB, VRA = THREADS / TA, VRB = THREADS / TB, PA = LA / WA, PB = LB / WB;
+    device const T *lhs0 = lhs + group.z * p[3];
+    device const T *rhs0 = rhs + group.z * p[6];
+    const bool vector = !PAIRED && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
+                        N % WB == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 && ulong(rhs0) % (WB * sizeof(T)) == 0;
+    if (vector) {
+        using CA = typename Bytes<WA * sizeof(T)>::type;
+        using CB = typename Bytes<WB * sizeof(T)>::type;
+        const uint avr = flat / TA, avc = flat % TA, bvr = flat / TB, bvc = flat % TB;
+        device const T *lv = lhs0 + (m0 + avr) * sm + avc * WA;
+        device const T *rv = rhs0 + ulong(bvr) * rk + n0 + bvc * WB;
+        const bool in_n = n0 + bvc * WB < N;
+        CA va[PA];
+        CB vb[PB];
+        const bool whole = full_m && n0 + BN <= N;
+        auto fetch_v = [&](ulong k0) {
+            if (whole && k0 + BK <= K) {
+                UNROLL for (uint t = 0; t < PA; ++t) { va[t] = *(device const CA *)(lv + ulong(VRA * t) * sm); }
+                UNROLL for (uint t = 0; t < PB; ++t) { vb[t] = *(device const CB *)(rv + ulong(VRB * t) * rk); }
+            } else {
+                const bool in_k = k0 + avc * WA < K;
+                UNROLL for (uint t = 0; t < PA; ++t) {
+                    bool in = in_k && m0 + avr + VRA * t < M;
+                    va[t] = in ? *(device const CA *)(lv + ulong(VRA * t) * sm) : CA(0);
+                }
+                UNROLL for (uint t = 0; t < PB; ++t) {
+                    bool in = in_n && k0 + bvr + VRB * t < K;
+                    vb[t] = in ? *(device const CB *)(rv + ulong(VRB * t) * rk) : CB(0);
+                }
+            }
+            lv += BK;
+            rv += BK * rk;
+        };
+        if constexpr (PREFETCH) {
+            fetch_v(0);
+        }
+        for (ulong k0 = 0; k0 < K; k0 += BK) {
+            if constexpr (!PREFETCH) {
+                fetch_v(k0);
+            }
+            UNROLL for (uint t = 0; t < PA; ++t) { *(threadgroup CA *)(lt + (avr + VRA * t) * BK + avc * WA) = va[t]; }
+            UNROLL for (uint t = 0; t < PB; ++t) { *(threadgroup CB *)(rt + (bvr + VRB * t) * BN + bvc * WB) = vb[t]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (PREFETCH && k0 + BK < K) {
+                fetch_v(k0 + BK);
+            }
+            mma();
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    } else {
+        fetch(0);
+        for (ulong k0 = 0; k0 < K; k0 += BK) {
+            UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }
+            UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * BN + bc] = rb[t]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (k0 + BK < K) {
+                fetch(k0 + BK);
+            }
+            mma();
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
     if constexpr (TILE) {
@@ -116,6 +196,19 @@ inline void matmul_sg_impl(device const T *lhs,
                 ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
                 if (m < M && n < N) {
                     o[m * H + n / 2] = epi(O(f[0]), O(f[1]), group.z * M * H + m * H + n / 2);
+                }
+            }
+        }
+    } else if (!ATOMIC && !EXPANDED && full_m && n0 + BN <= N) {
+        if constexpr (!ATOMIC && !EXPANDED) {
+            device Out *o = out + group.z * M * N;
+            UNROLL for (uint i = 0; i < FM; ++i) {
+                UNROLL for (uint j = 0; j < FN; ++j) {
+                    const thread vec<A, 2> &f = frag(c[i][j]);
+                    ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
+                    ulong at = m * N + n;
+                    o[at] = epi(O(f[0]), group.z * M * N + at);
+                    o[at + 1] = epi(O(f[1]), group.z * M * N + at + 1);
                 }
             }
         }

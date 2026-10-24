@@ -75,7 +75,8 @@ def matrix(n, dtype, rng):
 
 
 def square(n, dtype, rng):
-    return [(rng.uniform(-1, 1, (side(n), side(n))).astype(np.float32), dtype) for _ in range(2)]
+    scale = np.sqrt(3 / side(n))
+    return [((rng.uniform(-1, 1, (side(n), side(n))) * scale).astype(np.float32), dtype) for _ in range(2)]
 
 
 def vocabulary(n, dtype, rng):
@@ -401,6 +402,16 @@ def rotating(run, sets):
     return call, [[k] for k in range(len(sets))]
 
 
+def chained(run, sets):
+    last = [None]
+
+    def call(k):
+        args = sets[k] if last[0] is None else [last[0], *sets[k][1:]]
+        last[0] = outputs(run(k, *args))[0]
+
+    return call, [[k] for k in range(len(sets))]
+
+
 def rotation(per_call):
     return min(max(-(-ROTATION_BYTES // per_call), 2), 4096)
 
@@ -460,6 +471,8 @@ def measure(name, measured=lambda row: None):
                 rows.append({"op": name, "dtype": dtype, "n": n, "error": str(e).splitlines()[0][:200]})
                 measured(rows[-1])
                 continue
+            chain = op.flops is not None and list(out[0].shape) == list(lt[0].shape) and out[0].dtype == lt[0].dtype
+            calls = chained if chain else rotating
             loaded = sum(nbytes(t) for t in lt)
             stored = sum(nbytes(t) for t in out)
             sets = rotation(loaded + stored)
@@ -481,6 +494,7 @@ def measure(name, measured=lambda row: None):
                 "torch_us": None,
                 "matches_torch": None,
                 "rotation": sets,
+                "chained": chain,
             }
             graph = lumen.make_graph(lf)(*lt)
             plan = lumen.graph_compiler.Plan(graph, "mps", parameters=list(range(len(lt))))
@@ -491,7 +505,7 @@ def measure(name, measured=lambda row: None):
             timed = [
                 (
                     "lumen_us",
-                    *rotating(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets),
+                    *calls(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets),
                     lumen.mps.synchronize,
                 )
             ]
@@ -501,9 +515,7 @@ def measure(name, measured=lambda row: None):
                     tt = [to_torch(a, d) for a, d in arrays]
                     want = outputs(tf(*tt))
                     torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
-                    timed.append(
-                        ("torch_us", *rotating(lambda k, *args: tf(*args), torch_sets), torch.mps.synchronize)
-                    )
+                    timed.append(("torch_us", *calls(lambda k, *args: tf(*args), torch_sets), torch.mps.synchronize))
                 except Exception as e:
                     print(name, dtype, n, "torch:", str(e).splitlines()[0][:120], file=sys.stderr)
             times = {}

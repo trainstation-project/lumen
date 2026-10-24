@@ -388,13 +388,14 @@ pub(super) fn gemm_regions_kernel(
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
+        let prefetch = c.prefetch;
         writedoc!(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true, {threads}, {cols}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true, {threads}, {cols}, {prefetch}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
             }}
             "
         )
@@ -531,13 +532,14 @@ fn gemm_kernel_with(
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
+        let prefetch = c.prefetch;
         writedoc!(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}, {threads}, {cols}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}, {threads}, {cols}, {prefetch}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
             }}
             "
         )

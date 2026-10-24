@@ -16,22 +16,97 @@ const SMALL_TILE: (usize, usize) = (32, 32);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
+const SKINNY_ROWS: usize = 32;
+const SKINNY_WORK: usize = 1 << 24;
 
-pub(crate) fn matmul_source(t: &str, a: &str, o: &str, c: GemmConfig) -> (String, String) {
+pub(crate) const MPP_PREFIX: &str = "matmul_mpp_";
+
+pub(crate) fn mpp_transposes(step: &Step) -> Option<(bool, bool)> {
+    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+    let (ls, rs) = (
+        contiguous_strides(&lhs.shape),
+        contiguous_strides(&rhs.shape),
+    );
+    let launch_ = plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, None).ok()?;
+    let [m, n, k, _, sm, sk, _, rk, rn] = launch_.p;
+    let fits = [lhs.numel(), rhs.numel(), m * n].iter().all(|&e| e <= i32::MAX as usize);
+    let left = match (sk, sm) {
+        (1, _) => false,
+        (_, 1) if k > 1 => true,
+        _ => return None,
+    };
+    let right = match (rn, rk) {
+        (1, _) => false,
+        (_, 1) if n > 1 => true,
+        _ => return None,
+    };
+    fits.then_some((left, right))
+}
+
+pub(crate) fn skinny(step: &Step) -> bool {
+    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+    let (ls, rs) = (
+        contiguous_strides(&lhs.shape),
+        contiguous_strides(&rhs.shape),
+    );
+    plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, None)
+        .is_ok_and(|launch_| {
+            let [m, n, k, ..] = launch_.p;
+            m <= SKINNY_ROWS && launch_.p[8] == 1 && m * n * k >= SKINNY_WORK
+        })
+}
+
+pub(crate) fn matmul_source(
+    t: &str,
+    a: &str,
+    o: &str,
+    c: GemmConfig,
+    (left, right): (bool, bool),
+) -> (String, String) {
     let GemmConfig {
         bm,
         bn,
         bk,
         threads,
         cols,
+        prefetch,
+        algorithm,
     } = c;
-    let name = format!("matmul_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{cols}");
     let simds = threads / 32;
+    if algorithm == Algorithm::Skinny {
+        let name = format!("matmul_skinny_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}");
+        let source = format!(
+            "[[max_total_threads_per_threadgroup({threads})]]\n\
+             kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    \
+                 threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];\n    \
+                 matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}>(lhs, rhs, out, p, partials, group, tid.x);\n\
+             }}\n"
+        );
+        return (name, source);
+    }
+    if algorithm == Algorithm::Mpp {
+        let name = format!(
+            "{MPP_PREFIX}{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{}{}",
+            u8::from(left),
+            u8::from(right)
+        );
+        let source = format!(
+            "[[max_total_threads_per_threadgroup({threads})]]\n\
+             kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]]) {{\n    \
+                 matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}>(lhs, rhs, out, p, group);\n\
+             }}\n"
+        );
+        return (name, source);
+    }
+    let name = format!(
+        "matmul_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{cols}_{}",
+        u8::from(prefetch)
+    );
     let source = format!(
         "[[max_total_threads_per_threadgroup({threads})]]\n\
          kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {{\n    \
              threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];\n    \
-             matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o}, Same, false, false, false, false, false, false, {threads}, {cols}>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);\n\
+             matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o}, Same, false, false, false, false, false, false, {threads}, {cols}, {prefetch}>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);\n\
          }}\n"
     );
     (name, source)

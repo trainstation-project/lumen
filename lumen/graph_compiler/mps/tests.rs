@@ -1834,18 +1834,7 @@ fn matrix_vector_dots_are_reduced() {
         &'static [&'static str],
     );
     let cases: [Case; 4] = [
-        (
-            &[1, 64],
-            &[64, 48],
-            dot(1, 0, false),
-            &[
-                "reshape",
-                "broadcast_in_dim",
-                "mul",
-                "reduce_sum",
-                "reshape",
-            ],
-        ),
+        (&[1, 64], &[64, 48], dot(1, 0, false), &["dot_general"]),
         (
             &[1, 64],
             &[48, 64],
@@ -1864,18 +1853,7 @@ fn matrix_vector_dots_are_reduced() {
             dot(1, 0, false),
             &["broadcast_in_dim", "mul", "reduce_sum"],
         ),
-        (
-            &[3, 1, 64],
-            &[3, 64, 48],
-            dot(2, 1, true),
-            &[
-                "reshape",
-                "broadcast_in_dim",
-                "mul",
-                "reduce_sum",
-                "reshape",
-            ],
-        ),
+        (&[3, 1, 64], &[3, 64, 48], dot(2, 1, true), &["dot_general"]),
     ];
     for (lhs, rhs, p, want) in cases {
         let mut g = Graph::new();

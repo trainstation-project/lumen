@@ -268,7 +268,10 @@ pub(crate) fn encode(
         ));
     }
 
-    if let Some(encode) = step.launch::<Encode>() {
+    if let Some(encode) = step
+        .launch::<Encode>()
+        .filter(|_| step.views.iter().all(Option::is_none))
+    {
         return encode(step, inputs, output, scratch, keep);
     }
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {

@@ -16,7 +16,7 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, c_char};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
@@ -68,6 +68,7 @@ const PRELUDE: &str = concat!(
     include_str!("../../kernels/dot_general/mps/matmul_wide.metal"),
     include_str!("../../kernels/dot_general/mps/matmul_sg.metal"),
     include_str!("../../kernels/dot_general/mps/matmul_atomic.metal"),
+    include_str!("../../kernels/dot_general/mps/matmul_skinny.metal"),
     include_str!("../../kernels/dot_general/mps/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
     include_str!("../../kernels/attention/mps/backward.metal"),
@@ -330,11 +331,21 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Ok(plan)
 }
 
+const MPP_PRELUDE: &str = include_str!("../../kernels/dot_general/mps/matmul_mpp.metal");
+
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+    compile_with(PRELUDE, sources)
+}
+
+fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+    compile_with(MPP_PRELUDE, sources)
+}
+
+fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), String> {
     if sources.is_empty() {
         return Ok(());
     }
-    let source: String = std::iter::once(PRELUDE)
+    let source: String = std::iter::once(prelude)
         .chain(sources.values().map(String::as_str))
         .collect::<Vec<_>>()
         .join("\n");
@@ -349,6 +360,14 @@ fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
 }
 
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+fn mpp_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let probe = "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
+        compile_mpp_kernels(BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())])).is_ok()
+    })
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Launch {

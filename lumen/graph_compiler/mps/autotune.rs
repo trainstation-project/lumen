@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
-use super::{SOURCES, Tuning, codegen, compile_kernels, record_launch};
+use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
 use crate::allocator::Scratch;
+use crate::DType;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
@@ -25,13 +26,11 @@ pub(super) struct Loops<'a> {
     pub sources: BTreeMap<String, String>,
 }
 
-fn compile(sources: &mut BTreeMap<String, String>) -> Result<(), String> {
+fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut sources = std::mem::take(sources);
-    {
-        let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
-        sources.retain(|name, _| !compiled.contains_key(name));
-    }
-    compile_kernels(sources)
+    let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+    sources.retain(|name, _| !compiled.contains_key(name));
+    sources
 }
 
 impl Kernels for Loops<'_> {
@@ -64,7 +63,7 @@ impl Kernels for Loops<'_> {
     }
 
     fn compile(&mut self) -> Result<(), String> {
-        compile(&mut self.sources)
+        compile_kernels(uncompiled(&mut self.sources))
     }
 }
 
@@ -76,7 +75,7 @@ pub(super) struct Gemms {
 const TUNED_OUTPUTS: usize = 64 << 10;
 
 fn tiled_gemm(step: &Step) -> bool {
-    let float = step.output.1.dtype.is_float() && step.output.1.numel() >= TUNED_OUTPUTS;
+    let float = step.output.1.dtype.is_float();
     let whole = step.views.iter().all(Option::is_none);
     let tiled = match &step.primitive {
         Primitive::DotGeneral { .. } => true,
@@ -95,10 +94,22 @@ impl Kernels for Gemms {
     type Config = GemmConfig;
 
     fn configs(&self, step: &Step) -> Vec<GemmConfig> {
-        match tiled_gemm(step) {
-            true => gemm::configs().to_vec(),
-            false => Vec::new(),
+        let dot = matches!(
+            step.primitive,
+            Primitive::DotGeneral {
+                accum_dtype: DType::F32,
+                ..
+            }
+        );
+        let skinny = dot && gemm::skinny(step);
+        let large = step.output.1.numel() >= TUNED_OUTPUTS;
+        if !tiled_gemm(step) || !(large || skinny) {
+            return Vec::new();
         }
+        let mpp = large && dot && gemm::mpp_transposes(step).is_some() && super::mpp_available();
+        let mpp = if mpp { gemm::mpp_configs() } else { &[] };
+        let skinny = if skinny { gemm::skinny_configs() } else { &[] };
+        gemm::configs().iter().chain(mpp).chain(skinny).copied().collect()
     }
 
     fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
@@ -120,7 +131,7 @@ impl Kernels for Gemms {
                     codegen::metal_type(*accum_dtype),
                     codegen::metal_type(step.output.1.dtype),
                 );
-                gemm::matmul_source(t, a, o, config)
+                gemm::matmul_source(t, a, o, config, gemm::mpp_transposes(step).unwrap_or_default())
             }
         };
         self.sources.insert(kernel.clone(), source);
@@ -144,7 +155,11 @@ impl Kernels for Gemms {
     }
 
     fn compile(&mut self) -> Result<(), String> {
-        compile(&mut self.sources)
+        let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
+            .into_iter()
+            .partition(|(name, _)| name.starts_with(gemm::MPP_PREFIX));
+        compile_kernels(sg)?;
+        compile_mpp_kernels(mpp)
     }
 }
 
@@ -214,7 +229,7 @@ impl Buffers {
         let scratch = aligned(step.scratch.map_or(0, |(_, bytes)| bytes));
         let read: usize = inputs.iter().sum();
         let written: usize = outputs.iter().sum();
-        let mut copies = COLD_BYTES.div_ceil(read).clamp(1, MOST_COPIES);
+        let mut copies = COLD_BYTES.div_ceil(read).clamp(2, MOST_COPIES);
         let memory = loop {
             match Scratch::zeroed(read * copies + written + scratch) {
                 Some(memory) => break memory,
