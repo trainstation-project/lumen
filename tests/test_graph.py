@@ -1067,13 +1067,14 @@ class GatedMLP(lumen.nn.Module):
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
 def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     """A gated pair's backward (``merge_dots_backward``): its input's gradient one
-    dot of its cotangents side by side and the forward's weight block (K
-    twice as long, no copy of the weights), its weights' gradients one dot;
-    the cotangents the down projection's gradient GEMM's expanding
-    epilogue, written side by side, whatever the gate (SwiGLU's in float32,
-    from the rounded gradient widened: an upcast only that epilogue takes).
-    The forward the merged dot's paired epilogue, its halves (which the
-    backward reads) written by it too. The gradients the CPU's."""
+    dot of its cotangents and the forward's weight block, both interleaved
+    (K twice as long, no copy of the weights), its weights' gradients one
+    dot, interleaved as the block is; the cotangents the down projection's
+    gradient GEMM's expanding epilogue, written interleaved, whatever the
+    gate (SwiGLU's in float32, from the rounded gradient widened: an upcast
+    only that epilogue takes). The forward the merged dot's paired epilogue,
+    its halves (which the backward reads) written by it too. The gradients
+    the CPU's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1108,12 +1109,12 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
-    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [2 * h, d]]), labels
+    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [h, 2, d]]), labels
     forward = [s for s in merged if s["output"][2] == [m, h]]
     assert len(forward) == 1 and "mul" in forward[0]["label"], labels
     assert not any(s["label"].startswith("slice") and s["output"][2] == [m, h] for s in steps), labels
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
-    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
 
 
@@ -1193,9 +1194,9 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
-    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
-    assert any(_dot(s) and s["output"][2] == [2 * h, d] for s in steps), labels
+    assert any(s["label"] == "2x dot_general" and s["output"][2] == [h, 2, d] for s in steps), labels
     assert not any("transpose" in label for label in labels), labels
 
 
@@ -1420,8 +1421,9 @@ def test_gated_pairs_weights_are_interleaved():
     """Inference: a gated pair's two weights packed into one block
     interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
     pair one kernel (its products' pairs adjacent in a lane), the values as
-    unmerged. A training step (its weights assigned) keeps them side by
-    side."""
+    unmerged. A training step (its weights assigned, read again by their
+    update) interleaves them too: the update reads each weight as a view of
+    the block."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1440,7 +1442,7 @@ def test_gated_pairs_weights_are_interleaved():
 
     graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
-    assert all(k == 1 for regions in plan.interleaved for k in regions), plan.interleaved
+    assert plan.interleaved == [[2]], plan.interleaved
     values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
     x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
     got = []

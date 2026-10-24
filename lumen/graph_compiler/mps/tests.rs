@@ -876,7 +876,7 @@ fn dots_sharing_an_operand_merge() {
 }
 
 #[test]
-fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() {
+fn gated_pairs_interleave_unless_their_block_is_read_side_by_side() {
     let linear = DotGeneral {
         lhs_contracting: vec![1],
         rhs_contracting: vec![1],
@@ -909,7 +909,7 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
         (rows.clone(), vec![vec![2]])
     );
     let read = build(&|g, _, w3| Some(apply(g, Neg, &[w3])));
-    assert_eq!(pack(&read, &[]), (rows.clone(), vec![vec![1, 1]]));
+    assert_eq!(pack(&read, &[]), (rows.clone(), vec![vec![2]]));
     let concatenated = build(&|g, w1, w3| {
         let block = Concatenate {
             dimension: 0,
@@ -922,7 +922,7 @@ fn gated_pairs_interleave_only_where_nothing_reads_their_weights_side_by_side() 
     assert!(!names(&merged).contains(&"concatenate"), "{merged}");
     assert_eq!(
         pack(&build(&|_, _, _| None), &[false, true, true]),
-        (rows, vec![vec![1, 1]])
+        (rows, vec![vec![2]])
     );
 }
 
