@@ -74,6 +74,30 @@ def test_compiler_flags_defaults(compiler):
         configs.cpu.split_k = False
 
 
+def test_stub_defaults_are_the_compilers(compiler):
+    """The defaults ``lumen/config/_C.pyi`` shows for each device's flags
+    (``split_k: bool = True``) are the ones its compiler starts from: each
+    device's flags its own and its base class's (``CompilerConfig``), every
+    flag given one."""
+    import ast
+    import pathlib
+
+    stub = ast.parse((pathlib.Path(lumen.__file__).parent / "config" / "_C.pyi").read_text())
+    classes = {c.name: c for c in stub.body if isinstance(c, ast.ClassDef)}
+
+    def flags(name):
+        fields = {a.target.id: ast.literal_eval(a.value) for a in classes[name].body if isinstance(a, ast.AnnAssign)}
+        return {**(flags(classes[name].bases[0].id) if classes[name].bases else {}), **fields}
+
+    lumen.config.compiler.reset()
+    for device in ("cpu", "cuda", "mps", "tpu"):
+        config = getattr(lumen.config.compiler, device)
+        documented = flags(type(config).__name__)
+        actual = {k for k in dir(config) if not k.startswith("_") and k != "reset"}
+        assert set(documented) == actual, device
+        assert {k: getattr(config, k) for k in documented} == documented, device
+
+
 @pytest.mark.mps
 def test_compiler_flags_change_what_compiles(compiler):
     """Each flag turns its pass or kernel shape on or off (on MPS)."""
