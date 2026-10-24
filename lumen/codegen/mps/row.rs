@@ -412,9 +412,13 @@ pub(super) fn row_kernel(
                 ",
                 k + 1
             ),
-            (true, false) => writeln!(
+            (true, false) => writedoc!(
                 each,
-                "        if (c == 0u) {{ out{}[row] = {value}; }}",
+                "
+                if (c == 0u) {{
+                    out{}[row] = {value};
+                }}
+                ",
                 k + 1
             ),
             (false, _) => writeln!(each, "        out{}[j] = {value};", k + 1),
@@ -439,8 +443,11 @@ pub(super) fn row_kernel(
         }
         false => {
             let write = match out_type.numel() == rows {
-                true => format!(
-                    "if (c == 0u) {{ out[row] = {}; }}",
+                true => formatdoc!(
+                    "
+                    if (c == 0u) {{
+                        out[row] = {};
+                    }}",
                     e.value(out, "row".into())
                 ),
                 false => format!("out[j] = {value};"),
@@ -466,8 +473,11 @@ pub(super) fn row_kernel(
         false => Vec::new(),
     };
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
-    let signature = format!(
-        "kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]])"
+    let signature = formatdoc!(
+        "
+        kernel void NAME(
+            {params}{THREAD_ARGS}
+        )"
     );
     let staged = body.inputs().len() - 1;
     let prelude = match tile {

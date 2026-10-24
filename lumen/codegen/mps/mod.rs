@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use indoc::{formatdoc, writedoc};
+use indoc::{formatdoc, indoc, writedoc};
 
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -32,6 +32,12 @@ pub(crate) use gemm_row::*;
 pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
+
+pub(super) const THREAD_ARGS: &str = indoc! {"
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]"};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tuning {
@@ -97,11 +103,15 @@ pub(super) fn formatted(source: &str) -> String {
     let mut depth = 0usize;
     for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let code = line.split("//").next().unwrap_or("");
-        let closing = code.chars().take_while(|&c| c == '}').count();
+        let closing = code
+            .chars()
+            .take_while(|c| matches!(c, '}' | ')' | '>'))
+            .count();
         let level = depth.saturating_sub(closing);
         writeln!(out, "{}{line}", "    ".repeat(level)).unwrap();
-        let opened = code.matches('{').count();
-        depth = (depth + opened).saturating_sub(code.matches('}').count());
+        let opened = code.matches(['{', '(']).count() + usize::from(code.ends_with('<'));
+        let closed = code.matches(['}', ')']).count() + usize::from(code.starts_with('>'));
+        depth = (depth + opened).saturating_sub(closed);
         if depth == 0 && code.ends_with(['}', ';']) && closing > 0 {
             writeln!(out).unwrap();
         }
@@ -126,13 +136,18 @@ fn loads(source: &str) -> String {
         .collect();
     ks.sort_unstable();
     ks.dedup();
-    ks.iter()
-        .map(|k| {
-            format!(
-                "template <typename T, typename I> inline T NAME_load{k}(device const T *p, I i) {{ return p[i]; }}\n"
-            )
-        })
-        .collect()
+    ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
+}
+
+fn load_helper(name: &str, k: usize, index: &str) -> String {
+    formatdoc!(
+        "
+        template <typename T, typename I>
+        inline T {name}_load{k}(device const T *p, I i) {{
+            return p[{index}];
+        }}
+        "
+    )
 }
 
 pub(crate) fn strided_load(
@@ -143,12 +158,8 @@ pub(crate) fn strided_load(
     strides: &[usize],
 ) -> Option<String> {
     let index = gather_index("i", shape, strides);
-    let plain = format!(
-        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[i]; }}"
-    );
-    let strided = format!(
-        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[{index}]; }}"
-    );
+    let plain = load_helper(name, k, "i");
+    let strided = load_helper(name, k, &index);
     source
         .contains(&plain)
         .then(|| source.replace(&plain, &strided))
@@ -170,7 +181,7 @@ pub(super) fn io_params(
 ) -> (String, usize) {
     let (mut params, mut index) = (String::new(), 0);
     let mut param = |decl: String| {
-        write!(params, "{decl} [[buffer({index})]], ").unwrap();
+        writeln!(params, "{decl} [[buffer({index})]],").unwrap();
         index += 1;
     };
     let scalar = |k: usize| by_value.get(k) == Some(&true);

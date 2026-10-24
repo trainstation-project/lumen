@@ -70,7 +70,9 @@ pub(super) fn elementwise_kernel(
         "
         {stores}
         [[max_total_threads_per_threadgroup({group})]]
-        kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
+        kernel void NAME(
+            {params}ELEMENTWISE_ARGS({args})
+        ) {{
             {each} {{
                 {lines}{writes}
             }}
@@ -117,9 +119,14 @@ pub(super) fn written(
             }
             None => "i".to_string(),
         };
-        writeln!(
+        writedoc!(
             stores,
-            "template <typename T, typename I, typename V> inline void NAME_store{k}(device T *p, I i, V v) {{ p[{at}] = v; }}"
+            "
+            template <typename T, typename I, typename V>
+            inline void NAME_store{k}(device T *p, I i, V v) {{
+                p[{at}] = v;
+            }}
+            "
         )
         .unwrap();
         writeln!(writes, "NAME_store{k}({out}, j, {value});").unwrap();

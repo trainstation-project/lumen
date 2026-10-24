@@ -1,3 +1,5 @@
+use indoc::formatdoc;
+
 use super::{gather_index, named};
 use crate::graph::Primitive;
 
@@ -53,10 +55,12 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     let prologue = |rows: &str, cols: &str, at: String| {
         named(
             "prologue",
-            format!(
-                "@triton.jit\n\
-                 def NAME(ptr, l, {rows}, {cols}, mask):\n    \
-                     return tl.load(ptr + {at}, mask=mask, other=0)\n"
+            formatdoc!(
+                "
+                @triton.jit
+                def NAME(ptr, l, {rows}, {cols}, mask):
+                    return tl.load(ptr + {at}, mask=mask, other=0)
+                "
             ),
         )
     };
@@ -86,10 +90,12 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
         prologue_b: prologue("k", "n", b),
         epilogue: named(
             "epilogue",
-            format!(
-                "@triton.jit\n\
-                 def NAME(ptr, l, m, n, value, mask):\n    \
-                     tl.store(ptr + {d}, value.to(ptr.dtype.element_ty), mask=mask)\n"
+            formatdoc!(
+                "
+                @triton.jit
+                def NAME(ptr, l, m, n, value, mask):
+                    tl.store(ptr + {d}, value.to(ptr.dtype.element_ty), mask=mask)
+                "
             ),
         ),
     }
