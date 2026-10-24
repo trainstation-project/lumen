@@ -41,4 +41,3 @@ docstring explains what it demonstrates and how to run it.
 
 - [`../tests/README.md`](../tests/README.md): the tests, including the transformer's copy.
 - [`../benchmarks/README.md`](../benchmarks/README.md): kernel timings of `transformer.py`'s step.
-- [`../lumen/README.md`](../lumen/README.md): the APIs used here.
