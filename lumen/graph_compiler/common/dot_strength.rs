@@ -29,13 +29,19 @@ pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
                     let free = (0..shape.len()).filter(|d| !b.contains(d) && !c.contains(d));
                     free.map(|d| shape[d]).product::<usize>() == 1
                 };
+                let rows = |&(v, _, c): &(Var, &Vec<usize>, &Vec<usize>)| {
+                    let rank = out.type_of(v).shape.len();
+                    let mut c = c.clone();
+                    c.sort_unstable();
+                    c.iter().copied().eq(rank - c.len()..rank)
+                };
                 let accum = *accum_dtype;
                 match (vector(&operands[0]), vector(&operands[1])) {
                     (true, true) => Some(product(&mut out, operands[0], operands[1], accum)),
-                    (true, false) if matrices => {
+                    (true, false) if matrices && rows(&operands[1]) => {
                         Some(product(&mut out, operands[0], operands[1], accum))
                     }
-                    (false, true) if matrices => {
+                    (false, true) if matrices && rows(&operands[0]) => {
                         Some(product(&mut out, operands[1], operands[0], accum))
                     }
                     _ => None,

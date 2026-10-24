@@ -67,31 +67,35 @@ int lumen_mps_limits(lumen_mps_limits_t *out) {
 }
 
 void *lumen_mps_alloc(size_t nbytes) {
-    id<MTLDevice> device = lumen_default_device();
-    if (device == nil) {
-        return nullptr;
+    @autoreleasepool {
+        id<MTLDevice> device = lumen_default_device();
+        if (device == nil) {
+            return nullptr;
+        }
+        id<MTLBuffer> buffer =
+            [device newBufferWithLength:nbytes
+                                options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
+        if (buffer == nil) {
+            return nullptr;
+        }
+        void *contents = buffer.contents;
+        {
+            std::lock_guard<std::mutex> lock(g_buffers_mu);
+            g_buffers[static_cast<char *>(contents)] = buffer;
+        }
+        return contents;
     }
-    id<MTLBuffer> buffer =
-        [device newBufferWithLength:nbytes
-                            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
-    if (buffer == nil) {
-        return nullptr;
-    }
-    void *contents = buffer.contents;
-    {
-        std::lock_guard<std::mutex> lock(g_buffers_mu);
-        g_buffers[static_cast<char *>(contents)] = buffer;
-    }
-    return contents;
 }
 
 void lumen_mps_free(void *contents) {
     if (contents == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(g_buffers_mu);
-    g_buffers.erase(static_cast<char *>(contents));
-    g_heaps.erase(static_cast<char *>(contents));
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(g_buffers_mu);
+        g_buffers.erase(static_cast<char *>(contents));
+        g_heaps.erase(static_cast<char *>(contents));
+    }
 }
 
 static constexpr MTLResourceOptions kPlaced = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;

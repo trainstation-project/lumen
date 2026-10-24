@@ -1,5 +1,6 @@
 use super::{Kernel, MpsModule, request};
-use crate::graph::{Graph, Primitive, Var};
+use crate::DType;
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -14,38 +15,51 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
         let graph = &m.graph;
         let by_value = |i: &usize| {
             let v = graph.inputs()[*i];
-            let fused = |p: &Primitive| matches!(p, Primitive::Fusion { .. }) || alone(p);
+            let fused =
+                |n: &Node| matches!(n.primitive, Primitive::Fusion { .. }) || alone(graph, n);
             !graph.outputs().contains(&v)
                 && graph
                     .nodes()
                     .iter()
                     .filter(|n| n.inputs.contains(&v))
-                    .all(|n| fused(&n.primitive))
+                    .all(fused)
         };
         m.scalars.retain(by_value);
         let scalars: Vec<Var> = m.scalars.iter().map(|&i| graph.inputs()[i]).collect();
         let kernels = &mut m.kernels;
-        m.graph = wrapped(graph, &scalars, alone, |by_value| {
-            request(kernels, Kernel::Loop(by_value.to_vec()))
-        });
+        m.graph = wrapped(
+            graph,
+            &scalars,
+            |n| alone(graph, n),
+            |by_value| request(kernels, Kernel::Loop(by_value.to_vec())),
+        );
         Ok(())
     }
 }
 
-fn alone(p: &Primitive) -> bool {
-    matches!(
-        p,
+fn alone(graph: &Graph, n: &Node) -> bool {
+    let float = |v: Var| {
+        matches!(
+            graph.type_of(v).dtype,
+            DType::F16 | DType::BF16 | DType::F32
+        )
+    };
+    let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
+        && n.inputs.iter().all(|&v| float(v))
+        && float(n.output);
+    gemm || matches!(
+        n.primitive,
         Primitive::Concatenate {
             in_place: false,
             ..
         } | Primitive::Gather { .. }
-    ) || elementwise(p)
+    ) || elementwise(&n.primitive)
 }
 
 pub(super) fn wrapped(
     graph: &Graph,
     scalars: &[Var],
-    wraps: impl Fn(&Primitive) -> bool,
+    wraps: impl Fn(&Node) -> bool,
     mut kernel: impl FnMut(&[bool]) -> String,
 ) -> Graph {
     let mut out = Graph::new();
@@ -55,7 +69,7 @@ pub(super) fn wrapped(
     }
     for node in graph.nodes() {
         out.set_origin(node);
-        if wraps(&node.primitive) {
+        if wraps(node) {
             let mut reads: Vec<Var> = Vec::new();
             for &v in &node.inputs {
                 if !reads.contains(&v) {

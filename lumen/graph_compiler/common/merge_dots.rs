@@ -184,21 +184,11 @@ pub(crate) fn merge_dots(
     }
     let mut groups: Vec<Group> = groups
         .into_iter()
-        .flat_map(|g| {
-            match interleaves(
-                graph,
-                &g,
-                &position,
-                &alone,
-                &reads,
-                donated,
-                target.columns,
-            ) {
-                Some((order, rest, ..)) if target.views && !rest.is_empty() => {
-                    vec![g.subset(&order), g.subset(&rest)]
-                }
-                _ => vec![g],
+        .flat_map(|g| match interleaves(graph, &g, target.columns) {
+            Some((order, rest, ..)) if target.views && !rest.is_empty() => {
+                vec![g.subset(&order), g.subset(&rest)]
             }
+            _ => vec![g],
         })
         .collect();
     let mut merged = vec![false; nodes.len()];
@@ -239,8 +229,7 @@ pub(crate) fn merge_dots(
                 packed[weight(side, i)] = true;
             }
             if target.views
-                && let Some((order, rest, layout, rewrites)) =
-                    interleaves(graph, g, &position, &alone, &reads, donated, target.columns)
+                && let Some((order, rest, layout, rewrites)) = interleaves(graph, g, target.columns)
                 && rest.is_empty()
             {
                 g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
@@ -584,24 +573,11 @@ struct Interleaving {
 fn interleaves(
     graph: &Graph,
     g: &Group,
-    position: &[Option<usize>],
-    alone: &[bool],
-    reads: &[usize],
-    donated: &[bool],
     columns: usize,
 ) -> Option<(Vec<usize>, Vec<usize>, Layout, Interleaving)> {
     let nodes = graph.nodes();
     let operand = |i: usize| nodes[i].inputs[1 - g.side];
     let size = |w: Var| graph.type_of(w).shape[g.dimension];
-    let fits = g.side == 0
-        && g.weights.iter().all(|&w| {
-            let i = position[w].expect("a packable input");
-            alone[w] && donated.get(i) != Some(&true)
-        })
-        && g.nodes.iter().all(|&i| reads[operand(i)] == 1);
-    if !fits {
-        return None;
-    }
     let results: Vec<Var> = g.nodes.iter().map(|&i| nodes[i].output).collect();
     let sets = combined(graph, &results);
     let mut by_set: Vec<(usize, Vec<usize>)> = Vec::new();

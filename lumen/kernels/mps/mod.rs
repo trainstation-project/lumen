@@ -248,6 +248,10 @@ fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     Ok(pipeline)
 }
 
+pub(crate) type Encode = Box<
+    dyn Fn(&Step, &[*const u8], *mut u8, *mut u8, Vec<Tensor>) -> Result<(), String> + Send + Sync,
+>;
+
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -264,6 +268,12 @@ pub(crate) fn encode(
         ));
     }
 
+    if let Some(encode) = step
+        .launch::<Encode>()
+        .filter(|_| step.views.iter().all(Option::is_none))
+    {
+        return encode(step, inputs, output, scratch, keep);
+    }
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduce::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -438,6 +448,7 @@ pub(crate) fn launch(
     let (sizes, groups, group) = match grid {
         Grid::Threads(sizes) => (sizes, false, 0),
         Grid::Groups(sizes) => (sizes, true, 0),
+        Grid::GroupsOf { groups, threads } => (groups, true, threads),
         Grid::Elementwise { threads, group } => ([threads, 1, 1], false, group),
     };
     if sizes.contains(&0) {

@@ -4,6 +4,7 @@ use crate::{Device, Tensor};
 pub enum Grid {
     Threads([usize; 3]),
     Groups([usize; 3]),
+    GroupsOf { groups: [usize; 3], threads: usize },
     Elementwise { threads: usize, group: usize },
 }
 

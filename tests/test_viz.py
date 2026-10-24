@@ -90,8 +90,9 @@ def _step_args(device):
 @pytest.mark.mps
 def test_every_mps_kernel_dumps_its_source(tmp_path):
     """A training step's kernels (an embedding's gather and its scatter-add,
-    flash attention, the chunked cross entropy's update slices, matmuls):
-    each a file of Metal, none the step's text in its place."""
+    flash attention, the chunked cross entropy's update slices, matmuls,
+    each a generated GEMM): each a file of Metal, none the step's text in
+    its place."""
     lumen.config.compiler.fused_linear_cross_entropy = True
     lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 32
     try:
@@ -102,8 +103,10 @@ def test_every_mps_kernel_dumps_its_source(tmp_path):
         lumen.config.compiler.reset()
     assert written and all(p.suffix == ".metal" for p in written), [p.name for p in written if p.suffix != ".metal"]
     kernels = {p.name.split("-")[-1] for p in written}
-    for name in ("scatter_add", "dynamic_update_slice", "matmul"):
+    for name in ("scatter_add", "dynamic_update_slice"):
         assert any(k.startswith(name) for k in kernels), (name, sorted(kernels))
+    gemm = ("matmul_sg_impl<", "matmul_mpp<", "matmul_skinny<")
+    assert any(any(call in p.read_text() for call in gemm) for p in written), sorted(kernels)
 
 
 def test_a_training_steps_program_traces_to_its_graph():

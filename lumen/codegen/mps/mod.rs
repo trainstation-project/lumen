@@ -16,6 +16,7 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 mod attention;
+mod config;
 mod elementwise;
 mod emitter;
 mod gemm;
@@ -25,6 +26,7 @@ mod row;
 mod transpose;
 
 pub(crate) use attention::*;
+pub(crate) use config::*;
 use elementwise::*;
 use emitter::*;
 pub(crate) use gemm::*;
@@ -33,20 +35,11 @@ pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
 
-pub(super) const THREAD_ARGS: &str = indoc! {"
+pub(crate) const THREAD_ARGS: &str = indoc! {"
     uint3 group [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]"};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Tuning {
-    Loop {
-        per_thread: usize,
-        group: usize,
-        contiguous: bool,
-    },
-}
 
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
     is_loop(body).then(|| loop_tuning(body))
@@ -98,7 +91,7 @@ pub(crate) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
 }
 
-pub(super) fn formatted(source: &str) -> String {
+pub(crate) fn formatted(source: &str) -> String {
     let mut out = String::new();
     let mut open: Vec<(char, usize)> = Vec::new();
     let mut statement = 0;

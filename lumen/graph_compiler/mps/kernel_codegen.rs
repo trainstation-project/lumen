@@ -30,9 +30,9 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
         }
         if unmarked {
             let kernels = &mut m.kernels;
-            let concatenate = |p: &Primitive| {
+            let concatenate = |n: &crate::graph::Node| {
                 matches!(
-                    p,
+                    n.primitive,
                     Primitive::Concatenate {
                         in_place: false,
                         ..

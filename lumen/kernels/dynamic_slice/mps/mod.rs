@@ -1,7 +1,7 @@
 use crate::Tensor;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg};
+use crate::kernels::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg, u64_arg};
 
 pub(crate) fn copy(
     src: *const u8,
@@ -55,15 +55,21 @@ pub(crate) fn encode(
         .map_or("i32".into(), |(_, t)| t.dtype.to_string());
     let mut buffers = vec![source, output.cast_const()];
     buffers.extend((0..MAX_RANK).map(|d| *inputs.get(first + d).unwrap_or(&source)));
+    let count: usize = block.iter().product();
     let args = [
         dims_arg(x.shape.clone()),
         dims_arg(block.clone()),
         u32_arg(rank as u32),
+        u64_arg(count),
     ];
-    let kernel = match update {
-        true => format!("dynamic_update_slice_{bytes}_{index_dtype}"),
-        false => format!("dynamic_slice_{bytes}_{index_dtype}"),
+    let width = match x.numel() <= u32::MAX as usize {
+        true => 32,
+        false => 64,
     };
-    let grid = Grid::Threads([block.iter().product(), 1, 1]);
+    let kernel = match update {
+        true => format!("dynamic_update_slice_{bytes}_{index_dtype}_{width}"),
+        false => format!("dynamic_slice_{bytes}_{index_dtype}_{width}"),
+    };
+    let grid = Grid::Threads([count.div_ceil(16 / bytes), 1, 1]);
     launch(&kernel, &buffers, &args, grid, keep, step.label)
 }

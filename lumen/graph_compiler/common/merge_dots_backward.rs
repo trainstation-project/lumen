@@ -6,6 +6,7 @@ struct Group {
     sum: usize,
     adds: Vec<usize>,
     dots: Vec<usize>,
+    transposes: Vec<usize>,
     g: Vec<Var>,
     a: Vec<Var>,
     g_first: bool,
@@ -87,7 +88,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
         }
         let alone =
             |e: usize, by: usize| users[nodes[e].output] == [by] && !output(nodes[e].output);
-        let (mut adds, mut terms) = (vec![s], Vec::new());
+        let (mut adds, mut terms, mut transposes) = (vec![s], Vec::new(), Vec::new());
         let mut k = 0;
         let mut sum = true;
         while sum && k < adds.len() {
@@ -96,6 +97,13 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                     Some(e) if alone(e, adds[k]) && !taken[e] => match nodes[e].primitive {
                         Primitive::Add => adds.push(e),
                         _ if dot(e).is_some() => terms.push(e),
+                        Primitive::Transpose { .. } => match producer[nodes[e].inputs[0]] {
+                            Some(d) if alone(d, e) && !taken[d] && dot(d).is_some() => {
+                                transposes.push(e);
+                                terms.push(d);
+                            }
+                            _ => sum = false,
+                        },
                         _ => sum = false,
                     },
                     _ => sum = false,
@@ -103,7 +111,10 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             }
             k += 1;
         }
-        if !sum || terms.len() < 2 || terms.iter().any(|&e| !same(e, terms[0])) {
+        let transposed = transposes.is_empty()
+            || (transposes.len() == terms.len()
+                && transposes.iter().all(|&t| same(t, transposes[0])));
+        if !sum || !transposed || terms.len() < 2 || terms.iter().any(|&e| !same(e, terms[0])) {
             continue;
         }
         let Some((lc, rc)) = dot(terms[0]) else {
@@ -159,6 +170,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                 sum: s,
                 adds: adds[1..].to_vec(),
                 dots,
+                transposes: transposes.clone(),
                 g,
                 a,
                 g_first,
@@ -172,6 +184,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                 .adds
                 .iter()
                 .chain(&group.dots)
+                .chain(&group.transposes)
                 .chain(group.weights.iter().flat_map(|w| &w.0))
             {
                 taken[k] = true;
@@ -199,7 +212,7 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
         groups.iter().enumerate().find_map(|(k, p)| {
             if p.sum == i {
                 Some((k, 0))
-            } else if p.dots.contains(&i) || p.adds.contains(&i) {
+            } else if p.dots.contains(&i) || p.adds.contains(&i) || p.transposes.contains(&i) {
                 Some((k, 1))
             } else {
                 p.weights
@@ -223,7 +236,13 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                     };
                     let merged: Vec<&Node> = match r {
                         0 => std::iter::once(node)
-                            .chain(p.adds.iter().chain(&p.dots).map(|&e| &nodes[e]))
+                            .chain(
+                                p.adds
+                                    .iter()
+                                    .chain(&p.dots)
+                                    .chain(&p.transposes)
+                                    .map(|&e| &nodes[e]),
+                            )
                             .collect(),
                         _ => p
                             .weights
@@ -252,8 +271,15 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         };
                         let a = out.apply(concat, &a).expect("operands of one type");
                         let ins = if p.g_first { [stack, a] } else { [a, stack] };
-                        let merged = out.apply(nodes[p.dots[0]].primitive.clone(), &ins);
-                        map[node.output] = Some(merged.expect("the dots' dimension numbers"));
+                        let mut merged = out
+                            .apply(nodes[p.dots[0]].primitive.clone(), &ins)
+                            .expect("the dots' dimension numbers");
+                        if let Some(&t) = p.transposes.first() {
+                            merged = out
+                                .apply(nodes[t].primitive.clone(), &[merged])
+                                .expect("the terms' transpose");
+                        }
+                        map[node.output] = Some(merged);
                         return false;
                     }
                     let (w, dot, g_lhs) = p.weights.as_ref().expect("a weight's gradient");
