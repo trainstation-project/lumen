@@ -15,7 +15,8 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
         let graph = &m.graph;
         let by_value = |i: &usize| {
             let v = graph.inputs()[*i];
-            let fused = |n: &Node| matches!(n.primitive, Primitive::Fusion { .. }) || alone(graph, n);
+            let fused =
+                |n: &Node| matches!(n.primitive, Primitive::Fusion { .. }) || alone(graph, n);
             !graph.outputs().contains(&v)
                 && graph
                     .nodes()
@@ -26,15 +27,23 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
         m.scalars.retain(by_value);
         let scalars: Vec<Var> = m.scalars.iter().map(|&i| graph.inputs()[i]).collect();
         let kernels = &mut m.kernels;
-        m.graph = wrapped(graph, &scalars, |n| alone(graph, n), |by_value| {
-            request(kernels, Kernel::Loop(by_value.to_vec()))
-        });
+        m.graph = wrapped(
+            graph,
+            &scalars,
+            |n| alone(graph, n),
+            |by_value| request(kernels, Kernel::Loop(by_value.to_vec())),
+        );
         Ok(())
     }
 }
 
 fn alone(graph: &Graph, n: &Node) -> bool {
-    let float = |v: Var| matches!(graph.type_of(v).dtype, DType::F16 | DType::BF16 | DType::F32);
+    let float = |v: Var| {
+        matches!(
+            graph.type_of(v).dtype,
+            DType::F16 | DType::BF16 | DType::F32
+        )
+    };
     let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
         && n.inputs.iter().all(|&v| float(v))
         && float(n.output);

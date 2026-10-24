@@ -78,6 +78,36 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &CompilerConfig)
                     region_of[nodes[k].output] = Some(r);
                 }
             }
+            let fused = |sets: &[Vec<usize>]| -> Option<(Vec<usize>, usize)> {
+                let mut ends = Vec::new();
+                for (c, set) in regions.iter().zip(sets) {
+                    let size = graph.type_of(node.output).numel()
+                        / graph.type_of(node.output).shape[c.axis]
+                        * c.size();
+                    let outside = set.iter().copied().filter(|&k| {
+                        let v = nodes[k].output;
+                        is_output[v] || users[v].iter().any(|w| !set.contains(w))
+                    });
+                    let before = ends.len();
+                    for k in outside {
+                        if graph.type_of(nodes[k].output).numel() != size {
+                            return None;
+                        }
+                        ends.push(k);
+                    }
+                    if ends.len() == before {
+                        return None;
+                    }
+                }
+                let main = *ends.iter().max()?;
+                let read_after = ends.iter().all(|&k| {
+                    users[nodes[k].output]
+                        .iter()
+                        .all(|&w| w > main || sets.iter().any(|set| set.contains(&w)))
+                });
+                (ends.len() - 1 <= MAX_AUX && read_after).then_some((ends, main))
+            };
+            let mut best = fused(&sets).map(|f| (sets.clone(), f));
             let mut depends = vec![false; n];
             depends[node.output] = true;
             for (u, un) in nodes.iter().enumerate().skip(i + 1) {
@@ -88,8 +118,10 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &CompilerConfig)
                 let mut of: Vec<usize> = un.inputs.iter().filter_map(|&v| region_of[v]).collect();
                 of.sort_unstable();
                 of.dedup();
-                let [r] = of.as_slice() else {
-                    continue;
+                let r = match of.as_slice() {
+                    [] => continue,
+                    [r] => r,
+                    _ => break,
                 };
                 let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
                 let steps =
@@ -98,51 +130,22 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &CompilerConfig)
                     .inputs
                     .iter()
                     .all(|&v| region_of[v] == Some(*r) || (!depends[v] && earlier(v)));
-                if fusible[u] && steps && reads && !in_row(u) && !claimed[u] {
-                    sets[*r].push(u);
-                    region_of[un.output] = Some(*r);
+                if !(fusible[u] && steps && reads && !in_row(u) && !claimed[u]) {
+                    break;
+                }
+                sets[*r].push(u);
+                region_of[un.output] = Some(*r);
+                if let Some(f) = fused(&sets) {
+                    best = Some((sets.clone(), f));
                 }
             }
-            let ends: Option<Vec<usize>> = regions
-                .iter()
-                .zip(&sets)
-                .map(|(c, set)| {
-                    let outside: Vec<usize> = set
-                        .iter()
-                        .copied()
-                        .filter(|&k| {
-                            let v = nodes[k].output;
-                            is_output[v] || users[v].iter().any(|w| !set.contains(w))
-                        })
-                        .collect();
-                    match outside.as_slice() {
-                        [end]
-                            if graph.type_of(nodes[*end].output).numel()
-                                == graph.type_of(node.output).numel()
-                                    / graph
-                                        .type_of(node.output)
-                                        .shape
-                                        .last()
-                                        .copied()
-                                        .unwrap_or(1)
-                                    * c.size() =>
-                        {
-                            Some(*end)
-                        }
-                        _ => None,
-                    }
-                })
-                .collect();
-            if let Some(ends) = ends.filter(|e| e.len() - 1 <= MAX_AUX) {
-                let main = *ends.iter().max().expect("regions");
+            if let Some((sets, (ends, main))) = best {
                 (dot_end[i], dot_of[main]) = (Some(main), Some(i));
                 claimed[i] = true;
-                for set in &sets {
-                    for &k in set {
-                        claimed[k] = true;
-                        if k != main {
-                            in_epilogue[k] = true;
-                        }
+                for &k in sets.iter().flatten() {
+                    claimed[k] = true;
+                    if k != main {
+                        in_epilogue[k] = true;
                     }
                 }
                 for &end in ends.iter().filter(|&&e| e != main) {
@@ -162,18 +165,8 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &CompilerConfig)
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let shape = &graph.type_of(node.output).shape;
-            let tupled: Vec<usize> = shape.iter().copied().chain([1]).collect();
-            let expands = match un.primitive {
-                Primitive::Concatenate { dimension, .. } if dimension + 1 == shape.len() => {
-                    un.inputs.iter().all(|&v| graph.type_of(v).shape == *shape)
-                }
-                Primitive::Concatenate { dimension, .. } if dimension == shape.len() => {
-                    un.inputs.iter().all(|&v| graph.type_of(v).shape == tupled)
-                }
-                _ => false,
-            } && un.inputs.len() == 2
-                && pair.is_none();
+            let expands =
+                pair.is_none() && crate::codegen::mps::expansion(graph, node, un).is_some();
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
                 || pair.is_some_and(|p| p.contains(&u))

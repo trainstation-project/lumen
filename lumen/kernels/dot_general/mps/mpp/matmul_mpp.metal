@@ -30,12 +30,8 @@ template <typename T,
           bool TR,
           typename Out = O,
           typename Epi = Same>
-inline void matmul_mpp(device const T *lhs,
-                       device const T *rhs,
-                       device Out *out,
-                       constant ulong *p,
-                       uint3 group,
-                       Epi epi = Epi()) {
+inline void matmul_mpp(
+    device const T *lhs, device const T *rhs, device Out *out, constant ulong *p, uint3 group, Epi epi = Epi()) {
     using namespace mpp::tensor_ops;
     using extents = dextents<int32_t, 2>;
 

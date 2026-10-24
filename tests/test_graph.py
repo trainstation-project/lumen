@@ -1069,7 +1069,8 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     """A gated pair's backward (``merge_dots_backward``): its input's gradient one
     dot of its cotangents and the forward's weight block, both interleaved
     (K twice as long, no copy of the weights), its weights' gradients one
-    dot, interleaved as the block is; the cotangents the down projection's
+    dot, its rows interleaved as the block is, each weight's written apart
+    by its epilogue; the cotangents the down projection's
     gradient GEMM's expanding epilogue, written interleaved, whatever the
     gate (SwiGLU's in float32, from the rounded gradient widened: an upcast
     only that epilogue takes). The forward the merged dot's paired epilogue,
@@ -1109,7 +1110,7 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
-    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [h, 2, d]]), labels
+    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [h, d]]), labels
     forward = [s for s in merged if s["output"][2] == [m, h]]
     assert len(forward) == 1 and "mul" in forward[0]["label"], labels
     assert not any(s["label"].startswith("slice") and s["output"][2] == [m, h] for s in steps), labels
@@ -1150,7 +1151,8 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
     transposes read as the dots' dimensions (no copies): the cotangents
     the down projection's gradient GEMM's expanding epilogue, x's gradient
-    one dot of the block, the weights' one dot. The gradients autodiff's."""
+    one dot of the block, the weights' one dot writing each apart. The
+    gradients autodiff's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1196,7 +1198,7 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
-    assert any(s["label"] == "2x dot_general" and s["output"][2] == [h, 2, d] for s in steps), labels
+    assert any(s["label"] == "2x dot_general" and s["output"][2] == [h, d] for s in steps), labels
     assert not any("transpose" in label for label in labels), labels
 
 
@@ -1519,12 +1521,14 @@ class Projections(lumen.nn.Module):
     ws: list
     groups: list
     mixed: bool = False
+    left: bool = False
 
     def __call__(self, x):
-        if self.mixed:
-            p = [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in self.ws]
+        cast = (lambda t: t.bfloat16()) if self.mixed else (lambda t: t)
+        if self.left:
+            p = [F.matmul(cast(w), cast(x), "float32", "float32") for w in self.ws]
         else:
-            p = [F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
+            p = [F.matmul(cast(x), cast(w.t()), "float32", "float32") for w in self.ws]
         out, k = [], 0
         for g in self.groups:
             q, k = p[k : k + g], k + g
@@ -1565,14 +1569,16 @@ class Projections(lumen.nn.Module):
         "three apart",
     ],
 )
-def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, interleaved, steps):
+@pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
+def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, interleaved, steps, left):
     """Dots of one operand, combined in groups of K dividing the 8-column
     tile (``K`` values interleaved: SwiGLU's gate and up for K = 2) and any
     read alone: one block, each group a region of its own interleaved, each
     lone one a region as it is (``plan.interleaved``); one matmul whose
     epilogue computes each group's value from the lane's row. Groups of K
     not dividing the tile, or of a width not, merge apart into a block of
-    their own, their epilogues not fused. The values the unmerged
+    their own, their epilogues not fused. Weights on the left (``w @ x``)
+    interleave along the output's rows instead. The values the unmerged
     program's."""
     try:
         lumen.zeros([1], device="mps")
@@ -1580,8 +1586,9 @@ def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, i
         pytest.skip(str(e))
     d, m = 32, 16
     n = len(sizes)
-    make = lambda: Projections([meta(h, d) for h in sizes], groups, mixed)
-    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(m, d))
+    make = lambda: Projections([meta(h, d) for h in sizes], groups, mixed, left)
+    shape = (d, m) if left else (m, d)
+    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
     params = list(range(1, n + 1))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
     assert plan.interleaved == interleaved, plan.packed
@@ -1590,20 +1597,108 @@ def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, i
     for regions in interleaved:
         assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels
     values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k, h in enumerate(sizes)}
-    x = lumen.from_numpy(rand(m, d, seed=9)).to("mps")
+    x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
     got = []
     try:
         for merge in (True, False):
             lumen.config.compiler.merge_dots = merge
             model = make()
             f = lumen.compile(lambda model, x: model(x), device="mps")
-            f(model, meta(m, d))
+            f(model, meta(*shape))
             model.load_state_dict(values)
             got.append([lumen.to_numpy(t) for t in f(model, x)])
     finally:
         lumen.config.compiler.reset()
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-6)
+
+
+class SharedOperand(lumen.nn.Module):
+    ws: list
+    groups: list
+    left: bool = False
+
+    def __call__(self, x):
+        if self.left:
+            p = [F.matmul(w, x, "float32", "float32") for w in self.ws]
+        else:
+            p = [F.matmul(x, w.t(), "float32", "float32") for w in self.ws]
+        out, k = [], 0
+        for g in self.groups:
+            q, k = p[k : k + g], k + g
+            v = q[0] * F.sigmoid(q[0])
+            for r in q[1:]:
+                v = v * r
+            out.append(v)
+        return out
+
+
+def _gated_inference(model, x):
+    return model(x)
+
+
+def _gated_gradients(model, x):
+    loss = sum(F.sum(o * o) for o in model(x))
+    loss.backward()
+    return [loss, x.grad] + [w.grad for w in model.ws]
+
+
+def _gated_training(model, x):
+    loss = sum(F.sum(o * o) for o in model(x))
+    loss.backward()
+    for w in model.ws:
+        w.copy_(w - 0.01 * w.grad)
+    return loss
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize(
+    "groups, h",
+    [([2], 64), ([2, 2], 64), ([3], 64), ([2, 1], 64), ([2], 10)],
+    ids=["pair", "two pairs", "three", "pair and one", "pair apart"],
+)
+@pytest.mark.parametrize(
+    "step", [_gated_inference, _gated_gradients, _gated_training], ids=["inference", "gradients", "training"]
+)
+def test_weights_shared_on_either_side_merge_alike(groups, h, step):
+    """Dots sharing their operand merge the same whether the weights are
+    the right operand (``x @ w.T``) or the left (``w @ x``): the same
+    block layout and the same kernels, forward and backward, the left
+    form's blocks interleaved along the output's rows, a pair too narrow
+    to interleave read as row halves. The values the unmerged program's."""
+    try:
+        lumen.zeros([1], device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    d, m = 32, 24
+    n = sum(groups)
+    params = list(range(1, n + 1))
+    plans = []
+    for left in (False, True):
+        shape = (d, m) if left else (m, d)
+        make = lambda: SharedOperand([meta(h, d) for _ in range(n)], groups, left)
+        graph = lumen.make_graph(step)(make(), meta(*shape))
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+        plans.append((plan.interleaved, sorted(s["label"] for s in plan.steps())))
+        values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
+        x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
+        got = []
+        try:
+            for merge in (True, False):
+                lumen.config.compiler.merge_dots = merge
+                model = make()
+                f = lumen.compile(step, device="mps")
+                f(model, meta(*shape))
+                model.load_state_dict(values)
+                for _ in range(2):
+                    out = f(model, x)
+                out = out if isinstance(out, (list, tuple)) else [out]
+                got.append([lumen.to_numpy(t) for t in out] + [lumen.to_numpy(w._placed("mps")) for w in model.ws])
+        finally:
+            lumen.config.compiler.reset()
+        for merged, alone in zip(*got):
+            np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-4)
+    assert plans[0] == plans[1]
 
 
 @pytest.mark.mps

@@ -40,6 +40,7 @@ template <typename T,
           bool TILE = false,
           bool INTERLEAVED = false,
           bool REGIONS = false,
+          bool ROWS = false,
           uint THREADS = 256,
           uint COLS = SG_COLS,
           bool PREFETCH = true>
@@ -67,9 +68,13 @@ inline void matmul_sg_impl(device const T *lhs,
     // These coordinates describe each thread's contribution to cooperative
     // lhs and rhs tile loads.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
-    device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
+    constexpr bool HALVES = PAIRED && !INTERLEAVED;
+    static_assert(!(HALVES && ROWS) || RA % 2 == 0, "row halves step through rows two at a time");
+    constexpr uint SA = HALVES && ROWS ? RA / 2 : RA;
+    const ulong am = HALVES && ROWS ? ((m0 + ar) & 1) * (M / 2) + (m0 + ar) / 2 : m0 + ar;
+    device const T *l = lhs + group.z * p[3] + am * sm + ac * sk;
     // Paired layouts store adjacent logical columns in separate halves.
-    const ulong cn = PAIRED && !INTERLEAVED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
+    const ulong cn = HALVES && !ROWS ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
@@ -77,12 +82,12 @@ inline void matmul_sg_impl(device const T *lhs,
         bool full_k = k0 + BK <= K;
         if (full_m && full_k) {
             // Fast path for a completely valid lhs tile.
-            UNROLL for (uint t = 0; t < LA; ++t) { ra[t] = l[k0 * sk + ulong(RA * t) * sm]; }
+            UNROLL for (uint t = 0; t < LA; ++t) { ra[t] = l[k0 * sk + ulong(SA * t) * sm]; }
         } else {
             // Edge loads use zero for invalid M/K coordinates.
             UNROLL for (uint t = 0; t < LA; ++t) {
                 bool in = m0 + ar + RA * t < M && k0 + ac < K;
-                ra[t] = in ? l[k0 * sk + ulong(RA * t) * sm] : T(0);
+                ra[t] = in ? l[k0 * sk + ulong(SA * t) * sm] : T(0);
             }
         }
         if (full_n && full_k) {
@@ -193,6 +198,21 @@ inline void matmul_sg_impl(device const T *lhs,
     if constexpr (TILE) {
         // TILE epilogues consume the SIMD fragments directly.
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
+    } else if constexpr (PAIRED && REGIONS && ROWS) {
+        const uint at = frag_row(lane);
+        UNROLL for (uint i = 0; i < FM; ++i) {
+            UNROLL for (uint j = 0; j < FN; ++j) {
+                const thread vec<A, 2> &f = frag(c[i][j]);
+                vec<O, 2> window[8];
+                UNROLL for (uint d = 0; d < 8; ++d) {
+                    window[at ^ d] = vec<O, 2>(simd_shuffle_xor(f, (d & 3) * 2 + (d & 4) * 4));
+                }
+                ulong m = m0 + (sy * FM + i) * 8 + at, n = n0 + (sx * FN + j) * 8 + frag_col(lane);
+                if (m < M && n < N) {
+                    epi.store(m, n, window);
+                }
+            }
+        }
     } else if constexpr (PAIRED && REGIONS) {
         // Paired regional output reconstructs four rows from SIMD shuffles.
         const uint pair = frag_col(lane) / 2;
@@ -251,6 +271,10 @@ inline void matmul_sg_impl(device const T *lhs,
                         if constexpr (ATOMIC) {
                             device atomic_float *sum = (device atomic_float *)(out + m * N + n);
                             atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
+                        } else if constexpr (EXPANDED && ROWS) {
+                            Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
+                            o[m * N + n] = both.first;
+                            o[(M + m) * N + n] = both.second;
                         } else if constexpr (EXPANDED) {
                             device Out *row = out + group.z * M * 2 * N + m * 2 * N;
                             Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);

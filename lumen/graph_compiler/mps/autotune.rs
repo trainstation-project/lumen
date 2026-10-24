@@ -74,13 +74,20 @@ pub(super) struct Gemms {
 
 const TUNED_OUTPUTS: usize = 64 << 10;
 
-pub(super) fn matmul_of(step: &Step) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
+pub(super) fn matmul_of(
+    step: &Step,
+) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         return None;
     };
     let dot = codegen::gemm_dot(body)?;
     let ty = |v| body.type_of(v);
-    Some((&dot.primitive, ty(dot.inputs[0]), ty(dot.inputs[1]), ty(dot.output)))
+    Some((
+        &dot.primitive,
+        ty(dot.inputs[0]),
+        ty(dot.inputs[1]),
+        ty(dot.output),
+    ))
 }
 
 fn tiled_gemm(step: &Step) -> bool {
@@ -106,7 +113,9 @@ impl Kernels for Gemms {
             return Vec::new();
         };
         let plain = match &step.primitive {
-            Primitive::Fusion { body, .. } => codegen::gemm_dot(body).is_some_and(|d| codegen::gemm_plain(body, d)),
+            Primitive::Fusion { body, .. } => {
+                codegen::gemm_dot(body).is_some_and(|d| codegen::gemm_plain(body, d))
+            }
             _ => false,
         };
         let others = plain

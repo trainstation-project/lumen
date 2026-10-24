@@ -1,11 +1,4 @@
-template <typename T,
-          typename O,
-          uint R,
-          uint THREADS,
-          uint BLOCK,
-          uint V,
-          typename Out = O,
-          typename Epi = Same>
+template <typename T, typename O, uint R, uint THREADS, uint BLOCK, uint V, typename Out = O, typename Epi = Same>
 inline void matmul_skinny(device const T *lhs,
                           device const T *rhs,
                           device Out *out,

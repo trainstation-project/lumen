@@ -1968,3 +1968,155 @@ fn every_gemm_candidate_matches_the_reference() {
         }
     }
 }
+
+#[test]
+fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::kernels::dot_general::mps as gemm;
+    if !available() {
+        return;
+    }
+    let matmul = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let (pairs, plain, other, k) = (40, 24, 69, 96);
+    let extent = 2 * pairs + plain;
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.autotune = false;
+    let along = |g: &mut Graph, v: Var, shape: &[usize], at: usize, start: usize, end: usize| {
+        let mut limit = shape.to_vec();
+        let mut first = vec![0; shape.len()];
+        (first[at], limit[at]) = (start, end);
+        let s = Slice {
+            start_indices: first,
+            limit_indices: limit,
+            view: false,
+        };
+        apply(g, s, &[v])
+    };
+    let reshape = |g: &mut Graph, v: Var, sizes: &[usize]| {
+        let r = Reshape {
+            new_sizes: sizes.to_vec(),
+        };
+        apply(g, r, &[v])
+    };
+    let regions = |axis: usize| {
+        let sized = move |along: usize, rest: usize| match axis {
+            0 => vec![along, rest],
+            _ => vec![rest, along],
+        };
+        let out = sized(extent, other);
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::F32, &[out[0], k]));
+        let b = g.input(ty(DType::F32, &[k, out[1]]));
+        let d = apply(&mut g, matmul.clone(), &[a, b]);
+        let group = along(&mut g, d, &out, axis, 0, 2 * pairs);
+        let tuples: Vec<usize> = match axis {
+            0 => vec![pairs, 2, other],
+            _ => vec![other, pairs, 2],
+        };
+        let tupled = reshape(&mut g, group, &tuples);
+        let mut member = |t: usize| {
+            let s = along(&mut g, tupled, &tuples, axis + 1, t, t + 1);
+            reshape(&mut g, s, &sized(pairs, other))
+        };
+        let (first, second) = (member(0), member(1));
+        let gated = apply(&mut g, Mul, &[first, second]);
+        let rest = along(&mut g, d, &out, axis, 2 * pairs, extent);
+        let negated = apply(&mut g, Neg, &[rest]);
+        g.set_outputs(&[gated, negated]).unwrap();
+        g
+    };
+    let (half, rows) = (45, 50);
+    let halves = {
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::F32, &[2 * half, k]));
+        let b = g.input(ty(DType::F32, &[k, other]));
+        let d = apply(&mut g, matmul.clone(), &[a, b]);
+        let shape = [2 * half, other];
+        let first = along(&mut g, d, &shape, 0, 0, half);
+        let second = along(&mut g, d, &shape, 0, half, 2 * half);
+        let gated = apply(&mut g, Mul, &[first, second]);
+        g.set_outputs(&[gated]).unwrap();
+        g
+    };
+    let expanded = |interleaved: bool| {
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::F32, &[rows, k]));
+        let b = g.input(ty(DType::F32, &[k, other]));
+        let d = apply(&mut g, matmul.clone(), &[a, b]);
+        let squared = apply(&mut g, Mul, &[d, d]);
+        let negated = apply(&mut g, Neg, &[d]);
+        let both = match interleaved {
+            true => {
+                let parts = [squared, negated].map(|v| reshape(&mut g, v, &[rows, 1, other]));
+                let concat = Concatenate {
+                    dimension: 1,
+                    in_place: false,
+                };
+                let pairs = apply(&mut g, concat, &parts);
+                reshape(&mut g, pairs, &[2 * rows, other])
+            }
+            false => {
+                let concat = Concatenate {
+                    dimension: 0,
+                    in_place: false,
+                };
+                apply(&mut g, concat, &[squared, negated])
+            }
+        };
+        g.set_outputs(&[both]).unwrap();
+        g
+    };
+    let cases = [
+        ("regions along rows", regions(0)),
+        ("regions along columns", regions(1)),
+        ("row halves", halves),
+        ("rows expanded side by side", expanded(false)),
+        ("rows expanded interleaved", expanded(true)),
+    ];
+    for (case, g) in cases {
+        let inputs: Vec<Tensor> = g
+            .inputs()
+            .iter()
+            .enumerate()
+            .map(|(seed, &v)| values(DType::F32, &g.type_of(v).shape, seed as u64 + 1))
+            .collect();
+        let expected: Vec<Vec<f32>> = reference::run(&g, &inputs)
+            .unwrap()
+            .iter()
+            .map(|t| t.to_vec::<f32>())
+            .collect();
+        let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+        let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+        assert_eq!(plan.steps().len(), 1, "{case}: {plan}");
+        let step = plan.steps()[0].clone();
+        assert!(matmul_of(&step).is_some(), "{case}: {plan}");
+        let mut gemms = Gemms::default();
+        let built: Vec<_> = gemm::configs()
+            .iter()
+            .map(|&config| (config, gemms.build(&step, config)))
+            .collect();
+        gemms.compile().unwrap();
+        for (config, tuned) in built {
+            plan.steps_mut()[0].tuned = Some(tuned);
+            let got = plan.run(&on_mps).unwrap();
+            for (want, have) in expected.iter().zip(&got) {
+                let have = have.to_vec::<f32>();
+                let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+                for (e, (w, v)) in want.iter().zip(&have).enumerate() {
+                    assert!(
+                        (w - v).abs() <= scale * 1e-5,
+                        "{case} {config:?} [{e}]: {v} != {w}"
+                    );
+                }
+            }
+        }
+    }
+}

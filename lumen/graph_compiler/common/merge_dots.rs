@@ -184,13 +184,11 @@ pub(crate) fn merge_dots(
     }
     let mut groups: Vec<Group> = groups
         .into_iter()
-        .flat_map(|g| {
-            match interleaves(graph, &g, target.columns) {
-                Some((order, rest, ..)) if target.views && !rest.is_empty() => {
-                    vec![g.subset(&order), g.subset(&rest)]
-                }
-                _ => vec![g],
+        .flat_map(|g| match interleaves(graph, &g, target.columns) {
+            Some((order, rest, ..)) if target.views && !rest.is_empty() => {
+                vec![g.subset(&order), g.subset(&rest)]
             }
+            _ => vec![g],
         })
         .collect();
     let mut merged = vec![false; nodes.len()];
@@ -231,8 +229,7 @@ pub(crate) fn merge_dots(
                 packed[weight(side, i)] = true;
             }
             if target.views
-                && let Some((order, rest, layout, rewrites)) =
-                    interleaves(graph, g, target.columns)
+                && let Some((order, rest, layout, rewrites)) = interleaves(graph, g, target.columns)
                 && rest.is_empty()
             {
                 g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
@@ -581,9 +578,6 @@ fn interleaves(
     let nodes = graph.nodes();
     let operand = |i: usize| nodes[i].inputs[1 - g.side];
     let size = |w: Var| graph.type_of(w).shape[g.dimension];
-    if g.side != 0 {
-        return None;
-    }
     let results: Vec<Var> = g.nodes.iter().map(|&i| nodes[i].output).collect();
     let sets = combined(graph, &results);
     let mut by_set: Vec<(usize, Vec<usize>)> = Vec::new();
