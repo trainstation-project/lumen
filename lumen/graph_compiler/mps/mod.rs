@@ -27,7 +27,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
-use super::{CompilerConfig, Options};
+use super::{CompilerConfig, MpsConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
@@ -87,6 +87,10 @@ struct MpsModule<'a> {
 }
 
 impl Attentions for MpsModule<'_> {
+    fn contraction_epilogues(&self) -> bool {
+        self.options.config.mps.contraction_epilogues
+    }
+
     fn epilogues(&self) -> attention::Epilogues {
         attention::Epilogues {
             leaves: |_, _| true,
@@ -124,6 +128,10 @@ impl Module for MpsModule<'_> {
     fn options(&self) -> &Options {
         self.options
     }
+
+    fn config(&self) -> &dyn CompilerConfig {
+        &self.options.config.mps
+    }
 }
 
 enum Kernel {
@@ -139,7 +147,7 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
     format!("{PENDING}{}", kernels.len() - 1)
 }
 
-fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
+fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
     p.add(TakeAlongAxis);
     if config.fuse && config.fused_linear_cross_entropy {
@@ -242,7 +250,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
 
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
-    let config = &options.config;
+    let config = &options.config.mps;
     let mut module = MpsModule {
         graph: graph.clone(),
         options,
@@ -477,7 +485,7 @@ fn run_loop(
         true => HashMap::new(),
         false => HashMap::from([(0, (0, dst.strides().to_vec()))]),
     };
-    let config = super::config::config();
+    let config = super::config::configs().mps;
     let (name, source) = codegen::kernel(&body, &[by_value], &config, &views, None);
     let compiled = SOURCES
         .lock()

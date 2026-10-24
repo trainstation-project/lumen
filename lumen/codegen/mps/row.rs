@@ -65,7 +65,7 @@ pub(super) fn row_kernel(
     body: &Graph,
     by_value: &[bool],
     reductions: &[&Node],
-    config: &CompilerConfig,
+    config: &MpsConfig,
     tile: Option<(&Graph, &[bool], &Node)>,
 ) -> (String, String) {
     let out = body.outputs()[0];

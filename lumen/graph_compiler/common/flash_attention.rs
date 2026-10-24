@@ -3,10 +3,9 @@ use crate::graph_compiler::common::attention::{self, Epilogues};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
 pub(crate) trait Attentions: Module {
+    fn contraction_epilogues(&self) -> bool;
     fn epilogues(&self) -> Epilogues;
-
     fn scalars(&self) -> Vec<Var>;
-
     fn kernel(&mut self) -> String;
 }
 
@@ -18,11 +17,7 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        let epilogues = m
-            .options()
-            .config
-            .contraction_epilogues
-            .then(|| m.epilogues());
+        let epilogues = m.contraction_epilogues().then(|| m.epilogues());
         let (graph, scalars) = (m.graph().clone(), m.scalars());
         *m.graph_mut() = attention::fuse(&graph, epilogues, &scalars, |_| m.kernel());
         Ok(())

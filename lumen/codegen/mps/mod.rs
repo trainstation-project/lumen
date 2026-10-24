@@ -7,7 +7,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::{formatdoc, indoc, writedoc};
 
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph_compiler::mps::fusion;
 use crate::kernels::mps::element_arg;
@@ -63,7 +63,7 @@ fn is_loop(body: &Graph) -> bool {
 pub(crate) fn kernel(
     body: &Graph,
     by_value: &[bool],
-    config: &CompilerConfig,
+    config: &MpsConfig,
     views: &HashMap<usize, (usize, Vec<usize>)>,
     tuning: Option<Tuning>,
 ) -> (String, String) {

@@ -1,7 +1,7 @@
 import pytest
 
 import lumen
-from lumen.allocator import _C
+from lumen.config import _C
 
 
 @pytest.fixture(autouse=True)

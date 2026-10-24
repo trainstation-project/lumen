@@ -199,7 +199,7 @@ pub(super) fn gemm_row_kernel(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,
-    config: &CompilerConfig,
+    config: &MpsConfig,
 ) -> (String, String) {
     let mut rows = Graph::new();
     let mut var: HashMap<Var, Var> = HashMap::new();

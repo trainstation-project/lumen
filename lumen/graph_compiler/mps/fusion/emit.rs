@@ -3,7 +3,7 @@ use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
 use super::{MAX_INPUTS, label};
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) type Fusions = Vec<Option<(Vec<usize>, Vec<Var>)>>;
@@ -54,7 +54,7 @@ pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>
 pub(super) fn row_dots(
     a: &Analysis,
     rows: &[Row],
-    config: &CompilerConfig,
+    config: &MpsConfig,
     dots: &DotEpilogues,
     root: &mut [bool],
     host: &mut Vec<Option<usize>>,

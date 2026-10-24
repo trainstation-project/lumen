@@ -1,7 +1,6 @@
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.graph import prims, tracer
-from lumen.graph.tracer import config
 
 __all__ = ["substitute"]
 
@@ -11,7 +10,7 @@ def substitute(tape):
     node, an ``_Attention`` of the dots' operands: its output the second
     dot's, its log-sum-exp (``max + log(sum)``, from the softmax's own max
     and sum) added to the graph for its backward."""
-    if not config.compiler.flash_attention:
+    if not tracer.compiler_config().flash_attention:
         return tape
     graph = tracer.current_graph()
     for m in graph.attentions():

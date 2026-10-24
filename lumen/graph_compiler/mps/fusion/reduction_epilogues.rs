@@ -1,7 +1,7 @@
 use super::analysis::Analysis;
 use super::{constant, elementwise};
 use crate::graph::Primitive;
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) struct ReductionEpilogues {
@@ -13,7 +13,7 @@ pub(super) struct ReductionEpilogues {
 pub(super) fn reduction_epilogues(
     a: &Analysis,
     rows: &[Row],
-    config: &CompilerConfig,
+    config: &MpsConfig,
 ) -> ReductionEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
     let (producer, is_output, live, users, fusible) =

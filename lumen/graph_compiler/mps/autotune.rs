@@ -6,7 +6,7 @@ use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, reco
 use crate::DType;
 use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
@@ -22,7 +22,7 @@ const ALIGNMENT: usize = 256;
 
 pub(super) struct Loops<'a> {
     pub tunable: &'a BTreeMap<String, Tunable>,
-    pub config: &'a CompilerConfig,
+    pub config: &'a MpsConfig,
     pub sources: BTreeMap<String, String>,
 }
 

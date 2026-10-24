@@ -4,27 +4,6 @@ from lumen.device._C import DeviceLike
 from lumen.graph._C import Graph
 from lumen.tensor._C import Tensor
 
-class CompilerConfig:
-    fuse: bool
-    merge_dots: bool
-    normalization_diamonds: bool
-    reduction_epilogues: bool
-    contraction_epilogues: bool
-    multi_output_fusion: bool
-    horizontal_fusion: bool
-    online_softmax: bool
-    flash_attention: bool
-    split_k: bool
-    deterministic: bool
-    neural_engine: bool
-    row_cache: int
-    memory_limit: int
-    use_triton_backend: bool
-    autotune: bool
-    dump_to: Optional[str]
-
-    def reset(self) -> None: ...
-
 class Plan:
     """A graph compiled for execution by ``device``'s graph compiler (on
     MPS, with its elementwise ops fused), with its memory planned."""
@@ -55,7 +34,7 @@ class Plan:
     @property
     def neural_engine(self) -> bool:
         """Whether it runs steps on the Apple Neural Engine (Core ML
-        programs, ``lumen.config.compiler.neural_engine``)."""
+        programs, ``lumen.config.compiler.mps.neural_engine``)."""
 
     def _invalidate_neural_engine(self) -> None:
         """Compile its Neural Engine steps' programs again on their next

@@ -22,7 +22,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::plan::DeviceLayout;
-use super::{Options, positions};
+use super::{CompilerConfig, Options, positions};
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 
@@ -56,9 +56,17 @@ impl Module for TpuModule<'_> {
     fn options(&self) -> &Options {
         self.options
     }
+
+    fn config(&self) -> &dyn CompilerConfig {
+        &self.options.config.tpu
+    }
 }
 
 impl Attentions for TpuModule<'_> {
+    fn contraction_epilogues(&self) -> bool {
+        self.options.config.tpu.contraction_epilogues
+    }
+
     fn epilogues(&self) -> attention::Epilogues {
         attention::Epilogues {
             leaves: |graph, v| graph.type_of(v).shape.is_empty(),
@@ -89,20 +97,20 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         interleaved: Vec::new(),
     };
     let mut pipeline = Pipeline::new("tpu");
-    if options.config.merge_dots {
+    if options.config.tpu.merge_dots {
         pipeline.add(MergeDotsBackward);
     }
-    if options.config.flash_attention {
+    if options.config.tpu.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
-    if options.config.safe_kernels {
+    if options.config.tpu.safe_kernels {
         pipeline.add(ClampIndices);
     }
     pipeline
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
         .add(DotStrength { matrices: false });
-    if options.config.merge_dots {
+    if options.config.tpu.merge_dots {
         pipeline.add(MergeDots {
             target: Target {
                 reads: |_, _| true,
@@ -112,7 +120,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             },
         });
     }
-    if options.config.normalization_diamonds {
+    if options.config.tpu.normalization_diamonds {
         pipeline.add(Diamonds).add(DotRows);
     }
     pipeline
@@ -120,7 +128,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(FuseDots)
         .add(PlaceConcats)
         .add(LoopFusion);
-    if options.config.horizontal_fusion {
+    if options.config.tpu.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
     pipeline.run(&mut module)?;
@@ -140,7 +148,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         donate_into: options.donate_into.clone(),
         parameters,
         scalars: positions(&options.scalars),
-        memory_limit: options.config.memory_limit(),
+        memory_limit: options.config.tpu.memory_limit(),
         blocks: packed
             .iter()
             .enumerate()

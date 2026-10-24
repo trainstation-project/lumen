@@ -378,7 +378,7 @@ impl CompilerPass<TpuModule<'_>> for FuseDots {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph = fuse_dots(&m.graph, m.options.config.contraction_epilogues);
+        m.graph = fuse_dots(&m.graph, m.options.config.tpu.contraction_epilogues);
         Ok(())
     }
 }

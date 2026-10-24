@@ -9,7 +9,7 @@ use super::diamonds::Row;
 use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
@@ -77,7 +77,7 @@ pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
-    config: &CompilerConfig,
+    config: &MpsConfig,
     kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
     let a = analysis::Analysis::new(graph);
@@ -108,7 +108,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
     }
 
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config;
+        let config = &m.options.config.mps;
         let requested = m.kernels.len();
         let graph = loop {
             m.kernels.truncate(requested);

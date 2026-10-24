@@ -15,11 +15,7 @@ BATCH, STEPS, DROPOUT = 32, 300, 0
 ACCUM = 1
 PROFILED_STEPS = 10
 
-lumen.config.compiler.deterministic = True
-lumen.config.compiler.split_k = False
-lumen.config.compiler.fuse = True
-lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 64
-lumen.config.compiler.fused_linear_cross_entropy = True
+lumen.config.compiler.tpu.fused_linear_cross_entropy_chunk_size = 64
 
 
 class _MLP(lumen.autograd.Function):

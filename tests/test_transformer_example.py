@@ -279,7 +279,9 @@ def test_transformer_train_step_matches_cpu(chunk):
     two 2% (at most 3.4%) from each other: rounded at different places (a
     fused kernel's, flash attention's), not wrongly."""
     results = {}
-    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = chunk
+    lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = (
+        lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size
+    ) = chunk
     try:
         for device in ("cpu", "mps"):
             model = _model()
@@ -293,7 +295,9 @@ def test_transformer_train_step_matches_cpu(chunk):
             state = {name: lumen.to_numpy(t._placed(device)) for name, t in opt.named_parameters()}
             results[device] = loss, state
     finally:
-        lumen.config.compiler.fused_linear_cross_entropy_chunk_size = None
+        lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = (
+            lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size
+        ) = None
     (cpu_loss, cpu), (mps_loss, mps) = results["cpu"], results["mps"]
     assert mps_loss == pytest.approx(cpu_loss, rel=1e-2), (mps_loss, cpu_loss)
     assert cpu.keys() == mps.keys()

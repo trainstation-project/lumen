@@ -1,7 +1,6 @@
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
-from lumen.graph import prims
-from lumen.graph.tracer import config
+from lumen.graph import prims, tracer
 
 __all__ = ["substitute"]
 
@@ -10,7 +9,7 @@ def substitute(tape):
     """``tape`` with each cross entropy of a dot's logits nothing else reads
     replaced by one ``_LinearCrossEntropy`` node of the dot's operands and
     the classes (where the cross entropy was), the dot dropped."""
-    chunk = config.compiler.fused_linear_cross_entropy_chunk_size
+    chunk = tracer.compiler_config().fused_linear_cross_entropy_chunk_size
     if chunk is None:
         return tape
     from lumen.functional.cross_entropy.logits import _CrossEntropy

@@ -61,13 +61,14 @@ pub(crate) fn set_loop(launch: Loop) {
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
+        device,
         options,
     };
     Pipeline::new("triton")
         .add(Simplify { matched: true })
         .add(LoopFusion)
         .run(&mut module)?;
-    let mut plan = cpu::plan(&module.graph, options);
+    let mut plan = cpu::plan(&module.graph, device, options);
     let kernels = plan.steps().iter().map(|step| match &step.primitive {
         Primitive::Fusion { body, .. } => {
             let by_value: Vec<bool> = step
@@ -85,7 +86,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         _ => None,
     });
     plan.triton = Some(kernels.collect());
-    if options.config.autotune {
+    if options.config.cuda.autotune {
         let tuner = Autotuner {
             timer: gemm::Events { device },
         };

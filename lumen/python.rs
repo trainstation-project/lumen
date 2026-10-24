@@ -6,7 +6,7 @@ const PACKAGES: [(&str, Register); 12] = [
     ("device", crate::device::python::register),
     ("distributed", crate::distributed::python::register),
     ("tensor", crate::tensor::python::register),
-    ("allocator", crate::allocator::python::register),
+    ("config", crate::config::python::register),
     ("graph_compiler", crate::graph_compiler::python::register),
     ("profiler", crate::profiler::python::register),
     ("stream", crate::stream::python::register),

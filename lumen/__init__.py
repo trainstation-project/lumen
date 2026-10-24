@@ -13,8 +13,8 @@ from lumen import (
     safetensors,
 )
 from lumen._native import __version__
-from lumen.allocator import config
 from lumen.autograd import grad, jvp, value_and_grad, vjp
+from lumen.config import config
 from lumen.device import device
 from lumen.device._C import cpu, cuda, meta, mps, tpu
 from lumen.functional import cat

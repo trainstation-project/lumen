@@ -15,8 +15,8 @@ def rand(*shape, seed=0):
 
 @pytest.fixture
 def compiler():
-    """``lumen.config.compiler``, reset to its defaults after the test."""
-    yield lumen.config.compiler
+    """``lumen.config.compiler.mps``, reset to its defaults after the test."""
+    yield lumen.config.compiler.mps
     lumen.config.compiler.reset()
 
 

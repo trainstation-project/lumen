@@ -148,7 +148,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = split_k(m.graph(), !m.config().deterministic);
+        *m.graph_mut() = split_k(m.graph(), !m.options().config.mps.deterministic);
         Ok(())
     }
 }

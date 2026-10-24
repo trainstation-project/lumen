@@ -10,7 +10,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for FlashAttentionBackward {
     }
 
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let deterministic = m.options.config.deterministic;
+        let deterministic = m.options.config.mps.deterministic;
         let kernels = &mut m.kernels;
         m.graph = attention::fuse_backward(
             &m.graph,

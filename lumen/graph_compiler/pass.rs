@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{CompilerConfig, Options};
+use crate::Device;
 use crate::graph::Graph;
 
 pub(crate) trait Module {
@@ -8,13 +9,12 @@ pub(crate) trait Module {
     fn graph_mut(&mut self) -> &mut Graph;
     fn options(&self) -> &Options;
 
-    fn config(&self) -> &CompilerConfig {
-        &self.options().config
-    }
+    fn config(&self) -> &dyn CompilerConfig;
 }
 
 pub(crate) struct GraphModule<'a> {
     pub graph: Graph,
+    pub device: Device,
     pub options: &'a Options,
 }
 
@@ -29,6 +29,10 @@ impl Module for GraphModule<'_> {
 
     fn options(&self) -> &Options {
         self.options
+    }
+
+    fn config(&self) -> &dyn CompilerConfig {
+        self.options.config.of(self.device)
     }
 }
 
@@ -59,7 +63,7 @@ impl<M: Module> Pipeline<M> {
 
     pub(crate) fn run(&mut self, module: &mut M) -> Result<(), String> {
         let name = self.name;
-        let dump = module.config().dump_to.clone().map(|dir| {
+        let dump = module.config().dump_to().map(str::to_owned).map(|dir| {
             let id = DUMPED.fetch_add(1, Ordering::Relaxed);
             move |step: usize, pass: &str, graph: &Graph| {
                 let file = format!("{dir}/{id:04}.{name}.{step:02}.{pass}.txt");

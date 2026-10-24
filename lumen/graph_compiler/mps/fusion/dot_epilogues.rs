@@ -2,7 +2,7 @@ use super::analysis::Analysis;
 use super::{MAX_AUX, elementwise};
 use crate::DType;
 use crate::graph::{Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 pub(super) struct DotEpilogues {
@@ -12,7 +12,7 @@ pub(super) struct DotEpilogues {
     pub(super) aux: Vec<Option<usize>>,
 }
 
-pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &CompilerConfig) -> DotEpilogues {
+pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> DotEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
     let (producer, is_output, live, users, fusible) =
         (&a.producer, &a.is_output, &a.live, &a.users, &a.fusible);
