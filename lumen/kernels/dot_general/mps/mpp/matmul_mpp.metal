@@ -5,21 +5,37 @@
     #define LUMEN_MPP 1
 using namespace metal;
 
-template <typename O, typename C> inline void store_mpp(thread C &sum, device O *out, int N, int M, int row, int col) {
+template <typename O, typename Out, typename Epi, typename C>
+inline void store_mpp(thread C &sum, device Out *out, int N, int M, int row, int col, ulong base, Epi epi) {
     // MPP tensors can contain invalid lanes at the edge of a tile.
     _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
         if (sum.is_valid_element(i)) {
             auto at = sum.get_multidimensional_index(i);
             int m = row + at[1], n = col + at[0];
             if (m < M && n < N) {
-                out[ulong(m) * N + n] = O(sum[i]);
+                const ulong at = ulong(m) * N + n;
+                out[at] = epi(O(sum[i]), base + at);
             }
         }
     }
 }
 
-template <typename T, typename O, int BM, int BN, int BK, int SIMDS, bool TL, bool TR>
-inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, constant ulong *p, uint3 group) {
+template <typename T,
+          typename O,
+          int BM,
+          int BN,
+          int BK,
+          int SIMDS,
+          bool TL,
+          bool TR,
+          typename Out = O,
+          typename Epi = Same>
+inline void matmul_mpp(device const T *lhs,
+                       device const T *rhs,
+                       device Out *out,
+                       constant ulong *p,
+                       uint3 group,
+                       Epi epi = Epi()) {
     using namespace mpp::tensor_ops;
     using extents = dextents<int32_t, 2>;
 
@@ -31,7 +47,8 @@ inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, 
         l, TL ? extents(M, K) : extents(K, M), TL ? array<int32_t, 2>{1, int(p[5])} : array<int32_t, 2>{1, int(p[4])});
     tensor<device T, extents, tensor_inline> b(
         r, TR ? extents(K, N) : extents(N, K), TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
-    device O *o = out + ulong(group.z) * M * N;
+    const ulong base = ulong(group.z) * M * N;
+    device Out *o = out + base;
     const int row = int(group.y) * BM, col = int(group.x) * BN;
     if (row + BM <= M && col + BN <= N && K % BK == 0) {
         // Fully covered tiles use a fixed descriptor and accumulate in one
@@ -66,7 +83,7 @@ inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, 
             auto bk = slice_b(k0);
             op.run(ak, bk, sum);
         }
-        store_mpp(sum, o, N, M, row, col);
+        store_mpp<O>(sum, o, N, M, row, col, base, epi);
     } else {
         // Edge tiles and incomplete K tails use MPP's dynamic-extent path.
         constexpr auto desc = matmul2d_descriptor(
@@ -76,7 +93,7 @@ inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, 
         auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
         auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
         op.run(a0, b0, sum);
-        store_mpp(sum, o, N, M, row, col);
+        store_mpp<O>(sum, o, N, M, row, col, base, epi);
     }
 }
 #endif

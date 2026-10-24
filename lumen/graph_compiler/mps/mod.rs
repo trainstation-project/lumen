@@ -331,14 +331,14 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Ok(plan)
 }
 
-const MPP_PRELUDE: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
+const MPP: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
 
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(PRELUDE, sources)
 }
 
 fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
-    compile_with(MPP_PRELUDE, sources)
+    compile_with(&format!("{PRELUDE}\n{MPP}"), sources)
 }
 
 fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), String> {

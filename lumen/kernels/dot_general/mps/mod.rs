@@ -10,10 +10,7 @@ pub(crate) use mpp::*;
 pub(crate) use skinny::*;
 pub(crate) use tiled::*;
 
-use indoc::formatdoc;
-
 use crate::Tensor;
-use crate::codegen::mps::THREAD_ARGS;
 use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;
@@ -27,30 +24,6 @@ const SMALL_TILE: (usize, usize) = (32, 32);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
-
-fn signature(name: &str, t: &str, o: &str, threads: usize) -> String {
-    formatdoc! {"
-        [[max_total_threads_per_threadgroup({threads})]]
-        kernel void {name}(device const {t} *lhs [[buffer(0)]],
-        device const {t} *rhs [[buffer(1)]],
-        device {o} *out [[buffer(2)]],
-        constant ulong *p [[buffer(3)]],
-        {THREAD_ARGS}) {{"}
-}
-
-pub(crate) fn matmul_source(
-    t: &str,
-    a: &str,
-    o: &str,
-    c: GemmConfig,
-    layout: (bool, bool),
-) -> (String, String) {
-    match c.algorithm {
-        Algorithm::Tiled => tiled::source(t, a, o, c),
-        Algorithm::Mpp => mpp::source(t, a, o, c, layout),
-        Algorithm::Skinny => skinny::source(t, a, o, c),
-    }
-}
 
 pub(crate) struct MatmulOrder {
     pub lhs: Vec<usize>,
@@ -211,64 +184,14 @@ pub(crate) fn encode(
         name,
         None,
     )?;
-    let float = match (lhs.dtype, out.dtype) {
-        (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
-        (d, o) => format!("{d}_{}_{o}", accum_dtype(&step.primitive)),
-    };
-    let kernel = match (out.dtype.is_float(), launch_.small, launch_.mid) {
-        (true, true, _) => format!("matmul_small_{float}"),
-        (true, _, true) => format!("matmul_mid_{float}"),
-        (true, ..) => format!("matmul_{float}"),
-        (false, ..) => format!("matmul_{}", out.dtype),
-    };
     launch(
-        &kernel,
+        &format!("matmul_{}", out.dtype),
         &[inputs[0], inputs[1], output.cast_const()],
         &[dims_arg(launch_.p)],
         launch_.grid,
         keep,
         name,
     )
-}
-
-pub(crate) fn encode_tuned(
-    step: &Step,
-    kernel: &str,
-    config: GemmConfig,
-    inputs: &[*const u8],
-    output: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let (ls, rs) = (
-        contiguous_strides(&lhs.shape),
-        contiguous_strides(&rhs.shape),
-    );
-    let tile = Some((config.bm, config.bn));
-    let launch_ = plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, tile)?;
-    let Grid::Groups(groups) = launch_.grid else {
-        unreachable!("a matmul's grid")
-    };
-    let grid = Grid::GroupsOf {
-        groups,
-        threads: config.threads,
-    };
-    let buffers = [inputs[0], inputs[1], output.cast_const()];
-    launch(
-        kernel,
-        &buffers,
-        &[dims_arg(launch_.p)],
-        grid,
-        keep,
-        step.label,
-    )
-}
-
-fn accum_dtype(p: &Primitive) -> crate::DType {
-    let DotGeneral { accum_dtype, .. } = p else {
-        unreachable!("a dot_general")
-    };
-    *accum_dtype
 }
 
 fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, usize)> {

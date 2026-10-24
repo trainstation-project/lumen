@@ -1876,7 +1876,7 @@ fn matrix_vector_dots_are_reduced() {
 
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
-    use super::autotune::Gemms;
+    use super::autotune::{Gemms, matmul_of};
     use crate::graph_compiler::common::autotune::Kernels;
     use crate::kernels::dot_general::mps as gemm;
     if !available() {
@@ -1901,55 +1901,68 @@ fn every_gemm_candidate_matches_the_reference() {
     options.config.autotune = false;
     for dtype in [DType::F32, DType::BF16] {
         for (lhs, rhs, lc, rc) in cases {
-            let mut g = Graph::new();
-            let a = g.input(ty(dtype, lhs));
-            let b = g.input(ty(dtype, rhs));
-            let d = apply(&mut g, dot(lc, rc, dtype), &[a, b]);
-            g.set_outputs(&[d]).unwrap();
-            let inputs = [values(dtype, lhs, 1), values(dtype, rhs, 2)];
-            let expected = reference::run(&g, &inputs).unwrap()[0]
-                .to_dtype(DType::F32)
-                .unwrap()
-                .to_vec::<f32>();
-            let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
-            let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
-            let mut plan =
-                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
-            let at = plan
-                .steps()
-                .iter()
-                .position(|s| matches!(s.primitive, DotGeneral { .. }))
-                .expect("a dot_general step");
-            let step = plan.steps()[at].clone();
-            let layout = gemm::mpp_transposes(&step);
-            let mpp = match layout.is_some() && super::mpp_available() {
-                true => gemm::mpp_configs(),
-                false => &[],
-            };
-            let skinny = match layout {
-                Some((_, false)) => gemm::skinny_configs(),
-                _ => &[],
-            };
-            let mut gemms = Gemms::default();
-            let built: Vec<_> = gemm::configs()
-                .iter()
-                .chain(mpp)
-                .chain(skinny)
-                .map(|&config| (config, gemms.build(&step, config)))
-                .collect();
-            gemms.compile().unwrap();
-            for (config, tuned) in built {
-                plan.steps_mut()[at].tuned = Some(tuned);
-                let got = plan.run(&on_mps).unwrap()[0]
+            for fused in [false, true] {
+                let out = [lhs[1 - lc], rhs[1 - rc]];
+                let mut g = Graph::new();
+                let a = g.input(ty(dtype, lhs));
+                let b = g.input(ty(dtype, rhs));
+                let mut d = apply(&mut g, dot(lc, rc, dtype), &[a, b]);
+                let mut inputs = vec![values(dtype, lhs, 1), values(dtype, rhs, 2)];
+                if fused {
+                    let c = g.input(ty(dtype, &out));
+                    d = apply(&mut g, Add, &[d, c]);
+                    inputs.push(values(dtype, &out, 3));
+                }
+                g.set_outputs(&[d]).unwrap();
+                let expected = reference::run(&g, &inputs).unwrap()[0]
                     .to_dtype(DType::F32)
                     .unwrap()
                     .to_vec::<f32>();
-                let tol = scale * if dtype == DType::F32 { 1e-5 } else { 1e-2 };
-                for (k, (w, v)) in expected.iter().zip(&got).enumerate() {
-                    assert!(
-                        (w - v).abs() <= tol,
-                        "{config:?} {dtype} {lhs:?}·{rhs:?} [{k}]: {v} != {w}"
-                    );
+                let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
+                let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+                let mut plan =
+                    crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+                let at = plan
+                    .steps()
+                    .iter()
+                    .position(|s| matmul_of(s).is_some())
+                    .expect("a matmul step");
+                let step = plan.steps()[at].clone();
+                let Fusion { body, .. } = &step.primitive else {
+                    panic!("every float matmul runs as a GEMM fusion: {plan}");
+                };
+                assert_eq!(body.nodes().len(), 1 + usize::from(fused), "{body}");
+                let (p, l, r, o) = matmul_of(&step).unwrap();
+                let layout = gemm::mpp_transposes(p, l, r, o);
+                let mpp = match layout.is_some() && super::mpp_available() {
+                    true => gemm::mpp_configs(),
+                    false => &[],
+                };
+                let skinny = match layout {
+                    Some((_, false)) => gemm::skinny_configs(),
+                    _ => &[],
+                };
+                let mut gemms = Gemms::default();
+                let built: Vec<_> = gemm::configs()
+                    .iter()
+                    .chain(mpp)
+                    .chain(skinny)
+                    .map(|&config| (config, gemms.build(&step, config)))
+                    .collect();
+                gemms.compile().unwrap();
+                for (config, tuned) in built {
+                    plan.steps_mut()[at].tuned = Some(tuned);
+                    let got = plan.run(&on_mps).unwrap()[0]
+                        .to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec::<f32>();
+                    let tol = scale * if dtype == DType::F32 { 1e-5 } else { 1e-2 };
+                    for (k, (w, v)) in expected.iter().zip(&got).enumerate() {
+                        assert!(
+                            (w - v).abs() <= tol,
+                            "{config:?} {dtype} {lhs:?}·{rhs:?} fused={fused} [{k}]: {v} != {w}"
+                        );
+                    }
                 }
             }
         }

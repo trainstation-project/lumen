@@ -1,5 +1,5 @@
 use super::*;
-use crate::kernels::dot_general::mps::{DEFAULT_CONFIGS, GemmConfig};
+use crate::kernels::dot_general::mps::{Algorithm, DEFAULT_CONFIGS, GemmConfig, mpp_transposes};
 
 pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
     body.nodes()
@@ -223,6 +223,10 @@ pub(crate) fn gemm_interleaved<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a N
         },
         _ => None,
     }
+}
+
+pub(crate) fn gemm_plain(body: &Graph, dot: &Node) -> bool {
+    gemm_regions(body, dot).is_none() && gemm_pair(body, dot).is_none() && gemm_expanded(body, dot).is_none()
 }
 
 pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<[Var; 2]> {
@@ -545,27 +549,64 @@ fn gemm_kernel_with(
         }};
         "
     );
+    let plain = paired == "NAME_epi";
     let flags = 6 - paired.matches(',').count();
     let paired = format!("{paired}{}", ", false".repeat(flags));
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
+        assert!(
+            plain || c.algorithm == Algorithm::Tiled,
+            "only a plain epilogue runs on {:?}",
+            c.algorithm
+        );
+        let call = match c.algorithm {
+            Algorithm::Tiled => formatdoc!(
+                "
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                {paired},
+                {threads}, {cols}, {prefetch}>(
+                {lhs}, {rhs}, out, p,
+                lt, rt,
+                group, tid.y * 16 + tid.x, sg, lane,
+                NAME_epi{{{members}}});
+                "
+            ),
+            Algorithm::Mpp => {
+                let ty = |v: Var| body.type_of(v);
+                let (left, right) = mpp_transposes(
+                    &dot.primitive,
+                    ty(dot.inputs[0]),
+                    ty(dot.inputs[1]),
+                    ty(dot.output),
+                )
+                .expect("a layout Metal Performance Primitives read");
+                formatdoc!(
+                    "
+                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi>(
+                    {lhs}, {rhs}, out, p, group,
+                    NAME_epi{{{members}}});
+                    "
+                )
+            }
+            Algorithm::Skinny => formatdoc!(
+                "
+                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
+                {lhs}, {rhs}, out, p, partials, group, tid.x,
+                NAME_epi{{{members}}});
+                "
+            ),
+        };
         writedoc!(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
                                      {THREAD_ARGS}) {{
-                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
-                               {paired},
-                               {threads}, {cols}, {prefetch}>(
-                    {lhs}, {rhs}, out, p,
-                    lt, rt,
-                    group, tid.y * 16 + tid.x, sg, lane,
-                    NAME_epi{{{members}}});
-            }}
+            {call}}}
             "
         )
         .unwrap();

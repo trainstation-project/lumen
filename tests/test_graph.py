@@ -1195,7 +1195,7 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
-    assert any(s["primitive"] == "dot_general" and s["output"][2] == [2 * h, d] for s in steps), labels
+    assert any(_dot(s) and s["output"][2] == [2 * h, d] for s in steps), labels
     assert not any("transpose" in label for label in labels), labels
 
 
@@ -2728,6 +2728,16 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     ]
 
 
+def _dot(step):
+    """A plan step's matmul: a ``dot_general`` step's text, or the dot of a
+    fusion of the dot alone (the MPS compiler runs every float matmul as a
+    GEMM fusion, epilogue or not); None for any other step."""
+    if step["fusion"] is None:
+        return step["text"] if step["text"].startswith("dot_general") else None
+    nodes = [line.split(" = ", 1)[1] for line in step["fusion"]["body"].splitlines() if " = " in line]
+    return nodes[0] if len(nodes) == 1 and nodes[0].startswith("dot_general") else None
+
+
 @pytest.mark.mps
 def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     """A matmul of bfloat16 operands writing its float32 accumulator as it
@@ -2750,7 +2760,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     both = lambda x, w: (rounded(x, w), F.matmul(x, w, "float32", "float32"))  # noqa: E731
 
     def dots(f, *args):
-        return [s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
+        return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
     lumen.config.compiler.contraction_epilogues = False
     try:

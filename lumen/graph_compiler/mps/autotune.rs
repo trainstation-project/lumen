@@ -74,11 +74,19 @@ pub(super) struct Gemms {
 
 const TUNED_OUTPUTS: usize = 64 << 10;
 
+pub(super) fn matmul_of(step: &Step) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        return None;
+    };
+    let dot = codegen::gemm_dot(body)?;
+    let ty = |v| body.type_of(v);
+    Some((&dot.primitive, ty(dot.inputs[0]), ty(dot.inputs[1]), ty(dot.output)))
+}
+
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
     let whole = step.views.iter().all(Option::is_none);
     let tiled = match &step.primitive {
-        Primitive::DotGeneral { .. } => true,
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
                 && super::launch_of(body) == super::Launch::Gemm
@@ -94,19 +102,30 @@ impl Kernels for Gemms {
     type Config = GemmConfig;
 
     fn configs(&self, step: &Step) -> Vec<GemmConfig> {
-        let dot = matches!(
-            step.primitive,
-            Primitive::DotGeneral {
-                accum_dtype: DType::F32,
-                ..
-            }
-        );
-        let skinny = dot && gemm::skinny(step);
+        let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
+            return Vec::new();
+        };
+        let plain = match &step.primitive {
+            Primitive::Fusion { body, .. } => codegen::gemm_dot(body).is_some_and(|d| codegen::gemm_plain(body, d)),
+            _ => false,
+        };
+        let others = plain
+            && matches!(
+                dot,
+                Primitive::DotGeneral {
+                    accum_dtype: DType::F32,
+                    ..
+                }
+            );
+        let skinny = others && gemm::skinny(dot, lhs, rhs, out);
         let large = step.output.1.numel() >= TUNED_OUTPUTS;
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
-        let mpp = large && dot && gemm::mpp_transposes(step).is_some() && super::mpp_available();
+        let mpp = large
+            && others
+            && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
+            && super::mpp_available();
         let mpp = if mpp { gemm::mpp_configs() } else { &[] };
         let skinny = if skinny { gemm::skinny_configs() } else { &[] };
         gemm::configs()
@@ -118,57 +137,38 @@ impl Kernels for Gemms {
     }
 
     fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
-        let (kernel, source) = match &step.primitive {
-            Primitive::Fusion { body, .. } => {
-                let by_value: Vec<bool> = step
-                    .inputs
-                    .iter()
-                    .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
-                    .collect();
-                codegen::gemm_variant(body, &by_value, config)
-            }
-            p => {
-                let Primitive::DotGeneral { accum_dtype, .. } = p else {
-                    unreachable!("a matmul")
-                };
-                let (t, a, o) = (
-                    codegen::metal_type(step.inputs[0].1.dtype),
-                    codegen::metal_type(*accum_dtype),
-                    codegen::metal_type(step.output.1.dtype),
-                );
-                gemm::matmul_source(
-                    t,
-                    a,
-                    o,
-                    config,
-                    gemm::mpp_transposes(step).unwrap_or_default(),
-                )
-            }
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("a GEMM fusion")
         };
+        let by_value: Vec<bool> = step
+            .inputs
+            .iter()
+            .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+            .collect();
+        let (kernel, source) = codegen::gemm_variant(body, &by_value, config);
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
-        let encode: Encode =
-            Box::new(
-                move |step, inputs, output, scratch, keep| match &step.primitive {
-                    Primitive::Fusion { name: fusion, .. } => super::encode_with(
-                        step,
-                        fusion,
-                        Some((&name, config)),
-                        inputs,
-                        output,
-                        scratch,
-                        keep,
-                    ),
-                    _ => gemm::encode_tuned(step, &name, config, inputs, output, keep),
-                },
-            );
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
+                unreachable!("a GEMM fusion")
+            };
+            super::encode_with(
+                step,
+                fusion,
+                Some((&name, config)),
+                inputs,
+                output,
+                scratch,
+                keep,
+            )
+        });
         Tuned::new(kernel, encode)
     }
 
     fn compile(&mut self) -> Result<(), String> {
         let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
             .into_iter()
-            .partition(|(name, _)| name.starts_with(gemm::MPP_PREFIX));
+            .partition(|(_, source)| source.contains("matmul_mpp<"));
         compile_kernels(sg)?;
         compile_mpp_kernels(mpp)
     }

@@ -1,11 +1,19 @@
-template <typename T, typename O, uint R, uint THREADS, uint BLOCK, uint V>
+template <typename T,
+          typename O,
+          uint R,
+          uint THREADS,
+          uint BLOCK,
+          uint V,
+          typename Out = O,
+          typename Epi = Same>
 inline void matmul_skinny(device const T *lhs,
                           device const T *rhs,
-                          device O *out,
+                          device Out *out,
                           constant ulong *p,
                           threadgroup float *partials,
                           uint3 group,
-                          uint t) {
+                          uint t,
+                          Epi epi = Epi()) {
     // This kernel handles matrices with few rows by splitting each output
     // column block across threads and reducing the K dimension in threadgroup memory.
     constexpr uint GROUPS = BLOCK / V, SPLIT = THREADS / GROUPS, STRIDE = BLOCK + 1, W = V < 4 ? V : 4;
@@ -53,7 +61,8 @@ inline void matmul_skinny(device const T *lhs,
             }
         }
     }
-    device O *o = out + group.z * M * N;
+    const ulong base = group.z * M * N;
+    device Out *o = out + base;
     UNROLL for (uint r = 0; r < R; ++r) {
         // Publish this K-split partial, then reduce all partials for each output column.
         UNROLL for (uint i = 0; i < V; ++i) { partials[part * STRIDE + column * V + i] = acc[r][i]; }
@@ -64,7 +73,8 @@ inline void matmul_skinny(device const T *lhs,
                 v += partials[s * STRIDE + c];
             }
             if (m0 + r < M && c0 + c < N) {
-                o[(m0 + r) * N + c0 + c] = O(v);
+                const ulong at = (m0 + r) * N + c0 + c;
+                o[at] = epi(O(v), base + at);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

@@ -266,31 +266,3 @@ inline void matmul_sg_impl(device const T *lhs,
         }
     }
 }
-
-// Instantiate one SIMD-matrix kernel with the requested tile and accumulator types.
-#define MATMUL_SG(KERNEL, T, A, O, BM, BN, BK)                                                                    \
-    kernel void KERNEL(                                                                                           \
-        MATMUL_ARGS(T, O), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
-        threadgroup T lt[SG_LT(BM, BK, T, A)], rt[BK * BN];                                                       \
-        matmul_sg_impl<T, A, O, BM, BN, BK>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);       \
-    }
-
-// The three float variants trade tile size for occupancy on smaller problems.
-#define MATMUL_FLOAT(NAME, T)                            \
-    MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK)    \
-    MATMUL_SG(matmul_mid_##NAME, T, T, T, 64, 64, SG_BK) \
-    MATMUL_SG(matmul_small_##NAME, T, T, T, 32, 32, SMALL_BK)
-// Widened variants keep half or bfloat inputs while accumulating in float.
-#define MATMUL_WIDENED(NAME, T)                                                \
-    MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64, SG_BK)         \
-    MATMUL_SG(matmul_mid_##NAME##_f32_##NAME, T, float, T, 64, 64, SG_BK)      \
-    MATMUL_SG(matmul_small_##NAME##_f32_##NAME, T, float, T, 32, 32, SMALL_BK) \
-    MATMUL_SG(matmul_##NAME##_f32_f32, T, float, float, 128, 64, SG_BK)        \
-    MATMUL_SG(matmul_mid_##NAME##_f32_f32, T, float, float, 64, 64, SG_BK)     \
-    MATMUL_SG(matmul_small_##NAME##_f32_f32, T, float, float, 32, 32, SMALL_BK)
-
-#ifndef TEMPLATES_ONLY
-FOR_FLOAT(MATMUL_FLOAT)
-MATMUL_WIDENED(f16, half)
-MATMUL_WIDENED(bf16, bfloat)
-#endif

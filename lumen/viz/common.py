@@ -37,12 +37,6 @@ _SOURCES = [
     (r"^scatter_add_scan_", "scatter_add/mps/kernels.metal", "#define SCATTER_ADD_SCAN"),
     (r"^scatter_add_", "scatter_add/mps/kernels.metal", "#define SCATTER_ADD("),
     (r"^random_bits", "factory/mps/kernels.metal", "kernel void random_bits"),
-    (r"^matmul_(small|mid)_", "dot_general/mps/tiled/matmul_sg.metal", "inline void matmul_sg_impl"),
-    (
-        r"^matmul_(f16|bf16|f32)(_f32_(f16|bf16|f32))?$",
-        "dot_general/mps/tiled/matmul_sg.metal",
-        "inline void matmul_sg_impl",
-    ),
     (r"^matmul_(u64|i64)$", "dot_general/mps/integer/matmul_wide.metal", "inline void matmul_wide_impl"),
     (r"^matmul_(u8|u16|u32|i8|i16|i32)$", "dot_general/mps/integer/matmul.metal", "inline void matmul_impl"),
     (r"^reduce_\w+_rows_", "reduce/mps/kernels.metal", "inline void reduce_rows"),
