@@ -105,7 +105,7 @@ the epilogue is applied in a second kernel `NAME_final` over the partials
 (`split_launches` names the two launches for profiling).
 
 **GEMM with epilogue** (`gemm_kernel`). Instantiates `matmul_sg_impl` from
-`kernels/dot_general/mps/matmul_sg.metal` three times — `NAME` (128x64 tiles),
+`kernels/dot_general/mps/tiled/matmul_sg.metal` three times — `NAME` (128x64 tiles),
 `NAME_mid` (64x64), `NAME_small` (32x32) — and the encoder picks one. The
 epilogue (bias, activation, residual, cast) is a `NAME_epi` functor of the
 dot's value `r` and the flat index. Variants:

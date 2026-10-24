@@ -3,8 +3,8 @@ use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
-use crate::allocator::Scratch;
 use crate::DType;
+use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
@@ -109,7 +109,12 @@ impl Kernels for Gemms {
         let mpp = large && dot && gemm::mpp_transposes(step).is_some() && super::mpp_available();
         let mpp = if mpp { gemm::mpp_configs() } else { &[] };
         let skinny = if skinny { gemm::skinny_configs() } else { &[] };
-        gemm::configs().iter().chain(mpp).chain(skinny).copied().collect()
+        gemm::configs()
+            .iter()
+            .chain(mpp)
+            .chain(skinny)
+            .copied()
+            .collect()
     }
 
     fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
@@ -131,7 +136,13 @@ impl Kernels for Gemms {
                     codegen::metal_type(*accum_dtype),
                     codegen::metal_type(step.output.1.dtype),
                 );
-                gemm::matmul_source(t, a, o, config, gemm::mpp_transposes(step).unwrap_or_default())
+                gemm::matmul_source(
+                    t,
+                    a,
+                    o,
+                    config,
+                    gemm::mpp_transposes(step).unwrap_or_default(),
+                )
             }
         };
         self.sources.insert(kernel.clone(), source);

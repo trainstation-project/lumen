@@ -6,12 +6,19 @@ inline void matmul_skinny(device const T *lhs,
                           threadgroup float *partials,
                           uint3 group,
                           uint t) {
+    // This kernel handles matrices with few rows by splitting each output
+    // column block across threads and reducing the K dimension in threadgroup memory.
     constexpr uint GROUPS = BLOCK / V, SPLIT = THREADS / GROUPS, STRIDE = BLOCK + 1, W = V < 4 ? V : 4;
     const ulong M = p[0], N = p[1], K = p[2], sm = p[4], sk = p[5], rk = p[7];
+
+    // Threads are arranged into column groups and K-split partial reducers.
     const uint column = t % GROUPS, part = t / GROUPS;
     const ulong m0 = ulong(group.y) * R, c0 = ulong(group.x) * BLOCK, n0 = c0 + column * V;
     device const T *a = lhs + group.z * p[3];
     device const T *b = rhs + group.z * p[6];
+
+    // Clamp invalid rows to the last valid row so speculative loads remain valid;
+    // stores still check the true M boundary below.
     ulong rows[R];
     UNROLL for (uint r = 0; r < R; ++r) { rows[r] = min(m0 + r, M - 1) * sm; }
     float acc[R][V];
@@ -19,6 +26,7 @@ inline void matmul_skinny(device const T *lhs,
         UNROLL for (uint i = 0; i < V; ++i) { acc[r][i] = 0; }
     }
     if (n0 + V <= N && rk % W == 0 && ulong(b) % (W * sizeof(T)) == 0) {
+        // Aligned contiguous columns can use vectorized rhs loads.
         device const T *bk = b + part * rk + n0;
         device const T *ak = a + part * sk;
         const ulong bstep = SPLIT * rk, astep = SPLIT * sk;
@@ -33,6 +41,7 @@ inline void matmul_skinny(device const T *lhs,
             ak += astep;
         }
     } else {
+        // The general path supports arbitrary strides and partial N tiles.
         for (ulong k = part; k < K; k += SPLIT) {
             UNROLL for (uint r = 0; r < R; ++r) {
                 const float x = float(a[rows[r] + k * sk]);
@@ -46,6 +55,7 @@ inline void matmul_skinny(device const T *lhs,
     }
     device O *o = out + group.z * M * N;
     UNROLL for (uint r = 0; r < R; ++r) {
+        // Publish this K-split partial, then reduce all partials for each output column.
         UNROLL for (uint i = 0; i < V; ++i) { partials[part * STRIDE + column * V + i] = acc[r][i]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint c = t; c < BLOCK; c += THREADS) {

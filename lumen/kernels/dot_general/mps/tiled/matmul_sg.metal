@@ -1,3 +1,5 @@
+// Two values are used by paired and expanded epilogues when a SIMD fragment
+// represents adjacent output columns.
 template <typename T> struct Pair {
     T first, second;
 };
@@ -18,6 +20,7 @@ template <> struct Bytes<1> {
     using type = uchar;
 };
 
+// Large and mid kernels use 16-wide K slices; small kernels use 32-wide slices.
 #define SG_BK 16
 #define SMALL_BK 32
 #define SG_COLS 2
@@ -51,6 +54,8 @@ inline void matmul_sg_impl(device const T *lhs,
                            uint sg,
                            uint lane,
                            Epi epi = Epi()) {
+    // A threadgroup is divided into SIMD groups. Each SIMD group owns a
+    // rectangular region of the output tile made from 8 x 8 matrix fragments.
     constexpr uint SIMDS = THREADS / 32;
     constexpr uint FM = BM / (SIMDS / COLS) / 8, FN = BN / COLS / 8;
     constexpr uint LA = BM * BK / THREADS, LB = BK * BN / THREADS;
@@ -58,8 +63,12 @@ inline void matmul_sg_impl(device const T *lhs,
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;
+
+    // These coordinates describe each thread's contribution to cooperative
+    // lhs and rhs tile loads.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;
+    // Paired layouts store adjacent logical columns in separate halves.
     const ulong cn = PAIRED && !INTERLEAVED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
@@ -67,16 +76,20 @@ inline void matmul_sg_impl(device const T *lhs,
     auto fetch = [&](ulong k0) {
         bool full_k = k0 + BK <= K;
         if (full_m && full_k) {
+            // Fast path for a completely valid lhs tile.
             UNROLL for (uint t = 0; t < LA; ++t) { ra[t] = l[k0 * sk + ulong(RA * t) * sm]; }
         } else {
+            // Edge loads use zero for invalid M/K coordinates.
             UNROLL for (uint t = 0; t < LA; ++t) {
                 bool in = m0 + ar + RA * t < M && k0 + ac < K;
                 ra[t] = in ? l[k0 * sk + ulong(RA * t) * sm] : T(0);
             }
         }
         if (full_n && full_k) {
+            // Fast path for a completely valid rhs tile.
             UNROLL for (uint t = 0; t < LB; ++t) { rb[t] = r[(k0 + RB * t) * rk]; }
         } else {
+            // Edge loads use zero for invalid N/K coordinates.
             UNROLL for (uint t = 0; t < LB; ++t) {
                 bool in = k0 + br + RB * t < K && n0 + bc < N;
                 rb[t] = in ? r[(k0 + RB * t) * rk] : T(0);
@@ -84,6 +97,8 @@ inline void matmul_sg_impl(device const T *lhs,
         }
     };
     const uint sy = sg / COLS, sx = sg % COLS;
+
+    // c holds the SIMD matrix accumulators for this SIMD group's output region.
     simdgroup_matrix<A, 8, 8> c[FM][FN];
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }
@@ -91,6 +106,8 @@ inline void matmul_sg_impl(device const T *lhs,
     auto mma = [&]() {
         UNROLL for (uint kk = 0; kk < BK; kk += 8) {
             simdgroup_matrix<T, 8, 8> a[FM], b[FN];
+            // Each SIMD group loads 8-wide fragments from the shared tiles and
+            // accumulates their matrix products into c.
             simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * BK + kk, BK); }
             simdgroup_barrier(mem_flags::mem_none);
@@ -112,6 +129,7 @@ inline void matmul_sg_impl(device const T *lhs,
     const bool vector = !PAIRED && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
                         N % WB == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 && ulong(rhs0) % (WB * sizeof(T)) == 0;
     if (vector) {
+        // Contiguous, aligned inputs use packed vector loads to reduce memory transactions.
         using CA = typename Bytes<WA * sizeof(T)>::type;
         using CB = typename Bytes<WB * sizeof(T)>::type;
         const uint avr = flat / TA, avc = flat % TA, bvr = flat / TB, bvc = flat % TB;
@@ -123,9 +141,11 @@ inline void matmul_sg_impl(device const T *lhs,
         const bool whole = full_m && n0 + BN <= N;
         auto fetch_v = [&](ulong k0) {
             if (whole && k0 + BK <= K) {
+                // The vector fast path can load without bounds checks for full tiles.
                 UNROLL for (uint t = 0; t < PA; ++t) { va[t] = *(device const CA *)(lv + ulong(VRA * t) * sm); }
                 UNROLL for (uint t = 0; t < PB; ++t) { vb[t] = *(device const CB *)(rv + ulong(VRB * t) * rk); }
             } else {
+                // Partial vector tiles are zero-filled lane by lane.
                 const bool in_k = k0 + avc * WA < K;
                 UNROLL for (uint t = 0; t < PA; ++t) {
                     bool in = in_k && m0 + avr + VRA * t < M;
@@ -156,6 +176,7 @@ inline void matmul_sg_impl(device const T *lhs,
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     } else {
+        // General strided path for non-contiguous or unaligned inputs.
         fetch(0);
         for (ulong k0 = 0; k0 < K; k0 += BK) {
             UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }
@@ -170,8 +191,10 @@ inline void matmul_sg_impl(device const T *lhs,
     }
     threadgroup A *stage = (threadgroup A *)lt + sg * 64;
     if constexpr (TILE) {
+        // TILE epilogues consume the SIMD fragments directly.
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
     } else if constexpr (PAIRED && REGIONS) {
+        // Paired regional output reconstructs four rows from SIMD shuffles.
         const uint pair = frag_col(lane) / 2;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
@@ -188,6 +211,7 @@ inline void matmul_sg_impl(device const T *lhs,
             }
         }
     } else if constexpr (PAIRED) {
+        // Paired output stores two logical columns into a packed output layout.
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
         UNROLL for (uint i = 0; i < FM; ++i) {
@@ -200,6 +224,7 @@ inline void matmul_sg_impl(device const T *lhs,
             }
         }
     } else if (!ATOMIC && !EXPANDED && full_m && n0 + BN <= N) {
+        // Full ordinary tiles can store directly from SIMD fragments.
         if constexpr (!ATOMIC && !EXPANDED) {
             device Out *o = out + group.z * M * N;
             UNROLL for (uint i = 0; i < FM; ++i) {
@@ -213,6 +238,8 @@ inline void matmul_sg_impl(device const T *lhs,
             }
         }
     } else {
+        // Store through shared memory for edge tiles, expanded epilogues, and
+        // atomic or otherwise indirect output paths.
         device Out *o = out + group.z * M * N;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
@@ -240,6 +267,7 @@ inline void matmul_sg_impl(device const T *lhs,
     }
 }
 
+// Instantiate one SIMD-matrix kernel with the requested tile and accumulator types.
 #define MATMUL_SG(KERNEL, T, A, O, BM, BN, BK)                                                                    \
     kernel void KERNEL(                                                                                           \
         MATMUL_ARGS(T, O), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
@@ -247,10 +275,12 @@ inline void matmul_sg_impl(device const T *lhs,
         matmul_sg_impl<T, A, O, BM, BN, BK>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);       \
     }
 
+// The three float variants trade tile size for occupancy on smaller problems.
 #define MATMUL_FLOAT(NAME, T)                            \
     MATMUL_SG(matmul_##NAME, T, T, T, 128, 64, SG_BK)    \
     MATMUL_SG(matmul_mid_##NAME, T, T, T, 64, 64, SG_BK) \
     MATMUL_SG(matmul_small_##NAME, T, T, T, 32, 32, SMALL_BK)
+// Widened variants keep half or bfloat inputs while accumulating in float.
 #define MATMUL_WIDENED(NAME, T)                                                \
     MATMUL_SG(matmul_##NAME##_f32_##NAME, T, float, T, 128, 64, SG_BK)         \
     MATMUL_SG(matmul_mid_##NAME##_f32_##NAME, T, float, T, 64, 64, SG_BK)      \

@@ -64,12 +64,12 @@ const PRELUDE: &str = concat!(
         "
     ),
     include_str!("../../kernels/reduce/mps/kernels.metal"),
-    include_str!("../../kernels/dot_general/mps/matmul.metal"),
-    include_str!("../../kernels/dot_general/mps/matmul_wide.metal"),
-    include_str!("../../kernels/dot_general/mps/matmul_sg.metal"),
-    include_str!("../../kernels/dot_general/mps/matmul_atomic.metal"),
-    include_str!("../../kernels/dot_general/mps/matmul_skinny.metal"),
-    include_str!("../../kernels/dot_general/mps/linear_cross_entropy.metal"),
+    include_str!("../../kernels/dot_general/mps/integer/matmul.metal"),
+    include_str!("../../kernels/dot_general/mps/integer/matmul_wide.metal"),
+    include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
+    include_str!("../../kernels/dot_general/mps/tiled/matmul_atomic.metal"),
+    include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
+    include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
     include_str!("../../kernels/attention/mps/backward.metal"),
 );
@@ -331,7 +331,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Ok(plan)
 }
 
-const MPP_PRELUDE: &str = include_str!("../../kernels/dot_general/mps/matmul_mpp.metal");
+const MPP_PRELUDE: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
 
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(PRELUDE, sources)
@@ -364,7 +364,8 @@ static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
-        let probe = "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
+        let probe =
+            "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
         compile_mpp_kernels(BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())])).is_ok()
     })
 }

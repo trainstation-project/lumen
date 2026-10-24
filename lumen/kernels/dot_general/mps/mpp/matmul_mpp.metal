@@ -1,11 +1,12 @@
 #if __METAL_VERSION__ >= 400 && __has_include(<MetalPerformancePrimitives/MetalPerformancePrimitives.h>)
-#include <metal_stdlib>
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-#define LUMEN_MPP 1
+    // Use Metal Performance Primitives when the SDK exposes its tensor matmul.
+    #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+    #include <metal_stdlib>
+    #define LUMEN_MPP 1
 using namespace metal;
 
-template <typename O, typename C>
-inline void store_mpp(thread C &sum, device O *out, int N, int M, int row, int col) {
+template <typename O, typename C> inline void store_mpp(thread C &sum, device O *out, int N, int M, int row, int col) {
+    // MPP tensors can contain invalid lanes at the edge of a tile.
     _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
         if (sum.is_valid_element(i)) {
             auto at = sum.get_multidimensional_index(i);
@@ -21,18 +22,20 @@ template <typename T, typename O, int BM, int BN, int BK, int SIMDS, bool TL, bo
 inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, constant ulong *p, uint3 group) {
     using namespace mpp::tensor_ops;
     using extents = dextents<int32_t, 2>;
+
+    // The host supplies [M, N, K] followed by batch and logical dimension strides.
     const int M = int(p[0]), N = int(p[1]), K = int(p[2]);
     device T *l = (device T *)lhs + group.z * p[3];
     device T *r = (device T *)rhs + group.z * p[6];
-    tensor<device T, extents, tensor_inline> a(l,
-                                               TL ? extents(M, K) : extents(K, M),
-                                               TL ? array<int32_t, 2>{1, int(p[5])} : array<int32_t, 2>{1, int(p[4])});
-    tensor<device T, extents, tensor_inline> b(r,
-                                               TR ? extents(K, N) : extents(N, K),
-                                               TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
+    tensor<device T, extents, tensor_inline> a(
+        l, TL ? extents(M, K) : extents(K, M), TL ? array<int32_t, 2>{1, int(p[5])} : array<int32_t, 2>{1, int(p[4])});
+    tensor<device T, extents, tensor_inline> b(
+        r, TR ? extents(K, N) : extents(N, K), TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
     device O *o = out + ulong(group.z) * M * N;
     const int row = int(group.y) * BM, col = int(group.x) * BN;
     if (row + BM <= M && col + BN <= N && K % BK == 0) {
+        // Fully covered tiles use a fixed descriptor and accumulate in one
+        // cooperative MPP tensor across exact BK-sized K slices.
         constexpr auto desc =
             matmul2d_descriptor(BM, BN, BK, TL, TR, false, matmul2d_descriptor::mode::multiply_accumulate);
         matmul2d<desc, execution_simdgroups<SIMDS>> op;
@@ -65,6 +68,7 @@ inline void matmul_mpp(device const T *lhs, device const T *rhs, device O *out, 
         }
         store_mpp(sum, o, N, M, row, col);
     } else {
+        // Edge tiles and incomplete K tails use MPP's dynamic-extent path.
         constexpr auto desc = matmul2d_descriptor(
             BM, BN, static_cast<int>(dynamic_extent), TL, TR, false, matmul2d_descriptor::mode::multiply);
         matmul2d<desc, execution_simdgroups<SIMDS>> op;

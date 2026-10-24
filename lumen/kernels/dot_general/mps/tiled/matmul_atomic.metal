@@ -1,3 +1,5 @@
+// Split-K matmul: each group accumulates one K partition and atomically adds
+// its tile into the output that was zeroed by the host before launch.
 #define MATMUL_ATOMIC(NAME, T)                                                                                        \
     kernel void matmul_atomic_##NAME(                                                                                 \
         MATMUL_ARGS(T, float), uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { \
@@ -7,5 +9,6 @@
     }
 
 #ifndef TEMPLATES_ONLY
+// Generate one atomic split-K kernel for each floating-point input type.
 FOR_FLOAT(MATMUL_ATOMIC)
 #endif

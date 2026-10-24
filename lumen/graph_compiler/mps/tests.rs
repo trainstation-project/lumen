@@ -1873,3 +1873,85 @@ fn matrix_vector_dots_are_reduced() {
         }
     }
 }
+
+#[test]
+fn every_gemm_candidate_matches_the_reference() {
+    use super::autotune::Gemms;
+    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::kernels::dot_general::mps as gemm;
+    if !available() {
+        return;
+    }
+    let dot = |lc: usize, rc: usize, out: DType| DotGeneral {
+        lhs_contracting: vec![lc],
+        rhs_contracting: vec![rc],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: out,
+    };
+    type Case = (&'static [usize], &'static [usize], usize, usize);
+    let cases: [Case; 4] = [
+        (&[256, 192], &[192, 320], 1, 0),
+        (&[100, 99], &[99, 70], 1, 0),
+        (&[128, 96], &[80, 128], 0, 1),
+        (&[5, 1000], &[1000, 300], 1, 0),
+    ];
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.autotune = false;
+    for dtype in [DType::F32, DType::BF16] {
+        for (lhs, rhs, lc, rc) in cases {
+            let mut g = Graph::new();
+            let a = g.input(ty(dtype, lhs));
+            let b = g.input(ty(dtype, rhs));
+            let d = apply(&mut g, dot(lc, rc, dtype), &[a, b]);
+            g.set_outputs(&[d]).unwrap();
+            let inputs = [values(dtype, lhs, 1), values(dtype, rhs, 2)];
+            let expected = reference::run(&g, &inputs).unwrap()[0]
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec::<f32>();
+            let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+            let mut plan =
+                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let at = plan
+                .steps()
+                .iter()
+                .position(|s| matches!(s.primitive, DotGeneral { .. }))
+                .expect("a dot_general step");
+            let step = plan.steps()[at].clone();
+            let layout = gemm::mpp_transposes(&step);
+            let mpp = match layout.is_some() && super::mpp_available() {
+                true => gemm::mpp_configs(),
+                false => &[],
+            };
+            let skinny = match layout {
+                Some((_, false)) => gemm::skinny_configs(),
+                _ => &[],
+            };
+            let mut gemms = Gemms::default();
+            let built: Vec<_> = gemm::configs()
+                .iter()
+                .chain(mpp)
+                .chain(skinny)
+                .map(|&config| (config, gemms.build(&step, config)))
+                .collect();
+            gemms.compile().unwrap();
+            for (config, tuned) in built {
+                plan.steps_mut()[at].tuned = Some(tuned);
+                let got = plan.run(&on_mps).unwrap()[0]
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec::<f32>();
+                let tol = scale * if dtype == DType::F32 { 1e-5 } else { 1e-2 };
+                for (k, (w, v)) in expected.iter().zip(&got).enumerate() {
+                    assert!(
+                        (w - v).abs() <= tol,
+                        "{config:?} {dtype} {lhs:?}·{rhs:?} [{k}]: {v} != {w}"
+                    );
+                }
+            }
+        }
+    }
+}

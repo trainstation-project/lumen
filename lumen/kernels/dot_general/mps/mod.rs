@@ -1,11 +1,19 @@
 mod config;
+mod linear_cross_entropy;
+mod mpp;
+mod skinny;
+mod tiled;
 
 pub(crate) use config::*;
+pub(crate) use linear_cross_entropy::*;
+pub(crate) use mpp::*;
+pub(crate) use skinny::*;
+pub(crate) use tiled::*;
 
 use indoc::formatdoc;
 
 use crate::Tensor;
-use crate::codegen::mps::{THREAD_ARGS, formatted};
+use crate::codegen::mps::THREAD_ARGS;
 use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;
@@ -19,44 +27,15 @@ const SMALL_TILE: (usize, usize) = (32, 32);
 const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 const SMALL_TILES: usize = 32;
-const SKINNY_ROWS: usize = 32;
-const SKINNY_WORK: usize = 1 << 24;
 
-pub(crate) const MPP_PREFIX: &str = "matmul_mpp_";
-
-pub(crate) fn mpp_transposes(step: &Step) -> Option<(bool, bool)> {
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let (ls, rs) = (
-        contiguous_strides(&lhs.shape),
-        contiguous_strides(&rhs.shape),
-    );
-    let launch_ = plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, None).ok()?;
-    let [m, n, k, _, sm, sk, _, rk, rn] = launch_.p;
-    let fits = [lhs.numel(), rhs.numel(), m * n].iter().all(|&e| e <= i32::MAX as usize);
-    let left = match (sk, sm) {
-        (1, _) => false,
-        (_, 1) if k > 1 => true,
-        _ => return None,
-    };
-    let right = match (rn, rk) {
-        (1, _) => false,
-        (_, 1) if n > 1 => true,
-        _ => return None,
-    };
-    fits.then_some((left, right))
-}
-
-pub(crate) fn skinny(step: &Step) -> bool {
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let (ls, rs) = (
-        contiguous_strides(&lhs.shape),
-        contiguous_strides(&rhs.shape),
-    );
-    plan_matmul(&step.primitive, lhs, rhs, out, &ls, &rs, step.label, None)
-        .is_ok_and(|launch_| {
-            let [m, n, k, ..] = launch_.p;
-            m <= SKINNY_ROWS && launch_.p[8] == 1 && m * n * k >= SKINNY_WORK
-        })
+fn signature(name: &str, t: &str, o: &str, threads: usize) -> String {
+    formatdoc! {"
+        [[max_total_threads_per_threadgroup({threads})]]
+        kernel void {name}(device const {t} *lhs [[buffer(0)]],
+        device const {t} *rhs [[buffer(1)]],
+        device {o} *out [[buffer(2)]],
+        constant ulong *p [[buffer(3)]],
+        {THREAD_ARGS}) {{"}
 }
 
 pub(crate) fn matmul_source(
@@ -64,67 +43,13 @@ pub(crate) fn matmul_source(
     a: &str,
     o: &str,
     c: GemmConfig,
-    (left, right): (bool, bool),
+    layout: (bool, bool),
 ) -> (String, String) {
-    let GemmConfig {
-        bm,
-        bn,
-        bk,
-        threads,
-        cols,
-        prefetch,
-        algorithm,
-    } = c;
-    let simds = threads / 32;
-    let signature = |name: &str| {
-        formatdoc! {"
-            [[max_total_threads_per_threadgroup({threads})]]
-            kernel void {name}(device const {t} *lhs [[buffer(0)]],
-            device const {t} *rhs [[buffer(1)]],
-            device {o} *out [[buffer(2)]],
-            constant ulong *p [[buffer(3)]],
-            {THREAD_ARGS}) {{"}
-    };
-    if algorithm == Algorithm::Skinny {
-        let name = format!("matmul_skinny_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}");
-        let source = formatdoc! {"
-            {}
-            threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
-            matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}>(lhs, rhs, out, p, partials, group, tid.x);
-            }}
-            ", signature(&name)};
-        return (name, formatted(&source));
+    match c.algorithm {
+        Algorithm::Tiled => tiled::source(t, a, o, c),
+        Algorithm::Mpp => mpp::source(t, a, o, c, layout),
+        Algorithm::Skinny => skinny::source(t, a, o, c),
     }
-    if algorithm == Algorithm::Mpp {
-        let name = format!(
-            "{MPP_PREFIX}{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{}{}",
-            u8::from(left),
-            u8::from(right)
-        );
-        let source = formatdoc! {"
-            {}
-            matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}>(lhs, rhs, out, p, group);
-            }}
-            ", signature(&name)};
-        return (name, formatted(&source));
-    }
-    let name = format!(
-        "matmul_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{cols}_{}",
-        u8::from(prefetch)
-    );
-    let source = formatdoc! {"
-        {}
-        threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-        matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o},
-        Same, false, false, false, false, false, false,
-        {threads}, {cols}, {prefetch}>(
-        lhs, rhs, out, p,
-        lt, rt,
-        group, tid.y * 16 + tid.x, sg, lane);
-        }}
-        ", signature(&name)};
-    let source = formatted(&source);
-    (name, source)
 }
 
 pub(crate) struct MatmulOrder {
@@ -355,81 +280,4 @@ fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, us
         dims.iter().map(|d| d.0).product(),
         dims.last().map_or(0, |d| d.1),
     ))
-}
-
-pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> usize {
-    let (b, v) = (h.shape[0], w.shape[0]);
-    2 * b * v.div_ceil(float_tiles(1, b, v).2.1) * 4
-}
-
-pub(crate) fn encode_linear_cross_entropy(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    scratch: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let (h, w, target) = (&step.inputs[0].1, &step.inputs[1].1, &step.inputs[2].1);
-    let (b, d, v) = (h.shape[0], h.shape[1], w.shape[0]);
-    if b == 0 || v == 0 {
-        return Ok(());
-    }
-    if scratch.is_null() {
-        return Err(format!(
-            "{}: needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))",
-            step.label
-        ));
-    }
-    let (small, mid, (tm, tn)) = float_tiles(1, b, v);
-    let kind = match (small, mid) {
-        (true, _) => "small_",
-        (_, true) => "mid_",
-        _ => "",
-    };
-    let tiles = v.div_ceil(tn);
-    let (maxima, sums) = (
-        scratch.cast_const(),
-        unsafe { scratch.add(b * tiles * 4) }.cast_const(),
-    );
-    let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
-    let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
-    crate::profiler::next_launch("linear_cross_entropy (partials)", || {
-        crate::profiler::IoTypes {
-            inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
-            outputs: vec![partials.clone()],
-            input_strides: step.input_strides(),
-            output_strides: vec![contiguous_strides(&partials.shape)],
-        }
-    });
-    launch(
-        &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
-        &[
-            inputs[0],
-            inputs[1],
-            inputs[2],
-            output.cast_const(),
-            maxima,
-            sums,
-        ],
-        &[p],
-        Grid::Groups([tiles, b.div_ceil(tm), 1]),
-        keep.clone(),
-        step.label,
-    )?;
-    crate::profiler::next_launch("linear_cross_entropy (combine)", || {
-        crate::profiler::IoTypes {
-            inputs: vec![partials.clone()],
-            outputs: vec![step.output.1.clone()],
-            input_strides: vec![contiguous_strides(&partials.shape)],
-            output_strides: step.output_strides(),
-        }
-    });
-    launch(
-        "lce_combine",
-        &[maxima, sums, output.cast_const()],
-        &[dims_arg([b, tiles])],
-        Grid::Groups([b.div_ceil(8), 1, 1]),
-        keep,
-        step.label,
-    )
 }
