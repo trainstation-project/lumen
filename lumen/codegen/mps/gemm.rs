@@ -173,8 +173,12 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
     let grouped = regions.iter().any(|c| c.k() > 1);
+    let returned = axis + 1 == rank
+        && regions
+            .iter()
+            .any(|c| c.members().iter().any(|v| outputs.contains(v)));
     let one_pair = axis + 1 == rank && regions.len() == 1 && regions[0].k() == 2;
-    (covers && grouped && !one_pair).then_some(regions)
+    (covers && (grouped || returned) && !one_pair).then_some(regions)
 }
 
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
