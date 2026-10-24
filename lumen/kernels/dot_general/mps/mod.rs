@@ -1,3 +1,15 @@
+mod config;
+mod linear_cross_entropy;
+mod mpp;
+mod skinny;
+mod tiled;
+
+pub(crate) use config::*;
+pub(crate) use linear_cross_entropy::*;
+pub(crate) use mpp::*;
+pub(crate) use skinny::*;
+pub(crate) use tiled::*;
+
 use crate::Tensor;
 use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
@@ -98,6 +110,7 @@ pub(crate) struct MatmulLaunch {
     pub p: [usize; 9],
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_matmul(
     prim: &Primitive,
     lhs: &TensorType,
@@ -106,6 +119,7 @@ pub(crate) fn plan_matmul(
     lhs_strides: &[usize],
     rhs_strides: &[usize],
     name: &str,
+    tile: Option<(usize, usize)>,
 ) -> Result<MatmulLaunch, String> {
     let order = matmul_order(prim, lhs.shape.len(), rhs.shape.len());
     let not_matmul = || {
@@ -128,7 +142,10 @@ pub(crate) fn plan_matmul(
         size(rhs, &order.rhs[order.rhs_split.1..]),
     );
     let float = out.dtype.is_float();
-    let (small, mid, tile) = float_tiles(b, m, n);
+    let (small, mid, tile) = match tile {
+        None => float_tiles(b, m, n),
+        Some(tile) => (false, false, tile),
+    };
     let (small, mid) = (float && small, float && mid);
     let (tm, tn) = match float {
         true => tile,
@@ -165,32 +182,16 @@ pub(crate) fn encode(
         &strides(0),
         &strides(1),
         name,
+        None,
     )?;
-    let float = match (lhs.dtype, out.dtype) {
-        (d, o) if d == o && o == accum_dtype(&step.primitive) => format!("{d}"),
-        (d, o) => format!("{d}_{}_{o}", accum_dtype(&step.primitive)),
-    };
-    let kernel = match (out.dtype.is_float(), launch_.small, launch_.mid) {
-        (true, true, _) => format!("matmul_small_{float}"),
-        (true, _, true) => format!("matmul_mid_{float}"),
-        (true, ..) => format!("matmul_{float}"),
-        (false, ..) => format!("matmul_{}", out.dtype),
-    };
     launch(
-        &kernel,
+        &format!("matmul_{}", out.dtype),
         &[inputs[0], inputs[1], output.cast_const()],
         &[dims_arg(launch_.p)],
         launch_.grid,
         keep,
         name,
     )
-}
-
-fn accum_dtype(p: &Primitive) -> crate::DType {
-    let DotGeneral { accum_dtype, .. } = p else {
-        unreachable!("a dot_general")
-    };
-    *accum_dtype
 }
 
 fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, usize)> {
@@ -202,81 +203,4 @@ fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, us
         dims.iter().map(|d| d.0).product(),
         dims.last().map_or(0, |d| d.1),
     ))
-}
-
-pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> usize {
-    let (b, v) = (h.shape[0], w.shape[0]);
-    2 * b * v.div_ceil(float_tiles(1, b, v).2.1) * 4
-}
-
-pub(crate) fn encode_linear_cross_entropy(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    scratch: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let (h, w, target) = (&step.inputs[0].1, &step.inputs[1].1, &step.inputs[2].1);
-    let (b, d, v) = (h.shape[0], h.shape[1], w.shape[0]);
-    if b == 0 || v == 0 {
-        return Ok(());
-    }
-    if scratch.is_null() {
-        return Err(format!(
-            "{}: needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))",
-            step.label
-        ));
-    }
-    let (small, mid, (tm, tn)) = float_tiles(1, b, v);
-    let kind = match (small, mid) {
-        (true, _) => "small_",
-        (_, true) => "mid_",
-        _ => "",
-    };
-    let tiles = v.div_ceil(tn);
-    let (maxima, sums) = (
-        scratch.cast_const(),
-        unsafe { scratch.add(b * tiles * 4) }.cast_const(),
-    );
-    let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
-    let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
-    crate::profiler::next_launch("linear_cross_entropy (partials)", || {
-        crate::profiler::IoTypes {
-            inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
-            outputs: vec![partials.clone()],
-            input_strides: step.input_strides(),
-            output_strides: vec![contiguous_strides(&partials.shape)],
-        }
-    });
-    launch(
-        &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
-        &[
-            inputs[0],
-            inputs[1],
-            inputs[2],
-            output.cast_const(),
-            maxima,
-            sums,
-        ],
-        &[p],
-        Grid::Groups([tiles, b.div_ceil(tm), 1]),
-        keep.clone(),
-        step.label,
-    )?;
-    crate::profiler::next_launch("linear_cross_entropy (combine)", || {
-        crate::profiler::IoTypes {
-            inputs: vec![partials.clone()],
-            outputs: vec![step.output.1.clone()],
-            input_strides: vec![contiguous_strides(&partials.shape)],
-            output_strides: step.output_strides(),
-        }
-    });
-    launch(
-        "lce_combine",
-        &[maxima, sums, output.cast_const()],
-        &[dims_arg([b, tiles])],
-        Grid::Groups([b.div_ceil(8), 1, 1]),
-        keep,
-        step.label,
-    )
 }

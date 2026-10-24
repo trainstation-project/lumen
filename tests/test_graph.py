@@ -1067,13 +1067,14 @@ class GatedMLP(lumen.nn.Module):
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
 def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     """A gated pair's backward (``merge_dots_backward``): its input's gradient one
-    dot of its cotangents side by side and the forward's weight block (K
-    twice as long, no copy of the weights), its weights' gradients one dot;
-    the cotangents the down projection's gradient GEMM's expanding
-    epilogue, written side by side, whatever the gate (SwiGLU's in float32,
-    from the rounded gradient widened: an upcast only that epilogue takes).
-    The forward the merged dot's paired epilogue, its halves (which the
-    backward reads) written by it too. The gradients the CPU's."""
+    dot of its cotangents and the forward's weight block, both interleaved
+    (K twice as long, no copy of the weights), its weights' gradients one
+    dot, interleaved as the block is; the cotangents the down projection's
+    gradient GEMM's expanding epilogue, written interleaved, whatever the
+    gate (SwiGLU's in float32, from the rounded gradient widened: an upcast
+    only that epilogue takes). The forward the merged dot's paired epilogue,
+    its halves (which the backward reads) written by it too. The gradients
+    the CPU's."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1108,12 +1109,12 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
-    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [2 * h, d]]), labels
+    assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [h, 2, d]]), labels
     forward = [s for s in merged if s["output"][2] == [m, h]]
     assert len(forward) == 1 and "mul" in forward[0]["label"], labels
     assert not any(s["label"].startswith("slice") and s["output"][2] == [m, h] for s in steps), labels
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
-    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
 
 
@@ -1193,9 +1194,9 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
-    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, 2 * h], labels
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
-    assert any(s["primitive"] == "dot_general" and s["output"][2] == [2 * h, d] for s in steps), labels
+    assert any(s["label"] == "2x dot_general" and s["output"][2] == [h, 2, d] for s in steps), labels
     assert not any("transpose" in label for label in labels), labels
 
 
@@ -1420,8 +1421,9 @@ def test_gated_pairs_weights_are_interleaved():
     """Inference: a gated pair's two weights packed into one block
     interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
     pair one kernel (its products' pairs adjacent in a lane), the values as
-    unmerged. A training step (its weights assigned) keeps them side by
-    side."""
+    unmerged. A training step (its weights assigned, read again by their
+    update) interleaves them too: the update reads each weight as a view of
+    the block."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -1440,7 +1442,7 @@ def test_gated_pairs_weights_are_interleaved():
 
     graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
-    assert all(k == 1 for regions in plan.interleaved for k in regions), plan.interleaved
+    assert plan.interleaved == [[2]], plan.interleaved
     values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
     x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
     got = []
@@ -1663,23 +1665,25 @@ class Linear(lumen.nn.Module):
 def test_packed_weights_are_read_in_place_elsewhere():
     """A weight another function packed into a block (a strided view of it)
     is read in place by the matmuls of a function using it alone, at its
-    strides: no copy per call."""
+    strides: no copy per call. Large enough to be tuned (a few rows, the
+    skinny kernels), the tuned kernel, which assumes whole operands, is
+    not used for the strided one."""
     from lumen.profiler import ProfilerActivity, profile
 
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    x, w1v, w3v = rand(16, 32), rand(32, 64, seed=1), rand(32, 64, seed=2)
-    gated = Gated(meta(32, 64), meta(32, 64))
+    x, w1v, w3v = rand(16, 1024), rand(1024, 1024, seed=1), rand(1024, 1024, seed=2)
+    gated = Gated(meta(1024, 1024), meta(1024, 1024))
     run = lumen.compile(lambda model, x: model(x), device="mps")
-    run(gated, meta(16, 32))
+    run(gated, meta(16, 1024))
     gated.load_state_dict({"w1": lumen.from_numpy(w1v), "w3": lumen.from_numpy(w3v)})
     alone = Linear(gated.w1)
     run(alone, lumen.from_numpy(x))
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         out = run(alone, lumen.from_numpy(x))
-    np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(lumen.to_numpy(out), x @ w1v, rtol=1e-4, atol=1e-4)
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}
 
 
@@ -2621,12 +2625,13 @@ def test_trained_matmul_epilogue_normalizes_its_rows():
 @pytest.mark.mps
 @pytest.mark.parametrize("m, tiles", [(64, "mid"), (192, "mid"), (16, "small"), (256, "large")])
 def test_matmul_tiles_fit_its_rows(m, tiles):
-    """A float matmul runs on 128x64 tiles; on 64x64 ones where M leaves 33
-    to 64 rows of a last one (M of 64, 192: half a large tile idle, the
-    32x32 tiles reading the operands twice as often); on 32x32 where it
-    leaves 32 or fewer (or the large tiles are too few to fill the GPU).
-    With an epilogue too (its kernel's ``_mid``, ``_small`` variant). The
-    results NumPy's."""
+    """Untuned (``autotune`` off), a float matmul runs on 128x64 tiles; on
+    64x64 ones where M leaves 33 to 64 rows of a last one (M of 64, 192:
+    half a large tile idle, the 32x32 tiles reading the operands twice as
+    often); on 32x32 where it leaves 32 or fewer (or the large tiles are too
+    few to fill the GPU). With an epilogue too (its kernel's ``_mid``,
+    ``_small`` variant). Tuned, it runs on whichever tile was fastest. The
+    results NumPy's either way."""
     rng = np.random.default_rng(0)
     k, n = 256, 2048
     try:
@@ -2644,13 +2649,45 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
     def fused(a, b):
         return F.relu(plain(a, b))
 
-    for f, want in ((plain, product), (fused, np.maximum(product, 0))):
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
-            got = lumen.to_numpy(lumen.compile(f)(a, b))
-        (kernel,) = {e["kernel"] for e in prof.events() if e["kind"] == "gpu"}
-        ran = "small" if "small" in kernel else "mid" if "mid" in kernel else "large"
-        assert ran == tiles, kernel
-        np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-3)
+    for tuned in (False, True):
+        lumen.config.compiler.autotune = tuned
+        try:
+            for f, want in ((plain, product), (fused, np.maximum(product, 0))):
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+                    got = lumen.to_numpy(lumen.compile(f)(a, b))
+                (kernel,) = {e["kernel"] for e in prof.events() if e["kind"] == "gpu"}
+                ran = "small" if "small" in kernel else "mid" if "mid" in kernel else "large"
+                assert tuned or ran == tiles, kernel
+                np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-3)
+        finally:
+            lumen.config.compiler.reset()
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
+@pytest.mark.parametrize("m, k, n", [(512, 256, 512), (300, 200, 260), (5, 4096, 1000), (1, 4096, 4096)])
+def test_tuned_matmul_matches_numpy_in_every_layout(dtype, lhs_k, rhs_k, m, k, n):
+    """Tuned, a float matmul of 64K or more outputs, or of a few rows,
+    runs on whichever candidate was fastest: lumen's simdgroup kernels,
+    where Metal Performance Primitives compile ``matmul_mpp``, and for a
+    few rows ``matmul_skinny``. Either operand may be transposed
+    (contracting its first dimension rather than its last, or its last
+    rather than its first), tiles may be left partial at the edges (300 x
+    260 of 64-wide tiles, 5 rows of 8-row ones), and the result may round
+    to bfloat16. Each matches NumPy."""
+    rng = np.random.default_rng(0)
+    shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
+    try:
+        a, b = (lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+    want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
+    dims = (((lhs_k,), (rhs_k,)), ((), ()))
+    got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32", dtype))(a, b)
+    rtol = 1e-4 if dtype == "float32" else 2**-6
+    np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
 
 
 def _silu(h):
@@ -2693,6 +2730,16 @@ def test_matmul_epilogue_stops_at_an_upcast_of_its_rounded_result():
     ]
 
 
+def _dot(step):
+    """A plan step's matmul: a ``dot_general`` step's text, or the dot of a
+    fusion of the dot alone (the MPS compiler runs every float matmul as a
+    GEMM fusion, epilogue or not); None for any other step."""
+    if step["fusion"] is None:
+        return step["text"] if step["text"].startswith("dot_general") else None
+    nodes = [line.split(" = ", 1)[1] for line in step["fusion"]["body"].splitlines() if " = " in line]
+    return nodes[0] if len(nodes) == 1 and nodes[0].startswith("dot_general") else None
+
+
 @pytest.mark.mps
 def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     """A matmul of bfloat16 operands writing its float32 accumulator as it
@@ -2715,7 +2762,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     both = lambda x, w: (rounded(x, w), F.matmul(x, w, "float32", "float32"))  # noqa: E731
 
     def dots(f, *args):
-        return [s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
+        return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
     lumen.config.compiler.contraction_epilogues = False
     try:

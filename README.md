@@ -78,7 +78,8 @@ make test
 
 | Command | What it does |
 | --- | --- |
-| `make test` | `maturin develop`, then `cargo test --lib`, `cargo test --doc` and `python -m pytest tests -q -rs -n auto` (a worker per TPU or CUDA chip, or per CPU core; then the `all_devices` tests serially), with the device features of the machine's hardware (CUDA, TPU) detected. **Always run this after a change** (AGENTS.md). |
+| `make install` | `maturin develop --release` with the machine's device features: lumen built in release mode into the active virtualenv. Benchmarks (`dashboard/bench.py`, `serve.py`) must run on this build; a debug build is several times slower per call. |
+| `make test` | `make install`, then `cargo test --lib`, `cargo test --doc` and `python -m pytest tests -q -rs -n auto` (a worker per TPU or CUDA chip, or per CPU core; then the `all_devices` tests serially), with the device features of the machine's hardware (CUDA, TPU) detected. **Always run this after a change** (AGENTS.md). |
 | `make ci` | Every CI job locally: `fmt-check`, `clang-format-check`, `clippy`, `test`, `miri`. |
 | `make fmt-check` | `cargo fmt --all -- --check`. |
 | `make clang-format-check` | Checks the `.mm`/`.metal`/`.h` sources; needs `clang-format==21.1.6`. |

@@ -16,7 +16,7 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, c_char};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
@@ -35,6 +35,7 @@ use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
+use crate::kernels::dot_general::mps::GemmConfig;
 use crate::kernels::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
@@ -63,7 +64,12 @@ const PRELUDE: &str = concat!(
         "
     ),
     include_str!("../../kernels/reduce/mps/kernels.metal"),
-    include_str!("../../kernels/dot_general/mps/kernels.metal"),
+    include_str!("../../kernels/dot_general/mps/integer/matmul.metal"),
+    include_str!("../../kernels/dot_general/mps/integer/matmul_wide.metal"),
+    include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
+    include_str!("../../kernels/dot_general/mps/tiled/matmul_atomic.metal"),
+    include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
+    include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
     include_str!("../../kernels/attention/mps/backward.metal"),
 );
@@ -278,12 +284,16 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     if config.autotune {
-        let mut tuner = autotune::MpsAutotuner {
+        let tuner = super::common::autotune::Autotuner {
+            timer: autotune::Mps,
+        };
+        let mut loops = autotune::Loops {
             tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
-        super::common::autotune::autotune(&mut tuner, &mut plan)?;
+        tuner.tune(&mut loops, &mut plan)?;
+        tuner.tune(&mut autotune::Gemms::default(), &mut plan)?;
     }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
@@ -321,11 +331,21 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Ok(plan)
 }
 
+const MPP: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
+
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+    compile_with(PRELUDE, sources)
+}
+
+fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+    compile_with(&format!("{PRELUDE}\n{MPP}"), sources)
+}
+
+fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), String> {
     if sources.is_empty() {
         return Ok(());
     }
-    let source: String = std::iter::once(PRELUDE)
+    let source: String = std::iter::once(prelude)
         .chain(sources.values().map(String::as_str))
         .collect::<Vec<_>>()
         .join("\n");
@@ -340,6 +360,15 @@ fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
 }
 
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+fn mpp_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let probe =
+            "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
+        compile_mpp_kernels(BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())])).is_ok()
+    })
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Launch {
@@ -481,6 +510,7 @@ fn run_loop(
         scratch: None,
         scope: &[],
         sources: Vec::new(),
+        tuned: None,
     };
     let keep = vec![src.holding(), dst.holding()];
     let inputs = [src.data_ptr().cast_const()];
@@ -547,11 +577,26 @@ pub(crate) fn encode(
     scratch: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let Primitive::Fusion { name, body, .. } = &step.primitive else {
+    let Primitive::Fusion { name, .. } = &step.primitive else {
+        unreachable!("a fusion")
+    };
+    encode_with(step, name, None, inputs, output, scratch, keep)
+}
+
+pub(super) fn encode_with(
+    step: &Step,
+    name: &str,
+    gemm: Option<(&str, GemmConfig)>,
+    inputs: &[*const u8],
+    output: *mut u8,
+    scratch: *mut u8,
+    keep: Vec<Tensor>,
+) -> Result<(), String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a fusion")
     };
     let variant = strided_variant(step, name, body)?;
-    let name = variant.as_ref().unwrap_or(name);
+    let name = variant.as_deref().unwrap_or(name);
     if name.starts_with(crate::graph::NEURAL_ENGINE) {
         return ane::encode(step, inputs, output, keep);
     }
@@ -620,6 +665,7 @@ pub(crate) fn encode(
             &contiguous_strides(&lhs.shape),
             &contiguous_strides(&rhs.shape),
             step.label,
+            None,
         )?;
         let Grid::Groups([_, _, chunks]) = plan.grid else {
             unreachable!("a matmul's grid")
@@ -663,6 +709,7 @@ pub(crate) fn encode(
             )
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
+        let tuned = gemm;
         let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
@@ -671,11 +718,13 @@ pub(crate) fn encode(
             &ls,
             &rs,
             step.label,
+            tuned.as_ref().map(|(_, c)| (c.bm, c.bn)),
         )?;
-        let kernel = match (plan.small, plan.mid) {
-            (true, _) => format!("{name}_small"),
-            (_, true) => format!("{name}_mid"),
-            _ => name.clone(),
+        let kernel = match (&tuned, plan.small, plan.mid) {
+            (Some((tuned, _)), ..) => tuned.to_string(),
+            (None, true, _) => format!("{name}_small"),
+            (None, _, true) => format!("{name}_mid"),
+            _ => name.to_owned(),
         };
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
@@ -714,10 +763,19 @@ pub(crate) fn encode(
         }
         let (kernel, grid) = match codegen::row_dot(body) {
             Some(_) => (
-                name.clone(),
+                name.to_owned(),
                 Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
             ),
-            None => (kernel, plan.grid),
+            None => match (&tuned, plan.grid) {
+                (Some((_, c)), Grid::Groups(groups)) => (
+                    kernel,
+                    Grid::GroupsOf {
+                        groups,
+                        threads: c.threads,
+                    },
+                ),
+                (_, grid) => (kernel, grid),
+            },
         };
         return launch(&kernel, &buffers, &args, grid, keep, step.label);
     }

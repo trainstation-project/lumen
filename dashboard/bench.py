@@ -3,6 +3,7 @@ import json
 import math
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,8 @@ SQUARE_SIZES = tuple(1 << k for k in range(12, 25, 2))
 FLOATS = ("float32", "bfloat16")
 INTEGERS = ("int32",)
 SPEC_MEMORY_GBS = {"Apple M4 Pro": 273}
+GPU_GHZ = {"Apple M4 Pro": 1.578}
+LANES_PER_CORE = 128
 ROW = 1024
 EMBEDDING = 512
 DOT = (((1,), (0,)), ((), ()))
@@ -72,7 +75,8 @@ def matrix(n, dtype, rng):
 
 
 def square(n, dtype, rng):
-    return [(rng.uniform(-1, 1, (side(n), side(n))).astype(np.float32), dtype) for _ in range(2)]
+    scale = np.sqrt(3 / side(n))
+    return [((rng.uniform(-1, 1, (side(n), side(n))) * scale).astype(np.float32), dtype) for _ in range(2)]
 
 
 def vocabulary(n, dtype, rng):
@@ -349,6 +353,19 @@ OPS = {
 }
 
 
+def gpu_cores():
+    if platform.system() != "Darwin":
+        return None
+    out = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True).stdout
+    found = re.search(r"Total Number of Cores: (\d+)", out)
+    return int(found.group(1)) if found else None
+
+
+def peak_tflops(device):
+    cores, ghz = gpu_cores(), GPU_GHZ.get(device)
+    return round(cores * LANES_PER_CORE * 2 * ghz / 1e3, 2) if cores and ghz else None
+
+
 def device_name():
     if platform.system() == "Darwin":
         out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
@@ -381,6 +398,16 @@ def rotating(run, sets):
 
     def call(k):
         outs[k] = run(k, *sets[k])
+
+    return call, [[k] for k in range(len(sets))]
+
+
+def chained(run, sets):
+    last = [None]
+
+    def call(k):
+        args = sets[k] if last[0] is None else [last[0], *sets[k][1:]]
+        last[0] = outputs(run(k, *args))[0]
 
     return call, [[k] for k in range(len(sets))]
 
@@ -454,6 +481,8 @@ def measure(name, measured=lambda row: None):
                 rows.append({"op": name, "dtype": dtype, "n": n, "error": str(e).splitlines()[0][:200]})
                 measured(rows[-1])
                 continue
+            chain = op.flops is not None and list(out[0].shape) == list(lt[0].shape) and out[0].dtype == lt[0].dtype
+            calls = chained if chain else rotating
             loaded = sum(nbytes(t) for t in lt)
             stored = sum(nbytes(t) for t in out)
             sets = rotation(loaded + stored)
@@ -475,6 +504,7 @@ def measure(name, measured=lambda row: None):
                 "torch_us": None,
                 "matches_torch": None,
                 "rotation": sets,
+                "chained": chain,
             }
             graph = lumen.make_graph(lf)(*lt)
             plan = lumen.graph_compiler.Plan(graph, "mps", parameters=list(range(len(lt))))
@@ -485,7 +515,7 @@ def measure(name, measured=lambda row: None):
             timed = [
                 (
                     "lumen_us",
-                    *rotating(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets),
+                    *calls(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets),
                     lumen.mps.synchronize,
                 )
             ]
@@ -495,9 +525,7 @@ def measure(name, measured=lambda row: None):
                     tt = [to_torch(a, d) for a, d in arrays]
                     want = outputs(tf(*tt))
                     torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
-                    timed.append(
-                        ("torch_us", *rotating(lambda k, *args: tf(*args), torch_sets), torch.mps.synchronize)
-                    )
+                    timed.append(("torch_us", *calls(lambda k, *args: tf(*args), torch_sets), torch.mps.synchronize))
                 except Exception as e:
                     print(name, dtype, n, "torch:", str(e).splitlines()[0][:120], file=sys.stderr)
             times = {}
@@ -532,6 +560,7 @@ def update(data, name, measured=lambda row: None):
     if torch is not None:
         data["torch"] = torch.__version__
     data["spec_memory_gbs"] = SPEC_MEMORY_GBS.get(data["device"], data.get("spec_memory_gbs"))
+    data["spec_tflops"] = peak_tflops(data["device"]) or data.get("spec_tflops")
     return data
 
 
@@ -566,7 +595,11 @@ def save(data, names=None):
     data["sizes"] = SIZES
     write(
         DATA / "meta.json",
-        {key: data[key] for key in ("device", "torch", "spec_memory_gbs", "ops", "sizes") if key in data},
+        {
+            key: data[key]
+            for key in ("device", "torch", "spec_memory_gbs", "spec_tflops", "ops", "sizes")
+            if key in data
+        },
     )
     for name in OPS if names is None else names:
         op = {

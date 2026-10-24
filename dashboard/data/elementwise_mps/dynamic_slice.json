@@ -13,11 +13,11 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 2.218,
-   "torch_us": 3.857,
+   "lumen_us": 2.747,
+   "torch_us": 3.794,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 11.08
+   "gbs": 8.95
   },
   {
    "op": "dynamic_slice",
@@ -32,11 +32,11 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 2.386,
-   "torch_us": 4.409,
+   "lumen_us": 3.021,
+   "torch_us": 4.392,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 41.2
+   "gbs": 32.54
   },
   {
    "op": "dynamic_slice",
@@ -51,11 +51,11 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 4.693,
-   "torch_us": 5.189,
+   "lumen_us": 3.721,
+   "torch_us": 5.125,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 83.79
+   "gbs": 105.68
   },
   {
    "op": "dynamic_slice",
@@ -70,11 +70,11 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 15.323,
-   "torch_us": 8.157,
+   "lumen_us": 7.237,
+   "torch_us": 8.192,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 102.65
+   "gbs": 217.34
   },
   {
    "op": "dynamic_slice",
@@ -89,11 +89,11 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 62.906,
-   "torch_us": 21.913,
+   "lumen_us": 21.846,
+   "torch_us": 22.276,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 100.01
+   "gbs": 287.99
   },
   {
    "op": "dynamic_slice",
@@ -108,11 +108,11 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 222.492,
-   "torch_us": 81.419,
+   "lumen_us": 79.144,
+   "torch_us": 79.47,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 113.11
+   "gbs": 317.98
   },
   {
    "op": "dynamic_slice",
@@ -127,11 +127,11 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 865.988,
-   "torch_us": 306.754,
+   "lumen_us": 301.721,
+   "torch_us": 301.108,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 116.24
+   "gbs": 333.63
   },
   {
    "op": "dynamic_slice",
@@ -146,11 +146,11 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 3372.435,
-   "torch_us": 1216.344,
+   "lumen_us": 1183.125,
+   "torch_us": 1150.31,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 119.4
+   "gbs": 340.33
   },
   {
    "op": "dynamic_slice",
@@ -165,11 +165,11 @@
    "stored_bytes": 4096,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 2.141,
-   "torch_us": 3.953,
+   "lumen_us": 3.091,
+   "torch_us": 3.801,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 5.74
+   "gbs": 3.98
   },
   {
    "op": "dynamic_slice",
@@ -184,11 +184,11 @@
    "stored_bytes": 16384,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 2.208,
-   "torch_us": 4.385,
+   "lumen_us": 3.2,
+   "torch_us": 4.506,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 22.26
+   "gbs": 15.36
   },
   {
    "op": "dynamic_slice",
@@ -203,11 +203,11 @@
    "stored_bytes": 65536,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 4.373,
-   "torch_us": 5.031,
+   "lumen_us": 3.536,
+   "torch_us": 4.997,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 44.96
+   "gbs": 55.6
   },
   {
    "op": "dynamic_slice",
@@ -222,11 +222,11 @@
    "stored_bytes": 262144,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 14.563,
-   "torch_us": 5.942,
+   "lumen_us": 5.274,
+   "torch_us": 5.979,
    "matches_torch": true,
    "rotation": 683,
-   "gbs": 54.0
+   "gbs": 149.12
   },
   {
    "op": "dynamic_slice",
@@ -241,11 +241,11 @@
    "stored_bytes": 1048576,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 54.92,
-   "torch_us": 13.014,
+   "lumen_us": 12.002,
+   "torch_us": 12.477,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 57.28
+   "gbs": 262.1
   },
   {
    "op": "dynamic_slice",
@@ -260,11 +260,11 @@
    "stored_bytes": 4194304,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 207.482,
-   "torch_us": 43.471,
+   "lumen_us": 42.778,
+   "torch_us": 43.352,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 60.65
+   "gbs": 294.14
   },
   {
    "op": "dynamic_slice",
@@ -279,11 +279,11 @@
    "stored_bytes": 16777216,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 812.254,
-   "torch_us": 156.0,
+   "lumen_us": 156.621,
+   "torch_us": 155.281,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 61.97
+   "gbs": 321.36
   },
   {
    "op": "dynamic_slice",
@@ -298,16 +298,16 @@
    "stored_bytes": 67108864,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 3194.11,
-   "torch_us": 594.64,
+   "lumen_us": 603.356,
+   "torch_us": 588.944,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 63.03
+   "gbs": 333.68
   }
  ],
  "code": {
-  "kernel": "// step 0: dynamic_slice\n// dynamic_slice[slice_sizes=(524288,)]\n\n// dynamic_slice/mps/kernels.metal\n#define DYNAMIC_SLICE(NAME, E, INAME, I)                                                   \\\n    kernel void dynamic_slice_##NAME##_##INAME(                                            \\\n        device const E *in [[buffer(0)]], device E *out [[buffer(1)]], DS_INDEX_ARGS(I)) { \\\n        device const I *const index[DS_MAX_RANK] = {i0, i1, i2, i3, i4, i5, i6, i7};       \\\n        out[j] = in[block_offset<I>(j, rank, shape, sizes, index)];                        \\\n    }",
+  "kernel": "// step 0: dynamic_slice\n// dynamic_slice[slice_sizes=(524288,)]\n\n// dynamic_slice/mps/kernels.metal\n#define DYNAMIC_SLICE(NAME, E, INAME, I, W, U)                                             \\\n    kernel void dynamic_slice_##NAME##_##INAME##_##W(                                      \\\n        device const E *in [[buffer(0)]], device E *out [[buffer(1)]], DS_INDEX_ARGS(I)) { \\\n        DS_EACH(E, I, U, out[j] = in[off])                                                 \\\n    }",
   "plan": "plan (workspace 2097152 bytes)\n    ws+0:f32[524288] = dynamic_slice[slice_sizes=(524288,)] in0 in1"
  },
- "measured_at": "2026-10-23T17:20:44+00:00"
+ "measured_at": "2026-10-23T18:00:39+00:00"
 }

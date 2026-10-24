@@ -13,11 +13,12 @@
    "stored_bytes": 16384,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.842,
-   "torch_us": 12.985,
+   "lumen_us": 3.201,
+   "torch_us": 14.259,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 12.79
+   "chained": true,
+   "gbs": 15.36
   },
   {
    "op": "dot_general",
@@ -32,11 +33,12 @@
    "stored_bytes": 65536,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 5.582,
-   "torch_us": 13.39,
+   "lumen_us": 4.817,
+   "torch_us": 14.361,
    "matches_torch": true,
    "rotation": 2731,
-   "gbs": 35.22
+   "chained": true,
+   "gbs": 40.82
   },
   {
    "op": "dot_general",
@@ -51,11 +53,12 @@
    "stored_bytes": 262144,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 18.213,
-   "torch_us": 15.763,
+   "lumen_us": 12.895,
+   "torch_us": 17.502,
    "matches_torch": true,
    "rotation": 683,
-   "gbs": 43.18
+   "chained": true,
+   "gbs": 60.99
   },
   {
    "op": "dot_general",
@@ -70,11 +73,12 @@
    "stored_bytes": 1048576,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 74.907,
-   "torch_us": 45.131,
+   "lumen_us": 54.455,
+   "torch_us": 53.805,
    "matches_torch": true,
    "rotation": 171,
-   "gbs": 42.0
+   "chained": true,
+   "gbs": 57.77
   },
   {
    "op": "dot_general",
@@ -89,11 +93,12 @@
    "stored_bytes": 4194304,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 453.193,
-   "torch_us": 324.032,
+   "lumen_us": 341.395,
+   "torch_us": 343.436,
    "matches_torch": true,
    "rotation": 43,
-   "gbs": 27.77
+   "chained": true,
+   "gbs": 36.86
   },
   {
    "op": "dot_general",
@@ -108,11 +113,12 @@
    "stored_bytes": 16777216,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 3132.619,
-   "torch_us": 2539.25,
+   "lumen_us": 2584.925,
+   "torch_us": 2610.277,
    "matches_torch": true,
    "rotation": 11,
-   "gbs": 16.07
+   "chained": true,
+   "gbs": 19.47
   },
   {
    "op": "dot_general",
@@ -127,11 +133,12 @@
    "stored_bytes": 67108864,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 24267.158,
-   "torch_us": 19944.95,
+   "lumen_us": 21441.323,
+   "torch_us": 20612.469,
    "matches_torch": true,
    "rotation": 3,
-   "gbs": 8.3
+   "chained": true,
+   "gbs": 9.39
   },
   {
    "op": "dot_general",
@@ -146,11 +153,12 @@
    "stored_bytes": 8192,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.643,
-   "torch_us": 13.019,
+   "lumen_us": 3.148,
+   "torch_us": 14.468,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 6.75
+   "chained": true,
+   "gbs": 7.81
   },
   {
    "op": "dot_general",
@@ -165,11 +173,12 @@
    "stored_bytes": 32768,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 5.367,
-   "torch_us": 13.499,
+   "lumen_us": 4.259,
+   "torch_us": 15.509,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 18.32
+   "chained": true,
+   "gbs": 23.08
   },
   {
    "op": "dot_general",
@@ -184,11 +193,12 @@
    "stored_bytes": 131072,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 17.698,
-   "torch_us": 15.706,
+   "lumen_us": 9.61,
+   "torch_us": 16.171,
    "matches_torch": true,
    "rotation": 1366,
-   "gbs": 22.22
+   "chained": true,
+   "gbs": 40.92
   },
   {
    "op": "dot_general",
@@ -203,11 +213,12 @@
    "stored_bytes": 524288,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 71.56,
-   "torch_us": 37.797,
+   "lumen_us": 44.592,
+   "torch_us": 45.743,
    "matches_torch": true,
    "rotation": 342,
-   "gbs": 21.98
+   "chained": true,
+   "gbs": 35.27
   },
   {
    "op": "dot_general",
@@ -222,11 +233,12 @@
    "stored_bytes": 2097152,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 420.294,
-   "torch_us": 292.922,
+   "lumen_us": 309.18,
+   "torch_us": 300.172,
    "matches_torch": true,
    "rotation": 86,
-   "gbs": 14.97
+   "chained": true,
+   "gbs": 20.35
   },
   {
    "op": "dot_general",
@@ -241,11 +253,12 @@
    "stored_bytes": 8388608,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2945.629,
-   "torch_us": 2278.629,
+   "lumen_us": 2282.86,
+   "torch_us": 2290.646,
    "matches_torch": true,
    "rotation": 22,
-   "gbs": 8.54
+   "chained": true,
+   "gbs": 11.02
   },
   {
    "op": "dot_general",
@@ -260,16 +273,17 @@
    "stored_bytes": 33554432,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 22839.158,
-   "torch_us": 18223.483,
+   "lumen_us": 17914.969,
+   "torch_us": 18269.631,
    "matches_torch": true,
    "rotation": 6,
-   "gbs": 4.41
+   "chained": true,
+   "gbs": 5.62
   }
  ],
  "code": {
-  "kernel": "// step 0: dot_general\n// dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32]\n\n// dot_general/mps/kernels.metal\ninline void matmul_sg_impl(device const T *lhs,\n                           device const T *rhs,\n                           device Out *out,\n                           constant ulong *p,\n                           threadgroup T *lt,\n                           threadgroup T *rt,\n                           uint3 group,\n                           uint flat,\n                           uint sg,\n                           uint lane,\n                           Epi epi = Epi()) {\n    constexpr uint FM = BM / (8 / SG_COLS) / 8, FN = BN / SG_COLS / 8;\n    constexpr uint LA = BM * BK / 256, LB = BK * BN / 256;\n    constexpr uint RA = 256 / BK, RB = 256 / BN;\n    const ulong M = p[0], N = p[1], K = p[2];\n    const ulong sm = p[4], sk = p[5], rk = p[7];\n    const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;\n    const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;\n    device const T *l = lhs + group.z * p[3] + (m0 + ar) * sm + ac * sk;\n    const ulong cn = PAIRED && !INTERLEAVED ? ((n0 + bc) & 1) * (N / 2) + (n0 + bc) / 2 : n0 + bc;\n    device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];\n    const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;\n    T ra[LA], rb[LB];\n    auto fetch = [&](ulong k0) {\n        bool full_k = k0 + BK <= K;\n        if (full_m && full_k) {\n            UNROLL for (uint t = 0; t < LA; ++t) { ra[t] = l[k0 * sk + ulong(RA * t) * sm]; }\n        } else {\n            UNROLL for (uint t = 0; t < LA; ++t) {\n                bool in = m0 + ar + RA * t < M && k0 + ac < K;\n                ra[t] = in ? l[k0 * sk + ulong(RA * t) * sm] : T(0);\n            }\n        }\n        if (full_n && full_k) {\n            UNROLL for (uint t = 0; t < LB; ++t) { rb[t] = r[(k0 + RB * t) * rk]; }\n        } else {\n            UNROLL for (uint t = 0; t < LB; ++t) {\n                bool in = k0 + br + RB * t < K && n0 + bc < N;\n                rb[t] = in ? r[(k0 + RB * t) * rk] : T(0);\n            }\n        }\n    };\n    const uint sy = sg / SG_COLS, sx = sg % SG_COLS;\n    simdgroup_matrix<A, 8, 8> c[FM][FN];\n    UNROLL for (uint i = 0; i < FM; ++i) {\n        UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }\n    }\n    fetch(0);\n    for (ulong k0 = 0; k0 < K; k0 += BK) {\n        UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }\n        UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * BN + bc] = rb[t]; }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (k0 + BK < K) {\n            fetch(k0 + BK);\n        }\n        UNROLL for (uint kk = 0; kk < BK; kk += 8) {\n            simdgroup_matrix<T, 8, 8> a[FM], b[FN];\n            UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * BK + kk, BK); }\n            UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * BN + sx * FN * 8 + j * 8, BN); }\n            UNROLL for (uint i = 0; i < FM; ++i) {\n                UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_multiply_accumulate(c[i][j], a[i], b[j], c[i][j]); }\n            }\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n    threadgroup A *stage = (threadgroup A *)lt + sg * 64;\n    if constexpr (TILE) {\n        epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);\n    } else if constexpr (PAIRED && REGIONS) {\n        const uint pair = frag_col(lane) / 2;\n        UNROLL for (uint i = 0; i < FM; ++i) {\n            UNROLL for (uint j = 0; j < FN; ++j) {\n                const thread vec<A, 2> &f = frag(c[i][j]);\n                vec<O, 2> row[4];\n                row[pair] = vec<O, 2>(f);\n                row[pair ^ 1] = vec<O, 2>(simd_shuffle_xor(f, 1));\n                row[pair ^ 2] = vec<O, 2>(simd_shuffle_xor(f, 8));\n                row[pair ^ 3] = vec<O, 2>(simd_shuffle_xor(f, 9));\n                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);\n                if (m < M && n < N) {\n                    epi.store(m, n, row);\n                }\n            }\n        }\n    } else if constexpr (PAIRED) {\n        const ulong H = N / 2;\n        device Out *o = out + group.z * M * H;\n        UNROLL for (uint i = 0; i < FM; ++i) {\n            UNROLL for (uint j = 0; j < FN; ++j) {\n                const thread vec<A, 2> &f = frag(c[i][j]);\n                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);\n                if (m < M && n < N) {\n                    o[m * H + n / 2] = epi(O(f[0]), O(f[1]), group.z * M * H + m * H + n / 2);\n                }\n            }\n        }\n    } else {\n        device Out *o = out + group.z * M * N;\n        UNROLL for (uint i = 0; i < FM; ++i) {\n            UNROLL for (uint j = 0; j < FN; ++j) {\n                simdgroup_store(c[i][j], stage, 8);\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n                for (uint e = lane; e < 64; e += 32) {\n                    ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;\n                    if (m < M && n < N) {\n                        if constexpr (ATOMIC) {\n                            device atomic_float *sum = (device atomic_float *)(out + m * N + n);\n                            atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);\n                        } else if constexpr (EXPANDED) {\n                            device Out *row = out + group.z * M * 2 * N + m * 2 * N;\n                            Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);\n                            row[INTERLEAVED ? 2 * n : n] = both.first;\n                            row[INTERLEAVED ? 2 * n + 1 : N + n] = both.second;\n                        } else {\n                            o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);\n                        }\n                    }\n                }\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n            }\n        }\n    }\n}",
+  "kernel": "// step 0: dot_general\n// dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32]\n\n[[max_total_threads_per_threadgroup(64)]]\nkernel void matmul_mpp_float_float_float_64x32x64_64_00(device const float *lhs [[buffer(0)]],\n                                                        device const float *rhs [[buffer(1)]],\n                                                        device float *out [[buffer(2)]],\n                                                        constant ulong *p [[buffer(3)]],\n                                                        uint3 group [[threadgroup_position_in_grid]],\n                                                        uint3 tid [[thread_position_in_threadgroup]],\n                                                        uint sg [[simdgroup_index_in_threadgroup]],\n                                                        uint lane [[thread_index_in_simdgroup]]) {\n    matmul_mpp<float, float, 64, 32, 64, 2, false, false>(lhs, rhs, out, p, group);\n}",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] in0 in1"
  },
- "measured_at": "2026-10-23T17:16:38+00:00"
+ "measured_at": "2026-10-24T06:06:18+00:00"
 }

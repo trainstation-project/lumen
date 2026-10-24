@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
-use super::{SOURCES, Tuning, codegen, compile_kernels, encode, record_launch};
+use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
+use crate::DType;
 use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::common::autotune::Autotuner;
-use crate::graph_compiler::plan::{Buffer, Step};
-use crate::kernels::mps::{Captured, capture};
+use crate::graph_compiler::common::autotune::{Kernels, Timer};
+use crate::graph_compiler::plan::{Buffer, Step, Tuned};
+use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
+use crate::kernels::mps::{Captured, Encode, capture};
 
 pub(super) struct Tunable {
     pub by_value: Vec<bool>,
@@ -16,91 +18,180 @@ pub(super) struct Tunable {
 }
 
 const TUNED_ELEMENTS: RangeInclusive<usize> = (64 << 10)..=(16 << 20);
-const TIMED_ELEMENTS: usize = 16 << 20;
 const ALIGNMENT: usize = 256;
 
-pub(super) struct MpsAutotuner<'a> {
+pub(super) struct Loops<'a> {
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a CompilerConfig,
     pub sources: BTreeMap<String, String>,
 }
 
-fn fusion(step: &Step) -> (&String, &crate::graph::Graph) {
-    let Primitive::Fusion { name, body, .. } = &step.primitive else {
-        unreachable!("a fusion")
-    };
-    (name, body)
+fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut sources = std::mem::take(sources);
+    let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+    sources.retain(|name, _| !compiled.contains_key(name));
+    sources
 }
 
-impl Autotuner for MpsAutotuner<'_> {
+impl Kernels for Loops<'_> {
     type Config = Tuning;
 
-    fn device(&self) -> &'static str {
-        "mps"
-    }
-
-    fn key(&self, step: &Step) -> Option<String> {
-        let Primitive::Fusion { name, .. } = &step.primitive else {
-            return None;
+    fn configs(&self, step: &Step) -> Vec<Tuning> {
+        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+            return Vec::new();
         };
-        let n = step.output.1.numel();
-        (self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&n))
-            .then(|| format!("{name}/{n}"))
+        match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+            true => codegen::tunings_of(body),
+            false => Vec::new(),
+        }
     }
 
-    fn candidates(&self, step: &Step) -> Vec<Tuning> {
-        codegen::tunings_of(fusion(step).1)
-    }
-
-    fn generate(&mut self, step: &Step, tuning: Tuning) -> String {
-        let (name, body) = fusion(step);
+    fn build(&mut self, step: &Step, tuning: Tuning) -> Tuned {
+        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+            unreachable!("a fusion")
+        };
         let t = &self.tunable[name];
         let (kernel, source) =
             codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);
-        kernel
+        let name = kernel.clone();
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            super::encode_with(step, &name, None, inputs, output, scratch, keep)
+        });
+        Tuned::new(kernel, encode)
     }
 
     fn compile(&mut self) -> Result<(), String> {
-        let mut sources = std::mem::take(&mut self.sources);
-        {
-            let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
-            sources.retain(|name, _| !compiled.contains_key(name));
-        }
-        compile_kernels(sources)
+        compile_kernels(uncompiled(&mut self.sources))
     }
+}
 
-    fn time(&self, step: &Step, kernels: &[String]) -> Result<Vec<f64>, String> {
-        let reps = (TIMED_ELEMENTS / step.output.1.numel()).clamp(4, 256);
-        let Some(buffers) = Buffers::new(step) else {
-            return Ok(Vec::new());
+#[derive(Default)]
+pub(super) struct Gemms {
+    sources: BTreeMap<String, String>,
+}
+
+const TUNED_OUTPUTS: usize = 64 << 10;
+
+pub(super) fn matmul_of(step: &Step) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        return None;
+    };
+    let dot = codegen::gemm_dot(body)?;
+    let ty = |v| body.type_of(v);
+    Some((&dot.primitive, ty(dot.inputs[0]), ty(dot.inputs[1]), ty(dot.output)))
+}
+
+fn tiled_gemm(step: &Step) -> bool {
+    let float = step.output.1.dtype.is_float();
+    let whole = step.views.iter().all(Option::is_none);
+    let tiled = match &step.primitive {
+        Primitive::Fusion { name, body, .. } => {
+            !name.starts_with(crate::graph::NEURAL_ENGINE)
+                && super::launch_of(body) == super::Launch::Gemm
+                && codegen::row_dot(body).is_none()
+                && codegen::tile_scratch(body).is_none()
+        }
+        _ => false,
+    };
+    float && whole && tiled
+}
+
+impl Kernels for Gemms {
+    type Config = GemmConfig;
+
+    fn configs(&self, step: &Step) -> Vec<GemmConfig> {
+        let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
+            return Vec::new();
         };
-        kernels
+        let plain = match &step.primitive {
+            Primitive::Fusion { body, .. } => codegen::gemm_dot(body).is_some_and(|d| codegen::gemm_plain(body, d)),
+            _ => false,
+        };
+        let others = plain
+            && matches!(
+                dot,
+                Primitive::DotGeneral {
+                    accum_dtype: DType::F32,
+                    ..
+                }
+            );
+        let skinny = others && gemm::skinny(dot, lhs, rhs, out);
+        let large = step.output.1.numel() >= TUNED_OUTPUTS;
+        if !tiled_gemm(step) || !(large || skinny) {
+            return Vec::new();
+        }
+        let mpp = large
+            && others
+            && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
+            && super::mpp_available();
+        let mpp = if mpp { gemm::mpp_configs() } else { &[] };
+        let skinny = if skinny { gemm::skinny_configs() } else { &[] };
+        gemm::configs()
             .iter()
-            .map(|kernel| {
-                let mut timed = step.clone();
-                let Primitive::Fusion { name, .. } = &mut timed.primitive else {
-                    unreachable!("a fusion")
-                };
-                name.clone_from(kernel);
-                buffers.run(&timed, reps)
-            })
+            .chain(mpp)
+            .chain(skinny)
+            .copied()
             .collect()
     }
 
-    fn apply(&self, step: &mut Step, kernel: &str, _: Tuning) {
-        let Primitive::Fusion { name, .. } = &mut step.primitive else {
-            unreachable!("a fusion")
+    fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("a GEMM fusion")
         };
-        *name = kernel.to_owned();
+        let by_value: Vec<bool> = step
+            .inputs
+            .iter()
+            .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+            .collect();
+        let (kernel, source) = codegen::gemm_variant(body, &by_value, config);
+        self.sources.insert(kernel.clone(), source);
+        let name = kernel.clone();
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
+                unreachable!("a GEMM fusion")
+            };
+            super::encode_with(
+                step,
+                fusion,
+                Some((&name, config)),
+                inputs,
+                output,
+                scratch,
+                keep,
+            )
+        });
+        Tuned::new(kernel, encode)
+    }
+
+    fn compile(&mut self) -> Result<(), String> {
+        let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
+            .into_iter()
+            .partition(|(_, source)| source.contains("matmul_mpp<"));
+        compile_kernels(sg)?;
+        compile_mpp_kernels(mpp)
+    }
+}
+
+pub(super) struct Mps;
+
+impl Timer for Mps {
+    type Buffers = Buffers;
+
+    fn buffers(&self, step: &Step) -> Result<Option<Buffers>, String> {
+        Ok(Buffers::new(step))
+    }
+
+    fn time(&self, buffers: &Buffers, step: &Step, reps: usize) -> Result<f64, String> {
+        buffers.run(step, reps)
     }
 }
 
 const COLD_BYTES: usize = 64 << 20;
 const MOST_COPIES: usize = 256;
 
-struct Buffers {
+pub(super) struct Buffers {
     _memory: Scratch,
     copies: Vec<Vec<*const u8>>,
     output: *mut u8,
@@ -149,7 +240,7 @@ impl Buffers {
         let scratch = aligned(step.scratch.map_or(0, |(_, bytes)| bytes));
         let read: usize = inputs.iter().sum();
         let written: usize = outputs.iter().sum();
-        let mut copies = COLD_BYTES.div_ceil(read).clamp(1, MOST_COPIES);
+        let mut copies = COLD_BYTES.div_ceil(read).clamp(2, MOST_COPIES);
         let memory = loop {
             match Scratch::zeroed(read * copies + written + scratch) {
                 Some(memory) => break memory,
@@ -188,7 +279,11 @@ impl Buffers {
         let launches = self
             .copies
             .iter()
-            .map(|inputs| capture(|| encode(step, inputs, self.output, self.scratch, Vec::new())))
+            .map(|inputs| {
+                capture(|| {
+                    crate::kernels::mps::encode(step, inputs, self.output, self.scratch, Vec::new())
+                })
+            })
             .collect::<Result<Vec<_>, String>>()?;
         (0..launches[0].len())
             .map(|l| {

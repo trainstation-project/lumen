@@ -13,11 +13,11 @@
    "stored_bytes": 16,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 5.111,
-   "torch_us": 4.13,
+   "lumen_us": 4.584,
+   "torch_us": 4.135,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 3.21
+   "gbs": 3.58
   },
   {
    "op": "reduce_sum",
@@ -32,11 +32,11 @@
    "stored_bytes": 64,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 5.263,
-   "torch_us": 4.424,
+   "lumen_us": 4.768,
+   "torch_us": 4.448,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 12.46
+   "gbs": 13.76
   },
   {
    "op": "reduce_sum",
@@ -51,11 +51,11 @@
    "stored_bytes": 256,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 5.72,
-   "torch_us": 5.11,
+   "lumen_us": 5.175,
+   "torch_us": 4.833,
    "matches_torch": true,
    "rotation": 2047,
-   "gbs": 45.87
+   "gbs": 50.71
   },
   {
    "op": "reduce_sum",
@@ -70,11 +70,11 @@
    "stored_bytes": 1024,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 8.15,
-   "torch_us": 7.541,
+   "lumen_us": 7.56,
+   "torch_us": 7.674,
    "matches_torch": true,
    "rotation": 512,
-   "gbs": 128.79
+   "gbs": 138.84
   },
   {
    "op": "reduce_sum",
@@ -89,11 +89,11 @@
    "stored_bytes": 4096,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 23.664,
-   "torch_us": 22.439,
+   "lumen_us": 22.289,
+   "torch_us": 20.849,
    "matches_torch": true,
    "rotation": 128,
-   "gbs": 177.42
+   "gbs": 188.36
   },
   {
    "op": "reduce_sum",
@@ -108,11 +108,11 @@
    "stored_bytes": 16384,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 76.501,
-   "torch_us": 75.026,
+   "lumen_us": 75.896,
+   "torch_us": 73.564,
    "matches_torch": true,
    "rotation": 32,
-   "gbs": 219.52
+   "gbs": 221.27
   },
   {
    "op": "reduce_sum",
@@ -127,11 +127,11 @@
    "stored_bytes": 65536,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 266.381,
-   "torch_us": 272.477,
+   "lumen_us": 270.429,
+   "torch_us": 272.929,
    "matches_torch": true,
    "rotation": 8,
-   "gbs": 252.17
+   "gbs": 248.4
   },
   {
    "op": "reduce_sum",
@@ -146,11 +146,11 @@
    "stored_bytes": 262144,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 1021.842,
-   "torch_us": 1042.315,
+   "lumen_us": 1034.392,
+   "torch_us": 1051.742,
    "matches_torch": true,
    "rotation": 2,
-   "gbs": 262.95
+   "gbs": 259.76
   },
   {
    "op": "reduce_sum",
@@ -165,11 +165,11 @@
    "stored_bytes": 16,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 7.333,
-   "torch_us": 4.078,
+   "lumen_us": 4.607,
+   "torch_us": 4.065,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 1.12
+   "gbs": 1.78
   },
   {
    "op": "reduce_sum",
@@ -184,11 +184,11 @@
    "stored_bytes": 64,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 7.476,
-   "torch_us": 4.323,
+   "lumen_us": 4.571,
+   "torch_us": 4.346,
    "matches_torch": true,
    "rotation": 4096,
-   "gbs": 4.39
+   "gbs": 7.18
   },
   {
    "op": "reduce_sum",
@@ -203,11 +203,11 @@
    "stored_bytes": 256,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 7.683,
-   "torch_us": 4.634,
+   "lumen_us": 4.826,
+   "torch_us": 4.569,
    "matches_torch": true,
    "rotation": 4089,
-   "gbs": 17.09
+   "gbs": 27.21
   },
   {
    "op": "reduce_sum",
@@ -222,11 +222,11 @@
    "stored_bytes": 1024,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 8.606,
-   "torch_us": 6.078,
+   "lumen_us": 5.645,
+   "torch_us": 5.721,
    "matches_torch": true,
    "rotation": 1023,
-   "gbs": 61.04
+   "gbs": 93.06
   },
   {
    "op": "reduce_sum",
@@ -241,11 +241,11 @@
    "stored_bytes": 4096,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 18.279,
-   "torch_us": 11.893,
+   "lumen_us": 12.411,
+   "torch_us": 12.206,
    "matches_torch": true,
    "rotation": 256,
-   "gbs": 114.95
+   "gbs": 169.31
   },
   {
    "op": "reduce_sum",
@@ -260,11 +260,11 @@
    "stored_bytes": 16384,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 50.263,
-   "torch_us": 38.35,
+   "lumen_us": 39.637,
+   "torch_us": 39.873,
    "matches_torch": true,
    "rotation": 64,
-   "gbs": 167.22
+   "gbs": 212.05
   },
   {
    "op": "reduce_sum",
@@ -279,11 +279,11 @@
    "stored_bytes": 65536,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 173.179,
-   "torch_us": 140.194,
+   "lumen_us": 139.077,
+   "torch_us": 140.658,
    "matches_torch": true,
    "rotation": 16,
-   "gbs": 194.13
+   "gbs": 241.74
   },
   {
    "op": "reduce_sum",
@@ -298,16 +298,16 @@
    "stored_bytes": 262144,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 638.777,
-   "torch_us": 526.49,
+   "lumen_us": 523.469,
+   "torch_us": 523.04,
    "matches_torch": true,
    "rotation": 4,
-   "gbs": 210.53
+   "gbs": 256.9
   }
  ],
  "code": {
-  "kernel": "// step 0: reduce_sum\n// reduce_sum[axes=(1,) accum_dtype=f32]\n\n// reduce/mps/kernels.metal\ninline void reduce_grouped(In in,\n                           device O *out,\n                           A init,\n                           uint nk,\n                           constant ulong *ksizes,\n                           constant ulong *kstrides,\n                           uint nr,\n                           constant uint *rsizes,\n                           constant uint *rstrides,\n                           uint count,\n                           uint lanes,\n                           uint outputs,\n                           threadgroup A *shared,\n                           uint g,\n                           uint t,\n                           Epi epi = Epi()) {\n    uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;\n    A r = init;\n    if (i < outputs) {\n        ulong base = offset_of(i, nk, ksizes, kstrides);\n        for (uint j = lane; j < count; j += lanes) {\n            r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));\n        }\n    }\n    shared[t] = r;\n    for (uint s = lanes / 2; s > 0; s /= 2) {\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (lane < s) {\n            shared[t] = Op::apply(shared[t], shared[t + s]);\n        }\n    }\n    if (lane == 0 && i < outputs) {\n        out[i] = epi(shared[t]);\n    }\n}",
+  "kernel": "// step 0: reduce_sum\n// reduce_sum[axes=(1,) accum_dtype=f32]\n\n// reduce/mps/kernels.metal\ninline void reduce_grouped(In in,\n                           device O *out,\n                           A init,\n                           uint nk,\n                           constant ulong *ksizes,\n                           constant ulong *kstrides,\n                           uint nr,\n                           constant uint *rsizes,\n                           constant uint *rstrides,\n                           uint count,\n                           uint lanes,\n                           uint outputs,\n                           threadgroup A *shared,\n                           uint g,\n                           uint t,\n                           Epi epi = Epi()) {\n    uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;\n    A r = init;\n    if (i < outputs) {\n        ulong base = offset_of(i, nk, ksizes, kstrides);\n        if (nr == 1 && rstrides[0] == 1) {\n            constexpr uint V = sizeof(decltype(in[0])) >= 4 ? 1 : 4 / sizeof(decltype(in[0]));\n            uint j = lane * V;\n            for (; j + V <= count; j += lanes * V) {\n                for (uint v = 0; v < V; ++v) {\n                    r = Op::apply(r, A(in[base + j + v]));\n                }\n            }\n            for (; j < count; ++j) {\n                r = Op::apply(r, A(in[base + j]));\n            }\n        } else {\n            for (uint j = lane; j < count; j += lanes) {\n                r = Op::apply(r, A(in[base + offset_of32(j, nr, rsizes, rstrides)]));\n            }\n        }\n    }\n    if (lanes >= 32) {\n        for (ushort m = 16; m > 0; m /= 2) {\n            r = Op::apply(r, lane_xor(r, m));\n        }\n        uint simds = lanes / 32;\n        if (simds > 1) {\n            if (t % 32 == 0) {\n                shared[t / 32] = r;\n            }\n            threadgroup_barrier(mem_flags::mem_threadgroup);\n            if (lane == 0) {\n                for (uint k = 1; k < simds; ++k) {\n                    r = Op::apply(r, shared[t / 32 + k]);\n                }\n            }\n        }\n        if (lane == 0 && i < outputs) {\n            out[i] = epi(r);\n        }\n        return;\n    }\n    shared[t] = r;\n    for (uint s = lanes / 2; s > 0; s /= 2) {\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (lane < s) {\n            shared[t] = Op::apply(shared[t], shared[t + s]);\n        }\n    }\n    if (lane == 0 && i < outputs) {\n        out[i] = epi(shared[t]);\n    }\n}",
   "plan": "plan (workspace 4096 bytes)\n    ws+0:f32[1024] = reduce_sum[axes=(1,) accum_dtype=f32] in0"
  },
- "measured_at": "2026-10-23T17:14:19+00:00"
+ "measured_at": "2026-10-23T18:02:14+00:00"
 }

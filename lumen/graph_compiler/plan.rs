@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::cmp::Reverse;
 use std::fmt;
+use std::sync::Arc;
 #[cfg(lumen_mps_linked)]
 use std::sync::OnceLock;
 
@@ -43,9 +45,35 @@ pub struct Step {
     pub scratch: Option<(usize, usize)>,
     pub scope: Scope,
     pub sources: Vec<(&'static str, u32)>,
+    pub tuned: Option<Tuned>,
+}
+
+#[derive(Clone)]
+pub struct Tuned {
+    pub kernel: String,
+    launch: Arc<dyn Any + Send + Sync>,
+}
+
+impl Tuned {
+    pub(crate) fn new<L: Send + Sync + 'static>(kernel: String, launch: L) -> Self {
+        Tuned {
+            kernel,
+            launch: Arc::new(launch),
+        }
+    }
+}
+
+impl fmt::Debug for Tuned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.kernel)
+    }
 }
 
 impl Step {
+    pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
+        self.tuned.as_ref()?.launch.downcast_ref::<L>()
+    }
+
     pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
         let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {
             Some(view) => view.strides.clone(),
@@ -585,6 +613,7 @@ impl Plan {
                     sources_of(node, &mut sources);
                     sources
                 },
+                tuned: None,
             })
             .collect();
         for (k, v) in copies {
@@ -601,6 +630,7 @@ impl Plan {
                 scratch: None,
                 scope: &[],
                 sources: Vec::new(),
+                tuned: None,
             });
         }
         Plan {

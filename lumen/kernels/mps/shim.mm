@@ -169,7 +169,8 @@ static int launch(id<MTLComputePipelineState> pso,
         MTLSize size = MTLSizeMake(grid[0], grid[1], grid[2]);
         [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
         if (groups) {
-            [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            [encoder dispatchThreadgroups:size
+                    threadsPerThreadgroup:(group == 0 ? MTLSizeMake(16, 16, 1) : MTLSizeMake(group, 1, 1))];
         } else {
             NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, group == 0 ? 256 : group);
             NSUInteger x = std::min<NSUInteger>(grid[0], total);
@@ -258,7 +259,8 @@ double lumen_mps_time_pipeline(void *pipeline,
             }
             [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
             if (groups) {
-                [encoder dispatchThreadgroups:size threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+                [encoder dispatchThreadgroups:size
+                        threadsPerThreadgroup:(group == 0 ? MTLSizeMake(16, 16, 1) : MTLSizeMake(group, 1, 1))];
             } else {
                 [encoder dispatchThreads:size threadsPerThreadgroup:MTLSizeMake(x, y, z)];
             }
