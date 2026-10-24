@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use indoc::formatdoc;
+
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
@@ -79,22 +81,26 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
         locals: 0,
     };
     let result = emitter.value(body.outputs()[0], "j".into());
-    let inputs: Vec<String> = (0..body.inputs().len())
-        .map(|k| format!("in{k}, "))
-        .collect();
-    let loads: Vec<String> = (0..body.inputs().len())
+    let inputs = (0..body.inputs().len()).map(|k| format!("in{k}"));
+    let loads = (0..body.inputs().len())
         .filter(|&k| !by_value[k])
-        .map(|k| format!("LOAD{k}: tl.constexpr, "))
+        .map(|k| format!("LOAD{k}: tl.constexpr"));
+    let params: String = inputs
+        .chain(["out".into(), "n".into()])
+        .chain(loads)
+        .chain(["STORE: tl.constexpr".into(), "BLOCK: tl.constexpr".into()])
+        .map(|p| format!("    {p},\n"))
         .collect();
-    let source = format!(
-        "@triton.jit\n\
-         def NAME({}out, n, {}STORE: tl.constexpr, BLOCK: tl.constexpr):\n    \
-             j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
-             mask = j < n\n\
-         {}    STORE(out, j, {result}, mask)\n",
-        inputs.concat(),
-        loads.concat(),
-        emitter.lines,
+    let lines = &emitter.lines;
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME(
+        {params}):
+            j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+            mask = j < n
+        {lines}    STORE(out, j, {result}, mask)
+        "
     );
     named("fusion", source)
 }
@@ -108,30 +114,36 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
             triton_type(dtype).expect("a Triton dtype")
         ),
     };
-    let source = format!(
-        "@triton.jit\n\
-         def NAME(bits, out, n, STORE: tl.constexpr, BLOCK: tl.constexpr):\n    \
-             j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    \
-             STORE(out, j, {value}, j < n)\n"
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME(bits, out, n, STORE: tl.constexpr, BLOCK: tl.constexpr):
+            j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+            STORE(out, j, {value}, j < n)
+        "
     );
     named("fill", source)
 }
 
 pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
-    let source = format!(
-        "@triton.jit\n\
-         def NAME(ptr, i, mask):\n    \
-             return tl.load(ptr + {}, mask=mask)\n",
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME(ptr, i, mask):
+            return tl.load(ptr + {}, mask=mask)
+        ",
         at("i", shape, strides)
     );
     named("load", source)
 }
 
 pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
-    let source = format!(
-        "@triton.jit\n\
-         def NAME(ptr, i, value, mask):\n    \
-             tl.store(ptr + {}, value, mask=mask)\n",
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME(ptr, i, value, mask):
+            tl.store(ptr + {}, value, mask=mask)
+        ",
         at("i", shape, strides)
     );
     named("store", source)

@@ -2,7 +2,10 @@ mod config;
 
 pub(crate) use config::*;
 
+use indoc::formatdoc;
+
 use crate::Tensor;
+use crate::codegen::mps::{THREAD_ARGS, formatted};
 use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;
@@ -73,16 +76,24 @@ pub(crate) fn matmul_source(
         algorithm,
     } = c;
     let simds = threads / 32;
+    let signature = |name: &str| {
+        formatdoc! {"
+            [[max_total_threads_per_threadgroup({threads})]]
+            kernel void {name}(device const {t} *lhs [[buffer(0)]],
+            device const {t} *rhs [[buffer(1)]],
+            device {o} *out [[buffer(2)]],
+            constant ulong *p [[buffer(3)]],
+            {THREAD_ARGS}) {{"}
+    };
     if algorithm == Algorithm::Skinny {
         let name = format!("matmul_skinny_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}");
-        let source = format!(
-            "[[max_total_threads_per_threadgroup({threads})]]\n\
-             kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{\n    \
-                 threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];\n    \
-                 matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}>(lhs, rhs, out, p, partials, group, tid.x);\n\
-             }}\n"
-        );
-        return (name, source);
+        let source = formatdoc! {"
+            {}
+            threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+            matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}>(lhs, rhs, out, p, partials, group, tid.x);
+            }}
+            ", signature(&name)};
+        return (name, formatted(&source));
     }
     if algorithm == Algorithm::Mpp {
         let name = format!(
@@ -90,25 +101,29 @@ pub(crate) fn matmul_source(
             u8::from(left),
             u8::from(right)
         );
-        let source = format!(
-            "[[max_total_threads_per_threadgroup({threads})]]\n\
-             kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]]) {{\n    \
-                 matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}>(lhs, rhs, out, p, group);\n\
-             }}\n"
-        );
-        return (name, source);
+        let source = formatdoc! {"
+            {}
+            matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}>(lhs, rhs, out, p, group);
+            }}
+            ", signature(&name)};
+        return (name, formatted(&source));
     }
     let name = format!(
         "matmul_{t}_{a}_{o}_{bm}x{bn}x{bk}_{threads}_{cols}_{}",
         u8::from(prefetch)
     );
-    let source = format!(
-        "[[max_total_threads_per_threadgroup({threads})]]\n\
-         kernel void {name}(device const {t} *lhs [[buffer(0)]], device const {t} *rhs [[buffer(1)]], device {o} *out [[buffer(2)]], constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {{\n    \
-             threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];\n    \
-             matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o}, Same, false, false, false, false, false, false, {threads}, {cols}, {prefetch}>(lhs, rhs, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane);\n\
-         }}\n"
-    );
+    let source = formatdoc! {"
+        {}
+        threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+        matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {o},
+        Same, false, false, false, false, false, false,
+        {threads}, {cols}, {prefetch}>(
+        lhs, rhs, out, p,
+        lt, rt,
+        group, tid.y * 16 + tid.x, sg, lane);
+        }}
+        ", signature(&name)};
+    let source = formatted(&source);
     (name, source)
 }
 

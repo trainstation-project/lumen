@@ -24,8 +24,13 @@ def _snippet(text, anchor):
 
 
 def _launch_code(step, kernel, code):
+    from lumen.graph_compiler._C import _kernel_source
+
     if code is not None:
         return code, "mlir"
+    source = _kernel_source(kernel)
+    if source is not None:
+        return source, "metal"
     fusion = step["fusion"]
     if fusion and fusion["source"]:
         return fusion["source"], "metal"

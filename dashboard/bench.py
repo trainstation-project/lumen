@@ -425,6 +425,16 @@ def kernel_code(f, args):
     return {"kernel": kernel, "plan": files.get("plan.txt", "").strip()}
 
 
+def code_of(name):
+    op = OPS[name]
+    n = next(n for n in op.sizes if n >= 1 << 20)
+    lf = op.lumen(n) if op.sized else op.lumen
+    lt = [to_lumen(a, d) for a, d in op.inputs(n, op.dtypes[0], np.random.default_rng(0))]
+    f = lumen.compile(lf, device="mps")
+    f(*lt)
+    return kernel_code(f, lt)
+
+
 def to_lumen(array, dtype):
     t = lumen.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to("mps")
     return t if t.dtype == dtype else t.to(dtype=dtype)
@@ -603,7 +613,11 @@ def save(data, names=None):
 
 if __name__ == "__main__":
     lumen.config.static_allocator_bytes = 4 << 30
+    dry_run = "--dry-run" in sys.argv
     data = load()
-    for name in sys.argv[1:] or OPS:
-        data = update(data, name)
+    for name in [a for a in sys.argv[1:] if a != "--dry-run"] or OPS:
+        if dry_run:
+            data["code"][name] = code_of(name)
+        else:
+            data = update(data, name)
         save(data, [name])

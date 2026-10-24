@@ -154,8 +154,8 @@
   }
  ],
  "code": {
-  "kernel": "// step 0: not\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = not %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_b45d28fba828c947_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_b45d28fba828c947_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_b45d28fba828c947(device const int *in0 [[buffer(0)]], device int *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        int v0 = fusion_b45d28fba828c947_load0(in0, j);\n        int v1 = not_op(v0);\n        fusion_b45d28fba828c947_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_b45d28fba828c947 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = not %0\n  in (%1) }] in0"
+  "kernel": "// step 0: not\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = not %0\n//   in (%1) }\n\ntemplate <typename T, typename I>\ninline T fusion_85a0d93789811a84_load0(device const T *p, I i) {\n    return p[i];\n}\n\ntemplate <typename T, typename I, typename V>\ninline void fusion_85a0d93789811a84_store0(device T *p, I i, V v) {\n    p[i] = v;\n}\n\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_85a0d93789811a84(device const int *in0 [[buffer(0)]],\n                                    device int *out [[buffer(1)]],\n                                    ELEMENTWISE_ARGS(2)) {\n    for (uint j = i, k = 0; k < 2u && j < n; ++k, j += threads) {\n        int v0 = fusion_85a0d93789811a84_load0(in0, j);\n        int v1 = not_op(v0);\n        fusion_85a0d93789811a84_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_85a0d93789811a84 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = not %0\n  in (%1) }] in0"
  },
  "measured_at": "2026-10-23T17:00:09+00:00"
 }

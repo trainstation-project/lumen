@@ -134,7 +134,6 @@ pub(super) fn gemm_tiles(
         format!("staged[(ulong({x}) / {n}ul - m0) * {tile}ul + ulong({x}) % {n}ul - n0]")
     });
     let (params, first_arg) = io_params(body, by_value, out, &extra);
-    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     formatdoc!(
         "
         struct NAME_tiles_staging {{
@@ -169,10 +168,16 @@ pub(super) fn gemm_tiles(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]], {args}) {{
+        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+                               {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {tile}];
-            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o}, NAME_tiles_staging, false, false, false, true>({lhs}, {rhs}, (device {o} *)nullptr, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
+            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+                           NAME_tiles_staging, false, false, false, true>(
+                {lhs}, {rhs}, (device {o} *)nullptr, p,
+                lt, rt,
+                group, tid.y * 16 + tid.x, sg, lane,
+                NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
             const ulong m0 = ulong(group.y) * {tile}, n0 = ulong(group.x) * {tile};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = uint(m0) + rr;
@@ -273,7 +278,6 @@ pub(super) fn gemm_rows(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (params, first) = io_params(body, by_value, out, &[]);
-    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let tile = ROW_TILE;
     named(formatdoc!(
         "
@@ -306,10 +310,16 @@ pub(super) fn gemm_rows(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME({params}constant ulong *p [[buffer({first})]], {args}) {{
+        kernel void NAME({params}constant ulong *p [[buffer({first})]],
+                         {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {n}];
-            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o}, NAME_staging, false, false, false, true>({lhs}, {rhs}, (device {o} *)nullptr, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_staging{{staged}});
+            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+                           NAME_staging, false, false, false, true>(
+                {lhs}, {rhs}, (device {o} *)nullptr, p,
+                lt, rt,
+                group, tid.y * 16 + tid.x, sg, lane,
+                NAME_staging{{staged}});
             const ulong m0n = ulong(group.y) * {tile} * {n};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = group.y * {tile}u + rr, t = lane;

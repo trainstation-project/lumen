@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use indoc::{formatdoc, writedoc};
+use indoc::{formatdoc, indoc, writedoc};
 
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -34,6 +34,12 @@ pub(crate) use gemm_row::*;
 pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
+
+pub(crate) const THREAD_ARGS: &str = indoc! {"
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]"};
 
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
     is_loop(body).then(|| loop_tuning(body))
@@ -85,17 +91,53 @@ pub(crate) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
 }
 
-pub(super) fn formatted(source: &str) -> String {
+pub(crate) fn formatted(source: &str) -> String {
     let mut out = String::new();
-    let mut depth = 0usize;
+    let mut open: Vec<(char, usize)> = Vec::new();
+    let mut statement = 0;
     for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let code = line.split("//").next().unwrap_or("");
-        let closing = code.chars().take_while(|&c| c == '}').count();
-        let level = depth.saturating_sub(closing);
-        writeln!(out, "{}{line}", "    ".repeat(level)).unwrap();
-        let opened = code.matches('{').count();
-        depth = (depth + opened).saturating_sub(code.matches('}').count());
-        if depth == 0 && code.ends_with(['}', ';']) && closing > 0 {
+        let indent = match open.last() {
+            Some(&('{', column)) if line.starts_with('}') => column - 4,
+            Some(&(_, column)) => column,
+            None => 0,
+        };
+        if !matches!(open.last(), Some(&(b, _)) if b != '{') {
+            statement = indent;
+        }
+        writeln!(out, "{}{line}", " ".repeat(indent)).unwrap();
+        let chars: Vec<char> = line.chars().collect();
+        let code = chars
+            .windows(2)
+            .position(|w| w == ['/', '/'])
+            .unwrap_or(chars.len());
+        let aligned = |k: usize| match chars[k + 1..code].iter().all(|c| c.is_whitespace()) {
+            true => statement + 4,
+            false => indent + k + 1,
+        };
+        let mut quoted = false;
+        for (k, &c) in chars[..code].iter().enumerate() {
+            let after_name = k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_');
+            match c {
+                '"' => quoted = !quoted,
+                _ if quoted => {}
+                '{' => open.push((c, statement + 4)),
+                '(' | '[' => open.push((c, aligned(k))),
+                '<' if after_name && !matches!(chars.get(k + 1), Some('<' | '=' | ' ')) => {
+                    open.push((c, aligned(k)))
+                }
+                '>' if matches!(open.last(), Some(('<', _))) => {
+                    open.pop();
+                }
+                ')' | ']' | '}' => {
+                    while matches!(open.last(), Some(('<', _))) {
+                        open.pop();
+                    }
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        if open.is_empty() && line.starts_with('}') {
             writeln!(out).unwrap();
         }
     }
@@ -119,13 +161,18 @@ fn loads(source: &str) -> String {
         .collect();
     ks.sort_unstable();
     ks.dedup();
-    ks.iter()
-        .map(|k| {
-            format!(
-                "template <typename T, typename I> inline T NAME_load{k}(device const T *p, I i) {{ return p[i]; }}\n"
-            )
-        })
-        .collect()
+    ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
+}
+
+fn load_helper(name: &str, k: usize, index: &str) -> String {
+    formatdoc!(
+        "
+        template <typename T, typename I>
+        inline T {name}_load{k}(device const T *p, I i) {{
+            return p[{index}];
+        }}
+        "
+    )
 }
 
 pub(crate) fn strided_load(
@@ -136,23 +183,19 @@ pub(crate) fn strided_load(
     strides: &[usize],
 ) -> Option<String> {
     let index = gather_index("i", shape, strides);
-    let plain = format!(
-        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[i]; }}"
-    );
-    let strided = format!(
-        "template <typename T, typename I> inline T {name}_load{k}(device const T *p, I i) {{ return p[{index}]; }}"
-    );
+    let plain = load_helper(name, k, "i");
+    let strided = load_helper(name, k, &index);
     source
         .contains(&plain)
         .then(|| source.replace(&plain, &strided))
 }
 
 pub(super) fn named(source: String) -> (String, String) {
-    let source = formatted(&format!("{}{source}", loads(&source)));
+    let source = format!("{}{source}", loads(&source));
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("fusion_{:016x}", hasher.finish());
-    (name.clone(), source.replace("NAME", &name))
+    (name.clone(), formatted(&source.replace("NAME", &name)))
 }
 
 pub(super) fn io_params(
@@ -163,7 +206,7 @@ pub(super) fn io_params(
 ) -> (String, usize) {
     let (mut params, mut index) = (String::new(), 0);
     let mut param = |decl: String| {
-        write!(params, "{decl} [[buffer({index})]], ").unwrap();
+        writeln!(params, "{decl} [[buffer({index})]],").unwrap();
         index += 1;
     };
     let scalar = |k: usize| by_value.get(k) == Some(&true);

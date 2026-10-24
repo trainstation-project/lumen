@@ -44,7 +44,7 @@ _SOURCES = [
         "inline void matmul_sg_impl",
     ),
     (r"^matmul_(u64|i64)$", "dot_general/mps/matmul_wide.metal", "inline void matmul_wide_impl"),
-    (r"^matmul_", "dot_general/mps/matmul.metal", "inline void matmul_impl"),
+    (r"^matmul_(u8|u16|u32|i8|i16|i32)$", "dot_general/mps/matmul.metal", "inline void matmul_impl"),
     (r"^reduce_\w+_rows_", "reduce/mps/kernels.metal", "inline void reduce_rows"),
     (r"^reduce_\w+_cols_", "reduce/mps/kernels.metal", "inline void reduce_cols"),
     (r"^reduce_\w+_grouped_", "reduce/mps/kernels.metal", "inline void reduce_grouped"),

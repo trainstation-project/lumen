@@ -306,8 +306,8 @@
   }
  ],
  "code": {
-  "kernel": "// step 0: sinh\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = sinh %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_cee0d0d1575e09be_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_cee0d0d1575e09be_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_cee0d0d1575e09be(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        float v0 = fusion_cee0d0d1575e09be_load0(in0, j);\n        float v1 = sinh_op(v0);\n        fusion_cee0d0d1575e09be_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_cee0d0d1575e09be body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = sinh %0\n  in (%1) }] in0"
+  "kernel": "// step 0: sinh\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = sinh %0\n//   in (%1) }\n\ntemplate <typename T, typename I>\ninline T fusion_d4a5b0cb4b328c62_load0(device const T *p, I i) {\n    return p[i];\n}\n\ntemplate <typename T, typename I, typename V>\ninline void fusion_d4a5b0cb4b328c62_store0(device T *p, I i, V v) {\n    p[i] = v;\n}\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_d4a5b0cb4b328c62(device const float *in0 [[buffer(0)]],\n                                    device float *out [[buffer(1)]],\n                                    ELEMENTWISE_ARGS(2)) {\n    for (uint j = i, k = 0; k < 2u && j < n; ++k, j += threads) {\n        float v0 = fusion_d4a5b0cb4b328c62_load0(in0, j);\n        float v1 = sinh_op(v0);\n        fusion_d4a5b0cb4b328c62_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_d4a5b0cb4b328c62 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = sinh %0\n  in (%1) }] in0"
  },
  "measured_at": "2026-10-23T16:49:13+00:00"
 }

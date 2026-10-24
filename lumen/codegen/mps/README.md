@@ -155,7 +155,11 @@ emitted from the exact bits `full` would fill (`constant`). Anything else hits `
 ## Naming: `named`
 
 Every generator writes `NAME` where the kernel (and its helper structs)
-are named. `named` first re-indents the source by brace depth
+are named. Templates are written as formatted code, a parameter or a
+statement a line (kernel signatures one parameter a line, `THREAD_ARGS`
+for the threadgroup and SIMD indices). `named` first re-indents the
+source by the depth of its open braces, parentheses and template
+argument lists (a line ending in `<`, closed by one starting with `>`)
 (`formatted`), hashes it with `DefaultHasher`, and substitutes
 `fusion_<16 hex>`. Identical bodies therefore produce identical names and
 are compiled once (the `codegen` pass shares one kernel among fusions with
@@ -169,8 +173,8 @@ loop and transpose kernels write only through store epilogues, so no
 generator knows a layout. The `Emitter` reads input `k` at a flat index as
 `NAME_load{k}(in{k}, i)` (`load`); `named` prepends each load the source
 calls, `template <typename T, typename I> inline T NAME_load{k}(device const
-T *p, I i) { return p[i]; }`, on one line. `strided_load` rewrites that line
-to read through a layout's strides: `graph_compiler/mps`'s `encode` runs a
+T *p, I i) { return p[i]; }` (`load_helper`). `strided_load` rewrites that
+helper to read through a layout's strides: `graph_compiler/mps`'s `encode` runs a
 step whose input is a strided view (an argument the plan reads in place,
 `loads_strided`) as that variant, compiled once a layout. `read_staged`
 rewrites a row kernel's loads of the dot's product to its staged tile.

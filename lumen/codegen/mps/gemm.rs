@@ -319,12 +319,17 @@ pub(super) fn gemm_regions_kernel(
             for (t, (v, read)) in locals.iter().enumerate() {
                 e.invariant[*v] = true;
                 e.row_locals.insert(*v, format!("r{t}"));
-                write!(declared, "{o} r{t} = {read}; ").unwrap();
+                writeln!(declared, "{o} r{t} = {read};").unwrap();
             }
             let value = e.value(outputs[end], "j".into());
-            format!(
-                "{{ uint j = uint({index}); {declared}{}{}{target}[j] = {value}; }}",
-                e.hoisted, e.lines
+            let (hoisted, lines) = (&e.hoisted, &e.lines);
+            formatdoc!(
+                "
+                {{
+                    uint j = uint({index});
+                    {declared}{hoisted}{lines}{target}[j] = {value};
+                }}
+                "
             )
         };
         let read = |column: &str| format!("row[({column}) / 2][({column}) % 2]");
@@ -347,10 +352,18 @@ pub(super) fn gemm_regions_kernel(
                     &[(slice.output, read("c + 1"))],
                     &format!("m * {size} + (n - {offset}) + 1"),
                 );
-                format!("{first} {second}")
+                format!("{first}{second}")
             }
         };
-        writeln!(store, "        if (n < {limit}) {{ {branch} return; }}").unwrap();
+        writedoc!(
+            store,
+            "
+            if (n < {limit}) {{
+                {branch}return;
+            }}
+            "
+        )
+        .unwrap();
     }
     let (mut fields, mut members) = (String::new(), Vec::new());
     for (k, &v) in body.inputs().iter().enumerate() {
@@ -374,7 +387,6 @@ pub(super) fn gemm_regions_kernel(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (params, first) = io_params(body, by_value, w, &[]);
-    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
     let mut source = formatdoc!(
         "
@@ -393,9 +405,16 @@ pub(super) fn gemm_regions_kernel(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
-            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
+                                     {THREAD_ARGS}) {{
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, NAME_epi, false, true, false, false, true, true, {threads}, {cols}, {prefetch}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                               NAME_epi, false, true, false, false, true, true,
+                               {threads}, {cols}, {prefetch}>(
+                    {lhs}, {rhs}, out, p,
+                    lt, rt,
+                    group, tid.y * 16 + tid.x, sg, lane,
+                    NAME_epi{{{members}}});
             }}
             "
         )
@@ -497,7 +516,6 @@ fn gemm_kernel_with(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (params, first) = io_params(body, by_value, w, &[]);
-    let args = "uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]";
     let members = members.join(", ");
     let (operands, paired) = match (pair, expanded) {
         (Some(_), _) if gemm_interleaved(body, dot).is_some() => (
@@ -537,9 +555,16 @@ fn gemm_kernel_with(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
-            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]], {args}) {{
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
+                                     {THREAD_ARGS}) {{
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w}, {paired}, {threads}, {cols}, {prefetch}>({lhs}, {rhs}, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, NAME_epi{{{members}}});
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                               {paired},
+                               {threads}, {cols}, {prefetch}>(
+                    {lhs}, {rhs}, out, p,
+                    lt, rt,
+                    group, tid.y * 16 + tid.x, sg, lane,
+                    NAME_epi{{{members}}});
             }}
             "
         )

@@ -250,6 +250,17 @@ fn _captured_launches() -> Vec<Captured> {
         .collect()
 }
 
+#[pyfunction]
+fn _kernel_source(name: &str) -> Option<String> {
+    #[cfg(lumen_mps_linked)]
+    return super::mps::fusion_source(name);
+    #[cfg(not(lumen_mps_linked))]
+    return {
+        let _ = name;
+        None
+    };
+}
+
 fn triton_functions(functions: &[super::triton::Function]) -> Vec<(&str, &str, &str)> {
     functions
         .iter()
@@ -317,5 +328,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCompilerConfig>()?;
     m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;
+    m.add_function(wrap_pyfunction!(_kernel_source, m)?)?;
     m.add_class::<PyPlan>()
 }

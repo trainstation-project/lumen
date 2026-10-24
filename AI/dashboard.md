@@ -44,7 +44,9 @@ same change.
 3. **Benchmarks are measured, never edited by hand.** On a Mac, after
    `maturin develop --release`, run `python dashboard/bench.py <op> ...`
    for each affected op only. Restart a running `serve.py`, as it keeps
-   the old build loaded.
+   the old build loaded. A change to generated code alone (its text, not
+   what runs) needs no timings: `python dashboard/bench.py --dry-run
+   [<op> ...]` regenerates each op's kernel and plan and keeps its rows.
 4. **README.** Update `dashboard/README.md`: the commit its Notes say the
    statuses were read at, and the Files table if a file or a field
    changed.
