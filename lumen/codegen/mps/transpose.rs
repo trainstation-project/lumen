@@ -140,7 +140,9 @@ pub(super) fn transpose_kernel(
             for (uint dy = 0; dy < {TILE}; dy += 16) {{
                 for (uint dx = 0; dx < {TILE}; dx += 16) {{
                     uint {x} = {x}0 + tid.x + dx, {y} = {y}0 + tid.y + dy;
-                    if (a >= {a}u || b >= {b}u) continue;
+                    if (a >= {a}u || b >= {b}u) {{
+                        continue;
+                    }}
                     uint j = base + a * {sa}u + b;
                     {code}
                 }}
@@ -176,7 +178,8 @@ pub(super) fn transpose_kernel(
     named(formatdoc!(
         "
         {stores}
-        kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) {{
+        kernel void NAME({params}uint3 group [[threadgroup_position_in_grid]],
+                         uint3 tid [[thread_position_in_threadgroup]]) {{
             {source}
         }}
         "

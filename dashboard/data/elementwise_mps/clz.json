@@ -154,8 +154,8 @@
   }
  ],
  "code": {
-  "kernel": "// step 0: clz\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = clz %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_bd4ec412521a5f45_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_bd4ec412521a5f45_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_bd4ec412521a5f45(device const int *in0 [[buffer(0)]], device int *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 4u, k = 0; k < 4u && j < n; ++k, ++j) {\n        int v0 = fusion_bd4ec412521a5f45_load0(in0, j);\n        int v1 = clz_op(v0);\n        fusion_bd4ec412521a5f45_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_bd4ec412521a5f45 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = clz %0\n  in (%1) }] in0"
+  "kernel": "// step 0: clz\n// { lambda %0:i32[1048576]. let\n//     %1:i32[1048576] = clz %0\n//   in (%1) }\n\ntemplate <typename T, typename I>\ninline T fusion_aae373d3794a6fb9_load0(device const T *p, I i) {\n    return p[i];\n}\n\ntemplate <typename T, typename I, typename V>\ninline void fusion_aae373d3794a6fb9_store0(device T *p, I i, V v) {\n    p[i] = v;\n}\n\n[[max_total_threads_per_threadgroup(512)]]\nkernel void fusion_aae373d3794a6fb9(device const int *in0 [[buffer(0)]],\n                                    device int *out [[buffer(1)]],\n                                    ELEMENTWISE_ARGS(2)) {\n    for (uint j = i, k = 0; k < 2u && j < n; ++k, j += threads) {\n        int v0 = fusion_aae373d3794a6fb9_load0(in0, j);\n        int v1 = clz_op(v0);\n        fusion_aae373d3794a6fb9_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=fusion_aae373d3794a6fb9 body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = clz %0\n  in (%1) }] in0"
  },
  "measured_at": "2026-10-23T17:00:37+00:00"
 }

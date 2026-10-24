@@ -306,8 +306,8 @@
   }
  ],
  "code": {
-  "kernel": "// step 0: asin\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = asin %0\n//   in (%1) }\n\ntemplate <typename T, typename I> inline T fusion_a1ed0f4ce31124bf_load0(device const T *p, I i) { return p[i]; }\ntemplate <typename T, typename I, typename V> inline void fusion_a1ed0f4ce31124bf_store0(device T *p, I i, V v) { p[i] = v; }\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_a1ed0f4ce31124bf(device const float *in0 [[buffer(0)]], device float *out [[buffer(1)]], ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = fusion_a1ed0f4ce31124bf_load0(in0, j);\n        float v1 = asin_op(v0);\n        fusion_a1ed0f4ce31124bf_store0(out, j, v1);\n    }\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_a1ed0f4ce31124bf body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = asin %0\n  in (%1) }] in0"
+  "kernel": "// step 0: asin\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = asin %0\n//   in (%1) }\n\ntemplate <typename T, typename I>\ninline T fusion_5e1972a9de957c51_load0(device const T *p, I i) {\n    return p[i];\n}\n\ntemplate <typename T, typename I, typename V>\ninline void fusion_5e1972a9de957c51_store0(device T *p, I i, V v) {\n    p[i] = v;\n}\n\n[[max_total_threads_per_threadgroup(1024)]]\nkernel void fusion_5e1972a9de957c51(device const float *in0 [[buffer(0)]],\n                                    device float *out [[buffer(1)]],\n                                    ELEMENTWISE_ARGS(2)) {\n    for (uint j = i * 2u, k = 0; k < 2u && j < n; ++k, ++j) {\n        float v0 = fusion_5e1972a9de957c51_load0(in0, j);\n        float v1 = asin_op(v0);\n        fusion_5e1972a9de957c51_store0(out, j, v1);\n    }\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=fusion_5e1972a9de957c51 body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = asin %0\n  in (%1) }] in0"
  },
  "measured_at": "2026-10-23T16:47:30+00:00"
 }

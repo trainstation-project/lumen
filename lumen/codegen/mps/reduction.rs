@@ -115,12 +115,17 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
     };
     let (args, call) = match reduce::layout(ty, axes) {
         reduce::Layout::Rows => {
-            let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(", ")
-                + ", uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]";
+            let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(",\n")
+                + indoc! {",
+                    uint3 group [[threadgroup_position_in_grid]],
+                    uint3 groups [[threadgroups_per_grid]],
+                    uint3 tid [[thread_position_in_threadgroup]],
+                    uint3 size [[threads_per_threadgroup]]"};
             let call = formatdoc!(
                 "
                 {shared}
-                reduce_rows<{op}, {a}>(input, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x{epi});"
+                reduce_rows<{op}, {a}>(input, out, count, chunk, shared,
+                                       group, groups.x, tid.y * size.x + tid.x{epi});"
             );
             (args, call)
         }
@@ -131,10 +136,12 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
                 arg(2, "ulong &chunk"),
                 arg(3, "uint &chunks"),
             ]
-            .join(", ")
-                + ", uint i [[thread_position_in_grid]]";
-            let call =
-                format!("reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i{epi});");
+            .join(",\n")
+                + ",\nuint i [[thread_position_in_grid]]";
+            let call = formatdoc!(
+                "
+                reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i{epi});"
+            );
             (args, call)
         }
         reduce::Layout::Grouped => {
@@ -150,12 +157,18 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
                 arg(8, "uint &lanes"),
                 arg(9, "uint &outputs"),
             ]
-            .join(", ")
-                + ", uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]";
+            .join(",\n")
+                + indoc! {",
+                    uint3 group [[threadgroup_position_in_grid]],
+                    uint3 tid [[thread_position_in_threadgroup]]"};
             let call = formatdoc!(
                 "
                 {shared}
-                reduce_grouped<{op}, {a}>(input, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, lanes, outputs, shared, group.x, tid.y * 16 + tid.x{epi});"
+                reduce_grouped<{op}, {a}>(input, out, init,
+                                          nk, ksizes, kstrides,
+                                          nr, rsizes, rstrides,
+                                          count, lanes, outputs, shared,
+                                          group.x, tid.y * 16 + tid.x{epi});"
             );
             (args, call)
         }
@@ -164,15 +177,29 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
     let last = match (&epilogue, split, reduce::layout(ty, axes)) {
         (Some(_), true, reduce::Layout::Rows) => formatdoc!(
             "
-            kernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant ulong &count [[buffer(2)]], constant ulong &chunk [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]], uint3 tid [[thread_position_in_threadgroup]], uint3 size [[threads_per_threadgroup]]) {{
+            kernel void NAME_final(device const {a} *in [[buffer(0)]],
+                                   device {o} *out [[buffer(1)]],
+                                   constant ulong &count [[buffer(2)]],
+                                   constant ulong &chunk [[buffer(3)]],
+                                   uint3 group [[threadgroup_position_in_grid]],
+                                   uint3 groups [[threadgroups_per_grid]],
+                                   uint3 tid [[thread_position_in_threadgroup]],
+                                   uint3 size [[threads_per_threadgroup]]) {{
                 threadgroup {a} shared[REDUCE_THREADS];
-                reduce_rows<{op}, {a}>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());
+                reduce_rows<{op}, {a}>(in, out, count, chunk, shared,
+                                       group, groups.x, tid.y * size.x + tid.x, NAME_epilogue());
             }}
             "
         ),
         (Some(_), true, reduce::Layout::Cols) => formatdoc!(
             "
-            kernel void NAME_final(device const {a} *in [[buffer(0)]], device {o} *out [[buffer(1)]], constant uint &cols [[buffer(2)]], constant ulong &count [[buffer(3)]], constant ulong &chunk [[buffer(4)]], constant uint &chunks [[buffer(5)]], uint i [[thread_position_in_grid]]) {{
+            kernel void NAME_final(device const {a} *in [[buffer(0)]],
+                                   device {o} *out [[buffer(1)]],
+                                   constant uint &cols [[buffer(2)]],
+                                   constant ulong &count [[buffer(3)]],
+                                   constant ulong &chunk [[buffer(4)]],
+                                   constant uint &chunks [[buffer(5)]],
+                                   uint i [[thread_position_in_grid]]) {{
                 reduce_cols<{op}, {a}>(in, out, cols, count, chunk, chunks, i, NAME_epilogue());
             }}
             "
@@ -184,6 +211,10 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
         io_params(body, by_value, written, &[]).0,
         members.join(", "),
     );
+    let members = match members.len() > 80 {
+        true => format!("\n{}\n", members.replace(", ", ",\n")),
+        false => members,
+    };
     named(formatdoc!(
         "
         {epilogue}struct NAME_input {{
