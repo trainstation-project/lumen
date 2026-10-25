@@ -1,0 +1,90 @@
+{
+ "rows": [
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "linear_cross_entropy: has no Triton kernel on CUDA yet"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-10-25T03:43:49+00:00"
+}

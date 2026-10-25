@@ -1,0 +1,102 @@
+{
+ "rows": [
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "reduce_sum",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "reduce_sum: has no Triton kernel on CUDA yet"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-10-25T03:42:21+00:00"
+}
