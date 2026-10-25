@@ -69,6 +69,7 @@ inline void matmul_sg_impl(device const T *lhs,
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
     constexpr bool HALVES = GROUP > 1 && !INTERLEAVED;
     static_assert(!(HALVES && ROWS) || RA % 2 == 0, "row halves step through rows two at a time");
+    static_assert((ROWS ? BM : BN) % GROUP == 0, "a tile holds whole groups");
     constexpr uint SA = HALVES && ROWS ? RA / 2 : RA;
     const ulong am = HALVES && ROWS ? ((m0 + ar) & 1) * (M / 2) + (m0 + ar) / 2 : m0 + ar;
     device const T *l = lhs + group.z * p[3] + am * sm + ac * sk;

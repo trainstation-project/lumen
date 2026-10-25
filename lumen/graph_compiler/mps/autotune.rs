@@ -131,14 +131,17 @@ impl Kernels for Gemms {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
         };
-        let (plain, paired) = match &step.primitive {
-            Primitive::Fusion { body, .. } => codegen::gemm_dot(body).map_or((false, false), |d| {
-                (
-                    codegen::gemm_plain(body, d),
-                    codegen::gemm_mpp_pair(body, d),
-                )
-            }),
-            _ => (false, false),
+        let (plain, paired, group) = match &step.primitive {
+            Primitive::Fusion { body, .. } => {
+                codegen::gemm_dot(body).map_or((false, false, None), |d| {
+                    (
+                        codegen::gemm_plain(body, d),
+                        codegen::gemm_mpp_pair(body, d),
+                        codegen::gemm_group(body, d),
+                    )
+                })
+            }
+            _ => (false, false, None),
         };
         let f32 = matches!(
             dot,
@@ -181,6 +184,7 @@ impl Kernels for Gemms {
             .iter()
             .chain(&mpp)
             .chain(skinny)
+            .filter(|c| group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0))
             .copied()
             .collect()
     }

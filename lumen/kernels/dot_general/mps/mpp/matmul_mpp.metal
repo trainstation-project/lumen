@@ -51,6 +51,7 @@ inline void matmul_mpp(
     device const T *lhs, device const T *rhs, device Out *out, constant ulong *p, uint3 group, Epi epi = Epi()) {
     using namespace mpp::tensor_ops;
     using extents = dextents<int32_t, 2>;
+    static_assert(BN % GROUP == 0, "a tile holds whole groups");
 
     // The host supplies [M, N, K] followed by batch and logical dimension strides.
     const int M = int(p[0]), N = int(p[1]), K = int(p[2]);

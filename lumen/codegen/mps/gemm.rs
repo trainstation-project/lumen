@@ -201,6 +201,14 @@ pub(super) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
         .collect()
 }
 
+pub(crate) fn gemm_group(body: &Graph, dot: &Node) -> Option<(usize, bool)> {
+    let rank = body.type_of(dot.output).shape.len();
+    match gemm_pair(body, dot) {
+        Some(_) => Some((2, false)),
+        None => gemm_regions(body, dot).map(|r| (ROW_COLUMNS, r[0].axis + 1 != rank)),
+    }
+}
+
 pub(crate) fn gemm_plain(body: &Graph, dot: &Node) -> bool {
     gemm_regions(body, dot).is_none() && gemm_expanded(body, dot).is_none()
 }
