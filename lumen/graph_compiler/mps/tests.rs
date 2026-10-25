@@ -2439,60 +2439,11 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
             flags(false, true, true, false, false),
         ),
     ];
-    let split = [
-        (
-            "regions along rows",
-            regions(0, 64, 64, 256, 2048),
-            flags(true, false, true, true, true),
-        ),
-        (
-            "regions along columns",
-            regions(1, 64, 64, 192, 2048),
-            flags(true, false, true, true, false),
-        ),
-        (
-            "row halves",
-            row_halves(96, 256, 2048),
-            flags(true, false, false, true, true),
-        ),
-        (
-            "column halves",
-            pair(192, 128, 2048, false),
-            flags(true, false, false, false, false),
-        ),
-        (
-            "interleaved pairs",
-            pair(192, 128, 2048, true),
-            flags(true, false, true, false, false),
-        ),
-        (
-            "expanded side by side",
-            expanded(192, 256, 2048, 0),
-            flags(false, true, false, false, true),
-        ),
-        (
-            "expanded row pairs",
-            expanded(192, 256, 2048, 1),
-            flags(false, true, false, false, false),
-        ),
-        (
-            "expanded column pairs",
-            expanded(192, 256, 2048, 2),
-            flags(false, true, true, false, false),
-        ),
-    ];
     let mut options = crate::graph_compiler::Options::default();
     options.config.mps.autotune = false;
     options.config.mps.split_k = false;
-    for (algorithm, cases) in [
-        (Algorithm::Mpp, large),
-        (Algorithm::Skinny, skinny),
-        (Algorithm::Split { chunks: 0 }, split),
-    ] {
-        let tried = |c: &GemmConfig| match algorithm {
-            Algorithm::Split { .. } => matches!(c.algorithm, Algorithm::Split { .. }),
-            _ => c.algorithm == algorithm,
-        };
+    for (algorithm, cases) in [(Algorithm::Mpp, large), (Algorithm::Skinny, skinny)] {
+        let tried = |c: &GemmConfig| c.algorithm == algorithm;
         for (case, g, want) in cases {
             let inputs: Vec<Tensor> = g
                 .inputs()

@@ -3,7 +3,6 @@ pub(crate) enum Algorithm {
     Tiled,
     Mpp,
     Skinny,
-    Split { chunks: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

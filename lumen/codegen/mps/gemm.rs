@@ -344,17 +344,6 @@ pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
     }
 }
 
-fn variant_params(body: &Graph, by_value: &[bool], w: &str, c: GemmConfig) -> (String, usize) {
-    let extra = match c.algorithm {
-        Algorithm::Split { .. } => vec![
-            "device float *partials".to_owned(),
-            "device atomic_uint *counters".to_owned(),
-        ],
-        _ => Vec::new(),
-    };
-    io_params(body, by_value, w, &extra)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn staged_call(
     body: &Graph,
@@ -417,20 +406,6 @@ fn staged_call(
                 "
             ),
         },
-        Algorithm::Split { chunks } => {
-            let (cols, prefetch) = (c.cols, c.prefetch);
-            formatdoc!(
-                "
-                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, float, {simds})], rt[{bk} * {bn}];
-                threadgroup float tile[{bm} * {bn}], stage[{simds} * 64];
-                threadgroup uint arrived;
-                matmul_split<{t}, {o}, {bm}, {bn}, {bk}, {threads}, {cols}, {prefetch}, {chunks}, {w}, NAME_epi, {template}>(
-                {lhs}, {rhs}, out, p, partials, counters, lt, rt, tile, stage, &arrived,
-                group, tid.y * 16 + tid.x, sg, lane,
-                NAME_epi{{{members}}});
-                "
-            )
-        }
         Algorithm::Tiled => unreachable!("the tiled kernel stores from its fragments"),
     }
 }
@@ -664,7 +639,7 @@ pub(super) fn gemm_regions_kernel(
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
-        let (params, first) = variant_params(body, by_value, w, c);
+        let (params, first) = io_params(body, by_value, w, &[]);
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
@@ -841,7 +816,7 @@ fn gemm_kernel_with(
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
-        let (params, first) = variant_params(body, by_value, w, c);
+        let (params, first) = io_params(body, by_value, w, &[]);
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "

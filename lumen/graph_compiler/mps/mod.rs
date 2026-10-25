@@ -68,7 +68,6 @@ const PRELUDE: &str = concat!(
     include_str!("../../kernels/dot_general/mps/integer/matmul_wide.metal"),
     include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
     include_str!("../../kernels/dot_general/mps/tiled/matmul_atomic.metal"),
-    include_str!("../../kernels/dot_general/mps/tiled/matmul_split.metal"),
     include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
     include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
@@ -739,32 +738,6 @@ pub(super) fn encode_with(
         buffers.push(output.cast_const());
         buffers.extend(extra);
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
-        if let Some((tuned, c)) = &tuned
-            && let crate::kernels::dot_general::mps::Algorithm::Split { chunks } = c.algorithm
-        {
-            let [m, n, k] = [plan.p[0], plan.p[1], plan.p[2]];
-            let (partials, bytes) = split_k::split_scratch(m, n);
-            let counters = scratch.wrapping_add(partials).cast_const();
-            let words = (bytes - partials) / 4;
-            let zero = [
-                element_arg(DType::F32, Scalar::Float(0.0)),
-                u32_arg(words as u32),
-            ];
-            let fill = elementwise_grid(words, DType::F32);
-            let label = "full (split-K counters)";
-            launch("fill_4", &[counters], &zero, fill, Vec::new(), label)?;
-            let mut p = plan.p.to_vec();
-            let chunk = k / chunks;
-            (p[2], p[3], p[6]) = (chunk, chunk * p[5], chunk * p[7]);
-            buffers.push(scratch.cast_const());
-            buffers.push(counters);
-            let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(p)]).collect();
-            let grid = Grid::GroupsOf {
-                groups: [n.div_ceil(c.bn), m.div_ceil(c.bm), chunks],
-                threads: c.threads,
-            };
-            return launch(tuned, &buffers, &args, grid, keep, step.label);
-        }
         if let Some((offsets, _)) = codegen::tile_scratch(body) {
             let at = |o: usize| scratch.wrapping_add(o).cast_const();
             let (dotv, tiles): (*const u8, Vec<*const u8>) = (
@@ -892,11 +865,6 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
     }
     if split_k::atomic_dot(body).is_some() {
         return 0;
-    }
-    if launch_of(body) == Launch::Gemm
-        && let Some((m, n, _)) = split_k::gemm_splits(body)
-    {
-        return split_k::split_scratch(m, n).1;
     }
     match codegen::reduction_root(body).filter(|r| {
         matches!(

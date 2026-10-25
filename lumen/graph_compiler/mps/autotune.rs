@@ -82,12 +82,6 @@ impl Gemms {
     }
 }
 
-fn split_bytes(c: &GemmConfig, operand: usize) -> usize {
-    let simds = c.threads / 32;
-    let lhs = (c.bm * c.bk).max(simds * 64 * 4 / operand) * operand;
-    lhs + c.bk * c.bn * operand + c.bm * c.bn * 4 + simds * 64 * 4 + 4
-}
-
 const ROW_TILES: GemmConfig = GemmConfig {
     bm: codegen::ROW_TILE,
     bn: codegen::ROW_TILE,
@@ -155,24 +149,7 @@ impl Kernels for Gemms {
         );
         let skinny = f32 && gemm::skinny(dot, lhs, rhs, out);
         let large = out.numel() >= TUNED_OUTPUTS;
-        let split: Vec<GemmConfig> = match super::split_k::gemm_splits(body) {
-            Some((_, _, chunks)) if codegen::tile_scratch(body).is_none() => chunks
-                .into_iter()
-                .flat_map(|chunks| {
-                    gemm::configs()
-                        .iter()
-                        .filter(|c| {
-                            split_bytes(c, lhs.dtype.size_of()) <= gemm::MAX_THREADGROUP_BYTES
-                        })
-                        .map(move |&c| GemmConfig {
-                            algorithm: gemm::Algorithm::Split { chunks },
-                            ..c
-                        })
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        if !tiled_gemm(step) || !(large || skinny || !split.is_empty()) {
+        if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
         let stage = |c: &GemmConfig| c.threads / 32 * 64 * 4;
@@ -226,7 +203,6 @@ impl Kernels for Gemms {
             .iter()
             .chain(&mpp)
             .chain(&skinny)
-            .chain(&split)
             .copied()
             .collect()
     }
