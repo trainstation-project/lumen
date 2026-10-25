@@ -83,13 +83,13 @@ class AdamW(lumen.nn.Module):
     params: list
     m: list
     v: list
-    t: float
+    t: int
     lr: float
     betas: tuple
     eps: float
     weight_decay: float
 
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0.0):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0):
         params = list(params)
         fields = dict(
             params=params,
@@ -110,7 +110,7 @@ class AdamW(lumen.nn.Module):
 
     def step(self):
         b1, b2 = self.betas
-        self.t.copy_(self.t + 1.0)
+        self.t = self.t + 1
         c1 = 1.0 / (1.0 - F.exp(self.t * F.log(b1)))
         c2 = 1.0 / (1.0 - F.exp(self.t * F.log(b2)))
         for p, m, v in zip(self.params, self.m, self.v):
@@ -312,3 +312,36 @@ def test_transformer_train_step_matches_cpu(chunk):
         else:
             error = np.linalg.norm(got - want) / np.linalg.norm(want)
             assert error <= 5e-2, (name, error)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
+def test_transformer_optimizer_scalars_update(device):
+    """The optimizer's scalars across training steps: its step count ``t``
+    (an int field, ``self.t = self.t + 1`` in the step) is written back
+    after each step as an int, computed on the host (no read back from the
+    device); its learning rate (a float field) is a runtime scalar, so
+    setting it between steps runs the same plan (no trace again), with the
+    new value: at 0, the weights stay where they are."""
+    traces = []
+
+    def step(model, opt, x, y):
+        traces.append(1)
+        return train_step(model, opt, x, y)
+
+    model = _model()
+    opt = AdamW(model.parameters(), lr=LR, weight_decay=0.0)
+    ids_meta = meta(BATCH, SEQ, dtype="int64")
+    f = _compiled(step, device, model, opt, ids_meta, ids_meta)
+    model.load_state_dict({name: lumen.from_numpy(v) for name, v in _weights(model).items()})
+    ids = _ids()
+    x, y = lumen.from_numpy(ids), lumen.from_numpy((ids + 1) % VOCAB)
+    for k in range(1, 4):
+        f(model, opt, x, y)
+        assert opt.t == k and type(opt.t) is int
+    compiled = len(traces)
+    opt.lr = 0.0
+    before = {name: lumen.to_numpy(t._placed(device)).copy() for name, t in model.named_parameters()}
+    f(model, opt, x, y)
+    assert len(traces) == compiled and opt.t == 4
+    for name, t in model.named_parameters():
+        np.testing.assert_array_equal(lumen.to_numpy(t._placed(device)), before[name], err_msg=name)

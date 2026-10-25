@@ -24,6 +24,7 @@ __all__ = [
 _TRACES = []
 _RNG = []
 _DEVICES = []
+_HOSTS = []
 _SCOPES = []
 _SCOPE_OF = []
 _CALLS = itertools.count()
@@ -155,11 +156,12 @@ def producer(var):
 
 
 @contextlib.contextmanager
-def tracing(graph, device=None, sources=None, tape=None, leaves=None):
+def tracing(graph, device=None, sources=None, tape=None, leaves=None, host=None):
     """Ops record into ``graph`` (a ``Graph``, or anything answering as one:
     a ``lumen.pallas`` kernel) inside: a trace of its own, on ``device``,
     its values' source lines in ``sources``, its nodes on ``tape`` (for
-    ``.backward()`` of ``leaves``). Yields its random state."""
+    ``.backward()`` of ``leaves``), its scalars' math on ``host`` (a
+    ``_Host``, or None). Yields its random state."""
     tape = [] if tape is None else tape
     rng = {"state": None, "drawn": 0}
     _TRACES.append(graph)
@@ -171,6 +173,7 @@ def tracing(graph, device=None, sources=None, tape=None, leaves=None):
     _PRODUCERS.append({})
     _TAPES.append(tape)
     _BACKWARD.append((tape, [] if leaves is None else leaves))
+    _HOSTS.append(host)
     try:
         yield rng
     finally:
@@ -183,6 +186,7 @@ def tracing(graph, device=None, sources=None, tape=None, leaves=None):
         _PRODUCERS.pop()
         _TAPES.pop()
         _BACKWARD.pop()
+        _HOSTS.pop()
 
 
 def compiler_config():
@@ -212,64 +216,201 @@ def _weights(args):
     return list(params.values())
 
 
-def _scalars(args):
-    """The runtime scalars of ``args``: the float arguments, then the float
-    fields of the module arguments, in order."""
-    floats = [a for a in args if isinstance(a, float)]
-    return floats + [v for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
+def _runtime(dynamic):
+    """Which scalars are runtime: floats and numpy scalars, and the ints and
+    bools at the slots ``(argument, path)`` in ``dynamic``."""
+
+    def runtime(slot, value):
+        return type(value) not in (int, bool) or slot in dynamic
+
+    return runtime
 
 
-def _trace(fn, args, device):
+def _slots(args):
+    """``(slot, value)`` for each scalar of ``args`` (``nn.is_scalar``), its
+    slot ``(argument, path)``, in order."""
+    return [((i, path), nn.at(a, path)) for i, a in enumerate(args) for path in nn.scalar_paths(a)]
+
+
+def _runtime_slots(args, runtime):
+    """``(slot, value)`` for each runtime scalar of ``args``, in order: the
+    plan's scalar inputs."""
+    return [(slot, v) for slot, v in _slots(args) if runtime(slot, v)]
+
+
+def _scalar_dtype(device, value, portable=False):
+    """The dtype of a runtime scalar of ``value`` on ``device``: a bool's,
+    a numpy scalar's own, an int's int64, a float's float64; 64-bit types
+    32-bit where the device has none (MPS's float64, TPU's 64-bit types),
+    and float64 in a ``portable`` graph (the meta device's, ``make_graph``'s:
+    compiled for any device)."""
+    import numpy as np
+
+    kind = "meta" if portable else _device_type(device)
+    if isinstance(value, (bool, np.bool_)):
+        return "bool"
+    dtype = value.dtype.name if isinstance(value, np.generic) else "int64" if isinstance(value, int) else "float64"
+    narrow = {"float64": kind in ("mps", "tpu", "meta"), "int64": kind == "tpu", "uint64": kind == "tpu"}
+    return {"float64": "float32", "int64": "int32", "uint64": "uint32"}[dtype] if narrow.get(dtype) else dtype
+
+
+def _plain(value):
+    """A numpy scalar's Python value; any other scalar as it is."""
+    return value.item() if hasattr(value, "item") and not isinstance(value, (int, float, bool)) else value
+
+
+def _python(value, like):
+    """``value`` (a 0-d tensor's) as a scalar of ``like``'s type."""
+    (v,) = value.tolist()
+    return type(like)(v)
+
+
+class _Host:
+    """The host part of a trace: the ops of 0-d values computed from runtime
+    scalars and constants alone (a step count's ``t + 1``, a bias
+    correction), recorded into ``graph`` to run on the CPU each call, before
+    the device plan. A device op reading one of its values reads it as a
+    scalar input of the device graph, passed by value (``imported``): the
+    scalars' own inputs, or values it computes (``hoisted``)."""
+
+    def __init__(self, device_graph, device):
+        self.graph = Graph()
+        self.device_graph, self.device = device_graph, device
+        self.imports, self.hoisted, self.constants = {}, [], {}
+
+    def owns(self, x):
+        return isinstance(x, TracedTensor) and x.graph is self.graph
+
+    def precreate(self, var, dtype, shape):
+        """The device input for host value ``var``, created now."""
+        t = TracedTensor(self.device_graph, self.device_graph.input(dtype, list(shape)), self.device)
+        self.imports[var] = t
+        return t
+
+    def imported(self, x):
+        """Host value ``x`` as a value of the device graph: its input."""
+        t = self.imports.get(x.var)
+        if t is None:
+            t = self.precreate(x.var, x.dtype, x.shape)
+            self.hoisted.append(x.var)
+        t.weak = x.weak
+        return t
+
+    def replay(self, x):
+        """Constant ``x`` of the device graph (``recipe``) recorded again in
+        the host graph: its value there."""
+        v = self.constants.get(x.var)
+        if v is None:
+            name, params, operands = x.recipe
+            v = self.graph.apply(name, [self.replay(o) for o in operands], params)
+            self.constants[x.var] = v
+        return v
+
+    def value(self, x):
+        """``x`` (a host value or a constant) as a value of the host graph."""
+        return x.var if self.owns(x) else self.replay(x)
+
+    def bind(self, name, operands, params):
+        """``name`` of ``operands`` recorded in the host graph if they are
+        its values and constants, 0-d, and so is the result; else None."""
+        if not any(self.owns(x) for x in operands):
+            return None
+        constant = lambda x: isinstance(x, TracedTensor) and (self.owns(x) or x.recipe is not None)  # noqa: E731
+        if not all(constant(x) and not x.shape for x in operands):
+            return None
+        var = self.graph.apply(name, [self.value(x) for x in operands], params)
+        if self.graph.type_of(var)[1]:
+            return None
+        return TracedTensor(self.graph, var, self.device)
+
+
+def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     """``fn`` traced on ``args``: the graph, and what ``fn`` returned (a
     traced tensor, or modules, lists and tuples of them: the structure the
     graph's outputs, its traced tensors in order, are returned in). The graph's inputs
-    are the tensor arguments, then the runtime scalars (``_scalars``: 0-d
-    float32 inputs, weakly typed: each takes its tensor operand's dtype),
-    then the weights of the module arguments (``_weights``), each a whole
-    meta tensor, then, if ``fn`` draws random numbers (``lumen.random``),
-    the random state (the seed and the stream's position, uint64 runtime
-    scalars); the numbers it draws are
-    returned last (None if none). Precision warnings point at the line computing the value
-    they are about."""
+    are the tensor arguments, then the runtime scalars (``_runtime_slots``
+    of ``runtime``: 0-d inputs of ``_scalar_dtype`` (``portable``), weakly typed: each
+    takes its tensor operand's dtype; a module's scalar field assigned in
+    ``fn`` written back), then the weights of the module arguments
+    (``_weights``), each a whole meta tensor, then, if ``fn`` draws random
+    numbers (``lumen.random``), the random state (the seed and the stream's
+    position, uint64 runtime scalars), and the host values device ops read
+    (``hoisted``), in the order they are first read; the numbers it draws
+    are returned, then the static scalars ``fn`` assigned (``(slot,
+    value)``), then each input's kind and index in its kind (``layout``:
+    ``arg``, ``scalar``, ``hoisted``, ``weight``, ``rng``).
+
+    With ``split``, the scalars' math runs on the host (``_Host``): the host
+    graph computes the hoisted values and the scalars ``fn`` assigns from
+    scalars alone, from the scalars, each call; without (``make_graph``),
+    in the one graph. Precision warnings point at the line computing the
+    value they are about."""
     graph = Graph()
     traced = [TracedTensor(graph, graph.input(a.dtype, a.shape), device) if isinstance(a, Tensor) else a for a in args]
-
-    def scalar(_):
-        t = TracedTensor(graph, graph.input("float32", []), device)
-        t.weak = True
-        return t
-
-    traced = [scalar(a) if isinstance(a, float) else a for a in traced]
-    scalars = [scalar(v) for a in args if isinstance(a, nn.Module) for v in nn._floats(a)]
+    runtime_slots = _runtime_slots(args, runtime)
+    host = _Host(graph, device) if split else None
+    kinds = {t.var: ("arg", k) for k, t in enumerate(t for t in traced if isinstance(t, TracedTensor))}
+    inputs = {}
+    for k, (slot, value) in enumerate(runtime_slots):
+        dtype = _scalar_dtype(device, value, portable)
+        owner = graph if host is None else host.graph
+        inputs[slot] = TracedTensor(owner, owner.input(dtype, []), device)
+        inputs[slot].weak = True
+        kinds[inputs[slot].var if host is None else host.precreate(inputs[slot].var, dtype, ()).var] = ("scalar", k)
     weights = {}
     for t in _weights(args):
         weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape), device)
-    module_scalars = iter(scalars)
-    traced = [
-        (
-            nn.map_tensors(a, lambda t: weights[t.storage_id], lambda _: next(module_scalars))
-            if isinstance(a, nn.Module)
-            else a
-        )
-        for a in traced
-    ]
+        kinds[weights[t.storage_id].var] = ("weight", len(weights) - 1)
+
+    def mapped(i, a):
+        if isinstance(a, TracedTensor):
+            return a
+        return nn.map_tensors(a, lambda t: weights.get(t.storage_id, t), lambda path, v: inputs.get((i, path), v))
+
+    traced = [mapped(i, a) for i, a in enumerate(traced)]
+    scalars = [inputs[slot] for slot, _ in runtime_slots]
 
     sources = {}
     arguments = [t for t in traced if isinstance(t, TracedTensor) and not t.weak]
     assigned = {sid: t.var for sid, t in weights.items()}
-    assigned_scalars = [t.var for t in scalars]
+    assigned_scalars = [(t.graph, t.var) for t in scalars]
     assigned_arguments = [t.var for t in arguments]
     tape = []
     leaves = [t for t in traced if isinstance(t, TracedTensor) and not t.weak] + list(weights.values())
 
-    with tracing(graph, device, sources, tape, leaves) as rng:
+    with tracing(graph, device, sources, tape, leaves, host) as rng:
         out = fn(*traced)
+        changed = []
+        positions = {slot: k for k, (slot, _) in enumerate(runtime_slots)}
+        for slot, value in _slots(args):
+            i, path = slot
+            if not path:
+                continue
+            now = nn.at(traced[i], path)
+            k = positions.get(slot)
+            if k is None:
+                if isinstance(now, TracedTensor) or type(now) is not type(value) or now != value:
+                    changed.append((slot, now))
+            elif now is not scalars[k]:
+                dtype = _scalar_dtype(device, value, portable)
+                now = _as_tensor(now, dtype, "a scalar field's value")
+                scalars[k] = now if now.dtype == dtype else now.to(dtype)
+        if host is not None:
+            out = _tree_map(lambda o: host.imported(o) if host.owns(o) else o, out)
+    if host is not None:
+        kinds.update({host.imports[v].var: ("hoisted", j) for j, v in enumerate(host.hoisted)})
+    kinds.update({t.var: ("rng", k) for k, t in enumerate(rng["state"] or ())})
+    layout = [kinds[v] for v in graph.inputs()]
 
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
-    written_scalars = [k for k, t in enumerate(scalars) if t.var != assigned_scalars[k]]
+    written_scalars = [k for k, t in enumerate(scalars) if (t.graph, t.var) != assigned_scalars[k]]
+    on_host = [host is not None and (host.owns(scalars[k]) or scalars[k].recipe is not None) for k in written_scalars]
+    host_written = [k for k, h in zip(written_scalars, on_host) if h]
+    written_scalars = [k for k, h in zip(written_scalars, on_host) if not h]
+    written_slots = [runtime_slots[k][0] for k in written_scalars]
     written_arguments = [k for k, t in enumerate(arguments) if t.var != assigned_arguments[k]]
     graph.set_outputs(
         [o.var for o in outputs]
@@ -277,6 +418,11 @@ def _trace(fn, args, device):
         + [scalars[k].var for k in written_scalars]
         + [arguments[k].var for k in written_arguments]
     )
+    host_part = (None, 0, [])
+    if host is not None and (host.hoisted or host_written):
+        host.graph.set_outputs(host.hoisted + [host.value(scalars[k]) for k in host_written])
+        host.graph.prune()
+        host_part = (host.graph, len(host.hoisted), [runtime_slots[k][0] for k in host_written])
     renumbered = graph.prune()
     sources = {renumbered[v]: s for v, s in sources.items() if renumbered[v] is not None}
     grads = [t.grad for t in leaves if t.grad is not None]
@@ -295,7 +441,7 @@ def _trace(fn, args, device):
         else:
             warnings.warn(message)
     drawn = rng["drawn"] if rng["state"] is not None else None
-    return graph, out, (written, written_scalars, written_arguments), drawn
+    return graph, out, (written, written_slots, written_arguments, host_part), drawn, changed, layout
 
 
 def _lift(x):
@@ -308,17 +454,54 @@ def _lift(x):
     return x
 
 
-def _signature(args):
+def _signature(args, runtime):
+    """What a plan for ``args`` depends on: the tensors' types, the
+    modules' and containers' structure (``nn.structure``: a runtime
+    scalar's type, a static one's value), which weights are shared, and the
+    other arguments' values."""
     ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
     shared = tuple(ids.index(i) for i in ids)
-    return tuple(
-        (
-            (a.dtype, tuple(a.shape))
-            if isinstance(a, Tensor)
-            else nn.structure(a) if isinstance(a, (nn.Module, float)) else ("static", a)
-        )
-        for a in args
-    ) + (shared,)
+
+    def of(i, a):
+        if isinstance(a, Tensor):
+            return (a.dtype, tuple(a.shape))
+        if nn.is_scalar(a) or isinstance(a, (nn.Module, list, tuple)):
+            return nn.structure(a, lambda path, v: runtime((i, path), v))
+        return ("static", a)
+
+    return tuple(of(i, a) for i, a in enumerate(args)) + (shared,)
+
+
+def _settled(fn, args, device, dynamic, pinned, proven, portable=False, split=True):
+    """``fn`` traced on ``args`` (``_trace``) with the ints and bools at the
+    slots in ``dynamic`` runtime, traced again until it settles: one ``fn``
+    assigns is made runtime, written back each call; one that cannot be
+    (used as a shape or a condition, which a runtime scalar cannot be) is
+    ``pinned`` static, its new value baked in. ``proven``: the slots traced
+    runtime before. With ``split``, the scalars' math runs on the host
+    (``_trace``)."""
+    while True:
+        try:
+            result = _trace(fn, args, device, _runtime(dynamic), portable, split)
+        except Exception:
+            fresh = dynamic - proven
+            if not fresh:
+                raise
+            dynamic -= fresh
+            pinned |= fresh
+            continue
+        need = {slot for slot, _ in result[4] if slot not in pinned}
+        if need:
+            dynamic |= need
+            continue
+        for (i, path), now in result[4]:
+            if isinstance(now, TracedTensor):
+                where = ".".join(map(str, path))
+                raise TypeError(
+                    f"argument {i}'s {where} is static (a shape or a condition): it cannot be assigned a traced value"
+                )
+        proven |= dynamic
+        return result
 
 
 _flags = [None, None]
@@ -400,61 +583,84 @@ def compile(fn, device=None):
     plans = {}
     latest = []
     named = None if device is None else _device_name(device)
+    dynamic, pinned, proven, seen = set(), set(), set(), {}
 
     def prepare(args):
         """The plan for ``args`` and its inputs: the graph, the plan, its
         workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = named or _device(args, None)
-        key = _signature(args), target, _compiler_flags()
-        tensors = [a for a in args if isinstance(a, Tensor)]
-        scalars = list(range(len(tensors), len(tensors) + len(_scalars(args))))
-        tensors += [Tensor.full([], v, "float32") for v in _scalars(args)]
+        for slot, value in _slots(args):
+            if type(value) in (int, bool) and slot not in dynamic and slot not in pinned:
+                if seen.setdefault(slot, (type(value), value)) != (type(value), value):
+                    dynamic.add(slot)
+        key = _signature(args, _runtime(dynamic)), target, _compiler_flags()
+        result = None
         if key not in plans:
-            plans[key] = (*_trace(fn, args, target), [], len(tensors), scalars)
-        graph, out, _, drawn, entries, _, _ = plans[key]
+            result = _settled(fn, args, target, dynamic, pinned, proven)
+            key = _signature(args, _runtime(dynamic)), target, _compiler_flags()
+        if result is not None:
+            plans[key] = (*result, [])
+        graph, out, written_all, drawn, _, layout, entries = plans[key]
+        host_graph, n_hoisted, host_slots = written_all[3]
+        runtime_slots = _runtime_slots(args, _runtime(dynamic))
+        raw = [Tensor.full([], _plain(v), _scalar_dtype(target, v)) for _, v in runtime_slots]
+        pending[:] = []
+        hoisted = []
+        if host_graph is not None:
+            if key not in hosts:
+                hosts[key] = Plan(host_graph, "cpu")
+            values = hosts[key].run(raw)
+            hoisted, pending[:] = values[:n_hoisted], list(zip(host_slots, values[n_hoisted:]))
         from lumen import random
 
-        rng = random._state() if drawn is not None else []
         weights = _weights(args)
+        of = {
+            "arg": [a for a in args if isinstance(a, Tensor)],
+            "scalar": raw,
+            "hoisted": hoisted,
+            "weight": weights,
+            "rng": random._state() if drawn is not None else [],
+        }
+        logical = [of[kind][k] for kind, k in layout]
         latest[:] = [key]
         if _device_type(target) == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
-            return graph, entries[0][0], None, out, tensors + weights + rng
-        params = list(range(len(tensors), len(tensors) + len(weights)))
-        start = len(tensors) + len(weights)
-        scalars = scalars + list(range(start, start + len(rng)))
-        inputs = tensors + weights
+            return graph, entries[0][0], None, out, logical
+        params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
+        scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
 
         def inputs_for(plan):
             blocks = []
             for (positions, dimension), regions in zip(plan.packed, plan.interleaved):
-                block = _pack([inputs[i] for i in positions], dimension, target, regions)
+                block = _pack([logical[i] for i in positions], dimension, target, regions)
                 if block is None:
                     return None
                 blocks.append(block)
-            return tensors + [w._placed(target) for w in weights] + rng + blocks
+            return [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
 
         for plan, workspace in entries:
-            placed = inputs_for(plan)
-            if placed is not None:
-                return graph, plan, workspace, out, placed
+            inputs = inputs_for(plan)
+            if inputs is not None:
+                return graph, plan, workspace, out, inputs
         packable = params if not entries else []
-        written, written_scalars, written_arguments = plans[key][2]
+        written, written_scalars, written_arguments, _ = written_all
         returned = len(graph.outputs()) - len(written) - len(written_scalars) - len(written_arguments)
-        donate = [(len(tensors) + w, returned + j) for j, w in enumerate(written)]
+        donate = [(params[w], returned + j) for j, w in enumerate(written)]
         plan = Plan(graph, target, donate_into=donate, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)
         entries.append((plan, workspace))
-        placed = inputs_for(plan)
-        if placed is None:
+        inputs = inputs_for(plan)
+        if inputs is None:
             plan = Plan(graph, target, donate_into=donate, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
-            placed = inputs_for(plan)
-        return graph, plan, workspace, out, placed
+            inputs = inputs_for(plan)
+        return graph, plan, workspace, out, inputs
 
     baked = {}
+
+    hosts, pending = {}, []
 
     fast = {}
 
@@ -499,15 +705,16 @@ def compile(fn, device=None):
 
         result = _tree_map(result_of, out)
         if ran and all(type(a) is Tensor for a in args):
-            written, written_scalars, written_arguments = plans[latest[0]][2]
-            plain = not (written or written_scalars or written_arguments or plans[latest[0]][3] is not None)
+            written, written_scalars, written_arguments, host = plans[latest[0]][2]
+            drawn = plans[latest[0]][3]
+            plain = host[0] is None and not (written or written_scalars or written_arguments or drawn is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
                 signature = tuple([a._signature for a in args])
                 lone = isinstance(out, TracedTensor) and to_host == [False]
                 fast[signature, _compiler_flags()] = (plan, workspace, out, None if lone else to_host, latest[0])
         if ran:
             weights = _weights(args)
-            written, written_scalars, written_arguments = plans[latest[0]][2]
+            written, written_scalars, written_arguments, _ = plans[latest[0]][2]
             target = latest[0][1]
             for k, value in zip(written, outputs):
                 w = weights[k]
@@ -516,9 +723,12 @@ def compile(fn, device=None):
                     w.copy_(value)
                 elif w._is_parameter:
                     w._mark_written()
-            for k, value in zip(written_scalars, outputs):
-                (v,) = value.tolist()
-                nn._set_float(args, k, float(v))
+            for (i, path), value in zip(written_scalars, outputs):
+                nn.assign(args[i], path, _python(value, nn.at(args[i], path)))
+            for (i, path), value in plans[latest[0]][4]:
+                nn.assign(args[i], path, value)
+            for (i, path), value in pending:
+                nn.assign(args[i], path, _python(value, nn.at(args[i], path)))
             arguments = [a for a in args if isinstance(a, Tensor)]
             for k, value in zip(written_arguments, outputs):
                 arguments[k].copy_(value)
@@ -565,12 +775,11 @@ def compile(fn, device=None):
         elif not latest:
             raise RuntimeError(f"{name}: call {fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = latest
-        graph, _, _, drawn, _, n_tensors, scalars = plans[latest[0]]
+        graph, _, _, _, _, layout, _ = plans[latest[0]]
         target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
         types = [graph.type_of(v) for v in graph.inputs()]
-        n_rng = 2 if drawn is not None else 0
-        params = list(range(n_tensors, len(types) - n_rng))
-        scalars = scalars + list(range(len(types) - n_rng, len(types)))
+        params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
+        scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
         plan = Plan(graph, target, parameters=params, packable=params, scalars=scalars)
         inputs = [Tensor.ones(list(shape), dtype, target) for dtype, shape in types]
         for positions, dimension in plan.packed:
@@ -589,11 +798,12 @@ def compile(fn, device=None):
 def make_graph(fn):
     """A function returning the graph ``fn`` traces to on the given
     arguments (``jax.make_jaxpr``), which may be meta tensors; ``print`` it
-    to read it."""
+    to read it. Its runtime scalars are portable (``_scalar_dtype``): the
+    graph compiles for any device."""
 
     @functools.wraps(fn)
     def graph(*args):
-        return _trace(fn, args, _device(args, None))[0]
+        return _settled(fn, args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
 
     return graph
 
@@ -616,7 +826,8 @@ def _require_float(x, op):
 
 def _common_dtype(op, operands):
     """The dtype the tensors among ``operands`` share (weakly typed ones,
-    runtime scalars, take the others')."""
+    runtime scalars, take the others'; of weakly typed ones alone, the
+    widest float's, else int's, else bool's: ``step * log(beta)``)."""
     tensors = [x for x in map(_lift, operands) if isinstance(x, TracedTensor)]
     dtypes = sorted({x.dtype for x in tensors if not x.weak} or {x.dtype for x in tensors})
     if not dtypes:
@@ -624,6 +835,9 @@ def _common_dtype(op, operands):
             if hasattr(x, "_not_an_operand"):
                 raise TypeError(x._not_an_operand(op))
         raise TypeError(f"{op} needs a tensor operand")
+    if len(dtypes) > 1 and all(x.weak for x in tensors):
+        width = lambda d: int("".join(c for c in d if c.isdigit()) or 8)  # noqa: E731
+        return max(dtypes, key=lambda d: ("float" in d, "int" in d, width(d)))
     if len(dtypes) > 1:
         raise TypeError(f"{op} got tensors of dtypes {' and '.join(dtypes)}: convert them to one with .to(dtype)")
     return dtypes[0]
@@ -807,8 +1021,11 @@ def _true_div(x, y):
         r = _true_div(1.0, y)
         r.weak = True
         return _elementwise(prims.mul, _require_float(x, "true division (/)"), r)
+    tensors = [v for v in (x, y) if isinstance(v, TracedTensor)]
     x, y = _operands("div", x, y)
-    return prims.div(_require_float(x, "true division (/)"), y)
+    out = prims.div(_require_float(x, "true division (/)"), y)
+    out.weak = bool(tensors) and all(v.weak for v in tensors)
+    return out
 
 
 def _view(x, out, op):
@@ -896,7 +1113,20 @@ class TracedTensor:
     function passed to ``lumen.compile``. It has a dtype and shape but no
     data; its methods record primitives into the graph."""
 
-    __slots__ = ("graph", "_var", "dtype", "shape", "weak", "grad", "_base", "_ops", "_seen", "_version", "device")
+    __slots__ = (
+        "graph",
+        "_var",
+        "dtype",
+        "shape",
+        "weak",
+        "grad",
+        "_base",
+        "_ops",
+        "_seen",
+        "_version",
+        "device",
+        "recipe",
+    )
 
     def __init__(self, graph, var, device=None):
         self.graph = graph
@@ -904,6 +1134,7 @@ class TracedTensor:
         self._base, self._ops, self._seen, self._version = None, (), 0, 0
         self.weak = False
         self.grad = None
+        self.recipe = None
         self.device = device or (_DEVICES[-1] if _DEVICES else None)
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
@@ -1006,7 +1237,8 @@ class TracedTensor:
             raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
         base = self._base
         if base is None:
-            self._var = value.var
+            self.graph, self._var = value.graph, value.var
+            self.recipe = value.recipe
             self._version += 1
         else:
             base._var = _scatter(base, self._ops, value).var

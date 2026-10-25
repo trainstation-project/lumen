@@ -262,6 +262,9 @@ impl Emitter<'_> {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
                 match (self.by_value[k], idx.as_str()) {
+                    (true, _) if ty.dtype == DType::F64 => {
+                        format!("tl.full([], in{k}, tl.int64).to(tl.float64, bitcast=True)")
+                    }
                     (true, _) => format!("tl.full([], in{k}, {t})"),
                     (false, "0") => format!("LOAD{k}(in{k}, 0, None)"),
                     (false, _) => format!("LOAD{k}(in{k}, {idx}, mask)"),
@@ -285,6 +288,7 @@ impl Emitter<'_> {
                             (Div, true) if half => {
                                 format!("tl.div_rn({x}.to(tl.float32), {y}.to(tl.float32)).to({t})")
                             }
+                            (Div, true) if operand == DType::F64 => format!("{x} / {y}"),
                             (Div, true) => format!("tl.div_rn({x}, {y})"),
                             (Div, false) => format!(
                                 "tl.where({y} == 0, ~({x} ^ {x}), {x} // ({y} + ({y} == 0).to({t})))"
@@ -307,8 +311,12 @@ impl Emitter<'_> {
                         let f = match &node.primitive {
                             Exp => format!("libdevice.exp({a})"),
                             Log => format!("libdevice.log({a})"),
+                            Sqrt if ty.dtype == DType::F64 => format!("libdevice.sqrt({a})"),
                             Sqrt => format!("tl.sqrt_rn({a})"),
                             Tanh => format!("libdevice.tanh({a})"),
+                            _ if ty.dtype == DType::F64 => {
+                                format!("1.0 / (1.0 + libdevice.exp(-{a}))")
+                            }
                             _ => format!("tl.div_rn(1.0, 1.0 + libdevice.exp(-{a}))"),
                         };
                         match half {

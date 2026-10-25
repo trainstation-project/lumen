@@ -25,13 +25,13 @@ class AdamW(lumen.nn.Module):
     params: list
     m: list
     v: list
-    t: float
+    t: int
     lr: float
     betas: tuple
     eps: float
     weight_decay: float
 
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0.0):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0):
         params = list(params)
 
         fields = dict(
@@ -57,7 +57,7 @@ class AdamW(lumen.nn.Module):
         """Update the parameters from their ``.grad`` (or ``grads``, one
         per parameter in order: from ``lumen.grad``)."""
         b1, b2 = self.betas
-        self.t.copy_(self.t + 1.0)
+        self.t = self.t + 1
         c1 = 1.0 / (1.0 - F.exp(self.t * F.log(b1)))
         c2 = 1.0 / (1.0 - F.exp(self.t * F.log(b2)))
         grads = [p.grad for p in self.params] if grads is None else grads
