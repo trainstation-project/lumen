@@ -58,40 +58,41 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     if !lhs_batch.is_empty() || body.outputs().contains(&dot.output) || rank == 0 {
         return None;
     }
+    let along = |axis: usize| regions_along(body, dot, axis).or_else(|| halves(body, dot, axis));
     let columns = one_free(1, rhs_contracting)
-        .then(|| regions_along(body, dot, rank - 1))
+        .then(|| along(rank - 1))
         .flatten();
     columns.or_else(|| {
         (one_free(0, lhs_contracting) && rank > 1)
-            .then(|| regions_along(body, dot, 0).or_else(|| row_halves(body, dot)))
+            .then(|| along(0))
             .flatten()
     })
 }
 
-fn row_halves<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Columns<'a>>> {
+fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
     let shape = &body.type_of(dot.output).shape;
-    let m = shape[0];
+    let n = shape[axis];
     let half = |node: &Node, start: usize| match &node.primitive {
         Primitive::Slice {
             start_indices,
             limit_indices,
             ..
-        } => (0..shape.len()).all(|d| match d {
-            0 => start_indices[d] == start && limit_indices[d] == start + m / 2,
-            _ => start_indices[d] == 0 && limit_indices[d] == shape[d],
+        } => (0..shape.len()).all(|d| match d == axis {
+            true => start_indices[d] == start && limit_indices[d] == start + n / 2,
+            false => start_indices[d] == 0 && limit_indices[d] == shape[d],
         }),
         _ => false,
     };
     let (a, b) = match readers_of(body, dot.output).as_slice() {
-        [a, b] if half(a, 0) && half(b, m / 2) => (*a, *b),
-        [a, b] if half(b, 0) && half(a, m / 2) => (*b, *a),
+        [a, b] if half(a, 0) && half(b, n / 2) => (*a, *b),
+        [a, b] if half(b, 0) && half(a, n / 2) => (*b, *a),
         _ => return None,
     };
-    m.is_multiple_of(2).then(|| {
+    n.is_multiple_of(2).then(|| {
         vec![Columns {
-            axis: 0,
+            axis,
             offset: 0,
-            width: m,
+            width: n,
             region: Region::Group(vec![a, b]),
         }]
     })
@@ -156,9 +157,6 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
                 (start, width, region)
             }
         };
-        if width % ROW_COLUMNS != 0 {
-            return None;
-        }
         regions.push(Columns {
             axis,
             offset: start,
@@ -178,48 +176,20 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .iter()
             .any(|c| c.members().iter().any(|v| outputs.contains(v)));
     let one_pair = axis + 1 == rank && regions.len() == 1 && regions[0].k() == 2;
-    (covers && (grouped || returned) && !one_pair).then_some(regions)
+    let windows = one_pair || regions.iter().all(|c| c.width % ROW_COLUMNS == 0);
+    (covers && (grouped || returned) && windows).then_some(regions)
 }
 
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
-    let Primitive::DotGeneral {
-        lhs_batch,
-        rhs_contracting,
-        ..
-    } = &dot.primitive
-    else {
-        return None;
-    };
-    let shape = &body.type_of(dot.output).shape;
-    let rhs_rank = body.type_of(dot.inputs[1]).shape.len();
-    let (rank, n) = (shape.len(), *shape.last()?);
-    if !lhs_batch.is_empty() || rhs_rank != rhs_contracting.len() + 1 || n % 2 != 0 {
-        return None;
-    }
-    if let Some(pair) = gemm_interleaved(body, dot) {
-        return Some(pair);
-    }
-    if gemm_regions(body, dot).is_some() {
-        return None;
-    }
-    let readers = readers_of(body, dot.output);
-    let half = |node: &&Node, start: usize| match &node.primitive {
-        Primitive::Slice {
-            start_indices,
-            limit_indices,
-            ..
-        } => (0..rank).all(|d| match d == rank - 1 {
-            true => start_indices[d] == start && limit_indices[d] == start + n / 2,
-            false => start_indices[d] == 0 && limit_indices[d] == shape[d],
-        }),
-        _ => false,
-    };
-    match (readers.as_slice(), body.outputs().contains(&dot.output)) {
-        ([a, b], false) => match (half(a, 0) && half(b, n / 2), half(b, 0) && half(a, n / 2)) {
-            (true, _) => Some((a, b)),
-            (_, true) => Some((b, a)),
-            _ => None,
-        },
+    let rank = body.type_of(dot.output).shape.len();
+    match gemm_regions(body, dot)?.as_slice() {
+        [
+            Columns {
+                axis,
+                region: Region::Group(members),
+                ..
+            },
+        ] if axis + 1 == rank && members.len() == 2 => Some((members[0], members[1])),
         _ => None,
     }
 }
@@ -231,52 +201,12 @@ pub(super) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
         .collect()
 }
 
-pub(crate) fn gemm_interleaved<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
-    let shape = &body.type_of(dot.output).shape;
-    let (rank, n) = (shape.len(), *shape.last()?);
-    let pairs: Vec<usize> = shape[..rank - 1]
-        .iter()
-        .copied()
-        .chain([n / 2, 2])
-        .collect();
-    let outputs = body.outputs();
-    let reshape = match (
-        readers_of(body, dot.output).as_slice(),
-        outputs.contains(&dot.output),
-    ) {
-        ([r], false) if matches!(&r.primitive, Primitive::Reshape { new_sizes } if *new_sizes == pairs) => {
-            *r
-        }
-        _ => return None,
-    };
-    let one = |node: &&Node, start: usize| match &node.primitive {
-        Primitive::Slice {
-            start_indices,
-            limit_indices,
-            ..
-        } => (0..=rank).all(|d| match d == rank {
-            true => start_indices[d] == start && limit_indices[d] == start + 1,
-            false => start_indices[d] == 0 && limit_indices[d] == pairs[d],
-        }),
-        _ => false,
-    };
-    match (
-        readers_of(body, reshape.output).as_slice(),
-        outputs.contains(&reshape.output),
-    ) {
-        ([a, b], false) => match (one(a, 0) && one(b, 1), one(b, 0) && one(a, 1)) {
-            (true, _) => Some((a, b)),
-            (_, true) => Some((b, a)),
-            _ => None,
-        },
-        _ => None,
+pub(crate) fn gemm_group(body: &Graph, dot: &Node) -> Option<(usize, bool)> {
+    let rank = body.type_of(dot.output).shape.len();
+    match gemm_pair(body, dot) {
+        Some(_) => Some((2, false)),
+        None => gemm_regions(body, dot).map(|r| (ROW_COLUMNS, r[0].axis + 1 != rank)),
     }
-}
-
-pub(crate) fn gemm_plain(body: &Graph, dot: &Node) -> bool {
-    gemm_regions(body, dot).is_none()
-        && gemm_pair(body, dot).is_none()
-        && gemm_expanded(body, dot).is_none()
 }
 
 pub(crate) fn gemm_mpp_pair(body: &Graph, dot: &Node) -> bool {
@@ -287,14 +217,127 @@ pub(crate) fn gemm_mpp_pair(body: &Graph, dot: &Node) -> bool {
         ty(dot.inputs[1]),
         ty(dot.output),
     );
-    let read = match gemm_interleaved(body, dot) {
+    match gemm_pair(body, dot) {
+        Some((first, _)) if first.inputs[0] == dot.output => layout.is_some(),
         Some(_) => matches!(layout, Some((_, true))),
-        None => layout.is_some(),
-    };
-    gemm_regions(body, dot).is_none()
-        && gemm_pair(body, dot).is_some()
-        && gemm_expanded(body, dot).is_none()
-        && read
+        None => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct EpilogueFlags {
+    pub(crate) expanded: bool,
+    pub(crate) interleaved: bool,
+    pub(crate) group: usize,
+    pub(crate) rows: bool,
+}
+
+impl EpilogueFlags {
+    pub(crate) fn plain(&self) -> bool {
+        self.group == 1 && !self.expanded
+    }
+
+    fn template(&self) -> String {
+        let EpilogueFlags {
+            expanded,
+            interleaved,
+            group,
+            rows,
+        } = self;
+        format!("{expanded}, {interleaved}, {group}, {rows}")
+    }
+}
+
+fn regions_interleaved(regions: &[Columns], dot: &Node) -> bool {
+    !matches!(&regions[0].region, Region::Group(m) if m[0].inputs[0] == dot.output)
+}
+
+pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
+    if let (Some(regions), Some((group, rows))) = (gemm_regions(body, dot), gemm_group(body, dot)) {
+        return EpilogueFlags {
+            interleaved: regions_interleaved(&regions, dot),
+            group,
+            rows,
+            ..EpilogueFlags::default()
+        };
+    }
+    let expansion = gemm_expanded(body, dot).map(|(_, e)| e);
+    EpilogueFlags {
+        expanded: expansion.is_some(),
+        interleaved: expansion == Some(Expansion::Pairs),
+        group: 1,
+        rows: expansion == Some(Expansion::Rows),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn staged_call(
+    body: &Graph,
+    dot: &Node,
+    c: GemmConfig,
+    flags: EpilogueFlags,
+    dual: bool,
+    [t, a, o, w]: [&str; 4],
+    [lhs, rhs]: [&str; 2],
+    members: &str,
+) -> String {
+    let (bm, bn, bk, threads, simds) = (c.bm, c.bn, c.bk, c.threads, c.threads / 32);
+    let template = flags.template();
+    match c.algorithm {
+        Algorithm::Mpp => {
+            let ty = |v: Var| body.type_of(v);
+            let (left, right) = mpp_transposes(
+                &dot.primitive,
+                ty(dot.inputs[0]),
+                ty(dot.inputs[1]),
+                ty(dot.output),
+            )
+            .expect("a layout Metal Performance Primitives read");
+            match flags.plain() || dual {
+                true => {
+                    let (members_per_group, interleaved) = match dual {
+                        true => (2, flags.interleaved),
+                        false => (1, false),
+                    };
+                    formatdoc!(
+                        "
+                        matmul_mpp<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {members_per_group}, {interleaved}>(
+                        {lhs}, {rhs}, out, p, group,
+                        NAME_epi{{{members}}});
+                        "
+                    )
+                }
+                false => formatdoc!(
+                    "
+                    threadgroup float tile[{bm} * {bn}], stage[{simds} * 64];
+                    matmul_mpp_staged<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {template}>(
+                    {lhs}, {rhs}, out, p, group, sg, lane, tile, stage,
+                    NAME_epi{{{members}}});
+                    "
+                ),
+            }
+        }
+        Algorithm::Skinny => match flags.plain() {
+            true => formatdoc!(
+                "
+                threadgroup {a} partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                matmul_skinny<{t}, {a}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
+                {lhs}, {rhs}, out, p, partials, group, tid.x,
+                NAME_epi{{{members}}});
+                "
+            ),
+            false => formatdoc!(
+                "
+                threadgroup {a} partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                threadgroup float tile[8 * {bn}], stage[{simds} * 64];
+                matmul_skinny<{t}, {a}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi, {template}>(
+                {lhs}, {rhs}, out, p, partials, group, tid.x,
+                NAME_epi{{{members}}}, tile, stage, sg, lane);
+                "
+            ),
+        },
+        Algorithm::Tiled => unreachable!("the tiled kernel stores from its fragments"),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -403,8 +446,7 @@ pub(super) fn gemm_regions_kernel(
         true => ("window", "m", "true"),
         false => ("row", "n", "false"),
     };
-    let interleaved =
-        !matches!(&regions[0].region, Region::Group(m) if m[0].inputs[0] == dot.output);
+    let interleaved = regions_interleaved(regions, dot);
     let mut store = String::new();
     for (c, ends) in regions.iter().zip(&ends) {
         let (offset, size, limit, k) = (c.offset, c.size(), c.offset + c.width, c.k());
@@ -512,7 +554,6 @@ pub(super) fn gemm_regions_kernel(
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, w, &[]);
     let members = members.join(", ");
     let mut source = formatdoc!(
         "
@@ -523,25 +564,43 @@ pub(super) fn gemm_regions_kernel(
         }};
         "
     );
+    let flags = gemm_flags(body, dot);
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
+        let (params, first) = io_params(body, by_value, w, &[]);
+        let call = match c.algorithm {
+            Algorithm::Tiled => formatdoc!(
+                "
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
+                               NAME_epi, false, false, false, {interleaved}, {ROW_COLUMNS}, {flag},
+                               {threads}, {cols}, {prefetch}>(
+                    {lhs}, {rhs}, out, p,
+                    lt, rt,
+                    group, tid.y * 16 + tid.x, sg, lane,
+                    NAME_epi{{{members}}});
+                "
+            ),
+            _ => staged_call(
+                body,
+                dot,
+                c,
+                flags,
+                false,
+                [t, a, o, w],
+                [&lhs, &rhs],
+                &members,
+            ),
+        };
         writedoc!(
             source,
             "
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
                                      {THREAD_ARGS}) {{
-                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
-                matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
-                               NAME_epi, false, true, false, false, {interleaved}, true, {flag},
-                               {threads}, {cols}, {prefetch}>(
-                    {lhs}, {rhs}, out, p,
-                    lt, rt,
-                    group, tid.y * 16 + tid.x, sg, lane,
-                    NAME_epi{{{members}}});
-            }}
+            {call}}}
             "
         )
         .unwrap();
@@ -573,7 +632,8 @@ fn gemm_kernel_with(
     dot: &Node,
     variants: &[(&str, GemmConfig)],
 ) -> (String, String) {
-    if let Some(regions) = gemm_regions(body, dot) {
+    let pair = gemm_pair(body, dot);
+    if let Some(regions) = gemm_regions(body, dot).filter(|_| pair.is_none()) {
         return gemm_regions_kernel(body, by_value, dot, &regions, variants);
     }
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
@@ -596,7 +656,6 @@ fn gemm_kernel_with(
         metal_type(body.type_of(out).dtype),
     );
     let mut e = Emitter::new(body, by_value);
-    let pair = gemm_pair(body, dot);
     match pair {
         Some((first, second)) => {
             for (v, name) in [(first.output, "r1"), (second.output, "r2")] {
@@ -646,25 +705,15 @@ fn gemm_kernel_with(
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, w, &[]);
     let members = members.join(", ");
-    let (operands, paired) = match (pair, expanded) {
-        (Some(_), _) if gemm_interleaved(body, dot).is_some() => (
-            format!("{o} r1, {o} r2"),
-            "NAME_epi, false, true, false, false, true",
-        ),
-        (Some(_), _) => (format!("{o} r1, {o} r2"), "NAME_epi, false, true"),
-        (_, Some((_, Expansion::Pairs))) => (
-            format!("{o} r"),
-            "NAME_epi, false, false, true, false, true",
-        ),
-        (_, Some((_, Expansion::Rows))) => (
-            format!("{o} r"),
-            "NAME_epi, false, false, true, false, false, false, true",
-        ),
-        (_, Some(_)) => (format!("{o} r"), "NAME_epi, false, false, true"),
-        _ => (format!("{o} r"), "NAME_epi"),
+    let layout = expanded.map(|(_, layout)| layout);
+    let (operands, group, interleaved) = match pair {
+        Some((first, _)) => (format!("{o} r1, {o} r2"), 2, first.inputs[0] != dot.output),
+        None => (format!("{o} r"), 1, layout == Some(Expansion::Pairs)),
     };
+    let rows = layout == Some(Expansion::Rows);
+    let expanded_flag = expanded.is_some();
+    let flags = format!("NAME_epi, false, {expanded_flag}, false, {interleaved}, {group}, {rows}");
     let returns = match expanded {
         Some(_) => format!("Pair<{w}>"),
         None => w.to_string(),
@@ -680,26 +729,19 @@ fn gemm_kernel_with(
         }};
         "
     );
-    let plain = paired == "NAME_epi";
     let mpp_pair = gemm_mpp_pair(body, dot);
-    let interleaved = gemm_interleaved(body, dot).is_some();
-    let flags = 7 - paired.matches(',').count();
-    let paired = format!("{paired}{}", ", false".repeat(flags));
+    let epilogue = gemm_flags(body, dot);
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
-        assert!(
-            plain || c.algorithm == Algorithm::Tiled || (mpp_pair && c.algorithm == Algorithm::Mpp),
-            "only a plain or paired epilogue runs on {:?}",
-            c.algorithm
-        );
+        let (params, first) = io_params(body, by_value, w, &[]);
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
                 matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
-                {paired},
+                {flags},
                 {threads}, {cols}, {prefetch}>(
                 {lhs}, {rhs}, out, p,
                 lt, rt,
@@ -707,30 +749,15 @@ fn gemm_kernel_with(
                 NAME_epi{{{members}}});
                 "
             ),
-            Algorithm::Mpp => {
-                let ty = |v: Var| body.type_of(v);
-                let (left, right) = mpp_transposes(
-                    &dot.primitive,
-                    ty(dot.inputs[0]),
-                    ty(dot.inputs[1]),
-                    ty(dot.output),
-                )
-                .expect("a layout Metal Performance Primitives read");
-                formatdoc!(
-                    "
-                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {mpp_pair}, {interleaved}>(
-                    {lhs}, {rhs}, out, p, group,
-                    NAME_epi{{{members}}});
-                    "
-                )
-            }
-            Algorithm::Skinny => formatdoc!(
-                "
-                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
-                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
-                {lhs}, {rhs}, out, p, partials, group, tid.x,
-                NAME_epi{{{members}}});
-                "
+            _ => staged_call(
+                body,
+                dot,
+                c,
+                epilogue,
+                mpp_pair,
+                [t, a, o, w],
+                [&lhs, &rhs],
+                &members,
             ),
         };
         writedoc!(
