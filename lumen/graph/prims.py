@@ -81,6 +81,14 @@ def bind(name, *operands, **params):
     """Record ``name(*operands, **params)`` in the graph being traced."""
     graph = tracer.current_graph()
     operands = [tracer._lift(x) for x in operands]
+    host = tracer._HOSTS[-1] if tracer._HOSTS else None
+    if host is not None:
+        out = host.bind(name, operands, params)
+        if out is not None:
+            same = len(operands) == 1 and (out.dtype, out.shape) == (operands[0].dtype, operands[0].shape)
+            out.weak = same and operands[0].weak
+            return out
+        operands = [host.imported(x) if host.owns(x) else x for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
             if hasattr(x, "_not_an_operand"):
@@ -90,6 +98,9 @@ def bind(name, *operands, **params):
     var = graph.apply(name, inputs, params)
     tracer._record(name, inputs, params, var)
     out = tracer.TracedTensor(graph, var)
+    out.weak = len(operands) == 1 and operands[0].weak and graph.type_of(var) == graph.type_of(inputs[0])
+    if all(x.recipe is not None for x in operands):
+        out.recipe = (name, params, operands)
     if name == "to_host" or (name != "to_device" and any(tracer._device_type(x.device) == "cpu" for x in operands)):
         out.device = "cpu:0"
     return out

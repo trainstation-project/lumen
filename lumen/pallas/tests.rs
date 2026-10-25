@@ -249,3 +249,35 @@ fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
         assert!(text.contains(expected), "{expected}\nin\n{text}");
     }
 }
+
+#[test]
+fn an_integer_power_takes_its_sign_from_the_exponents_parity() {
+    let mut k = Kernel::new(1, None, 64);
+    let shape = [8, 128];
+    let base = k
+        .alloc(Type::Ref(TensorType::new(DType::BF16, &shape), Space::Vmem))
+        .unwrap();
+    let exponent = k
+        .alloc(Type::Ref(TensorType::new(DType::I32, &shape), Space::Vmem))
+        .unwrap();
+    let (x, e) = (k.load(base, &[]).unwrap(), k.load(exponent, &[]).unwrap());
+    let y = k
+        .apply(Primitive::Binary(crate::graph::BinaryOp::Pow), &[x, e])
+        .unwrap();
+    assert_eq!(
+        *k.type_of(y),
+        Type::Value(TensorType::new(DType::BF16, &shape))
+    );
+    let text = lower(&k, "power").unwrap();
+    for expected in [
+        "\"stable_mosaic.arith.sitofp\"(%t3) : (vector<8x128xi32>) -> vector<8x128xf32>",
+        "\"stable_mosaic.math.absf\"(",
+        "\"stable_mosaic.math.powf\"(%t6, %t5)",
+        "\"stable_mosaic.arith.andi\"(%t3, ",
+        "\"stable_mosaic.arith.select\"(",
+        "-> vector<8x128xbf16>",
+    ] {
+        assert!(text.contains(expected), "{expected}\nin\n{text}");
+    }
+    assert!(!text.contains("i32>) -> vector<8x128xbf16>"), "{text}");
+}

@@ -637,8 +637,12 @@ def test_modules_are_frozen_dataclasses_of_weights():
     m = Stack([Affine(meta(4, 4), shared), Affine(meta(4, 4), shared)], 0.5)
     assert [n for n, _ in m.named_parameters()] == ["layers.0.w", "layers.0.b", "layers.1.w"]
     assert m.parameters()[1] is shared
+    m.scale = 1
+    assert m.scale == 1.0 and type(m.scale) is float
     with pytest.raises(dataclasses.FrozenInstanceError):
-        m.scale = 1.0
+        m.layers = []
+    with pytest.raises(TypeError, match="float field"):
+        m.scale = "1"
     with pytest.raises(ValueError, match="compile it first"):
         m.load_state_dict({n: lumen.zeros(t.shape) for n, t in m.named_parameters()})
     with pytest.raises(KeyError, match="missing"):
@@ -3166,6 +3170,98 @@ def test_copy_into_a_modules_float_is_written_back():
 
     with pytest.raises(TypeError, match="tuple"):
         lumen.compile(assign_tuple, device="cpu")(steps)
+
+
+class _Scalars(lumen.nn.Module):
+    w: lumen.Tensor
+    lr: float
+    step: int
+    clip: bool
+    heads: int
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS])
+def test_scalar_fields_are_assigned_as_python_values(device):
+    """A module's float, int and bool fields are assigned as Python values,
+    inside a compiled function (``s.step = s.step + 1``) and outside, and
+    written back as their type. A float is a runtime scalar; an int or bool
+    is static until the function assigns it or it changes, then a runtime
+    scalar (traced again once: no plan per value); one that cannot be (a
+    condition, a shape) stays static, a plan per value."""
+    traces = []
+
+    def step(s, x):
+        traces.append(1)
+        s.step = s.step + 1
+        s.lr = s.lr * 0.5
+        y = x * s.lr + s.step
+        if s.clip:
+            y = F.maximum(y, 0.0)
+        return y.reshape([s.heads, -1])
+
+    f = lumen.compile(step, device=device)
+    s = _Scalars(lumen.empty([4], device="meta"), 1.0, 0, False, 2)
+    try:
+        x = lumen.from_numpy(np.full(4, -3.0, np.float32)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    for k in range(1, 5):
+        y = lumen.to_numpy(f(s, x))
+        np.testing.assert_allclose(y, np.full((2, 2), -3.0 * 0.5**k + k), rtol=1e-6)
+        assert (s.step, s.lr, s.clip) == (k, 0.5**k, False)
+        assert (type(s.step), type(s.lr), type(s.clip)) == (int, float, bool)
+    assert len(traces) == 2
+    s.lr, s.clip = 1.0, True
+    np.testing.assert_allclose(lumen.to_numpy(f(s, x)), np.full((2, 2), 3.5), rtol=1e-6)
+    s.clip = False
+    f(s, x)
+    s.clip = True
+    f(s, x)
+    assert len(traces) == 4
+    s.heads = 4
+    assert list(f(s, x).shape) == [4, 1]
+    with pytest.raises(TypeError, match="int field"):
+        s.step = 1.5
+
+
+class _Seen(lumen.nn.Module):
+    w: lumen.Tensor
+    seen: float
+    step: int
+
+
+def test_scalars_written_from_scalars_alone_run_on_the_host():
+    """A scalar field assigned from scalars and constants alone (``step +
+    1``) is computed on the host each call, from the scalars passed, never
+    read back from the device (which would wait for the device's work); one
+    assigned from the device's values (a loss) is read back."""
+    from lumen.graph import tracer
+
+    def step(s, x):
+        s.step = s.step + 1
+        s.seen = F.sum(x * s.w)
+        return x * 1.0
+
+    s = _Seen(lumen.empty([3], device="meta"), 0.0, 1)
+    runtime = tracer._runtime({(0, ("step",))})
+    args = (s, lumen.empty([3], device="meta"))
+    _, _, (_, read, _, (_, _, host)), _, _, _ = tracer._trace(step, args, "cpu", runtime, split=True)
+    assert (read, host) == ([(0, ("seen",))], [(0, ("step",))])
+    f = lumen.compile(step, device="cpu")
+    f(s, lumen.empty([3], device="meta"))
+    s.load_state_dict({"w": lumen.from_numpy(np.full(3, 2.0, np.float32))})
+    for _ in range(2):
+        f(s, lumen.from_numpy(np.arange(3, dtype=np.float32)))
+    assert (s.seen, s.step) == (6.0, 3) and type(s.step) is int
+
+
+def test_float64_runtime_scalars_are_exact():
+    """A float runtime scalar of a float64 program on the CPU is the Python
+    float exactly, not rounded to float32 first; float32 programs see it
+    rounded once."""
+    f = lumen.compile(lambda x, c: x * c, device="cpu")
+    assert lumen.to_numpy(f(lumen.from_numpy(np.ones(1)), 0.1))[0] == 0.1
+    assert lumen.to_numpy(f(lumen.from_numpy(np.ones(1, np.float32)), 0.1))[0] == np.float32(0.1)
 
 
 class _ReluMLP(lumen.nn.Module):

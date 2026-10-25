@@ -1122,13 +1122,7 @@ impl Emitter<'_> {
         use crate::graph::BinaryOp as B;
         let (float, uns) = (a.1.dtype.is_float(), unsigned(a.1.dtype));
         if matches!(op, B::Pow) && b.1.dtype.is_int() {
-            let to = if unsigned(b.1.dtype) {
-                "arith.uitofp"
-            } else {
-                "arith.sitofp"
-            };
-            let y = (self.unary(to, &[b], "", &a.1), a.1.clone());
-            return Ok(self.unary("math.powf", &[a, &y], FAST, out));
+            return self.integer_pow(a, b, out);
         }
         let (name, attrs) = match op {
             B::Pow => ("math.powf", FAST),
@@ -1147,6 +1141,31 @@ impl Emitter<'_> {
             B::Nextafter => return self.nextafter(a, b),
         };
         Ok(self.unary(name, &[a, b], attrs, out))
+    }
+
+    fn integer_pow(
+        &mut self,
+        a: &(String, TensorType),
+        b: &(String, TensorType),
+        out: &TensorType,
+    ) -> Result<String, String> {
+        let f32 = TensorType::new(DType::F32, &a.1.shape);
+        let i32 = TensorType::new(DType::I32, &a.1.shape);
+        let x = (self.cast(a, DType::F32)?, f32.clone());
+        let e = (self.cast(b, DType::F32)?, f32.clone());
+        let abs = self.apply("math.absf", &[&x], FAST, &f32);
+        let magnitude = self.apply("math.powf", &[&abs, &e], FAST, &f32);
+        let bits = self.apply("tpu.bitcast", &[&x], "", &i32);
+        let zero = self.splat(Scalar::Int(0), &i32);
+        let negative = self.compare(&bits, &zero, 2);
+        let one = self.splat(Scalar::Int(1), &b.1);
+        let low = self.apply("arith.andi", &[b, &one], "", &b.1);
+        let none = self.splat(Scalar::Int(0), &b.1);
+        let odd = self.compare(&low, &none, 1);
+        let flip = self.apply("arith.andi", &[&negative, &odd], "", &odd.1.clone());
+        let negated = self.apply("arith.negf", &[&magnitude], FAST, &f32);
+        let r = self.select(&flip, &negated, &magnitude);
+        self.cast(&r, out.dtype)
     }
 
     fn erf_inv(&mut self, x: &(String, TensorType)) -> Result<String, String> {

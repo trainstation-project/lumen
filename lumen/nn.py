@@ -7,11 +7,24 @@ __all__ = ["Module"]
 
 class Module:
     """A tree of weights: subclasses are frozen dataclasses (no decorator
-    needed), whose tensor fields, recursively, are the weights."""
+    needed), whose tensor fields, recursively, are the weights. Their
+    scalar fields (annotated ``float``, ``int`` or ``bool``: a learning
+    rate, a step count, a flag) are assigned as Python values, outside a
+    compiled function or inside it (``self.step = self.step + 1``), where
+    they are runtime scalars or static (``lumen.compile``)."""
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         dataclasses.dataclass(frozen=True, eq=False)(cls)
+        frozen = cls.__setattr__
+
+        def __setattr__(self, name, value):
+            kind = _scalar_fields(type(self)).get(name)
+            if kind is None:
+                return frozen(self, name, value)
+            object.__setattr__(self, name, _assigned(name, kind, value))
+
+        cls.__setattr__ = __setattr__
 
     def named_parameters(self):
         """``(path, weight)`` for each weight, recursively, in field order
@@ -41,6 +54,48 @@ class Module:
                 params[path].copy_(t)
 
 
+_KINDS = {float: "float", int: "int", bool: "bool", "float": "float", "int": "int", "bool": "bool"}
+
+
+def _scalar_fields(cls):
+    """``{name: kind}`` of ``cls``'s fields annotated ``float``, ``int`` or
+    ``bool``."""
+    fields = dataclasses.fields(cls)
+    return {f.name: _KINDS[f.type] for f in fields if isinstance(f.type, (type, str)) and f.type in _KINDS}
+
+
+def is_scalar(v):
+    """Whether ``v`` is a scalar a compiled function can take at runtime: a
+    Python float, int or bool (not a subclass: an enum is static), or a
+    numpy real or bool scalar."""
+    if type(v) in (float, int, bool):
+        return True
+    import numpy as np
+
+    return isinstance(v, (np.bool_, np.integer, np.floating))
+
+
+def _assigned(name, kind, value):
+    """``value`` assigned to the ``kind`` scalar field ``name``: a Python
+    value of the kind (an int as a float), or inside a compiled function a
+    0-d traced tensor of it."""
+    import numpy as np
+
+    from lumen.graph.tracer import TracedTensor
+
+    if isinstance(value, TracedTensor) and len(value.shape) == 0:
+        dtype = value.dtype
+        if {"float": "float" in dtype, "int": "int" in dtype, "bool": dtype == "bool"}[kind]:
+            return value
+    elif kind == "bool" and isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    elif kind == "int" and isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+        return int(value)
+    elif kind == "float" and isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
+        return float(value)
+    raise TypeError(f"{name} is a {kind} field: assign it a {kind} or a 0-d {kind} tensor, got {value!r}")
+
+
 def _leaves(x, path):
     """``(path, tensor)`` for each tensor in ``x`` (a module, a list or
     tuple, or a tensor), recursively: inside a compiled function, its
@@ -58,75 +113,68 @@ def _leaves(x, path):
             yield from _leaves(v, prefix + str(i))
 
 
-def _set_float(x, k, value):
-    """Set the ``k``-th float of ``x`` (in :func:`_floats`' order) to
-    ``value``: a module's field or a list's element (a tuple's cannot be)."""
-    slots = list(_float_slots(x))
-    holder, key = slots[k]
-    if holder is None:
-        raise TypeError("a float in a tuple cannot be assigned: hold it in a module field or a list")
-    if isinstance(holder, Module):
-        object.__setattr__(holder, key, value)
-    else:
-        holder[key] = value
-
-
-def _float_slots(x):
-    """Where each float of ``x`` is, ``(holder, key)``, in :func:`_floats`'
-    order (``(None, None)`` in a tuple)."""
-    if isinstance(x, Module):
-        items = [(x, f.name, getattr(x, f.name)) for f in dataclasses.fields(x)]
-    elif isinstance(x, (list, tuple)):
-        items = [(x if isinstance(x, list) else None, i, v) for i, v in enumerate(x)]
-    else:
-        return
-    for holder, key, v in items:
-        if isinstance(v, float):
-            yield (holder, key) if holder is not None else (None, None)
-        else:
-            yield from _float_slots(v)
-
-
-def _floats(x):
-    """Each float field of ``x`` (a module, a list or tuple), recursively, in
-    field order: runtime scalars of a compiled function (``lumen.compile``),
-    not baked into it."""
-    if isinstance(x, float):
-        yield x
+def scalar_paths(x, path=()):
+    """The path (field names and indices) to each scalar (``is_scalar``)
+    of ``x``, a module, a list or tuple, or a scalar, recursively, in field
+    order."""
+    if is_scalar(x):
+        yield path
     elif isinstance(x, Module):
         for f in dataclasses.fields(x):
-            yield from _floats(getattr(x, f.name))
+            yield from scalar_paths(getattr(x, f.name), (*path, f.name))
     elif isinstance(x, (list, tuple)):
-        for v in x:
-            yield from _floats(v)
+        for i, v in enumerate(x):
+            yield from scalar_paths(v, (*path, i))
 
 
-def structure(x):
-    """``x``'s structure, hashable: its classes, static fields (not floats,
-    which are runtime scalars) and weights' types (what a compiled
-    function's plan depends on)."""
+def at(x, path):
+    """The value at ``path`` in ``x`` (as ``scalar_paths`` names it)."""
+    for key in path:
+        x = getattr(x, key) if isinstance(x, Module) else x[key]
+    return x
+
+
+def assign(x, path, value):
+    """Set the value at ``path`` in ``x`` (a module's field or a list's
+    element; a tuple's cannot be)."""
+    holder, key = at(x, path[:-1]), path[-1]
+    if isinstance(holder, Module):
+        object.__setattr__(holder, key, value)
+    elif isinstance(holder, list):
+        holder[key] = value
+    else:
+        raise TypeError("a scalar in a tuple cannot be assigned: hold it in a module field or a list")
+
+
+def structure(x, runtime, path=()):
+    """``x``'s structure, hashable: its classes, static values and weights'
+    types (what a compiled function's plan depends on); a scalar at a path
+    ``runtime(path, value)`` holds by its type alone."""
     if isinstance(x, Tensor):
         return ("tensor", x.dtype, tuple(x.shape))
     if isinstance(x, Module):
-        return (type(x), tuple((f.name, structure(getattr(x, f.name))) for f in dataclasses.fields(x)))
+        fields = dataclasses.fields(x)
+        return (type(x), tuple((f.name, structure(getattr(x, f.name), runtime, (*path, f.name))) for f in fields))
     if isinstance(x, (list, tuple)):
-        return (type(x), tuple(map(structure, x)))
-    if isinstance(x, float):
-        return ("scalar",)
+        return (type(x), tuple(structure(v, runtime, (*path, i)) for i, v in enumerate(x)))
+    if is_scalar(x):
+        return ("scalar", type(x)) if runtime(path, x) else ("static", type(x), x)
     return ("static", x)
 
 
-def map_tensors(x, f, scalar=None):
+def map_tensors(x, f, scalar=None, path=()):
     """``x`` with each tensor ``t`` in it (recursively, through modules,
-    lists and tuples) replaced by ``f(t)``, and each float ``v`` by
-    ``scalar(v)`` if given."""
+    lists and tuples) replaced by ``f(t)``, and each scalar ``v`` at
+    ``path`` by ``scalar(path, v)`` if given."""
     if isinstance(x, Tensor):
         return f(x)
-    if isinstance(x, float) and scalar is not None:
-        return scalar(x)
+    if scalar is not None and is_scalar(x):
+        return scalar(path, x)
     if isinstance(x, Module):
-        fields = {fl.name: map_tensors(getattr(x, fl.name), f, scalar) for fl in dataclasses.fields(x)}
+        fields = {
+            fl.name: map_tensors(getattr(x, fl.name), f, scalar, (*path, fl.name)) for fl in dataclasses.fields(x)
+        }
         return dataclasses.replace(x, **fields)
     if isinstance(x, (list, tuple)):
-        return type(x)(map_tensors(v, f, scalar) for v in x)
+        return type(x)(map_tensors(v, f, scalar, (*path, i)) for i, v in enumerate(x))
     return x

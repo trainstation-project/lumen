@@ -6,10 +6,10 @@
 // A threadgroup computes one 64 x 64 output tile in K-sized slices of 16.
 #define MM_TILE 64
 #define MM_TK 16
-template <typename T>
+template <typename T, typename A, typename O>
 inline void matmul_impl(device const T *lhs,
                         device const T *rhs,
-                        device T *out,
+                        device O *out,
                         constant ulong *p,
                         threadgroup T *lt,
                         threadgroup T *rt,
@@ -71,9 +71,9 @@ inline void matmul_impl(device const T *lhs,
     };
 
     // sum[i][j] accumulates the 4 x 4 output values owned by this thread.
-    T sum[F][F];
+    A sum[F][F];
     UNROLL for (uint i = 0; i < F; ++i) {
-        UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] = T(0); }
+        UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] = A(0); }
     }
 
     // Prime the register prefetch for the first K tile.
@@ -104,7 +104,7 @@ inline void matmul_impl(device const T *lhs,
 
             // Form the outer product and accumulate this thread's 4 x 4 block.
             UNROLL for (uint i = 0; i < F; ++i) {
-                UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] += a[i] * b[j]; }
+                UNROLL for (uint j = 0; j < F; ++j) { sum[i][j] += A(a[i]) * A(b[j]); }
             }
         }
 
@@ -114,14 +114,14 @@ inline void matmul_impl(device const T *lhs,
     }
 
     // The output is contiguous and has row-major shape [batch, M, N].
-    device T *o = out + group.z * M * N;
+    device O *o = out + group.z * M * N;
     UNROLL for (uint i = 0; i < F; ++i) {
         UNROLL for (uint j = 0; j < F; ++j) {
             ulong m = m0 + tid.y + 16 * i, n = n0 + tid.x + 16 * j;
 
             // Only the edge threads in a partial M/N tile need this check.
             if (m < M && n < N) {
-                o[m * N + n] = sum[i][j];
+                o[m * N + n] = O(sum[i][j]);
             }
         }
     }
@@ -133,18 +133,24 @@ inline void matmul_impl(device const T *lhs,
         uint3 tid [[thread_position_in_threadgroup]]
 
 // Instantiate the common integer matmul implementation for each supported
-// 8-, 16-, and 32-bit signed or unsigned type.
-#define MATMUL(NAME, T)                                          \
-    kernel void matmul_##NAME(MATMUL_ARGS(T, T)) {               \
-        threadgroup T lt[MM_TILE * MM_TK], rt[MM_TK * MM_TILE];  \
-        matmul_impl<T>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
+// 8-, 16-, and 32-bit signed or unsigned operand type, its accumulator and
+// its output: kernels are named matmul_<operand>_<accumulator>_<output>.
+#define MATMUL(NAME, T, A, O)                                          \
+    kernel void matmul_##NAME(MATMUL_ARGS(T, O)) {                     \
+        threadgroup T lt[MM_TILE * MM_TK], rt[MM_TK * MM_TILE];        \
+        matmul_impl<T, A, O>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
+#define MATMUL_NARROW(N, T)                     \
+    MATMUL(N##_##N##_##N, T, T, T)              \
+    MATMUL(N##_i32_##N, T, int, T)              \
+    MATMUL(N##_i32_i32, T, int, int)
+
 #ifndef TEMPLATES_ONLY
-MATMUL(u8, uchar)
-MATMUL(u16, ushort)
-MATMUL(u32, uint)
-MATMUL(i8, char)
-MATMUL(i16, short)
-MATMUL(i32, int)
+MATMUL_NARROW(u8, uchar)
+MATMUL_NARROW(u16, ushort)
+MATMUL_NARROW(i8, char)
+MATMUL_NARROW(i16, short)
+MATMUL(u32_u32_u32, uint, uint, uint)
+MATMUL(i32_i32_i32, int, int, int)
 #endif
