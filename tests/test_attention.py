@@ -89,6 +89,39 @@ def test_flash_attention(device, case, dtype):
         assert steps(f, q, k, v) == ["flash_attention"]
 
 
+DECODE_CASES = [
+    (1, 1, 64, 32, 8, 64),
+    (2, 4, 100, 4, 2, 32),
+    (1, 16, 72, 4, 4, 64),
+]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "device, case",
+    [("cpu", c) for c in DECODE_CASES] + [pytest.param("mps", c, marks=pytest.mark.mps) for c in DECODE_CASES],
+    ids=[f"cpu-{c}" for c in DECODE_CASES] + [f"mps-{c}" for c in DECODE_CASES],
+)
+def test_attention_decode(device, case, dtype):
+    b, sq, sk, n, nkv, h = case
+    (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, h))
+    q_, k_, v_ = arrays
+
+    def f(q, k, v, start):
+        return F.attention_decode(q, k, v, start)
+
+    step = lumen.compile(f)
+    for start in (0, sk // 2, sk - sq):
+        pos = lumen.tensor(start, dtype=lumen.int32, device=device)
+        out = step(q, k, v, pos)
+        assert out.dtype == dtype and list(out.shape) == [b, sq, n, h]
+        seen = start + sq
+        want = reference(q_, k_[:, :seen], v_[:, :seen], causal=True)
+        np.testing.assert_allclose(lumen.to_numpy(out.to(dtype="float32")), want, rtol=TOL[dtype], atol=TOL[dtype])
+    if device == "mps":
+        assert steps(f, q, k, v, pos) == ["flash_attention"]
+
+
 @pytest.mark.mps
 def test_attention_as_traced_without_flash_attention():
     """With ``flash_attention`` off, attention runs as traced (scores in

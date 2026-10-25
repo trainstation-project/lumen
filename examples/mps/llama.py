@@ -55,7 +55,6 @@ class Attention(lumen.nn.Module):
     def __call__(self, x, rotary, cache_k, cache_v, pos):
         batch, seq, dim = x.shape
         head_dim = dim // self.heads
-        group = self.heads // self.kv_heads
         q = rotary(self.q_proj(x).reshape(batch, seq, self.heads, head_dim), pos)
         k = rotary(self.k_proj(x).reshape(batch, seq, self.kv_heads, head_dim), pos)
         v = self.v_proj(x).bfloat16().reshape(batch, seq, self.kv_heads, head_dim)
@@ -65,22 +64,9 @@ class Attention(lumen.nn.Module):
 
         if seq > 1:
             out = F.flash_attention(q, k, v, is_causal=True)
-            return self.o_proj(out.reshape(batch, seq, dim))
+        else:
+            out = F.attention_decode(q, cache_k, cache_v, pos)
 
-        q = q.reshape(batch, seq, self.kv_heads, group, head_dim).permute(0, 2, 3, 1, 4)
-        q = q.reshape(batch, self.kv_heads, group * seq, head_dim)
-        keys = cache_k.permute(0, 2, 3, 1)
-        values = cache_v.permute(0, 2, 1, 3)
-
-        scores = F.matmul(q, keys, "float32", "float32") * (1.0 / math.sqrt(head_dim))
-        scores = scores.reshape(batch, self.kv_heads, group, seq, MAX_TOKENS)
-        key_at = lumen.arange(MAX_TOKENS, lumen.int32)
-        query_at = (lumen.arange(seq, lumen.int32) + pos).reshape(seq, 1)
-        scores = F.where(F.le(key_at, query_at), scores, float("-inf"))
-        probs = F.softmax(scores, dim=-1).bfloat16().reshape(batch, self.kv_heads, group * seq, MAX_TOKENS)
-
-        out = F.matmul(probs, values, "float32", "bfloat16")
-        out = out.reshape(batch, self.kv_heads, group, seq, head_dim).permute(0, 3, 1, 2, 4)
         return self.o_proj(out.reshape(batch, seq, dim))
 
 

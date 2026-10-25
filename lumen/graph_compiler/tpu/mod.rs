@@ -81,6 +81,10 @@ impl Attentions for TpuModule<'_> {
     fn kernel(&mut self) -> String {
         "flash_attention".into()
     }
+
+    fn runtime_offsets(&self) -> bool {
+        false
+    }
 }
 
 impl Blocks for TpuModule<'_> {
