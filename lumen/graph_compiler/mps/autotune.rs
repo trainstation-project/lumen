@@ -70,7 +70,27 @@ impl Kernels for Loops<'_> {
 #[derive(Default)]
 pub(super) struct Gemms {
     sources: BTreeMap<String, String>,
+    config: MpsConfig,
 }
+
+impl Gemms {
+    pub(super) fn new(config: &MpsConfig) -> Self {
+        Gemms {
+            sources: BTreeMap::new(),
+            config: config.clone(),
+        }
+    }
+}
+
+const ROW_TILES: GemmConfig = GemmConfig {
+    bm: codegen::ROW_TILE,
+    bn: codegen::ROW_TILE,
+    bk: 32,
+    threads: 256,
+    cols: 1,
+    prefetch: false,
+    algorithm: gemm::Algorithm::Tiled,
+};
 
 const TUNED_OUTPUTS: usize = 64 << 10;
 
@@ -97,8 +117,7 @@ fn tiled_gemm(step: &Step) -> bool {
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
                 && super::launch_of(body) == super::Launch::Gemm
-                && codegen::row_dot(body).is_none()
-                && codegen::tile_scratch(body).is_none()
+                && (codegen::row_dot(body).is_none() || codegen::tile_scratch(body).is_some())
         }
         _ => false,
     };
@@ -112,34 +131,55 @@ impl Kernels for Gemms {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
         };
-        let plain = match &step.primitive {
-            Primitive::Fusion { body, .. } => {
-                codegen::gemm_dot(body).is_some_and(|d| codegen::gemm_plain(body, d))
-            }
-            _ => false,
+        let (plain, paired) = match &step.primitive {
+            Primitive::Fusion { body, .. } => codegen::gemm_dot(body).map_or((false, false), |d| {
+                (
+                    codegen::gemm_plain(body, d),
+                    codegen::gemm_mpp_pair(body, d),
+                )
+            }),
+            _ => (false, false),
         };
-        let others = plain
-            && matches!(
-                dot,
-                Primitive::DotGeneral {
-                    accum_dtype: DType::F32,
-                    ..
-                }
-            );
+        let f32 = matches!(
+            dot,
+            Primitive::DotGeneral {
+                accum_dtype: DType::F32,
+                ..
+            }
+        );
+        let others = plain && f32;
         let skinny = others && gemm::skinny(dot, lhs, rhs, out);
         let large = step.output.1.numel() >= TUNED_OUTPUTS;
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
         let mpp = large
-            && others
+            && (others || (paired && f32))
             && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
             && super::mpp_available();
-        let mpp = if mpp { gemm::mpp_configs() } else { &[] };
+        let mpp: Vec<GemmConfig> = match mpp {
+            true => gemm::mpp_configs()
+                .iter()
+                .filter(|c| !paired || c.bn >= 2 * 32)
+                .copied()
+                .collect(),
+            false => Vec::new(),
+        };
+        let tiles = match &step.primitive {
+            Primitive::Fusion { body, .. } => codegen::tile_scratch(body).is_some(),
+            _ => false,
+        };
+        if tiles {
+            let wide = mpp.iter().filter(|c| c.bn % codegen::ROW_TILE == 0);
+            return match mpp.is_empty() {
+                true => Vec::new(),
+                false => std::iter::once(&ROW_TILES).chain(wide).copied().collect(),
+            };
+        }
         let skinny = if skinny { gemm::skinny_configs() } else { &[] };
         gemm::configs()
             .iter()
-            .chain(mpp)
+            .chain(&mpp)
             .chain(skinny)
             .copied()
             .collect()
@@ -154,7 +194,7 @@ impl Kernels for Gemms {
             .iter()
             .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
             .collect();
-        let (kernel, source) = codegen::gemm_variant(body, &by_value, config);
+        let (kernel, source) = codegen::gemm_variant(body, &by_value, config, &self.config);
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {

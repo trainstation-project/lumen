@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernels::dot_general::mps::GemmConfig;
 
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
     reductions_of_rows(body, true)
@@ -66,7 +67,7 @@ pub(super) fn row_kernel(
     by_value: &[bool],
     reductions: &[&Node],
     config: &MpsConfig,
-    tile: Option<(&Graph, &[bool], &Node)>,
+    tile: Option<(&Graph, &[bool], &Node, Option<GemmConfig>)>,
 ) -> (String, String) {
     let out = body.outputs()[0];
     let out_type = body.type_of(out);
@@ -476,13 +477,13 @@ pub(super) fn row_kernel(
     let signature = format!("kernel void NAME({params}{THREAD_ARGS})");
     let staged = body.inputs().len() - 1;
     let prelude = match tile {
-        Some((real, by_value, dot)) if !wide => {
+        Some((real, by_value, dot, _)) if !wide => {
             let source = read_staged(&source, staged, |x| format!("staged[({x}) - m0n]"));
             return gemm_rows(real, by_value, dot, &source, rows, n);
         }
-        Some((real, by_value, dot)) => {
-            gemm_tiles(real, by_value, dot, body, reductions, &passes[0], rows, n)
-        }
+        Some((real, by_value, dot, gemm)) => gemm_tiles(
+            real, by_value, dot, body, reductions, &passes[0], rows, n, gemm,
+        ),
         None => String::new(),
     };
     if simd && partials.is_empty() {

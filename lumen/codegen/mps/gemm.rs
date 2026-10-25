@@ -279,6 +279,24 @@ pub(crate) fn gemm_plain(body: &Graph, dot: &Node) -> bool {
         && gemm_expanded(body, dot).is_none()
 }
 
+pub(crate) fn gemm_mpp_pair(body: &Graph, dot: &Node) -> bool {
+    let ty = |v: Var| body.type_of(v);
+    let layout = mpp_transposes(
+        &dot.primitive,
+        ty(dot.inputs[0]),
+        ty(dot.inputs[1]),
+        ty(dot.output),
+    );
+    let read = match gemm_interleaved(body, dot) {
+        Some(_) => matches!(layout, Some((_, true))),
+        None => layout.is_some(),
+    };
+    gemm_regions(body, dot).is_none()
+        && gemm_pair(body, dot).is_some()
+        && gemm_expanded(body, dot).is_none()
+        && read
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Expansion {
     Columns,
@@ -539,7 +557,12 @@ pub(crate) fn gemm_variant(
     body: &Graph,
     by_value: &[bool],
     config: GemmConfig,
+    mps: &MpsConfig,
 ) -> (String, String) {
+    if tile_scratch(body).is_some() {
+        let dot = row_dot(body).expect("a matmul with row reductions");
+        return gemm_row_kernel(body, by_value, dot, mps, Some(config));
+    }
     let dot = gemm_dot(body).expect("a matmul");
     gemm_kernel_with(body, by_value, dot, &[("", config)])
 }
@@ -658,6 +681,8 @@ fn gemm_kernel_with(
         "
     );
     let plain = paired == "NAME_epi";
+    let mpp_pair = gemm_mpp_pair(body, dot);
+    let interleaved = gemm_interleaved(body, dot).is_some();
     let flags = 7 - paired.matches(',').count();
     let paired = format!("{paired}{}", ", false".repeat(flags));
     for &(suffix, c) in variants {
@@ -665,8 +690,8 @@ fn gemm_kernel_with(
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
         assert!(
-            plain || c.algorithm == Algorithm::Tiled,
-            "only a plain epilogue runs on {:?}",
+            plain || c.algorithm == Algorithm::Tiled || (mpp_pair && c.algorithm == Algorithm::Mpp),
+            "only a plain or paired epilogue runs on {:?}",
             c.algorithm
         );
         let call = match c.algorithm {
@@ -693,7 +718,7 @@ fn gemm_kernel_with(
                 .expect("a layout Metal Performance Primitives read");
                 formatdoc!(
                     "
-                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi>(
+                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {mpp_pair}, {interleaved}>(
                     {lhs}, {rhs}, out, p, group,
                     NAME_epi{{{members}}});
                     "

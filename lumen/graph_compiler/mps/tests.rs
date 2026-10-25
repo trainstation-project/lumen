@@ -2054,3 +2054,171 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
         }
     }
 }
+
+#[test]
+fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::kernels::dot_general::mps::Algorithm;
+    if !available() || !super::mpp_available() {
+        return;
+    }
+    let (m, h) = (100, 768);
+    let projection = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let slice = |g: &mut Graph, v: Var, start_indices: Vec<usize>, limit_indices: Vec<usize>| {
+        let s = Slice {
+            start_indices,
+            limit_indices,
+            view: false,
+        };
+        apply(g, s, &[v])
+    };
+    let reshape = |g: &mut Graph, v: Var, sizes: &[usize]| {
+        let r = Reshape {
+            new_sizes: sizes.to_vec(),
+        };
+        apply(g, r, &[v])
+    };
+    let full = |g: &mut Graph, value: f64| {
+        let f = Full {
+            shape: vec![m],
+            fill_value: Scalar::Float(value),
+            dtype: DType::F32,
+        };
+        apply(g, f, &[])
+    };
+    let pair = |k: usize, interleaved: bool| {
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::BF16, &[m, k]));
+        let w = g.input(ty(DType::BF16, &[2 * h, k]));
+        let d = apply(&mut g, projection.clone(), &[a, w]);
+        let (first, second) = match interleaved {
+            true => {
+                let pairs = reshape(&mut g, d, &[m, h, 2]);
+                let mut member = |t: usize| {
+                    let s = slice(&mut g, pairs, vec![0, 0, t], vec![m, h, t + 1]);
+                    reshape(&mut g, s, &[m, h])
+                };
+                (member(0), member(1))
+            }
+            false => (
+                slice(&mut g, d, vec![0, 0], vec![m, h]),
+                slice(&mut g, d, vec![0, h], vec![m, 2 * h]),
+            ),
+        };
+        let gate = apply(&mut g, Logistic, &[first]);
+        let silu = apply(&mut g, Mul, &[first, gate]);
+        let z = apply(&mut g, Mul, &[silu, second]);
+        let out = apply(
+            &mut g,
+            Cast {
+                new_dtype: DType::BF16,
+            },
+            &[z],
+        );
+        g.set_outputs(&[out]).unwrap();
+        g
+    };
+    let norm = |k: usize| {
+        let mut g = Graph::new();
+        let a = g.input(ty(DType::BF16, &[m, k]));
+        let w = g.input(ty(DType::BF16, &[h, k]));
+        let r = g.input(ty(DType::F32, &[m, h]));
+        let gamma = g.input(ty(DType::F32, &[h]));
+        let d = apply(&mut g, projection.clone(), &[a, w]);
+        let x = apply(&mut g, Add, &[r, d]);
+        let squares = apply(&mut g, Mul, &[x, x]);
+        let sum = ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        };
+        let s = apply(&mut g, sum, &[squares]);
+        let inverse = full(&mut g, 1.0 / h as f64);
+        let mean = apply(&mut g, Mul, &[s, inverse]);
+        let eps = full(&mut g, 1e-5);
+        let variance = apply(&mut g, Add, &[mean, eps]);
+        let rms = apply(&mut g, Sqrt, &[variance]);
+        let column = reshape(&mut g, rms, &[m, 1]);
+        let rows = BroadcastInDim {
+            shape: vec![m, h],
+            broadcast_dimensions: vec![0, 1],
+        };
+        let rms = apply(&mut g, rows, &[column]);
+        let y = apply(&mut g, Div, &[x, rms]);
+        let columns = BroadcastInDim {
+            shape: vec![m, h],
+            broadcast_dimensions: vec![1],
+        };
+        let gamma = apply(&mut g, columns, &[gamma]);
+        let out = apply(&mut g, Mul, &[y, gamma]);
+        g.set_outputs(&[out, x]).unwrap();
+        g
+    };
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.mps.autotune = false;
+    for k in [96, 256] {
+        let cases = [
+            ("interleaved pair", pair(k, true)),
+            ("halves pair", pair(k, false)),
+            ("norm wider than a tile", norm(k)),
+        ];
+        for (case, g) in cases {
+            let inputs: Vec<Tensor> = g
+                .inputs()
+                .iter()
+                .enumerate()
+                .map(|(seed, &v)| {
+                    let t = g.type_of(v);
+                    values(t.dtype, &t.shape, seed as u64 + 1)
+                })
+                .collect();
+            let expected: Vec<Vec<f32>> = reference::run(&g, &inputs)
+                .unwrap()
+                .iter()
+                .map(|t| t.to_dtype(DType::F32).unwrap().to_vec::<f32>())
+                .collect();
+            let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+            let mut plan =
+                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let at = plan
+                .steps()
+                .iter()
+                .position(|s| matmul_of(s).is_some())
+                .expect("a matmul step");
+            let step = plan.steps()[at].clone();
+            let mut gemms = Gemms::new(&MpsConfig::default());
+            let configs: Vec<_> = gemms
+                .configs(&step)
+                .into_iter()
+                .filter(|c| c.algorithm == Algorithm::Mpp)
+                .collect();
+            assert!(!configs.is_empty(), "{case} K={k}: no MPP candidate");
+            let built: Vec<_> = configs
+                .into_iter()
+                .map(|config| (config, gemms.build(&step, config)))
+                .collect();
+            gemms.compile().unwrap();
+            for (config, tuned) in built {
+                plan.steps_mut()[at].tuned = Some(tuned);
+                let got = plan.run(&on_mps).unwrap();
+                for (want, have) in expected.iter().zip(&got) {
+                    let have = have.to_dtype(DType::F32).unwrap().to_vec::<f32>();
+                    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+                    for (e, (w, v)) in want.iter().zip(&have).enumerate() {
+                        assert!(
+                            (w - v).abs() <= scale * 1e-2,
+                            "{case} K={k} {config:?} [{e}]: {v} != {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
