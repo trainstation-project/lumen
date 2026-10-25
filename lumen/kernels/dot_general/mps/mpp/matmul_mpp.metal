@@ -46,7 +46,7 @@ template <typename T,
           bool TR,
           typename Out = O,
           typename Epi = Same,
-          int GROUP = 1,
+          uint GROUP = 1,
           bool INTERLEAVED = false>
 inline void matmul_mpp(
     device const T *lhs, device const T *rhs, device Out *out, constant ulong *p, uint3 group, Epi epi = Epi()) {
