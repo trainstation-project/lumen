@@ -289,6 +289,33 @@ def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
     assert lumen.to_numpy(y).tolist() == a.T.tolist()
 
 
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_triton_autotuned_loops_match_untuned_and_dump_their_launch(device, dtype, tmp_path, triton_on_cuda):
+    """A Triton loop the compiler autotunes computes what the untuned loop
+    does, at lengths no ``BLOCK_SIZE`` divides, and its dumped source carries
+    the ``BLOCK_SIZE`` and warps it picked."""
+    compiler = lumen.config.compiler.cuda
+    try:
+        for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
+            try:
+                x = lumen.from_numpy(rand(n, seed=n)).to(device).to(dtype=dtype)
+            except RuntimeError as e:
+                pytest.skip(str(e))
+            results = []
+            for autotune in (False, True):
+                compiler.autotune = autotune
+                y = lumen.compile(lambda x: -x * 2)(x)
+                results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
+            assert np.array_equal(results[0], results[1]), n
+        lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
+        source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.py"))
+        assert re.search(r"# BLOCK_SIZE=\d+ warps=\d+", source)
+        assert "BLOCK_SIZE: tl.constexpr" in source
+    finally:
+        compiler.autotune = True
+
+
 @pytest.mark.mps
 def test_mps_reads_strided_inputs_in_place():
     """A transposed or narrowed MPS input is read where it is, not copied

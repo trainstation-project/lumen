@@ -246,12 +246,17 @@ fn triton_gemm(
 
 fn triton_loop(
     kernel: &super::triton::Kernel,
+    config: &crate::codegen::triton::LoopConfig,
     functions: &[super::triton::Function],
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
 ) -> Result<(), String> {
     crate::kernels::launched::launched(&kernel.name, || {
-        Some(triton_code(&kernel.source, functions))
+        let source = format!(
+            "# BLOCK_SIZE={} warps={}\n{}",
+            config.block_size, config.warps, kernel.source
+        );
+        Some(triton_code(&source, functions))
     });
     Python::attach(|py| {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
@@ -265,6 +270,8 @@ fn triton_loop(
                 scalars,
                 PyTensor::wrap(out.clone()),
                 triton_functions(functions),
+                config.block_size,
+                config.warps,
             ))
             .map(|_| ())
     })

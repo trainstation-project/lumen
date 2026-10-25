@@ -9,14 +9,15 @@ use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::set_gemm;
 
-use super::common::autotune::Autotuner;
+use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
-use super::plan::{Buffer, Step};
+use super::plan::{Buffer, Step, Tuned};
 use super::{Options, Plan, cpu};
-use crate::codegen::triton as codegen;
+use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::{DType, Device, Scalar, Tensor};
+use crate::stream::event::event_for;
+use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -46,6 +47,7 @@ impl Function {
 
 pub type Loop = fn(
     kernel: &Kernel,
+    config: &LoopConfig,
     functions: &[Function],
     inputs: &[Tensor],
     out: &Tensor,
@@ -69,30 +71,97 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         .add(LoopFusion)
         .run(&mut module)?;
     let mut plan = cpu::plan(&module.graph, device, options);
-    let kernels = plan.steps().iter().map(|step| match &step.primitive {
-        Primitive::Fusion { body, .. } => {
-            let by_value: Vec<bool> = step
-                .inputs
-                .iter()
-                .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
-                .collect();
-            let (name, source) = crate::codegen::triton::kernel(body, &by_value);
-            Some(Kernel {
-                name,
-                source,
-                by_value,
-            })
-        }
-        _ => None,
-    });
+    let kernels = plan.steps().iter().map(loop_kernel);
     plan.triton = Some(kernels.collect());
     if options.config.cuda.autotune {
         let tuner = Autotuner {
-            timer: gemm::Events { device },
+            timer: Events { device },
         };
         tuner.tune(&mut gemm::Gemms, &mut plan)?;
+        tuner.tune(&mut Loops, &mut plan)?;
     }
     Ok(plan)
+}
+
+fn loop_kernel(step: &Step) -> Option<Kernel> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        return None;
+    };
+    let by_value: Vec<bool> = step
+        .inputs
+        .iter()
+        .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+        .collect();
+    let (name, source) = codegen::kernel(body, &by_value);
+    Some(Kernel {
+        name,
+        source,
+        by_value,
+    })
+}
+
+struct Loops;
+
+impl Kernels for Loops {
+    type Config = LoopConfig;
+
+    fn configs(&self, step: &Step) -> Vec<LoopConfig> {
+        match step.primitive {
+            Primitive::Fusion { .. } => LOOP_CONFIGS.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn build(&mut self, _: &Step, config: LoopConfig) -> Tuned {
+        Tuned::new(format!("{config:?}"), config)
+    }
+}
+
+struct Events {
+    device: Device,
+}
+
+impl Timer for Events {
+    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor);
+
+    fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String> {
+        let zeros = |ty: &TensorType, device| {
+            Tensor::zeros(
+                &ty.shape,
+                TensorOptions::new().dtype(ty.dtype).device(device),
+            )
+        };
+        let inputs = step
+            .inputs
+            .iter()
+            .map(|(b, ty)| match b {
+                Buffer::Scalar(_) => zeros(ty, Device::Cpu(0)),
+                _ => zeros(ty, self.device),
+            })
+            .collect();
+        Ok(Some((
+            loop_kernel(step),
+            inputs,
+            zeros(&step.output.1, self.device),
+        )))
+    }
+
+    fn time(
+        &self,
+        (kernel, inputs, out): &Self::Buffers,
+        step: &Step,
+        reps: usize,
+    ) -> Result<f64, String> {
+        let mut start = event_for(self.device, true)?;
+        let mut end = event_for(self.device, true)?;
+        start.record()?;
+        for _ in 0..reps {
+            run(kernel.as_ref(), step, inputs, out)?;
+        }
+        end.record()?;
+        end.synchronize()?;
+        Ok(start.elapsed_time(end.as_ref())? / 1e3 / reps as f64)
+    }
 }
 
 pub(crate) fn run(
@@ -116,7 +185,10 @@ pub(crate) fn run(
                 "STORE",
                 codegen::store(out.shape(), out.strides()),
             ));
-            launch(kernel, &functions, inputs, out)
+            let config = step
+                .launch::<LoopConfig>()
+                .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
+            launch(kernel, config, &functions, inputs, out)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
@@ -131,7 +203,7 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
     };
     let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
     let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
-    launch(&kernel, &[store], &[bits], t)
+    launch(&kernel, &LOOP_CONFIGS[UNTUNED_LOOP], &[store], &[bits], t)
 }
 
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
@@ -148,7 +220,13 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
         Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
     ];
-    launch(&kernel, &functions, std::slice::from_ref(src), dst)
+    launch(
+        &kernel,
+        &LOOP_CONFIGS[UNTUNED_LOOP],
+        &functions,
+        std::slice::from_ref(src),
+        dst,
+    )
 }
 
 pub(crate) fn reads_strided(step: &Step) -> bool {
@@ -160,6 +238,7 @@ pub(crate) fn reads_strided(step: &Step) -> bool {
 
 fn launch(
     kernel: &Kernel,
+    config: &LoopConfig,
     functions: &[Function],
     inputs: &[Tensor],
     out: &Tensor,
@@ -167,5 +246,5 @@ fn launch(
     let launch = LOOP.get().ok_or(
         "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
     )?;
-    launch(kernel, functions, inputs, out)
+    launch(kernel, config, functions, inputs, out)
 }

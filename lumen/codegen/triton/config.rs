@@ -37,3 +37,27 @@ pub(crate) const CONFIGS: [Config; 7] = [
 ];
 
 pub(crate) const UNTUNED: usize = 2;
+
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub struct LoopConfig {
+    pub block_size: usize,
+    pub warps: usize,
+}
+
+const fn loop_config(block_size: usize, warps: usize) -> LoopConfig {
+    LoopConfig { block_size, warps }
+}
+
+pub(crate) const LOOP_CONFIGS: [LoopConfig; 8] = [
+    loop_config(512, 4),
+    loop_config(1024, 4),
+    loop_config(2048, 4),
+    loop_config(4096, 4),
+    loop_config(1024, 8),
+    loop_config(2048, 8),
+    loop_config(4096, 8),
+    loop_config(8192, 8),
+];
+
+pub(crate) const UNTUNED_LOOP: usize = 1;
