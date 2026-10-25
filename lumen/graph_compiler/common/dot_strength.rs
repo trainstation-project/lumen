@@ -2,7 +2,7 @@ use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
+pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -29,37 +29,23 @@ pub(crate) fn reduce_vector_dots(graph: &Graph, matrices: bool) -> Graph {
                     let free = (0..shape.len()).filter(|d| !b.contains(d) && !c.contains(d));
                     free.map(|d| shape[d]).product::<usize>() == 1
                 };
-                let rows = |&(v, _, c): &(Var, &Vec<usize>, &Vec<usize>)| {
-                    let rank = out.type_of(v).shape.len();
-                    let mut c = c.clone();
-                    c.sort_unstable();
-                    c.iter().copied().eq(rank - c.len()..rank)
-                };
                 let accum = *accum_dtype;
-                match (vector(&operands[0]), vector(&operands[1])) {
-                    (true, true) => Some(product(&mut out, operands[0], operands[1], accum)),
-                    (true, false) if matrices && rows(&operands[1]) => {
-                        Some(product(&mut out, operands[0], operands[1], accum))
-                    }
-                    (false, true) if matrices && rows(&operands[0]) => {
-                        Some(product(&mut out, operands[1], operands[0], accum))
-                    }
-                    _ => None,
-                }
-                .map(|sum| {
-                    let sum = reshaped(&mut out, sum, &graph.type_of(node.output).shape);
-                    match accum == *output_dtype {
-                        true => sum,
-                        false => out
-                            .apply(
-                                Primitive::Cast {
-                                    new_dtype: *output_dtype,
-                                },
-                                &[sum],
-                            )
-                            .expect("a cast"),
-                    }
-                })
+                (vector(&operands[0]) && vector(&operands[1]))
+                    .then(|| product(&mut out, operands[0], operands[1], accum))
+                    .map(|sum| {
+                        let sum = reshaped(&mut out, sum, &graph.type_of(node.output).shape);
+                        match accum == *output_dtype {
+                            true => sum,
+                            false => out
+                                .apply(
+                                    Primitive::Cast {
+                                        new_dtype: *output_dtype,
+                                    },
+                                    &[sum],
+                                )
+                                .expect("a cast"),
+                        }
+                    })
             }
             _ => None,
         }
@@ -165,9 +151,7 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     }
 }
 
-pub(crate) struct DotStrength {
-    pub(crate) matrices: bool,
-}
+pub(crate) struct DotStrength;
 
 impl<M: Module> CompilerPass<M> for DotStrength {
     fn name(&self) -> &'static str {
@@ -175,7 +159,7 @@ impl<M: Module> CompilerPass<M> for DotStrength {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = reduce_vector_dots(m.graph(), self.matrices);
+        *m.graph_mut() = reduce_vector_dots(m.graph());
         Ok(())
     }
 }

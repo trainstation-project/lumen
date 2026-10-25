@@ -101,7 +101,7 @@ pub(super) fn gemm_tiles(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (tile, tiles) = (ROW_TILE, n.div_ceil(ROW_TILE));
-    let mpp = gemm.filter(|c| c.algorithm == Algorithm::Mpp);
+    let mpp = gemm.filter(|c| c.algorithm != Algorithm::Tiled);
     let at = match mpp {
         Some(_) => format!("(uint(n0) + c0) / {tile}u"),
         None => "group.x".to_owned(),
@@ -141,22 +141,36 @@ pub(super) fn gemm_tiles(
         let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
             format!("dotv[{x}]")
         });
-        let ty = |v: Var| body.type_of(v);
-        let (left, right) = mpp_transposes(
-            &dot.primitive,
-            ty(dot.inputs[0]),
-            ty(dot.inputs[1]),
-            ty(dot.output),
-        )
-        .expect("a layout Metal Performance Primitives read");
         let (bm, bn, bk, threads, simds) = (c.bm, c.bn, c.bk, c.threads, c.threads / 32);
+        let product = match c.algorithm {
+            Algorithm::Gemv => {
+                let (_, vectors) = gemv_of(body, dot).expect("a matrix-vector dot");
+                format!(
+                    "matmul_gemv<{t}, {accum}, {o}, {bn}, {simds}, {bk}, {vectors}, true, {o}, Same>(\n\
+                     {lhs}, {rhs}, dotv, p, group, sg, lane);"
+                )
+            }
+            _ => {
+                let ty = |v: Var| body.type_of(v);
+                let (left, right) = mpp_transposes(
+                    &dot.primitive,
+                    ty(dot.inputs[0]),
+                    ty(dot.inputs[1]),
+                    ty(dot.output),
+                )
+                .expect("a layout Metal Performance Primitives read");
+                format!(
+                    "matmul_mpp<{t}, {accum}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(\n\
+                     {lhs}, {rhs}, dotv, p, group);"
+                )
+            }
+        };
         return formatdoc!(
             "
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
                                    {THREAD_ARGS}) {{
-                matmul_mpp<{t}, {accum}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(
-                    {lhs}, {rhs}, dotv, p, group);
+                {product}
                 threadgroup_barrier(mem_flags::mem_device);
                 const ulong m0 = ulong(group.y) * {bm}, n0 = ulong(group.x) * {bn};
                 for (uint rr = sg; rr < {bm}u; rr += {simds}u) {{

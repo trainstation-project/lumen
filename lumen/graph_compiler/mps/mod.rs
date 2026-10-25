@@ -20,7 +20,6 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
-use super::common::dot_strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
@@ -69,6 +68,7 @@ const PRELUDE: &str = concat!(
     include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
     include_str!("../../kernels/dot_general/mps/tiled/matmul_atomic.metal"),
     include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
+    include_str!("../../kernels/dot_general/mps/gemv/matmul_gemv.metal"),
     include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
     include_str!("../../kernels/attention/mps/forward.metal"),
     include_str!("../../kernels/attention/mps/backward.metal"),
@@ -183,7 +183,6 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     if config.neural_engine {
         p.add(ane::NeuralEngine);
     }
-    p.add(DotStrength { matrices: true });
     if config.split_k {
         p.add(split_k::SplitK);
     }
@@ -722,6 +721,10 @@ pub(super) fn encode_with(
         };
         let (ls, rs) = (strides(dot.inputs[0]), strides(dot.inputs[1]));
         let tuned = gemm;
+        let config = tuned
+            .as_ref()
+            .map(|&(_, c)| c)
+            .or_else(|| codegen::gemv_config(body));
         let plan = crate::kernels::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
@@ -730,12 +733,13 @@ pub(super) fn encode_with(
             &ls,
             &rs,
             step.label,
-            tuned.as_ref().map(|(_, c)| (c.bm, c.bn)),
+            config.map(|c| (c.bm, c.bn)),
         )?;
-        let kernel = match (&tuned, plan.small, plan.mid) {
+        let kernel = match (&tuned, config, plan.small, plan.mid) {
             (Some((tuned, _)), ..) => tuned.to_string(),
-            (None, true, _) => format!("{name}_small"),
-            (None, _, true) => format!("{name}_mid"),
+            (None, Some(_), ..) => name.to_owned(),
+            (None, None, true, _) => format!("{name}_small"),
+            (None, None, _, true) => format!("{name}_mid"),
             _ => name.to_owned(),
         };
         let mut buffers = inputs.to_vec();
@@ -753,8 +757,8 @@ pub(super) fn encode_with(
             first.push(dotv);
             first.extend(&tiles);
             let name = tuned.as_ref().map_or(name, |(tuned, _)| tuned);
-            let grid = match &tuned {
-                Some((_, c)) if c.algorithm == crate::kernels::dot_general::mps::Algorithm::Mpp => {
+            let grid = match config {
+                Some(c) if c.algorithm != crate::kernels::dot_general::mps::Algorithm::Tiled => {
                     Grid::GroupsOf {
                         groups: [n.div_ceil(c.bn), m.div_ceil(c.bm), 1],
                         threads: c.threads,
@@ -787,8 +791,8 @@ pub(super) fn encode_with(
                 name.to_owned(),
                 Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
             ),
-            None => match (&tuned, plan.grid) {
-                (Some((_, c)), Grid::Groups(groups)) => (
+            None => match (config, plan.grid) {
+                (Some(c), Grid::Groups(groups)) => (
                     kernel,
                     Grid::GroupsOf {
                         groups,

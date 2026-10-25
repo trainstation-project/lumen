@@ -3,6 +3,7 @@ pub(crate) enum Algorithm {
     Tiled,
     Mpp,
     Skinny,
+    Gemv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

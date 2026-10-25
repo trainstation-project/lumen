@@ -113,7 +113,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     pipeline
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
-        .add(DotStrength { matrices: false });
+        .add(DotStrength);
     if options.config.tpu.merge_dots {
         pipeline.add(MergeDots {
             target: Target {

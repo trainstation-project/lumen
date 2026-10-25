@@ -1,5 +1,9 @@
 use super::*;
-use crate::kernels::dot_general::mps::{Algorithm, DEFAULT_CONFIGS, GemmConfig, mpp_transposes};
+use crate::kernels::dot_general::mps::{
+    Algorithm, DEFAULT_CONFIGS, GemmConfig, gemv, gemv_default, gemv_rows, gemv_tiles_default,
+    mpp_transposes, plan_matmul,
+};
+use crate::tensor::contiguous_strides;
 
 pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
     body.nodes()
@@ -336,8 +340,41 @@ fn staged_call(
                 "
             ),
         },
+        Algorithm::Gemv => {
+            let (vector_lhs, vectors) = gemv_of(body, dot).expect("a matrix-vector dot");
+            let rows = gemv_rows(&c, vector_lhs);
+            match flags.plain() {
+                true => formatdoc!(
+                    "
+                    matmul_gemv<{t}, {a}, {o}, {rows}, {simds}, {bk}, {vectors}, {vector_lhs}, {w}, NAME_epi>(
+                    {lhs}, {rhs}, out, p, group, sg, lane,
+                    NAME_epi{{{members}}});
+                    "
+                ),
+                false => formatdoc!(
+                    "
+                    threadgroup float tile[8 * {rows}], stage[{simds} * 64];
+                    matmul_gemv<{t}, {a}, {o}, {rows}, {simds}, {bk}, {vectors}, {vector_lhs}, {w}, NAME_epi, {template}>(
+                    {lhs}, {rhs}, out, p, group, sg, lane,
+                    NAME_epi{{{members}}}, tile, stage);
+                    "
+                ),
+            }
+        }
         Algorithm::Tiled => unreachable!("the tiled kernel stores from its fragments"),
     }
+}
+
+pub(crate) fn gemv_of(body: &Graph, dot: &Node) -> Option<(bool, usize)> {
+    let ty = |v: Var| body.type_of(v);
+    let (lhs, rhs, out) = (ty(dot.inputs[0]), ty(dot.inputs[1]), ty(dot.output));
+    let vector_lhs = gemv(&dot.primitive, lhs, rhs, out)?;
+    let (ls, rs) = (
+        contiguous_strides(&lhs.shape),
+        contiguous_strides(&rhs.shape),
+    );
+    let launch = plan_matmul(&dot.primitive, lhs, rhs, out, &ls, &rs, "", None).ok()?;
+    Some((vector_lhs, launch.p[usize::from(!vector_lhs)]))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -609,7 +646,21 @@ pub(super) fn gemm_regions_kernel(
 }
 
 pub(super) fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (String, String) {
-    gemm_kernel_with(body, by_value, dot, &DEFAULT_CONFIGS)
+    match gemv_config(body) {
+        Some(c) => gemm_kernel_with(body, by_value, dot, &[("", c)]),
+        None => gemm_kernel_with(body, by_value, dot, &DEFAULT_CONFIGS),
+    }
+}
+
+pub(crate) fn gemv_config(body: &Graph) -> Option<GemmConfig> {
+    if row_dot(body).is_some() && tile_scratch(body).is_none() {
+        return None;
+    }
+    let (vector_lhs, _) = gemv_of(body, gemm_dot(body)?)?;
+    match tile_scratch(body) {
+        Some(_) => vector_lhs.then(gemv_tiles_default),
+        None => Some(gemv_default(vector_lhs)),
+    }
 }
 
 pub(crate) fn gemm_variant(

@@ -13,6 +13,7 @@ import lumen.functional as F
 REPO = "meta-llama/Llama-3.2-1B-Instruct"
 MAX_TOKENS = 1024
 NEW_TOKENS = 256
+CHECK_EVERY = 128
 
 lumen.config.static_allocator_bytes = 4 << 30
 
@@ -113,12 +114,15 @@ class Llama(lumen.nn.Module):
             x = layer(x, self.rotary, cache_k, cache_v, pos)
         last = self.model.norm(x[:, -1])
         logits = F.matmul(last, self.model.embed_tokens.weight.t(), "float32", "float32")
-        return F.argmax(logits, -1).reshape(1, 1)
+        token = F.argmax(logits, -1)
+        cache.ids.narrow(0, pos + ids.shape[1], 1).copy_(token)
+        return token.reshape(1, 1)
 
 
 class KVCache(lumen.nn.Module):
     k: list
     v: list
+    ids: lumen.Tensor
 
 
 def inverse_frequencies(config):
@@ -178,6 +182,7 @@ def build(config):
     cache = KVCache(
         k=[meta(1, MAX_TOKENS, kv_heads, head_dim) for _ in range(layers)],
         v=[meta(1, MAX_TOKENS, kv_heads, head_dim) for _ in range(layers)],
+        ids=meta(MAX_TOKENS, dtype=lumen.int32),
     )
     return model, cache
 
@@ -208,7 +213,7 @@ message = " ".join(sys.argv[1:]) or "Write a haiku about compilers."
 prompt = tokenizer.encode(chat_prompt(message), add_special_tokens=False).ids
 
 model, cache = build(config)
-step = lumen.compile(lambda model, cache, ids, pos: model(ids, cache, pos), device="mps")
+step = lumen.compile(lambda model, cache, ids, pos: (model(ids, cache, pos), cache.ids), device="mps")
 step(model, cache, meta(1, len(prompt), dtype=lumen.int32), meta(dtype=lumen.int32))
 step(model, cache, meta(1, 1, dtype=lumen.int32), meta(dtype=lumen.int32))
 
@@ -222,13 +227,20 @@ for t in cache.k + cache.v:
     t.zero_()
 
 start = time.perf_counter()
-ids = step(model, cache, tokens(prompt), position(0))
-generated = [ids.item()]
+ids, history = step(model, cache, tokens(prompt), position(0))
+lumen.mps.synchronize()
 first = time.perf_counter()
-while generated[-1] not in eos and len(generated) < NEW_TOKENS and len(prompt) + len(generated) < MAX_TOKENS:
-    ids = step(model, cache, ids, position(len(prompt) + len(generated) - 1))
-    generated.append(ids.item())
+last = min(len(prompt) + NEW_TOKENS, MAX_TOKENS)
+filled = len(prompt) + 1
+while True:
+    for pos in range(filled - 1, min(filled - 1 + CHECK_EVERY, last - 1)):
+        ids, history = step(model, cache, ids, position(pos))
+    filled = min(filled + CHECK_EVERY, last)
+    generated = history.tolist()[len(prompt) : filled]
+    if filled == last or any(t in eos for t in generated):
+        break
 end = time.perf_counter()
+generated = generated[: next((i + 1 for i, t in enumerate(generated) if t in eos), len(generated))]
 
 print(tokenizer.decode([t for t in generated if t not in eos]))
 print(

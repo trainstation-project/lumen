@@ -140,6 +140,18 @@ impl Kernels for Gemms {
         let group = codegen::gemm_group(body, d);
         let dual = codegen::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
+        if tiled_gemm(step) && codegen::gemv_config(body).is_some() {
+            let (vector_lhs, _) = codegen::gemv_of(body, d).expect("a matrix-vector dot");
+            let tiles = codegen::tile_scratch(body).is_some();
+            return gemm::gemv_configs(vector_lhs)
+                .iter()
+                .filter(|c| {
+                    !tiles || gemm::gemv_rows(c, vector_lhs).is_multiple_of(codegen::ROW_TILE)
+                })
+                .filter(|c| group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0))
+                .copied()
+                .collect();
+        }
         let skinny = gemm::skinny(dot, lhs, rhs, out);
         let large = out.numel() >= TUNED_OUTPUTS;
         if !tiled_gemm(step) || !(large || skinny) {

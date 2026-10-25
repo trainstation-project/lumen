@@ -1,10 +1,12 @@
 mod config;
+mod gemv;
 mod linear_cross_entropy;
 mod mpp;
 mod skinny;
 mod tiled;
 
 pub(crate) use config::*;
+pub(crate) use gemv::*;
 pub(crate) use linear_cross_entropy::*;
 pub(crate) use mpp::*;
 pub(crate) use skinny::*;
