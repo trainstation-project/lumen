@@ -6,7 +6,6 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-BLOCK = 1024
 kernels = {}
 
 
@@ -32,10 +31,11 @@ def scalar(x):
     return x.item()
 
 
-def launch(name, source, inputs, scalars, out, specs):
+def launch(name, source, inputs, scalars, out, specs, block_size, warps):
     n = math.prod(out.shape)
     if n == 0:
         return
     args = [scalar(x) if k in scalars else x for k, x in enumerate(inputs)]
     kernel = compiled(name, source)
-    kernel[(triton.cdiv(n, BLOCK),)](*args, out, n, **functions(specs), BLOCK=BLOCK, enable_fp_fusion=False)
+    grid = (triton.cdiv(n, block_size),)
+    kernel[grid](*args, out, n, **functions(specs), BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False)

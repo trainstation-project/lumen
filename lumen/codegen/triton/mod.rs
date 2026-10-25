@@ -13,7 +13,7 @@ use crate::{DType, Element, Scalar};
 mod config;
 mod gemm;
 
-pub(crate) use config::{CONFIGS, Config, UNTUNED};
+pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
 pub(crate) use gemm::gemm;
 
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
@@ -90,7 +90,10 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     let params: String = inputs
         .chain(["out".into(), "n".into()])
         .chain(loads)
-        .chain(["STORE: tl.constexpr".into(), "BLOCK: tl.constexpr".into()])
+        .chain([
+            "STORE: tl.constexpr".into(),
+            "BLOCK_SIZE: tl.constexpr".into(),
+        ])
         .map(|p| format!("    {p},\n"))
         .collect();
     let lines = &emitter.lines;
@@ -99,7 +102,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
         @triton.jit
         def NAME(
         {params}):
-            j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+            j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = j < n
         {lines}    STORE(out, j, {result}, mask)
         "
@@ -119,8 +122,8 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
     let source = formatdoc!(
         "
         @triton.jit
-        def NAME(bits, out, n, STORE: tl.constexpr, BLOCK: tl.constexpr):
-            j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        def NAME(bits, out, n, STORE: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+            j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             STORE(out, j, {value}, j < n)
         "
     );
