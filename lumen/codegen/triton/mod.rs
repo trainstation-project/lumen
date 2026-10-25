@@ -4,7 +4,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::formatdoc;
 
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
@@ -54,6 +54,8 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Logistic
             | Cast { .. }
             | Select
+            | Unary(_)
+            | Binary(_)
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
@@ -199,6 +201,258 @@ impl Emitter<'_> {
         format!("{prefix}{}", self.locals - 1)
     }
 
+    fn local(&mut self, expr: String) -> String {
+        let name = self.fresh("t");
+        writeln!(self.lines, "    {name} = {expr}").unwrap();
+        name
+    }
+
+    fn computed(&mut self, x: &str, dtype: DType) -> (String, &'static str) {
+        match dtype {
+            DType::F64 => (x.to_string(), "tl.float64"),
+            DType::F32 => (x.to_string(), "tl.float32"),
+            _ => (self.local(format!("{x}.to(tl.float32)")), "tl.float32"),
+        }
+    }
+
+    fn unary(&mut self, op: UnaryOp, x: String, operand: DType, out: DType) -> String {
+        use UnaryOp::*;
+        let t = triton_type(out).expect("a Triton dtype");
+        if !operand.is_float() {
+            let bits = operand.bits();
+            let wide = match bits {
+                64 => format!("{x}.to(tl.int64, bitcast=True)"),
+                _ => format!(
+                    "{x}.to({}, bitcast=True).to(tl.uint32).to(tl.int32, bitcast=True)",
+                    unsigned(bits)
+                ),
+            };
+            return match op {
+                Abs => format!("tl.where({x} < 0, -{x}, {x})"),
+                Sign => format!("tl.where({x} > 0, 1, tl.where({x} < 0, -1, 0)).to({t})"),
+                Not if operand == DType::Bool => format!("{x} == 0"),
+                Not => format!("~{x}"),
+                PopulationCount => format!("libdevice.popc({wide}).to({t})"),
+                Clz if bits == 64 => format!("libdevice.clz({wide}).to({t})"),
+                Clz => format!("(libdevice.clz({wide}) - {}).to({t})", 32 - bits),
+                op => unreachable!("{} of an integer", op.name()),
+            };
+        }
+        let (a, f) = self.computed(&x, operand);
+        let value = match op {
+            Sin => format!("libdevice.sin({a})"),
+            Cos => format!("libdevice.cos({a})"),
+            Tan => format!("libdevice.tan({a})"),
+            Asin => format!("libdevice.asin({a})"),
+            Acos => format!("libdevice.acos({a})"),
+            Atan => format!("libdevice.atan({a})"),
+            Sinh => format!("libdevice.sinh({a})"),
+            Cosh => format!("libdevice.cosh({a})"),
+            Asinh => format!("libdevice.asinh({a})"),
+            Acosh => format!("libdevice.acosh({a})"),
+            Atanh => format!("libdevice.atanh({a})"),
+            Floor => format!("libdevice.floor({a})"),
+            Ceil => format!("libdevice.ceil({a})"),
+            RoundEven => format!("libdevice.rint({a})"),
+            Log1p => format!("libdevice.log1p({a})"),
+            Expm1 => format!("libdevice.expm1({a})"),
+            Exp2 => format!("libdevice.exp2({a})"),
+            Log2 => format!("libdevice.log2({a})"),
+            Rsqrt if f == "tl.float64" => format!("1.0 / libdevice.sqrt({a})"),
+            Rsqrt => format!("tl.div_rn(1.0, tl.sqrt_rn({a}))"),
+            Cbrt => format!("libdevice.cbrt({a})"),
+            Abs => format!("tl.abs({a})"),
+            Sign => {
+                format!("tl.where(({a} == 0) | ({a} != {a}), {a}, tl.where({a} > 0, 1.0, -1.0))")
+            }
+            IsFinite => return format!("tl.abs({a}) < float(\"inf\")"),
+            ErfInv => self.erf_inv(&a, f),
+            ReducePrecision {
+                exponent_bits,
+                mantissa_bits,
+            } => self.reduce_precision(&a, f, exponent_bits, mantissa_bits),
+            op => unreachable!("{} of a float", op.name()),
+        };
+        format!("({value}).to({t})")
+    }
+
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        x: String,
+        y: String,
+        (operand, other): (DType, DType),
+        out: DType,
+    ) -> String {
+        use BinaryOp::*;
+        let t = triton_type(out).expect("a Triton dtype");
+        if operand.is_float() {
+            let (a, _) = self.computed(&x, operand);
+            let value = match op {
+                Pow if !other.is_float() => format!("libdevice.pow({a}, {y}.to(tl.int32))"),
+                Pow => format!("libdevice.pow({a}, {})", self.computed(&y, operand).0),
+                Rem => format!("libdevice.fmod({a}, {})", self.computed(&y, operand).0),
+                Min => {
+                    return format!("tl.minimum({x}, {y}, propagate_nan=tl.PropagateNan.ALL)");
+                }
+                Nextafter => return self.nextafter(&x, &y, operand),
+                op => unreachable!("{} of floats", op.name()),
+            };
+            return format!("({value}).to({t})");
+        }
+        let bits = operand.bits();
+        let signed = !matches!(
+            operand,
+            DType::Bool | DType::U8 | DType::U16 | DType::U32 | DType::U64
+        );
+        match op {
+            Rem if signed => {
+                let safe = self.local(format!(
+                    "tl.where(({y} == 0) | ({y} == -1), 1, {y}).to({t})"
+                ));
+                format!("tl.where({y} == 0, {x}, tl.where({y} == -1, 0, {x} % {safe}).to({t}))")
+            }
+            Rem => {
+                let safe = self.local(format!("tl.where({y} == 0, 1, {y}).to({t})"));
+                format!("tl.where({y} == 0, {x}, {x} % {safe})")
+            }
+            Min => format!("tl.minimum({x}, {y})"),
+            And => format!("{x} & {y}"),
+            Or => format!("{x} | {y}"),
+            Xor => format!("{x} ^ {y}"),
+            ShiftLeft | ShiftRightLogical | ShiftRightArithmetic => {
+                let in_range = self.local(format!("({y} >= 0) & ({y} < {bits})"));
+                let shift = self.local(format!("tl.where({in_range}, {y}, 0).to({t})"));
+                let (u, i) = (unsigned(bits), format!("tl.int{bits}"));
+                match op {
+                    ShiftLeft => format!("tl.where({in_range}, {x} << {shift}, 0).to({t})"),
+                    ShiftRightLogical => {
+                        let r = self.local(format!(
+                            "({x}.to({u}, bitcast=True) >> {shift}.to({u}, bitcast=True)).to({t}, bitcast=True)"
+                        ));
+                        format!("tl.where({in_range}, {r}, 0).to({t})")
+                    }
+                    _ => {
+                        let v = self.local(format!("{x}.to({i}, bitcast=True)"));
+                        let r = self.local(format!(
+                            "({v} >> {shift}.to({i}, bitcast=True)).to({t}, bitcast=True)"
+                        ));
+                        let fill = self.local(format!(
+                            "tl.where({v} < 0, -1, 0).to({i}).to({t}, bitcast=True)"
+                        ));
+                        format!("tl.where({in_range}, {r}, {fill})")
+                    }
+                }
+            }
+            op => unreachable!("{} of integers", op.name()),
+        }
+    }
+
+    fn erf_inv(&mut self, a: &str, f: &str) -> String {
+        const SMALL: [&str; 9] = [
+            "2.81022636e-08",
+            "3.43273939e-07",
+            "-3.5233877e-06",
+            "-4.39150654e-06",
+            "0.00021858087",
+            "-0.00125372503",
+            "-0.00417768164",
+            "0.246640727",
+            "1.50140941",
+        ];
+        const LARGE: [&str; 9] = [
+            "-0.000200214257",
+            "0.000100950558",
+            "0.00134934322",
+            "-0.00367342844",
+            "0.00573950773",
+            "-0.0076224613",
+            "0.00943887047",
+            "1.00167406",
+            "2.83297682",
+        ];
+        let w = self.local(format!("-libdevice.log((1.0 - {a}) * (1.0 + {a}))"));
+        let near = self.local(format!("{w} - 2.5"));
+        let far = self.local(format!("libdevice.sqrt({w}) - 3.0"));
+        let mut polynomial = |at: &str, coefficients: &[&str]| {
+            let mut p = self.local(format!("tl.full([], {}, {f})", coefficients[0]));
+            for c in &coefficients[1..] {
+                p = self.local(format!("{c} + {p} * {at}"));
+            }
+            p
+        };
+        let small = polynomial(&near, &SMALL);
+        let large = polynomial(&far, &LARGE);
+        format!(
+            "tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), tl.where({w} < 5.0, {small}, {large}) * {a})"
+        )
+    }
+
+    fn reduce_precision(
+        &mut self,
+        a: &str,
+        f: &str,
+        exponent_bits: u32,
+        mantissa_bits: u32,
+    ) -> String {
+        let (u, width, mantissa, exponent, bias) = match f {
+            "tl.float64" => ("tl.uint64", 64, 52, 11, 1023u64),
+            _ => ("tl.uint32", 32, 23, 8, 127u64),
+        };
+        let c = |v: u64| format!("tl.full([], {v:#x}, {u})");
+        let ones = u64::MAX >> (64 - width);
+        let mut b = self.local(format!("{a}.to({u}, bitcast=True)"));
+        if mantissa_bits < mantissa {
+            let shift = u64::from(mantissa - mantissa_bits);
+            let last = 1u64 << shift;
+            let round = self.local(format!(
+                "{} + (({b} & {}) >> {})",
+                c((last >> 1) - 1),
+                c(last),
+                c(shift)
+            ));
+            b = self.local(format!("({b} + {round}) & {}", c(!(last - 1) & ones)));
+        }
+        if exponent_bits <= exponent {
+            let reduced = (1u64 << (exponent_bits - 1)) - 1;
+            let field = ((1u64 << exponent) - 1) << mantissa;
+            let sign = 1u64 << (width - 1);
+            let e = self.local(format!("{b} & {}", c(field)));
+            let s = self.local(format!("{b} & {}", c(sign)));
+            b = self.local(format!(
+                "tl.where({e} > {}, {s} | {}, tl.where({e} <= {}, {s}, {b}))",
+                c((bias + reduced) << mantissa),
+                c(field),
+                c(bias.saturating_sub(reduced) << mantissa)
+            ));
+        }
+        format!("tl.where({a} != {a}, {a}, {b}.to({f}, bitcast=True))")
+    }
+
+    fn nextafter(&mut self, x: &str, y: &str, dtype: DType) -> String {
+        let t = triton_type(dtype).expect("a Triton dtype");
+        let bits = dtype.bits();
+        let u = unsigned(bits);
+        let c = |v: u64| format!("tl.full([], {v:#x}, {u})");
+        let sign = 1u64 << (bits - 1);
+        let b = self.local(format!("{x}.to({u}, bitcast=True)"));
+        let zero = self.local(format!("({b} & {}) == 0", c(sign - 1)));
+        let up = self.local(format!("{y} > {x}"));
+        let tiny = self.local(format!("tl.where({up}, {}, {})", c(1), c(sign | 1)));
+        let step = self.local(format!(
+            "tl.where({up} == (({b} & {}) == 0), {b} + {}, {b} - {})",
+            c(sign),
+            c(1),
+            c(1)
+        ));
+        let next = self.local(format!(
+            "tl.where({zero}, {tiny}, {step}).to({t}, bitcast=True)"
+        ));
+        format!(
+            "tl.where(({x} != {x}) | ({y} != {y}), {x} + {y}, tl.where({x} == {y}, {y}, {next}))"
+        )
+    }
+
     fn index(&mut self, expr: String) -> String {
         if expr == "j" || expr.parse::<u64>().is_ok() {
             return expr;
@@ -337,6 +591,16 @@ impl Emitter<'_> {
                         let y = self.value(node.inputs[2], idx);
                         format!("tl.where({p}, {x}, {y})")
                     }
+                    Unary(op) => {
+                        let x = self.value(node.inputs[0], idx);
+                        self.unary(*op, x, operand, ty.dtype)
+                    }
+                    Binary(op) => {
+                        let x = self.value(node.inputs[0], idx.clone());
+                        let y = self.value(node.inputs[1], idx);
+                        let other = body.type_of(node.inputs[1]).dtype;
+                        self.binary(*op, x, y, (operand, other), ty.dtype)
+                    }
                     Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
@@ -359,6 +623,15 @@ impl Emitter<'_> {
         writeln!(self.lines, "    {name} = {expr}").unwrap();
         self.values.insert(key, name.clone());
         name
+    }
+}
+
+fn unsigned(bits: usize) -> &'static str {
+    match bits {
+        8 => "tl.uint8",
+        16 => "tl.uint16",
+        32 => "tl.uint32",
+        _ => "tl.uint64",
     }
 }
 
