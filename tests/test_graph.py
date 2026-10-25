@@ -1003,7 +1003,7 @@ class SwiGLU(lumen.nn.Module):
 def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
     """Two projections of one input combined elementwise (SwiGLU's gate and
     value): one matmul of their block whose epilogue computes the gate (its
-    tile holding each pair's columns side by side, ``PAIRED``), neither
+    tile holding each pair's columns side by side, ``GROUP`` 2), neither
     projection written out; the values the CPU's. One whose gate is an
     output too is paired as well, the epilogue writing the gate out
     beside the product; its values the CPU's."""

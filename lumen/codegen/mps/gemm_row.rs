@@ -218,7 +218,7 @@ pub(super) fn gemm_tiles(
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {tile}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
-                           NAME_tiles_staging, false, false, false, true>(
+                           NAME_tiles_staging, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
@@ -365,7 +365,7 @@ pub(super) fn gemm_rows(
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {n}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
-                           NAME_staging, false, false, false, true>(
+                           NAME_staging, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
