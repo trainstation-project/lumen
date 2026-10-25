@@ -21,12 +21,21 @@ try:
 except ImportError:
     torch = None
 
+DEVICE = "mps"
 DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps"
+GPUS = ("A100", "H100", "H200", "B200", "B300", "R200")
 SIZES = tuple(1 << k for k in range(12, 27, 2))
 SQUARE_SIZES = tuple(1 << k for k in range(12, 25, 2))
 FLOATS = ("float32", "bfloat16")
 INTEGERS = ("int32",)
-SPEC_MEMORY_GBS = {"Apple M4 Pro": 273}
+SPEC_MEMORY_GBS = {
+    "Apple M4 Pro": 273,
+    "NVIDIA A100-SXM4-80GB": 2039,
+    "NVIDIA H100 80GB HBM3": 3350,
+    "NVIDIA H200": 4800,
+    "NVIDIA B200": 8000,
+}
+SPEC_TFLOPS = {"NVIDIA A100-SXM4-80GB": 19.5, "NVIDIA H100 80GB HBM3": 66.9, "NVIDIA H200": 66.9, "NVIDIA B200": 80}
 GPU_GHZ = {"Apple M4 Pro": 1.578}
 LANES_PER_CORE = 128
 ROW = 1024
@@ -291,7 +300,7 @@ OPS = {
         "factory",
         "0, 1, …, n − 1",
         lambda n: lambda: prims.iota("int32", (n,), 0),
-        lambda n: lambda: torch.arange(n, dtype=torch.int32, device="mps"),
+        lambda n: lambda: torch.arange(n, dtype=torch.int32, device=DEVICE),
         nothing,
         INTEGERS,
         sized=True,
@@ -300,7 +309,7 @@ OPS = {
         "factory",
         "n copies of 2.5",
         lambda n: lambda: prims.full((n,), 2.5, "float32"),
-        lambda n: lambda: torch.full((n,), 2.5, dtype=torch.float32, device="mps"),
+        lambda n: lambda: torch.full((n,), 2.5, dtype=torch.float32, device=DEVICE),
         nothing,
         ("float32",),
         sized=True,
@@ -362,11 +371,34 @@ def gpu_cores():
 
 
 def peak_tflops(device):
+    if device in SPEC_TFLOPS:
+        return SPEC_TFLOPS[device]
     cores, ghz = gpu_cores(), GPU_GHZ.get(device)
     return round(cores * LANES_PER_CORE * 2 * ghz / 1e3, 2) if cores and ghz else None
 
 
+def use(device):
+    """Benchmark on ``device``: MPS (``data/elementwise_mps``), or CUDA with
+    the Triton backend (``data/elementwise_triton/<gpu>``)."""
+    global DEVICE, DATA
+    DEVICE = device
+    if device == "cuda":
+        lumen.config.compiler.cuda.use_triton_backend = True
+        name = device_name()
+        gpu = next((g for g in GPUS if g in name.upper()), None)
+        if gpu is None:
+            raise SystemExit(f"{name}: not a GPU the dashboard lists ({', '.join(GPUS)})")
+        DATA = pathlib.Path(__file__).parent / "data" / "elementwise_triton" / gpu.lower()
+
+
+def synchronize(module):
+    return getattr(module, DEVICE).synchronize
+
+
 def device_name():
+    if DEVICE == "cuda":
+        query = ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+        return subprocess.run(query, capture_output=True, text=True).stdout.splitlines()[0].strip()
     if platform.system() == "Darwin":
         out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
         return out.stdout.strip() or "Apple GPU"
@@ -420,7 +452,8 @@ def kernel_code(f, args):
     with tempfile.TemporaryDirectory() as d:
         f.dump_code(d, *args)
         files = {p.name: p.read_text() for p in pathlib.Path(d).rglob("*") if p.is_file()}
-    kernel = next((v for k, v in sorted(files.items()) if k.endswith(".metal") and k != "prelude.metal"), "")
+    launched = (v for k, v in sorted(files.items()) if re.match(r"\d{4}-", k) and not k.endswith(".pallas.py"))
+    kernel = next(launched, "")
     kernel = "\n".join(line for line in kernel.splitlines() if not line.startswith("// /")).strip()
     return {"kernel": kernel, "plan": files.get("plan.txt", "").strip()}
 
@@ -430,18 +463,18 @@ def code_of(name):
     n = next(n for n in op.sizes if n >= 1 << 20)
     lf = op.lumen(n) if op.sized else op.lumen
     lt = [to_lumen(a, d) for a, d in op.inputs(n, op.dtypes[0], np.random.default_rng(0))]
-    f = lumen.compile(lf, device="mps")
+    f = lumen.compile(lf, device=DEVICE)
     f(*lt)
     return kernel_code(f, lt)
 
 
 def to_lumen(array, dtype):
-    t = lumen.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to("mps")
+    t = lumen.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to(DEVICE)
     return t if t.dtype == dtype else t.to(dtype=dtype)
 
 
 def to_torch(array, dtype):
-    t = torch.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to("mps")
+    t = torch.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to(DEVICE)
     return t.to(getattr(torch, dtype)) if dtype in ("float32", "bfloat16", "float16") else t
 
 
@@ -474,7 +507,7 @@ def measure(name, measured=lambda row: None):
             tf = (op.torch(n) if op.sized else op.torch) if torch is not None and op.torch is not None else None
             arrays = op.inputs(n, dtype, rng)
             lt = [to_lumen(a, d) for a, d in arrays]
-            f = lumen.compile(lf, device="mps")
+            f = lumen.compile(lf, device=DEVICE)
             try:
                 out = outputs(f(*lt))
             except Exception as e:
@@ -507,16 +540,16 @@ def measure(name, measured=lambda row: None):
                 "chained": chain,
             }
             graph = lumen.make_graph(lf)(*lt)
-            plan = lumen.graph_compiler.Plan(graph, "mps", parameters=list(range(len(lt))))
+            plan = lumen.graph_compiler.Plan(graph, DEVICE, parameters=list(range(len(lt))))
             workspaces = [
-                lumen.Tensor.empty([max(plan.workspace_bytes, 1)], "uint8", "mps", alignment=plan.workspace_alignment)
+                lumen.Tensor.empty([max(plan.workspace_bytes, 1)], "uint8", DEVICE, alignment=plan.workspace_alignment)
                 for _ in range(sets)
             ]
             timed = [
                 (
                     "lumen_us",
                     *calls(lambda k, *args: plan.run_in(workspaces[k], list(args)), lumen_sets),
-                    lumen.mps.synchronize,
+                    synchronize(lumen),
                 )
             ]
             want = None
@@ -525,7 +558,7 @@ def measure(name, measured=lambda row: None):
                     tt = [to_torch(a, d) for a, d in arrays]
                     want = outputs(tf(*tt))
                     torch_sets = [tt] + [[t.clone() for t in tt] for _ in range(sets - 1)]
-                    timed.append(("torch_us", *calls(lambda k, *args: tf(*args), torch_sets), torch.mps.synchronize))
+                    timed.append(("torch_us", *calls(lambda k, *args: tf(*args), torch_sets), synchronize(torch)))
                 except Exception as e:
                     print(name, dtype, n, "torch:", str(e).splitlines()[0][:120], file=sys.stderr)
             times = {}
@@ -538,7 +571,7 @@ def measure(name, measured=lambda row: None):
             row["gbs"] = round(row["bytes"] / row["lumen_us"] / 1e3, 2)
             if want is not None:
                 row["matches_torch"] = all(matches(g, w) for g, w in zip(out, want))
-                torch.mps.empty_cache()
+                getattr(torch, DEVICE).empty_cache()
             rows.append(row)
             measured(row)
             if code is None and dtype == op.dtypes[0] and n >= 1 << 20:
@@ -614,8 +647,13 @@ def save(data, names=None):
 if __name__ == "__main__":
     lumen.config.static_allocator_bytes = 4 << 30
     dry_run = "--dry-run" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--dry-run"]
+    if "--device" in args:
+        at = args.index("--device")
+        use(args[at + 1])
+        del args[at : at + 2]
     data = load()
-    for name in [a for a in sys.argv[1:] if a != "--dry-run"] or OPS:
+    for name in args or OPS:
         if dry_run:
             data["code"][name] = code_of(name)
         else:

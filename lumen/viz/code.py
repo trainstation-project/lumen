@@ -27,7 +27,7 @@ def _launch_code(step, kernel, code):
     from lumen.graph_compiler._C import _kernel_source
 
     if code is not None:
-        return code, "mlir"
+        return code, "py" if "@triton.jit" in code else "mlir"
     source = _kernel_source(kernel)
     if source is not None:
         return source, "metal"
@@ -44,7 +44,7 @@ def _launch_code(step, kernel, code):
 def _header(step, at, ext):
     fusion = step["fusion"]
     graph = fusion["body"] if fusion else step["text"]
-    mark = "#" if ext == "txt" else "//"
+    mark = "#" if ext in ("txt", "py") else "//"
     lines = [f"step {at}: {step['label']}", *_traced_at(step["sources"]), *graph.rstrip().splitlines()]
     return "".join(f"{mark} {line}\n" for line in lines) + "\n"
 
