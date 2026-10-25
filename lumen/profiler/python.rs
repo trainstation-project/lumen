@@ -138,6 +138,8 @@ fn avg_dict<'py>(py: Python<'py>, a: &EventAvg) -> PyResult<Bound<'py, PyDict>> 
     d.set_item("self_cpu_memory_usage", a.self_cpu_memory_usage)?;
     d.set_item("device_memory_usage", a.device_memory_usage)?;
     d.set_item("self_device_memory_usage", a.self_device_memory_usage)?;
+    d.set_item("input_shapes", &a.input_shapes)?;
+    d.set_item("input_strides", &a.input_strides)?;
     Ok(d)
 }
 
@@ -151,16 +153,26 @@ impl PyProfile {
             .collect()
     }
 
-    fn key_averages<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    #[pyo3(signature = (group_by_input_shape=false))]
+    fn key_averages<'py>(
+        &self,
+        py: Python<'py>,
+        group_by_input_shape: bool,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
-            .key_averages()
+            .key_averages(group_by_input_shape)
             .iter()
             .map(|a| avg_dict(py, a))
             .collect()
     }
 
-    #[pyo3(signature = (sort_by=None, row_limit=None))]
-    fn table(&self, sort_by: Option<&str>, row_limit: Option<i64>) -> PyResult<String> {
+    #[pyo3(signature = (sort_by=None, row_limit=None, group_by_input_shape=false))]
+    fn table(
+        &self,
+        sort_by: Option<&str>,
+        row_limit: Option<i64>,
+        group_by_input_shape: bool,
+    ) -> PyResult<String> {
         let sort_by = sort_by
             .map(|s| {
                 SortBy::parse(s)
@@ -169,7 +181,7 @@ impl PyProfile {
             .transpose()?;
 
         let row_limit = row_limit.and_then(|n| usize::try_from(n).ok());
-        Ok(self.inner.table(sort_by, row_limit))
+        Ok(self.inner.table(sort_by, row_limit, group_by_input_shape))
     }
 
     fn chrome_trace(&self) -> String {
