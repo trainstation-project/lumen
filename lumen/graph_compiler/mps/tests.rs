@@ -2511,3 +2511,66 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
         }
     }
 }
+
+#[test]
+fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+    if !available() {
+        return;
+    }
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.mps.autotune = false;
+    options.config.mps.split_k = false;
+    let k = 1 << 16;
+    for accum in [DType::F32, DType::BF16] {
+        for (m, n) in [(4, 1024), (256, 256)] {
+            let mut g = Graph::new();
+            let a = g.input(ty(DType::BF16, &[m, k]));
+            let b = g.input(ty(DType::BF16, &[k, n]));
+            let dot = DotGeneral {
+                lhs_contracting: vec![1],
+                rhs_contracting: vec![0],
+                lhs_batch: vec![],
+                rhs_batch: vec![],
+                accum_dtype: accum,
+                output_dtype: accum,
+            };
+            let d = apply(&mut g, dot, &[a, b]);
+            g.set_outputs(&[d]).unwrap();
+            let ones = |s: &[usize]| {
+                let options = crate::TensorOptions::new()
+                    .dtype(DType::BF16)
+                    .device(Device::Mps(0));
+                Tensor::ones(s, options)
+            };
+            let on_mps = [ones(&[m, k]), ones(&[k, n])];
+            let mut plan =
+                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let at = plan
+                .steps()
+                .iter()
+                .position(|s| matmul_of(s).is_some())
+                .expect("a matmul step");
+            let step = plan.steps()[at].clone();
+            let mut gemms = Gemms::new(&MpsConfig::default());
+            let built: Vec<_> = gemms
+                .configs(&step)
+                .into_iter()
+                .map(|config| (config, gemms.build(&step, config)))
+                .collect();
+            assert!(built.len() > 1, "{accum} {m}x{n}: tuned candidates");
+            gemms.compile().unwrap();
+            for (config, tuned) in built {
+                plan.steps_mut()[at].tuned = Some(tuned);
+                let got = &plan.run(&on_mps).unwrap()[0];
+                assert_eq!(got.dtype(), accum, "{config:?}");
+                let sum = got.to_dtype(DType::F32).unwrap().to_vec::<f32>()[0];
+                match accum {
+                    DType::F32 => assert_eq!(sum, k as f32, "{config:?}"),
+                    _ => assert!(sum < k as f32, "{config:?}: {sum} of {k} ones in {accum}"),
+                }
+            }
+        }
+    }
+}

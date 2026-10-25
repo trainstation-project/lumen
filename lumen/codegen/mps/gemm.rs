@@ -351,7 +351,7 @@ fn staged_call(
     c: GemmConfig,
     flags: EpilogueFlags,
     dual: bool,
-    [t, o, w]: [&str; 3],
+    [t, a, o, w]: [&str; 4],
     [lhs, rhs]: [&str; 2],
     members: &str,
 ) -> String {
@@ -372,7 +372,7 @@ fn staged_call(
                     let interleaved = dual && flags.interleaved;
                     formatdoc!(
                         "
-                        matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {dual}, {interleaved}>(
+                        matmul_mpp<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {dual}, {interleaved}>(
                         {lhs}, {rhs}, out, p, group,
                         NAME_epi{{{members}}});
                         "
@@ -381,7 +381,7 @@ fn staged_call(
                 false => formatdoc!(
                     "
                     threadgroup float tile[{bm} * {bn}], stage[{simds} * 64];
-                    matmul_mpp_staged<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {template}>(
+                    matmul_mpp_staged<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {template}>(
                     {lhs}, {rhs}, out, p, group, sg, lane, tile, stage,
                     NAME_epi{{{members}}});
                     "
@@ -391,16 +391,17 @@ fn staged_call(
         Algorithm::Skinny => match flags.plain() {
             true => formatdoc!(
                 "
-                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
-                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
+                threadgroup {a} partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                matmul_skinny<{t}, {a}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
                 {lhs}, {rhs}, out, p, partials, group, tid.x,
                 NAME_epi{{{members}}});
                 "
             ),
             false => formatdoc!(
                 "
-                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)], tile[8 * {bn}], stage[{simds} * 64];
-                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi, {template}>(
+                threadgroup {a} partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                threadgroup float tile[8 * {bn}], stage[{simds} * 64];
+                matmul_skinny<{t}, {a}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi, {template}>(
                 {lhs}, {rhs}, out, p, partials, group, tid.x,
                 NAME_epi{{{members}}}, tile, stage, sg, lane);
                 "
@@ -659,7 +660,7 @@ pub(super) fn gemm_regions_kernel(
                 c,
                 flags,
                 false,
-                [t, o, w],
+                [t, a, o, w],
                 [&lhs, &rhs],
                 &members,
             ),
@@ -836,7 +837,7 @@ fn gemm_kernel_with(
                 c,
                 epilogue,
                 mpp_pair,
-                [t, o, w],
+                [t, a, o, w],
                 [&lhs, &rhs],
                 &members,
             ),

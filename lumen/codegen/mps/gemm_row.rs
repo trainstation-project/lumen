@@ -5,12 +5,7 @@ pub(crate) const ROW_TILE: usize = 64;
 
 pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     let dot = gemm_dot(body)?;
-    let Primitive::DotGeneral {
-        lhs_batch,
-        accum_dtype: DType::F32,
-        ..
-    } = &dot.primitive
-    else {
+    let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
         return None;
     };
     let dots = body
@@ -93,6 +88,10 @@ pub(super) fn gemm_tiles(
     n: usize,
     gemm: Option<GemmConfig>,
 ) -> String {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
+        unreachable!("a dot")
+    };
+    let accum = metal_type(accum_dtype);
     let t = metal_type(body.type_of(dot.inputs[0]).dtype);
     let o = metal_type(body.type_of(dot.output).dtype);
     let out = metal_type(body.type_of(body.outputs()[0]).dtype);
@@ -156,7 +155,7 @@ pub(super) fn gemm_tiles(
             [[max_total_threads_per_threadgroup({threads})]]
             kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
                                    {THREAD_ARGS}) {{
-                matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(
+                matmul_mpp<{t}, {accum}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(
                     {lhs}, {rhs}, dotv, p, group);
                 threadgroup_barrier(mem_flags::mem_device);
                 const ulong m0 = ulong(group.y) * {bm}, n0 = ulong(group.x) * {bn};
@@ -190,7 +189,7 @@ pub(super) fn gemm_tiles(
             // matrix), rounded to the dot's dtype: staged, and written to
             // the dot's value inside it.
             template <uint FM, uint FN>
-            void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+            void tile(thread simdgroup_matrix<{accum}, 8, 8> (&c)[FM][FN],
                       ulong m0,
                       ulong n0,
                       uint sy,
@@ -200,7 +199,7 @@ pub(super) fn gemm_tiles(
                 const uint fr = frag_row(lane), fc = frag_col(lane);
                 UNROLL for (uint i = 0; i < FM; ++i) {{
                     UNROLL for (uint j = 0; j < FN; ++j) {{
-                        const vec<float, 2> e = frag(c[i][j]);
+                        const vec<{accum}, 2> e = frag(c[i][j]);
                         const uint r = (sy * FM + i) * 8 + fr, col = (sx * FN + j) * 8 + fc;
                         for (uint h = 0; h < 2; ++h) {{
                             const {o} v = {o}(e[h]);
@@ -216,9 +215,9 @@ pub(super) fn gemm_tiles(
         }};
         kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
                                {THREAD_ARGS}) {{
-            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
+            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {tile}];
-            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+            matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
                            NAME_tiles_staging, false, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
@@ -316,6 +315,10 @@ pub(super) fn gemm_rows(
     rows: usize,
     n: usize,
 ) -> (String, String) {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
+        unreachable!("a dot")
+    };
+    let accum = metal_type(accum_dtype);
     let t = metal_type(body.type_of(dot.inputs[0]).dtype);
     let o = metal_type(body.type_of(dot.output).dtype);
     let out = metal_type(body.type_of(body.outputs()[0]).dtype);
@@ -334,7 +337,7 @@ pub(super) fn gemm_rows(
             // matrix), rounded to the dot's dtype, at their place in the
             // tile; the columns past the rows' none.
             template <uint FM, uint FN>
-            void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],
+            void tile(thread simdgroup_matrix<{accum}, 8, 8> (&c)[FM][FN],
                       ulong m0,
                       ulong n0,
                       uint sy,
@@ -344,7 +347,7 @@ pub(super) fn gemm_rows(
                 const uint fr = frag_row(lane), fc = frag_col(lane);
                 UNROLL for (uint i = 0; i < FM; ++i) {{
                     UNROLL for (uint j = 0; j < FN; ++j) {{
-                        const vec<float, 2> e = frag(c[i][j]);
+                        const vec<{accum}, 2> e = frag(c[i][j]);
                         const uint r = (sy * FM + i) * 8 + fr, col = (sx * FN + j) * 8 + fc;
                         if (col < {n}u) {{
                             staged[r * {n}u + col] = {o}(e[0]);
@@ -359,9 +362,9 @@ pub(super) fn gemm_rows(
         }};
         kernel void NAME({params}constant ulong *p [[buffer({first})]],
                          {THREAD_ARGS}) {{
-            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, float)], rt[SG_BK * {tile}];
+            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
             threadgroup {o} staged[{tile} * {n}];
-            matmul_sg_impl<{t}, float, {o}, {tile}, {tile}, SG_BK, {o},
+            matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
                            NAME_staging, false, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,

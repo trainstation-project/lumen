@@ -1,4 +1,5 @@
 template <typename T,
+          typename A,
           typename O,
           uint R,
           uint THREADS,
@@ -15,7 +16,7 @@ inline void matmul_skinny(device const T *lhs,
                           device const T *rhs,
                           device Out *out,
                           constant ulong *p,
-                          threadgroup float *partials,
+                          threadgroup A *partials,
                           uint3 group,
                           uint t,
                           Epi epi = Epi(),
@@ -43,7 +44,7 @@ inline void matmul_skinny(device const T *lhs,
         const ulong m = min(m0 + r, M - 1);
         rows[r] = (HALF_ROWS ? (m & 1) * (M / 2) + m / 2 : m) * sm;
     }
-    float acc[R][V];
+    A acc[R][V];
     UNROLL for (uint r = 0; r < R; ++r) {
         UNROLL for (uint i = 0; i < V; ++i) { acc[r][i] = 0; }
     }
@@ -62,10 +63,10 @@ inline void matmul_skinny(device const T *lhs,
                 }
             }
             UNROLL for (uint r = 0; r < R; ++r) {
-                const float x = float(ak[rows[r]]);
+                const A x = A(ak[rows[r]]);
                 UNROLL for (uint i = 0; i < V; ++i) {
                     const uint h = i % HALVES, e = i / HALVES;
-                    acc[r][i] += x * float(bv[h][e / HW][e % HW]);
+                    acc[r][i] += x * A(bv[h][e / HW][e % HW]);
                 }
             }
             bk += bstep;
@@ -75,11 +76,11 @@ inline void matmul_skinny(device const T *lhs,
         // The general path supports arbitrary strides and partial N tiles.
         for (ulong k = part; k < K; k += SPLIT) {
             UNROLL for (uint r = 0; r < R; ++r) {
-                const float x = float(a[rows[r] + k * sk]);
+                const A x = A(a[rows[r] + k * sk]);
                 UNROLL for (uint i = 0; i < V; ++i) {
                     if (n0 + i < N) {
                         const ulong n = n0 + i;
-                        acc[r][i] += x * float(b[k * rk + (HALF_COLUMNS ? (n & 1) * (N / 2) + n / 2 : n)]);
+                        acc[r][i] += x * A(b[k * rk + (HALF_COLUMNS ? (n & 1) * (N / 2) + n / 2 : n)]);
                     }
                 }
             }
@@ -92,7 +93,7 @@ inline void matmul_skinny(device const T *lhs,
         UNROLL for (uint i = 0; i < V; ++i) { partials[part * STRIDE + column * V + i] = acc[r][i]; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint c = t; c < BLOCK; c += THREADS) {
-            float v = 0;
+            A v = 0;
             for (uint s = 0; s < SPLIT; ++s) {
                 v += partials[s * STRIDE + c];
             }

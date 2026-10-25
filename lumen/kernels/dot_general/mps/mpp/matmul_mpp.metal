@@ -36,6 +36,7 @@ inline void store_mpp_pair(
 }
 
 template <typename T,
+          typename A,
           typename O,
           int BM,
           int BN,
@@ -96,8 +97,8 @@ inline void matmul_mpp(
             };
             auto a0 = slice_a(0);
             auto b0 = slice_b(bf, 0);
-            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
+            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < first.get_capacity(); ++i) {
                 if (first.is_valid_element(i)) {
                     first[i] = 0;
@@ -119,8 +120,8 @@ inline void matmul_mpp(
             auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
             auto b0 = TR ? bf.slice(0, col) : bf.slice(col, 0);
             auto b1 = TR ? bs.slice(0, col) : bs.slice(col, 0);
-            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b1), float>();
+            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
+            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b1), A>();
             op.run(a0, b0, first);
             op.run(a0, b1, second);
             store_mpp_pair<O>(first, second, o, H, M, row, col, base, epi);
@@ -151,7 +152,7 @@ inline void matmul_mpp(
             };
             auto a0 = slice_a(0);
             auto b0 = slice_b(0);
-            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
                 if (sum.is_valid_element(i)) {
                     sum[i] = 0;
@@ -170,14 +171,14 @@ inline void matmul_mpp(
             matmul2d<desc, execution_simdgroups<SIMDS>> op;
             auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
             auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
-            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             op.run(a0, b0, sum);
             store_mpp<O>(sum, o, N, M, row, col, base, epi);
         }
     }
 }
 
-template <typename T, int BM, int BN, int BK, int SIMDS, bool TL, bool TR, typename TA, typename TB>
+template <typename T, typename A, int BM, int BN, int BK, int SIMDS, bool TL, bool TR, typename TA, typename TB>
 inline void mpp_tile(thread TA &a,
                      thread TB &b,
                      int row,
@@ -219,7 +220,7 @@ inline void mpp_tile(thread TA &a,
         };
         auto a0 = slice_a(0);
         auto b0 = slice_b(0);
-        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
         _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
             if (sum.is_valid_element(i)) {
                 sum[i] = 0;
@@ -237,13 +238,14 @@ inline void mpp_tile(thread TA &a,
         matmul2d<desc, execution_simdgroups<SIMDS>> op;
         auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
         auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
-        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
         op.run(a0, b0, sum);
         write(sum);
     }
 }
 
 template <typename T,
+          typename A,
           typename O,
           int BM,
           int BN,
@@ -290,19 +292,19 @@ inline void matmul_mpp_staged(device const T *lhs,
         auto a0 = lhs_view(0, H);
         auto a1 = lhs_view(ulong(H) * p[4], H);
         auto b = rhs_view(0, N);
-        mpp_tile<T, BM / 2, BN, BK, SIMDS, TL, TR>(a0, b, row / 2, col, H, N, K, tile, BN, 2, 1, 0);
-        mpp_tile<T, BM / 2, BN, BK, SIMDS, TL, TR>(a1, b, row / 2, col, H, N, K, tile, BN, 2, 1, BN);
+        mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a0, b, row / 2, col, H, N, K, tile, BN, 2, 1, 0);
+        mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a1, b, row / 2, col, H, N, K, tile, BN, 2, 1, BN);
     } else if constexpr (PAIRED && !INTERLEAVED) {
         const int H = N / 2;
         auto a = lhs_view(0, M);
         auto b0 = rhs_view(0, H);
         auto b1 = rhs_view(ulong(H) * p[8], H);
-        mpp_tile<T, BM, BN / 2, BK, SIMDS, TL, TR>(a, b0, row, col / 2, M, H, K, tile, BN, 1, 2, 0);
-        mpp_tile<T, BM, BN / 2, BK, SIMDS, TL, TR>(a, b1, row, col / 2, M, H, K, tile, BN, 1, 2, 1);
+        mpp_tile<T, A, BM, BN / 2, BK, SIMDS, TL, TR>(a, b0, row, col / 2, M, H, K, tile, BN, 1, 2, 0);
+        mpp_tile<T, A, BM, BN / 2, BK, SIMDS, TL, TR>(a, b1, row, col / 2, M, H, K, tile, BN, 1, 2, 1);
     } else {
         auto a = lhs_view(0, M);
         auto b = rhs_view(0, N);
-        mpp_tile<T, BM, BN, BK, SIMDS, TL, TR>(a, b, row, col, M, N, K, tile, BN, 1, 1, 0);
+        mpp_tile<T, A, BM, BN, BK, SIMDS, TL, TR>(a, b, row, col, M, N, K, tile, BN, 1, 1, 0);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     store_staged<float, O, Out, Epi, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS, BM, BN, SIMDS>(
