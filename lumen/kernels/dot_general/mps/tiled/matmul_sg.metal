@@ -26,6 +26,133 @@ template <> struct Bytes<1> {
 #define SG_COLS 2
 #define SG_LT(BM, BK, T, A) SG_LT_OF(BM, BK, T, A, 8)
 #define SG_LT_OF(BM, BK, T, A, S) (BM * BK > S * 64 * sizeof(A) / sizeof(T) ? BM * BK : S * 64 * sizeof(A) / sizeof(T))
+template <typename A,
+          typename O,
+          typename Out,
+          typename Epi,
+          bool ATOMIC,
+          bool PAIRED,
+          bool EXPANDED,
+          bool INTERLEAVED,
+          bool REGIONS,
+          bool ROWS>
+inline void store_block(vec<A, 2> f,
+                        ulong mb,
+                        ulong nb,
+                        ulong M,
+                        ulong N,
+                        ulong limit,
+                        uint z,
+                        device Out *out,
+                        threadgroup A *stage,
+                        uint lane,
+                        Epi epi) {
+    if constexpr (!ATOMIC && PAIRED && REGIONS && ROWS) {
+        const uint at = frag_row(lane);
+        vec<O, 2> window[8];
+        UNROLL for (uint d = 0; d < 8; ++d) {
+            window[at ^ d] = vec<O, 2>(simd_shuffle_xor(f, (d & 3) * 2 + (d & 4) * 4));
+        }
+        ulong m = mb + at, n = nb + frag_col(lane);
+        if (m < limit && n < N) {
+            epi.store(m, n, window);
+        }
+    } else if constexpr (!ATOMIC && PAIRED && REGIONS) {
+        // Paired regional output reconstructs four rows from SIMD shuffles.
+        const uint pair = frag_col(lane) / 2;
+        vec<O, 2> row[4];
+        row[pair] = vec<O, 2>(f);
+        row[pair ^ 1] = vec<O, 2>(simd_shuffle_xor(f, 1));
+        row[pair ^ 2] = vec<O, 2>(simd_shuffle_xor(f, 8));
+        row[pair ^ 3] = vec<O, 2>(simd_shuffle_xor(f, 9));
+        ulong m = mb + frag_row(lane), n = nb + frag_col(lane);
+        if (m < limit && n < N) {
+            epi.store(m, n, row);
+        }
+    } else if constexpr (!ATOMIC && PAIRED) {
+        // Paired output stores two logical columns into a packed output layout.
+        const ulong H = N / 2;
+        device Out *o = out + z * M * H;
+        ulong m = mb + frag_row(lane), n = nb + frag_col(lane);
+        if (m < limit && n < N) {
+            o[m * H + n / 2] = epi(O(f[0]), O(f[1]), z * M * H + m * H + n / 2);
+        }
+    } else if (!ATOMIC && !EXPANDED && mb + 8 <= limit && nb + 8 <= N) {
+        if constexpr (!ATOMIC && !EXPANDED) {
+            // Full ordinary tiles can store directly from SIMD fragments.
+            device Out *o = out + z * M * N;
+            ulong at = (mb + frag_row(lane)) * N + nb + frag_col(lane);
+            o[at] = epi(O(f[0]), z * M * N + at);
+            o[at + 1] = epi(O(f[1]), z * M * N + at + 1);
+        }
+    } else {
+        // Store through shared memory for edge tiles, expanded epilogues, and
+        // atomic or otherwise indirect output paths.
+        const uint own = frag_row(lane) * 8 + frag_col(lane);
+        stage[own] = f[0];
+        stage[own + 1] = f[1];
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        device Out *o = out + z * M * N;
+        for (uint e = lane; e < 64; e += 32) {
+            ulong m = mb + e / 8, n = nb + e % 8;
+            if (m < limit && n < N) {
+                if constexpr (ATOMIC) {
+                    device atomic_float *sum = (device atomic_float *)(out + m * N + n);
+                    atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
+                } else if constexpr (EXPANDED && ROWS) {
+                    Pair<Out> both = epi(O(stage[e]), z * M * N + m * N + n);
+                    o[m * N + n] = both.first;
+                    o[(M + m) * N + n] = both.second;
+                } else if constexpr (EXPANDED) {
+                    device Out *row = out + z * M * 2 * N + m * 2 * N;
+                    Pair<Out> both = epi(O(stage[e]), z * M * N + m * N + n);
+                    row[INTERLEAVED ? 2 * n : n] = both.first;
+                    row[INTERLEAVED ? 2 * n + 1 : N + n] = both.second;
+                } else {
+                    o[m * N + n] = epi(O(stage[e]), z * M * N + m * N + n);
+                }
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+template <typename A,
+          typename O,
+          typename Out,
+          typename Epi,
+          bool PAIRED,
+          bool EXPANDED,
+          bool INTERLEAVED,
+          bool REGIONS,
+          bool ROWS,
+          uint BM,
+          uint BN,
+          uint SIMDS>
+inline void store_staged(threadgroup const float *tile,
+                         ulong m0,
+                         ulong n0,
+                         ulong M,
+                         ulong N,
+                         ulong limit,
+                         uint z,
+                         device Out *out,
+                         threadgroup A *stage,
+                         uint sg,
+                         uint lane,
+                         Epi epi) {
+    const uint fr = frag_row(lane), fc = frag_col(lane);
+    for (uint b = sg; b < BM / 8 * (BN / 8); b += SIMDS) {
+        const uint bi = b / (BN / 8), bj = b % (BN / 8);
+        if (m0 + bi * 8 >= limit || n0 + bj * 8 >= N) {
+            continue;
+        }
+        threadgroup const float *at = tile + (bi * 8 + fr) * BN + bj * 8 + fc;
+        store_block<A, O, Out, Epi, false, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS>(
+            vec<A, 2>(A(at[0]), A(at[1])), m0 + bi * 8, n0 + bj * 8, M, N, limit, z, out, stage + sg * 64, lane, epi);
+    }
+}
+
 template <typename T,
           typename A,
           typename O,
@@ -198,94 +325,21 @@ inline void matmul_sg_impl(device const T *lhs,
     if constexpr (TILE) {
         // TILE epilogues consume the SIMD fragments directly.
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
-    } else if constexpr (PAIRED && REGIONS && ROWS) {
-        const uint at = frag_row(lane);
-        UNROLL for (uint i = 0; i < FM; ++i) {
-            UNROLL for (uint j = 0; j < FN; ++j) {
-                const thread vec<A, 2> &f = frag(c[i][j]);
-                vec<O, 2> window[8];
-                UNROLL for (uint d = 0; d < 8; ++d) {
-                    window[at ^ d] = vec<O, 2>(simd_shuffle_xor(f, (d & 3) * 2 + (d & 4) * 4));
-                }
-                ulong m = m0 + (sy * FM + i) * 8 + at, n = n0 + (sx * FN + j) * 8 + frag_col(lane);
-                if (m < M && n < N) {
-                    epi.store(m, n, window);
-                }
-            }
-        }
-    } else if constexpr (PAIRED && REGIONS) {
-        // Paired regional output reconstructs four rows from SIMD shuffles.
-        const uint pair = frag_col(lane) / 2;
-        UNROLL for (uint i = 0; i < FM; ++i) {
-            UNROLL for (uint j = 0; j < FN; ++j) {
-                const thread vec<A, 2> &f = frag(c[i][j]);
-                vec<O, 2> row[4];
-                row[pair] = vec<O, 2>(f);
-                row[pair ^ 1] = vec<O, 2>(simd_shuffle_xor(f, 1));
-                row[pair ^ 2] = vec<O, 2>(simd_shuffle_xor(f, 8));
-                row[pair ^ 3] = vec<O, 2>(simd_shuffle_xor(f, 9));
-                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
-                if (m < M && n < N) {
-                    epi.store(m, n, row);
-                }
-            }
-        }
-    } else if constexpr (PAIRED) {
-        // Paired output stores two logical columns into a packed output layout.
-        const ulong H = N / 2;
-        device Out *o = out + group.z * M * H;
-        UNROLL for (uint i = 0; i < FM; ++i) {
-            UNROLL for (uint j = 0; j < FN; ++j) {
-                const thread vec<A, 2> &f = frag(c[i][j]);
-                ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
-                if (m < M && n < N) {
-                    o[m * H + n / 2] = epi(O(f[0]), O(f[1]), group.z * M * H + m * H + n / 2);
-                }
-            }
-        }
-    } else if (!ATOMIC && !EXPANDED && full_m && n0 + BN <= N) {
-        // Full ordinary tiles can store directly from SIMD fragments.
-        if constexpr (!ATOMIC && !EXPANDED) {
-            device Out *o = out + group.z * M * N;
-            UNROLL for (uint i = 0; i < FM; ++i) {
-                UNROLL for (uint j = 0; j < FN; ++j) {
-                    const thread vec<A, 2> &f = frag(c[i][j]);
-                    ulong m = m0 + (sy * FM + i) * 8 + frag_row(lane), n = n0 + (sx * FN + j) * 8 + frag_col(lane);
-                    ulong at = m * N + n;
-                    o[at] = epi(O(f[0]), group.z * M * N + at);
-                    o[at + 1] = epi(O(f[1]), group.z * M * N + at + 1);
-                }
-            }
-        }
     } else {
-        // Store through shared memory for edge tiles, expanded epilogues, and
-        // atomic or otherwise indirect output paths.
-        device Out *o = out + group.z * M * N;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
-                simdgroup_store(c[i][j], stage, 8);
-                simdgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint e = lane; e < 64; e += 32) {
-                    ulong m = m0 + (sy * FM + i) * 8 + e / 8, n = n0 + (sx * FN + j) * 8 + e % 8;
-                    if (m < M && n < N) {
-                        if constexpr (ATOMIC) {
-                            device atomic_float *sum = (device atomic_float *)(out + m * N + n);
-                            atomic_fetch_add_explicit(sum, float(stage[e]), memory_order_relaxed);
-                        } else if constexpr (EXPANDED && ROWS) {
-                            Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
-                            o[m * N + n] = both.first;
-                            o[(M + m) * N + n] = both.second;
-                        } else if constexpr (EXPANDED) {
-                            device Out *row = out + group.z * M * 2 * N + m * 2 * N;
-                            Pair<Out> both = epi(O(stage[e]), group.z * M * N + m * N + n);
-                            row[INTERLEAVED ? 2 * n : n] = both.first;
-                            row[INTERLEAVED ? 2 * n + 1 : N + n] = both.second;
-                        } else {
-                            o[m * N + n] = epi(O(stage[e]), group.z * M * N + m * N + n);
-                        }
-                    }
-                }
-                simdgroup_barrier(mem_flags::mem_threadgroup);
+                store_block<A, O, Out, Epi, ATOMIC, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS>(
+                    frag(c[i][j]),
+                    m0 + (sy * FM + i) * 8,
+                    n0 + (sx * FN + j) * 8,
+                    M,
+                    N,
+                    M,
+                    group.z,
+                    out,
+                    stage,
+                    lane,
+                    epi);
             }
         }
     }

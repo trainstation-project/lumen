@@ -1706,7 +1706,7 @@ fn skinny_dots_split_their_contraction() {
         g
     };
     let g = build(4, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g, false);
+    let split = super::split_k::split_k(&g, false, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
@@ -1721,16 +1721,16 @@ fn skinny_dots_split_their_contraction() {
     for (w, g) in want.iter().zip(&got) {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false);
+    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
-    let split = super::split_k::split_k(&g, true);
+    let split = super::split_k::split_k(&g, true, false);
     assert_eq!(split.nodes().len(), 4, "{split}");
     let g = build(352, 352, 2048, DType::BF16);
-    let split = super::split_k::split_k(&g, true);
+    let split = super::split_k::split_k(&g, true, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(
         names,
@@ -1746,7 +1746,7 @@ fn skinny_dots_split_their_contraction() {
         build(4, 256, 2049, DType::F32),
         build(4, 256, 1024, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g, false);
+        let split = super::split_k::split_k(&g, false, false);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }
@@ -2215,6 +2215,344 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
                         assert!(
                             (w - v).abs() <= scale * 1e-2,
                             "{case} K={k} {config:?} [{e}]: {v} != {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn every_tuned_gemm_kernel_stores_every_epilogue() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::kernels::dot_general::mps::{Algorithm, GemmConfig};
+    if !available() || !super::mpp_available() {
+        return;
+    }
+    let matmul = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+    let slice = |g: &mut Graph, v: Var, shape: &[usize], at: usize, start: usize, end: usize| {
+        let mut limit = shape.to_vec();
+        let mut first = vec![0; shape.len()];
+        (first[at], limit[at]) = (start, end);
+        let s = Slice {
+            start_indices: first,
+            limit_indices: limit,
+            view: false,
+        };
+        apply(g, s, &[v])
+    };
+    let reshape = |g: &mut Graph, v: Var, sizes: &[usize]| {
+        let r = Reshape {
+            new_sizes: sizes.to_vec(),
+        };
+        apply(g, r, &[v])
+    };
+    let dot = |g: &mut Graph, rows: usize, k: usize, columns: usize| {
+        let a = g.input(ty(DType::F32, &[rows, k]));
+        let b = g.input(ty(DType::F32, &[k, columns]));
+        apply(g, matmul.clone(), &[a, b])
+    };
+    let regions = |axis: usize, pairs: usize, plain: usize, other: usize, k: usize| {
+        let extent = 2 * pairs + plain;
+        let sized = |along: usize, rest: usize| match axis {
+            0 => vec![along, rest],
+            _ => vec![rest, along],
+        };
+        let out = sized(extent, other);
+        let mut g = Graph::new();
+        let d = dot(&mut g, out[0], k, out[1]);
+        let group = slice(&mut g, d, &out, axis, 0, 2 * pairs);
+        let tuples: Vec<usize> = match axis {
+            0 => vec![pairs, 2, other],
+            _ => vec![other, pairs, 2],
+        };
+        let tupled = reshape(&mut g, group, &tuples);
+        let mut member = |t: usize| {
+            let s = slice(&mut g, tupled, &tuples, axis + 1, t, t + 1);
+            reshape(&mut g, s, &sized(pairs, other))
+        };
+        let (first, second) = (member(0), member(1));
+        let gated = apply(&mut g, Mul, &[first, second]);
+        let rest = slice(&mut g, d, &out, axis, 2 * pairs, extent);
+        let negated = apply(&mut g, Neg, &[rest]);
+        g.set_outputs(&[gated, negated]).unwrap();
+        g
+    };
+    let row_halves = |half: usize, other: usize, k: usize| {
+        let mut g = Graph::new();
+        let d = dot(&mut g, 2 * half, k, other);
+        let shape = [2 * half, other];
+        let first = slice(&mut g, d, &shape, 0, 0, half);
+        let second = slice(&mut g, d, &shape, 0, half, 2 * half);
+        let gated = apply(&mut g, Mul, &[first, second]);
+        g.set_outputs(&[gated]).unwrap();
+        g
+    };
+    let pair = |rows: usize, half: usize, k: usize, interleaved: bool| {
+        let mut g = Graph::new();
+        let d = dot(&mut g, rows, k, 2 * half);
+        let (first, second) = match interleaved {
+            true => {
+                let tuples = [rows, half, 2];
+                let pairs = reshape(&mut g, d, &tuples);
+                let mut member = |t: usize| {
+                    let s = slice(&mut g, pairs, &tuples, 2, t, t + 1);
+                    reshape(&mut g, s, &[rows, half])
+                };
+                (member(0), member(1))
+            }
+            false => {
+                let shape = [rows, 2 * half];
+                (
+                    slice(&mut g, d, &shape, 1, 0, half),
+                    slice(&mut g, d, &shape, 1, half, 2 * half),
+                )
+            }
+        };
+        let gate = apply(&mut g, Logistic, &[first]);
+        let gated = apply(&mut g, Mul, &[gate, second]);
+        g.set_outputs(&[gated]).unwrap();
+        g
+    };
+    let expanded = |rows: usize, other: usize, k: usize, along: usize| {
+        let mut g = Graph::new();
+        let d = dot(&mut g, rows, k, other);
+        let squared = apply(&mut g, Mul, &[d, d]);
+        let negated = apply(&mut g, Neg, &[d]);
+        let concat = |dimension: usize| Concatenate {
+            dimension,
+            in_place: false,
+        };
+        let both = match along {
+            0 => apply(&mut g, concat(0), &[squared, negated]),
+            1 => {
+                let parts = [squared, negated].map(|v| reshape(&mut g, v, &[rows, 1, other]));
+                let pairs = apply(&mut g, concat(1), &parts);
+                reshape(&mut g, pairs, &[2 * rows, other])
+            }
+            _ => {
+                let parts = [squared, negated].map(|v| reshape(&mut g, v, &[rows, other, 1]));
+                let pairs = apply(&mut g, concat(2), &parts);
+                reshape(&mut g, pairs, &[rows, 2 * other])
+            }
+        };
+        g.set_outputs(&[both]).unwrap();
+        g
+    };
+    let flags = |paired, expanded, interleaved, regions, rows| codegen::EpilogueFlags {
+        paired,
+        expanded,
+        interleaved,
+        regions,
+        rows,
+    };
+    let large = [
+        (
+            "regions along rows",
+            regions(0, 320, 64, 256, 96),
+            flags(true, false, true, true, true),
+        ),
+        (
+            "regions along columns",
+            regions(1, 320, 64, 256, 96),
+            flags(true, false, true, true, false),
+        ),
+        (
+            "row halves",
+            row_halves(256, 300, 96),
+            flags(true, false, false, true, true),
+        ),
+        (
+            "column halves",
+            pair(256, 320, 96, false),
+            flags(true, false, false, false, false),
+        ),
+        (
+            "interleaved pairs",
+            pair(256, 320, 96, true),
+            flags(true, false, true, false, false),
+        ),
+        (
+            "expanded side by side",
+            expanded(200, 384, 96, 0),
+            flags(false, true, false, false, true),
+        ),
+        (
+            "expanded row pairs",
+            expanded(200, 384, 96, 1),
+            flags(false, true, false, false, false),
+        ),
+        (
+            "expanded column pairs",
+            expanded(200, 384, 96, 2),
+            flags(false, true, true, false, false),
+        ),
+    ];
+    let skinny = [
+        (
+            "regions along rows",
+            regions(0, 8, 8, 1024, 1024),
+            flags(true, false, true, true, true),
+        ),
+        (
+            "regions along columns",
+            regions(1, 256, 512, 24, 1024),
+            flags(true, false, true, true, false),
+        ),
+        (
+            "row halves",
+            row_halves(12, 1024, 1024),
+            flags(true, false, false, true, true),
+        ),
+        (
+            "column halves",
+            pair(24, 512, 1024, false),
+            flags(true, false, false, false, false),
+        ),
+        (
+            "interleaved pairs",
+            pair(24, 512, 1024, true),
+            flags(true, false, true, false, false),
+        ),
+        (
+            "expanded side by side",
+            expanded(24, 1024, 1024, 0),
+            flags(false, true, false, false, true),
+        ),
+        (
+            "expanded row pairs",
+            expanded(24, 1024, 1024, 1),
+            flags(false, true, false, false, false),
+        ),
+        (
+            "expanded column pairs",
+            expanded(24, 1024, 1024, 2),
+            flags(false, true, true, false, false),
+        ),
+    ];
+    let split = [
+        (
+            "regions along rows",
+            regions(0, 64, 64, 256, 2048),
+            flags(true, false, true, true, true),
+        ),
+        (
+            "regions along columns",
+            regions(1, 64, 64, 192, 2048),
+            flags(true, false, true, true, false),
+        ),
+        (
+            "row halves",
+            row_halves(96, 256, 2048),
+            flags(true, false, false, true, true),
+        ),
+        (
+            "column halves",
+            pair(192, 128, 2048, false),
+            flags(true, false, false, false, false),
+        ),
+        (
+            "interleaved pairs",
+            pair(192, 128, 2048, true),
+            flags(true, false, true, false, false),
+        ),
+        (
+            "expanded side by side",
+            expanded(192, 256, 2048, 0),
+            flags(false, true, false, false, true),
+        ),
+        (
+            "expanded row pairs",
+            expanded(192, 256, 2048, 1),
+            flags(false, true, false, false, false),
+        ),
+        (
+            "expanded column pairs",
+            expanded(192, 256, 2048, 2),
+            flags(false, true, true, false, false),
+        ),
+    ];
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.mps.autotune = false;
+    options.config.mps.split_k = false;
+    for (algorithm, cases) in [
+        (Algorithm::Mpp, large),
+        (Algorithm::Skinny, skinny),
+        (Algorithm::Split { chunks: 0 }, split),
+    ] {
+        let tried = |c: &GemmConfig| match algorithm {
+            Algorithm::Split { .. } => matches!(c.algorithm, Algorithm::Split { .. }),
+            _ => c.algorithm == algorithm,
+        };
+        for (case, g, want) in cases {
+            let inputs: Vec<Tensor> = g
+                .inputs()
+                .iter()
+                .enumerate()
+                .map(|(seed, &v)| values(DType::F32, &g.type_of(v).shape, seed as u64 + 1))
+                .collect();
+            let expected: Vec<Vec<f32>> = reference::run(&g, &inputs)
+                .unwrap()
+                .iter()
+                .map(|t| t.to_vec::<f32>())
+                .collect();
+            let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+            let mut plan =
+                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let at = plan
+                .steps()
+                .iter()
+                .position(|s| matmul_of(s).is_some())
+                .unwrap_or_else(|| panic!("{case}: a matmul step in {plan}"));
+            let step = plan.steps()[at].clone();
+            let Fusion { body, .. } = &step.primitive else {
+                panic!("{case}: a GEMM fusion: {plan}");
+            };
+            let got = codegen::gemm_flags(body, codegen::gemm_dot(body).unwrap());
+            assert_eq!(got, want, "{case} {algorithm:?}: {body}");
+            let mut gemms = Gemms::new(&MpsConfig::default());
+            let configs: Vec<_> = gemms
+                .configs(&step)
+                .into_iter()
+                .filter(|c| c.algorithm != Algorithm::Tiled)
+                .fold(Vec::<GemmConfig>::new(), |mut kept, c| {
+                    let shape = |k: &GemmConfig| (k.algorithm, k.bm, k.bn);
+                    if !kept.iter().any(|k| shape(k) == shape(&c)) {
+                        kept.push(c);
+                    }
+                    kept
+                });
+            assert!(
+                configs.iter().any(tried),
+                "{case}: no {algorithm:?} candidate: {} configs, output {:?}, views {:?}",
+                gemms.configs(&step).len(),
+                step.output.1,
+                step.views
+            );
+            let built: Vec<_> = configs
+                .into_iter()
+                .map(|config| (config, gemms.build(&step, config)))
+                .collect();
+            gemms.compile().unwrap();
+            for (config, tuned) in built {
+                plan.steps_mut()[at].tuned = Some(tuned);
+                let got = plan.run(&on_mps).unwrap();
+                for (want, have) in expected.iter().zip(&got) {
+                    let have = have.to_vec::<f32>();
+                    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+                    for (e, (w, v)) in want.iter().zip(&have).enumerate() {
+                        assert!(
+                            (w - v).abs() <= scale * 1e-4,
+                            "{case} {config:?} [{e}]: {v} != {w}"
                         );
                     }
                 }

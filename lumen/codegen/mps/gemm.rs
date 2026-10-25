@@ -273,12 +273,6 @@ pub(crate) fn gemm_interleaved<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a N
     }
 }
 
-pub(crate) fn gemm_plain(body: &Graph, dot: &Node) -> bool {
-    gemm_regions(body, dot).is_none()
-        && gemm_pair(body, dot).is_none()
-        && gemm_expanded(body, dot).is_none()
-}
-
 pub(crate) fn gemm_mpp_pair(body: &Graph, dot: &Node) -> bool {
     let ty = |v: Var| body.type_of(v);
     let layout = mpp_transposes(
@@ -295,6 +289,150 @@ pub(crate) fn gemm_mpp_pair(body: &Graph, dot: &Node) -> bool {
         && gemm_pair(body, dot).is_some()
         && gemm_expanded(body, dot).is_none()
         && read
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct EpilogueFlags {
+    pub(crate) paired: bool,
+    pub(crate) expanded: bool,
+    pub(crate) interleaved: bool,
+    pub(crate) regions: bool,
+    pub(crate) rows: bool,
+}
+
+impl EpilogueFlags {
+    pub(crate) fn plain(&self) -> bool {
+        !(self.paired || self.expanded || self.regions)
+    }
+
+    fn template(&self) -> String {
+        let EpilogueFlags {
+            paired,
+            expanded,
+            interleaved,
+            regions,
+            rows,
+        } = self;
+        format!("{paired}, {expanded}, {interleaved}, {regions}, {rows}")
+    }
+}
+
+fn regions_interleaved(regions: &[Columns], dot: &Node) -> bool {
+    !matches!(&regions[0].region, Region::Group(m) if m[0].inputs[0] == dot.output)
+}
+
+pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
+    if let Some(regions) = gemm_regions(body, dot) {
+        let rank = body.type_of(dot.output).shape.len();
+        return EpilogueFlags {
+            paired: true,
+            interleaved: regions_interleaved(&regions, dot),
+            regions: true,
+            rows: regions[0].axis + 1 != rank,
+            ..EpilogueFlags::default()
+        };
+    }
+    let paired = gemm_pair(body, dot).is_some();
+    let expansion = gemm_expanded(body, dot).map(|(_, e)| e);
+    EpilogueFlags {
+        paired,
+        expanded: expansion.is_some(),
+        interleaved: (paired && gemm_interleaved(body, dot).is_some())
+            || expansion == Some(Expansion::Pairs),
+        regions: false,
+        rows: expansion == Some(Expansion::Rows),
+    }
+}
+
+fn variant_params(body: &Graph, by_value: &[bool], w: &str, c: GemmConfig) -> (String, usize) {
+    let extra = match c.algorithm {
+        Algorithm::Split { .. } => vec![
+            "device float *partials".to_owned(),
+            "device atomic_uint *counters".to_owned(),
+        ],
+        _ => Vec::new(),
+    };
+    io_params(body, by_value, w, &extra)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn staged_call(
+    body: &Graph,
+    dot: &Node,
+    c: GemmConfig,
+    flags: EpilogueFlags,
+    dual: bool,
+    [t, o, w]: [&str; 3],
+    [lhs, rhs]: [&str; 2],
+    members: &str,
+) -> String {
+    let (bm, bn, bk, threads, simds) = (c.bm, c.bn, c.bk, c.threads, c.threads / 32);
+    let template = flags.template();
+    match c.algorithm {
+        Algorithm::Mpp => {
+            let ty = |v: Var| body.type_of(v);
+            let (left, right) = mpp_transposes(
+                &dot.primitive,
+                ty(dot.inputs[0]),
+                ty(dot.inputs[1]),
+                ty(dot.output),
+            )
+            .expect("a layout Metal Performance Primitives read");
+            match flags.plain() || dual {
+                true => {
+                    let interleaved = dual && flags.interleaved;
+                    formatdoc!(
+                        "
+                        matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {dual}, {interleaved}>(
+                        {lhs}, {rhs}, out, p, group,
+                        NAME_epi{{{members}}});
+                        "
+                    )
+                }
+                false => formatdoc!(
+                    "
+                    threadgroup float tile[{bm} * {bn}], stage[{simds} * 64];
+                    matmul_mpp_staged<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {template}>(
+                    {lhs}, {rhs}, out, p, group, sg, lane, tile, stage,
+                    NAME_epi{{{members}}});
+                    "
+                ),
+            }
+        }
+        Algorithm::Skinny => match flags.plain() {
+            true => formatdoc!(
+                "
+                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
+                {lhs}, {rhs}, out, p, partials, group, tid.x,
+                NAME_epi{{{members}}});
+                "
+            ),
+            false => formatdoc!(
+                "
+                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)], tile[8 * {bn}], stage[{simds} * 64];
+                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi, {template}>(
+                {lhs}, {rhs}, out, p, partials, group, tid.x,
+                NAME_epi{{{members}}}, tile, stage, sg, lane);
+                "
+            ),
+        },
+        Algorithm::Split { chunks } => {
+            let (cols, prefetch) = (c.cols, c.prefetch);
+            formatdoc!(
+                "
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, float, {simds})], rt[{bk} * {bn}];
+                threadgroup float tile[{bm} * {bn}], stage[{simds} * 64];
+                threadgroup uint arrived;
+                matmul_split<{t}, {o}, {bm}, {bn}, {bk}, {threads}, {cols}, {prefetch}, {chunks}, {w}, NAME_epi, {template}>(
+                {lhs}, {rhs}, out, p, partials, counters, lt, rt, tile, stage, &arrived,
+                group, tid.y * 16 + tid.x, sg, lane,
+                NAME_epi{{{members}}});
+                "
+            )
+        }
+        Algorithm::Tiled => unreachable!("the tiled kernel stores from its fragments"),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -403,8 +541,7 @@ pub(super) fn gemm_regions_kernel(
         true => ("window", "m", "true"),
         false => ("row", "n", "false"),
     };
-    let interleaved =
-        !matches!(&regions[0].region, Region::Group(m) if m[0].inputs[0] == dot.output);
+    let interleaved = regions_interleaved(regions, dot);
     let mut store = String::new();
     for (c, ends) in regions.iter().zip(&ends) {
         let (offset, size, limit, k) = (c.offset, c.size(), c.offset + c.width, c.k());
@@ -512,7 +649,6 @@ pub(super) fn gemm_regions_kernel(
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, w, &[]);
     let members = members.join(", ");
     let mut source = formatdoc!(
         "
@@ -523,16 +659,15 @@ pub(super) fn gemm_regions_kernel(
         }};
         "
     );
+    let flags = gemm_flags(body, dot);
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
-        writedoc!(
-            source,
-            "
-            [[max_total_threads_per_threadgroup({threads})]]
-            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
-                                     {THREAD_ARGS}) {{
+        let (params, first) = variant_params(body, by_value, w, c);
+        let call = match c.algorithm {
+            Algorithm::Tiled => formatdoc!(
+                "
                 threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
                 matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
                                NAME_epi, false, true, false, false, {interleaved}, true, {flag},
@@ -541,7 +676,26 @@ pub(super) fn gemm_regions_kernel(
                     lt, rt,
                     group, tid.y * 16 + tid.x, sg, lane,
                     NAME_epi{{{members}}});
-            }}
+                "
+            ),
+            _ => staged_call(
+                body,
+                dot,
+                c,
+                flags,
+                false,
+                [t, o, w],
+                [&lhs, &rhs],
+                &members,
+            ),
+        };
+        writedoc!(
+            source,
+            "
+            [[max_total_threads_per_threadgroup({threads})]]
+            kernel void NAME{suffix}({params}constant ulong *p [[buffer({first})]],
+                                     {THREAD_ARGS}) {{
+            {call}}}
             "
         )
         .unwrap();
@@ -646,7 +800,6 @@ fn gemm_kernel_with(
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
-    let (params, first) = io_params(body, by_value, w, &[]);
     let members = members.join(", ");
     let (operands, paired) = match (pair, expanded) {
         (Some(_), _) if gemm_interleaved(body, dot).is_some() => (
@@ -680,20 +833,15 @@ fn gemm_kernel_with(
         }};
         "
     );
-    let plain = paired == "NAME_epi";
     let mpp_pair = gemm_mpp_pair(body, dot);
-    let interleaved = gemm_interleaved(body, dot).is_some();
+    let epilogue = gemm_flags(body, dot);
     let flags = 7 - paired.matches(',').count();
     let paired = format!("{paired}{}", ", false".repeat(flags));
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
         let prefetch = c.prefetch;
-        assert!(
-            plain || c.algorithm == Algorithm::Tiled || (mpp_pair && c.algorithm == Algorithm::Mpp),
-            "only a plain or paired epilogue runs on {:?}",
-            c.algorithm
-        );
+        let (params, first) = variant_params(body, by_value, w, c);
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
@@ -707,30 +855,15 @@ fn gemm_kernel_with(
                 NAME_epi{{{members}}});
                 "
             ),
-            Algorithm::Mpp => {
-                let ty = |v: Var| body.type_of(v);
-                let (left, right) = mpp_transposes(
-                    &dot.primitive,
-                    ty(dot.inputs[0]),
-                    ty(dot.inputs[1]),
-                    ty(dot.output),
-                )
-                .expect("a layout Metal Performance Primitives read");
-                formatdoc!(
-                    "
-                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {mpp_pair}, {interleaved}>(
-                    {lhs}, {rhs}, out, p, group,
-                    NAME_epi{{{members}}});
-                    "
-                )
-            }
-            Algorithm::Skinny => formatdoc!(
-                "
-                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
-                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
-                {lhs}, {rhs}, out, p, partials, group, tid.x,
-                NAME_epi{{{members}}});
-                "
+            _ => staged_call(
+                body,
+                dot,
+                c,
+                epilogue,
+                mpp_pair,
+                [t, o, w],
+                [&lhs, &rhs],
+                &members,
             ),
         };
         writedoc!(

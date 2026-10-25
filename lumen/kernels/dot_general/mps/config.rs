@@ -3,6 +3,7 @@ pub(crate) enum Algorithm {
     Tiled,
     Mpp,
     Skinny,
+    Split { chunks: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,4 +17,4 @@ pub(crate) struct GemmConfig {
     pub algorithm: Algorithm,
 }
 
-pub(super) const MAX_THREADGROUP_BYTES: usize = 32 << 10;
+pub(crate) const MAX_THREADGROUP_BYTES: usize = 32 << 10;

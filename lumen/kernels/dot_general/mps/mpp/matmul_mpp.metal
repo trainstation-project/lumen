@@ -176,4 +176,136 @@ inline void matmul_mpp(
         }
     }
 }
+
+template <typename T, int BM, int BN, int BK, int SIMDS, bool TL, bool TR, typename TA, typename TB>
+inline void mpp_tile(thread TA &a,
+                     thread TB &b,
+                     int row,
+                     int col,
+                     int rows,
+                     int cols,
+                     int K,
+                     threadgroup float *tile,
+                     int stride,
+                     int rs,
+                     int cs,
+                     int offset) {
+    using namespace mpp::tensor_ops;
+    auto write = [&](thread auto &sum) {
+        _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
+            if (sum.is_valid_element(i)) {
+                auto at = sum.get_multidimensional_index(i);
+                tile[at[1] * rs * stride + at[0] * cs + offset] = sum[i];
+            }
+        }
+    };
+    if (row + BM <= rows && col + BN <= cols && K % BK == 0) {
+        constexpr auto desc =
+            matmul2d_descriptor(BM, BN, BK, TL, TR, false, matmul2d_descriptor::mode::multiply_accumulate);
+        matmul2d<desc, execution_simdgroups<SIMDS>> op;
+        auto slice_a = [&](int k0) {
+            if constexpr (TL) {
+                return a.template slice<BM, BK>(row, k0);
+            } else {
+                return a.template slice<BK, BM>(k0, row);
+            }
+        };
+        auto slice_b = [&](int k0) {
+            if constexpr (TR) {
+                return b.template slice<BK, BN>(k0, col);
+            } else {
+                return b.template slice<BN, BK>(col, k0);
+            }
+        };
+        auto a0 = slice_a(0);
+        auto b0 = slice_b(0);
+        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+        _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
+            if (sum.is_valid_element(i)) {
+                sum[i] = 0;
+            }
+        }
+        for (int k0 = 0; k0 < K; k0 += BK) {
+            auto ak = slice_a(k0);
+            auto bk = slice_b(k0);
+            op.run(ak, bk, sum);
+        }
+        write(sum);
+    } else {
+        constexpr auto desc = matmul2d_descriptor(
+            BM, BN, static_cast<int>(dynamic_extent), TL, TR, false, matmul2d_descriptor::mode::multiply);
+        matmul2d<desc, execution_simdgroups<SIMDS>> op;
+        auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
+        auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
+        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+        op.run(a0, b0, sum);
+        write(sum);
+    }
+}
+
+template <typename T,
+          typename O,
+          int BM,
+          int BN,
+          int BK,
+          int SIMDS,
+          bool TL,
+          bool TR,
+          typename Out,
+          typename Epi,
+          bool PAIRED,
+          bool EXPANDED,
+          bool INTERLEAVED,
+          bool REGIONS,
+          bool ROWS>
+inline void matmul_mpp_staged(device const T *lhs,
+                              device const T *rhs,
+                              device Out *out,
+                              constant ulong *p,
+                              uint3 group,
+                              uint sg,
+                              uint lane,
+                              threadgroup float *tile,
+                              threadgroup float *stage,
+                              Epi epi) {
+    using extents = dextents<int32_t, 2>;
+    const int M = int(p[0]), N = int(p[1]), K = int(p[2]);
+    device T *l = (device T *)lhs + group.z * p[3];
+    device T *r = (device T *)rhs + group.z * p[6];
+    auto lhs_view = [&](ulong offset, int rows) {
+        return tensor<device T, extents, tensor_inline>(
+            l + offset,
+            TL ? extents(rows, K) : extents(K, rows),
+            TL ? array<int32_t, 2>{1, int(p[5])} : array<int32_t, 2>{1, int(p[4])});
+    };
+    auto rhs_view = [&](ulong offset, int cols) {
+        return tensor<device T, extents, tensor_inline>(
+            r + offset,
+            TR ? extents(K, cols) : extents(cols, K),
+            TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
+    };
+    const int row = int(group.y) * BM, col = int(group.x) * BN;
+    if constexpr (PAIRED && !INTERLEAVED && ROWS) {
+        const int H = M / 2;
+        auto a0 = lhs_view(0, H);
+        auto a1 = lhs_view(ulong(H) * p[4], H);
+        auto b = rhs_view(0, N);
+        mpp_tile<T, BM / 2, BN, BK, SIMDS, TL, TR>(a0, b, row / 2, col, H, N, K, tile, BN, 2, 1, 0);
+        mpp_tile<T, BM / 2, BN, BK, SIMDS, TL, TR>(a1, b, row / 2, col, H, N, K, tile, BN, 2, 1, BN);
+    } else if constexpr (PAIRED && !INTERLEAVED) {
+        const int H = N / 2;
+        auto a = lhs_view(0, M);
+        auto b0 = rhs_view(0, H);
+        auto b1 = rhs_view(ulong(H) * p[8], H);
+        mpp_tile<T, BM, BN / 2, BK, SIMDS, TL, TR>(a, b0, row, col / 2, M, H, K, tile, BN, 1, 2, 0);
+        mpp_tile<T, BM, BN / 2, BK, SIMDS, TL, TR>(a, b1, row, col / 2, M, H, K, tile, BN, 1, 2, 1);
+    } else {
+        auto a = lhs_view(0, M);
+        auto b = rhs_view(0, N);
+        mpp_tile<T, BM, BN, BK, SIMDS, TL, TR>(a, b, row, col, M, N, K, tile, BN, 1, 1, 0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    store_staged<float, O, Out, Epi, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS, BM, BN, SIMDS>(
+        tile, row, col, M, N, M, group.z, out, stage, sg, lane, epi);
+}
 #endif

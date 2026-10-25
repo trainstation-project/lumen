@@ -1,19 +1,26 @@
+use super::fusion::fusible;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::kernels::dot_general::mps::float_groups;
+use crate::kernels::dot_general::mps::{float_groups, plan_matmul};
+use crate::tensor::contiguous_strides;
 
 const GROUPS: usize = 256;
 const MAX_SPLIT: usize = 8;
 const MIN_CHUNK: usize = 256;
 const MIN_K: usize = 2048;
 
-pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
+pub(super) fn split_k(graph: &Graph, atomic: bool, epilogues: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
         nodes
             .iter()
             .any(|n| n.output == v && matches!(n.primitive, Primitive::Slice { .. }))
+    };
+    let fused = |v: Var| {
+        nodes
+            .iter()
+            .any(|n| n.inputs.contains(&v) && fusible(graph, n))
     };
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -43,7 +50,8 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
             (&[l], &[r])
                 if lhs_batch.is_empty()
                     && *accum_dtype == DType::F32
-                    && !node.inputs.iter().any(|&v| sliced(v)) =>
+                    && !node.inputs.iter().any(|&v| sliced(v))
+                    && !(epilogues && fused(node.output)) =>
             {
                 let m = lhs.numel() / lhs.shape[l];
                 let n = rhs.numel() / rhs.shape[r];
@@ -128,6 +136,46 @@ pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
     }
 }
 
+pub(super) fn gemm_splits(body: &Graph) -> Option<(usize, usize, Vec<usize>)> {
+    let dot = crate::codegen::mps::gemm_dot(body)?;
+    let Primitive::DotGeneral {
+        lhs_batch,
+        accum_dtype,
+        ..
+    } = &dot.primitive
+    else {
+        return None;
+    };
+    if !lhs_batch.is_empty() || *accum_dtype != DType::F32 {
+        return None;
+    }
+    let (lhs, rhs) = (body.type_of(dot.inputs[0]), body.type_of(dot.inputs[1]));
+    let (ls, rs) = (
+        contiguous_strides(&lhs.shape),
+        contiguous_strides(&rhs.shape),
+    );
+    let out = body.type_of(dot.output);
+    let launch = plan_matmul(&dot.primitive, lhs, rhs, out, &ls, &rs, "", None).ok()?;
+    let [m, n, k, ..] = launch.p;
+    let splits = splits(m, n, k);
+    (!splits.is_empty()).then_some((m, n, splits))
+}
+
+fn splits(m: usize, n: usize, k: usize) -> Vec<usize> {
+    match chunks(m, n, k) {
+        Some(_) => [2, 4, MAX_SPLIT]
+            .into_iter()
+            .filter(|&s| k.is_multiple_of(s) && k / s >= MIN_CHUNK)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+pub(super) fn split_scratch(m: usize, n: usize) -> (usize, usize) {
+    let partials = (MAX_SPLIT * m * n * 4).next_multiple_of(crate::graph_compiler::plan::ALIGNMENT);
+    (partials, partials + m.div_ceil(32) * n.div_ceil(32) * 4)
+}
+
 fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
     let groups = float_groups(1, m, n);
     if groups == 0 || 2 * groups >= GROUPS || k < MIN_K {
@@ -148,7 +196,9 @@ impl<M: Module> CompilerPass<M> for SplitK {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = split_k(m.graph(), !m.options().config.mps.deterministic);
+        let config = &m.options().config.mps;
+        let epilogues = config.autotune && config.fuse && config.contraction_epilogues;
+        *m.graph_mut() = split_k(m.graph(), !config.deterministic, epilogues);
         Ok(())
     }
 }

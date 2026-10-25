@@ -266,12 +266,12 @@ def test_split_k_agrees(compiler, dtype):
 @pytest.mark.mps
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_then_silu(compiler, dtype):
-    """SiLU after a matmul of few output tiles and a long contraction: not
-    split, it is the matmul's epilogue (one kernel); split, it needs every
-    chunk's products: the epilogue of the ``reduce_sum`` of the dot's
-    partials (reading the sum twice), atomic adds allowed or not (its
-    partials cost less than its operands). Each agrees with SiLU of the
-    exact product to rounding."""
+    """SiLU after a matmul of few output tiles and a long contraction is the
+    matmul's epilogue (one kernel), split or not: split, each of the
+    contraction's chunks writes its partial products and the last of a
+    tile's chunks to finish sums them in chunk order and applies it, atomic
+    adds allowed or not. Each agrees with SiLU of the exact product to
+    rounding."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     try:
@@ -288,8 +288,8 @@ def test_split_k_then_silu(compiler, dtype):
     silu = "logistic → mul" + {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
     plans = {
         "unsplit": ["dot_general → " + silu],
-        "atomic": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
-        "deterministic": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
+        "atomic": ["dot_general → " + silu],
+        "deterministic": ["dot_general → " + silu],
     }
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for mode, plan in plans.items():
