@@ -8,6 +8,7 @@ import lumen.functional as F
 from lumen import prims
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
@@ -224,30 +225,46 @@ def on(device, f, *arrays, dtype=None):
     return host(lumen.compile(f, device=device)(*args)), run(f, *[tensor(a, dtype) for a in arrays])
 
 
-@pytest.mark.parametrize("device", [MPS])
+ROUNDING = {"mps": 4e-7, "cuda": 1e-6}
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
-def test_mps_float_functions_agree_with_the_cpu(device, name, prim, ref, values):
-    """Each float function in float32 on MPS, infinities, NaN and signed
-    zeros included: the CPU's value within float32's rounding."""
+def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
+    """Each float function in float32 on MPS and on CUDA (a generated
+    Triton loop, libdevice's functions), infinities, NaN and signed zeros
+    included: the CPU's value within a few float32 roundings."""
     got, expected = on(device, prim, np.concatenate([values, SPECIALS]).astype(np.float32))
-    np.testing.assert_allclose(got, expected, rtol=4e-7, atol=0)
+    np.testing.assert_allclose(got, expected, rtol=ROUNDING[device], atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS])
-def test_mps_float_functions_with_parameters_agree_with_the_cpu(device):
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
+def test_float64_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
+    """Each float function in float64 on CUDA (libdevice's double
+    functions): the CPU's within a few float64 roundings."""
+    got, expected = on(device, prim, np.concatenate([values, SPECIALS]))
+    np.testing.assert_allclose(got, expected, rtol=1e-14, atol=0)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cuda):
     """erf_inv, is_finite, reduce_precision and the binary float functions
-    (min, pow of negative bases too, rem, nextafter) on MPS: the CPU's."""
+    (min, pow of negative bases too, rem, nextafter) on MPS and CUDA: the
+    CPU's."""
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal(200).astype(np.float32) * 3 for _ in range(2))
     b[:4] = [0.0, np.nan, np.inf, -0.0]
+    rounding = ROUNDING[device]
     cases = [
-        (prims.erf_inv, [np.linspace(-0.999, 0.999, 101, dtype=np.float32)], 4e-7),
+        (prims.erf_inv, [np.linspace(-0.999, 0.999, 101, dtype=np.float32)], rounding),
         (prims.is_finite, [np.concatenate([SPAN, SPECIALS]).astype(np.float32)], 0),
         (lambda x: prims.reduce_precision(x, 5, 10), [np.concatenate([SPAN * 1e4, SPECIALS]).astype(np.float32)], 0),
         (lambda x: prims.reduce_precision(x, 8, 7), [np.concatenate([SPAN, SPECIALS]).astype(np.float32)], 0),
         (prims.min, [a, b], 0),
-        (prims.pow, [np.abs(a) + 0.1, b], 4e-7),
-        (prims.pow, [a, np.round(b)], 4e-7),
+        (prims.pow, [np.abs(a) + 0.1, b], rounding),
+        (prims.pow, [a, np.round(b)], rounding),
+        (prims.pow, [a, np.nan_to_num(np.round(b), posinf=0, neginf=0).astype(np.int32)], rounding),
         (prims.rem, [a, b], 0),
         (prims.nextafter, [a, b], 0),
     ]
@@ -256,10 +273,11 @@ def test_mps_float_functions_with_parameters_agree_with_the_cpu(device):
         np.testing.assert_allclose(got, expected, rtol=rtol, atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS])
-def test_mps_exact_bfloat16_functions_agree_with_the_cpu(device):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
     """The functions whose value is exact in its dtype run in bfloat16 on
-    MPS, bit for bit the CPU's; bfloat16 sin, as exp, has no MPS kernel."""
+    MPS and CUDA, bit for bit the CPU's; bfloat16 sin, as exp, has no MPS
+    kernel, and on CUDA is float32's, rounded once."""
     rng = np.random.default_rng(1)
     x = np.concatenate([SPAN, SPECIALS]).astype(np.float32)
     a, b = (rng.standard_normal(100).astype(np.float32) * 3 for _ in range(2))
@@ -269,15 +287,20 @@ def test_mps_exact_bfloat16_functions_agree_with_the_cpu(device):
     for f in [prims.min, prims.rem, prims.nextafter]:
         got, expected = on(device, f, a, b, dtype="bfloat16")
         np.testing.assert_array_equal(got, expected)
-    with pytest.raises(RuntimeError, match="convert to float32"):
-        on(device, prims.sin, a, dtype="bfloat16")
+    if device == "mps":
+        with pytest.raises(RuntimeError, match="convert to float32"):
+            on(device, prims.sin, a, dtype="bfloat16")
+    else:
+        got, expected = on(device, prims.sin, a, dtype="bfloat16")
+        np.testing.assert_allclose(got, expected, rtol=2**-8, atol=2**-8)
 
 
-@pytest.mark.parametrize("device", [MPS])
-@pytest.mark.parametrize("dtype", ["int32", "uint32", "int8", "uint8"])
-def test_mps_integer_functions_agree_with_the_cpu(device, dtype):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int8", "uint8", "int64"])
+def test_integer_functions_agree_with_the_cpu(device, dtype, triton_on_cuda):
     """not, population_count, clz, abs, sign, min, rem (by 0 and -1 too),
-    and/or/xor and the shifts (out of range too) on MPS: the CPU's."""
+    and/or/xor and the shifts (out of range too) on MPS and CUDA: the
+    CPU's."""
     rng = np.random.default_rng(2)
     low = 0 if dtype.startswith("u") else -100
     x, y = rng.integers(low, 100, 300), rng.integers(low, 100, 300)

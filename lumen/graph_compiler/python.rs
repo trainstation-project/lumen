@@ -194,6 +194,14 @@ fn triton_functions(functions: &[super::triton::Function]) -> Vec<(&str, &str, &
         .collect()
 }
 
+fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
+    let passed: Vec<String> = functions
+        .iter()
+        .map(|f| format!("# {} = {}\n{}", f.param, f.name, f.source))
+        .collect();
+    [passed.join("\n"), kernel.to_owned()].join("\n")
+}
+
 fn triton_gemm(
     tensors: [&crate::Tensor; 3],
     sizes: [usize; 4],
@@ -201,6 +209,18 @@ fn triton_gemm(
     config: &super::triton::Config,
     functions: &[super::triton::Function],
 ) -> Result<(), String> {
+    crate::kernels::launched::launched("dot_general", || {
+        let template = format!(
+            "# @triton.jit: lumen/kernels/dot_general/triton.py's kernel, BLOCK_M={} BLOCK_N={} BLOCK_K={} GROUP_M={} stages={} warps={}\n",
+            config.block_m,
+            config.block_n,
+            config.block_k,
+            config.group_m,
+            config.stages,
+            config.warps
+        );
+        Some(triton_code(&template, functions))
+    });
     Python::attach(|py| {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
         py.import("lumen.kernels.dot_general.triton")?
@@ -230,6 +250,9 @@ fn triton_loop(
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
 ) -> Result<(), String> {
+    crate::kernels::launched::launched(&kernel.name, || {
+        Some(triton_code(&kernel.source, functions))
+    });
     Python::attach(|py| {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| kernel.by_value[k]).collect();

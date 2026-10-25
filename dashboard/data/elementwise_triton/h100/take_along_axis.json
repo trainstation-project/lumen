@@ -1,0 +1,102 @@
+{
+ "rows": [
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "take_along_axis",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "take_along_axis: has no Triton kernel on CUDA yet"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-10-25T03:51:36+00:00"
+}
