@@ -64,6 +64,9 @@ impl<T: Timer> Autotuner<T> {
         for (steps, candidates) in jobs {
             let mut trial = plan.steps()[steps[0]].clone();
             let Some(buffers) = self.timer.buffers(&trial)? else {
+                if std::env::var("DEBUG_TUNE").is_ok() {
+                    eprintln!("DBG untimable :: {}", key(&trial).chars().take(120).collect::<String>());
+                }
                 continue;
             };
             let mut reps = vec![0; candidates.len()];
@@ -83,6 +86,9 @@ impl<T: Timer> Autotuner<T> {
             let Some(k) = fastest.filter(|&k| seconds[k].is_finite()) else {
                 continue;
             };
+            if std::env::var("DEBUG_TUNE").is_ok() {
+                eprintln!("DBG tuned {} candidates={} best={k} {:.1}us default-ish={:.1}us :: {}", steps.len(), candidates.len(), seconds[k] * 1e6, seconds[0] * 1e6, key(&plan.steps()[steps[0]]).chars().take(120).collect::<String>());
+            }
             for i in steps {
                 plan.steps_mut()[i].tuned = Some(candidates[k].clone());
             }

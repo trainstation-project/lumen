@@ -2,7 +2,7 @@ use super::fusion::fusible;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::kernels::dot_general::mps::float_groups;
+use crate::kernels::dot_general::mps::{float_groups, gemv};
 
 const GROUPS: usize = 256;
 const MAX_SPLIT: usize = 8;
@@ -49,7 +49,8 @@ pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
             (&[l], &[r])
                 if lhs_batch.is_empty()
                     && accum_dtype.is_float()
-                    && !node.inputs.iter().any(|&v| sliced(v)) =>
+                    && !node.inputs.iter().any(|&v| sliced(v))
+                    && gemv(&node.primitive, lhs, rhs, graph.type_of(node.output)).is_none() =>
             {
                 let m = lhs.numel() / lhs.shape[l];
                 let n = rhs.numel() / rhs.shape[r];
