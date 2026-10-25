@@ -35,11 +35,10 @@ template <typename T,
           typename Out = O,
           typename Epi = Same,
           bool ATOMIC = false,
-          bool PAIRED = false,
           bool EXPANDED = false,
           bool TILE = false,
           bool INTERLEAVED = false,
-          bool REGIONS = false,
+          uint GROUP = 1,
           bool ROWS = false,
           uint THREADS = 256,
           uint COLS = SG_COLS,
@@ -68,8 +67,9 @@ inline void matmul_sg_impl(device const T *lhs,
     // These coordinates describe each thread's contribution to cooperative
     // lhs and rhs tile loads.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
-    constexpr bool HALVES = PAIRED && !INTERLEAVED;
+    constexpr bool HALVES = GROUP > 1 && !INTERLEAVED;
     static_assert(!(HALVES && ROWS) || RA % 2 == 0, "row halves step through rows two at a time");
+    static_assert((ROWS ? BM : BN) % GROUP == 0, "a tile holds whole groups");
     constexpr uint SA = HALVES && ROWS ? RA / 2 : RA;
     const ulong am = HALVES && ROWS ? ((m0 + ar) & 1) * (M / 2) + (m0 + ar) / 2 : m0 + ar;
     device const T *l = lhs + group.z * p[3] + am * sm + ac * sk;
@@ -131,7 +131,7 @@ inline void matmul_sg_impl(device const T *lhs,
     constexpr uint TA = BK / WA, TB = BN / WB, VRA = THREADS / TA, VRB = THREADS / TB, PA = LA / WA, PB = LB / WB;
     device const T *lhs0 = lhs + group.z * p[3];
     device const T *rhs0 = rhs + group.z * p[6];
-    const bool vector = !PAIRED && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
+    const bool vector = !HALVES && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
                         N % WB == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 && ulong(rhs0) % (WB * sizeof(T)) == 0;
     if (vector) {
         // Contiguous, aligned inputs use packed vector loads to reduce memory transactions.
@@ -198,7 +198,7 @@ inline void matmul_sg_impl(device const T *lhs,
     if constexpr (TILE) {
         // TILE epilogues consume the SIMD fragments directly.
         epi.template tile<FM, FN>(c, m0, n0, sy, sx, flat, lane);
-    } else if constexpr (PAIRED && REGIONS && ROWS) {
+    } else if constexpr (GROUP == 8 && ROWS) {
         const uint at = frag_row(lane);
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
@@ -213,8 +213,8 @@ inline void matmul_sg_impl(device const T *lhs,
                 }
             }
         }
-    } else if constexpr (PAIRED && REGIONS) {
-        // Paired regional output reconstructs four rows from SIMD shuffles.
+    } else if constexpr (GROUP == 8) {
+        // Grouped output reconstructs eight-column rows from SIMD shuffles.
         const uint pair = frag_col(lane) / 2;
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
@@ -230,8 +230,8 @@ inline void matmul_sg_impl(device const T *lhs,
                 }
             }
         }
-    } else if constexpr (PAIRED) {
-        // Paired output stores two logical columns into a packed output layout.
+    } else if constexpr (GROUP == 2) {
+        // Pairs are each lane's two columns, stored into a packed output layout.
         const ulong H = N / 2;
         device Out *o = out + group.z * M * H;
         UNROLL for (uint i = 0; i < FM; ++i) {
