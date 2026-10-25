@@ -4,7 +4,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
 from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 
@@ -34,13 +33,13 @@ class RMSNorm(lumen.nn.Module):
 
 
 class Rotary(lumen.nn.Module):
-    cos: lumen.Tensor
-    sin: lumen.Tensor
+    inv_freq: lumen.Tensor
 
     def __call__(self, x, pos):
         seq, half = x.shape[1], x.shape[-1] // 2
-        cos = self.cos.narrow(0, pos, seq).reshape(1, seq, 1, 2 * half)
-        sin = self.sin.narrow(0, pos, seq).reshape(1, seq, 1, 2 * half)
+        angles = (lumen.arange(seq, lumen.int32) + pos).float().reshape(seq, 1) * self.inv_freq
+        angles = F.cat([angles, angles], dim=-1).reshape(1, seq, 1, 2 * half)
+        cos, sin = F.cos(angles), F.sin(angles)
         rotated = F.cat([-x[..., half:], x[..., :half]], dim=-1)
         return (x * cos + rotated * sin).bfloat16()
 
@@ -126,7 +125,8 @@ class Llama(lumen.nn.Module):
         for layer, cache_k, cache_v in zip(self.model.layers, cache.k, cache.v):
             x = layer(x, self.rotary, cache_k, cache_v, pos)
         last = self.model.norm(x[:, -1])
-        return F.matmul(last, self.model.embed_tokens.weight.t(), "float32", "float32")
+        logits = F.matmul(last, self.model.embed_tokens.weight.t(), "float32", "float32")
+        return F.argmax(logits, -1).reshape(1, 1)
 
 
 class KVCache(lumen.nn.Module):
@@ -134,23 +134,22 @@ class KVCache(lumen.nn.Module):
     v: list
 
 
-def rotary_tables(config):
+def inverse_frequencies(config):
     head_dim = config["hidden_size"] // config["num_attention_heads"]
-    inv_freq = 1.0 / config["rope_theta"] ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim)
     scaling = config["rope_scaling"]
-    original = scaling["original_max_position_embeddings"]
-    wavelen = 2 * math.pi / inv_freq
-    low_freq_wavelen = original / scaling["low_freq_factor"]
-    high_freq_wavelen = original / scaling["high_freq_factor"]
-    smooth = (original / wavelen - scaling["low_freq_factor"]) / (
-        scaling["high_freq_factor"] - scaling["low_freq_factor"]
-    )
-    smoothed = (1 - smooth) * inv_freq / scaling["factor"] + smooth * inv_freq
-    inv_freq = np.where(wavelen > low_freq_wavelen, inv_freq / scaling["factor"], inv_freq)
-    inv_freq = np.where((wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen), smoothed, inv_freq)
-    angles = np.outer(np.arange(MAX_TOKENS), inv_freq.astype(np.float32)).astype(np.float32)
-    angles = np.concatenate([angles, angles], axis=-1)
-    return np.cos(angles), np.sin(angles)
+    original, factor = scaling["original_max_position_embeddings"], scaling["factor"]
+    low, high = scaling["low_freq_factor"], scaling["high_freq_factor"]
+    frequencies = []
+    for i in range(0, head_dim, 2):
+        frequency = 1.0 / config["rope_theta"] ** (i / head_dim)
+        wavelen = 2 * math.pi / frequency
+        if wavelen > original / low:
+            frequency /= factor
+        elif wavelen >= original / high:
+            smooth = (original / wavelen - low) / (high - low)
+            frequency = (1 - smooth) * frequency / factor + smooth * frequency
+        frequencies.append(frequency)
+    return frequencies
 
 
 def meta(*shape, dtype=lumen.bfloat16):
@@ -187,9 +186,7 @@ def build(config):
             ],
             norm=RMSNorm(meta(dim), eps),
         ),
-        rotary=Rotary(
-            meta(MAX_TOKENS, head_dim, dtype=lumen.float32), meta(MAX_TOKENS, head_dim, dtype=lumen.float32)
-        ),
+        rotary=Rotary(meta(head_dim // 2, dtype=lumen.float32)),
     )
     cache = KVCache(
         k=[meta(1, MAX_TOKENS, kv_heads, head_dim) for _ in range(layers)],
@@ -208,15 +205,11 @@ def chat_prompt(message):
 
 
 def position(pos):
-    return lumen.from_numpy(np.array(pos, np.int32)).to("mps")
+    return lumen.tensor(pos, dtype=lumen.int32, device="mps")
 
 
 def tokens(ids):
-    return lumen.from_numpy(np.array([ids], np.int32)).to("mps")
-
-
-def greedy(logits):
-    return int(np.argmax(lumen.to_numpy(logits)))
+    return lumen.tensor([ids], dtype=lumen.int32, device="mps")
 
 
 path = Path(snapshot_download(REPO, allow_patterns=["*.json", "*.safetensors"]))
@@ -232,23 +225,22 @@ step = lumen.compile(lambda model, cache, ids, pos: model(ids, cache, pos), devi
 step(model, cache, meta(1, len(prompt), dtype=lumen.int32), meta(dtype=lumen.int32))
 step(model, cache, meta(1, 1, dtype=lumen.int32), meta(dtype=lumen.int32))
 
-cos, sin = rotary_tables(config)
 model.load_state_dict(
     {
         **lumen.safetensors.load_file(path / "model.safetensors"),
-        "rotary.cos": lumen.from_numpy(cos),
-        "rotary.sin": lumen.from_numpy(sin),
+        "rotary.inv_freq": lumen.tensor(inverse_frequencies(config), dtype=lumen.float32),
     }
 )
 for t in cache.k + cache.v:
     t.zero_()
 
 start = time.perf_counter()
-generated = [greedy(step(model, cache, tokens(prompt), position(0)))]
+ids = step(model, cache, tokens(prompt), position(0))
+generated = [ids.item()]
 first = time.perf_counter()
 while generated[-1] not in eos and len(generated) < NEW_TOKENS and len(prompt) + len(generated) < MAX_TOKENS:
-    logits = step(model, cache, tokens(generated[-1:]), position(len(prompt) + len(generated) - 1))
-    generated.append(greedy(logits))
+    ids = step(model, cache, ids, position(len(prompt) + len(generated) - 1))
+    generated.append(ids.item())
 end = time.perf_counter()
 
 print(tokenizer.decode([t for t in generated if t not in eos]))

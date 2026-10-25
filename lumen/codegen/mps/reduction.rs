@@ -21,7 +21,11 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
             _ => return None,
         }
     }
-    found.map(|i| &nodes[i])
+    let reductions = nodes
+        .iter()
+        .filter(|n| matches!(n.primitive, ReduceSum { .. } | ReduceMax { .. }))
+        .count();
+    found.filter(|_| reductions == 1).map(|i| &nodes[i])
 }
 
 pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
