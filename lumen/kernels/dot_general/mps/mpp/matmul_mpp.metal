@@ -36,6 +36,7 @@ inline void store_mpp_pair(
 }
 
 template <typename T,
+          typename A,
           typename O,
           int BM,
           int BN,
@@ -97,8 +98,8 @@ inline void matmul_mpp(
             };
             auto a0 = slice_a(0);
             auto b0 = slice_b(bf, 0);
-            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
+            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < first.get_capacity(); ++i) {
                 if (first.is_valid_element(i)) {
                     first[i] = 0;
@@ -120,8 +121,8 @@ inline void matmul_mpp(
             auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
             auto b0 = TR ? bf.slice(0, col) : bf.slice(col, 0);
             auto b1 = TR ? bs.slice(0, col) : bs.slice(col, 0);
-            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b1), float>();
+            auto first = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
+            auto second = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b1), A>();
             op.run(a0, b0, first);
             op.run(a0, b1, second);
             store_mpp_pair<O>(first, second, o, H, M, row, col, base, epi);
@@ -152,7 +153,7 @@ inline void matmul_mpp(
             };
             auto a0 = slice_a(0);
             auto b0 = slice_b(0);
-            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
                 if (sum.is_valid_element(i)) {
                     sum[i] = 0;
@@ -171,7 +172,7 @@ inline void matmul_mpp(
             matmul2d<desc, execution_simdgroups<SIMDS>> op;
             auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
             auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
-            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), A>();
             op.run(a0, b0, sum);
             store_mpp<O>(sum, o, N, M, row, col, base, epi);
         }

@@ -637,7 +637,7 @@ fn gemm_kernel_with(
                 .expect("a layout Metal Performance Primitives read");
                 formatdoc!(
                     "
-                    matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {group}, {interleaved}>(
+                    matmul_mpp<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {group}, {interleaved}>(
                     {lhs}, {rhs}, out, p, group,
                     NAME_epi{{{members}}});
                     "
@@ -645,8 +645,8 @@ fn gemm_kernel_with(
             }
             Algorithm::Skinny => formatdoc!(
                 "
-                threadgroup float partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
-                matmul_skinny<{t}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
+                threadgroup {a} partials[{threads} / ({bn} / {bk}) * ({bn} + 1)];
+                matmul_skinny<{t}, {a}, {o}, {bm}, {threads}, {bn}, {bk}, {w}, NAME_epi>(
                 {lhs}, {rhs}, out, p, partials, group, tid.x,
                 NAME_epi{{{members}}});
                 "
