@@ -50,7 +50,10 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
                 && (to.dtype.size_of() > from.dtype.size_of()) == grows
                 && to.dtype.size_of() != from.dtype.size_of()
         };
-        if let Some(regions) = crate::codegen::mps::gemm_regions(graph, node) {
+        let pair = crate::codegen::mps::gemm_pair(graph, node);
+        if let Some(regions) =
+            crate::codegen::mps::gemm_regions(graph, node).filter(|_| pair.is_none())
+        {
             let index_of = |v: Var| producer[v].expect("a node's value");
             let mut sets: Vec<Vec<usize>> = regions
                 .iter()
@@ -154,7 +157,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
                 continue;
             }
         }
-        let pair: Option<[usize; 2]> = crate::codegen::mps::gemm_pair(graph, node)
+        let pair: Option<[usize; 2]> = pair
             .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
         let mut taken = vec![i];
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);

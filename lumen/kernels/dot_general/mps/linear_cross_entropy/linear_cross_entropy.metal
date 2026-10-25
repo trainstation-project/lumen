@@ -57,23 +57,23 @@ template <typename L, uint BM, uint BN> struct LceRows {
         }
     }
 };
-#define LCE_PARTIALS_TILE(KIND, NAME, T, LNAME, L, BM, BN, BK)                                             \
-    kernel void lce_partials_##KIND##NAME##_##LNAME(device const T *h [[buffer(0)]],                       \
-                                                    device const T *w [[buffer(1)]],                       \
-                                                    device const L *target [[buffer(2)]],                  \
-                                                    device float *out [[buffer(3)]],                       \
-                                                    device float *maxima [[buffer(4)]],                    \
-                                                    device float *sums [[buffer(5)]],                      \
-                                                    constant ulong *p [[buffer(6)]],                       \
-                                                    uint3 group [[threadgroup_position_in_grid]],          \
-                                                    uint3 tid [[thread_position_in_threadgroup]],          \
-                                                    uint sg [[simdgroup_index_in_threadgroup]],            \
-                                                    uint lane [[thread_index_in_simdgroup]]) {             \
-        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[BK * BN];                                            \
-        threadgroup float halves[BM * SG_COLS * 2];                                                        \
-        LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};                   \
-        matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, false, true>( \
-            h, w, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, rows);                              \
+#define LCE_PARTIALS_TILE(KIND, NAME, T, LNAME, L, BM, BN, BK)                                      \
+    kernel void lce_partials_##KIND##NAME##_##LNAME(device const T *h [[buffer(0)]],                \
+                                                    device const T *w [[buffer(1)]],                \
+                                                    device const L *target [[buffer(2)]],           \
+                                                    device float *out [[buffer(3)]],                \
+                                                    device float *maxima [[buffer(4)]],             \
+                                                    device float *sums [[buffer(5)]],               \
+                                                    constant ulong *p [[buffer(6)]],                \
+                                                    uint3 group [[threadgroup_position_in_grid]],   \
+                                                    uint3 tid [[thread_position_in_threadgroup]],   \
+                                                    uint sg [[simdgroup_index_in_threadgroup]],     \
+                                                    uint lane [[thread_index_in_simdgroup]]) {      \
+        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[BK * BN];                                     \
+        threadgroup float halves[BM * SG_COLS * 2];                                                 \
+        LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};            \
+        matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, true>( \
+            h, w, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, rows);                       \
     }
 #define LCE_PARTIALS(NAME, T, LNAME, L)                       \
     LCE_PARTIALS_TILE(, NAME, T, LNAME, L, 128, 64, SG_BK)    \

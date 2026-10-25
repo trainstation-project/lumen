@@ -1689,7 +1689,7 @@ fn vector_dots_are_reduced() {
 
 #[test]
 fn skinny_dots_split_their_contraction() {
-    let build = |m: usize, n: usize, k: usize, dtype: DType| {
+    let build_with = |m: usize, n: usize, k: usize, dtype: DType, accum: DType| {
         let mut g = Graph::new();
         let a = g.input(ty(dtype, &[m, k]));
         let b = g.input(ty(dtype, &[k, n]));
@@ -1698,13 +1698,14 @@ fn skinny_dots_split_their_contraction() {
             rhs_contracting: vec![0],
             lhs_batch: vec![],
             rhs_batch: vec![],
-            accum_dtype: DType::F32,
+            accum_dtype: accum,
             output_dtype: dtype,
         };
         let d = apply(&mut g, dot, &[a, b]);
         g.set_outputs(&[d]).unwrap();
         g
     };
+    let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
     let g = build(4, 256, 4096, DType::F32);
     let split = super::split_k::split_k(&g, false, false);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
@@ -1741,6 +1742,41 @@ fn skinny_dots_split_their_contraction() {
         unreachable!("a fusion")
     };
     assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
+    let g = build_with(352, 352, 2048, DType::BF16, DType::BF16);
+    let split = super::split_k::split_k(&g, true, false);
+    let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
+    assert_eq!(
+        names,
+        ["reshape", "reshape", "dot_general", "reduce_sum"],
+        "{split}"
+    );
+    for node in &split.nodes()[2..] {
+        let accum = match &node.primitive {
+            DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. } => *accum_dtype,
+            p => unreachable!("{p}"),
+        };
+        assert_eq!(accum, DType::BF16, "{split}");
+        assert_eq!(split.type_of(node.output).dtype, DType::BF16, "{split}");
+    }
+    let inputs = [
+        data(&[352, 2048], 1).to_dtype(DType::BF16).unwrap(),
+        data(&[2048, 352], 2).to_dtype(DType::BF16).unwrap(),
+    ];
+    let run = |g: &Graph| {
+        reference::run(g, &inputs).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+    };
+    let exact = run(&build_with(352, 352, 2048, DType::BF16, DType::F32));
+    let error = |got: &[f32]| {
+        exact
+            .iter()
+            .zip(got)
+            .fold(0f32, |m, (e, v)| m.max((e - v).abs()))
+    };
+    let (unsplit, split) = (error(&run(&g)), error(&run(&split)));
+    assert!(split > 0.0 && split <= unsplit, "{split} {unsplit}");
     for g in [
         build(1024, 1024, 4096, DType::F32),
         build(4, 256, 2049, DType::F32),
@@ -2348,95 +2384,94 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
         g.set_outputs(&[both]).unwrap();
         g
     };
-    let flags = |paired, expanded, interleaved, regions, rows| codegen::EpilogueFlags {
-        paired,
+    let flags = |expanded, interleaved, group, rows| codegen::EpilogueFlags {
         expanded,
         interleaved,
-        regions,
+        group,
         rows,
     };
     let large = [
         (
             "regions along rows",
             regions(0, 320, 64, 256, 96),
-            flags(true, false, true, true, true),
+            flags(false, true, 8, true),
         ),
         (
             "regions along columns",
             regions(1, 320, 64, 256, 96),
-            flags(true, false, true, true, false),
+            flags(false, true, 8, false),
         ),
         (
             "row halves",
             row_halves(256, 300, 96),
-            flags(true, false, false, true, true),
+            flags(false, false, 8, true),
         ),
         (
             "column halves",
             pair(256, 320, 96, false),
-            flags(true, false, false, false, false),
+            flags(false, false, 2, false),
         ),
         (
             "interleaved pairs",
             pair(256, 320, 96, true),
-            flags(true, false, true, false, false),
+            flags(false, true, 2, false),
         ),
         (
             "expanded side by side",
             expanded(200, 384, 96, 0),
-            flags(false, true, false, false, true),
+            flags(true, false, 1, true),
         ),
         (
             "expanded row pairs",
             expanded(200, 384, 96, 1),
-            flags(false, true, false, false, false),
+            flags(true, false, 1, false),
         ),
         (
             "expanded column pairs",
             expanded(200, 384, 96, 2),
-            flags(false, true, true, false, false),
+            flags(true, true, 1, false),
         ),
     ];
     let skinny = [
         (
             "regions along rows",
             regions(0, 8, 8, 1024, 1024),
-            flags(true, false, true, true, true),
+            flags(false, true, 8, true),
         ),
         (
             "regions along columns",
             regions(1, 256, 512, 24, 1024),
-            flags(true, false, true, true, false),
+            flags(false, true, 8, false),
         ),
         (
             "row halves",
             row_halves(12, 1024, 1024),
-            flags(true, false, false, true, true),
+            flags(false, false, 8, true),
         ),
         (
             "column halves",
             pair(24, 512, 1024, false),
-            flags(true, false, false, false, false),
+            flags(false, false, 2, false),
         ),
         (
             "interleaved pairs",
             pair(24, 512, 1024, true),
-            flags(true, false, true, false, false),
+            flags(false, true, 2, false),
         ),
         (
             "expanded side by side",
             expanded(24, 1024, 1024, 0),
-            flags(false, true, false, false, true),
+            flags(true, false, 1, true),
         ),
         (
             "expanded row pairs",
             expanded(24, 1024, 1024, 1),
-            flags(false, true, false, false, false),
+            flags(true, false, 1, false),
         ),
         (
             "expanded column pairs",
             expanded(24, 1024, 1024, 2),
-            flags(false, true, true, false, false),
+            flags(true, true, 1, false),
         ),
     ];
     let mut options = crate::graph_compiler::Options::default();

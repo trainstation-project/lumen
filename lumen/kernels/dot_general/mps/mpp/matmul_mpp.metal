@@ -46,12 +46,13 @@ template <typename T,
           bool TR,
           typename Out = O,
           typename Epi = Same,
-          bool PAIRED = false,
+          uint GROUP = 1,
           bool INTERLEAVED = false>
 inline void matmul_mpp(
     device const T *lhs, device const T *rhs, device Out *out, constant ulong *p, uint3 group, Epi epi = Epi()) {
     using namespace mpp::tensor_ops;
     using extents = dextents<int32_t, 2>;
+    static_assert(BN % GROUP == 0, "a tile holds whole groups");
 
     // The host supplies [M, N, K] followed by batch and logical dimension strides.
     const int M = int(p[0]), N = int(p[1]), K = int(p[2]);
@@ -62,7 +63,7 @@ inline void matmul_mpp(
     tensor<device T, extents, tensor_inline> b(
         r, TR ? extents(K, N) : extents(N, K), TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
     const int row = int(group.y) * BM;
-    if constexpr (PAIRED) {
+    if constexpr (GROUP == 2) {
         constexpr int HN = BN / 2;
         const int H = N / 2, col = int(group.x) * HN;
         const ulong s = TR ? p[8] : 1, step = INTERLEAVED ? 2 * s : s;
@@ -255,10 +256,9 @@ template <typename T,
           bool TR,
           typename Out,
           typename Epi,
-          bool PAIRED,
           bool EXPANDED,
           bool INTERLEAVED,
-          bool REGIONS,
+          uint GROUP,
           bool ROWS>
 inline void matmul_mpp_staged(device const T *lhs,
                               device const T *rhs,
@@ -287,14 +287,15 @@ inline void matmul_mpp_staged(device const T *lhs,
             TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
     };
     const int row = int(group.y) * BM, col = int(group.x) * BN;
-    if constexpr (PAIRED && !INTERLEAVED && ROWS) {
+    constexpr bool HALVES = GROUP > 1 && !INTERLEAVED;
+    if constexpr (HALVES && ROWS) {
         const int H = M / 2;
         auto a0 = lhs_view(0, H);
         auto a1 = lhs_view(ulong(H) * p[4], H);
         auto b = rhs_view(0, N);
         mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a0, b, row / 2, col, H, N, K, tile, BN, 2, 1, 0);
         mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a1, b, row / 2, col, H, N, K, tile, BN, 2, 1, BN);
-    } else if constexpr (PAIRED && !INTERLEAVED) {
+    } else if constexpr (HALVES) {
         const int H = N / 2;
         auto a = lhs_view(0, M);
         auto b0 = rhs_view(0, H);
@@ -307,7 +308,7 @@ inline void matmul_mpp_staged(device const T *lhs,
         mpp_tile<T, A, BM, BN, BK, SIMDS, TL, TR>(a, b, row, col, M, N, K, tile, BN, 1, 1, 0);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    store_staged<float, O, Out, Epi, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS, BM, BN, SIMDS>(
+    store_staged<float, O, Out, Epi, EXPANDED, INTERLEAVED, GROUP, ROWS, BM, BN, SIMDS>(
         tile, row, col, M, N, M, group.z, out, stage, sg, lane, epi);
 }
 #endif

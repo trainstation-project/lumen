@@ -137,6 +137,7 @@ impl Kernels for Gemms {
             return Vec::new();
         };
         let epilogue = codegen::gemm_flags(body, d);
+        let group = codegen::gemm_group(body, d);
         let dual = codegen::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
         let skinny = gemm::skinny(dot, lhs, rhs, out);
@@ -145,7 +146,7 @@ impl Kernels for Gemms {
             return Vec::new();
         }
         let stage = |c: &GemmConfig| c.threads / 32 * 64 * 4;
-        let halves = epilogue.paired && !epilogue.interleaved;
+        let halves = epilogue.group > 1 && !epilogue.interleaved;
         let mpp_fits = |c: &&GemmConfig| match () {
             _ if dual => c.bn >= 2 * 32,
             _ if staged => {
@@ -160,9 +161,7 @@ impl Kernels for Gemms {
         };
         let skinny_fits = |c: &&GemmConfig| {
             let partials = c.threads / (c.bn / c.bk) * (c.bn + 1) * 4;
-            let windows = !(epilogue.regions && epilogue.rows) || c.bm == 8;
-            epilogue.plain()
-                || (partials + 8 * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES && windows)
+            epilogue.plain() || partials + 8 * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
         };
         let mpp =
             large && gemm::mpp_transposes(dot, lhs, rhs, out).is_some() && super::mpp_available();
@@ -193,6 +192,7 @@ impl Kernels for Gemms {
             .iter()
             .chain(&mpp)
             .chain(&skinny)
+            .filter(|c| group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0))
             .copied()
             .collect()
     }

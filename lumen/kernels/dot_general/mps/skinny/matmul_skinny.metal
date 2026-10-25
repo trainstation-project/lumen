@@ -7,10 +7,9 @@ template <typename T,
           uint V,
           typename Out = O,
           typename Epi = Same,
-          bool PAIRED = false,
           bool EXPANDED = false,
           bool INTERLEAVED = false,
-          bool REGIONS = false,
+          uint GROUP = 1,
           bool ROWS = false>
 inline void matmul_skinny(device const T *lhs,
                           device const T *rhs,
@@ -24,8 +23,8 @@ inline void matmul_skinny(device const T *lhs,
                           threadgroup float *stage = nullptr,
                           uint sg = 0,
                           uint lane = 0) {
-    constexpr bool STAGED = PAIRED || EXPANDED || REGIONS;
-    constexpr bool HALF_ROWS = PAIRED && !INTERLEAVED && ROWS, HALF_COLUMNS = PAIRED && !INTERLEAVED && !ROWS;
+    constexpr bool STAGED = GROUP > 1 || EXPANDED;
+    constexpr bool HALF_ROWS = GROUP > 1 && !INTERLEAVED && ROWS, HALF_COLUMNS = GROUP > 1 && !INTERLEAVED && !ROWS;
     // This kernel handles matrices with few rows by splitting each output
     // column block across threads and reducing the K dimension in threadgroup memory.
     constexpr uint GROUPS = BLOCK / V, SPLIT = THREADS / GROUPS, STRIDE = BLOCK + 1;
@@ -107,7 +106,7 @@ inline void matmul_skinny(device const T *lhs,
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if constexpr (STAGED) {
-        store_staged<float, O, Out, Epi, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS, 8, BLOCK, THREADS / 32>(
+        store_staged<float, O, Out, Epi, EXPANDED, INTERLEAVED, GROUP, ROWS, 8, BLOCK, THREADS / 32>(
             tile, m0, c0, M, N, min(M, m0 + R), group.z, out, stage, sg, lane, epi);
     }
 }

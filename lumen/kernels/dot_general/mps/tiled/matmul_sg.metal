@@ -31,10 +31,9 @@ template <typename A,
           typename Out,
           typename Epi,
           bool ATOMIC,
-          bool PAIRED,
           bool EXPANDED,
           bool INTERLEAVED,
-          bool REGIONS,
+          uint GROUP,
           bool ROWS>
 inline void store_block(vec<A, 2> f,
                         ulong mb,
@@ -47,7 +46,7 @@ inline void store_block(vec<A, 2> f,
                         threadgroup A *stage,
                         uint lane,
                         Epi epi) {
-    if constexpr (!ATOMIC && PAIRED && REGIONS && ROWS) {
+    if constexpr (!ATOMIC && GROUP == 8 && ROWS) {
         const uint at = frag_row(lane);
         vec<O, 2> window[8];
         UNROLL for (uint d = 0; d < 8; ++d) {
@@ -57,8 +56,8 @@ inline void store_block(vec<A, 2> f,
         if (m < limit && n < N) {
             epi.store(m, n, window);
         }
-    } else if constexpr (!ATOMIC && PAIRED && REGIONS) {
-        // Paired regional output reconstructs four rows from SIMD shuffles.
+    } else if constexpr (!ATOMIC && GROUP == 8) {
+        // Grouped output reconstructs eight-column rows from SIMD shuffles.
         const uint pair = frag_col(lane) / 2;
         vec<O, 2> row[4];
         row[pair] = vec<O, 2>(f);
@@ -69,8 +68,8 @@ inline void store_block(vec<A, 2> f,
         if (m < limit && n < N) {
             epi.store(m, n, row);
         }
-    } else if constexpr (!ATOMIC && PAIRED) {
-        // Paired output stores two logical columns into a packed output layout.
+    } else if constexpr (!ATOMIC && GROUP == 2) {
+        // Pairs are each lane's two columns, stored into a packed output layout.
         const ulong H = N / 2;
         device Out *o = out + z * M * H;
         ulong m = mb + frag_row(lane), n = nb + frag_col(lane);
@@ -121,10 +120,9 @@ template <typename A,
           typename O,
           typename Out,
           typename Epi,
-          bool PAIRED,
           bool EXPANDED,
           bool INTERLEAVED,
-          bool REGIONS,
+          uint GROUP,
           bool ROWS,
           uint BM,
           uint BN,
@@ -148,7 +146,7 @@ inline void store_staged(threadgroup const float *tile,
             continue;
         }
         threadgroup const float *at = tile + (bi * 8 + fr) * BN + bj * 8 + fc;
-        store_block<A, O, Out, Epi, false, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS>(
+        store_block<A, O, Out, Epi, false, EXPANDED, INTERLEAVED, GROUP, ROWS>(
             vec<A, 2>(A(at[0]), A(at[1])), m0 + bi * 8, n0 + bj * 8, M, N, limit, z, out, stage + sg * 64, lane, epi);
     }
 }
@@ -162,11 +160,10 @@ template <typename T,
           typename Out = O,
           typename Epi = Same,
           bool ATOMIC = false,
-          bool PAIRED = false,
           bool EXPANDED = false,
           bool TILE = false,
           bool INTERLEAVED = false,
-          bool REGIONS = false,
+          uint GROUP = 1,
           bool ROWS = false,
           uint THREADS = 256,
           uint COLS = SG_COLS,
@@ -195,8 +192,9 @@ inline void matmul_sg_impl(device const T *lhs,
     // These coordinates describe each thread's contribution to cooperative
     // lhs and rhs tile loads.
     const uint ac = flat % BK, ar = flat / BK, bc = flat % BN, br = flat / BN;
-    constexpr bool HALVES = PAIRED && !INTERLEAVED;
+    constexpr bool HALVES = GROUP > 1 && !INTERLEAVED;
     static_assert(!(HALVES && ROWS) || RA % 2 == 0, "row halves step through rows two at a time");
+    static_assert((ROWS ? BM : BN) % GROUP == 0, "a tile holds whole groups");
     constexpr uint SA = HALVES && ROWS ? RA / 2 : RA;
     const ulong am = HALVES && ROWS ? ((m0 + ar) & 1) * (M / 2) + (m0 + ar) / 2 : m0 + ar;
     device const T *l = lhs + group.z * p[3] + am * sm + ac * sk;
@@ -258,7 +256,7 @@ inline void matmul_sg_impl(device const T *lhs,
     constexpr uint TA = BK / WA, TB = BN / WB, VRA = THREADS / TA, VRB = THREADS / TB, PA = LA / WA, PB = LB / WB;
     device const T *lhs0 = lhs + group.z * p[3];
     device const T *rhs0 = rhs + group.z * p[6];
-    const bool vector = !PAIRED && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
+    const bool vector = !HALVES && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
                         N % WB == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 && ulong(rhs0) % (WB * sizeof(T)) == 0;
     if (vector) {
         // Contiguous, aligned inputs use packed vector loads to reduce memory transactions.
@@ -328,18 +326,17 @@ inline void matmul_sg_impl(device const T *lhs,
     } else {
         UNROLL for (uint i = 0; i < FM; ++i) {
             UNROLL for (uint j = 0; j < FN; ++j) {
-                store_block<A, O, Out, Epi, ATOMIC, PAIRED, EXPANDED, INTERLEAVED, REGIONS, ROWS>(
-                    frag(c[i][j]),
-                    m0 + (sy * FM + i) * 8,
-                    n0 + (sx * FN + j) * 8,
-                    M,
-                    N,
-                    M,
-                    group.z,
-                    out,
-                    stage,
-                    lane,
-                    epi);
+                store_block<A, O, Out, Epi, ATOMIC, EXPANDED, INTERLEAVED, GROUP, ROWS>(frag(c[i][j]),
+                                                                                        m0 + (sy * FM + i) * 8,
+                                                                                        n0 + (sx * FN + j) * 8,
+                                                                                        M,
+                                                                                        N,
+                                                                                        M,
+                                                                                        group.z,
+                                                                                        out,
+                                                                                        stage,
+                                                                                        lane,
+                                                                                        epi);
             }
         }
     }
