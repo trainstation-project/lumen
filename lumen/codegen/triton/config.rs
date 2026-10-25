@@ -45,19 +45,39 @@ pub struct LoopConfig {
     pub warps: usize,
 }
 
-const fn loop_config(block_size: usize, warps: usize) -> LoopConfig {
-    LoopConfig { block_size, warps }
-}
-
 pub(crate) const LOOP_CONFIGS: [LoopConfig; 8] = [
-    loop_config(512, 4),
-    loop_config(1024, 4),
-    loop_config(2048, 4),
-    loop_config(4096, 4),
-    loop_config(1024, 8),
-    loop_config(2048, 8),
-    loop_config(4096, 8),
-    loop_config(8192, 8),
+    LoopConfig {
+        block_size: 512,
+        warps: 4,
+    },
+    LoopConfig {
+        block_size: 1024,
+        warps: 4,
+    },
+    LoopConfig {
+        block_size: 2048,
+        warps: 4,
+    },
+    LoopConfig {
+        block_size: 4096,
+        warps: 4,
+    },
+    LoopConfig {
+        block_size: 1024,
+        warps: 8,
+    },
+    LoopConfig {
+        block_size: 2048,
+        warps: 8,
+    },
+    LoopConfig {
+        block_size: 4096,
+        warps: 8,
+    },
+    LoopConfig {
+        block_size: 8192,
+        warps: 8,
+    },
 ];
 
 pub(crate) const UNTUNED_LOOP: usize = 1;
