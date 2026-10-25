@@ -21,7 +21,7 @@ class Linear(lumen.nn.Module):
     weight: lumen.Tensor
 
     def __call__(self, x):
-        return F.matmul(x, self.weight.t(), "float32", "float32")
+        return F.matmul(x, self.weight.t(), "float32", "bfloat16")
 
 
 class RMSNorm(lumen.nn.Module):
@@ -29,7 +29,7 @@ class RMSNorm(lumen.nn.Module):
     eps: float
 
     def __call__(self, x):
-        return F.rms_norm(x, x.size(-1), eps=self.eps).bfloat16() * self.weight
+        return F.rms_norm(x.float(), x.size(-1), eps=self.eps).bfloat16() * self.weight
 
 
 class Rotary(lumen.nn.Module):
@@ -39,7 +39,7 @@ class Rotary(lumen.nn.Module):
         seq, half = x.shape[1], x.shape[-1] // 2
         angles = (lumen.arange(seq, lumen.int32) + pos).float().reshape(seq, 1) * self.inv_freq
         angles = F.cat([angles, angles], dim=-1).reshape(1, seq, 1, 2 * half)
-        cos, sin = F.cos(angles), F.sin(angles)
+        cos, sin = F.cos(angles).to(dtype=x.dtype), F.sin(angles).to(dtype=x.dtype)
         rotated = F.cat([-x[..., half:], x[..., :half]], dim=-1)
         return (x * cos + rotated * sin).bfloat16()
 
@@ -78,6 +78,7 @@ class MLP(lumen.nn.Module):
     def __call__(self, x):
         gate = self.gate_proj(x)
         up = self.up_proj(x)
+        gate, up = gate.float(), up.float()
         return self.down_proj((gate * F.sigmoid(gate) * up).bfloat16())
 
 
@@ -107,7 +108,7 @@ class Llama(lumen.nn.Module):
     rotary: Rotary
 
     def __call__(self, ids, cache, pos):
-        x = self.model.embed_tokens.weight[ids.reshape(-1)].reshape(*ids.shape, -1).float()
+        x = self.model.embed_tokens.weight[ids.reshape(-1)].reshape(*ids.shape, -1)
         for layer, cache_k, cache_v in zip(self.model.layers, cache.k, cache.v):
             x = layer(x, self.rotary, cache_k, cache_v, pos)
         last = self.model.norm(x[:, -1])
