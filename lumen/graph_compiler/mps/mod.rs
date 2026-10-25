@@ -108,6 +108,10 @@ impl Attentions for MpsModule<'_> {
     fn kernel(&mut self) -> String {
         request(&mut self.kernels, Kernel::Attention)
     }
+
+    fn runtime_offsets(&self) -> bool {
+        true
+    }
 }
 
 impl Blocks for MpsModule<'_> {

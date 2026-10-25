@@ -28,6 +28,7 @@ pub(crate) struct Attention {
     pub hv: usize,
     pub scores: Vec<Score>,
     pub causal: Option<i64>,
+    pub offset: Option<Var>,
     pub lse: Option<usize>,
     pub dot1: usize,
     pub dot2: usize,
@@ -234,8 +235,11 @@ fn fits32(acc: &Access, rows: usize, cols: usize) -> bool {
 
 pub(crate) const MAX_HEAD: usize = 256;
 
-pub(crate) fn attentions(graph: &Graph) -> Vec<Attention> {
-    let m = Matcher::new(graph);
+pub(crate) fn attentions(graph: &Graph, runtime_offsets: bool) -> Vec<Attention> {
+    let m = Matcher {
+        runtime_offsets,
+        ..Matcher::new(graph)
+    };
     let mut found: Vec<Attention> = Vec::new();
     for (i, node) in graph.nodes().iter().enumerate() {
         let dot = m.live[i] && matches!(node.primitive, Primitive::DotGeneral { .. });
@@ -252,7 +256,7 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
-    attentions(graph)
+    attentions(graph, false)
         .into_iter()
         .map(|a| {
             let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
@@ -274,7 +278,7 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
 }
 
 pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
-    attentions(body).into_iter().next()
+    attentions(body, true).into_iter().next()
 }
 
 type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
@@ -291,11 +295,13 @@ pub(crate) fn fuse(
     graph: &Graph,
     epilogues: Option<Epilogues>,
     scalars: &[Var],
+    runtime_offsets: bool,
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
-    let found: Vec<Fused> = attentions(graph)
+    let found: Vec<Fused> = attentions(graph, runtime_offsets)
         .into_iter()
+        .filter(|a| a.offset.is_none_or(|v| !scalars.contains(&v)))
         .map(|a| {
             let (mut chain, mut leaves, mut kept) = match epilogues {
                 Some(e) => m.epilogue(a.root, scalars, e.leaves, e.reshaped),
@@ -346,7 +352,11 @@ pub(crate) fn fuse(
             continue;
         };
         let mut bases: Vec<Var> = Vec::new();
-        for &b in [a.q.base, a.k.base, a.v.base].iter().chain(leaves) {
+        for &b in [a.q.base, a.k.base, a.v.base]
+            .iter()
+            .chain(leaves)
+            .chain(&a.offset)
+        {
             if !bases.contains(&b) {
                 bases.push(b);
             }
@@ -404,6 +414,7 @@ struct Matcher<'a> {
     output: Vec<bool>,
     live: Vec<bool>,
     plain_dq: bool,
+    runtime_offsets: bool,
     views: HashMap<Var, (usize, Vec<usize>)>,
 }
 
@@ -508,6 +519,7 @@ impl<'a> Matcher<'a> {
         }
         Matcher {
             plain_dq: false,
+            runtime_offsets: false,
             views: HashMap::new(),
             graph,
             producer,
@@ -652,6 +664,7 @@ impl<'a> Matcher<'a> {
         let (x, lse_b) = (sub.inputs[0], sub.inputs[1]);
         let nb = ty(x).shape.len().checked_sub(2)?;
         let (s, scores, causal) = self.scores(x, nb, true)?;
+        let causal = causal.map(|(c, _)| c);
         let (lc1, rc1, lb1, rb1, acc1, _) = dot(s)?;
         let (k_, q_) = (nodes[s].inputs[0], nodes[s].inputs[1]);
         if lb1.len() != nb || lc1.len() != 1 || rc1.len() != 1 || acc1 != f32 || ty(x).dtype != f32
@@ -913,7 +926,7 @@ impl<'a> Matcher<'a> {
         x: Var,
         nb: usize,
         transposed: bool,
-    ) -> Option<(usize, Vec<Score>, Option<i64>)> {
+    ) -> Option<(usize, Vec<Score>, Option<Causal>)> {
         use Primitive::*;
         let ty = |v: Var| self.graph.type_of(v);
         let (mut v, mut scale, mut causal) = (x, None, None);
@@ -1118,7 +1131,8 @@ impl<'a> Matcher<'a> {
             h,
             hv,
             scores,
-            causal,
+            causal: causal.map(|(c, _)| c),
+            offset: causal.and_then(|(_, v)| v),
             lse,
             dot1,
             dot2: i,
@@ -1142,8 +1156,10 @@ impl<'a> Matcher<'a> {
         })
     }
 
-    fn causal(&self, v: Var, nb: usize, transposed: bool) -> Option<i64> {
+    fn causal(&self, v: Var, nb: usize, transposed: bool) -> Option<Causal> {
         use Primitive::*;
+        let shape = self.graph.type_of(v).shape.clone();
+        let (v, dims) = self.broadcast_dims(v);
         let n = self.node(v)?;
         let (a, b, inclusive) = match n.primitive {
             Lt => (n.inputs[0], n.inputs[1], false),
@@ -1164,36 +1180,131 @@ impl<'a> Matcher<'a> {
             }
             _ => return None,
         };
-        let (ai, aj, ac) = self.affine(a, nb)?;
-        let (bi, bj, bc) = self.affine(b, nb)?;
-        let (ci, cj, c0) = (ai - bi, aj - bj, ac - bc);
-        let (ci, cj) = if transposed { (cj, ci) } else { (ci, cj) };
-        if (ci, cj) != (-1, 1) {
+        let (a, b) = (self.affine(a)?, self.affine(b)?);
+        let mut outer = vec![0; nb + 2];
+        for (k, (x, y)) in a.coefficients.iter().zip(&b.coefficients).enumerate() {
+            match (dims[k], x - y) {
+                (_, 0) => {}
+                (Some(d), c) if d < outer.len() => outer[d] = c,
+                _ => return None,
+            }
+        }
+        let (query, key) = if transposed {
+            (nb + 1, nb)
+        } else {
+            (nb, nb + 1)
+        };
+        for (d, c) in [(query, -1), (key, 1)] {
+            if shape.get(d) == Some(&1) {
+                outer[d] = c;
+            }
+        }
+        if outer[..nb].iter().any(|&c| c != 0) || (outer[query], outer[key]) != (-1, 1) {
             return None;
         }
-        Some(if inclusive { -c0 } else { -c0 - 1 })
+        let offset = match sum_terms(a.term, b.term.map(|(v, k)| (v, -k))) {
+            None => None,
+            Some((v, -1)) => Some(v),
+            Some(_) => return None,
+        };
+        let c0 = a.constant - b.constant;
+        Some((if inclusive { -c0 } else { -c0 - 1 }, offset))
     }
 
-    fn affine(&self, v: Var, nb: usize) -> Option<(i64, i64, i64)> {
+    fn broadcast_dims(&self, mut v: Var) -> (Var, Vec<Option<usize>>) {
+        let mut dims: Vec<Option<usize>> =
+            (0..self.graph.type_of(v).shape.len()).map(Some).collect();
+        while let Some(n) = self.node(v) {
+            let inner = &self.graph.type_of(n.inputs[0]).shape;
+            let mapped = match &n.primitive {
+                Primitive::BroadcastInDim {
+                    broadcast_dimensions,
+                    ..
+                } => broadcast_dimensions.iter().map(|&d| dims[d]).collect(),
+                Primitive::Reshape { .. } => {
+                    let outer = &self.graph.type_of(v).shape;
+                    let Some(map) = unit_reshape(inner, outer) else {
+                        break;
+                    };
+                    map.iter().map(|d| d.and_then(|d| dims[d])).collect()
+                }
+                _ => break,
+            };
+            dims = mapped;
+            v = n.inputs[0];
+        }
+        (v, dims)
+    }
+
+    fn affine(&self, v: Var) -> Option<Affine> {
         use Primitive::*;
-        let n = self.node(v)?;
+        let ty = self.graph.type_of(v);
+        let rank = ty.shape.len();
+        let constant = |c: i64| Affine {
+            coefficients: vec![0; rank],
+            constant: c,
+            term: None,
+        };
+        let Some(n) = self.node(v) else {
+            let runtime = self.runtime_offsets && rank == 0 && ty.dtype.is_int();
+            return runtime.then_some(Affine {
+                term: Some((v, 1)),
+                ..constant(0)
+            });
+        };
         match &n.primitive {
-            Iota { dimension, .. } if *dimension == nb => Some((1, 0, 0)),
-            Iota { dimension, .. } if *dimension == nb + 1 => Some((0, 1, 0)),
-            Full {
-                fill_value, shape, ..
-            } if shape.is_empty() => {
-                let c = fill_value.to_f64();
-                (c.fract() == 0.0).then_some((0, 0, c as i64))
+            Iota { dimension, .. } => {
+                let mut a = constant(0);
+                a.coefficients[*dimension] = 1;
+                Some(a)
             }
-            BroadcastInDim { .. } | Reshape { .. } | Cast { .. } => {
-                let (ci, cj, c) = self.affine(n.inputs[0], nb)?;
-                (matches!(n.primitive, Cast { .. }) || (ci, cj) == (0, 0)).then_some((ci, cj, c))
+            Full { fill_value, .. } => {
+                let c = fill_value.to_f64();
+                (c.fract() == 0.0).then(|| constant(c as i64))
+            }
+            Cast { .. } => self.affine(n.inputs[0]),
+            BroadcastInDim {
+                broadcast_dimensions,
+                ..
+            } => {
+                let a = self.affine(n.inputs[0])?;
+                let inner = &self.graph.type_of(n.inputs[0]).shape;
+                let mut out = constant(a.constant);
+                out.term = a.term;
+                for (k, &d) in broadcast_dimensions.iter().enumerate() {
+                    if inner[k] == ty.shape[d] {
+                        out.coefficients[d] = a.coefficients[k];
+                    }
+                }
+                Some(out)
+            }
+            Reshape { .. } => {
+                let a = self.affine(n.inputs[0])?;
+                let map = unit_reshape(&self.graph.type_of(n.inputs[0]).shape, &ty.shape)?;
+                let mut out = constant(a.constant);
+                out.term = a.term;
+                for (k, d) in map.into_iter().enumerate() {
+                    if let Some(d) = d {
+                        out.coefficients[d] = a.coefficients[k];
+                    }
+                }
+                Some(out)
             }
             Add | Sub => {
-                let (a, b) = (self.affine(n.inputs[0], nb)?, self.affine(n.inputs[1], nb)?);
+                let (a, b) = (self.affine(n.inputs[0])?, self.affine(n.inputs[1])?);
                 let s = if matches!(n.primitive, Add) { 1 } else { -1 };
-                Some((a.0 + s * b.0, a.1 + s * b.1, a.2 + s * b.2))
+                let term = match (a.term, b.term) {
+                    (Some((x, _)), Some((y, _))) if x != y => return None,
+                    (at, bt) => sum_terms(at, bt.map(|(v, k)| (v, s * k))),
+                };
+                let coefficients = (a.coefficients.iter().zip(&b.coefficients))
+                    .map(|(x, y)| x + s * y)
+                    .collect();
+                Some(Affine {
+                    coefficients,
+                    constant: a.constant + s * b.constant,
+                    term,
+                })
             }
             _ => None,
         }
@@ -1257,6 +1368,36 @@ impl<'a> Matcher<'a> {
         };
         (base, offset, dims)
     }
+}
+
+type Causal = (i64, Option<Var>);
+
+struct Affine {
+    coefficients: Vec<i64>,
+    constant: i64,
+    term: Option<(Var, i64)>,
+}
+
+fn sum_terms(a: Option<(Var, i64)>, b: Option<(Var, i64)>) -> Option<(Var, i64)> {
+    match (a, b) {
+        (Some((v, x)), Some((w, y))) if v == w => (x + y != 0).then_some((v, x + y)),
+        (Some(_), Some(_)) => None,
+        (t, None) | (None, t) => t,
+    }
+}
+
+fn unit_reshape(inner: &[usize], outer: &[usize]) -> Option<Vec<Option<usize>>> {
+    let kept =
+        |shape: &[usize]| -> Vec<usize> { (0..shape.len()).filter(|&d| shape[d] != 1).collect() };
+    let (a, b) = (kept(inner), kept(outer));
+    if a.len() != b.len() || a.iter().zip(&b).any(|(&x, &y)| inner[x] != outer[y]) {
+        return None;
+    }
+    let mut map = vec![None; inner.len()];
+    for (&x, &y) in a.iter().zip(&b) {
+        map[x] = Some(y);
+    }
+    Some(map)
 }
 
 fn reshaped(

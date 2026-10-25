@@ -59,6 +59,8 @@ class FunctionEventAvg:
         "self_cpu_memory_usage",
         "device_memory_usage",
         "self_device_memory_usage",
+        "input_shapes",
+        "input_strides",
     )
 
     def __init__(self, fields):
@@ -77,15 +79,18 @@ class EventList(list):
     """``key_averages()`` result: a list of :class:`FunctionEventAvg` that
     also renders PyTorch's summary table."""
 
-    def __init__(self, rows, native):
+    def __init__(self, rows, native, group_by_input_shape=False):
         super().__init__(rows)
         self._native = native
+        self._group_by_input_shape = group_by_input_shape
 
     def table(self, sort_by=None, row_limit=100):
         """PyTorch-style table, sorted descending by ``sort_by`` (e.g.
         ``"cpu_time_total"``, ``"self_device_time_total"``; ``cuda_*`` names
-        work too) and cut to ``row_limit`` rows (negative: no limit)."""
-        return self._native.table(sort_by, row_limit)
+        work too) and cut to ``row_limit`` rows (negative: no limit); grouped
+        by input shape, with each row's input dtypes and shapes and its
+        strides."""
+        return self._native.table(sort_by, row_limit, self._group_by_input_shape)
 
 
 class profile:
@@ -142,10 +147,13 @@ class profile:
         has the types of the op that issued it."""
         return self._profile().events()
 
-    def key_averages(self):
-        """Per-name totals (PyTorch: ``prof.key_averages()``)."""
+    def key_averages(self, group_by_input_shape=False):
+        """Per-name totals (PyTorch: ``prof.key_averages()``); with
+        ``group_by_input_shape``, per name and input dtypes, shapes and
+        strides (recorded with ``record_shapes``)."""
         native = self._profile()
-        return EventList([FunctionEventAvg(r) for r in native.key_averages()], native)
+        rows = [FunctionEventAvg(r) for r in native.key_averages(group_by_input_shape)]
+        return EventList(rows, native, group_by_input_shape)
 
     def export_chrome_trace(self, path):
         """Write a Chrome trace, viewable in Perfetto or ``chrome://tracing``

@@ -1,4 +1,4 @@
-from lumen.functional.attention import flash_attention, naive_attention
+from lumen.functional.attention import attention_decode, flash_attention, naive_attention
 from lumen.functional.cross_entropy import cross_entropy
 from lumen.functional.functions import *
 
@@ -34,6 +34,7 @@ __all__ = [
     "cross_entropy",
     "rms_norm",
     "matmul",
+    "attention_decode",
     "flash_attention",
     "naive_attention",
     "sin",

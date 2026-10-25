@@ -1048,6 +1048,8 @@ def _strides(x):
             strides, shape = _reshape_strides(shape, strides, op[1]), list(op[1])
         elif op[0] == "permute":
             strides, shape = [strides[d] for d in op[1]], [shape[d] for d in op[1]]
+        elif op[0] == "dynamic_slice":
+            shape = list(op[2])
         else:
             shape = [limit - start for start, limit in zip(op[1], op[2])]
     return strides
@@ -1083,6 +1085,8 @@ def _apply(x, op):
         return prims.reshape(x, op[1])
     if op[0] == "permute":
         return prims.transpose(x, op[1])
+    if op[0] == "dynamic_slice":
+        return prims.dynamic_slice(x, op[1], op[2])
     return prims.slice(x, op[1], op[2])
 
 
@@ -1565,9 +1569,16 @@ class TracedTensor:
         return out if tuple(shape) == out.shape else out.reshape(shape)
 
     def narrow(self, dim, start, length):
-        """The ``length`` elements of dimension ``dim`` from ``start``."""
+        """The ``length`` elements of dimension ``dim`` from ``start``: an
+        int, or a 0-d integer tensor read when it runs (clamped so the
+        elements are inside, as ``prims.dynamic_slice``)."""
         d = _dim(dim, self.ndim)
         n = self.shape[d]
+        if isinstance(start, TracedTensor):
+            starts, sizes = [0] * self.ndim, list(self.shape)
+            starts[d], sizes[d] = start, length
+            out = prims.dynamic_slice(self, starts, sizes)
+            return _view(self, out, ("dynamic_slice", tuple(starts), tuple(sizes)))
         start = start + n if start < 0 else start
         if not (0 <= start and length >= 0 and start + length <= n):
             raise IndexError(f"narrow: [{start}, {start + length}) is not within dimension {d} of size {n}")

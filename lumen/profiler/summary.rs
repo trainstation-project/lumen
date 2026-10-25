@@ -22,6 +22,8 @@ pub struct EventAvg {
     pub self_cpu_memory_usage: i64,
     pub device_memory_usage: i64,
     pub self_device_memory_usage: i64,
+    pub input_shapes: String,
+    pub input_strides: String,
 }
 
 impl EventAvg {
@@ -161,7 +163,7 @@ impl Profile {
         totals
     }
 
-    pub fn key_averages(&self) -> Vec<EventAvg> {
+    pub fn key_averages(&self, group_by_input_shape: bool) -> Vec<EventAvg> {
         let totals = self.totals();
         let names: HashMap<u64, &str> = self
             .events
@@ -179,10 +181,30 @@ impl Profile {
             if event.kind == EventKind::Gpu && op == Some(&event.name.as_str()) {
                 continue;
             }
-            let row = rows.entry(event.name.clone()).or_insert_with(|| {
-                order.push(event.name.clone());
+            let (input_shapes, input_strides) = match group_by_input_shape {
+                true => (
+                    event
+                        .inputs
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    event
+                        .input_strides
+                        .iter()
+                        .map(|s| format!("{s:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                false => (String::new(), String::new()),
+            };
+            let key = format!("{}\0{input_shapes}\0{input_strides}", event.name);
+            let row = rows.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
                 EventAvg {
                     name: event.name.clone(),
+                    input_shapes,
+                    input_strides,
                     ..EventAvg::default()
                 }
             });
@@ -205,7 +227,7 @@ impl Profile {
         }
         order
             .into_iter()
-            .map(|name| rows.remove(&name).unwrap())
+            .map(|key| rows.remove(&key).unwrap())
             .collect()
     }
 
@@ -229,8 +251,13 @@ impl Profile {
         }
     }
 
-    pub fn table(&self, sort_by: Option<SortBy>, row_limit: Option<usize>) -> String {
-        let mut rows = self.key_averages();
+    pub fn table(
+        &self,
+        sort_by: Option<SortBy>,
+        row_limit: Option<usize>,
+        group_by_input_shape: bool,
+    ) -> String {
+        let mut rows = self.key_averages(group_by_input_shape);
         if let Some(sort_by) = sort_by {
             rows.sort_by_key(|r| std::cmp::Reverse(sort_by.key(r)));
         }
@@ -278,6 +305,9 @@ impl Profile {
             headers.extend([format!("{dev} Mem"), format!("Self {dev} Mem")]);
         }
         headers.push("# of Calls".to_owned());
+        if group_by_input_shape {
+            headers.extend(["Input Shapes".to_owned(), "Input Strides".to_owned()]);
+        }
 
         let body: Vec<Vec<String>> = rows
             .iter()
@@ -311,6 +341,9 @@ impl Profile {
                     ]);
                 }
                 cells.push(r.count.to_string());
+                if group_by_input_shape {
+                    cells.extend([r.input_shapes.clone(), r.input_strides.clone()]);
+                }
                 cells
             })
             .collect();

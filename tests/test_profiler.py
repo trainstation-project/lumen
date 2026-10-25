@@ -219,7 +219,8 @@ def test_steps_record_their_strides(tmp_path):
     """With record_shapes each plan step records the strides its kernel
     reads its inputs and writes its outputs at: a slice a dot reads in
     place at its operand's, the rest contiguous. Its kernels on the device
-    carry them too, and the trace has them (PyTorch's ``Input Strides``)."""
+    carry them too, and the trace has them (each input's row of its
+    ``Tensors`` table)."""
     try:
         a = lumen.ones([4, 8], device="mps")
     except RuntimeError as e:
@@ -239,7 +240,8 @@ def test_steps_record_their_strides(tmp_path):
     prof.export_chrome_trace(str(path))
     trace = json.loads(path.read_text())
     (traced,) = [e for e in trace["traceEvents"] if e.get("cat") == "cpu_op" and e["name"] == dot["name"]]
-    assert traced["args"]["Input Strides"] == dot["input_strides"]
+    inputs = [row for row in traced["args"]["Tensors"] if row["tensor"].startswith("input")]
+    assert [row["strides"] for row in inputs] == [str(s) for s in dot["input_strides"]]
 
 
 @pytest.mark.mps

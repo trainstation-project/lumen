@@ -87,7 +87,7 @@ fn record_function_ranges_nest() {
     assert_eq!(inner.parent, Some(outer.id));
     assert_eq!(outer.parent, None);
     assert!(outer.start_ns <= inner.start_ns && inner.end_ns <= outer.end_ns);
-    let rows = p.key_averages();
+    let rows = p.key_averages(false);
     let (o, i) = (row(&rows, "outer"), row(&rows, "inner"));
     assert_eq!(o.cpu_time_total, outer.duration_ns());
     assert_eq!(
@@ -125,7 +125,7 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
     assert_eq!(one(&p, "lumen::narrow").parent, Some(select.id));
     let fill = one(&p, "lumen::fill_");
     assert_eq!(fill.parent, None, "called directly");
-    assert_eq!(row(&p.key_averages(), "lumen::fill_").count, 1);
+    assert_eq!(row(&p.key_averages(false), "lumen::fill_").count, 1);
 }
 
 #[test]
@@ -185,15 +185,45 @@ fn device_events_have_their_ops_types() {
         .split("},{")
         .find(|e| e.contains("\"cat\":\"kernel\""))
         .expect("the kernel's event");
-    assert!(
-        line.contains("\"Input Dims\":[[2,3],[3,4]],\"Input type\":[\"f16\",\"f16\"]"),
-        "{line}"
-    );
-    assert!(
-        line.contains("\"Output Dims\":[[2,4]],\"Output type\":[\"f16\"]"),
-        "{line}"
-    );
     assert!(line.contains("\"Accum type\":[\"f32\"]"), "{line}");
+    let tensors = concat!(
+        "\"Tensors\":[",
+        "{\"tensor\":\"input 0\",\"dtype\":\"f16\",\"shape\":\"[2, 3]\",\"strides\":\"\"},",
+        "{\"tensor\":\"input 1\",\"dtype\":\"f16\",\"shape\":\"[3, 4]\",\"strides\":\"\"},",
+        "{\"tensor\":\"output 0\",\"dtype\":\"f16\",\"shape\":\"[2, 4]\",\"strides\":\"\"}]"
+    );
+    assert!(trace.contains(tensors), "{trace}");
+}
+
+#[test]
+fn rows_group_by_input_shape_with_their_shapes_and_strides() {
+    let config = ProfilerConfig {
+        record_shapes: true,
+        ..cpu()
+    };
+    let ty = |shape: &[usize]| TensorType::new(DType::BF16, shape);
+    let p = profile(config, || {
+        for (shape, strides) in [([2, 3], [3, 1]), ([2, 3], [3, 1]), ([4, 3], [1, 4])] {
+            let mut op = record_op("lumen::matmul", || vec![ty(&shape)]);
+            op.strides(|| (vec![strides.to_vec()], vec![]));
+        }
+    });
+    let rows = p.key_averages(true);
+    let matmuls: Vec<(&str, &str, u64)> = rows
+        .iter()
+        .filter(|r| r.name == "lumen::matmul")
+        .map(|r| (r.input_shapes.as_str(), r.input_strides.as_str(), r.count))
+        .collect();
+    assert_eq!(
+        matmuls,
+        [("bf16[2,3]", "[3, 1]", 2), ("bf16[4,3]", "[1, 4]", 1)]
+    );
+    assert_eq!(row(&p.key_averages(false), "lumen::matmul").count, 3);
+    let table = p.table(None, None, true);
+    for cell in ["Input Shapes", "Input Strides", "bf16[4,3]", "[1, 4]"] {
+        assert!(table.contains(cell), "missing {cell:?} in\n{table}");
+    }
+    assert!(!p.table(None, None, false).contains("Input Shapes"));
 }
 
 #[test]
@@ -247,7 +277,7 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     assert_eq!(alloc.device, Device::Cpu(0));
     assert_eq!(alloc.parent, Some(one(&p, "lumen::empty").id));
     assert_eq!(free.parent, None, "freed outside any op");
-    let rows = p.key_averages();
+    let rows = p.key_averages(false);
     let (empty, zeros) = (row(&rows, "lumen::empty"), row(&rows, "lumen::zeros"));
     assert_eq!(
         (empty.self_cpu_memory_usage, empty.cpu_memory_usage),
@@ -332,7 +362,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
     assert_eq!(gpu.len(), 1);
     assert_eq!(gpu[0].kind, EventKind::Gpu);
     assert_eq!(gpu[0].parent, Some(one(&p, "op").id));
-    let rows = p.key_averages();
+    let rows = p.key_averages(false);
     let (op, outer, copy) = (
         row(&rows, "op"),
         row(&rows, "outer"),
@@ -351,7 +381,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
         (1000, 0)
     );
     assert!(copy.is_device_event && !op.is_device_event);
-    let table = p.table(None, None);
+    let table = p.table(None, None, false);
     assert!(table.contains("Self CUDA time total: 1.000us"), "{table}");
     let op_line = table.lines().find(|l| l.starts_with("op ")).unwrap();
     assert!(op_line.contains("100.00%"), "{table}");
@@ -380,7 +410,7 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
         let t = now_ns();
         record_gpu("Memset", Device::Cuda(0), t, t + 5000);
     });
-    let table = p.table(None, None);
+    let table = p.table(None, None, false);
     for column in [
         "Name",
         "Self CPU %",
@@ -406,7 +436,7 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
         "only CPU memory here:\n{table}"
     );
 
-    let limited = p.table(Some(SortBy::DeviceTimeTotal), Some(2));
+    let limited = p.table(Some(SortBy::DeviceTimeTotal), Some(2), false);
     let first_cells: Vec<&str> = limited
         .lines()
         .filter_map(|l| l.split_whitespace().next())
@@ -424,7 +454,7 @@ fn cpu_only_tables_omit_device_and_memory_columns() {
     let p = profile(cpu(), || {
         let _r = record_function("r");
     });
-    let table = p.table(Some(SortBy::CpuTimeTotal), None);
+    let table = p.table(Some(SortBy::CpuTimeTotal), None, false);
     assert!(table.contains("Self CPU"));
     assert!(!table.contains("CUDA") && !table.contains("Mem"), "{table}");
 }
@@ -482,8 +512,8 @@ fn chrome_trace_has_pytorchs_event_layout() {
         "\"Bytes\":12",
         "\"cat\":\"gpu_memcpy\",\"name\":\"Memcpy DtoH\"",
         "\"cat\":\"ac2g\"",
-        "\"Output Dims\":[[3]],\"Output type\":[\"f32\"]",
-        "\"Input Dims\":[[3]],\"Input type\":[\"f32\"]",
+        "{\"tensor\":\"input 0\",\"dtype\":\"f32\",\"shape\":\"[3]\"",
+        "{\"tensor\":\"output 0\",\"dtype\":\"f32\",\"shape\":\"[3]\"",
         "\"args\":{\"name\":\"CUDA 0\"}",
     ] {
         assert!(trace.contains(needle), "missing {needle} in\n{trace}");
@@ -515,7 +545,7 @@ fn host_kernels_are_apart_from_their_dispatch() {
         .expect("its kernel");
     assert_eq!((kernel.name.as_str(), kernel.parent), ("exp", Some(op.id)));
     assert!(op.start_ns <= kernel.start_ns && kernel.end_ns <= op.end_ns);
-    let rows = p.key_averages();
+    let rows = p.key_averages(false);
     assert_eq!(row(&rows, "exp").count, 2);
     let trace = p.chrome_trace();
     let (host, dispatch) = (chrome::host_pid(), std::process::id());
@@ -622,7 +652,7 @@ mod cuda {
         for e in [htod, dtoh] {
             assert_eq!((e.kind, e.device), (EventKind::Gpu, Device::Cuda(0)));
         }
-        let table = p.table(Some(SortBy::SelfDeviceTimeTotal), None);
+        let table = p.table(Some(SortBy::SelfDeviceTimeTotal), None, false);
         assert!(
             table.contains("Self CUDA") && table.contains("CUDA Mem"),
             "{table}"

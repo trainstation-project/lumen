@@ -7,6 +7,7 @@ pub(crate) trait Attentions: Module {
     fn epilogues(&self) -> Epilogues;
     fn scalars(&self) -> Vec<Var>;
     fn kernel(&mut self) -> String;
+    fn runtime_offsets(&self) -> bool;
 }
 
 pub(crate) struct FlashAttention;
@@ -19,7 +20,9 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let epilogues = m.contraction_epilogues().then(|| m.epilogues());
         let (graph, scalars) = (m.graph().clone(), m.scalars());
-        *m.graph_mut() = attention::fuse(&graph, epilogues, &scalars, |_| m.kernel());
+        let runtime_offsets = m.runtime_offsets();
+        *m.graph_mut() =
+            attention::fuse(&graph, epilogues, &scalars, runtime_offsets, |_| m.kernel());
         Ok(())
     }
 }

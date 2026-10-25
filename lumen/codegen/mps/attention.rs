@@ -92,6 +92,10 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
     let score = score_functor(&a.scores);
     let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
+    let offset = match a.offset {
+        Some(v) => format!("{offset} + int({}[0])", input(v)),
+        None => offset.to_string(),
+    };
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
     let call = match decodes(a) {
         true => formatdoc!(
