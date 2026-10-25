@@ -3,7 +3,6 @@ use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
-use crate::DType;
 use crate::allocator::Scratch;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::MpsConfig;
@@ -140,21 +139,13 @@ impl Kernels for Gemms {
             }),
             _ => (false, false),
         };
-        let f32 = matches!(
-            dot,
-            Primitive::DotGeneral {
-                accum_dtype: DType::F32,
-                ..
-            }
-        );
-        let others = plain && f32;
-        let skinny = others && gemm::skinny(dot, lhs, rhs, out);
+        let skinny = plain && gemm::skinny(dot, lhs, rhs, out);
         let large = step.output.1.numel() >= TUNED_OUTPUTS;
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
         let mpp = large
-            && (others || (paired && f32))
+            && (plain || paired)
             && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
             && super::mpp_available();
         let mpp: Vec<GemmConfig> = match mpp {
