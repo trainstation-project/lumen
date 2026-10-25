@@ -2640,7 +2640,13 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
     let wf = cast(&mut g, w, DType::F32);
     let products = apply(&mut g, Mul, &[xs, wf]);
     let dot = sum(&mut g, products);
-    let row = apply(&mut g, Reshape { new_sizes: vec![1, n] }, &[dot]);
+    let row = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![1, n],
+        },
+        &[dot],
+    );
     let rounded = cast(&mut g, row, DType::BF16);
     let y = apply(&mut g, Add, &[r, rounded]);
     let yf = cast(&mut g, y, DType::F32);
@@ -2658,7 +2664,13 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
     let inverse = broadcast(&mut g, inverse, &[1], vec![]);
     let mean = apply(&mut g, Mul, &[total, inverse]);
     let rms = apply(&mut g, Sqrt, &[mean]);
-    let rms = apply(&mut g, Reshape { new_sizes: vec![1, 1] }, &[rms]);
+    let rms = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![1, 1],
+        },
+        &[rms],
+    );
     let rms = broadcast(&mut g, rms, &[1, n], vec![0, 1]);
     let normed = apply(&mut g, Div, &[yf, rms]);
     let normed = cast(&mut g, normed, DType::BF16);
