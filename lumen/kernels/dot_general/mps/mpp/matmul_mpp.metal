@@ -67,10 +67,10 @@ inline void matmul_mpp(
         const ulong s = TR ? p[8] : 1, step = INTERLEAVED ? 2 * s : s;
         const int stride = TR ? int(step) : int(p[7]);
         auto view = [&](ulong offset) {
-            return tensor<device T, extents, tensor_inline>(r + offset,
-                                                            TR ? extents(K, H) : extents(H, K),
-                                                            TR ? array<int32_t, 2>{1, stride}
-                                                               : array<int32_t, 2>{int(step), stride});
+            return tensor<device T, extents, tensor_inline>(
+                r + offset,
+                TR ? extents(K, H) : extents(H, K),
+                TR ? array<int32_t, 2>{1, stride} : array<int32_t, 2>{int(step), stride});
         };
         auto bf = view(0);
         auto bs = view(INTERLEAVED ? s : ulong(H) * s);
@@ -126,54 +126,54 @@ inline void matmul_mpp(
             store_mpp_pair<O>(first, second, o, H, M, row, col, base, epi);
         }
     } else {
-    const ulong base = ulong(group.z) * M * N;
-    device Out *o = out + base;
-    const int col = int(group.x) * BN;
-    if (row + BM <= M && col + BN <= N && K % BK == 0) {
-        // Fully covered tiles use a fixed descriptor and accumulate in one
-        // cooperative MPP tensor across exact BK-sized K slices.
-        constexpr auto desc =
-            matmul2d_descriptor(BM, BN, BK, TL, TR, false, matmul2d_descriptor::mode::multiply_accumulate);
-        matmul2d<desc, execution_simdgroups<SIMDS>> op;
-        auto slice_a = [&](int k0) {
-            if constexpr (TL) {
-                return a.template slice<BM, BK>(row, k0);
-            } else {
-                return a.template slice<BK, BM>(k0, row);
+        const ulong base = ulong(group.z) * M * N;
+        device Out *o = out + base;
+        const int col = int(group.x) * BN;
+        if (row + BM <= M && col + BN <= N && K % BK == 0) {
+            // Fully covered tiles use a fixed descriptor and accumulate in one
+            // cooperative MPP tensor across exact BK-sized K slices.
+            constexpr auto desc =
+                matmul2d_descriptor(BM, BN, BK, TL, TR, false, matmul2d_descriptor::mode::multiply_accumulate);
+            matmul2d<desc, execution_simdgroups<SIMDS>> op;
+            auto slice_a = [&](int k0) {
+                if constexpr (TL) {
+                    return a.template slice<BM, BK>(row, k0);
+                } else {
+                    return a.template slice<BK, BM>(k0, row);
+                }
+            };
+            auto slice_b = [&](int k0) {
+                if constexpr (TR) {
+                    return b.template slice<BK, BN>(k0, col);
+                } else {
+                    return b.template slice<BN, BK>(col, k0);
+                }
+            };
+            auto a0 = slice_a(0);
+            auto b0 = slice_b(0);
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
+                if (sum.is_valid_element(i)) {
+                    sum[i] = 0;
+                }
             }
-        };
-        auto slice_b = [&](int k0) {
-            if constexpr (TR) {
-                return b.template slice<BK, BN>(k0, col);
-            } else {
-                return b.template slice<BN, BK>(col, k0);
+            for (int k0 = 0; k0 < K; k0 += BK) {
+                auto ak = slice_a(k0);
+                auto bk = slice_b(k0);
+                op.run(ak, bk, sum);
             }
-        };
-        auto a0 = slice_a(0);
-        auto b0 = slice_b(0);
-        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-        _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
-            if (sum.is_valid_element(i)) {
-                sum[i] = 0;
-            }
+            store_mpp<O>(sum, o, N, M, row, col, base, epi);
+        } else {
+            // Edge tiles and incomplete K tails use MPP's dynamic-extent path.
+            constexpr auto desc = matmul2d_descriptor(
+                BM, BN, static_cast<int>(dynamic_extent), TL, TR, false, matmul2d_descriptor::mode::multiply);
+            matmul2d<desc, execution_simdgroups<SIMDS>> op;
+            auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
+            auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
+            auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
+            op.run(a0, b0, sum);
+            store_mpp<O>(sum, o, N, M, row, col, base, epi);
         }
-        for (int k0 = 0; k0 < K; k0 += BK) {
-            auto ak = slice_a(k0);
-            auto bk = slice_b(k0);
-            op.run(ak, bk, sum);
-        }
-        store_mpp<O>(sum, o, N, M, row, col, base, epi);
-    } else {
-        // Edge tiles and incomplete K tails use MPP's dynamic-extent path.
-        constexpr auto desc = matmul2d_descriptor(
-            BM, BN, static_cast<int>(dynamic_extent), TL, TR, false, matmul2d_descriptor::mode::multiply);
-        matmul2d<desc, execution_simdgroups<SIMDS>> op;
-        auto a0 = TL ? a.slice(row, 0) : a.slice(0, row);
-        auto b0 = TR ? b.slice(0, col) : b.slice(col, 0);
-        auto sum = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();
-        op.run(a0, b0, sum);
-        store_mpp<O>(sum, o, N, M, row, col, base, epi);
-    }
     }
 }
 #endif

@@ -3,10 +3,10 @@ use pyo3::prelude::*;
 
 use crate as core;
 
-pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::Device> {
-    let device = match device {
-        None => return Ok(core::Device::Cpu(0)),
-        Some(d) if d.is_none() => return Ok(core::Device::Cpu(0)),
+pub(crate) fn parse_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::Device> {
+    Ok(match device {
+        None => core::Device::Cpu(0),
+        Some(d) if d.is_none() => core::Device::Cpu(0),
         Some(d) => match d.cast::<PyDevice>() {
             Ok(d) => d.get().to_core(),
             Err(_) => {
@@ -16,7 +16,11 @@ pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core
                 PyDevice::parse(spec)?.to_core()
             }
         },
-    };
+    })
+}
+
+pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::Device> {
+    let device = parse_device(device)?;
     core::allocator::allocator_for(device).map_err(PyRuntimeError::new_err)?;
     Ok(device)
 }

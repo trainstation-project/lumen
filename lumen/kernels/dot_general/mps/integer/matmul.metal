@@ -141,9 +141,9 @@ inline void matmul_impl(device const T *lhs,
         matmul_impl<T, A, O>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
-#define MATMUL_NARROW(N, T)                     \
-    MATMUL(N##_##N##_##N, T, T, T)              \
-    MATMUL(N##_i32_##N, T, int, T)              \
+#define MATMUL_NARROW(N, T)        \
+    MATMUL(N##_##N##_##N, T, T, T) \
+    MATMUL(N##_i32_##N, T, int, T) \
     MATMUL(N##_i32_i32, T, int, int)
 
 #ifndef TEMPLATES_ONLY
