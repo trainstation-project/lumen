@@ -117,6 +117,34 @@ def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_
     np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("start", [3, 9, -2], ids=["inside", "clamped", "negative"])
+def test_narrow_at_tensor_start(device, dtype, start):
+    """``narrow`` at a 0-d tensor start reads the block there, and a
+    ``copy_`` into it writes the block in place, its start clamped as
+    ``prims.dynamic_slice``'s."""
+    rng = np.random.default_rng(0)
+    xt = _tensor(rng.standard_normal((2, 10, 3)).astype(np.float32), device, dtype)
+    ut = _tensor(rng.standard_normal((2, 4, 3)).astype(np.float32), device, dtype)
+    x, u = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, ut))
+    i = _tensor(np.array([start], np.int32), device)
+    block = _block(x.shape, (0, start, 0), u.shape)
+
+    read = lumen.compile(lambda x, i: x.narrow(1, i.reshape(()), 4) * 2.0)(xt, i)
+    np.testing.assert_array_equal(lumen.to_numpy(read.to(dtype="float32")), 2 * x[block])
+
+    def write(x, u, i):
+        y = x * 2.0
+        y.narrow(1, i.reshape(()), 4).copy_(u)
+        return y
+
+    want = 2 * x
+    want[block] = u
+    got = lumen.compile(write)(xt, ut, i)
+    np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
+
+
 def test_start_indices():
     """Python ints are constants of the traced indices' dtype; indices must
     be int32 or int64 scalars of one dtype, and the block inside."""

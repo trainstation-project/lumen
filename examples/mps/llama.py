@@ -10,7 +10,6 @@ from tokenizers import Tokenizer
 
 import lumen
 import lumen.functional as F
-from lumen import prims
 
 REPO = "meta-llama/Llama-3.2-1B-Instruct"
 MAX_TOKENS = 1024
@@ -40,8 +39,8 @@ class Rotary(lumen.nn.Module):
 
     def __call__(self, x, pos):
         seq, half = x.shape[1], x.shape[-1] // 2
-        cos = prims.dynamic_slice(self.cos, (pos, 0), (seq, 2 * half)).reshape(1, seq, 1, 2 * half)
-        sin = prims.dynamic_slice(self.sin, (pos, 0), (seq, 2 * half)).reshape(1, seq, 1, 2 * half)
+        cos = self.cos.narrow(0, pos, seq).reshape(1, seq, 1, 2 * half)
+        sin = self.sin.narrow(0, pos, seq).reshape(1, seq, 1, 2 * half)
         rotated = F.cat([-x[..., half:], x[..., :half]], dim=-1)
         return (x * cos + rotated * sin).bfloat16()
 
@@ -62,8 +61,12 @@ class Attention(lumen.nn.Module):
         k = rotary(self.k_proj(x).reshape(batch, seq, self.kv_heads, head_dim), pos)
         v = self.v_proj(x).bfloat16().reshape(batch, seq, self.kv_heads, head_dim)
 
-        cache_k.copy_(prims.dynamic_update_slice(cache_k, k, (0, pos, 0, 0)))
-        cache_v.copy_(prims.dynamic_update_slice(cache_v, v, (0, pos, 0, 0)))
+        cache_k.narrow(1, pos, seq).copy_(k)
+        cache_v.narrow(1, pos, seq).copy_(v)
+
+        if seq > 1:
+            out = F.flash_attention(q, k, v, is_causal=True)
+            return self.o_proj(out.reshape(batch, seq, dim))
 
         q = q.reshape(batch, seq, self.kv_heads, group, head_dim).permute(0, 2, 3, 1, 4)
         q = q.reshape(batch, self.kv_heads, group * seq, head_dim)
@@ -72,9 +75,9 @@ class Attention(lumen.nn.Module):
 
         scores = F.matmul(q, keys, "float32", "float32") * (1.0 / math.sqrt(head_dim))
         scores = scores.reshape(batch, self.kv_heads, group, seq, MAX_TOKENS)
-        key_at = prims.iota("int32", scores.shape, 4)
-        query_at = prims.iota("int32", scores.shape, 3)
-        scores = F.where(F.le(key_at, query_at + pos), scores, float("-inf"))
+        key_at = lumen.arange(MAX_TOKENS, lumen.int32)
+        query_at = (lumen.arange(seq, lumen.int32) + pos).reshape(seq, 1)
+        scores = F.where(F.le(key_at, query_at), scores, float("-inf"))
         probs = F.softmax(scores, dim=-1).bfloat16().reshape(batch, self.kv_heads, group * seq, MAX_TOKENS)
 
         out = F.matmul(probs, values, "float32", "bfloat16")
