@@ -42,7 +42,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         let split = match (&lhs_contracting[..], &rhs_contracting[..]) {
             (&[l], &[r])
                 if lhs_batch.is_empty()
-                    && *accum_dtype == DType::F32
+                    && accum_dtype.is_float()
                     && !node.inputs.iter().any(|&v| sliced(v)) =>
             {
                 let m = lhs.numel() / lhs.shape[l];
@@ -69,16 +69,18 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
             rhs_contracting: vec![r + 1],
             lhs_batch: vec![l],
             rhs_batch: vec![r],
-            accum_dtype: DType::F32,
-            output_dtype: DType::F32,
+            accum_dtype: *accum_dtype,
+            output_dtype: *accum_dtype,
         };
         let sum = Primitive::ReduceSum {
             axes: vec![0],
-            accum_dtype: DType::F32,
+            accum_dtype: *accum_dtype,
         };
-        let partials = 2 * s * lhs.numel() / lhs.shape[l] * (rhs.numel() / rhs.shape[r]) * 4;
+        let partials = 2 * s * lhs.numel() / lhs.shape[l]
+            * (rhs.numel() / rhs.shape[r])
+            * accum_dtype.size_of();
         let operands = (lhs.numel() + rhs.numel()) * lhs.dtype.size_of();
-        let mut value = match atomic && partials > operands {
+        let mut value = match atomic && *accum_dtype == DType::F32 && partials > operands {
             true => {
                 let mut body = Graph::new();
                 let ins = [a, b].map(|v| body.input(out.type_of(v).clone()));
@@ -100,7 +102,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
                 sum
             }
         };
-        if *output_dtype != DType::F32 {
+        if output_dtype != accum_dtype {
             value = apply(
                 &mut out,
                 Primitive::Cast {
