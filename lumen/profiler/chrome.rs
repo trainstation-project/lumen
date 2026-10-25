@@ -3,7 +3,6 @@ use std::fmt::Write;
 
 use super::{Event, EventKind};
 use crate::device::Device;
-use crate::graph::TensorType;
 
 const GPU_TID: u64 = 7;
 const ANNOTATION_TID: u64 = 8;
@@ -73,42 +72,28 @@ pub(crate) fn json_str(s: &str) -> String {
     out
 }
 
-fn types_json(types: &[TensorType]) -> (String, String) {
-    let dims: Vec<String> = types
-        .iter()
-        .map(|t| {
-            let d: Vec<String> = t.shape.iter().map(|n| n.to_string()).collect();
-            format!("[{}]", d.join(","))
-        })
-        .collect();
-    let dtypes: Vec<String> = types.iter().map(|t| json_str(t.dtype.name())).collect();
-    (
-        format!("[{}]", dims.join(",")),
-        format!("[{}]", dtypes.join(",")),
-    )
-}
-
 fn types_args(e: &Event) -> String {
     let mut args = String::new();
     let sides = [
-        ("Input", &e.inputs, &e.input_strides),
-        ("Output", &e.outputs, &e.output_strides),
+        ("input", &e.inputs, &e.input_strides),
+        ("output", &e.outputs, &e.output_strides),
     ];
+    let mut rows: Vec<String> = Vec::new();
     for (side, types, strides) in sides {
-        if !types.is_empty() {
-            let (dims, dtypes) = types_json(types);
-            let _ = write!(args, ",\"{side} Dims\":{dims},\"{side} type\":{dtypes}");
+        for (k, t) in types.iter().enumerate() {
+            let shape: Vec<String> = t.shape.iter().map(usize::to_string).collect();
+            let strides = strides.get(k).map_or(String::new(), |s| format!("{s:?}"));
+            rows.push(format!(
+                "{{\"tensor\":{},\"dtype\":{},\"shape\":{},\"strides\":{}}}",
+                json_str(&format!("{side} {k}")),
+                json_str(t.dtype.name()),
+                json_str(&format!("[{}]", shape.join(", "))),
+                json_str(&strides)
+            ));
         }
-        if !strides.is_empty() {
-            let strides: Vec<String> = strides
-                .iter()
-                .map(|s| {
-                    let s: Vec<String> = s.iter().map(|n| n.to_string()).collect();
-                    format!("[{}]", s.join(","))
-                })
-                .collect();
-            let _ = write!(args, ",\"{side} Strides\":[{}]", strides.join(","));
-        }
+    }
+    if !rows.is_empty() {
+        let _ = write!(args, ",\"Tensors\":[{}]", rows.join(","));
     }
     if !e.accum.is_empty() {
         let accum: Vec<String> = e.accum.iter().map(|d| json_str(d.name())).collect();

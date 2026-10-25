@@ -185,15 +185,14 @@ fn device_events_have_their_ops_types() {
         .split("},{")
         .find(|e| e.contains("\"cat\":\"kernel\""))
         .expect("the kernel's event");
-    assert!(
-        line.contains("\"Input Dims\":[[2,3],[3,4]],\"Input type\":[\"f16\",\"f16\"]"),
-        "{line}"
-    );
-    assert!(
-        line.contains("\"Output Dims\":[[2,4]],\"Output type\":[\"f16\"]"),
-        "{line}"
-    );
     assert!(line.contains("\"Accum type\":[\"f32\"]"), "{line}");
+    let tensors = concat!(
+        "\"Tensors\":[",
+        "{\"tensor\":\"input 0\",\"dtype\":\"f16\",\"shape\":\"[2, 3]\",\"strides\":\"\"},",
+        "{\"tensor\":\"input 1\",\"dtype\":\"f16\",\"shape\":\"[3, 4]\",\"strides\":\"\"},",
+        "{\"tensor\":\"output 0\",\"dtype\":\"f16\",\"shape\":\"[2, 4]\",\"strides\":\"\"}]"
+    );
+    assert!(trace.contains(tensors), "{trace}");
 }
 
 #[test]
@@ -513,8 +512,8 @@ fn chrome_trace_has_pytorchs_event_layout() {
         "\"Bytes\":12",
         "\"cat\":\"gpu_memcpy\",\"name\":\"Memcpy DtoH\"",
         "\"cat\":\"ac2g\"",
-        "\"Output Dims\":[[3]],\"Output type\":[\"f32\"]",
-        "\"Input Dims\":[[3]],\"Input type\":[\"f32\"]",
+        "{\"tensor\":\"input 0\",\"dtype\":\"f32\",\"shape\":\"[3]\"",
+        "{\"tensor\":\"output 0\",\"dtype\":\"f32\",\"shape\":\"[3]\"",
         "\"args\":{\"name\":\"CUDA 0\"}",
     ] {
         assert!(trace.contains(needle), "missing {needle} in\n{trace}");
