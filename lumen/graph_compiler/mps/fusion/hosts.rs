@@ -62,6 +62,7 @@ pub(super) fn hosts(
         &a.fusible,
     );
     let (dot_of, dot_aux, ends) = (&dots.of, dots.aux.clone(), &reductions.ends);
+    let epilogue = &reductions.epilogue;
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     let mut host: Vec<Option<usize>> = dot_aux;
     for (i, node) in nodes.iter().enumerate().rev() {
@@ -72,6 +73,7 @@ pub(super) fn hosts(
             && !is_reduction(node)
             && (is_output[node.output] || expensive(graph, node))
             && dot_of[i].is_none()
+            && epilogue[i].is_none()
             && !rows.iter().any(|r| r.root == i && !r.outputs.is_empty());
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;

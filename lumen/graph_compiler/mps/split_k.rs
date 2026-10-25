@@ -1,3 +1,4 @@
+use super::fusion::fusible;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
@@ -8,12 +9,17 @@ const MAX_SPLIT: usize = 8;
 const MIN_CHUNK: usize = 256;
 const MIN_K: usize = 2048;
 
-pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
+pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
         nodes
             .iter()
             .any(|n| n.output == v && matches!(n.primitive, Primitive::Slice { .. }))
+    };
+    let fused = |v: Var| {
+        nodes
+            .iter()
+            .any(|n| n.inputs.contains(&v) && fusible(graph, n))
     };
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -42,7 +48,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
         let split = match (&lhs_contracting[..], &rhs_contracting[..]) {
             (&[l], &[r])
                 if lhs_batch.is_empty()
-                    && *accum_dtype == DType::F32
+                    && accum_dtype.is_float()
                     && !node.inputs.iter().any(|&v| sliced(v)) =>
             {
                 let m = lhs.numel() / lhs.shape[l];
@@ -69,15 +75,18 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
             rhs_contracting: vec![r + 1],
             lhs_batch: vec![l],
             rhs_batch: vec![r],
-            accum_dtype: DType::F32,
-            output_dtype: DType::F32,
+            accum_dtype: *accum_dtype,
+            output_dtype: *accum_dtype,
         };
         let sum = Primitive::ReduceSum {
             axes: vec![0],
-            accum_dtype: DType::F32,
+            accum_dtype: *accum_dtype,
         };
-        let partials = 2 * s * lhs.numel() / lhs.shape[l] * (rhs.numel() / rhs.shape[r]) * 4;
+        let partials = 2 * s * lhs.numel() / lhs.shape[l]
+            * (rhs.numel() / rhs.shape[r])
+            * accum_dtype.size_of();
         let operands = (lhs.numel() + rhs.numel()) * lhs.dtype.size_of();
+        let atomic = atomic && *accum_dtype == DType::F32 && !(fuse && fused(node.output));
         let mut value = match atomic && partials > operands {
             true => {
                 let mut body = Graph::new();
@@ -100,7 +109,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool) -> Graph {
                 sum
             }
         };
-        if *output_dtype != DType::F32 {
+        if output_dtype != accum_dtype {
             value = apply(
                 &mut out,
                 Primitive::Cast {
@@ -148,7 +157,8 @@ impl<M: Module> CompilerPass<M> for SplitK {
     }
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = split_k(m.graph(), !m.options().config.mps.deterministic);
+        let config = &m.options().config.mps;
+        *m.graph_mut() = split_k(m.graph(), !config.deterministic, config.fuse);
         Ok(())
     }
 }

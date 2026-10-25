@@ -130,51 +130,68 @@ impl Kernels for Gemms {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
         };
-        let (plain, paired, group) = match &step.primitive {
-            Primitive::Fusion { body, .. } => {
-                codegen::gemm_dot(body).map_or((false, false, None), |d| {
-                    (
-                        codegen::gemm_plain(body, d),
-                        codegen::gemm_mpp_pair(body, d),
-                        codegen::gemm_group(body, d),
-                    )
-                })
-            }
-            _ => (false, false, None),
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return Vec::new();
         };
-        let skinny = plain && gemm::skinny(dot, lhs, rhs, out);
-        let large = step.output.1.numel() >= TUNED_OUTPUTS;
+        let Some(d) = codegen::gemm_dot(body) else {
+            return Vec::new();
+        };
+        let epilogue = codegen::gemm_flags(body, d);
+        let group = codegen::gemm_group(body, d);
+        let dual = codegen::gemm_mpp_pair(body, d);
+        let staged = !epilogue.plain() && !dual;
+        let skinny = gemm::skinny(dot, lhs, rhs, out);
+        let large = out.numel() >= TUNED_OUTPUTS;
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
-        let mpp = large
-            && (plain || paired)
-            && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
-            && super::mpp_available();
+        let stage = |c: &GemmConfig| c.threads / 32 * 64 * 4;
+        let halves = epilogue.group > 1 && !epilogue.interleaved;
+        let mpp_fits = |c: &&GemmConfig| match () {
+            _ if dual => c.bn >= 2 * 32,
+            _ if staged => {
+                let half = match epilogue.rows {
+                    true => c.bm,
+                    false => c.bn,
+                };
+                c.bm * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
+                    && (!halves || half >= 2 * 32)
+            }
+            _ => true,
+        };
+        let skinny_fits = |c: &&GemmConfig| {
+            let partials = c.threads / (c.bn / c.bk) * (c.bn + 1) * 4;
+            epilogue.plain() || partials + 8 * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
+        };
+        let mpp =
+            large && gemm::mpp_transposes(dot, lhs, rhs, out).is_some() && super::mpp_available();
         let mpp: Vec<GemmConfig> = match mpp {
             true => gemm::mpp_configs()
                 .iter()
-                .filter(|c| !paired || c.bn >= 2 * 32)
+                .filter(mpp_fits)
                 .copied()
                 .collect(),
             false => Vec::new(),
         };
-        let tiles = match &step.primitive {
-            Primitive::Fusion { body, .. } => codegen::tile_scratch(body).is_some(),
-            _ => false,
-        };
-        if tiles {
+        if codegen::tile_scratch(body).is_some() {
             let wide = mpp.iter().filter(|c| c.bn % codegen::ROW_TILE == 0);
             return match mpp.is_empty() {
                 true => Vec::new(),
                 false => std::iter::once(&ROW_TILES).chain(wide).copied().collect(),
             };
         }
-        let skinny = if skinny { gemm::skinny_configs() } else { &[] };
+        let skinny: Vec<GemmConfig> = match skinny {
+            true => gemm::skinny_configs()
+                .iter()
+                .filter(skinny_fits)
+                .copied()
+                .collect(),
+            false => Vec::new(),
+        };
         gemm::configs()
             .iter()
             .chain(&mpp)
-            .chain(skinny)
+            .chain(&skinny)
             .filter(|c| group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0))
             .copied()
             .collect()
@@ -212,7 +229,7 @@ impl Kernels for Gemms {
     fn compile(&mut self) -> Result<(), String> {
         let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
             .into_iter()
-            .partition(|(_, source)| source.contains("matmul_mpp<"));
+            .partition(|(_, source)| source.contains("matmul_mpp"));
         compile_kernels(sg)?;
         compile_mpp_kernels(mpp)
     }
