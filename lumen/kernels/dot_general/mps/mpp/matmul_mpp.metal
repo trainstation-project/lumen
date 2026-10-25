@@ -45,7 +45,7 @@ template <typename T,
           bool TR,
           typename Out = O,
           typename Epi = Same,
-          bool PAIRED = false,
+          int GROUP = 1,
           bool INTERLEAVED = false>
 inline void matmul_mpp(
     device const T *lhs, device const T *rhs, device Out *out, constant ulong *p, uint3 group, Epi epi = Epi()) {
@@ -61,7 +61,7 @@ inline void matmul_mpp(
     tensor<device T, extents, tensor_inline> b(
         r, TR ? extents(K, N) : extents(N, K), TR ? array<int32_t, 2>{1, int(p[8])} : array<int32_t, 2>{1, int(p[7])});
     const int row = int(group.y) * BM;
-    if constexpr (PAIRED) {
+    if constexpr (GROUP == 2) {
         constexpr int HN = BN / 2;
         const int H = N / 2, col = int(group.x) * HN;
         const ulong s = TR ? p[8] : 1, step = INTERLEAVED ? 2 * s : s;
