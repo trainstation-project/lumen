@@ -2609,3 +2609,101 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
         }
     }
 }
+
+#[test]
+fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
+    if !available() {
+        return;
+    }
+    let (n, k) = (64, 128);
+    let mut g = Graph::new();
+    let w = g.input(ty(DType::BF16, &[n, k]));
+    let x = g.input(ty(DType::F32, &[k]));
+    let r = g.input(ty(DType::BF16, &[1, n]));
+    let gamma = g.input(ty(DType::BF16, &[n]));
+    let cast = |g: &mut Graph, v: Var, new_dtype: DType| apply(g, Cast { new_dtype }, &[v]);
+    let broadcast = |g: &mut Graph, v: Var, shape: &[usize], dims: Vec<usize>| {
+        let b = BroadcastInDim {
+            shape: shape.to_vec(),
+            broadcast_dimensions: dims,
+        };
+        apply(g, b, &[v])
+    };
+    let sum = |g: &mut Graph, v: Var| {
+        let s = ReduceSum {
+            axes: vec![1],
+            accum_dtype: DType::F32,
+        };
+        apply(g, s, &[v])
+    };
+    let xs = broadcast(&mut g, x, &[n, k], vec![1]);
+    let wf = cast(&mut g, w, DType::F32);
+    let products = apply(&mut g, Mul, &[xs, wf]);
+    let dot = sum(&mut g, products);
+    let row = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![1, n],
+        },
+        &[dot],
+    );
+    let rounded = cast(&mut g, row, DType::BF16);
+    let y = apply(&mut g, Add, &[r, rounded]);
+    let yf = cast(&mut g, y, DType::F32);
+    let squares = apply(&mut g, Mul, &[yf, yf]);
+    let total = sum(&mut g, squares);
+    let inverse = apply(
+        &mut g,
+        Full {
+            shape: vec![],
+            fill_value: Scalar::Float(1.0 / n as f64),
+            dtype: DType::F32,
+        },
+        &[],
+    );
+    let inverse = broadcast(&mut g, inverse, &[1], vec![]);
+    let mean = apply(&mut g, Mul, &[total, inverse]);
+    let rms = apply(&mut g, Sqrt, &[mean]);
+    let rms = apply(
+        &mut g,
+        Reshape {
+            new_sizes: vec![1, 1],
+        },
+        &[rms],
+    );
+    let rms = broadcast(&mut g, rms, &[1, n], vec![0, 1]);
+    let normed = apply(&mut g, Div, &[yf, rms]);
+    let normed = cast(&mut g, normed, DType::BF16);
+    let gamma = broadcast(&mut g, gamma, &[1, n], vec![1]);
+    let out = apply(&mut g, Mul, &[normed, gamma]);
+    g.set_outputs(&[out]).unwrap();
+    let inputs = [
+        values(DType::BF16, &[n, k], 1),
+        values(DType::F32, &[k], 2),
+        values(DType::BF16, &[1, n], 3),
+        values(DType::BF16, &[n], 4),
+    ];
+    let expected = reference::run(&g, &inputs).unwrap()[0]
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec::<f32>();
+    let plan = crate::graph_compiler::compile(&g, Device::Mps(0)).unwrap();
+    for step in plan.steps() {
+        if let Fusion { body, .. } = &step.primitive {
+            let reductions = body
+                .nodes()
+                .iter()
+                .filter(|n| matches!(n.primitive, ReduceSum { .. }))
+                .count();
+            assert!(reductions <= 1, "{plan}");
+        }
+    }
+    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+    let got = plan.run(&on_mps).unwrap()[0]
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec::<f32>();
+    for (w, v) in expected.iter().zip(&got) {
+        assert!((w - v).abs() <= 2e-2 * w.abs().max(1.0), "{v} != {w}");
+    }
+}

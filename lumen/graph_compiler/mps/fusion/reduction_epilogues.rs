@@ -27,6 +27,10 @@ pub(super) fn reduction_epilogues(
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
         );
         let in_row = rows.iter().any(|r| r.reductions.contains(&i));
+        let of_row = |u: usize| {
+            rows.iter()
+                .any(|r| r.root == u || r.inner.contains(&u) || r.reductions.contains(&u))
+        };
         if !config.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
             continue;
         }
@@ -42,7 +46,7 @@ pub(super) fn reduction_epilogues(
                 .inputs
                 .iter()
                 .all(|&x| after[x] || constant(graph, producer, x));
-            if !fusible[u] || !step || !reads {
+            if !fusible[u] || !step || !reads || of_row(u) {
                 break;
             }
             taken.push(u);
