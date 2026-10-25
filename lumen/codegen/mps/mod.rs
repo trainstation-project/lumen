@@ -68,7 +68,7 @@ pub(crate) fn kernel(
     tuning: Option<Tuning>,
 ) -> (String, String) {
     if let Some(dot) = row_dot(body) {
-        return gemm_row_kernel(body, by_value, dot, config);
+        return gemm_row_kernel(body, by_value, dot, config, None);
     }
     if let Some(dot) = gemm_dot(body) {
         return gemm_kernel(body, by_value, dot);

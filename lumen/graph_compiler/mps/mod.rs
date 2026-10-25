@@ -301,7 +301,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             sources: BTreeMap::new(),
         };
         tuner.tune(&mut loops, &mut plan)?;
-        tuner.tune(&mut autotune::Gemms::default(), &mut plan)?;
+        tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
     }
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
@@ -748,11 +748,20 @@ pub(super) fn encode_with(
             let mut first = buffers.clone();
             first.push(dotv);
             first.extend(&tiles);
-            let grid = Grid::Groups([
-                n.div_ceil(codegen::ROW_TILE),
-                m.div_ceil(codegen::ROW_TILE),
-                1,
-            ]);
+            let name = tuned.as_ref().map_or(name, |(tuned, _)| tuned);
+            let grid = match &tuned {
+                Some((_, c)) if c.algorithm == crate::kernels::dot_general::mps::Algorithm::Mpp => {
+                    Grid::GroupsOf {
+                        groups: [n.div_ceil(c.bn), m.div_ceil(c.bm), 1],
+                        threads: c.threads,
+                    }
+                }
+                _ => Grid::Groups([
+                    n.div_ceil(codegen::ROW_TILE),
+                    m.div_ceil(codegen::ROW_TILE),
+                    1,
+                ]),
+            };
             launch(
                 &format!("{name}_tiles"),
                 &first,

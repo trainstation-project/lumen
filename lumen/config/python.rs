@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 
 use crate as core;
 use crate::Device;
-use crate::device::python::resolve_device;
+use crate::device::python::parse_device;
 use crate::graph_compiler::config::{
     self, Configs, PyCompilerConfig, PyCpuConfig, PyCudaConfig, PyMpsConfig, PyTpuConfig,
 };
@@ -63,7 +63,7 @@ impl PyCompilerConfigs {
 
     fn of<'py>(&self, device: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = device.py();
-        Ok(match resolve_device(Some(device))? {
+        Ok(match parse_device(Some(device))? {
             Device::Cpu(_) | Device::Meta(_) => PyCpuConfig::object(py)?.into_bound(py).into_any(),
             Device::Cuda(_) => PyCudaConfig::object(py)?.into_bound(py).into_any(),
             Device::Mps(_) => PyMpsConfig::object(py)?.into_bound(py).into_any(),

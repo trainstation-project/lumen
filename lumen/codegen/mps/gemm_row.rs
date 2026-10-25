@@ -1,4 +1,5 @@
 use super::*;
+use crate::kernels::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
 
 pub(crate) const ROW_TILE: usize = 64;
 
@@ -90,6 +91,7 @@ pub(super) fn gemm_tiles(
     first: &[(usize, bool)],
     rows: usize,
     n: usize,
+    gemm: Option<GemmConfig>,
 ) -> String {
     let t = metal_type(body.type_of(dot.inputs[0]).dtype);
     let o = metal_type(body.type_of(dot.output).dtype);
@@ -100,6 +102,11 @@ pub(super) fn gemm_tiles(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (tile, tiles) = (ROW_TILE, n.div_ceil(ROW_TILE));
+    let mpp = gemm.filter(|c| c.algorithm == Algorithm::Mpp);
+    let at = match mpp {
+        Some(_) => format!("(uint(n0) + c0) / {tile}u"),
+        None => "group.x".to_owned(),
+    };
     let mut extra = vec![format!("device {o} *dotv")];
     let mut read = by_value.to_vec();
     read.resize(body.inputs().len(), false);
@@ -123,17 +130,56 @@ pub(super) fn gemm_tiles(
             "
             acc{k} = {lanes}(acc{k});
             if (lane == 0) {{
-                tiles{k}[row * {tiles}u + group.x] = acc{k};
+                tiles{k}[row * {tiles}u + {at}] = acc{k};
             }}
             "
         )
         .unwrap();
     }
     let staged = rows_body.inputs().len() - 1;
+    let (params, first_arg) = io_params(body, by_value, out, &extra);
+    if let Some(c) = mpp {
+        let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
+            format!("dotv[{x}]")
+        });
+        let ty = |v: Var| body.type_of(v);
+        let (left, right) = mpp_transposes(
+            &dot.primitive,
+            ty(dot.inputs[0]),
+            ty(dot.inputs[1]),
+            ty(dot.output),
+        )
+        .expect("a layout Metal Performance Primitives read");
+        let (bm, bn, bk, threads, simds) = (c.bm, c.bn, c.bk, c.threads, c.threads / 32);
+        return formatdoc!(
+            "
+            [[max_total_threads_per_threadgroup({threads})]]
+            kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+                                   {THREAD_ARGS}) {{
+                matmul_mpp<{t}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(
+                    {lhs}, {rhs}, dotv, p, group);
+                threadgroup_barrier(mem_flags::mem_device);
+                const ulong m0 = ulong(group.y) * {bm}, n0 = ulong(group.x) * {bn};
+                for (uint rr = sg; rr < {bm}u; rr += {simds}u) {{
+                    uint row = uint(m0) + rr;
+                    if (row >= {rows}u) {{
+                        break;
+                    }}
+                    for (uint c0 = 0; c0 < {bn}u && n0 + c0 < {n}u; c0 += {tile}u) {{
+                        {init}for (uint cc = lane; cc < {tile}u && n0 + c0 + cc < {n}u; cc += 32u) {{
+                            uint j = row * {n}u + uint(n0) + c0 + cc;
+                            {lines}{step}
+                        }}
+                        {write}
+                    }}
+                }}
+            }}
+            "
+        );
+    }
     let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
         format!("staged[(ulong({x}) / {n}ul - m0) * {tile}ul + ulong({x}) % {n}ul - n0]")
     });
-    let (params, first_arg) = io_params(body, by_value, out, &extra);
     formatdoc!(
         "
         struct NAME_tiles_staging {{
@@ -200,6 +246,7 @@ pub(super) fn gemm_row_kernel(
     by_value: &[bool],
     dot: &Node,
     config: &MpsConfig,
+    gemm: Option<GemmConfig>,
 ) -> (String, String) {
     let mut rows = Graph::new();
     let mut var: HashMap<Var, Var> = HashMap::new();
@@ -224,7 +271,7 @@ pub(super) fn gemm_row_kernel(
         &read,
         &reductions,
         config,
-        Some((body, by_value, dot)),
+        Some((body, by_value, dot, gemm)),
     )
 }
 
