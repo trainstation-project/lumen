@@ -1,0 +1,90 @@
+{
+ "rows": [
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "scatter_add: has no Triton kernel on CUDA yet"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-10-25T02:19:40+00:00"
+}

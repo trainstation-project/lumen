@@ -1,0 +1,54 @@
+{
+ "rows": [
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 4096,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 16384,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 65536,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 262144,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 1048576,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 4194304,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 16777216,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  },
+  {
+   "op": "random_bits",
+   "dtype": "uint32",
+   "n": 67108864,
+   "error": "random_bits: has no Triton kernel on CUDA yet"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-10-25T02:13:57+00:00"
+}
