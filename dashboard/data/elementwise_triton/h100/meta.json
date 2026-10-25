@@ -1,5 +1,6 @@
 {
  "device": "NVIDIA H100 80GB HBM3",
+ "torch": "2.14.1+cu130",
  "spec_memory_gbs": 3350,
  "spec_tflops": 66.9,
  "ops": {

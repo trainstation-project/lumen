@@ -13,12 +13,12 @@
    "stored_bytes": 16384,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 29.059,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 33.048,
+   "torch_us": 12.606,
+   "matches_torch": true,
    "rotation": 4096,
    "chained": true,
-   "gbs": 1.69
+   "gbs": 1.49
   },
   {
    "op": "dot_general",
@@ -33,12 +33,12 @@
    "stored_bytes": 65536,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 29.809,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 33.395,
+   "torch_us": 12.587,
+   "matches_torch": true,
    "rotation": 2731,
    "chained": true,
-   "gbs": 6.6
+   "gbs": 5.89
   },
   {
    "op": "dot_general",
@@ -53,12 +53,12 @@
    "stored_bytes": 262144,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 30.108,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 34.276,
+   "torch_us": 15.66,
+   "matches_torch": true,
    "rotation": 683,
    "chained": true,
-   "gbs": 26.12
+   "gbs": 22.94
   },
   {
    "op": "dot_general",
@@ -73,12 +73,12 @@
    "stored_bytes": 1048576,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 30.357,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 34.359,
+   "torch_us": 15.874,
+   "matches_torch": true,
    "rotation": 171,
    "chained": true,
-   "gbs": 103.62
+   "gbs": 91.55
   },
   {
    "op": "dot_general",
@@ -93,12 +93,12 @@
    "stored_bytes": 4194304,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 67.598,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 67.51,
+   "torch_us": 59.914,
+   "matches_torch": true,
    "rotation": 43,
    "chained": true,
-   "gbs": 186.14
+   "gbs": 186.39
   },
   {
    "op": "dot_general",
@@ -113,12 +113,12 @@
    "stored_bytes": 16777216,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 420.734,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 420.896,
+   "torch_us": 338.856,
+   "matches_torch": true,
    "rotation": 11,
    "chained": true,
-   "gbs": 119.63
+   "gbs": 119.58
   },
   {
    "op": "dot_general",
@@ -133,12 +133,12 @@
    "stored_bytes": 67108864,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 3067.012,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 3070.89,
+   "torch_us": 2658.015,
+   "matches_torch": true,
    "rotation": 3,
    "chained": true,
-   "gbs": 65.64
+   "gbs": 65.56
   },
   {
    "op": "dot_general",
@@ -153,12 +153,12 @@
    "stored_bytes": 8192,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 29.476,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 32.95,
+   "torch_us": 12.145,
+   "matches_torch": true,
    "rotation": 4096,
    "chained": true,
-   "gbs": 0.83
+   "gbs": 0.75
   },
   {
    "op": "dot_general",
@@ -173,12 +173,12 @@
    "stored_bytes": 32768,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 29.457,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 33.573,
+   "torch_us": 12.29,
+   "matches_torch": true,
    "rotation": 4096,
    "chained": true,
-   "gbs": 3.34
+   "gbs": 2.93
   },
   {
    "op": "dot_general",
@@ -193,12 +193,12 @@
    "stored_bytes": 131072,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 29.791,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 33.637,
+   "torch_us": 12.508,
+   "matches_torch": true,
    "rotation": 1366,
    "chained": true,
-   "gbs": 13.2
+   "gbs": 11.69
   },
   {
    "op": "dot_general",
@@ -213,12 +213,12 @@
    "stored_bytes": 524288,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 29.881,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 33.54,
+   "torch_us": 12.525,
+   "matches_torch": true,
    "rotation": 342,
    "chained": true,
-   "gbs": 52.64
+   "gbs": 46.9
   },
   {
    "op": "dot_general",
@@ -233,12 +233,12 @@
    "stored_bytes": 2097152,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 30.356,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 34.54,
+   "torch_us": 12.266,
+   "matches_torch": true,
    "rotation": 86,
    "chained": true,
-   "gbs": 207.26
+   "gbs": 182.15
   },
   {
    "op": "dot_general",
@@ -253,12 +253,12 @@
    "stored_bytes": 8388608,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 32.71,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 35.267,
+   "torch_us": 25.642,
+   "matches_torch": true,
    "rotation": 22,
    "chained": true,
-   "gbs": 769.36
+   "gbs": 713.58
   },
   {
    "op": "dot_general",
@@ -273,17 +273,17 @@
    "stored_bytes": 33554432,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 200.15,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 199.871,
+   "torch_us": 175.459,
+   "matches_torch": true,
    "rotation": 6,
    "chained": true,
-   "gbs": 502.94
+   "gbs": 503.64
   }
  ],
  "code": {
   "kernel": "# step 0: dot_general\n# /workspace/mayank/lumen/dashboard/bench.py:255  lambda a, b: prims.dot_general(a, b, DOT, \"float32\", a.dtype),\n# dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32]\n\n# PROLOGUE_A = prologue_4ee447ef997cd483\n@triton.jit\ndef prologue_4ee447ef997cd483(ptr, l, m, k, mask):\n    return tl.load(ptr + l * 0 + (m) * 1024 + k, mask=mask, other=0)\n\n# PROLOGUE_B = prologue_ba5b40008c33463a\n@triton.jit\ndef prologue_ba5b40008c33463a(ptr, l, k, n, mask):\n    return tl.load(ptr + l * 0 + (k) * 1024 + n, mask=mask, other=0)\n\n# EPILOGUE = epilogue_33e8931a8fd2f235\n@triton.jit\ndef epilogue_33e8931a8fd2f235(ptr, l, m, n, value, mask):\n    tl.store(ptr + l * 0 + (m) * 1024 + n, value.to(ptr.dtype.element_ty), mask=mask)\n\n# @triton.jit: lumen/kernels/dot_general/triton.py's kernel, BLOCK_M=64 BLOCK_N=32 BLOCK_K=32 GROUP_M=8 stages=5 warps=2",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] in0 in1"
  },
- "measured_at": "2026-10-25T02:11:17+00:00"
+ "measured_at": "2026-10-25T03:43:49+00:00"
 }

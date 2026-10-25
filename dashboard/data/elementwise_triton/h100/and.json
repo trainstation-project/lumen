@@ -13,12 +13,12 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 23.466,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 24.447,
+   "torch_us": 6.635,
+   "matches_torch": true,
    "rotation": 4096,
    "chained": false,
-   "gbs": 2.09
+   "gbs": 2.01
   },
   {
    "op": "and",
@@ -33,12 +33,12 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 23.376,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 24.311,
+   "torch_us": 6.826,
+   "matches_torch": true,
    "rotation": 2731,
    "chained": false,
-   "gbs": 8.41
+   "gbs": 8.09
   },
   {
    "op": "and",
@@ -53,12 +53,12 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 23.633,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 24.012,
+   "torch_us": 6.97,
+   "matches_torch": true,
    "rotation": 683,
    "chained": false,
-   "gbs": 33.28
+   "gbs": 32.75
   },
   {
    "op": "and",
@@ -73,12 +73,12 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 23.777,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 24.508,
+   "torch_us": 6.874,
+   "matches_torch": true,
    "rotation": 171,
    "chained": false,
-   "gbs": 132.3
+   "gbs": 128.36
   },
   {
    "op": "and",
@@ -93,12 +93,12 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 23.67,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 25.045,
+   "torch_us": 7.0,
+   "matches_torch": true,
    "rotation": 43,
    "chained": false,
-   "gbs": 531.6
+   "gbs": 502.41
   },
   {
    "op": "and",
@@ -113,12 +113,12 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 24.666,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 25.689,
+   "torch_us": 19.901,
+   "matches_torch": true,
    "rotation": 11,
    "chained": false,
-   "gbs": 2040.53
+   "gbs": 1959.27
   },
   {
    "op": "and",
@@ -133,12 +133,12 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 70.44,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 70.466,
+   "torch_us": 69.638,
+   "matches_torch": true,
    "rotation": 3,
    "chained": false,
-   "gbs": 2858.13
+   "gbs": 2857.07
   },
   {
    "op": "and",
@@ -153,17 +153,17 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 267.845,
-   "torch_us": null,
-   "matches_torch": null,
+   "lumen_us": 267.78,
+   "torch_us": 266.865,
+   "matches_torch": true,
    "rotation": 2,
    "chained": false,
-   "gbs": 3006.61
+   "gbs": 3007.34
   }
  ],
  "code": {
   "kernel": "# step 0: and\n# /workspace/mayank/lumen/dashboard/bench.py:512  out = outputs(f(*lt))\n# { lambda %0:i32[1048576] %1:i32[1048576]. let\n#     %2:i32[1048576] = and %0 %1\n#   in (%2) }\n\n# LOAD0 = load_41586ad75c7cc8e9\n@triton.jit\ndef load_41586ad75c7cc8e9(ptr, i, mask):\n    return tl.load(ptr + i, mask=mask)\n\n# LOAD1 = load_41586ad75c7cc8e9\n@triton.jit\ndef load_41586ad75c7cc8e9(ptr, i, mask):\n    return tl.load(ptr + i, mask=mask)\n\n# STORE = store_154117f9bc0ad6d6\n@triton.jit\ndef store_154117f9bc0ad6d6(ptr, i, value, mask):\n    tl.store(ptr + i, value, mask=mask)\n\n@triton.jit\ndef fusion_2bfd960cb9c3519a(\n    in0,\n    in1,\n    out,\n    n,\n    LOAD0: tl.constexpr,\n    LOAD1: tl.constexpr,\n    STORE: tl.constexpr,\n    BLOCK: tl.constexpr,\n):\n    j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    mask = j < n\n    v0 = LOAD0(in0, j, mask)\n    v1 = LOAD1(in1, j, mask)\n    v2 = v0 & v1\n    STORE(out, j, v2, mask)",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=loop body={ lambda %0:i32[1048576] %1:i32[1048576]. let\n    %2:i32[1048576] = and %0 %1\n  in (%2) }] in0 in1"
  },
- "measured_at": "2026-10-25T02:02:33+00:00"
+ "measured_at": "2026-10-25T03:33:42+00:00"
 }
