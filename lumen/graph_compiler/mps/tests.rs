@@ -1675,7 +1675,7 @@ fn vector_dots_are_reduced() {
     };
     let d = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[d]).unwrap();
-    let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g, true);
+    let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g);
     let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
     let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
@@ -1784,63 +1784,6 @@ fn skinny_dots_split_their_contraction() {
     ] {
         let split = super::split_k::split_k(&g, false, false);
         assert_eq!(split.nodes().len(), 1, "{split}");
-    }
-}
-
-#[test]
-fn matrix_vector_dots_are_reduced() {
-    let dot = |lc: usize, rc: usize, batch: bool| DotGeneral {
-        lhs_contracting: vec![lc],
-        rhs_contracting: vec![rc],
-        lhs_batch: if batch { vec![0] } else { vec![] },
-        rhs_batch: if batch { vec![0] } else { vec![] },
-        accum_dtype: DType::F32,
-        output_dtype: DType::F32,
-    };
-    type Case = (
-        &'static [usize],
-        &'static [usize],
-        Primitive,
-        &'static [&'static str],
-    );
-    let cases: [Case; 4] = [
-        (&[1, 64], &[64, 48], dot(1, 0, false), &["dot_general"]),
-        (
-            &[1, 64],
-            &[48, 64],
-            dot(1, 1, false),
-            &[
-                "reshape",
-                "broadcast_in_dim",
-                "mul",
-                "reduce_sum",
-                "reshape",
-            ],
-        ),
-        (
-            &[48, 64],
-            &[64],
-            dot(1, 0, false),
-            &["broadcast_in_dim", "mul", "reduce_sum"],
-        ),
-        (&[3, 1, 64], &[3, 64, 48], dot(2, 1, true), &["dot_general"]),
-    ];
-    for (lhs, rhs, p, want) in cases {
-        let mut g = Graph::new();
-        let a = g.input(ty(DType::F32, lhs));
-        let b = g.input(ty(DType::F32, rhs));
-        let d = apply(&mut g, p, &[a, b]);
-        g.set_outputs(&[d]).unwrap();
-        let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g, true);
-        let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
-        assert_eq!(names, want, "{reduced}");
-        let inputs = [data(lhs, 1), data(rhs, 2)];
-        let want = reference::run(&g, &inputs).unwrap();
-        let got = reference::run(&reduced, &inputs).unwrap();
-        assert_eq!(want[0].shape(), got[0].shape());
-        for (w, g) in want[0].to_vec::<f32>().iter().zip(&got[0].to_vec::<f32>()) {
-            assert!((w - g).abs() <= 64.0 * 4.0 * f32::EPSILON, "{w} {g}");
-        }
     }
 }
 
