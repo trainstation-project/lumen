@@ -297,7 +297,11 @@ fn groups(graph: &Graph, multi_output: bool) -> (Vec<Option<usize>>, Vec<Vec<Var
     let mut dots = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate().rev() {
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. });
-        if group[i].is_some() || (!fusible(graph, node) && !dot) {
+        let placed = matches!(
+            node.primitive,
+            Primitive::Concatenate { in_place: true, .. }
+        );
+        if group[i].is_some() || placed || (!fusible(graph, node) && !dot) {
             continue;
         }
         // Join the readers' group when they all share one that isn't a claim and doesn't feed a dot.

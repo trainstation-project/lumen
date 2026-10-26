@@ -1325,9 +1325,28 @@ impl Plan {
                             None => view(input),
                         })
                         .collect();
+                    // An output placed in a larger buffer (an in-place concatenate's slot) is
+                    // written through its offset and strides there.
+                    let written = |(output, at): (&(Buffer, TensorType), &Option<View>)| match at {
+                        None => view(output),
+                        Some(at) => {
+                            let (buffer, ty) = output;
+                            let bytes = at.offset * ty.dtype.size_of();
+                            let (base, start) = match *buffer {
+                                Buffer::Workspace(offset) => (workspace, offset + bytes),
+                                b => (tensor(b), bytes),
+                            };
+                            base.view_strided(start, ty.dtype, &ty.shape, &at.strides)
+                        }
+                    };
+                    let mut outputs = std::iter::once(&step.output)
+                        .chain(&step.extra_outputs)
+                        .zip(&step.output_views)
+                        .map(written);
+                    let out = outputs.next().expect("a step's output");
+                    let outs: Vec<Tensor> = outputs.collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
-                    let outs: Vec<Tensor> = step.extra_outputs.iter().map(view).collect();
-                    super::triton::run(kernel, step, &inputs, &view(&step.output), &outs)?;
+                    super::triton::run(kernel, step, &inputs, &out, &outs)?;
                 }
                 _ => {
                     let _ = scratch;

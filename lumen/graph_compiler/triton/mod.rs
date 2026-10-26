@@ -4,6 +4,7 @@
 mod fusion;
 mod gemm;
 mod horizontal;
+mod place_concats;
 mod split_k;
 
 use std::sync::OnceLock;
@@ -14,6 +15,7 @@ use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
+use place_concats::PlaceConcats;
 use split_k::SplitK;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
@@ -166,6 +168,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.split_k {
         pipeline.add(SplitK);
     }
+    pipeline.add(PlaceConcats);
     pipeline.add(LoopFusion {
         multi_output: config.multi_output_fusion,
     });
