@@ -45,39 +45,23 @@ pub struct LoopConfig {
     pub warps: usize,
 }
 
-pub(crate) const LOOP_CONFIGS: [LoopConfig; 8] = [
-    LoopConfig {
-        block_size: 512,
-        warps: 4,
-    },
-    LoopConfig {
-        block_size: 1024,
-        warps: 4,
-    },
-    LoopConfig {
-        block_size: 2048,
-        warps: 4,
-    },
-    LoopConfig {
-        block_size: 4096,
-        warps: 4,
-    },
-    LoopConfig {
-        block_size: 1024,
-        warps: 8,
-    },
-    LoopConfig {
-        block_size: 2048,
-        warps: 8,
-    },
-    LoopConfig {
-        block_size: 4096,
-        warps: 8,
-    },
-    LoopConfig {
-        block_size: 8192,
-        warps: 8,
-    },
-];
+const BLOCK_SIZES: [usize; 9] = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+const WARPS: [usize; 4] = [4, 8, 16, 32];
 
-pub(crate) const UNTUNED_LOOP: usize = 1;
+pub(crate) const LOOP_CONFIGS: [LoopConfig; BLOCK_SIZES.len() * WARPS.len()] = {
+    let mut configs = [LoopConfig {
+        block_size: 0,
+        warps: 0,
+    }; BLOCK_SIZES.len() * WARPS.len()];
+    let mut i = 0;
+    while i < configs.len() {
+        configs[i] = LoopConfig {
+            block_size: BLOCK_SIZES[i / WARPS.len()],
+            warps: WARPS[i % WARPS.len()],
+        };
+        i += 1;
+    }
+    configs
+};
+
+pub(crate) const UNTUNED_LOOP: usize = 5 * WARPS.len();

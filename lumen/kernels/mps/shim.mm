@@ -214,67 +214,6 @@ int lumen_mps_launch_pipeline(void *pso,
                   context);
 }
 
-double lumen_mps_time_pipeline(void *pipeline,
-                               const void *const *buffers,
-                               size_t nbuffers,
-                               size_t copies,
-                               const void *const *args,
-                               const size_t *arg_lens,
-                               size_t nargs,
-                               const size_t *grid,
-                               int groups,
-                               size_t group,
-                               size_t reps) {
-    id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)pipeline;
-    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
-    if (queue == nil || nbuffers + nargs > kMaxBuffers) {
-        return -1;
-    }
-    @autoreleasepool {
-        std::vector<id<MTLBuffer>> bound(nbuffers * copies);
-        std::vector<size_t> offsets(nbuffers * copies, 0);
-        for (size_t i = 0; i < nbuffers * copies; ++i) {
-            if (buffers[i] != nullptr) {
-                bound[i] = lumen_mps_buffer(buffers[i], &offsets[i]);
-                if (bound[i] == nil) {
-                    return -1;
-                }
-            }
-        }
-        id<MTLCommandBuffer> commands = [queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
-        [encoder setComputePipelineState:pso];
-        for (size_t j = 0; j < nargs; ++j) {
-            [encoder setBytes:args[j] length:arg_lens[j] atIndex:nbuffers + j];
-        }
-        MTLSize size = MTLSizeMake(grid[0], grid[1], grid[2]);
-        NSUInteger total = std::min<NSUInteger>(pso.maxTotalThreadsPerThreadgroup, group == 0 ? 256 : group);
-        NSUInteger x = std::min<NSUInteger>(grid[0], total);
-        NSUInteger y = std::min<NSUInteger>(grid[1], total / x);
-        NSUInteger z = std::min<NSUInteger>(grid[2], total / (x * y));
-        for (size_t r = 0; r < reps; ++r) {
-            size_t copy = (r % copies) * nbuffers;
-            for (size_t i = 0; i < nbuffers; ++i) {
-                [encoder setBuffer:bound[copy + i] offset:offsets[copy + i] atIndex:i];
-            }
-            [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            if (groups) {
-                [encoder dispatchThreadgroups:size
-                        threadsPerThreadgroup:(group == 0 ? MTLSizeMake(16, 16, 1) : MTLSizeMake(group, 1, 1))];
-            } else {
-                [encoder dispatchThreads:size threadsPerThreadgroup:MTLSizeMake(x, y, z)];
-            }
-        }
-        [encoder endEncoding];
-        [commands commit];
-        [commands waitUntilCompleted];
-        if (commands.status != MTLCommandBufferStatusCompleted) {
-            return -1;
-        }
-        return (commands.GPUEndTime - commands.GPUStartTime) / reps;
-    }
-}
-
 int lumen_mps_launch_kernel(const char *name,
                             const void *const *buffers,
                             size_t nbuffers,

@@ -13,6 +13,26 @@ unsafe extern "C" {
     fn lumen_mps_stream_command_buffer() -> *mut c_void;
     fn lumen_mps_stream_mark(done: Completion, context: *mut c_void);
     fn lumen_mps_stream_fence();
+    fn lumen_mps_stream_hold() -> *mut c_void;
+    fn lumen_mps_stream_release(gate: *mut c_void);
+}
+
+struct Gate(*mut c_void);
+
+unsafe impl Send for Gate {}
+
+impl Gate {
+    fn release(self) {
+        unsafe { lumen_mps_stream_release(self.0) }
+    }
+}
+
+pub(crate) fn hold() -> Result<Box<dyn FnOnce() + Send>, String> {
+    let gate = Gate(unsafe { lumen_mps_stream_hold() });
+    if gate.0.is_null() {
+        return Err("holding the MPS stream failed: no Metal device".into());
+    }
+    Ok(Box::new(move || gate.release()))
 }
 
 pub(crate) fn fence() {

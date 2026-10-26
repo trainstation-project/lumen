@@ -250,6 +250,8 @@ fn triton_loop(
     functions: &[super::triton::Function],
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
+    n: usize,
+    programs: usize,
 ) -> Result<(), String> {
     crate::kernels::launched::launched(&kernel.name, || {
         let source = format!(
@@ -270,6 +272,8 @@ fn triton_loop(
                 scalars,
                 PyTensor::wrap(out.clone()),
                 triton_functions(functions),
+                n,
+                programs,
                 config.block_size,
                 config.warps,
             ))

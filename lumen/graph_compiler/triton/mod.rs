@@ -16,7 +16,6 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{Options, Plan, cpu};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::stream::event::event_for;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
 #[derive(Debug, Clone)]
@@ -25,6 +24,8 @@ pub struct Kernel {
     pub name: String,
     pub source: String,
     pub by_value: Vec<bool>,
+    pub lanes: usize,
+    pub splits: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,8 @@ pub type Loop = fn(
     functions: &[Function],
     inputs: &[Tensor],
     out: &Tensor,
+    n: usize,
+    programs: usize,
 ) -> Result<(), String>;
 
 static LOOP: OnceLock<Loop> = OnceLock::new();
@@ -99,19 +102,39 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
 }
 
 fn loop_kernel(step: &Step) -> Option<Kernel> {
-    let Primitive::Fusion { body, .. } = &step.primitive else {
-        return None;
-    };
     let by_value: Vec<bool> = step
         .inputs
         .iter()
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
-    let (name, source) = codegen::kernel(body, &by_value);
+    let (name, source, lanes, splits) = match &step.primitive {
+        Primitive::Fusion { body, .. } => match codegen::reduction_root(body) {
+            Some(root) => {
+                let r = codegen::reduction(body, &by_value, root);
+                (r.name, r.source, r.lanes, r.splits)
+            }
+            None => {
+                let (name, source) = codegen::kernel(body, &by_value);
+                (name, source, 1, 1)
+            }
+        },
+        Primitive::Cumsum {
+            axis,
+            reverse,
+            accum_dtype,
+        } => {
+            let (name, source, lanes) =
+                codegen::scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
+            (name, source, lanes, 1)
+        }
+        _ => return None,
+    };
     Some(Kernel {
         name,
         source,
         by_value,
+        lanes,
+        splits,
     })
 }
 
@@ -121,10 +144,14 @@ impl Kernels for Loops {
     type Config = LoopConfig;
 
     fn configs(&self, step: &Step) -> Vec<LoopConfig> {
-        match step.primitive {
-            Primitive::Fusion { .. } => LOOP_CONFIGS.to_vec(),
-            _ => Vec::new(),
-        }
+        let Some(kernel) = loop_kernel(step) else {
+            return Vec::new();
+        };
+        let widest = kernel.lanes.max(kernel.splits.next_power_of_two());
+        LOOP_CONFIGS
+            .into_iter()
+            .filter(|c| c.block_size >= widest)
+            .collect()
     }
 
     fn build(&mut self, _: &Step, config: LoopConfig) -> Tuned {
@@ -138,6 +165,10 @@ struct Events {
 
 impl Timer for Events {
     type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor);
+
+    fn device(&self) -> Device {
+        self.device
+    }
 
     fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String> {
         let zeros = |ty: &TensorType, device| {
@@ -161,21 +192,13 @@ impl Timer for Events {
         )))
     }
 
-    fn time(
+    fn run(
         &self,
         (kernel, inputs, out): &Self::Buffers,
         step: &Step,
-        reps: usize,
-    ) -> Result<f64, String> {
-        let mut start = event_for(self.device, true)?;
-        let mut end = event_for(self.device, true)?;
-        start.record()?;
-        for _ in 0..reps {
-            run(kernel.as_ref(), step, inputs, out)?;
-        }
-        end.record()?;
-        end.synchronize()?;
-        Ok(start.elapsed_time(end.as_ref())? / 1e3 / reps as f64)
+        _: usize,
+    ) -> Result<(), String> {
+        run(kernel.as_ref(), step, inputs, out)
     }
 }
 
@@ -187,8 +210,8 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
-        (Primitive::Fusion { .. }, Some(kernel)) => {
-            let mut functions: Vec<Function> = inputs
+        (Primitive::Fusion { .. } | Primitive::Cumsum { .. }, Some(kernel)) => {
+            let loads: Vec<Function> = inputs
                 .iter()
                 .enumerate()
                 .filter(|&(k, _)| !kernel.by_value[k])
@@ -196,14 +219,37 @@ pub(crate) fn run(
                     Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides()))
                 })
                 .collect();
-            functions.push(Function::new(
-                "STORE",
-                codegen::store(out.shape(), out.strides()),
-            ));
+            let store = Function::new("STORE", codegen::store(out.shape(), out.strides()));
+            let functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
             let config = step
                 .launch::<LoopConfig>()
                 .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
-            launch(kernel, config, &functions, inputs, out)
+            let n = match step.primitive {
+                Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[axis]),
+                _ => Some(out.numel()),
+            };
+            let n = n.unwrap_or(0);
+            if kernel.splits == 1 {
+                return launch(kernel, config, &functions, inputs, out, n);
+            }
+            let Primitive::Fusion { body, .. } = &step.primitive else {
+                unreachable!("a split reduction")
+            };
+            let reduced = codegen::reduction_root(body).expect("a reduction").output;
+            let options = TensorOptions::new()
+                .dtype(body.type_of(reduced).dtype)
+                .device(out.device());
+            let partials = unsafe { Tensor::empty(&[n * kernel.splits], options) };
+            launch(kernel, config, &loads, inputs, &partials, n)?;
+            let last = Kernel {
+                name: format!("{}_final", kernel.name),
+                source: kernel.source.clone(),
+                by_value: [kernel.by_value.as_slice(), &[false]].concat(),
+                lanes: kernel.splits.next_power_of_two(),
+                splits: 1,
+            };
+            let inputs = [inputs, std::slice::from_ref(&partials)].concat();
+            launch(&last, config, &functions, &inputs, out, n)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
@@ -215,10 +261,19 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
         name,
         source,
         by_value: vec![true],
+        lanes: 1,
+        splits: 1,
     };
     let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
     let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
-    launch(&kernel, &LOOP_CONFIGS[UNTUNED_LOOP], &[store], &[bits], t)
+    launch(
+        &kernel,
+        &LOOP_CONFIGS[UNTUNED_LOOP],
+        &[store],
+        &[bits],
+        t,
+        t.numel(),
+    )
 }
 
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
@@ -230,6 +285,8 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         name,
         source,
         by_value: vec![false],
+        lanes: 1,
+        splits: 1,
     };
     let functions = [
         Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
@@ -241,13 +298,14 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         &functions,
         std::slice::from_ref(src),
         dst,
+        dst.numel(),
     )
 }
 
 pub(crate) fn reads_strided(step: &Step) -> bool {
     matches!(
         step.primitive,
-        Primitive::DotGeneral { .. } | Primitive::Fusion { .. }
+        Primitive::DotGeneral { .. } | Primitive::Fusion { .. } | Primitive::Cumsum { .. }
     )
 }
 
@@ -257,9 +315,11 @@ fn launch(
     functions: &[Function],
     inputs: &[Tensor],
     out: &Tensor,
+    n: usize,
 ) -> Result<(), String> {
     let launch = LOOP.get().ok_or(
         "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
     )?;
-    launch(kernel, config, functions, inputs, out)
+    let programs = n.div_ceil(config.block_size / kernel.lanes) * kernel.splits;
+    launch(kernel, config, functions, inputs, out, n, programs)
 }

@@ -4,12 +4,13 @@ use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
 use crate::allocator::Scratch;
+use crate::device::Device;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
-use crate::kernels::mps::{Captured, Encode, capture};
+use crate::kernels::mps::Encode;
 
 pub(super) struct Tunable {
     pub by_value: Vec<bool>,
@@ -252,12 +253,17 @@ pub(super) struct Mps;
 impl Timer for Mps {
     type Buffers = Buffers;
 
+    fn device(&self) -> Device {
+        Device::Mps(0)
+    }
+
     fn buffers(&self, step: &Step) -> Result<Option<Buffers>, String> {
         Ok(Buffers::new(step))
     }
 
-    fn time(&self, buffers: &Buffers, step: &Step, reps: usize) -> Result<f64, String> {
-        buffers.run(step, reps)
+    fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
+        let inputs = &buffers.copies[rep % buffers.copies.len()];
+        crate::kernels::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 
@@ -346,23 +352,5 @@ impl Buffers {
             _memory: memory,
             copies,
         })
-    }
-
-    fn run(&self, step: &Step, reps: usize) -> Result<f64, String> {
-        let launches = self
-            .copies
-            .iter()
-            .map(|inputs| {
-                capture(|| {
-                    crate::kernels::mps::encode(step, inputs, self.output, self.scratch, Vec::new())
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        (0..launches[0].len())
-            .map(|l| {
-                let copies: Vec<&Captured> = launches.iter().map(|c| &c[l]).collect();
-                Captured::time(&copies, reps.max(copies.len()))
-            })
-            .sum()
     }
 }

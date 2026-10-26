@@ -1,5 +1,4 @@
 import linecache
-import math
 import struct
 
 import triton
@@ -31,11 +30,11 @@ def scalar(x):
     return x.item()
 
 
-def launch(name, source, inputs, scalars, out, specs, block_size, warps):
-    n = math.prod(out.shape)
+def launch(name, source, inputs, scalars, out, specs, n, programs, block_size, warps):
     if n == 0:
         return
     args = [scalar(x) if k in scalars else x for k, x in enumerate(inputs)]
     kernel = compiled(name, source)
-    grid = (triton.cdiv(n, block_size),)
-    kernel[grid](*args, out, n, **functions(specs), BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False)
+    kernel[(programs,)](
+        *args, out, n, **functions(specs), BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False
+    )

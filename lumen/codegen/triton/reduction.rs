@@ -1,0 +1,266 @@
+use super::*;
+use crate::graph::TensorType;
+
+const ROW_LANES: usize = 256;
+const SPLIT_ROW_LANES: usize = 512;
+const COLUMN_LANES: usize = 16;
+const SPLIT_BELOW: usize = 1024;
+const SPLIT_SPAN: usize = 8192;
+const MOST_SPLITS: usize = 512;
+
+pub(crate) struct Reduction {
+    pub name: String,
+    pub source: String,
+    pub lanes: usize,
+    pub splits: usize,
+}
+
+pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
+    body.nodes().iter().find(|n| {
+        matches!(
+            n.primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        )
+    })
+}
+
+struct Tile {
+    lanes: usize,
+    rows: bool,
+}
+
+impl Tile {
+    fn new(shape: &[usize], reduced: impl Fn(usize) -> bool, count: usize, split: bool) -> Self {
+        let rows = shape.iter().rposition(|&n| n != 1).is_none_or(reduced);
+        let most = match (rows, split) {
+            (true, false) => ROW_LANES,
+            (true, true) => SPLIT_ROW_LANES,
+            (false, _) => COLUMN_LANES,
+        };
+        Tile {
+            lanes: count.next_power_of_two().min(most),
+            rows,
+        }
+    }
+
+    fn outputs(&self) -> String {
+        format!("BLOCK_SIZE // {}", self.lanes)
+    }
+
+    fn shape(&self) -> String {
+        match self.rows {
+            true => format!("[{}, {}]", self.outputs(), self.lanes),
+            false => format!("[{}, {}]", self.lanes, self.outputs()),
+        }
+    }
+
+    fn axis(&self) -> usize {
+        if self.rows { 1 } else { 0 }
+    }
+
+    fn join(&self, outer: &str, inner: &str, op: &str) -> String {
+        match self.rows {
+            true => format!("{outer}[:, None] {op} {inner}[None, :]"),
+            false => format!("{inner}[:, None] {op} {outer}[None, :]"),
+        }
+    }
+
+    fn spread(&self, outer: &str) -> String {
+        match self.rows {
+            true => format!("{outer}[:, None]"),
+            false => format!("{outer}[None, :]"),
+        }
+    }
+}
+
+fn combine(sum: bool, dtype: DType) -> &'static str {
+    match (sum, dtype) {
+        (true, _) => "a + b",
+        (false, DType::Bool) => "a | b",
+        (false, d) if d.is_float() => "tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)",
+        (false, _) => "tl.maximum(a, b)",
+    }
+}
+
+fn lowest(dtype: DType) -> String {
+    match dtype {
+        d if d.is_float() => "float(\"-inf\")".into(),
+        DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
+            format!("-{}", 1u64 << (dtype.bits() - 1))
+        }
+        _ => "0".into(),
+    }
+}
+
+fn indented(lines: &str) -> String {
+    lines.lines().map(|l| format!("    {l}\n")).collect()
+}
+
+pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reduction {
+    let x = body.type_of(root.inputs[0]);
+    let a = body.type_of(root.output).dtype;
+    let acc = triton_type(a).expect("a Triton dtype");
+    let (axes, sum) = match &root.primitive {
+        Primitive::ReduceSum { axes, .. } => (axes, true),
+        Primitive::ReduceMax { axes } => (axes, false),
+        p => unreachable!("{p} is not a reduction"),
+    };
+    let strides = contiguous_strides(&x.shape);
+    let kept: Vec<usize> = (0..x.shape.len()).filter(|d| !axes.contains(d)).collect();
+    let mut reduced = axes.clone();
+    reduced.sort_unstable();
+    let shape = |ds: &[usize]| ds.iter().map(|&d| x.shape[d]).collect::<Vec<_>>();
+    let stride = |ds: &[usize]| ds.iter().map(|&d| strides[d]).collect::<Vec<_>>();
+    let count: usize = shape(&reduced).iter().product();
+    let splits = match body.type_of(root.output).numel() < SPLIT_BELOW {
+        true => (count / SPLIT_SPAN).clamp(1, MOST_SPLITS),
+        false => 1,
+    };
+    let tile = Tile::new(&x.shape, |d| axes.contains(&d), count, splits > 1);
+    let o_at = gather_index("o", &shape(&kept), &stride(&kept));
+    let r_at = gather_index("r", &shape(&reduced), &stride(&reduced));
+
+    let mut prologue = Emitter::new(body, by_value);
+    let element = prologue.value(root.inputs[0], "j".into());
+    let element = match x.dtype == a {
+        true => element,
+        false => format!("{element}.to({acc})"),
+    };
+    let mut epilogue = Emitter::new(body, by_value);
+    epilogue.locals = prologue.locals;
+    epilogue
+        .values
+        .insert((root.output, "o".into()), "reduced".into());
+    let result = epilogue.value(body.outputs()[0], "o".into());
+
+    let (lanes, outputs, tile_shape, axis) =
+        (tile.lanes, tile.outputs(), tile.shape(), tile.axis());
+    let (j, mask) = (
+        tile.join("jo", "jr", "+"),
+        tile.join("(o < n)", &format!("(r < {count})"), "&"),
+    );
+    let (combine, init) = (combine(sum, a), lowest(a));
+    let init = if sum { "0".into() } else { init };
+    let (lines, tail) = (indented(&prologue.lines), &epilogue.lines);
+    let per = count.div_ceil(splits).div_ceil(lanes) * lanes;
+    let (block, range, finish) = match splits {
+        1 => (
+            "tl.program_id(0)".to_string(),
+            format!("0, {count}, {lanes}"),
+            format!("    mask = o < n\n{tail}    STORE(out, o, {result}, mask)\n"),
+        ),
+        _ => (
+            "tl.program_id(0) % tl.cdiv(n, {outputs})".to_string(),
+            format!("s * {per}, tl.minimum((s + 1) * {per}, {count}), {lanes}"),
+            format!("    tl.store(out + o * {splits} + s, reduced, mask=o < n)\n"),
+        ),
+    };
+    let block = block.replace("{outputs}", &outputs);
+    let kernel_params = params(by_value, None, splits == 1);
+    let mut source = formatdoc!(
+        "
+        @triton.jit
+        def NAME_combine(a, b):
+            return {combine}
+
+
+        @triton.jit
+        def NAME(
+        {kernel_params}):
+            s = tl.program_id(0) // tl.cdiv(n, {outputs})
+            o = ({block}).to(tl.int64) * ({outputs}) + tl.arange(0, {outputs})
+            jo = ({o_at}) + 0 * o
+            empty = tl.full([], {init}, {acc})
+            acc = tl.full({tile_shape}, {init}, {acc})
+            for start in range({range}):
+                r = start + tl.arange(0, {lanes})
+                jr = ({r_at}) + 0 * r
+                j = {j}
+                mask = {mask}
+        {lines}        acc = NAME_combine(acc, tl.where(mask, {element}, empty))
+            reduced = tl.reduce(acc, {axis}, NAME_combine)
+        {finish}"
+    );
+    if splits > 1 {
+        let parts = splits.next_power_of_two();
+        let params = params(by_value, Some("partials"), true);
+        source += &formatdoc!(
+            "
+
+
+            @triton.jit
+            def NAME_final(
+            {params}):
+                o = tl.program_id(0).to(tl.int64) * (BLOCK_SIZE // {parts}) + tl.arange(0, BLOCK_SIZE // {parts})
+                p = tl.arange(0, {parts})
+                empty = tl.full([], {init}, {acc})
+                mask = (o < n)[:, None] & (p < {splits})[None, :]
+                partial = tl.load(partials + o[:, None] * {splits} + p[None, :], mask=mask, other=empty)
+                reduced = tl.reduce(partial, 1, NAME_combine)
+                mask = o < n
+            {tail}    STORE(out, o, {result}, mask)
+            "
+        );
+    }
+    let (name, source) = named("fusion", source);
+    Reduction {
+        name,
+        source,
+        lanes,
+        splits,
+    }
+}
+
+pub(crate) fn scan(
+    x: &TensorType,
+    axis: usize,
+    reverse: bool,
+    a: DType,
+) -> (String, String, usize) {
+    let acc = triton_type(a).expect("a Triton dtype");
+    let length = x.shape[axis];
+    let inner: usize = x.shape[axis + 1..].iter().product();
+    let tile = Tile::new(&x.shape, |d| d == axis, length, false);
+    let (lanes, outputs, axis) = (tile.lanes, tile.outputs(), tile.axis());
+    let line = format!("(o // {inner}) * {} + o % {inner}", length * inner);
+    let step = match reverse {
+        true => format!("({} - k) * {inner}", length.max(1) - 1),
+        false => format!("k * {inner}"),
+    };
+    let (j, mask, carried) = (
+        tile.join("jo", "jk", "+"),
+        tile.join("(o < n)", &format!("(k < {length})"), "&"),
+        tile.spread("carry"),
+    );
+    let element = match x.dtype == a {
+        true => "LOAD0(in0, j, mask)".to_string(),
+        false => format!("LOAD0(in0, j, mask).to({acc})"),
+    };
+    let params = params(&[false], None, true);
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME_combine(a, b):
+            return a + b
+
+
+        @triton.jit
+        def NAME(
+        {params}):
+            o = tl.program_id(0).to(tl.int64) * ({outputs}) + tl.arange(0, {outputs})
+            jo = {line}
+            carry = tl.zeros([{outputs}], {acc})
+            for start in range(0, {length}, {lanes}):
+                k = start + tl.arange(0, {lanes})
+                jk = {step}
+                j = {j}
+                mask = {mask}
+                x = {element}
+                x = tl.where(mask, x, tl.zeros_like(x))
+                STORE(out, j, {carried} + tl.associative_scan(x, {axis}, NAME_combine), mask)
+                carry = carry + tl.reduce(x, {axis}, NAME_combine)
+        "
+    );
+    let (name, source) = named("scan", source);
+    (name, source, lanes)
+}

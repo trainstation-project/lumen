@@ -36,6 +36,9 @@ pub(crate) fn templated(
     kernel: &str,
     code: impl FnOnce() -> (Option<String>, Option<(String, String)>),
 ) {
+    if !crate::profiler::traced() {
+        return;
+    }
     CAPTURED.with_borrow_mut(|c| {
         if let Some(c) = c {
             let (step, label) = STEP.get();
