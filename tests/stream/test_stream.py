@@ -1,6 +1,7 @@
 """Tests of lumen streams, events and the ``wait`` primitive."""
 
 import pytest
+from helpers import CUDA, MPS, TPU
 
 import lumen
 
@@ -36,12 +37,7 @@ def test_the_stream_is_the_only_api():
 
 @pytest.mark.parametrize(
     "device",
-    [
-        "cpu",
-        pytest.param("mps", marks=pytest.mark.mps),
-        pytest.param("tpu", marks=pytest.mark.tpu),
-        pytest.param("cuda", marks=pytest.mark.cuda),
-    ],
+    ["cpu", MPS, TPU, CUDA],
 )
 def test_events_time_the_work_between_them(device, triton_on_cuda):
     """Two events with ``enable_timing`` around a compiled program:

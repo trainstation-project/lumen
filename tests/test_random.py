@@ -4,11 +4,12 @@ import math
 
 import numpy as np
 import pytest
+from helpers import MPS, TPU
 
 import lumen
 import lumen.functional as F
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+DEVICES = ["cpu", MPS, TPU]
 
 
 def _philox(key, counter):

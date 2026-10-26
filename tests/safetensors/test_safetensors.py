@@ -2,13 +2,11 @@
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS, TPU
 
 import lumen
 from lumen.safetensors import load, load_file, safe_open, save, save_file
 
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
-TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 DTYPES = [
     "bool",
     "uint8",

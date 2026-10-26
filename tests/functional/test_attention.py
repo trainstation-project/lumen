@@ -5,13 +5,11 @@ import warnings
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS
 
 import lumen
 import lumen.functional as F
 from lumen import prims
-
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 def reference(q, k, v, scale=None, causal=False):

@@ -3,12 +3,10 @@
 import ctypes
 
 import pytest
+from helpers import CUDA, MPS
 
 import lumen
 from lumen.kernels import _C
-
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 OP = "lumen::dummy_op"
 
