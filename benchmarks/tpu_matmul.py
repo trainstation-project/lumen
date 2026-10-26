@@ -1,3 +1,5 @@
+"""Measures lumen's TPU matmul throughput in TFLOP/s for a set of ``MxKxN`` shapes."""
+
 import argparse
 import time
 
@@ -18,6 +20,7 @@ SHAPES = [
 
 
 def tflops(m, k, n, dtype, seconds):
+    """Achieved TFLOP/s of an ``[m, k] @ [k, n]`` ``dtype`` matmul on the TPU, timed over ``seconds`` after a warm-up."""
     rng = np.random.default_rng(0)
     a = lumen.from_numpy(rng.standard_normal((m, k), dtype=np.float32)).to(dtype=dtype).to("tpu")
     b = lumen.from_numpy(rng.standard_normal((k, n), dtype=np.float32)).to(dtype=dtype).to("tpu")
@@ -27,6 +30,7 @@ def tflops(m, k, n, dtype, seconds):
         f(a, b).wait_()
     calls = 0
     start = time.perf_counter()
+    # Issue calls in batches of 10 without waiting so the device queue stays full; wait once at the end.
     while time.perf_counter() - start < seconds:
         for _ in range(10):
             out = f(a, b)
@@ -36,6 +40,7 @@ def tflops(m, k, n, dtype, seconds):
 
 
 def main():
+    """Parses ``--dtype``, ``--shapes`` and ``--seconds`` and prints the throughput of each shape."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--shapes", nargs="*", default=SHAPES)
