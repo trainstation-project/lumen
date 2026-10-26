@@ -1,3 +1,4 @@
+//! `Tensor`: a strided view of shared device storage, with factories, views, host access and copies.
 use std::sync::Arc;
 
 use super::dtype::{DType, Element, bf16, dispatch_dtype, f16};
@@ -9,10 +10,12 @@ use crate::graph::TensorType;
 use crate::kernels::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
 
+/// The device in `options`, defaulting to the CPU.
 fn device_of(options: &TensorOptions) -> Device {
     options.device_opt().unwrap_or(Device::Cpu(0))
 }
 
+/// Bytes a `dtype` tensor of `shape` takes on `device`, including TPU tile padding.
 fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => {
@@ -22,6 +25,7 @@ fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     }
 }
 
+/// Alignment a `dtype` tensor of `shape` needs on `device`.
 fn device_alignment(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => crate::device::tpu::layout::alignment(dtype, shape),
@@ -29,16 +33,20 @@ fn device_alignment(device: Device, dtype: DType, shape: &[usize]) -> usize {
     }
 }
 
+/// A strided view of a shared storage; cloning shares the storage.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Arc<Storage>,
     dtype: DType,
     shape: Vec<usize>,
+    /// Element strides, one per dim.
     strides: Vec<usize>,
+    /// Element offset of the first element in the storage.
     offset: usize,
 }
 
 impl Tensor {
+    /// A contiguous tensor over all of `storage`.
     pub(super) fn wrap(storage: Arc<Storage>, dtype: DType, shape: &[usize]) -> Self {
         Tensor {
             storage,
@@ -49,6 +57,8 @@ impl Tensor {
         }
     }
 
+    /// Allocates an uninitialized tensor of `size` with `options`' dtype and device.
+    ///
     /// # Safety
     ///
     /// Its elements are uninitialized: each must be written before it is
@@ -57,6 +67,8 @@ impl Tensor {
         unsafe { Self::empty_aligned(size, options, 0) }
     }
 
+    /// Allocates an uninitialized tensor whose storage is aligned to at least `alignment` bytes.
+    ///
     /// # Safety
     ///
     /// Its elements are uninitialized: each must be written before it is
@@ -75,6 +87,7 @@ impl Tensor {
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
+    /// An uninitialized contiguous tensor with this one's shape, dtype and allocator.
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
         let nbytes = device_bytes(self.device(), self.dtype, &self.shape);
@@ -82,6 +95,7 @@ impl Tensor {
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 
+    /// A tensor of `size` filled with zeros.
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("zeros"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
@@ -89,6 +103,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// A tensor of `size` filled with ones.
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("ones"), Vec::new);
         let t = unsafe { Self::empty(size, options) };

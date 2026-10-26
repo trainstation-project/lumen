@@ -1,7 +1,12 @@
+//! Tests for dtypes, tensor options and factories, fills, views and storage sharing, device copies,
+//! meta tensors and parameter packing, dtype casts, and float rounding.
+
+/// Dtype sizes, predicates and names, and per-dtype element round trips.
 mod dtype {
     use crate::tensor::dtype::{bf16, f16};
     use crate::{DType, Device, Element, Tensor};
 
+    /// Each dtype's size matches the Rust type that stores it.
     #[test]
     fn size_of_matches_rust_types() {
         assert_eq!(DType::Bool.size_of(), 1);
@@ -19,6 +24,7 @@ mod dtype {
         assert_eq!(DType::F64.size_of(), size_of::<f64>());
     }
 
+    /// `is_float` and `is_int` classify dtypes; bool is neither.
     #[test]
     fn dtype_predicates() {
         assert!(DType::F32.is_float() && DType::F16.is_float() && DType::BF16.is_float());
@@ -27,14 +33,17 @@ mod dtype {
         assert!(!DType::Bool.is_int() && !DType::F32.is_int());
     }
 
+    /// Dtypes display by their short name.
     #[test]
     fn dtype_names() {
         assert_eq!(DType::BF16.to_string(), "bf16");
         assert_eq!(DType::I8.to_string(), "i8");
     }
 
+    /// Defines a test that a dtype's values round-trip through `from_slice`, `get`, `set` and `zeros`.
     macro_rules! test_roundtrip {
         ($name:ident, $t:ty, $dtype:expr, $a:expr, $b:expr) => {
+            /// Values round-trip through a tensor of this dtype, and `zeros` gives the type's zero.
             #[test]
             fn $name() {
                 let a: $t = $a;
@@ -78,6 +87,7 @@ mod dtype {
         bf16::from_f32(1.5),
         bf16::from_f32(2.5)
     );
+    /// `arange` works for f16 and its display names the dtype.
     #[test]
     fn f16_arange_and_display() {
         let t = Tensor::arange(4, DType::F16);
@@ -87,6 +97,7 @@ mod dtype {
         assert!(s.contains("dtype=f16"), "{s}");
     }
 
+    /// Views of an f64 tensor read the right elements.
     #[test]
     fn views_work_for_every_dtype() {
         let t = Tensor::arange(6, DType::F64).reshape(&[2, 3]);
@@ -96,10 +107,12 @@ mod dtype {
     }
 }
 
+/// Default and given dtypes and devices of the factories.
 mod options {
     use crate::tensor::dtype::f16;
     use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
+    /// With no options, tensors are float32 on the CPU.
     #[test]
     fn defaults_are_float32_on_cpu() {
         let t = Tensor::zeros(&[2, 3], TensorOptions::new());
@@ -108,6 +121,7 @@ mod options {
         assert_eq!(Tensor::ones(&[2], TensorOptions::new()).dtype(), DType::F32);
     }
 
+    /// A bare dtype or device converts into `TensorOptions`.
     #[test]
     fn a_dtype_or_device_converts_into_options() {
         assert_eq!(Tensor::zeros(&[1], DType::I64).dtype(), DType::I64);
@@ -119,6 +133,7 @@ mod options {
         assert_eq!(TensorOptions::new().dtype_opt(), None);
     }
 
+    /// `full` takes its dtype from the fill value when none is given.
     #[test]
     fn full_infers_dtype_from_the_fill_value() {
         let i = Tensor::full(&[2], 7, TensorOptions::new());
@@ -133,6 +148,7 @@ mod options {
         assert_eq!(f.to_vec::<f32>(), vec![1.5]);
     }
 
+    /// `full` casts the fill value to the given dtype.
     #[test]
     fn full_converts_the_fill_value_to_the_given_dtype() {
         assert_eq!(Tensor::full(&[1], 2.9, DType::I32).to_vec::<i32>(), vec![2]);
@@ -149,6 +165,7 @@ mod options {
         assert_eq!(t.to_vec::<f64>(), vec![0.5; 4]);
     }
 
+    /// `ones` defaults to float32, not the int64 of its fill value.
     #[test]
     fn ones_uses_the_default_dtype_not_the_int_fill() {
         let t = Tensor::ones(&[3], TensorOptions::new());
@@ -156,6 +173,7 @@ mod options {
         assert_eq!(Tensor::ones(&[1], DType::Bool).to_vec::<bool>(), vec![true]);
     }
 
+    /// `arange` takes its dtype from `end` and rounds a fractional end up.
     #[test]
     fn arange_infers_dtype_from_end() {
         let i = Tensor::arange(4, TensorOptions::new());
@@ -171,6 +189,7 @@ mod options {
         assert_eq!(Tensor::arange(0, TensorOptions::new()).numel(), 0);
     }
 
+    /// `from_slice` keeps the slice's dtype or converts to the given one.
     #[test]
     fn from_slice_keeps_or_converts_the_element_type() {
         let t = Tensor::from_slice(&[1u8, 2, 3], TensorOptions::new());
@@ -182,10 +201,12 @@ mod options {
     }
 }
 
+/// `fill_`, `zero_` and the filling factories.
 mod fill {
     use crate::tensor::dtype::{bf16, f16};
     use crate::{DType, Device, Tensor};
 
+    /// `fill_` writes every element and returns the tensor for chaining.
     #[test]
     fn fill_sets_every_element_and_returns_the_tensor() {
         let t = Tensor::zeros(&[2, 3], DType::F32);
@@ -193,6 +214,7 @@ mod fill {
         assert_eq!(t.zero_().to_vec::<f32>(), vec![0.0; 6]);
     }
 
+    /// `fill_` casts the value to the tensor's dtype.
     #[test]
     fn fill_converts_the_value_to_the_dtype() {
         let i = Tensor::zeros(&[3], DType::I32);
@@ -208,6 +230,7 @@ mod fill {
         assert_eq!(u.fill_(0xAB).to_vec::<u8>(), vec![0xAB; 4]);
     }
 
+    /// Filling a view writes only the elements it covers.
     #[test]
     fn fill_writes_through_views_only() {
         let t = Tensor::arange(12, DType::F32).reshape(&[3, 4]);
@@ -226,6 +249,7 @@ mod fill {
         assert_eq!(tt.to_vec::<i64>(), vec![7; 4]);
     }
 
+    /// Filling an empty tensor does nothing.
     #[test]
     fn fill_of_an_empty_tensor_is_a_no_op() {
         let t = Tensor::zeros(&[0, 3], Device::Cpu(0));
@@ -233,6 +257,7 @@ mod fill {
         assert_eq!(t.numel(), 0);
     }
 
+    /// `full` and `ones` write every element of new storage.
     #[test]
     fn full_and_ones_fill_fresh_storage() {
         assert_eq!(
@@ -248,10 +273,12 @@ mod fill {
     }
 }
 
+/// Views share storage and see each other's writes.
 mod storage_semantics {
 
     use crate::{DType, Tensor};
 
+    /// A new tensor has the expected size and device.
     #[test]
     fn storage_is_created_with_correct_size() {
         let t = Tensor::zeros(&[2, 3, 4], DType::F32);
@@ -260,6 +287,7 @@ mod storage_semantics {
         assert_eq!(t.device().to_string(), "cpu:0");
     }
 
+    /// New tensors have row-major strides.
     #[test]
     fn contiguous_strides_are_row_major() {
         let t = Tensor::zeros(&[2, 3, 4], DType::F32);
@@ -267,6 +295,7 @@ mod storage_semantics {
         assert!(t.is_contiguous());
     }
 
+    /// `reshape` returns a view of the same storage.
     #[test]
     fn reshape_is_a_view_and_shares_storage() {
         let t = Tensor::arange(6, DType::F32);
@@ -276,6 +305,7 @@ mod storage_semantics {
         assert_eq!(m.get::<f32>(&[1, 2]), 5.0);
     }
 
+    /// A write through one view shows through another.
     #[test]
     fn mutation_through_one_view_is_visible_through_aliases() {
         let t = Tensor::arange(6, DType::F32);
@@ -284,6 +314,7 @@ mod storage_semantics {
         assert_eq!(t.get::<f32>(&[1]), 99.0);
     }
 
+    /// `narrow` offsets into the same storage.
     #[test]
     fn narrow_bumps_storage_offset() {
         let t = Tensor::arange(10, DType::F32);
@@ -293,6 +324,7 @@ mod storage_semantics {
         assert_eq!(v.to_vec::<f32>(), vec![3.0, 4.0, 5.0, 6.0]);
     }
 
+    /// `select` gives row views of a matrix.
     #[test]
     fn select_rows_of_matrix() {
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
@@ -304,6 +336,7 @@ mod storage_semantics {
         assert!(row0.shares_storage_with(&t));
     }
 
+    /// `transpose` swaps strides and keeps the storage.
     #[test]
     fn transpose_swaps_strides_without_copying() {
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
@@ -316,6 +349,7 @@ mod storage_semantics {
         assert_eq!(tt.to_vec::<f32>(), vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
     }
 
+    /// `permute` reorders shape and strides.
     #[test]
     fn permute_generalizes_transpose() {
         let t = Tensor::zeros(&[2, 3, 4], DType::F32);
@@ -324,6 +358,7 @@ mod storage_semantics {
         assert_eq!(p.strides(), &[1, 12, 4]);
     }
 
+    /// `contiguous` on a strided view copies into new storage.
     #[test]
     fn contiguous_materializes_fresh_storage() {
         let t = Tensor::arange(6, DType::F32)
@@ -335,6 +370,7 @@ mod storage_semantics {
         assert_eq!(c.to_vec::<f32>(), t.to_vec::<f32>());
     }
 
+    /// A view keeps the storage alive after the original tensor drops.
     #[test]
     fn storage_is_freed_only_after_last_view_drops() {
         let t = Tensor::arange(4, DType::F32);
@@ -345,6 +381,7 @@ mod storage_semantics {
         assert_eq!(v.to_vec::<f32>(), vec![1.0, 2.0]);
     }
 
+    /// Reading with the wrong element type panics.
     #[test]
     #[should_panic(expected = "dtype mismatch")]
     fn dtype_mismatch_is_rejected() {
@@ -352,6 +389,7 @@ mod storage_semantics {
         let _ = t.to_vec::<i32>();
     }
 
+    /// Display shows the dtype and the values.
     #[test]
     fn display() {
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
@@ -361,17 +399,21 @@ mod storage_semantics {
     }
 }
 
+/// Element access, copies and fills of CPU tensors.
 mod device_kernels {
     use crate::{DType, Device, Tensor, TensorOptions};
 
+    /// A float32 tensor of `values` with `shape`.
     fn tensor_on(values: &[f32], shape: &[usize]) -> Tensor {
         Tensor::from_slice(values, DType::F32).reshape(shape)
     }
 
+    /// A float32 CPU tensor of `values` with `shape`.
     fn tensor(values: &[f32], shape: &[usize]) -> Tensor {
         tensor_on(values, shape)
     }
 
+    /// `get` and `set` read and write single elements.
     #[test]
     fn element_access_reads_and_writes_elements() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
@@ -381,6 +423,7 @@ mod device_kernels {
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 9.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
+    /// Strided views read their own elements, and `contiguous` keeps the device.
     #[test]
     fn strided_views_read_their_elements() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
@@ -393,6 +436,7 @@ mod device_kernels {
         assert_eq!(c.to_vec::<f32>(), tt.to_vec::<f32>());
     }
 
+    /// `to` the tensor's own device returns a view of the same storage.
     #[test]
     fn to_same_device_is_a_no_op_copy() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
@@ -403,6 +447,7 @@ mod device_kernels {
         assert_eq!(same.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
     }
 
+    /// `to` the same device keeps a view's offset and storage.
     #[test]
     fn to_a_different_device_copies_only_the_view_and_keeps_its_layout() {
         let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]);
@@ -412,12 +457,14 @@ mod device_kernels {
         assert_eq!(view.to_vec::<f32>(), vec![1.0, 2.0, 4.0, 5.0]);
     }
 
+    /// `to` the same device shares storage.
     #[test]
     fn to_the_same_device_shares_storage() {
         let t = Tensor::arange(4, DType::F32);
         assert!(t.to(Device::Cpu(0)).shares_storage_with(&t));
     }
 
+    /// Empty tensors read and copy without touching data.
     #[test]
     fn empty_tensors_need_no_device_access() {
         let t = tensor(&[], &[0, 3]);
@@ -425,6 +472,7 @@ mod device_kernels {
         assert_eq!(t.to(Device::Cpu(0)).numel(), 0);
     }
 
+    /// `zero_` on uninitialized storage zeroes it.
     #[test]
     fn zeroing_fresh_storage_writes_every_byte() {
         let t = unsafe { Tensor::empty(&[3], TensorOptions::new().dtype(DType::F32)) };
@@ -432,6 +480,7 @@ mod device_kernels {
         assert_eq!(t.to_vec::<f32>(), vec![0.0; 3]);
     }
 
+    /// Zeroing a row leaves the other rows alone.
     #[test]
     fn byte_pattern_fills_leave_other_elements_alone() {
         let t = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
@@ -439,6 +488,7 @@ mod device_kernels {
         assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
     }
 
+    /// Fills write the exact value, including negative zero.
     #[test]
     fn other_values_are_written_byte_for_byte() {
         let t = tensor(&[1.0, 2.0, 3.0], &[3]);
@@ -452,6 +502,7 @@ mod device_kernels {
         );
     }
 
+    /// Filling a column view leaves the other columns alone.
     #[test]
     fn strided_fill_leaves_skipped_elements_alone() {
         let t = tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
@@ -459,6 +510,7 @@ mod device_kernels {
         assert_eq!(t.to_vec::<f32>(), vec![0.0, 0.0, 2.0, 3.0, 0.0, 5.0]);
     }
 
+    /// `empty` allocates with the given options and can then be written.
     #[test]
     fn empty_allocates_with_the_options_and_is_writable() {
         let t = unsafe { Tensor::empty(&[2, 3], TensorOptions::new().dtype(DType::I32)) };
@@ -473,11 +525,13 @@ mod device_kernels {
     }
 }
 
+/// Tensors on Metal.
 #[cfg(lumen_mps_linked)]
 mod mps {
     use crate::device::mps;
     use crate::{DType, Device, TensorOptions};
 
+    /// Returns from the test when no Metal device is available.
     macro_rules! require_mps {
         () => {
             if !mps::MPS.is_available() {
@@ -487,6 +541,7 @@ mod mps {
         };
     }
 
+    /// A Metal tensor reads, writes and makes views.
     #[test]
     fn tensor_on_mps_roundtrips() {
         require_mps!();
@@ -506,6 +561,7 @@ mod mps {
         assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
     }
 
+    /// A strided tensor moves to Metal and back with its layout.
     #[test]
     fn tensor_moves_between_cpu_and_mps() {
         require_mps!();
@@ -521,6 +577,7 @@ mod mps {
         assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
     }
 
+    /// `zeros` on Metal gives all-false bools.
     #[test]
     fn zeros_on_mps_are_zero() {
         require_mps!();
@@ -533,6 +590,7 @@ mod mps {
         assert!(t.to_vec::<bool>().iter().all(|&b| !b));
     }
 
+    /// Metal fills work for 2-, 4- and 8-byte elements and row views.
     #[test]
     fn fill_on_mps_writes_every_element_size_on_the_gpu() {
         require_mps!();
@@ -554,6 +612,7 @@ mod mps {
         assert_eq!(t.to_vec::<f32>(), expected);
     }
 
+    /// Metal fills respect views, also for bytes and bools.
     #[test]
     fn fill_on_mps_uses_metal_and_respects_views() {
         require_mps!();
@@ -581,6 +640,7 @@ mod mps {
         assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
     }
 
+    /// Metal fills of overlapping regions apply in submission order.
     #[test]
     fn fills_on_mps_run_in_order() {
         require_mps!();
@@ -599,6 +659,7 @@ mod mps {
         assert_eq!(t.to_vec::<f32>(), expected);
     }
 
+    /// Metal fills of a permuted, narrowed view write only that view.
     #[test]
     fn strided_fills_on_mps_write_only_the_view() {
         require_mps!();
@@ -631,11 +692,13 @@ mod mps {
     }
 }
 
+/// Tensors on CUDA.
 #[cfg(lumen_cuda_linked)]
 mod cuda {
     use crate::device::cuda;
     use crate::{DType, Device, Tensor, TensorOptions};
 
+    /// Returns from the test when no CUDA device is available.
     macro_rules! require_cuda {
         () => {
             if !cuda::CUDA.is_available() {
@@ -645,10 +708,12 @@ mod cuda {
         };
     }
 
+    /// Options for `dtype` on the first CUDA device.
     fn on_gpu(dtype: DType) -> TensorOptions {
         TensorOptions::new().dtype(dtype).device(Device::Cuda(0))
     }
 
+    /// A CUDA tensor reads, writes and makes views.
     #[test]
     fn tensor_on_cuda_roundtrips() {
         require_cuda!();
@@ -662,6 +727,7 @@ mod cuda {
         assert_eq!(col.to_vec::<f32>(), vec![9.0, 4.0]);
     }
 
+    /// A strided tensor moves to CUDA and back with its layout.
     #[test]
     fn tensor_moves_between_cpu_and_cuda() {
         require_cuda!();
@@ -675,6 +741,7 @@ mod cuda {
         assert_eq!(back.to_vec::<i64>(), vec![1, 3, 2, 4]);
     }
 
+    /// A tensor copies between two GPUs into new storage.
     #[test]
     fn tensor_moves_between_gpus() {
         require_cuda!();
@@ -690,14 +757,17 @@ mod cuda {
     }
 }
 
+/// Meta tensors and parameter packing.
 mod meta {
 
     use crate::{DType, Device, Tensor, TensorOptions};
 
+    /// Options for `dtype` on the meta device.
     fn meta(dtype: DType) -> TensorOptions {
         TensorOptions::new().dtype(dtype).device(Device::Meta(0))
     }
 
+    /// `pack` lays out members interleaved per region, and rejects mismatched sizes or regions.
     #[test]
     fn parameters_pack_interleaved() {
         let options = || TensorOptions::new().device(Device::Meta(0));
@@ -754,6 +824,7 @@ mod meta {
         assert!(Tensor::pack(&three, 1, &[2], Device::Cpu(0)).is_err());
     }
 
+    /// Factories, views, fills and display work on meta tensors without data.
     #[test]
     fn factories_and_views_need_no_data() {
         for t in [
@@ -782,6 +853,7 @@ mod meta {
         );
     }
 
+    /// `to(meta)` keeps the shape and strides.
     #[test]
     fn to_meta_drops_the_data() {
         let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], DType::F32).reshape(&[3, 1]);
@@ -792,12 +864,14 @@ mod meta {
         );
     }
 
+    /// Reading a meta tensor's data panics.
     #[test]
     #[should_panic(expected = "meta tensors have no data")]
     fn reading_data_panics() {
         Tensor::zeros(&[2], meta(DType::F32)).to_vec::<f32>();
     }
 
+    /// Copying a meta tensor to the CPU panics.
     #[test]
     #[should_panic(expected = "cannot copy a meta tensor to cpu")]
     fn copying_out_panics() {
@@ -805,10 +879,12 @@ mod meta {
     }
 }
 
+/// `Tensor::to_dtype`.
 mod to_dtype {
     use crate::tensor::dtype::bf16;
     use crate::{DType, Device, Tensor};
 
+    /// Casts run on the tensor's device, a same-dtype cast is a no-op, and meta casts keep meta.
     #[test]
     fn converts_on_the_tensors_device() {
         let x = Tensor::from_slice(&[1.0f32, 2.5, -3.7, 1e6], DType::F32);
@@ -839,6 +915,7 @@ mod to_dtype {
     }
 }
 
+/// f16 and bf16 conversions from f64 round once, to nearest even.
 #[test]
 fn half_floats_round_to_nearest_once() {
     use crate::tensor::dtype::{to_bf16, to_f16};
@@ -864,6 +941,7 @@ fn half_floats_round_to_nearest_once() {
     assert!(to_f16(f64::NAN).is_nan());
 }
 
+/// Narrow dtypes encode to the same bytes as `ml_dtypes`, and float8 bytes round-trip.
 #[test]
 fn narrow_dtypes_are_ml_dtypes_bytes() {
     use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2, i2, i4, u4};
