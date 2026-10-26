@@ -1,4 +1,5 @@
-//! Autotuning candidate configurations for Triton GEMM and looped (row/elementwise) kernels.
+//! Autotuning candidates and launch defaults for Triton kernels: GEMM, looped (row/elementwise),
+//! reduction and flash-attention.
 
 /// Tile shape and launch parameters for one Triton GEMM candidate.
 #[derive(Debug, Clone, Copy)]
@@ -129,3 +130,16 @@ pub(crate) fn untuned_attention(head_bytes: usize) -> AttentionConfig {
         false => ATTENTION_CONFIGS[7],
     }
 }
+
+/// Most lanes per output when the reduced axis is innermost.
+pub(super) const ROW_LANES: usize = 256;
+/// Most lanes per output for a split reduction over the innermost axis.
+pub(super) const SPLIT_ROW_LANES: usize = 512;
+/// Most lanes per output when the reduced axis is strided (outputs are contiguous instead).
+pub(super) const COLUMN_LANES: usize = 16;
+/// Reductions with fewer outputs than this are split across programs to fill the GPU.
+pub(super) const SPLIT_BELOW: usize = 1024;
+/// Reduced elements each split aims to cover.
+pub(super) const SPLIT_SPAN: usize = 8192;
+/// Upper bound on splits per output.
+pub(super) const MOST_SPLITS: usize = 512;
