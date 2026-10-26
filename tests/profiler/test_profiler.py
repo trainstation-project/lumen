@@ -3,13 +3,12 @@
 import json
 
 import pytest
+from helpers import CUDA
 
 import lumen
 import lumen.functional as F
 from lumen.graph._C import FUSION_SEPARATOR
 from lumen.profiler import ProfilerActivity, profile, record_function
-
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 def _names(prof, kind=None):

@@ -4,19 +4,15 @@ import re
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS, rand
 
 import lumen
 import lumen.functional as F
 
-DEVICES = [pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
+DEVICES = [MPS, CUDA]
 
 # Most buffers one horizontally fused kernel binds on each device.
 MAX_BUFFERS = {"mps": 30, "cuda": 64}
-
-
-def rand(*shape, seed=0):
-    """Standard normal float32 array of `shape` from `seed`."""
-    return np.random.default_rng(seed).standard_normal(shape).astype(np.float32)
 
 
 @pytest.fixture

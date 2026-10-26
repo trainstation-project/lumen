@@ -2,13 +2,11 @@
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS
 
 import lumen
 import lumen.functional as F
 from lumen.config._C import CompilerConfig
-
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 @pytest.fixture

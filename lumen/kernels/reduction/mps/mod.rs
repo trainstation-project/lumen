@@ -211,8 +211,11 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     let a: usize = x.shape[..first].iter().product();
     let count: usize = x.shape[first..end].iter().product();
     let b: usize = x.shape[end..].iter().product();
-    // aim for about 256 threadgroups on rows and 65536 threads on columns, without chunks shorter than 4096/64
-    let chunks = if b == 1 {
+    // aim for about 256 threadgroups on rows and 65536 threads on columns, without chunks shorter than 4096/64;
+    // an empty output has nothing to split
+    let chunks = if a * b == 0 {
+        1
+    } else if b == 1 {
         if a >= 256 {
             1
         } else {

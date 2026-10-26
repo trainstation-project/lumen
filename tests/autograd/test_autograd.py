@@ -3,14 +3,11 @@ autograd Functions, and the attention and merged-dot nodes autodiff differentiat
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS, TPU
 
 import lumen
 import lumen.functional as F
 from lumen import prims
-
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
-TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def numeric_grad(f, xs, argnum, eps=1e-6):

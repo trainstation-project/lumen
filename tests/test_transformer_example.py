@@ -2,12 +2,11 @@
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS, meta
 
 import lumen
 import lumen.functional as F
 
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
 BATCH, PASSES, LR = 8, 3, 3e-3
 
@@ -159,11 +158,6 @@ def train_step(model, opt, x, y):
 def predict(model, x):
     """Returns the model's logits for `x`."""
     return model(x)
-
-
-def meta(*shape, dtype="float32"):
-    """Meta tensor of `shape` and `dtype`, a placeholder for tracing."""
-    return lumen.empty(list(shape), dtype, device="meta")
 
 
 def _model():

@@ -4,14 +4,11 @@ import math
 
 import numpy as np
 import pytest
+from helpers import CUDA, MPS, TPU
 
 import lumen
 import lumen.functional as F
 from lumen import prims
-
-MPS = pytest.param("mps", marks=pytest.mark.mps)
-CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
-TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def tensor(a, dtype=None, device="cpu"):
