@@ -1,24 +1,38 @@
+//! Metal encoding of `Cumsum`, splitting long scans into chunks scanned in three passes.
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, launch, u32_arg, u64_arg};
 use crate::kernels::reduction::mps::kernel_dtype;
 use crate::{DType, Tensor};
 
+/// Scan length above which a contiguous axis uses the threadgroup row kernel.
 const ROW_THREADS: usize = 64;
+/// Target number of row threadgroups when splitting rows into chunks.
 const ROW_GROUPS: usize = 256;
+/// Smallest chunk a split row scan gives a threadgroup.
 const ROW_CHUNK: usize = 4096;
+/// Target number of threads when splitting strided lines into chunks.
 const LINE_THREADS: usize = 16384;
+/// Smallest chunk a split line scan gives a thread.
 const LINE_CHUNK: usize = 64;
 
+/// How a cumsum over one axis is laid out and split.
 struct Scan {
+    /// Product of the dims before the axis.
     a: usize,
+    /// Length of the scanned axis.
     n: usize,
+    /// Product of the dims after the axis (the scan stride).
     b: usize,
+    /// Whether the axis is contiguous and long enough for the threadgroup row kernel.
     rows: bool,
+    /// Number of chunks each line is split into.
     chunks: usize,
+    /// Elements per chunk.
     chunk: usize,
 }
 
+/// Picks the kernel and chunking for a cumsum of `x` along `axis`, splitting lines so there is enough parallel work.
 fn scan(x: &TensorType, axis: usize) -> Scan {
     let a: usize = x.shape[..axis].iter().product();
     let (n, b): (usize, usize) = (x.shape[axis], x.shape[axis + 1..].iter().product());
@@ -42,6 +56,7 @@ fn scan(x: &TensorType, axis: usize) -> Scan {
     }
 }
 
+/// Bytes of scratch for per-chunk partial sums; zero when the scan is not split.
 pub(crate) fn scratch_bytes(x: &TensorType, axis: usize, accum: DType) -> usize {
     let s = scan(x, axis);
     match s.chunks {
@@ -50,6 +65,8 @@ pub(crate) fn scratch_bytes(x: &TensorType, axis: usize, accum: DType) -> usize 
     }
 }
 
+/// Encodes a cumsum step. A split scan runs three passes: per-chunk totals into scratch,
+/// an in-place scan of those totals, then the chunked scan carrying each chunk's prefix.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -115,6 +132,7 @@ pub(crate) fn encode(
     };
     if chunks > 1 {
         pass(true, keep.clone())?;
+        // Scans each line's chunk totals in place, as a contiguous line of length `chunks`.
         let lines = a * b;
         let args = [
             u64_arg(chunks),

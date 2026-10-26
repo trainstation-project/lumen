@@ -1,3 +1,5 @@
+"""Trains a two-layer MLP on ``sin(sum(x))`` with ``loss.backward()``, PyTorch style; pass a device as the first argument."""
+
 import sys
 
 import numpy as np
@@ -10,14 +12,18 @@ device = sys.argv[1] if len(sys.argv) > 1 else "cpu"
 
 
 class MLP(lumen.nn.Module):
+    """Two bias-free linear layers with a ReLU between them."""
+
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Maps ``x`` of shape ``[batch, 8]`` to ``[batch, 1]``."""
         return F.matmul(F.relu(F.matmul(x, self.w1, "float32", "float32")), self.w2, "float32", "float32")
 
 
 def train_step(model, opt, x, y):
+    """Takes one AdamW step on the MSE loss and returns the loss."""
     opt.zero_grad()
     d = model(x) - y
     loss = F.mean(d * d)

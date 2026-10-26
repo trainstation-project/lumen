@@ -1,3 +1,5 @@
+"""Mapping from lumen dtype names to CuTe numeric types."""
+
 from cutlass import BFloat16, Float16, Float32, Int32, Int64, Numeric, Uint32
 
 _LUMEN_DTYPE_TO_CUTE_DTYPE_MAPPING = {

@@ -1,3 +1,5 @@
+//! Python bindings for building, inspecting and running lumen graphs (`lumen.graph._C`).
+
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -5,12 +7,14 @@ use pyo3::types::PyDict;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 
+/// A graph being traced from Python, exposed as `lumen.Graph`.
 #[pyclass(name = "Graph", module = "lumen")]
 #[derive(Default)]
 pub(crate) struct PyGraph {
     pub(crate) inner: Graph,
 }
 
+/// Builds the primitive called `name` from its Python keyword parameters, as `lumen.graph.prims` passes them.
 pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
     use Primitive::*;
     let get = |key: &str| {
@@ -131,6 +135,7 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             exponent_bits: get("exponent_bits")?.extract()?,
             mantissa_bits: get("mantissa_bits")?.extract()?,
         }),
+        // Remaining names are the generic unary and binary elementwise ops.
         other if crate::graph::UnaryOp::of_name(other).is_some() => {
             Unary(crate::graph::UnaryOp::of_name(other).expect("checked"))
         }
@@ -147,17 +152,20 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
 
 #[pymethods]
 impl PyGraph {
+    /// An empty graph.
     #[new]
     fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a graph input of `dtype` and `shape` and returns its value.
     fn input(&mut self, dtype: &str, shape: Vec<usize>) -> PyResult<Var> {
         Ok(self
             .inner
             .input(TensorType::new(parse_dtype(dtype)?, &shape)))
     }
 
+    /// Appends primitive `name` (with `params`) applied to `inputs`, type-checking it, and returns its output.
     #[pyo3(signature = (name, inputs, params = None))]
     fn apply(
         &mut self,
@@ -176,6 +184,7 @@ impl PyGraph {
             .map_err(PyValueError::new_err)
     }
 
+    /// The `(dtype, shape)` of `var`, or an error if it is not a value of this graph.
     fn type_of(&self, var: Var) -> PyResult<(&'static str, Vec<usize>)> {
         if var >= self.inner.types.len() {
             return Err(PyValueError::new_err(format!(
@@ -186,26 +195,31 @@ impl PyGraph {
         Ok((dtype_name(ty.dtype), ty.shape.clone()))
     }
 
+    /// The graph's input values in order.
     fn inputs(&self) -> Vec<Var> {
         self.inner.inputs().to_vec()
     }
 
+    /// The graph's output values in order.
     fn outputs(&self) -> Vec<Var> {
         self.inner.outputs().to_vec()
     }
 
+    /// Drops nodes the outputs don't need; returns, for each old value, its new index if kept.
     fn prune(&mut self) -> Vec<Option<Var>> {
         let (pruned, map) = self.inner.prune();
         self.inner = pruned;
         map
     }
 
+    /// Records `file:line` as the Python source of the node producing `var`.
     fn _set_source(&mut self, var: Var, file: String, line: u32) {
         let line = (crate::graph::intern(file), line);
         self.inner
             .set_sources(var, crate::graph::intern_lines(&[line]));
     }
 
+    /// Sets the profiler scope (`(name, call)` ranges) attached to nodes appended from now on.
     fn _set_scope(&mut self, ranges: Vec<(String, u64)>) {
         let ranges: Vec<crate::graph::Range> = ranges
             .into_iter()
@@ -217,6 +231,8 @@ impl PyGraph {
         self.inner.set_scope(crate::graph::intern_scope(&ranges));
     }
 
+    /// The attention patterns the compiler recognises in the graph, one dict each: the q/k/v,
+    /// score and output values, the softmax max/sum, the score chain, causal mask, dropout and member nodes.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         use crate::graph_compiler::common::attention::{Score, traced};
         let nodes = self.inner.nodes();
@@ -262,10 +278,12 @@ impl PyGraph {
             .collect()
     }
 
+    /// `(accumulation, cast, message)` for each dot or sum rounded to a narrow output that is later cast back up.
     fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()
     }
 
+    /// Each node as a dict of its primitive, params, inputs, output, profiler scope and sources.
     fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
             .nodes()
@@ -281,12 +299,14 @@ impl PyGraph {
             .collect()
     }
 
+    /// Marks `outputs` as the graph's results.
     fn set_outputs(&mut self, outputs: Vec<Var>) -> PyResult<()> {
         self.inner
             .set_outputs(&outputs)
             .map_err(PyValueError::new_err)
     }
 
+    /// Runs the graph on `inputs` with the reference CPU interpreter and returns its outputs.
     fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
         let outputs =
@@ -294,15 +314,18 @@ impl PyGraph {
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
+    /// The graph in its text form.
     fn __str__(&self) -> String {
         self.inner.to_string()
     }
 
+    /// The graph in its text form.
     fn __repr__(&self) -> String {
         self.inner.to_string()
     }
 }
 
+/// The primitive's parameters as a Python dict, the inverse of `primitive`; empty for parameterless ones.
 fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
     use Primitive::*;
     let d = PyDict::new(py);
@@ -427,6 +450,8 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
     Ok(d)
 }
 
+/// A node's primitive as a dict of its name, params and text; a fusion also gets its kernel name,
+/// body and (on Metal) generated source under `fusion`.
 pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
@@ -451,8 +476,10 @@ pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bo
     Ok(d)
 }
 
+/// Python callables registered as custom ops, indexed by the kernel handle stored in `CustomCall`.
 static CUSTOM_OPS: std::sync::RwLock<Vec<Py<PyAny>>> = std::sync::RwLock::new(Vec::new());
 
+/// Stores a custom op's Python function and returns its kernel handle.
 #[pyfunction]
 fn _register_custom_op(f: Py<PyAny>) -> usize {
     let mut ops = CUSTOM_OPS
@@ -462,6 +489,7 @@ fn _register_custom_op(f: Py<PyAny>) -> usize {
     ops.len() - 1
 }
 
+/// Calls the Python custom op with handle `kernel` on `args`, holding the GIL.
 fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
     Python::attach(|py| {
         let f = {
@@ -477,6 +505,7 @@ fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
     })
 }
 
+/// Adds the graph bindings to `lumen.graph._C` and installs the custom-op call hook.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::graph::custom::set_hook(call_custom_op);
     m.add_function(wrap_pyfunction!(_register_custom_op, m)?)?;
@@ -484,6 +513,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)
 }
 
+/// The range names of a profiler scope, outermost first.
 pub(crate) fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
     scope.iter().map(|r| r.name).collect()
 }

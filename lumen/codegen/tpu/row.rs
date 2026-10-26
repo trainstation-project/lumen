@@ -1,3 +1,6 @@
+//! TPU row fusions: elementwise work around reductions over each row's last axis (norms, softmax),
+//! with every value classified by how it lines up with the rows.
+
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
@@ -10,17 +13,24 @@ use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::kernels::tpu::{Launch, launch};
 
+/// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;
 
+/// How a row fusion value lines up with its `rows x n` operand.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Kind {
+    /// Every element: `rows x n`.
     Full,
+    /// One value per row, such as a reduction's result.
     PerRow,
+    /// One value per column, shared by every row.
     Lanes,
+    /// A single value.
     Scalar,
 }
 
 impl Kind {
+    /// The kind's name in the kernel spec.
     #[cfg(lumen_tpu_linked)]
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -32,6 +42,8 @@ impl Kind {
     }
 }
 
+/// Whether `node` can join a TPU row fusion: 32-bit-or-narrower dtypes and an elementwise, reshape,
+/// broadcast or reduction primitive.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     let narrow = node
@@ -47,6 +59,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     narrow && row_op
 }
 
+/// The axes `p` reduces, or `None` when it is not a sum or max reduction.
 fn reduction(p: &Primitive) -> Option<&[usize]> {
     match p {
         Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => Some(axes),
@@ -54,6 +67,7 @@ fn reduction(p: &Primitive) -> Option<&[usize]> {
     }
 }
 
+/// The `(rows, n)` of the fusion's first reduction operand, viewed as rows of its last axis.
 pub(crate) fn rows(body: &Graph) -> Option<(usize, usize)> {
     let node = body
         .nodes()
@@ -64,6 +78,8 @@ pub(crate) fn rows(body: &Graph) -> Option<(usize, usize)> {
     Some((x.numel() / n.max(1), n))
 }
 
+/// Each value's kind in the row fusion `body`, or `None` when some value doesn't line up with
+/// whole rows or a node mixes kinds it can't.
 pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
     let (rows, n) = rows(body)?;
     let nodes = body.nodes();
@@ -75,6 +91,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
         m if m == n => Some(Kind::Lanes),
         _ => None,
     };
+    // Backward pass: a value takes the kind its readers need.
     let mut kind: Vec<Option<Kind>> = vec![None; body.types.len()];
     for node in nodes.iter().rev() {
         match &node.primitive {
@@ -85,6 +102,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
             } => {
                 let (x, out) = (node.inputs[0], body.type_of(node.output));
                 let xt = body.type_of(x);
+                // A broadcast whose last output dim comes from an `n`-wide operand dim spreads lanes; otherwise it spreads rows.
                 let last = out.shape.len().saturating_sub(1);
                 let onto_last = broadcast_dimensions
                     .iter()
@@ -108,6 +126,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
             }
         }
     }
+    // Forward pass: settle each node output's kind from its operands.
     for node in nodes {
         let out = body.type_of(node.output);
         let k = match &node.primitive {
@@ -134,6 +153,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
         Kind::Lanes => n,
         Kind::Scalar => 1,
     };
+    // Every used value's size must match its kind; unused slots default to scalar.
     let mut known = Vec::with_capacity(kind.len());
     for (v, k) in kind.iter().enumerate() {
         let used = body.inputs().contains(&v) || nodes.iter().any(|n| n.output == v);
@@ -143,6 +163,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
             _ => return None,
         }
     }
+    // Check each node combines its operands' kinds in a way the kernel supports.
     for node in nodes {
         let out = known[node.output];
         let operands: Vec<Kind> = node.inputs.iter().map(|&v| known[v]).collect();
@@ -166,6 +187,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
     Some(known)
 }
 
+/// Whether `t` can be streamed as `kind`: rows of whole tiles, a lane vector or a scalar.
 pub(crate) fn readable(t: &TensorType, kind: Kind) -> bool {
     let Ok(layout) = Layout::new(t.dtype, &t.shape) else {
         return false;
@@ -182,6 +204,8 @@ pub(crate) fn readable(t: &TensorType, kind: Kind) -> bool {
     }
 }
 
+/// Whether the row fusion `body` runs on TPU: whole-row operands, row-shaped outputs and a
+/// minimal block within `ROW_BYTES`.
 pub(crate) fn fits(body: &Graph) -> bool {
     let Some((rows, n)) = rows(body) else {
         return false;
@@ -199,6 +223,7 @@ pub(crate) fn fits(body: &Graph) -> bool {
         && unit * n * 4 <= ROW_BYTES
 }
 
+/// The JSON node for `node` in a row kernel, tagged with its value's `kind`.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
     let named = |params: String| {
@@ -215,6 +240,7 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
         Primitive::ReduceMax { .. }
         | Primitive::Reshape { .. }
         | Primitive::BroadcastInDim { .. } => named(String::new()),
+        // Splice the kind into the plain node's closing brace.
         p => {
             let plain = super::node(p, args);
             format!(
@@ -226,6 +252,7 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
     }
 }
 
+/// Launches the row fusion `step` on TPU `index`, writing into `output`.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn encode(
     index: usize,
@@ -271,6 +298,7 @@ pub(crate) fn encode(
             )
         })
         .collect();
+    // Block rows come in multiples of the tallest tile among the operand dtypes.
     let unit = body
         .inputs()
         .iter()

@@ -1,3 +1,5 @@
+"""Tests for `dynamic_slice` and `dynamic_update_slice`: values, clamping, gradients and in-place updates."""
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,7 @@ def triton():
 
 
 def _tensor(a, device, dtype=None):
+    """`a` on `device` (cast to `dtype` if given), skipping the test if the device is unavailable."""
     try:
         t = lumen.from_numpy(a).to(device)
     except RuntimeError as e:
@@ -36,6 +39,7 @@ def _block(shape, starts, sizes):
 
 
 def _scalars(*indices):
+    """Each index tensor reshaped to a 0-d scalar."""
     return [i.reshape(()) for i in indices]
 
 
@@ -114,6 +118,7 @@ def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_
     x, *us = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, *uts))
 
     def f(x, *us):
+        """Applies each update in turn to (optionally a computed copy of) `x`."""
         x = x * 2.0 if in_place else x
         for u, at in zip(us, starts):
             x = prims.dynamic_update_slice(x, u, at)
@@ -148,6 +153,7 @@ def test_narrow_at_tensor_start(device, dtype, start):
     np.testing.assert_array_equal(lumen.to_numpy(read.to(dtype="float32")), 2 * x[block])
 
     def write(x, u, i):
+        """Writes `u` into a narrow view of `2 * x` at start `i`."""
         y = x * 2.0
         y.narrow(1, i.reshape(()), 4).copy_(u)
         return y
@@ -188,6 +194,7 @@ def test_dynamic_slice_gradients(device):
     block = _block(x.shape, (2, 1), u.shape)
 
     def sliced(x, w, i):
+        """Sum of the product of the blocks of `x` and `w` at row `i`."""
         return F.sum(
             prims.dynamic_slice(x, (i.reshape(()), 1), (2, 3)) * prims.dynamic_slice(w, (i.reshape(()), 1), (2, 3))
         )
@@ -198,6 +205,7 @@ def test_dynamic_slice_gradients(device):
     np.testing.assert_allclose(lumen.to_numpy(gx), want)
 
     def updated(x, u, w, i):
+        """Sum of `w` times `x` with `u` written at row `i`."""
         return F.sum(prims.dynamic_update_slice(x, u, (i.reshape(()), 1)) * w)
 
     gx, gu = lumen.compile(lumen.grad(updated, (0, 1)))(xt, ut, wt, i)
@@ -208,6 +216,7 @@ def test_dynamic_slice_gradients(device):
 
 
 def _plan(f, *shapes, **options):
+    """The CPU plan of `f` traced on meta tensors of the given `(shape, dtype)` pairs, as text."""
     args = [lumen.empty(s, dtype=d, device="meta") for s, d in shapes]
     return str(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "cpu", **options))
 
@@ -248,6 +257,7 @@ def test_operand_read_after_its_update(device):
     i = _tensor(np.array([2], np.int32), device)
 
     def f(x, u, i):
+        """The update of `2 * x`, and a reshape of `2 * x` read after it."""
         e = x * 2.0
         return prims.dynamic_update_slice(e, u, (i.reshape(()), 0)), e.reshape(24) * 3.0
 
@@ -259,6 +269,8 @@ def test_operand_read_after_its_update(device):
 
 
 class _Cache(lumen.nn.Module):
+    """Module holding a key cache tensor."""
+
     k: lumen.Tensor
 
 
@@ -271,6 +283,7 @@ def test_kv_cache_is_written_in_place(device):
     cache = _Cache(lumen.empty([1, 64, 4], device="meta"))
 
     def step(c, k, t):
+        """Writes `k` into the cache at position `t` and returns its sum."""
         c.k.copy_(prims.dynamic_update_slice(c.k, k, (0, t.reshape(()), 0)))
         return F.sum(k)
 

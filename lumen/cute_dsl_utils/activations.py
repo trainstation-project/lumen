@@ -1,3 +1,5 @@
+"""Fast-math activations for CuTe DSL kernels, computed in float32."""
+
 import cutlass.cute as cute
 from cutlass import Float32, Numeric, const_expr, range_constexpr
 from cutlass.cute import TensorSSA
@@ -5,6 +7,7 @@ from cutlass.cute import TensorSSA
 
 @cute.jit
 def tanh(x: Numeric | TensorSSA, output_dtype: Numeric | None = None) -> Numeric | TensorSSA:
+    """tanh of a scalar or register tensor via fast-math float32, cast to `output_dtype` (default: `x`'s)."""
     if const_expr(output_dtype is None):
         output_dtype = x.dtype
 
@@ -25,6 +28,7 @@ def tanh(x: Numeric | TensorSSA, output_dtype: Numeric | None = None) -> Numeric
 
 @cute.jit
 def sigmoid(x: Numeric | TensorSSA, output_dtype: Numeric | None = None) -> Numeric | TensorSSA:
+    """Logistic sigmoid as `0.5 * tanh(x / 2) + 0.5`, cast to `output_dtype` (default: `x`'s)."""
     if const_expr(output_dtype is None):
         output_dtype = x.dtype
 

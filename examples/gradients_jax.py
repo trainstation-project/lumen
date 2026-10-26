@@ -1,3 +1,5 @@
+"""Trains a two-layer MLP on ``sin(sum(x))`` with ``lumen.value_and_grad``, JAX style; pass a device as the first argument."""
+
 import sys
 
 import numpy as np
@@ -10,19 +12,24 @@ device = sys.argv[1] if len(sys.argv) > 1 else "cpu"
 
 
 class MLP(lumen.nn.Module):
+    """Two bias-free linear layers with a ReLU between them."""
+
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Maps ``x`` of shape ``[batch, 8]`` to ``[batch, 1]``."""
         return F.matmul(F.relu(F.matmul(x, self.w1, "float32", "float32")), self.w2, "float32", "float32")
 
 
 def loss_fn(model, x, y):
+    """Mean squared error of ``model(x)`` against ``y``."""
     d = model(x) - y
     return F.mean(d * d)
 
 
 def train_step(model, opt, x, y):
+    """Takes one AdamW step on the MSE gradients and returns the loss."""
     loss, grads = lumen.value_and_grad(loss_fn)(model, x, y)
     opt.step([grads.w1, grads.w2])
     return loss

@@ -1,3 +1,5 @@
+"""Python tensor API: dtype names, tensor factories (traced as prims inside ``lumen.compile``) and numpy/DLPack interop."""
+
 import builtins
 
 from lumen.tensor import dlpack
@@ -86,18 +88,23 @@ def empty(shape, dtype=None, device=None):
 
 
 def zeros(shape, dtype=None, device=None):
+    """A tensor of zeros; inside a trace, a ``full`` prim in ``dtype`` or the default dtype."""
     if prims := _prims():
         return prims.full(shape, 0, dtype or default_dtype)
     return Tensor.zeros(list(shape), dtype, device)
 
 
 def ones(shape, dtype=None, device=None):
+    """A tensor of ones; inside a trace, a ``full`` prim in ``dtype`` or the default dtype."""
     if prims := _prims():
         return prims.full(shape, 1, dtype or default_dtype)
     return Tensor.ones(list(shape), dtype, device)
 
 
 def full(shape, value, dtype=None, device=None):
+    """A tensor filled with ``value``; inside a trace, a ``full`` prim, or a broadcast when ``value`` is a traced scalar.
+
+    Without ``dtype``, a traced fill takes bool, int64 or the default dtype from ``value``'s Python type."""
     if prims := _prims():
         if getattr(value, "shape", None) == ():
             value = value if dtype in (None, value.dtype) else prims.cast(value, dtype)
@@ -108,11 +115,13 @@ def full(shape, value, dtype=None, device=None):
 
 
 def arange(n, dtype=None, device=None):
+    """``0, 1, ..., n - 1``; inside a trace, an ``iota`` prim."""
     if prims := _prims():
         return prims.iota(dtype or default_dtype, (n,), 0)
     return Tensor.arange(n, dtype, device)
 
 
+# Dtypes numpy reads through the ``ml_dtypes`` package, converted element by element.
 _ML_DTYPES = ("int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2", "float8_e4m3b11fnuz")
 
 
@@ -130,6 +139,7 @@ def to_numpy(t):
         return np.asarray(t.tolist(), dtype=getattr(ml_dtypes, t.dtype))
     host = t.cpu()
     array = np.from_dlpack(host)
+    # ``cpu()`` returns the same storage for a host tensor, so copy to keep the array independent.
     return array.copy() if host.storage_id == t.storage_id else array
 
 
@@ -146,12 +156,14 @@ def from_numpy(a):
 
 
 def _tensor__array__(self, dtype=None, copy=None):
+    """numpy's ``__array__`` protocol for ``Tensor``, casting to ``dtype`` when given."""
     arr = to_numpy(self)
     if dtype is not None:
         arr = arr.astype(dtype, copy=False)
     return arr
 
 
+# Attach numpy and DLPack protocols to the native Tensor class.
 try:
     Tensor.__array__ = _tensor__array__
     Tensor.__dlpack__ = dlpack.__dlpack__

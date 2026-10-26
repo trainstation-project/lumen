@@ -1,5 +1,8 @@
+//! Metal source for a single reduction fused with an elementwise prologue and epilogue.
 use super::*;
 
+/// The body's only reduction when the first output reaches it through elementwise or reshape
+/// nodes alone, else `None`.
 pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     use Primitive::*;
     let nodes = body.nodes();
@@ -7,6 +10,8 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
+    // Walk back from the first output; any non-elementwise node other than the one reduction
+    // rules the body out.
     let (mut found, mut stack) = (None, vec![body.outputs()[0]]);
     while let Some(v) = stack.pop() {
         let i = producer[v]?;
@@ -28,6 +33,8 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     found.filter(|_| reductions == 1).map(|i| &nodes[i])
 }
 
+/// Labels for the two launches of a split reduction: the reduction with its prologue, and the
+/// reduction root with its epilogue.
 pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
     let root = reduction_root(body).expect("a reduction fusion");
     let nodes = body.nodes();
@@ -55,10 +62,13 @@ pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
     (names(false), names(true))
 }
 
+/// Whether the body applies an epilogue after its reduction.
 pub(crate) fn has_epilogue(body: &Graph) -> bool {
     reduction_root(body).is_some_and(|r| r.output != body.outputs()[0])
 }
 
+/// Generates the reduction kernel for `root`, reading its operand through a fused `NAME_input`
+/// functor and, when the reduction splits, a `NAME_final` kernel that applies the epilogue.
 pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String, String) {
     let x = root.inputs[0];
     let ty = body.type_of(x);
@@ -113,6 +123,7 @@ pub(super) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> (String
     let a = metal_type(body.type_of(root.output).dtype);
     let shared = format!("threadgroup {a} shared[REDUCE_THREADS];");
     let split = reduce::splits(ty, axes);
+    // A split reduction writes raw partials; the epilogue then runs only in the final pass.
     let (epi, written) = match (&epilogue, split) {
         (Some(_), false) => (", NAME_epilogue()", o),
         _ => ("", a),

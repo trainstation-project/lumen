@@ -1,4 +1,5 @@
 
+/// `simd_shuffle_up` for any element type, moving its bits through an unsigned integer of the same width.
 template <typename A> inline A shuffle_up(A x, ushort delta) {
     if constexpr (sizeof(A) == 8) {
         return as_type<A>(simd_shuffle_up(as_type<uint2>(x), delta));
@@ -11,6 +12,7 @@ template <typename A> inline A shuffle_up(A x, ushort delta) {
     }
 }
 
+/// Inclusive prefix sum of `x` across the 32 lanes of a simdgroup (Hillis-Steele).
 template <typename A> inline A simd_inclusive_sum(A x, ushort lane) {
     for (ushort d = 1; d < 32; d *= 2) {
         A below = shuffle_up(x, d);
@@ -21,11 +23,15 @@ template <typename A> inline A simd_inclusive_sum(A x, ushort lane) {
     return x;
 }
 
+/// Sum of all chunks before chunk `c` of `line`, read from the scanned per-chunk `partials`.
 template <typename A> inline A carried(device const A *partials, uint chunks, ulong line, uint c) {
     return c > 0 ? partials[line * chunks + c - 1] : A(0);
 }
 
+/// Elements each thread of a row scan reads per 256-thread pass.
 #define SCAN_READS 4
+/// Scans elements `[start, end)` of one contiguous row with a 256-thread threadgroup, adding `carry`.
+/// Writes the prefix sums when `WRITE`, and returns `carry` plus the range's total. `reverse` scans from the end.
 template <bool WRITE, typename T, typename A>
 inline A cumsum_rows(device const T *in,
                      device A *out,
@@ -48,6 +54,7 @@ inline A cumsum_rows(device const T *in,
             }
             sums[r] = sum;
         }
+        // Each thread's local sums are offset by the lanes below it, then by the simdgroups below it.
         A inclusive = simd_inclusive_sum(sum, lane);
         A before = shuffle_up(inclusive, 1);
         if (lane == 0) {
@@ -57,6 +64,7 @@ inline A cumsum_rows(device const T *in,
             totals[sg] = inclusive;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        // The first simdgroup scans the 8 simdgroup totals into totals[8..16].
         if (sg == 0) {
             A group = simd_inclusive_sum(lane < 8 ? totals[lane] : A(0), lane);
             if (lane < 8) {
@@ -79,9 +87,12 @@ inline A cumsum_rows(device const T *in,
     return carry;
 }
 
+/// Serially scans elements `[start, end)` of one strided line (stride `b`), adding `carry`.
+/// Writes the prefix sums when `WRITE`, and returns `carry` plus the range's total.
 template <bool WRITE, typename T, typename A>
 inline A cumsum_lines(
     device const T *in, device A *out, ulong n, bool reverse, uint b, uint line, ulong start, ulong end, A carry) {
+    // Line `line` is outer index `line / b` and inner index `line % b`.
     ulong first = ulong(line / b) * n * b + line % b;
     for (ulong k = start; k < end; ++k) {
         ulong at = first + (reverse ? n - 1 - k : k) * b;
@@ -93,6 +104,9 @@ inline A cumsum_lines(
     return carry;
 }
 
+/// Defines the row (contiguous axis, one threadgroup per row chunk) and line (strided axis, one thread per line chunk)
+/// cumsum kernels for input `T` and accumulator `A`. With `sum_only`, they write each chunk's total to `partials`;
+/// otherwise they scan, starting each chunk from the scanned `partials`.
 #define CUMSUM(NAME, T, A)                                                                                        \
     kernel void cumsum_rows_##NAME(device const T *in [[buffer(0)]],                                              \
                                    device A *out [[buffer(1)]],                                                   \
@@ -142,6 +156,7 @@ inline A cumsum_lines(
         }                                                                                                         \
     }
 
+/// Instantiates `CUMSUM` with the accumulator type equal to the input type.
 #define CUMSUM_SAME(NAME, T) CUMSUM(NAME, T, T)
 
 #ifndef TEMPLATES_ONLY

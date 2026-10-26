@@ -1,3 +1,5 @@
+"""Tests of lumen.distributed: device meshes, the TCP store, process groups and multi-process launches."""
+
 import json
 import os
 import socket
@@ -10,22 +12,27 @@ import pytest
 import lumen
 from lumen.distributed import DeviceMesh, TCPStore, get_rank, get_world_size, init_device_mesh, is_initialized
 
+# Environment variables a launcher like torchrun sets for each process.
 LAUNCHER = ("RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
 
 
 @pytest.fixture(autouse=True)
 def one_process(monkeypatch):
+    """Runs every test as a single process, without the launcher's variables."""
     for name in LAUNCHER:
         monkeypatch.delenv(name, raising=False)
 
 
 def free_port():
+    """A TCP port on localhost that is free right now."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
 def launch(program, world_size, env=lambda rank: {}):
+    """Runs `program` in `world_size` Python processes wired by env rendezvous; returns each one's last
+    JSON line, sorted by rank. `env` adds variables per rank."""
     port = free_port()
     processes = [
         subprocess.Popen(
@@ -54,11 +61,13 @@ def launch(program, world_size, env=lambda rank: {}):
 
 
 def test_rank_and_world_size_default_to_one_process():
+    """Without a launcher, lumen sees rank 0 of a world of one, uninitialized."""
     assert (get_rank(), get_world_size()) == (0, 1)
     assert not is_initialized()
 
 
 def test_a_mesh_of_one_process():
+    """A 1x1 mesh needs no process group and answers its shape, names, rank and coordinate queries."""
     mesh = init_device_mesh("cuda", (1, 1), mesh_dim_names=("dp", "tp"))
     assert mesh.mesh == [[0]]
     assert (mesh.device_type, mesh.shape, mesh.ndim, mesh.size()) == ("cuda", (1, 1), 2, 1)
@@ -86,11 +95,13 @@ def test_a_mesh_of_one_process():
     ],
 )
 def test_invalid_meshes(device_type, mesh, names, error):
+    """Malformed meshes raise naming what is wrong."""
     with pytest.raises(ValueError, match=error):
         DeviceMesh(device_type, mesh, mesh_dim_names=names)
 
 
 def test_equality_and_repr():
+    """Meshes compare and hash by device type, layout and names, and repr as their constructor call."""
     mesh = DeviceMesh("cpu", [[0]], mesh_dim_names=("dp", "tp"))
     assert mesh == init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp", "tp"))
     assert hash(mesh) == hash(init_device_mesh("cpu", (1, 1), mesh_dim_names=("dp", "tp")))
@@ -101,6 +112,7 @@ def test_equality_and_repr():
 
 @pytest.mark.mps
 def test_an_mps_mesh_is_the_one_device_without_a_rendezvous():
+    """An MPS mesh is the single local device and starts no process group."""
     mesh = init_device_mesh("mps", (1,), mesh_dim_names=("dp",))
     assert (mesh.get_coordinate(), mesh.get_local_rank()) == ([0], 0)
     with pytest.raises(RuntimeError, match="the 1 MPS device, got 2"):
@@ -110,6 +122,7 @@ def test_an_mps_mesh_is_the_one_device_without_a_rendezvous():
 
 @pytest.mark.mps
 def test_an_mps_mesh_runs_in_one_process(monkeypatch):
+    """An MPS mesh rejects a world of several processes."""
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "2")
     with pytest.raises(RuntimeError, match="MPS runs in one process, but WORLD_SIZE is 2"):
@@ -118,6 +131,7 @@ def test_an_mps_mesh_runs_in_one_process(monkeypatch):
 
 
 def test_a_mesh_of_several_processes_needs_the_launcher(monkeypatch):
+    """A multi-process mesh outside a launcher reports the missing rendezvous variable."""
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "2")
     with pytest.raises(RuntimeError, match="MASTER_PORT is not set"):
@@ -126,6 +140,7 @@ def test_a_mesh_of_several_processes_needs_the_launcher(monkeypatch):
 
 
 def test_store_set_get_add_wait():
+    """A master and a client share keys: set, get, add, and wait with a timeout."""
     master = TCPStore("127.0.0.1", 0, is_master=True, timeout=timedelta(seconds=10))
     client = TCPStore("127.0.0.1", master.port, timeout=10)
     master.set("text", "hello")
@@ -138,6 +153,7 @@ def test_store_set_get_add_wait():
 
 
 def test_a_world_of_one_process(monkeypatch):
+    """A process group of one initializes once, and destroying it restores the env rank."""
     monkeypatch.setenv("RANK", "3")
     store = TCPStore("127.0.0.1", 0, is_master=True, timeout=10)
     lumen.distributed.init_process_group(store=store, rank=0, world_size=1)
@@ -153,12 +169,14 @@ def test_a_world_of_one_process(monkeypatch):
 
 
 def test_env_rendezvous_needs_the_launchers_variables():
+    """Env rendezvous without the launcher's variables, or a TCP init without a rank, fails clearly."""
     with pytest.raises(ValueError, match="MASTER_PORT is not set"):
         lumen.distributed.init_process_group(rank=0, world_size=1)
     with pytest.raises(ValueError, match="needs rank"):
         lumen.distributed.init_process_group(init_method="tcp://127.0.0.1:1", world_size=1)
 
 
+# Run in each process: rendezvous, build a 2x2 mesh and report what this rank sees.
 INIT_PROGRAM = """
 import json
 from lumen.distributed import DeviceMesh, get_rank, get_world_size, init_device_mesh, init_process_group
@@ -176,6 +194,7 @@ print(json.dumps({
 
 
 def test_processes_meet_through_env_rendezvous():
+    """Four processes rendezvous and each sees its row of a 2x2 mesh."""
     results = launch(INIT_PROGRAM, 4)
     assert [r["world_size"] for r in results] == [4] * 4
     assert [r["tp"] for r in results] == [[0, 1], [0, 1], [2, 3], [2, 3]]
@@ -183,6 +202,7 @@ def test_processes_meet_through_env_rendezvous():
     assert [r["half"] for r in results] == [[0], [1], None, None]
 
 
+# Run in each process: a 2x4 mesh that initializes the group itself and is read by compiled functions.
 MESH_PROGRAM = """
 import json
 import numpy as np
@@ -210,6 +230,7 @@ print(json.dumps({
 
 
 def test_a_mesh_meets_its_processes_and_compiles_with_them():
+    """Eight processes build a 2x4 mesh, slice it by name, and compiled functions read their mesh ranks."""
     results = launch(MESH_PROGRAM, 8)
     for rank, r in enumerate(results):
         dp, tp = divmod(rank, 4)
@@ -222,6 +243,7 @@ def test_a_mesh_meets_its_processes_and_compiles_with_them():
         assert (r["f"], r["g"]) == (4 + tp, 1 + dp)
 
 
+# Run in each process: a 2x2 TPU mesh with one chip per process, adding the rank on device.
 TPU_PROGRAM = """
 import json
 import numpy as np
@@ -242,6 +264,7 @@ print(json.dumps({
 
 
 def test_tpu_launch_env(monkeypatch):
+    """`set_tpu_launch_env` derives the topology and slice-builder addresses for a process per chip."""
     monkeypatch.setattr(os, "environ", {"LUMEN_TPU_SLICEBUILDER_ADDRESSES": "h:1,h:2,h:3,h:4"})
     env = lumen.distributed.set_tpu_launch_env(nproc_per_node=4)
     assert env == {
@@ -258,6 +281,7 @@ def test_tpu_launch_env(monkeypatch):
 
 
 def tpu_launch_env():
+    """Variables `python -m lumen.distributed` prints for launching a process per TPU chip."""
     out = subprocess.run(
         [sys.executable, "-m", "lumen.distributed"], capture_output=True, text=True, check=True
     ).stdout
@@ -267,6 +291,7 @@ def tpu_launch_env():
 @pytest.mark.tpu
 @pytest.mark.all_devices
 def test_a_process_per_tpu_chip_in_one_slice():
+    """On a 4-chip host, a process per chip sees one chip and its coordinate in a 2x2 mesh."""
     count = "import lumen; print(lumen.tpu.device_count())"
     chips = int(subprocess.run([sys.executable, "-c", count], capture_output=True, text=True, check=True).stdout)
     if chips != 4:

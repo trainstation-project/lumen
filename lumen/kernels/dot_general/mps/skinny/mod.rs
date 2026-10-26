@@ -1,3 +1,5 @@
+//! Selection of the skinny matmul for few-row, large products.
+
 mod config;
 
 pub(crate) use config::*;
@@ -6,9 +8,12 @@ use super::plan_matmul;
 use crate::graph::{Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 
+/// Most output rows the skinny kernel handles.
 const SKINNY_ROWS: usize = 32;
+/// Fewest multiply-adds (`m * n * k`) for which the skinny kernel beats the tiled one.
 const SKINNY_WORK: usize = 1 << 24;
 
+/// Whether `dot` should use the skinny kernel: few rows, contiguous rhs columns, enough work.
 pub(crate) fn skinny(
     dot: &Primitive,
     lhs: &TensorType,

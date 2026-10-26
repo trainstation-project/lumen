@@ -1,3 +1,5 @@
+//! MPS autotuning backends: candidate tunings for loop fusions and GEMM configs, and the timer that runs them.
+
 use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 use std::sync::PoisonError;
@@ -12,20 +14,29 @@ use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
 use crate::kernels::mps::Encode;
 
+/// What a tunable loop fusion needs to regenerate its kernel under another tuning.
 pub(super) struct Tunable {
+    /// Per fusion input, whether it is passed by value.
     pub by_value: Vec<bool>,
+    /// Strided views of fusion inputs, keyed by input index, as `(offset, strides)`.
     pub views: HashMap<usize, (usize, Vec<usize>)>,
 }
 
+/// Output sizes, in elements, for which loop fusions are worth tuning.
 const TUNED_ELEMENTS: RangeInclusive<usize> = (64 << 10)..=(16 << 20);
+/// Byte alignment of each buffer carved out of the timing scratch.
 const ALIGNMENT: usize = 256;
 
+/// Tuning backend for loop fusions.
 pub(super) struct Loops<'a> {
+    /// Fusions that may be retuned, by name.
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a MpsConfig,
+    /// Kernel sources built so far, compiled together by `compile`.
     pub sources: BTreeMap<String, String>,
 }
 
+/// Takes `sources`, keeping only kernels not already compiled.
 fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut sources = std::mem::take(sources);
     let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -36,6 +47,7 @@ fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String
 impl Kernels for Loops<'_> {
     type Config = Tuning;
 
+    /// Tunings to try for a tunable fusion of a mid-sized output, or none.
     fn configs(&self, step: &Step) -> Vec<Tuning> {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             return Vec::new();
@@ -46,6 +58,7 @@ impl Kernels for Loops<'_> {
         }
     }
 
+    /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
     fn build(&mut self, step: &Step, tuning: Tuning) -> Tuned {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             unreachable!("a fusion")
@@ -62,17 +75,20 @@ impl Kernels for Loops<'_> {
         Tuned::new(kernel, encode)
     }
 
+    /// Compiles the newly generated loop kernels.
     fn compile(&mut self) -> Result<(), String> {
         compile_kernels(uncompiled(&mut self.sources))
     }
 }
 
+/// Tuning backend for GEMM fusions.
 #[derive(Default)]
 pub(super) struct Gemms {
     sources: BTreeMap<String, String>,
     config: MpsConfig,
 }
 
+/// Creates an empty GEMM tuner for `config`.
 impl Gemms {
     pub(super) fn new(config: &MpsConfig) -> Self {
         Gemms {
@@ -82,6 +98,7 @@ impl Gemms {
     }
 }
 
+/// Config used for GEMMs whose epilogue writes row tiles to scratch.
 const ROW_TILES: GemmConfig = GemmConfig {
     bm: codegen::ROW_TILE,
     bn: codegen::ROW_TILE,
@@ -92,8 +109,10 @@ const ROW_TILES: GemmConfig = GemmConfig {
     algorithm: gemm::Algorithm::Tiled,
 };
 
+/// Output size, in elements, from which a GEMM counts as large enough to tune.
 const TUNED_OUTPUTS: usize = 64 << 10;
 
+/// The dot of a GEMM fusion with its lhs, rhs and output types.
 pub(super) fn matmul_of(
     step: &Step,
 ) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
@@ -110,6 +129,7 @@ pub(super) fn matmul_of(
     ))
 }
 
+/// Whether `step` is a float GEMM fusion over whole buffers that the tiled GEMM kernels can run.
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
     let whole = step.views.iter().all(Option::is_none);
@@ -127,6 +147,7 @@ fn tiled_gemm(step: &Step) -> bool {
 impl Kernels for Gemms {
     type Config = GemmConfig;
 
+    /// Candidate GEMM configs for `step`, filtered to those its epilogue fits in threadgroup memory.
     fn configs(&self, step: &Step) -> Vec<GemmConfig> {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
@@ -158,6 +179,7 @@ impl Kernels for Gemms {
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
+        // Threadgroup bytes for the per-simdgroup epilogue staging area.
         let stage = |c: &GemmConfig| c.threads / 32 * 64 * 4;
         let halves = epilogue.group > 1 && !epilogue.interleaved;
         let mpp_fits = |c: &&GemmConfig| match () {
@@ -186,6 +208,7 @@ impl Kernels for Gemms {
                 .collect(),
             false => Vec::new(),
         };
+        // Row-tile epilogues only tune between the row-tile config and wide MPP tiles.
         if codegen::tile_scratch(body).is_some() {
             let wide = mpp.iter().filter(|c| c.bn % codegen::ROW_TILE == 0);
             return match mpp.is_empty() {
@@ -210,6 +233,7 @@ impl Kernels for Gemms {
             .collect()
     }
 
+    /// Generates the GEMM variant for `config` and an encoder that launches it.
     fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("a GEMM fusion")
@@ -239,6 +263,7 @@ impl Kernels for Gemms {
         Tuned::new(kernel, encode)
     }
 
+    /// Compiles new GEMM variants, routing Metal Performance Primitives ones to the MPP compiler.
     fn compile(&mut self) -> Result<(), String> {
         let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
             .into_iter()
@@ -248,6 +273,7 @@ impl Kernels for Gemms {
     }
 }
 
+/// Timer that runs tuning candidates on the first MPS device.
 pub(super) struct Mps;
 
 impl Timer for Mps {
@@ -257,26 +283,33 @@ impl Timer for Mps {
         Device::Mps(0)
     }
 
+    /// Allocates the timing buffers for `step`.
     fn buffers(&self, step: &Step) -> Result<Option<Buffers>, String> {
         Ok(Buffers::new(step))
     }
 
+    /// Encodes one launch, rotating through input copies so repeats read cold memory.
     fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
         let inputs = &buffers.copies[rep % buffers.copies.len()];
         crate::kernels::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 
+/// Input bytes to spread across copies so repeated runs miss the cache.
 const COLD_BYTES: usize = 64 << 20;
+/// Most input copies allocated for timing.
 const MOST_COPIES: usize = 256;
 
+/// Zeroed device memory holding rotated input copies, the outputs and scratch for a timed step.
 pub(super) struct Buffers {
     _memory: Scratch,
+    /// Per copy, the input pointers followed by the extra output pointers.
     copies: Vec<Vec<*const u8>>,
     output: *mut u8,
     scratch: *mut u8,
 }
 
+/// Bytes spanned by a tensor of type `ty` under `view`, including the view's offset when `offset` is set.
 fn extent(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
     let size = ty.dtype.size_of();
     match view {
@@ -294,11 +327,13 @@ fn extent(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
     }
 }
 
+/// Rounds `bytes` up to a nonzero multiple of `ALIGNMENT`.
 fn aligned(bytes: usize) -> usize {
     bytes.div_ceil(ALIGNMENT).max(1) * ALIGNMENT
 }
 
 impl Buffers {
+    /// Lays out the buffers for `step`, halving the copy count until the allocation succeeds.
     fn new(step: &Step) -> Option<Self> {
         let inputs: Vec<usize> = step
             .inputs
@@ -327,6 +362,7 @@ impl Buffers {
                 None => return None,
             }
         };
+        // Layout: `copies` input sets back to back, then the outputs, then scratch.
         let base = memory.as_ptr();
         let mut at = read * copies;
         let mut outs = Vec::with_capacity(outputs.len());

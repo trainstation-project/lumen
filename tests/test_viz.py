@@ -1,3 +1,5 @@
+"""Tests for graph, plan and kernel-source dumps and the `lumen.viz` program writer and CLI."""
+
 import subprocess
 import sys
 
@@ -13,6 +15,7 @@ CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 def test_dump_graph(tmp_path):
+    """`dump_graph` needs a call first, then writes the page and JSON with inputs, nodes and their source lines."""
     f = lumen.compile(lambda x, w: F.relu(F.matmul(x, w, "float32", x.dtype)))
     with pytest.raises(RuntimeError, match="call <lambda> first"):
         f.dump_graph(tmp_path / "none.html")
@@ -38,6 +41,7 @@ def test_dump_graph(tmp_path):
 
 
 def test_dump_code_writes_each_kernel_in_order(tmp_path):
+    """`dump_code` writes one file per kernel in step order plus the graph, plan and a program that retraces to it."""
     f = lumen.compile(lambda x, w: F.relu(F.matmul(x, w, "float32", x.dtype)))
     with pytest.raises(RuntimeError, match="call <lambda> first"):
         f.dump_code(tmp_path)
@@ -60,6 +64,7 @@ def test_dump_code_writes_each_kernel_in_order(tmp_path):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_dump_code_of_device_kernels(device, tmp_path, triton_on_cuda):
+    """On MPS and CUDA, `dump_code` writes each kernel's Metal or Triton source."""
     try:
         x, w = lumen.zeros([64, 128]).to(device), lumen.zeros([128, 256]).to(device)
     except RuntimeError as e:
@@ -81,6 +86,7 @@ B, S, N, H, V = 2, 64, 2, 64, 512
 
 
 def _step(emb, wq, wk, wv, head, ids, targets):
+    """A small transformer training step: embedding, attention, cross entropy and backward."""
     h = emb[ids]
     q, k, v = (F.matmul(h.bfloat16(), w.bfloat16(), "float32", "bfloat16").reshape(B, S, N, H) for w in (wq, wk, wv))
     a = F.flash_attention(q, k, v, is_causal=True).reshape(B * S, N * H)
@@ -91,6 +97,7 @@ def _step(emb, wq, wk, wv, head, ids, targets):
 
 
 def _step_args(device):
+    """Random weights and token ids for `_step` on `device`."""
     rng = np.random.default_rng(0)
     floats = [(V, N * H)] + [(N * H, N * H)] * 3 + [(V, N * H)]
     args = [lumen.from_numpy((rng.standard_normal(s) * 0.1).astype(np.float32)) for s in floats]
@@ -143,6 +150,7 @@ def test_a_training_steps_program_traces_to_its_graph():
 
 
 def test_the_cli_writes_the_page(tmp_path):
+    """`python -m lumen.viz` writes an example's page and reports its plan."""
     out = tmp_path / "mlp.html"
     run = subprocess.run(
         [sys.executable, "-m", "lumen.viz", "--example", "mlp", "--device", "cpu", "-o", str(out)],

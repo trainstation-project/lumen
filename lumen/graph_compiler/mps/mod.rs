@@ -1,3 +1,6 @@
+//! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
+//! and the encoder that launches each fused step with the right grid.
+
 mod alone;
 pub(crate) mod ane;
 mod autotune;
@@ -50,10 +53,13 @@ use place_concats::PlaceConcats;
 use place_views::PlaceViews;
 pub(crate) use place_views::{fusion_reads_strided, loads_strided};
 
+// Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {
+    /// Compiles `source` and adds its kernels to the shared library; returns nonzero on failure.
     fn lumen_mps_compile_kernels(source: *const c_char) -> i32;
 }
 
+/// Kernel templates and helpers every generated Metal source is compiled against.
 const PRELUDE: &str = concat!(
     include_str!("../../kernels/mps/kernels.metal"),
     indoc::indoc!(
@@ -74,23 +80,34 @@ const PRELUDE: &str = concat!(
     include_str!("../../kernels/attention/mps/backward.metal"),
 );
 
+/// Graph and side tables threaded through the MPS passes.
 struct MpsModule<'a> {
     graph: Graph,
+    /// Compile options, including the MPS config.
     options: &'a Options,
+    /// Packed weight blocks from dot merging: member input indices and the packed axis.
     packed: Vec<(Vec<usize>, usize)>,
+    /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
+    /// Normalization rows found by the diamonds pass, consumed by loop fusion.
     rows: Vec<diamonds::Row>,
+    /// Graph input indices passed to kernels by value.
     scalars: Vec<usize>,
+    /// Kernels requested so far; fusions name them as `PENDING` plus an index.
     kernels: Vec<Kernel>,
+    /// Generated Metal sources by kernel name.
     sources: BTreeMap<String, String>,
+    /// Loop kernels that the autotuner may regenerate, by kernel name.
     tunable: BTreeMap<String, autotune::Tunable>,
 }
 
 impl Attentions for MpsModule<'_> {
+    /// Whether attention may absorb elementwise epilogues.
     fn contraction_epilogues(&self) -> bool {
         self.options.config.mps.contraction_epilogues
     }
 
+    /// Any epilogue leaf may be fused, without reshapes.
     fn epilogues(&self) -> attention::Epilogues {
         attention::Epilogues {
             leaves: |_, _| true,
@@ -98,6 +115,7 @@ impl Attentions for MpsModule<'_> {
         }
     }
 
+    /// Graph values of the by-value scalar inputs.
     fn scalars(&self) -> Vec<Var> {
         self.scalars
             .iter()
@@ -105,16 +123,19 @@ impl Attentions for MpsModule<'_> {
             .collect()
     }
 
+    /// Requests an attention kernel, returning its pending name.
     fn kernel(&mut self) -> String {
         request(&mut self.kernels, Kernel::Attention)
     }
 
+    /// MPS attention kernels take KV offsets at run time.
     fn runtime_offsets(&self) -> bool {
         true
     }
 }
 
 impl Blocks for MpsModule<'_> {
+    /// Packed and interleaved weight block tables the dot merge passes fill.
     fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>) {
         (&mut self.packed, &mut self.interleaved)
     }
@@ -138,19 +159,26 @@ impl Module for MpsModule<'_> {
     }
 }
 
+/// Kind of kernel a fusion requests, generated later by the codegen pass.
 enum Kernel {
+    /// Loop fusion, with a by-value flag per input.
     Loop(Vec<bool>),
+    /// Flash attention forward.
     Attention,
+    /// Flash attention backward.
     AttentionBackward,
 }
 
+/// Name prefix of fusions whose kernel is requested but not yet generated.
 const PENDING: &str = "pending#";
 
+/// Records a kernel request and returns the placeholder name a fusion uses until codegen.
 fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
     kernels.push(kernel);
     format!("{PENDING}{}", kernels.len() - 1)
 }
 
+/// The MPS pass pipeline, with optional passes enabled by `config`.
 fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
     p.add(TakeAlongAxis);
@@ -200,6 +228,7 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     p
 }
 
+/// Rejects graphs with ops MPS has no kernel for: bfloat16 transcendentals and mixed-dtype dots.
 fn unsupported(graph: &Graph) -> Result<(), String> {
     use Primitive::*;
     for node in graph.nodes() {
@@ -222,6 +251,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
+/// Compiles `graph` for MPS: runs the passes, compiles the kernels, plans buffers and optionally autotunes.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
     let config = &options.config.mps;
@@ -277,6 +307,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         tuner.tune(&mut loops, &mut plan)?;
         tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
     }
+    // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.
     let first_block = fused.inputs().len() - packed.len();
     let mut derived: Vec<(Buffer, usize)> = Vec::new();
     for step in plan.steps_mut() {
@@ -313,16 +344,20 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     Ok(plan)
 }
 
+/// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
 const MPP: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
 
+/// Compiles `sources` against the standard prelude.
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(PRELUDE, sources)
 }
 
+/// Compiles `sources` against the prelude plus the MPP templates.
 fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(&format!("{PRELUDE}\n{MPP}"), sources)
 }
 
+/// Compiles `sources` as one Metal library after `prelude` and records them as compiled.
 fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), String> {
     if sources.is_empty() {
         return Ok(());
@@ -341,8 +376,10 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
     Ok(())
 }
 
+/// Every compiled kernel source by name.
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+/// Whether this Metal toolchain supports Metal Performance Primitives, probed once.
 fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
@@ -352,20 +389,31 @@ fn mpp_available() -> bool {
     })
 }
 
+/// How a fused kernel is launched.
 #[derive(Clone, Copy, PartialEq)]
 enum Launch {
+    /// Flash attention forward.
     Attention,
+    /// Flash attention backward.
     AttentionBackward,
+    /// Split-K matmul accumulating with atomics.
     AtomicDot,
+    /// GEMM with a fused epilogue.
     Gemm,
+    /// Row-wise reductions in one threadgroup per row group.
     Rows,
+    /// Standalone reduction kernel.
     Reduction,
+    /// Tiled transpose.
     Transpose,
+    /// Plain elementwise loop.
     Elementwise,
 }
 
+/// Launch kind and tuning of each compiled kernel by name.
 static LAUNCHES: Mutex<BTreeMap<String, (Launch, Option<Tuning>)>> = Mutex::new(BTreeMap::new());
 
+/// Classifies a fusion body by the launch its kernel needs.
 fn launch_of(body: &Graph) -> Launch {
     if attention::of_body(body).is_some() {
         Launch::Attention
@@ -386,12 +434,14 @@ fn launch_of(body: &Graph) -> Launch {
     }
 }
 
+/// Records how kernel `name` for `body` launches under `tuning`.
 pub(super) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
     let launch = (launch_of(body), tuning);
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     launches.insert(name.to_owned(), launch);
 }
 
+/// Launch kind and tuning of kernel `name`, deriving and caching them from `body` if unrecorded.
 fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(&launch) = launches.get(name) {
@@ -403,14 +453,17 @@ fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     (launch, tuning)
 }
 
+/// Generated Metal source of fusion kernel `name`, if compiled.
 #[cfg(feature = "python")]
 pub(crate) fn fusion_source(name: &str) -> Option<String> {
     let sources = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
     sources.get(name).cloned()
 }
 
+/// Strided-load kernel variants by base kernel name and input strides.
 static VARIANTS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+/// Type of `t` with its dtype swapped for the same-width unsigned integer, so copies move bits.
 fn carried(t: &Tensor) -> TensorType {
     let carrier = match t.dtype().size_of() {
         1 => DType::U8,
@@ -421,6 +474,7 @@ fn carried(t: &Tensor) -> TensorType {
     TensorType::new(carrier, t.shape())
 }
 
+/// Copies `src` into `dst` bit for bit with a loop kernel, honoring both tensors' strides.
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     let mut body = Graph::new();
     let x = body.input(carried(dst));
@@ -428,6 +482,7 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     run_loop(body, "copy_", dst, src, false)
 }
 
+/// Fills `dst` with `value` by broadcasting its bits from a by-value scalar.
 pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
     let ty = carried(dst);
     let mut body = Graph::new();
@@ -448,6 +503,8 @@ pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
     run_loop(body, "fill_", dst, &scalar, true)
 }
 
+/// Compiles (once) and runs the one-input loop `body` from `src` into `dst`.
+/// `by_value` passes `src` as a scalar argument instead of a buffer.
 fn run_loop(
     body: Graph,
     label: &'static str,
@@ -499,6 +556,8 @@ fn run_loop(
     encode(&step, &inputs, dst.data_ptr(), std::ptr::null_mut(), keep)
 }
 
+/// Name of a kernel variant of `name` that loads the step's strided input views directly, compiling it on
+/// first use; `None` when no view needs it.
 fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<String>, String> {
     if step.views.iter().all(Option::is_none) {
         return Ok(None);
@@ -552,6 +611,7 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
     Ok(Some(variant))
 }
 
+/// Encodes fused step `step` reading `inputs` into `output`, using `scratch` and keeping `keep` alive.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -565,6 +625,8 @@ pub(crate) fn encode(
     encode_with(step, name, None, inputs, output, scratch, keep)
 }
 
+/// Encodes a fused step, launching the tuned GEMM variant `gemm` when given.
+/// `inputs` holds the body inputs followed by extra output pointers.
 pub(super) fn encode_with(
     step: &Step,
     name: &str,
@@ -583,6 +645,7 @@ pub(super) fn encode_with(
         return ane::encode(step, inputs, output, keep);
     }
     let (inputs, extra) = inputs.split_at(body.inputs().len());
+    // By-value inputs become kernel arguments; the rest are bound as buffers.
     let (mut device, mut scalars) = (Vec::new(), Vec::new());
     for (&p, (b, ty)) in inputs.iter().zip(&step.inputs) {
         match b {
@@ -594,6 +657,7 @@ pub(super) fn encode_with(
     }
     let inputs = device.as_slice();
     let (kind, tuning) = launch_kind(name, body);
+    // Attention buffers: inputs, outputs, then the dropout random state, which must be bound as buffers.
     let attention_buffers = |dropout: bool| -> Result<Vec<*const u8>, String> {
         let state = match (dropout, scalars.len()) {
             (false, _) | (true, 2) => 0,
@@ -610,6 +674,7 @@ pub(super) fn encode_with(
     if kind == Launch::Attention {
         let a = attention::of_body(body).expect("an attention");
         let batch: usize = a.batch.iter().product();
+        // Decode attention runs one threadgroup per query, otherwise one per 64 queries.
         let queries = match codegen::decodes(&a) {
             true => a.sq,
             false => a.sq.div_ceil(64),
@@ -623,6 +688,7 @@ pub(super) fn encode_with(
         let batch: usize = b.batch.iter().product();
         let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let buffers = attention_buffers(b.dropout.is_some())?;
+        // The fused dK/dV kernel accumulates dQ atomically, so dQ starts at zero.
         if b.dv_out.is_some() && b.dq_out.is_some() {
             let n = body.type_of(body.outputs()[2]).numel();
             let args = [
@@ -653,6 +719,7 @@ pub(super) fn encode_with(
             unreachable!("a matmul's grid")
         };
         let [m, n] = [plan.p[0], plan.p[1]];
+        // Atomic split-K adds chunk partials into the output, so it starts at zero.
         let zero = [
             element_arg(DType::F32, Scalar::Float(0.0)),
             u32_arg((m * n) as u32),
@@ -717,6 +784,7 @@ pub(super) fn encode_with(
         buffers.push(output.cast_const());
         buffers.extend(extra);
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
+        // Row-tile epilogues run as two launches: the GEMM writes tiles to scratch, then a row kernel finishes.
         if let Some((offsets, _)) = codegen::tile_scratch(body) {
             let at = |o: usize| scratch.wrapping_add(o).cast_const();
             let (dotv, tiles): (*const u8, Vec<*const u8>) = (
@@ -838,6 +906,7 @@ pub(super) fn encode_with(
     launch(name, &buffers, &args, grid, keep, step.label)
 }
 
+/// Scratch bytes a fusion kernel needs: tile buffers for row-tile GEMMs or partials for reductions.
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
     if let Some((_, bytes)) = codegen::tile_scratch(body) {
         return bytes;

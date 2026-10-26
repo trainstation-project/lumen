@@ -1,3 +1,6 @@
+//! TPU reductions: classifies a reduction's axes into a kernel layout and encodes a fused
+//! prologue, reduction and epilogue as a spec for `lumen.kernels.reduction.tpu`.
+
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
@@ -11,8 +14,10 @@ use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::kernels::tpu::{Launch, launch};
 
+/// How a reduction's operand is viewed as `lead` matrices of `m` rows by `n` columns.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Layout {
+    /// Reduces the last axis; `h` is the dim before the rows (1 below rank 3) and `lead` the dims before it.
     Rows {
         rank: usize,
         lead: usize,
@@ -20,11 +25,9 @@ pub(crate) enum Layout {
         m: usize,
         n: usize,
     },
-    Columns {
-        lead: usize,
-        m: usize,
-        n: usize,
-    },
+    /// Reduces every axis but the last.
+    Columns { lead: usize, m: usize, n: usize },
+    /// Reduces every axis; `flat` marks a rank-1 operand.
     Total {
         lead: usize,
         m: usize,
@@ -33,6 +36,7 @@ pub(crate) enum Layout {
     },
 }
 
+/// The axes `p` reduces, or `None` when it is not a sum or max reduction.
 fn axes(p: &Primitive) -> Option<&[usize]> {
     match p {
         Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => Some(axes),
@@ -40,6 +44,7 @@ fn axes(p: &Primitive) -> Option<&[usize]> {
     }
 }
 
+/// The layout reducing `x` over `axes` maps to, or `None` when no kernel handles those axes.
 pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
     let r = x.shape.len();
     let mut sorted = axes.to_vec();
@@ -82,6 +87,7 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
     None
 }
 
+/// Whether `node` is a reduction the TPU kernel runs: 32-bit-or-narrower non-bool dtypes and a supported layout.
 pub(crate) fn reducible(graph: &Graph, node: &Node) -> bool {
     let Some(axes) = axes(&node.primitive) else {
         return false;
@@ -92,6 +98,7 @@ pub(crate) fn reducible(graph: &Graph, node: &Node) -> bool {
 }
 
 #[cfg(lumen_tpu_linked)]
+/// The JSON describing the reduction `p` (sum with its accumulator dtype, or max).
 fn reduced(p: &Primitive) -> String {
     match p {
         Primitive::ReduceSum { accum_dtype, .. } => {
@@ -105,6 +112,7 @@ fn reduced(p: &Primitive) -> String {
 }
 
 #[cfg(lumen_tpu_linked)]
+/// The layout's fields as JSON spec entries.
 fn shown(layout: &Layout) -> String {
     match *layout {
         Layout::Rows {
@@ -125,6 +133,8 @@ fn shown(layout: &Layout) -> String {
     }
 }
 
+/// Launches the reduction fusion `step` on TPU `index`: nodes feeding the reduction run on input
+/// blocks as a prologue, the rest on the reduced result as an epilogue.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn encode(
     index: usize,
@@ -145,6 +155,7 @@ pub(crate) fn encode(
     let (x, out) = (body.type_of(reduce.inputs[0]), body.type_of(reduce.output));
     let layout = layout(x, axes(&reduce.primitive).expect("a reduction"))
         .ok_or_else(|| failed("a reduction over axes no layout takes"))?;
+    // Mark the nodes the reduced operand depends on: they form the prologue.
     let mut feeds = vec![false; body.types.len()];
     feeds[reduce.inputs[0]] = true;
     for n in nodes[..at].iter().rev() {
@@ -165,6 +176,7 @@ pub(crate) fn encode(
         prologue.push(super::node(&n.primitive, &args));
         value.insert(n.output, k + prologue.len() - 1);
     }
+    // The reduction's result takes the value slot right after the prologue.
     value.insert(reduce.output, k + prologue.len());
     let mut epilogue = Vec::new();
     let mut copied: HashMap<Var, usize> = HashMap::new();
@@ -174,6 +186,7 @@ pub(crate) fn encode(
         }
         let mut args = Vec::new();
         for &v in &n.inputs {
+            // Constants shared with the prologue are re-emitted in the epilogue; other prologue values aren't kept.
             let shared = feeds[v] && v != reduce.inputs[0];
             let made = nodes.iter().find(|m| m.output == v);
             match made {
@@ -191,6 +204,7 @@ pub(crate) fn encode(
         epilogue.push(super::node(&n.primitive, &args));
         value.insert(n.output, k + prologue.len() + epilogue.len());
     }
+    // Each body input is read at the reduction's input blocks, its output blocks, or as a scalar.
     let kinds: Vec<String> = body
         .inputs()
         .iter()
@@ -210,6 +224,7 @@ pub(crate) fn encode(
         })
         .collect::<Result<_, _>>()?;
     let result = body.type_of(body.outputs()[0]);
+    // Dtypes streamed at input-block and output-block granularity, for sizing the blocks.
     let dtypes = |kind: &str| -> Vec<DType> {
         body.inputs()
             .iter()

@@ -1,3 +1,5 @@
+"""Public functional API: elementwise, reduction, matmul, attention and loss operations on traced tensors."""
+
 from lumen.functional.attention import attention_decode, flash_attention, naive_attention
 from lumen.functional.cross_entropy import cross_entropy
 from lumen.functional.functions import *

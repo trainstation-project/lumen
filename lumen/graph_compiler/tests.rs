@@ -1,3 +1,4 @@
+//! Tests for the shared graph compiler passes: CSE, simplification, host stages and the pass pipeline.
 use super::common::cse::cse;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
@@ -5,18 +6,22 @@ use crate::graph_compiler::plan_tests::data;
 use crate::kernels::reference;
 use crate::{DType, Scalar};
 
+/// An `f32` tensor type of `shape`.
 fn ty(shape: &[usize]) -> TensorType {
     TensorType::new(DType::F32, shape)
 }
 
+/// Applies `p` to `inputs`, panicking on a type error.
 fn apply(g: &mut Graph, p: Primitive, inputs: &[Var]) -> Var {
     g.apply(p, inputs).unwrap()
 }
 
+/// Primitive names of `g`'s nodes, in order.
 fn names(g: &Graph) -> Vec<&'static str> {
     g.nodes().iter().map(|n| n.primitive.name()).collect()
 }
 
+/// A plain `[m, k] x [k, n]` matmul accumulating and returning `f32`.
 fn matmul() -> Primitive {
     DotGeneral {
         lhs_contracting: vec![1],
@@ -28,6 +33,7 @@ fn matmul() -> Primitive {
     }
 }
 
+/// CSE merges the repeated matmul and zero broadcast and keeps the results unchanged.
 #[test]
 fn repeated_computations_run_once() {
     let mut g = Graph::new();
@@ -81,6 +87,7 @@ fn repeated_computations_run_once() {
     assert_eq!(e[0].to_vec::<f32>(), a[0].to_vec::<f32>());
 }
 
+/// CSE keeps nodes that differ in parameters or operand order.
 #[test]
 fn different_parameters_or_order_are_kept() {
     let mut g = Graph::new();
@@ -94,6 +101,7 @@ fn different_parameters_or_order_are_kept() {
     assert_eq!(names(&cse(&g)), names(&g));
 }
 
+/// Asserts `g` and `simplified` produce identical `f32` outputs on `inputs`.
 fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
     let want = reference::run(g, inputs).unwrap();
     let got = reference::run(simplified, inputs).unwrap();
@@ -102,6 +110,7 @@ fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
     }
 }
 
+/// A filled `f32` constant of `shape`.
 fn full(shape: &[usize], value: f64) -> Primitive {
     Full {
         shape: shape.to_vec(),
@@ -110,6 +119,8 @@ fn full(shape: &[usize], value: f64) -> Primitive {
     }
 }
 
+/// Identities, double negation, same-branch selects, no-op casts and reshape, transpose and broadcast
+/// chains all fold away.
 #[test]
 fn algebraic_simplification() {
     let mut g = Graph::new();
@@ -175,6 +186,7 @@ fn algebraic_simplification() {
     same_values(&g, &simplified, &[data(&[2, 3], 1)]);
 }
 
+/// A transposed matmul becomes a matmul with swapped operands when the untransposed result isn't read.
 #[test]
 fn transposes_of_dots_swap_their_operands() {
     let build = |read_twice: bool| {
@@ -206,6 +218,7 @@ fn transposes_of_dots_swap_their_operands() {
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
+/// With rearranging enabled, operand transposes move after the elementwise ops into one transpose.
 #[test]
 fn rearranges_move_past_elementwise_primitives() {
     let mut g = Graph::new();
@@ -234,6 +247,8 @@ fn rearranges_move_past_elementwise_primitives() {
     );
 }
 
+/// A widening cast moves after reshapes, transposes and slices, and after a concat only when the
+/// constant it joins survives the round trip.
 #[test]
 fn casts_move_past_layout_primitives() {
     let cast = |dtype| Cast { new_dtype: dtype };
@@ -272,6 +287,7 @@ fn casts_move_past_layout_primitives() {
         "{moved}"
     );
     same_values(&g, &moved, &inputs);
+    // 1.0 is exact in bf16, so the widening cast can move past the concat; 0.1 isn't.
     for (value, want) in [
         (1.0, vec!["cast", "full", "concatenate", "cast"]),
         (0.1, vec!["cast", "cast", "full", "concatenate"]),
@@ -294,6 +310,7 @@ fn casts_move_past_layout_primitives() {
     }
 }
 
+/// A device multiply copied to the host and multiplied there.
 fn to_host_graph() -> Graph {
     let mut g = Graph::new();
     let x = g.input(ty(&[2]));
@@ -306,6 +323,7 @@ fn to_host_graph() -> Graph {
     g
 }
 
+/// Work after a `ToHost` runs in a separate host stage that reads the copied value.
 #[test]
 fn host_values_run_in_a_host_stage() {
     let device = match crate::device::mps::MPS.is_available() {
@@ -328,6 +346,7 @@ fn host_values_run_in_a_host_stage() {
     }
 }
 
+/// A value copied to the host and straight back splits the plan into device, host and device stages.
 #[test]
 fn values_copied_back_at_once_pass_through_a_host_stage() {
     let device = match crate::device::mps::MPS.is_available() {
@@ -359,6 +378,7 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
     }
 }
 
+/// A `ToDevice` of a device value is a no-op and leaves one unstaged plan.
 #[test]
 fn programs_without_host_values_are_one_plan() {
     let mut g = Graph::new();
@@ -372,6 +392,7 @@ fn programs_without_host_values_are_one_plan() {
     assert_eq!(steps, ["mul"]);
 }
 
+/// Mixing a host value and a device value in one op is a compile error.
 #[test]
 fn ops_on_host_and_device_values_raise() {
     let mut g = Graph::new();
@@ -386,6 +407,7 @@ fn ops_on_host_and_device_values_raise() {
     );
 }
 
+/// A pipeline runs its passes in order and dumps the graph before and after each to `dump_to`.
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
@@ -393,6 +415,7 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::pass::{CompilerPass, GraphModule, Pipeline};
     use super::{CpuConfig, Options};
 
+    /// Test pass that negates the graph's first output.
     struct Negate;
     impl CompilerPass<GraphModule<'_>> for Negate {
         fn name(&self) -> &'static str {

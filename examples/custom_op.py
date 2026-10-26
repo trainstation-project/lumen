@@ -1,3 +1,5 @@
+"""Registers a hand-written Metal bias+ReLU kernel as a custom op and calls it inside a compiled layer."""
+
 import numpy as np
 
 import lumen
@@ -26,6 +28,7 @@ def bias_relu_(y: lumen.Tensor, b: lumen.Tensor) -> None:
 
 @lumen.compile
 def layer(x, w, b):
+    """Matmul, in-place bias+ReLU through the custom op, then a row sum."""
     y = F.matmul(x, w, "float32", "float32")
     bias_relu_(y, b)
     return F.sum(y, -1)

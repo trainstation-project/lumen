@@ -1,7 +1,10 @@
+//! The TPU device backend, backed by the PJRT shim linked in with the `tpu` feature.
+
 use super::DeviceBackend;
 
 pub mod layout;
 
+/// Bindings to the C shim around the TPU runtime; failing calls leave their message for `lumen_tpu_error`.
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod ffi {
     use std::ffi::{c_char, c_void};
@@ -45,6 +48,7 @@ pub(crate) mod ffi {
     }
 }
 
+/// The message of the last failed TPU call.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn error() -> String {
     unsafe { std::ffi::CStr::from_ptr(ffi::lumen_tpu_error()) }
@@ -52,6 +56,7 @@ pub(crate) fn error() -> String {
         .into_owned()
 }
 
+/// The bytes in use and the memory limit of TPU `index`.
 #[cfg(all(test, lumen_tpu_linked))]
 pub(crate) fn memory(index: usize) -> Result<(usize, usize), String> {
     let (mut in_use, mut limit) = (0, 0);
@@ -61,13 +66,17 @@ pub(crate) fn memory(index: usize) -> Result<(usize, usize), String> {
     }
 }
 
+/// Serialises tests that need a whole TPU.
 #[cfg(all(test, lumen_tpu_linked))]
 pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The TPU device backend.
 pub struct Tpu;
+/// The TPU backend as a `DeviceBackend`.
 pub static TPU: &dyn DeviceBackend = &Tpu;
 
 impl Tpu {
+    /// Whether the TPU runtime is open; always false without TPU support.
     pub fn opened(&self) -> bool {
         #[cfg(lumen_tpu_linked)]
         {

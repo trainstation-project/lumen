@@ -1,3 +1,5 @@
+//! TPU GEMMs fused with a row-wise epilogue (such as a norm over each output row) in one kernel.
+
 use std::collections::HashMap;
 
 use super::row::{Kind, kinds, readable, row_node, rows};
@@ -8,15 +10,19 @@ use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::{block, caps};
 use crate::kernels::tpu::{Launch, launch};
 
+/// VMEM budget, in bytes, a GEMM-row block may use.
 const VMEM: usize = 88 << 20;
 
+/// Most output rows one block holds.
 const ROWS: usize = 1024;
 
+/// The fusion's nodes after its leading dot as a graph whose first input is the dot's output.
 fn row_part(body: &Graph) -> Graph {
     let nodes = body.nodes();
     let mut row = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; body.types.len()];
     map[nodes[0].output] = row.input(body.type_of(nodes[0].output).clone());
+    // Body inputs 0 and 1 are the dot's operands; the rest feed the row part.
     for &v in &body.inputs()[2..] {
         map[v] = row.input(body.type_of(v).clone());
     }
@@ -31,6 +37,8 @@ fn row_part(body: &Graph) -> Graph {
     row
 }
 
+/// Launches the dot-then-row fusion `step` on TPU `index`: each block of rows computes its full
+/// `n`-wide GEMM output in VMEM and applies the row nodes to it.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -91,8 +99,10 @@ pub(crate) fn encode(
         .filter(|s| s.1 == Kind::Full)
         .map(|s| s.0.size_of())
         .sum();
+    // Double-buffered lhs and rhs blocks, five float32 row-block scratches and double-buffered full-row streams.
     let footprint =
         |bm: usize, bk: usize| 2 * (bm * bk + bk * n) * size + bm * n * 4 * 5 + 2 * bm * n * full;
+    // Row blocks: the whole height if it fits, else multiples of the widest tile dividing it.
     let candidates = |cap: usize| match height <= cap {
         true => vec![height],
         false => (1..=cap / unit)
@@ -104,6 +114,7 @@ pub(crate) fn encode(
     let cap = caps(lhs.dtype, k).2;
     let bk = block(k, 128, cap)
         .ok_or_else(|| failed(&format!("K ({k}) at most {cap} or a multiple of 128")))?;
+    // Prefer the largest row block, trying a smaller K block before a smaller row block.
     let (bm, bk) = candidates(ROWS)
         .into_iter()
         .flat_map(|bm| [bk, block(k, 128, 512).unwrap_or(bk)].map(|bk| (bm, bk)))

@@ -1,7 +1,10 @@
+//! Autotuning configs for the Metal Performance Primitives matmul.
+
 use std::sync::OnceLock;
 
 use super::super::{Algorithm, GemmConfig};
 
+/// Every MPP config autotuning tries: each (tile, simdgroups) pair with K steps of 32, 64 and 128.
 pub(crate) fn mpp_configs() -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<Vec<GemmConfig>> = OnceLock::new();
     CONFIGS.get_or_init(|| {

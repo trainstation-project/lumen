@@ -1,16 +1,21 @@
+//! Horizontal fusion of independent same-shape `loop` fusions into one kernel launch.
 use super::super::TpuModule;
 use crate::codegen::tpu::fusible;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::horizontal::{Target, fuse};
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Largest output, in elements, of a loop fusion eligible for horizontal fusion.
 const MAX_ELEMENTS: usize = 1 << 20;
 
+/// Most buffers one horizontally fused kernel may read and write.
 const MAX_STREAMS: usize = 32;
 
+/// Horizontal fusion target that merges small TPU `loop` fusions sharing an output shape.
 struct Loops;
 
 impl Target for Loops {
+    /// Accepts non-scalar, small, fully fusible `loop` fusions not written in place into a concat.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let ty = graph.type_of(node.output);
         let Primitive::Fusion { name, body, .. } = &node.primitive else {
@@ -27,23 +32,28 @@ impl Target for Loops {
             && !placed
     }
 
+    /// Groups candidates by output shape.
     fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
         graph.type_of(node.output).shape.clone()
     }
 
+    /// Caps the buffer count at `MAX_STREAMS`.
     fn fits(&self, _: &Graph, _: &[usize], buffers: usize) -> bool {
         buffers <= MAX_STREAMS
     }
 
+    /// Accepts any group that fits.
     fn accepts(&self, _: &Graph, _: &[usize], _: &Graph) -> bool {
         true
     }
 
+    /// Names the merged kernel `loop`.
     fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
         "loop".into()
     }
 }
 
+/// Merges independent small `loop` fusions with the same output shape.
 pub(in crate::graph_compiler::tpu) struct HorizontalFusion;
 
 impl CompilerPass<TpuModule<'_>> for HorizontalFusion {

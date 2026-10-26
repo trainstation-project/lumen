@@ -1,3 +1,5 @@
+"""CuTe tensor helpers: fake tensors for compiling, real tensors over lumen buffers, alignment."""
+
 import cutlass.cute as cute
 from cutlass.cute.runtime import from_dlpack
 
@@ -53,6 +55,7 @@ def get_alignment(t: object) -> int:
     address = t.data_ptr()
 
     alignment = 4
+    # Narrow dtypes only promise the 4-byte minimum.
     if element_bytes(t.dtype) >= 4:
         for i in get_powers_of_2(4, 16):
             if address % i != 0:

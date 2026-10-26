@@ -1,7 +1,11 @@
+//! Metal host-to-device copy.
+
 use crate::graph::TensorType;
 use crate::{Device, Tensor, TensorOptions};
 
+/// Copies host tensor `src` into MPS tensor `dst` through a fresh MPS staging buffer and a GPU copy kernel.
 pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
+    // Stage on the CPU, then copy on the GPU so the write is ordered after work already queued on `dst`.
     let options = TensorOptions::new()
         .dtype(src.dtype())
         .device(Device::Mps(0));

@@ -1,8 +1,10 @@
+//! Launches the Metal dynamic-slice kernels.
 use crate::Tensor;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg, u64_arg};
 
+/// Copies the `ty`-shaped tensor at `src` to `dst` on the GPU.
 pub(crate) fn copy(
     src: *const u8,
     dst: *mut u8,
@@ -23,8 +25,11 @@ pub(crate) fn copy(
     )
 }
 
+/// Highest operand rank the Metal kernels take.
 const MAX_RANK: usize = 8;
 
+/// Encodes a `DynamicSlice` or `DynamicUpdateSlice` step; an out-of-place update first copies
+/// the operand into the output.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -53,6 +58,7 @@ pub(crate) fn encode(
         .inputs
         .get(first)
         .map_or("i32".into(), |(_, t)| t.dtype.to_string());
+    // Unused index slots point at the source buffer; the kernel only reads the first `rank`.
     let mut buffers = vec![source, output.cast_const()];
     buffers.extend((0..MAX_RANK).map(|d| *inputs.get(first + d).unwrap_or(&source)));
     let count: usize = block.iter().product();
@@ -62,6 +68,7 @@ pub(crate) fn encode(
         u32_arg(rank as u32),
         u64_arg(count),
     ];
+    // Use 32-bit offsets when the operand fits, 64-bit otherwise.
     let width = match x.numel() <= u32::MAX as usize {
         true => 32,
         false => 64,

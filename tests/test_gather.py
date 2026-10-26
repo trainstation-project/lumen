@@ -1,3 +1,5 @@
+"""Tests for gather, scatter_add and take_along_axis: values with clamped indices, fusion, gradients, determinism and operand checks."""
+
 import numpy as np
 import pytest
 
@@ -23,6 +25,7 @@ def safe_kernels():
 
 
 def _tensor(a, device, dtype=None):
+    """Returns numpy array ``a`` on ``device`` (cast to ``dtype`` when given), skipping the test when the device is unavailable."""
     try:
         t = lumen.from_numpy(a).to(device)
     except RuntimeError as e:
@@ -30,6 +33,7 @@ def _tensor(a, device, dtype=None):
     return t if dtype is None else t.to(dtype=dtype)
 
 
+# Indices along a size-4 or size-5 axis, including out-of-range ones (9 and -2) that the kernels clamp.
 IDS = np.array([[3, 0, 3], [1, 9, -2]])
 
 
@@ -66,6 +70,7 @@ def test_gather_fuses(device, index_dtype, axis):
     xt, ids = _tensor(x, device), _tensor(IDS.astype(index_dtype), device)
 
     def f(x, i):
+        """Returns a gather of ``x * 2`` plus one, and that result RMS-normalized."""
         g = prims.gather(x * 2.0, i, axis) + 1.0
         return g, F.rms_norm(g, g.shape[-1])
 
@@ -90,6 +95,7 @@ def test_gather_of_a_table_of_as_many_elements_as_rows(device):
     ids, c = rng.integers(0, 16, (32, 32)), rng.standard_normal((1024, 64)).astype(np.float32)
 
     def loss(table, positions, ids, c):
+        """Returns the summed product of ``c`` with the RMS-normalized embedding of ``ids`` plus ``positions``."""
         h = (table[ids] + positions).reshape(1024, 64)
         return F.sum(F.rms_norm(h, 64) * c)
 

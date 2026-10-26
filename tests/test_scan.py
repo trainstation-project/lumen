@@ -1,3 +1,5 @@
+"""Tests for ``F.cumsum`` and ``prims.cumsum`` on every device: values, reverse scans, dtypes, gradients and determinism."""
+
 import numpy as np
 import pytest
 
@@ -18,6 +20,7 @@ def triton():
     lumen.config.compiler.cuda.use_triton_backend = False
 
 
+# (shape, axis) pairs: long rows split into chunks, tall columns, strided middle axes, a negative axis and an empty tensor.
 CASES = [((4, 1000), 1), ((1, 70000), 1), ((3000, 3), 0), ((3, 50, 7), 1), ((8, 3), -1), ((5, 0, 3), 1)]
 
 
@@ -29,6 +32,7 @@ def _cumsum(x, axis, reverse):
 
 
 def _tensor(a, device, dtype):
+    """Returns numpy array ``a`` as a ``dtype`` tensor on ``device``, skipping the test when the device is unavailable."""
     try:
         return lumen.from_numpy(a).to(device).to(dtype=dtype)
     except RuntimeError as e:

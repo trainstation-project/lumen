@@ -1,17 +1,22 @@
+//! Unit tests for primitive type inference, graph display and the reference interpreter.
+
 use super::Primitive::*;
 use super::{Graph, Primitive, TensorType};
 use crate::kernels::reference;
 use crate::tensor::dtype::bf16;
 use crate::{DType, Scalar, Tensor};
 
+/// Shorthand for a `TensorType`.
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
+/// Infers the output type of `p` applied to operands of types `args`.
 fn infer(p: Primitive, args: &[TensorType]) -> Result<TensorType, String> {
     p.infer(&args.iter().collect::<Vec<_>>())
 }
 
+/// Binary elementwise ops need equal shapes and dtypes; float-only unaries reject integers.
 #[test]
 fn elementwise_is_strict() {
     let x = ty(DType::F32, &[2, 3]);
@@ -31,6 +36,7 @@ fn elementwise_is_strict() {
     assert!(infer(Add, &[x]).is_err());
 }
 
+/// `select` needs a bool predicate and two branches of the same type.
 #[test]
 fn select_rules() {
     let (p, x) = (ty(DType::Bool, &[4]), ty(DType::F32, &[4]));
@@ -42,6 +48,7 @@ fn select_rules() {
     assert!(infer(Select, &[p, x, ty(DType::F64, &[4])]).is_err());
 }
 
+/// `slice` bounds must match the rank, be ordered and stay inside the operand.
 #[test]
 fn slice_rules() {
     let x = ty(DType::F32, &[4, 6]);
@@ -63,6 +70,7 @@ fn slice_rules() {
     assert!(infer(slice(&[0, 0], &[4, 7]), &[x]).is_err());
 }
 
+/// `concatenate` sums sizes along its dimension and rejects mismatched ranks, dtypes or other dims.
 #[test]
 fn concatenate_rules() {
     let (a, b) = (ty(DType::F32, &[2, 3, 4]), ty(DType::F32, &[2, 5, 4]));
@@ -83,6 +91,7 @@ fn concatenate_rules() {
     assert!(infer(cat(0), &[]).is_err());
 }
 
+/// Reductions drop their axes, reject repeated or out-of-range axes and only allow a wider float accumulator.
 #[test]
 fn reduce_drops_axes() {
     let x = ty(DType::F32, &[2, 3, 4]);
@@ -113,6 +122,7 @@ fn reduce_drops_axes() {
     );
 }
 
+/// `dot_general` output is batch, then lhs free, then rhs free dims, with contracted sizes checked.
 #[test]
 fn dot_general_shape() {
     let p = DotGeneral {
@@ -128,6 +138,7 @@ fn dot_general_shape() {
     assert!(infer(p, &[l.clone(), ty(DType::F32, &[5, 2, 4])]).is_err());
 }
 
+/// Which `accum_dtype`/`output_dtype` pairs are legal, mixed-operand rules, and that the result is rounded once.
 #[test]
 fn dot_general_accumulates_in_accum_dtype() {
     let dot = |accum_dtype, output_dtype| DotGeneral {
@@ -180,6 +191,7 @@ fn dot_general_accumulates_in_accum_dtype() {
         dot(DType::F32, DType::BF16).to_string(),
         "dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=bf16]"
     );
+    // 1 + 2/256 is exact in f32 but bf16 accumulation loses each 1/256 term.
     let b = |v: f32| bf16::from_f32(v);
     let x =
         Tensor::from_slice(&[b(1.0), b(1.0 / 256.0), b(1.0 / 256.0)], DType::BF16).reshape(&[1, 3]);
@@ -197,6 +209,7 @@ fn dot_general_accumulates_in_accum_dtype() {
     );
 }
 
+/// Type inference for `broadcast_in_dim`, `transpose` and `reshape`.
 #[test]
 fn layout_primitives() {
     let x = ty(DType::I32, &[3, 1]);
@@ -219,6 +232,7 @@ fn layout_primitives() {
     assert!(infer(Reshape { new_sizes: vec![4] }, &[x]).is_err());
 }
 
+/// A graph prints in jaxpr-like text, and applying to an unknown value fails.
 #[test]
 fn display_is_jaxpr_like() {
     let mut g = Graph::new();
@@ -240,6 +254,7 @@ fn display_is_jaxpr_like() {
     assert!(g.apply(Neg, &[7]).is_err());
 }
 
+/// Runs a single primitive `p` on `inputs` through the reference interpreter and returns its output.
 fn run(p: Primitive, inputs: &[Tensor]) -> Tensor {
     let mut g = Graph::new();
     let vars: Vec<_> = inputs
@@ -251,6 +266,7 @@ fn run(p: Primitive, inputs: &[Tensor]) -> Tensor {
     reference::run(&g, inputs).unwrap().remove(0)
 }
 
+/// A hand-built softmax graph matches the expected values, including a constant row.
 #[test]
 fn softmax_graph() {
     let mut g = Graph::new();
@@ -287,6 +303,7 @@ fn softmax_graph() {
     assert_eq!(y[3..], [1.0 / 3.0; 3]);
 }
 
+/// Integer `dot_general` values through the reference interpreter.
 #[test]
 fn dot_general_values() {
     let l = Tensor::from_slice(&[1i32, 2, 3, 4, 5, 6], DType::I32).reshape(&[2, 3]);
@@ -304,6 +321,7 @@ fn dot_general_values() {
     assert_eq!(y.to_vec::<i32>(), [4, 5, 10, 11]);
 }
 
+/// Integer arithmetic wraps, comparisons are unsigned for u64, and float-to-int casts saturate with NaN to 0.
 #[test]
 fn integers_wrap_and_converts_saturate() {
     let x = Tensor::from_slice(&[250u8, 3], DType::U8);
@@ -326,6 +344,7 @@ fn integers_wrap_and_converts_saturate() {
     assert!(run(to_f16, &[f]).to_vec::<half::f16>()[0] == half::f16::from_f32(300.0));
 }
 
+/// Reference values of `transpose`, `broadcast_in_dim`, `iota` and `full` (a float fill truncated to int).
 #[test]
 fn layout_values() {
     let x = Tensor::from_slice(&[1i64, 2, 3, 4, 5, 6], DType::I64).reshape(&[2, 3]);
@@ -356,6 +375,7 @@ fn layout_values() {
     assert_eq!(run(full, &[]).to_vec::<i32>(), [2, 2]);
 }
 
+/// The interpreter rejects inputs of the wrong dtype or count.
 #[test]
 fn rejects_mismatched_inputs() {
     let mut g = Graph::new();
@@ -365,6 +385,7 @@ fn rejects_mismatched_inputs() {
     assert!(reference::run(&g, &[]).is_err());
 }
 
+/// Shifts by at least the bit width, remainder sign, `not`, popcount and clz match XLA semantics.
 #[test]
 fn bit_ops_follow_xla() {
     use crate::graph::BinaryOp::*;
@@ -406,6 +427,7 @@ fn bit_ops_follow_xla() {
     assert_eq!(run(Unary(Not), &[b]).to_vec::<bool>(), [false, true]);
 }
 
+/// Round-half-even, sign of NaN, `nextafter`, `reduce_precision`, `is_finite` and `erf_inv` match XLA.
 #[test]
 fn float_functions_follow_xla() {
     use crate::graph::BinaryOp::Nextafter;

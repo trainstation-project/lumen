@@ -1,3 +1,4 @@
+/// Sums `x` across the simdgroup, in float for bfloat accumulators.
 template <typename A> inline A gemv_sum(A x) {
     if constexpr (is_same_v<A, bfloat>) {
         return A(simd_sum(float(x)));
@@ -6,6 +7,10 @@ template <typename A> inline A gemv_sum(A x) {
     }
 }
 
+/// Multiplies a matrix by up to `J` vectors: each simdgroup owns `RT / SIMDS` matrix rows and its
+/// lanes split K, `V` elements at a time, then reduce with `simd_sum`. `VECTOR_LHS` says which
+/// operand holds the vectors. Staged variants (`GROUP > 1` or `EXPANDED`) write results to `tile` and
+/// store them through the shared paired-epilogue path.
 template <typename T,
           typename A,
           typename O,
@@ -37,6 +42,7 @@ inline void matmul_gemv(device const T *lhs,
     static_assert(RT % SIMDS == 0, "each simdgroup owns whole matrix rows");
     static_assert(V % 4 == 0, "each lane loads whole four-element vectors");
     static_assert(!STAGED || RT % 8 == 0, "a staged tile holds whole fragments");
+    // R counts matrix rows, S vectors; strides come from p = [M, N, K, lhs b/m/k, rhs b/k/n].
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong R = VECTOR_LHS ? N : M, S = VECTOR_LHS ? M : N;
     device const T *matrix = VECTOR_LHS ? rhs + group.z * p[6] : lhs + group.z * p[3];
@@ -45,6 +51,9 @@ inline void matmul_gemv(device const T *lhs,
     const ulong vj = VECTOR_LHS ? p[4] : p[8], vk = VECTOR_LHS ? p[5] : p[7];
     const ulong r0 = ulong(VECTOR_LHS ? group.x : group.y) * RT;
 
+    // Row and vector offsets, clamped in range; out-of-range ones are discarded at the store.
+    // With halves, local row/col 2i reads i of the first half and 2i+1 reads i of the second, so
+    // paired outputs sit next to each other.
     ulong rows[RS], cols[J];
     UNROLL for (uint i = 0; i < RS; ++i) {
         const ulong r = min(r0 + sg * RS + i, R - 1);
@@ -59,6 +68,7 @@ inline void matmul_gemv(device const T *lhs,
         UNROLL for (uint j = 0; j < J; ++j) { acc[i][j] = 0; }
     }
 
+    // Vectorized loads need contiguous K, row starts aligned to four elements and an aligned base.
     const bool packed = mk == 1 && mr % 4 == 0 && ulong(matrix) % (4 * sizeof(T)) == 0;
     for (ulong k = lane * V; k < K; k += 32 * V) {
         vec<T, 4> w[RS][V / 4];
@@ -83,6 +93,7 @@ inline void matmul_gemv(device const T *lhs,
         }
     }
 
+    // Lane 0 of each simdgroup holds the reduced sums and writes them.
     const ulong base = group.z * M * N;
     UNROLL for (uint i = 0; i < RS; ++i) {
         const ulong r = r0 + sg * RS + i;

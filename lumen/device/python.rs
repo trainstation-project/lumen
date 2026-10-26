@@ -1,8 +1,11 @@
+//! Python bindings for devices: the `lumen.device` class and the `lumen.<type>` submodules.
+
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate as core;
 
+/// A device from a Python `lumen.device`, a `"type[:index]"` string, or `None` (CPU 0).
 pub(crate) fn parse_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::Device> {
     Ok(match device {
         None => core::Device::Cpu(0),
@@ -19,12 +22,14 @@ pub(crate) fn parse_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::
     })
 }
 
+/// Like [`parse_device`], but also fails if the device has no allocator on this machine.
 pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::Device> {
     let device = parse_device(device)?;
     core::allocator::allocator_for(device).map_err(PyRuntimeError::new_err)?;
     Ok(device)
 }
 
+/// Python `lumen.device`: a device type with an optional index, like `torch.device`.
 #[pyclass(
     name = "device",
     module = "lumen",
@@ -36,10 +41,12 @@ pub(crate) fn resolve_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PyDevice {
     device: core::Device,
+    /// Whether an index was given; unindexed devices print without one and report `index` as `None`.
     indexed: bool,
 }
 
 impl PyDevice {
+    /// A device of type `kind`, rejecting negative indices and unknown types.
     fn checked(kind: &str, index: Option<i64>) -> PyResult<Self> {
         let index = match index {
             None => None,
@@ -61,6 +68,7 @@ impl PyDevice {
         })
     }
 
+    /// Parses `"type"` or `"type:index"`, the index being decimal digits only.
     fn parse(spec: &str) -> PyResult<Self> {
         let (kind, index) = match spec.split_once(':') {
             None => (spec, None),
@@ -78,6 +86,7 @@ impl PyDevice {
         Self::checked(kind, index)
     }
 
+    /// An indexed Python device for `device`.
     pub(crate) fn from_core(device: core::Device) -> Self {
         PyDevice {
             device,
@@ -85,10 +94,12 @@ impl PyDevice {
         }
     }
 
+    /// The underlying core device (index 0 when unindexed).
     fn to_core(&self) -> core::Device {
         self.device
     }
 
+    /// Device type name, e.g. `"mps"`.
     fn name(&self) -> &'static str {
         self.device.backend().name()
     }
@@ -96,6 +107,7 @@ impl PyDevice {
 
 #[pymethods]
 impl PyDevice {
+    /// Copies a `device`, or parses a string with the index either inside it or passed separately.
     #[new]
     #[pyo3(signature = (device, index = None))]
     fn new(device: &Bound<'_, PyAny>, index: Option<i64>) -> PyResult<Self> {
@@ -126,16 +138,19 @@ impl PyDevice {
         }
     }
 
+    /// Device type name, exposed to Python as `type`.
     #[getter(r#type)]
     fn kind(&self) -> &'static str {
         self.name()
     }
 
+    /// Device index, or `None` when none was given.
     #[getter]
     fn index(&self) -> Option<usize> {
         self.indexed.then(|| self.device.index())
     }
 
+    /// `"type:index"`, or just `"type"` when unindexed.
     fn __str__(&self) -> String {
         match self.indexed {
             true => self.device.to_string(),
@@ -143,6 +158,7 @@ impl PyDevice {
         }
     }
 
+    /// `device(type='...', index=...)`, like torch.
     fn __repr__(&self) -> String {
         match self.index() {
             None => format!("device(type='{}')", self.name()),
@@ -150,12 +166,14 @@ impl PyDevice {
         }
     }
 
+    /// Pickles as `device(str(self))`.
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let cls = py.get_type::<PyDevice>().into_any().unbind();
         Ok((cls, (self.__str__(),)))
     }
 }
 
+/// Builds the `lumen.<kind>` submodule with `device_count`, `is_available` and `synchronize`.
 fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py, PyModule>> {
     use pyo3::types::{PyCFunction, PyDict, PyTuple};
     let m = PyModule::new(py, &format!("{}.{kind}", crate::LIBRARY_NAME))?;
@@ -179,6 +197,7 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
         Some(c"synchronize"),
         None,
         move |args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<()> {
+            // The device may be passed by keyword or as the first positional argument.
             let given = match kwargs {
                 Some(k) => k.get_item("device")?,
                 None => None,
@@ -202,6 +221,7 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
     Ok(m)
 }
 
+/// Registers the device class and each device-type submodule (also in `sys.modules`) on `m`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
     for kind in ["cpu", "cuda", "meta", "mps", "tpu"] {

@@ -1,12 +1,19 @@
+//! Finds how a GEMM's output is split into column regions by its readers so each region's epilogue can fuse into the GEMM.
 use crate::graph::{Graph, Node, Primitive, Var};
 
+/// Column granularity a region's width must be a multiple of so row kernels can window it.
 pub(crate) const ROW_COLUMNS: usize = 8;
 
+/// The readers covering one column range of a GEMM output.
 pub(crate) enum Region<'a> {
+    /// Interleaved members of a `reshape` that splits the axis into tuples of `k`, ordered by tuple index;
+    /// also used for the two contiguous halves of the output.
     Group(Vec<&'a Node>),
+    /// A single slice of the output read as is.
     Plain(&'a Node),
 }
 
+/// A column range `offset..offset + width` along `axis` of a GEMM output and the region reading it.
 pub(crate) struct Columns<'a> {
     pub(crate) axis: usize,
     pub(crate) offset: usize,
@@ -15,6 +22,7 @@ pub(crate) struct Columns<'a> {
 }
 
 impl Columns<'_> {
+    /// Returns the variables each member of the region produces.
     pub(crate) fn members(&self) -> Vec<Var> {
         match &self.region {
             Region::Group(members) => members.iter().map(|m| m.output).collect(),
@@ -22,6 +30,7 @@ impl Columns<'_> {
         }
     }
 
+    /// Returns how many members share the range: the tuple size for a group, 1 for a plain slice.
     pub(crate) fn k(&self) -> usize {
         match &self.region {
             Region::Group(members) => members.len(),
@@ -29,11 +38,14 @@ impl Columns<'_> {
         }
     }
 
+    /// Returns the width each member covers.
     pub(crate) fn size(&self) -> usize {
         self.width / self.k()
     }
 }
 
+/// Splits the output of `dot` into regions along its last axis (or its first, when the lhs has one free dim),
+/// or `None` when the readers don't tile the output in a fusable way.
 pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Columns<'a>>> {
     let Primitive::DotGeneral {
         lhs_batch,
@@ -48,9 +60,11 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     let one_free = |side: usize, contracting: &[usize]| {
         body.type_of(dot.inputs[side]).shape.len() == contracting.len() + 1
     };
+    // batched dots, dots that are graph outputs and scalars never fuse epilogues
     if !lhs_batch.is_empty() || body.outputs().contains(&dot.output) || rank == 0 {
         return None;
     }
+    // prefer the column axis when the rhs contributes exactly one free dimension, otherwise try the row axis
     let along = |axis: usize| regions_along(body, dot, axis).or_else(|| halves(body, dot, axis));
     let columns = one_free(1, rhs_contracting)
         .then(|| along(rank - 1))
@@ -62,6 +76,7 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     })
 }
 
+/// Matches exactly two readers that slice the first and second halves of `dot`'s output along `axis`.
 fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
     let shape = &body.type_of(dot.output).shape;
     let n = shape[axis];
@@ -91,10 +106,13 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
     })
 }
 
+/// Collects the readers of `dot`'s output that slice disjoint ranges along `axis`, each possibly reshaped into
+/// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing.
 fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
     let shape = &body.type_of(dot.output).shape;
     let (rank, n) = (shape.len(), shape[axis]);
     let outputs = body.outputs();
+    // a slice that keeps every dim but `axis` whole yields its `(start, limit)` on `axis`
     let along = |node: &Node, of: &[usize], axis: usize| match &node.primitive {
         Primitive::Slice {
             start_indices,
@@ -105,6 +123,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .then(|| (start_indices[axis], limit_indices[axis])),
         _ => None,
     };
+    // a reshape of `width` columns into `(width / k, k)` whose readers each pick one tuple index
     let group = |tupling: &'a Node, width: usize| -> Option<Region<'a>> {
         let Primitive::Reshape { new_sizes: tuples } = &tupling.primitive else {
             return None;
@@ -157,12 +176,14 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             region,
         });
     }
+    // regions must tile `0..n` exactly with no gaps or overlaps
     regions.sort_by_key(|c| c.offset);
     let covers = regions.first().is_some_and(|c| c.offset == 0)
         && regions
             .windows(2)
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
+    // only worth a split when some region interleaves members or writes a graph output directly
     let grouped = regions.iter().any(|c| c.k() > 1);
     let returned = axis + 1 == rank
         && regions
@@ -173,6 +194,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     (covers && (grouped || returned) && windows).then_some(regions)
 }
 
+/// Returns every node in `body` that reads `v`.
 pub(crate) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
     body.nodes()
         .iter()

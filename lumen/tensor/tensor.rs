@@ -1,3 +1,4 @@
+//! `Tensor`: a strided view of shared device storage, with factories, views, host access and copies.
 use std::sync::Arc;
 
 use super::dtype::{DType, Element, bf16, dispatch_dtype, f16};
@@ -9,10 +10,12 @@ use crate::graph::TensorType;
 use crate::kernels::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
 
+/// The device in `options`, defaulting to the CPU.
 fn device_of(options: &TensorOptions) -> Device {
     options.device_opt().unwrap_or(Device::Cpu(0))
 }
 
+/// Bytes a `dtype` tensor of `shape` takes on `device`, including TPU tile padding.
 fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => {
@@ -22,6 +25,7 @@ fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     }
 }
 
+/// Alignment a `dtype` tensor of `shape` needs on `device`.
 fn device_alignment(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => crate::device::tpu::layout::alignment(dtype, shape),
@@ -29,16 +33,20 @@ fn device_alignment(device: Device, dtype: DType, shape: &[usize]) -> usize {
     }
 }
 
+/// A strided view of a shared storage; cloning shares the storage.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     storage: Arc<Storage>,
     dtype: DType,
     shape: Vec<usize>,
+    /// Element strides, one per dim.
     strides: Vec<usize>,
+    /// Element offset of the first element in the storage.
     offset: usize,
 }
 
 impl Tensor {
+    /// A contiguous tensor over all of `storage`.
     pub(super) fn wrap(storage: Arc<Storage>, dtype: DType, shape: &[usize]) -> Self {
         Tensor {
             storage,
@@ -49,6 +57,8 @@ impl Tensor {
         }
     }
 
+    /// Allocates an uninitialized tensor of `size` with `options`' dtype and device.
+    ///
     /// # Safety
     ///
     /// Its elements are uninitialized: each must be written before it is
@@ -57,6 +67,8 @@ impl Tensor {
         unsafe { Self::empty_aligned(size, options, 0) }
     }
 
+    /// Allocates an uninitialized tensor whose storage is aligned to at least `alignment` bytes.
+    ///
     /// # Safety
     ///
     /// Its elements are uninitialized: each must be written before it is
@@ -75,6 +87,7 @@ impl Tensor {
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
+    /// An uninitialized contiguous tensor with this one's shape, dtype and allocator.
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
         let nbytes = device_bytes(self.device(), self.dtype, &self.shape);
@@ -82,6 +95,7 @@ impl Tensor {
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 
+    /// A tensor of `size` filled with zeros.
     pub fn zeros(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("zeros"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
@@ -89,6 +103,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// A tensor of `size` filled with ones.
     pub fn ones(size: &[usize], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("ones"), Vec::new);
         let t = unsafe { Self::empty(size, options) };
@@ -96,6 +111,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// A tensor of `size` filled with `fill_value`; the dtype defaults to the value's inferred one.
     pub fn full(
         size: &[usize],
         fill_value: impl Into<Scalar>,
@@ -109,6 +125,7 @@ impl Tensor {
         recorded(op, Self::filled(size, fill_value, options.dtype(dtype)))
     }
 
+    /// The 1-D tensor `0, 1, ..., ceil(end) - 1`; the dtype defaults to `end`'s inferred one.
     pub fn arange(end: impl Into<Scalar>, options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("arange"), Vec::new);
         let (end, options) = (end.into(), options.into());
@@ -121,6 +138,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// A 1-D tensor of `data`, converted when `options` gives another dtype.
     pub fn from_slice<T: Element>(data: &[T], options: impl Into<TensorOptions>) -> Self {
         let op = crate::profiler::record_op(op_name!("from_slice"), Vec::new);
         let options = options.into();
@@ -136,12 +154,14 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// An uninitialized tensor filled with `value`.
     fn filled(size: &[usize], value: Scalar, options: TensorOptions) -> Self {
         let t = unsafe { Self::empty(size, options) };
         t.fill_(value);
         t
     }
 
+    /// Writes `value` into every element, on the tensor's own device; meta and empty tensors are left alone.
     fn fill(&self, value: Scalar) {
         if self.numel() == 0 || self.device() == Device::Meta(0) {
             return;
@@ -158,11 +178,13 @@ impl Tensor {
             return crate::graph_compiler::mps::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
+        // Other devices fill a host tensor and copy it over.
         let host = unsafe { Self::empty(&self.shape, self.dtype) };
         host.fill(value);
         self.copy_(&host).unwrap_or_else(|e| panic!("fill_: {e}"));
     }
 
+    /// Writes `value` into every element of a host tensor after its pending work finishes.
     fn fill_host<T: Element>(&self, value: T) {
         self.wait_();
         let base = self.data_ptr().cast::<T>();
@@ -180,6 +202,7 @@ impl Tensor {
         });
     }
 
+    /// A 1-D tensor on `device` holding `data`.
     fn from_values<T: Element>(data: &[T], device: Device) -> Self {
         let options = TensorOptions::new().dtype(T::DTYPE).device(device);
         let t = unsafe { Self::empty(&[data.len()], options) };
@@ -187,12 +210,14 @@ impl Tensor {
         t
     }
 
+    /// A 1-D host tensor holding `data`.
     fn host<T: Element>(data: &[T]) -> Self {
         let t = unsafe { Self::empty(&[data.len()], T::DTYPE) };
         t.write(data);
         t
     }
 
+    /// Copies `data` into this contiguous tensor; a no-op on meta.
     fn write<T: Element>(&self, data: &[T]) {
         self.check_dtype::<T>();
         if self.device() == Device::Meta(0) {
@@ -211,6 +236,7 @@ impl Tensor {
         self.dtype
     }
 
+    /// A zero-dim handle sharing this tensor's storage, to keep it alive while kernels use it.
     #[cfg(lumen_mps_linked)]
     pub(crate) fn holding(&self) -> Tensor {
         Tensor {
@@ -230,6 +256,7 @@ impl Tensor {
         self.storage.device()
     }
 
+    /// Address of the first element.
     pub(crate) fn data_ptr(&self) -> *mut u8 {
         self.storage
             .data_ptr()
@@ -252,6 +279,7 @@ impl Tensor {
         self.shape.iter().product()
     }
 
+    /// Bytes of the elements the shape covers.
     pub(crate) fn nbytes(&self) -> usize {
         self.numel() * self.dtype.size_of()
     }
@@ -260,14 +288,17 @@ impl Tensor {
         self.offset
     }
 
+    /// Id of the underlying storage, shared by all views of it.
     pub fn storage_id(&self) -> usize {
         self.storage.id()
     }
 
+    /// True when both tensors view the same storage allocation.
     pub fn shares_storage_with(&self, other: &Tensor) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
 
+    /// A view of `storage` with the given layout.
     #[cfg(feature = "python")]
     pub(crate) fn from_storage(
         storage: Arc<Storage>,
@@ -285,6 +316,7 @@ impl Tensor {
         }
     }
 
+    /// A contiguous `dtype` view of `shape` starting `byte_offset` bytes into this contiguous tensor.
     pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
         let start = self.offset * self.dtype.size_of() + byte_offset;
         let size = dtype.size_of();
@@ -305,14 +337,17 @@ impl Tensor {
         }
     }
 
+    /// The tensor's dtype and shape.
     pub(crate) fn ty(&self) -> TensorType {
         TensorType::new(self.dtype, &self.shape)
     }
 
+    /// True when the strides are row-major for the shape.
     pub fn is_contiguous(&self) -> bool {
         self.strides == contiguous_strides(&self.shape)
     }
 
+    /// A view with a new shape; requires a contiguous tensor. On TPU a reshape that changes the tiled layout copies through the host.
     pub fn reshape(&self, shape: &[usize]) -> Self {
         let op = crate::profiler::record_op(op_name!("reshape"), || vec![self.ty()]);
         assert!(
@@ -343,6 +378,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// The view of `len` entries along `dim` starting at `start`.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("narrow"), || vec![self.ty()]);
         assert!(dim < self.ndim(), "dim {dim} out of range");
@@ -357,6 +393,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// The view of `len` entries along `dim` taking every `step`th from `start`.
     pub(crate) fn stepped(&self, dim: usize, start: usize, len: usize, step: usize) -> Self {
         assert!(dim < self.ndim(), "dim {dim} out of range");
         assert!(
@@ -371,11 +408,13 @@ impl Tensor {
         t
     }
 
+    /// The view at `index` along `dim`, with that dim removed.
     pub fn select(&self, dim: usize, index: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("select"), || vec![self.ty()]);
         recorded(op, self.narrow(dim, index, 1).squeeze_dim(dim))
     }
 
+    /// The view with dims `a` and `b` swapped.
     pub fn transpose(&self, a: usize, b: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("transpose"), || vec![self.ty()]);
         assert!(a < self.ndim() && b < self.ndim(), "dim out of range");
@@ -385,6 +424,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// The view whose dim `i` is this tensor's dim `dims[i]`.
     pub fn permute(&self, dims: &[usize]) -> Self {
         let op = crate::profiler::record_op(op_name!("permute"), || vec![self.ty()]);
         assert_eq!(dims.len(), self.ndim(), "permute must list every dim");
@@ -402,6 +442,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// The view with size-1 dim `dim` removed.
     pub fn squeeze_dim(&self, dim: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("squeeze_dim"), || vec![self.ty()]);
         assert_eq!(self.shape[dim], 1, "cannot squeeze dim {dim} of size != 1");
@@ -411,6 +452,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// The view with a size-1 dim inserted at `dim`.
     pub fn unsqueeze(&self, dim: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("unsqueeze"), || vec![self.ty()]);
         assert!(dim <= self.ndim(), "dim out of range");
@@ -425,6 +467,7 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// This tensor if contiguous, else a contiguous copy on the same device; `T` is the element type for host copies.
     pub fn contiguous<T: Element>(&self) -> Self {
         let op = crate::profiler::record_op(op_name!("contiguous"), || vec![self.ty()]);
         if self.is_contiguous() {
@@ -444,11 +487,13 @@ impl Tensor {
         recorded(op, t)
     }
 
+    /// A copy on `device`, or this tensor if already there.
     pub fn to(&self, device: Device) -> Self {
         let op = crate::profiler::record_op(op_name!("to"), || vec![self.ty()]);
         recorded(op, self.copy_to(device))
     }
 
+    /// Casts to `dtype` by compiling and running a one-op graph on the tensor's device.
     pub fn to_dtype(&self, dtype: DType) -> Result<Self, String> {
         if dtype == self.dtype {
             return Ok(self.clone());
@@ -463,6 +508,7 @@ impl Tensor {
         Ok(plan.run_on(std::slice::from_ref(self), device)?.remove(0))
     }
 
+    /// Copies to `device`, keeping the strides by copying the storage span the view covers.
     pub(crate) fn copy_to(&self, device: Device) -> Self {
         if device == self.device() {
             return self.clone();
@@ -471,9 +517,11 @@ impl Tensor {
             self.device() != Device::Meta(0),
             "cannot copy a meta tensor to {device}: meta tensors have no data"
         );
+        // Device-to-device copies go through the host.
         if device != Device::Cpu(0) && self.device() != Device::Cpu(0) {
             return self.copy_to(Device::Cpu(0)).copy_to(device);
         }
+        // TPU tensors are tiled, so they are copied whole and contiguous.
         if let (Device::Tpu(_), _) | (_, Device::Tpu(_)) = (device, self.device()) {
             assert!(
                 self.device() == Device::Cpu(0) || self.is_contiguous(),
@@ -505,12 +553,14 @@ impl Tensor {
         }
     }
 
+    /// The elements in row-major order; `T` must match the dtype.
     pub fn to_vec<T: Element>(&self) -> Vec<T> {
         let _op = crate::profiler::record_op(op_name!("to_vec"), || vec![self.ty()]);
         self.check_dtype::<T>();
         self.values()
     }
 
+    /// The elements in row-major order, read through a host copy.
     fn values<T: Element>(&self) -> Vec<T> {
         assert!(
             self.device() != Device::Meta(0),
@@ -530,6 +580,7 @@ impl Tensor {
         out
     }
 
+    /// A 1-D view from the first element to the last one this view reaches in the storage.
     pub(crate) fn span(&self) -> Self {
         let len = if self.numel() == 0 {
             0
@@ -551,11 +602,13 @@ impl Tensor {
         }
     }
 
+    /// Waits for pending device work on this tensor.
     pub fn wait_(&self) -> &Self {
         crate::kernels::wait::wait(self);
         self
     }
 
+    /// A zero-dim view of the element at storage offset `offset`.
     fn element(&self, offset: usize) -> Self {
         Tensor {
             storage: Arc::clone(&self.storage),
@@ -566,6 +619,7 @@ impl Tensor {
         }
     }
 
+    /// Panics unless `T` stores this tensor's dtype.
     fn check_dtype<T: Element>(&self) {
         assert_eq!(
             self.dtype,
@@ -576,6 +630,7 @@ impl Tensor {
         );
     }
 
+    /// Storage offset of the element at `index`, panicking when out of bounds.
     fn physical_offset(&self, index: &[usize]) -> usize {
         assert_eq!(index.len(), self.ndim(), "expected {} indices", self.ndim());
         for (d, &i) in index.iter().enumerate() {
@@ -584,6 +639,7 @@ impl Tensor {
         self.offset + flat_offset(index, &self.strides)
     }
 
+    /// The element at `index`.
     pub fn get<T: Element>(&self, index: &[usize]) -> T {
         let _op = crate::profiler::record_op(op_name!("get"), || vec![self.ty()]);
         self.check_dtype::<T>();
@@ -591,6 +647,7 @@ impl Tensor {
         self.element(off).values::<T>()[0]
     }
 
+    /// Writes `value` to the element at `index`.
     pub fn set<T: Element>(&self, index: &[usize], value: T) {
         let mut op = crate::profiler::record_op(op_name!("set"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -599,6 +656,7 @@ impl Tensor {
         self.element(off).write(&[value]);
     }
 
+    /// Fills every element with `value`, cast to the dtype.
     pub fn fill_(&self, value: impl Into<Scalar>) -> &Self {
         let mut op = crate::profiler::record_op(op_name!("fill_"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -606,6 +664,7 @@ impl Tensor {
         self
     }
 
+    /// Copies `src` (same dtype and shape, any device) into this tensor; into a meta parameter it copies to every placement.
     pub fn copy_(&self, src: &Tensor) -> Result<&Self, String> {
         let mut op = crate::profiler::record_op(op_name!("copy_"), || vec![src.ty(), self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -651,6 +710,7 @@ impl Tensor {
             }
             return Ok(self);
         }
+        // Remaining cases stage `src` as a contiguous host tensor.
         let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu(0)).contiguous::<T>());
         if self.is_contiguous() {
             copy_h2d(self, &host);
@@ -667,6 +727,7 @@ impl Tensor {
             ));
         }
 
+        // A strided view on CPU or MPS (shared memory) is written element by element.
         self.wait_();
         let size = self.dtype.size_of();
         let mut k = 0;
@@ -684,6 +745,7 @@ impl Tensor {
         Ok(self)
     }
 
+    /// Fills every element with zero.
     pub fn zero_(&self) -> &Self {
         let mut op = crate::profiler::record_op(op_name!("zero_"), || vec![self.ty()]);
         op.outputs(|| vec![self.ty()]);
@@ -691,11 +753,13 @@ impl Tensor {
     }
 }
 
+/// Sets `op`'s output type to `t`'s and returns `t`.
 fn recorded(mut op: RecordGuard, t: Tensor) -> Tensor {
     op.outputs(|| vec![t.ty()]);
     t
 }
 
+/// Row-major element strides for `shape`.
 pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![1; shape.len()];
     for d in (0..shape.len().saturating_sub(1)).rev() {
@@ -704,6 +768,7 @@ pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+/// Prints the elements, or only shape and dtype for a meta tensor.
 impl std::fmt::Display for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.device() == Device::Meta(0) {
@@ -733,6 +798,7 @@ impl std::fmt::Display for Tensor {
 }
 
 impl Tensor {
+    /// Formats the tensor's elements read as `T`.
     fn fmt_typed<T: Element>(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -744,15 +810,18 @@ impl Tensor {
     }
 }
 
+/// Element offset of `index` under `strides`.
 pub(crate) fn flat_offset(index: &[usize], strides: &[usize]) -> usize {
     index.iter().zip(strides).map(|(i, s)| i * s).sum()
 }
 
+/// Calls `f` with every index of `shape` in row-major order; it always calls `f` at least once, so callers skip empty tensors.
 pub(crate) fn for_each_index(shape: &[usize], mut f: impl FnMut(Vec<usize>)) {
     let mut idx = vec![0; shape.len()];
     loop {
         f(idx.clone());
 
+        // Increment the index like an odometer, last dim fastest.
         let mut d = shape.len();
         loop {
             if d == 0 {

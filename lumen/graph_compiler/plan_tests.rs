@@ -1,3 +1,5 @@
+//! Tests for plan compilation (buffer reuse, donation, scheduling, scratch, views) and,
+//! when MPS is linked, for running plans on MPS against the reference evaluator.
 use super::Plan;
 use super::plan::Buffer;
 use crate::graph::Primitive::*;
@@ -5,14 +7,17 @@ use crate::graph::{Graph, Primitive, TensorType};
 use crate::kernels::reference;
 use crate::{DType, Scalar, Tensor};
 
+/// Shorthand for `TensorType::new`.
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
+/// Deterministic pseudo-random float32 values in `[-2, 2)` of the given shape.
 pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
     let mut state = seed;
     let values: Vec<f32> = (0..shape.iter().product::<usize>())
         .map(|_| {
+            // 64-bit LCG step; the top 24 bits become a uniform float.
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
@@ -22,6 +27,7 @@ pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
     Tensor::from_slice(&values, DType::F32).reshape(shape)
 }
 
+/// Compiles `g`, checks it matches the reference evaluator bitwise and returns the plan.
 fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
     let plan = Plan::compile(g);
     let expected = reference::run(g, inputs).unwrap();
@@ -34,6 +40,7 @@ fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
     plan
 }
 
+/// A two-layer ReLU MLP followed by a softmax, on `[4, 8]` inputs.
 pub(crate) fn mlp() -> Graph {
     let mut g = Graph::new();
     let x = g.input(ty(DType::F32, &[4, 8]));
@@ -95,6 +102,7 @@ pub(crate) fn mlp() -> Graph {
     g
 }
 
+/// The MLP plan matches the reference, elides reshapes and writes its output buffer last.
 #[test]
 fn plan_matches_reference() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
@@ -107,6 +115,7 @@ fn plan_matches_reference() {
     assert_eq!(plan.steps().last().unwrap().output.0, Buffer::Output(0));
 }
 
+/// A chain of elementwise ops runs entirely in place in the caller's buffers.
 #[test]
 fn plan_reuses_workspace() {
     let mut g = Graph::new();
@@ -119,6 +128,7 @@ fn plan_reuses_workspace() {
     assert_eq!(plan.workspace_bytes(), 0, "{plan}");
 }
 
+/// Scheduling reduces each branch before computing the next, shrinking the workspace.
 #[test]
 fn plan_schedules_steps_to_shrink_the_workspace() {
     let mut g = Graph::new();
@@ -144,6 +154,7 @@ fn plan_schedules_steps_to_shrink_the_workspace() {
     assert_eq!(&ops[..2], ["exp", "reduce_sum"], "{plan}");
 }
 
+/// A memory limit below the needed workspace recomputes a value instead of keeping it.
 #[test]
 #[cfg_attr(miri, ignore = "128 KiB values, too slow for Miri")]
 fn plan_rematerializes_under_a_memory_limit() {
@@ -180,6 +191,7 @@ fn plan_rematerializes_under_a_memory_limit() {
     assert_eq!((recomputed, exps), (4 * N, 3));
 }
 
+/// Philox-4x32-10 matches the Random123 known-answer tests.
 #[test]
 fn philox_matches_random123() {
     use crate::kernels::reference::philox4x32;
@@ -205,6 +217,7 @@ fn philox_matches_random123() {
     }
 }
 
+/// `RandomBits` draws from one counter stream, so offsets select overlapping windows.
 #[test]
 fn random_bits_are_a_counter_stream() {
     use crate::kernels::reference::philox_bits;
@@ -233,6 +246,7 @@ fn random_bits_are_a_counter_stream() {
     assert_ne!(draw(11, &[6]), whole);
 }
 
+/// Outputs that alias other values get copy steps and unused nodes are dropped.
 #[test]
 fn plan_copies_aliased_outputs_and_drops_dead_code() {
     let mut g = Graph::new();
@@ -247,6 +261,7 @@ fn plan_copies_aliased_outputs_and_drops_dead_code() {
     assert_eq!(plan.workspace_bytes(), 0);
 }
 
+/// Owned plans keep outputs in the workspace, read parameters in place and copy arguments.
 #[test]
 fn owned_plans_place_outputs_in_the_workspace_and_read_inputs_in_place() {
     let mut g = Graph::new();
@@ -280,6 +295,7 @@ fn owned_plans_place_outputs_in_the_workspace_and_read_inputs_in_place() {
     assert!(plan.run_in(&small, &[w.clone(), w.clone()]).is_err());
 }
 
+/// An argument sharing storage with a donated parameter is copied before it is overwritten.
 #[test]
 fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
     let mut g = Graph::new();
@@ -301,6 +317,8 @@ fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
     assert_eq!(out[0].to_vec::<f32>(), [3.0, 10.0, 21.0, 36.0]);
 }
 
+/// Elementwise steps write over an operand that dies there, but not when it is read later
+/// or the step is a transpose or a dtype-changing cast.
 #[test]
 fn steps_write_over_operands_that_die_there() {
     let ty = |shape: &[usize]| TensorType::new(DType::F32, shape);
@@ -315,6 +333,7 @@ fn steps_write_over_operands_that_die_there() {
             step.inputs.iter().map(|i| i.0).collect::<Vec<_>>(),
         )
     };
+    // `Exp` then `second`, with `e` optionally read again after it.
     let build = |second: Primitive, read_later: bool| {
         let mut g = Graph::new();
         let x = g.input(ty(&[3, 3]));
@@ -364,6 +383,7 @@ fn steps_write_over_operands_that_die_there() {
     );
 }
 
+/// Compiles `g` donating input 0 and returns the plan with the first non-workspace output buffer.
 fn donating(g: &Graph) -> (Plan, Buffer) {
     let options = super::PlanOptions {
         scratch: None,
@@ -384,6 +404,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
     (plan, out.expect("a step writes the output"))
 }
 
+/// A donated input holds an output written elementwise over it, but not a transpose's.
 #[test]
 fn donated_inputs_hold_outputs_written_in_place() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
@@ -450,6 +471,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
     assert_eq!(outputs, [Buffer::Output(0), Buffer::Input(0)], "{plan}");
 }
 
+/// An input donated into one output is not reused for another.
 #[test]
 fn inputs_donated_into_an_output_hold_it_alone() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
@@ -481,6 +503,7 @@ fn inputs_donated_into_an_output_hold_it_alone() {
     }
 }
 
+/// A donated member of a packed block is not overwritten while the block is still read.
 #[test]
 fn donated_inputs_in_a_block_wait_for_its_readers() {
     let ty = TensorType::new(DType::F32, &[2, 3]);
@@ -517,6 +540,7 @@ fn donated_inputs_in_a_block_wait_for_its_readers() {
     assert_eq!(writes, None, "{packed}");
 }
 
+/// A custom call mutates its operands in place unless they are read afterwards.
 #[test]
 fn custom_calls_mutate_in_place_where_they_can() {
     let ty = TensorType::new(DType::F32, &[4]);
@@ -569,6 +593,7 @@ fn custom_calls_mutate_in_place_where_they_can() {
     assert!(written.iter().zip(&operands).all(|(w, o)| w != o), "{plan}");
 }
 
+/// Operands of an in-place concatenate are written into the result at their offsets.
 #[test]
 fn in_place_concatenates_are_written_by_their_operands_steps() {
     let mut g = Graph::new();
@@ -614,6 +639,7 @@ fn in_place_concatenates_are_written_by_their_operands_steps() {
     );
 }
 
+/// Kernel scratch gets its own workspace region not overlapping live operands.
 #[test]
 fn kernel_scratch_is_placed_in_the_workspace() {
     let mut g = Graph::new();
@@ -660,6 +686,8 @@ fn kernel_scratch_is_placed_in_the_workspace() {
     assert!(plan.to_string().contains("(scratch ws+"));
 }
 
+/// Running on meta tensors returns typed outputs without computing; a CPU run of meta
+/// inputs fails.
 #[test]
 fn plans_run_on_meta_tensors_compute_nothing() {
     let g = mlp();
@@ -684,6 +712,7 @@ fn plans_run_on_meta_tensors_compute_nothing() {
     );
 }
 
+/// Plan tests that run on MPS and compare against the reference evaluator.
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps {
     use super::Primitive::*;
@@ -694,6 +723,7 @@ pub(crate) mod mps {
     use crate::tensor::dtype::dispatch_dtype;
     use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
+    /// Every dtype MPS supports.
     const DTYPES: [DType; 12] = [
         DType::Bool,
         DType::U8,
@@ -709,10 +739,12 @@ pub(crate) mod mps {
         DType::F32,
     ];
 
+    /// Whether an MPS device is present; MPS tests pass vacuously otherwise.
     pub(crate) fn available() -> bool {
         crate::device::mps::MPS.is_available()
     }
 
+    /// Test values of `dtype`: scaled floats, or integers in about `[-100, 100]`.
     pub(crate) fn values(dtype: DType, shape: &[usize], seed: u64) -> Tensor {
         let x = data(shape, seed).to_vec::<f32>();
         dispatch_dtype!(dtype, T => {
@@ -730,6 +762,8 @@ pub(crate) mod mps {
         })
     }
 
+    /// Small integers every `period`-th element and zeros elsewhere, so sums of half-precision
+    /// values stay exact.
     pub(crate) fn exact_values(dtype: DType, shape: &[usize], seed: u64, period: usize) -> Tensor {
         let x = data(shape, seed).to_vec::<f32>();
         let v: Vec<f64> = x
@@ -746,14 +780,17 @@ pub(crate) mod mps {
         })
     }
 
+    /// Reads any tensor's elements as float64.
     fn as_f64(t: &Tensor) -> Vec<f64> {
         dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
     }
 
+    /// Compiles `g` for MPS and checks its outputs match the reference within dtype tolerance.
     pub(crate) fn check(g: &Graph, inputs: &[Tensor]) {
         check_within(g, inputs, 0.0);
     }
 
+    /// `check`, allowing `slack` extra absolute error for float dtypes.
     pub(crate) fn check_within(g: &Graph, inputs: &[Tensor], slack: f64) {
         let expected = reference::run(g, inputs).unwrap();
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
@@ -776,6 +813,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// A softmax over the last axis written as reductions, broadcasts and elementwise ops.
     fn written_softmax(dtype: DType, shape: &[usize]) -> Graph {
         let mut g = Graph::new();
         let x = g.input(ty(dtype, shape));
@@ -799,10 +837,13 @@ pub(crate) mod mps {
         g
     }
 
+    /// Checks a graph of the single node `p` on MPS.
     fn check_node(p: Primitive, types: &[TensorType]) {
         check_node_within(p, types, 0.0);
     }
 
+    /// `check_node`, allowing `slack` extra error; half-precision reductions and contractions
+    /// use exact values.
     fn check_node_within(p: Primitive, types: &[TensorType], slack: f64) {
         let mut g = Graph::new();
         let vars: Vec<_> = types.iter().map(|ty| g.input(ty.clone())).collect();
@@ -815,6 +856,7 @@ pub(crate) mod mps {
             } => Some(lhs_contracting.iter().map(|&d| types[0].shape[d]).product()),
             _ => None,
         };
+        // Half-precision sums only stay exact with sparse small integers.
         let exact = count.filter(|_| matches!(types[0].dtype, DType::F16 | DType::BF16));
         let inputs: Vec<Tensor> = types
             .iter()
@@ -832,10 +874,12 @@ pub(crate) mod mps {
         check_within(&g, &inputs, slack);
     }
 
+    /// Shorthand for `TensorType::new`.
     fn ty(dtype: DType, shape: &[usize]) -> TensorType {
         TensorType::new(dtype, shape)
     }
 
+    /// Checks a constant node on MPS, alone and fed into a `Max`.
     fn check_constant(p: Primitive) {
         let out = p.infer(&[]).unwrap();
         let mut g = Graph::new();
@@ -846,6 +890,7 @@ pub(crate) mod mps {
         check(&g, &[values(out.dtype, &out.shape, 7)]);
     }
 
+    /// Elementwise ops across dtypes; bfloat16 transcendentals are rejected.
     #[test]
     fn elementwise() {
         if !available() {
@@ -883,6 +928,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Casts between every dtype pair, including saturating and NaN float casts.
     #[test]
     fn conversions() {
         if !available() {
@@ -903,6 +949,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Half-precision matmuls accumulate in float32 and write either dtype.
     #[test]
     fn widened_contractions() {
         if !available() {
@@ -926,6 +973,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Reductions over large and degenerate shapes across dtypes.
     #[test]
     fn large_reductions() {
         if !available() {
@@ -978,6 +1026,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Small reductions and batched or multi-axis contractions across dtypes.
     #[test]
     fn reductions_and_contractions() {
         if !available() {
@@ -1051,6 +1100,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Broadcasts, transposes, slices, softmax, concatenates and constants across dtypes.
     #[test]
     fn layout_and_constants() {
         if !available() {
@@ -1137,6 +1187,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// The MLP plan runs on MPS.
     #[test]
     fn mlp_plan() {
         if !available() {
@@ -1146,6 +1197,7 @@ pub(crate) mod mps {
         check(&mlp(), &inputs);
     }
 
+    /// Forward and reverse cumulative sums along each axis on MPS.
     #[test]
     fn cumsum_runs_on_mps() {
         if !available() {
@@ -1183,6 +1235,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Random bits on MPS, alone and fused, match the reference, also with scalar inputs.
     #[test]
     fn random_bits_run_on_mps() {
         if !available() {
@@ -1237,6 +1290,7 @@ pub(crate) mod mps {
         }
     }
 
+    /// Dynamic slices and updates with in-range and clamped starts; a donated update writes in place.
     #[test]
     fn dynamic_slices_run_on_mps() {
         if !available() {
@@ -1307,6 +1361,7 @@ pub(crate) mod mps {
         );
     }
 
+    /// float64 and inputs on mixed devices are rejected on MPS.
     #[test]
     fn rejects_float64_and_mixed_devices() {
         if !available() {

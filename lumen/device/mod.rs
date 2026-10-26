@@ -1,3 +1,5 @@
+//! Devices (`cpu`, `mps`, `cuda`, `tpu`, `meta`) and the backend trait each implements.
+
 pub mod cpu;
 pub mod cuda;
 pub mod meta;
@@ -8,13 +10,18 @@ pub mod tpu;
 
 use std::fmt;
 
+/// Per-device-type queries: name, how many devices exist, and how to select one.
 pub trait DeviceBackend: Sync {
+    /// Lowercase device type name, as used in `"name:index"`.
     fn name(&self) -> &'static str;
+    /// Number of devices of this type present on this machine.
     fn device_count(&self) -> usize;
+    /// Whether at least one device of this type exists.
     fn is_available(&self) -> bool {
         self.device_count() > 0
     }
 
+    /// `Ok` if device `index` exists, else a message saying why not.
     fn check(&self, index: usize) -> Result<(), String> {
         let count = self.device_count();
         match index < count {
@@ -26,9 +33,11 @@ pub trait DeviceBackend: Sync {
         }
     }
 
+    /// Makes `index` the current device before launching work on it; a no-op by default.
     fn set_device(&self, _index: usize) {}
 }
 
+/// A device type and index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     Cpu(usize),
@@ -39,6 +48,7 @@ pub enum Device {
 }
 
 impl Device {
+    /// The device of type `name` (`"cpu"`, `"mps"`, ...) at `index`, or `None` for an unknown type.
     pub fn of_type(name: &str, index: usize) -> Option<Device> {
         match name {
             "cpu" => Some(Device::Cpu(index)),
@@ -50,6 +60,7 @@ impl Device {
         }
     }
 
+    /// The backend for this device's type.
     pub fn backend(self) -> &'static dyn DeviceBackend {
         match self {
             Device::Cpu(_) => cpu::CPU,
@@ -60,6 +71,7 @@ impl Device {
         }
     }
 
+    /// The device's index within its type.
     pub fn index(self) -> usize {
         match self {
             Device::Cpu(index)
@@ -70,12 +82,14 @@ impl Device {
         }
     }
 
+    /// `Ok` if this device exists on this machine.
     pub fn check(self) -> Result<(), String> {
         self.backend().check(self.index())
     }
 }
 
 impl fmt::Display for Device {
+    /// Formats as `"type:index"`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.backend().name(), self.index())
     }

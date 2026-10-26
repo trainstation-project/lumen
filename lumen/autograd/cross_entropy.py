@@ -1,3 +1,5 @@
+"""Fuses a cross entropy over a dot's logits into a chunked linear cross entropy backward."""
+
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.graph import prims, tracer
@@ -14,6 +16,7 @@ def substitute(tape):
         return tape
     from lumen.functional.cross_entropy.logits import _CrossEntropy
 
+    # Tape index of each single-output node, and which tape entries read each var.
     at = {entry[3]: k for k, entry in enumerate(tape) if not isinstance(entry[3], tuple)}
     readers = {}
     for k, (_, inputs, _, _) in enumerate(tape):
@@ -28,6 +31,7 @@ def substitute(tape):
             continue
         p = tape[d][2]
         h, w = (_value(v) for v in tape[d][1])
+        # Only plain 2-D ``h @ w`` or ``h @ w.T`` with float32 logits is fused.
         rhs = tuple(p["rhs_contracting"])
         fits = (
             h.ndim == 2
@@ -63,6 +67,7 @@ class _LinearCrossEntropy(Function):
 
     @staticmethod
     def backward(ctx, g):
+        """Gradients of ``h`` and ``w`` (none for ``target``), one row chunk of logits at a time."""
         from lumen import functional as F
         from lumen.functional.cross_entropy.utils import _one_hot
 
@@ -73,6 +78,7 @@ class _LinearCrossEntropy(Function):
         for start in range(0, b, ctx.chunk):
             rows = slice(start, min(start + ctx.chunk, b))
             hc = h[rows]
+            # Softmax minus one-hot, scaled by the incoming per-row gradient.
             x = F.matmul(hc, wt, "float32", "float32")
             p = F.exp(x - lse[rows].reshape(-1, 1))
             ds = ((p - _one_hot(target[rows], v, "float32")) * g[rows].reshape(-1, 1)).to(dtype=h.dtype)

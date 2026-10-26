@@ -1,9 +1,14 @@
+"""Pallas program for a TPU dot whose epilogue reduces along rows, so a block spans all ``n`` columns."""
+
 from lumen import pallas as pl
 from lumen.codegen.tpu import per_row
 from lumen.kernels.tpu import pallas
 
 
 def program(spec):
+    """The dot of ``spec`` over ``[bm, n]`` row blocks: ``height`` rows, ``n``, ``k``, ``transposed``,
+    ``blocks`` (bm, bk), ``inputs`` and ``outputs`` (each full, per row, per lane or scalar) and the
+    per-row epilogue ``nodes``."""
     rows, n, k, t = spec["height"], spec["n"], spec["k"], spec["transposed"]
     bm, bk = spec["blocks"]
     dtype, value = spec["operands"], spec["value"]
@@ -18,7 +23,10 @@ def program(spec):
     }
 
     def kernel(refs, memory, result, *scratch):
+        """Pipelines the row-blocked dot and its epilogue from ``memory`` into ``result``."""
+
         def copy(src, dst):
+            """Blocking DMA of ``src`` into ``dst``."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
@@ -39,6 +47,7 @@ def program(spec):
         ]
 
         def finish(product, given, written):
+            """Runs the epilogue on ``product`` with the inputs' blocks and writes the outputs."""
             given = iter(given)
             values = [product.to(value)]
             for i, (_, kind) in enumerate(inputs):
@@ -52,6 +61,7 @@ def program(spec):
                 ref[...] = values[v]
 
         def body(xb, yb, *refs_):
+            """One grid step: accumulate this K block's product, finishing on the last."""
             given, written = refs_[: len(piped)], refs_[len(piped) :]
             product = pl.dot(xb[...], yb[...], trans_b=t)
             if kb == 1:
@@ -61,12 +71,14 @@ def program(spec):
 
             @pl.when(step == 0)
             def _():
+                """Zeroes the accumulator on the first K step."""
                 scratch[0][...] = 0.0
 
             scratch[0][...] += product
 
             @pl.when(step == kb - 1)
             def _():
+                """Runs the epilogue after the last K step."""
                 finish(scratch[0][...], given, written)
 
         x_spec = pl.BlockSpec((bm, bk), lambda i, s: (i, s))

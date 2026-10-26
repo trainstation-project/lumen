@@ -1,3 +1,5 @@
+//! Launches the Pallas flash attention forward and backward kernels on TPU.
+
 #[cfg(lumen_tpu_linked)]
 use crate::graph::Primitive;
 #[cfg(lumen_tpu_linked)]
@@ -5,12 +7,16 @@ use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::kernels::tpu::{Launch, launch};
 
+/// TPU lane width; attention block sizes are multiples of it.
 const LANES: usize = 128;
 
+/// Largest query block.
 const QUERIES: usize = 1024;
 
+/// Largest key block.
 const KEYS: usize = 4096;
 
+/// Largest multiple of `LANES` up to `cap` that divides `n`, or `n` itself when none does.
 fn block(n: usize, cap: usize) -> usize {
     (1..=cap / LANES)
         .rev()
@@ -19,10 +25,12 @@ fn block(n: usize, cap: usize) -> usize {
         .unwrap_or(n)
 }
 
+/// Query and key block sizes for sequence lengths `sq` and `sk`.
 pub(crate) fn blocks(sq: usize, sk: usize) -> (usize, usize) {
     (block(sq, QUERIES), block(sk, KEYS))
 }
 
+/// Launches the Python attention kernel `kind` (`forward` or `backward`) with buffer pointers `rows`.
 #[cfg(lumen_tpu_linked)]
 fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
     let module = match kind {
@@ -41,6 +49,7 @@ fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(),
     launch(index, launched)
 }
 
+/// Encodes an attention fusion step, binding its inputs, then its output, then any extra outputs.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn encode(
     index: usize,

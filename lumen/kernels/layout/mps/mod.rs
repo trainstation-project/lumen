@@ -1,9 +1,12 @@
+//! Encodes layout primitives (reshape, broadcast, transpose, slice) on MPS as strided copies.
+
 use crate::Tensor;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{BYTES_PER_THREAD, Grid, dims32_arg, launch, u32_arg};
 use crate::tensor::contiguous_strides;
 
+/// Encodes a layout step as a gather of the input under the strides that produce the output.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -21,6 +24,7 @@ pub(crate) fn encode(
             broadcast_dimensions,
             ..
         } => {
+            // Broadcast dims, and kept dims of size 1, read with stride 0.
             let mut strides = vec![0; out.shape.len()];
             for (k, &d) in broadcast_dimensions.iter().enumerate() {
                 if x.shape[k] != 1 {
@@ -40,6 +44,8 @@ pub(crate) fn encode(
     gather(width, &out.shape, &strides, inputs[0], output, keep, name)
 }
 
+/// Copies `src` viewed with `shape` and element `strides` into contiguous `dst`, using the tiled transpose
+/// when the innermost dim is strided and another dim has unit stride.
 fn gather(
     width: usize,
     shape: &[usize],
@@ -49,6 +55,7 @@ fn gather(
     keep: Vec<Tensor>,
     name: &'static str,
 ) -> Result<(), String> {
+    // Drop unit dims and merge neighbors that are contiguous with each other.
     let mut dims: Vec<(usize, usize)> = Vec::new();
     for (&size, &stride) in shape.iter().zip(strides) {
         match dims.last_mut() {
@@ -60,6 +67,7 @@ fn gather(
     let buffers = [src, dst.cast_const()];
     let inner_stride = dims.last().map_or(0, |d| d.1);
     let a = dims.iter().position(|d| d.1 == 1);
+    // `a` is the unit-stride source dim, `b` the innermost (strided) output dim; the rest are batch dims.
     if let (true, Some(a)) = (inner_stride > 1, a) {
         let b = dims.len() - 1;
         let out_strides = contiguous_strides(&dims.iter().map(|d| d.0).collect::<Vec<_>>());

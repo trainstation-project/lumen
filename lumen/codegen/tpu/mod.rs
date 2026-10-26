@@ -1,3 +1,5 @@
+//! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
+
 pub(crate) mod attention;
 #[cfg(lumen_tpu_linked)]
 mod elementwise;
@@ -17,6 +19,7 @@ use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 pub(crate) use elementwise::encode;
 
+/// Whether `p` can run inside a plain elementwise TPU loop (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
     if let BroadcastInDim {
@@ -48,11 +51,13 @@ pub(crate) fn fusible(p: &Primitive) -> bool {
     )
 }
 
+/// The JSON node `{"name", "params", "args"}` the Python kernels rebuild `p` from, with `args` indexing earlier values.
 pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
         Primitive::Full {
             fill_value, dtype, ..
         } => {
+            // JSON has no NaN or infinity literals; Python's json module reads these spellings.
             let value = match *fill_value {
                 Scalar::Bool(b) => b.to_string(),
                 Scalar::Int(i) => i.to_string(),
@@ -81,6 +86,7 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     )
 }
 
+/// The `(row stride, column offset)` of output `k` when it is written into a window of a wider matrix.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn window(step: &Step, k: usize) -> Option<(usize, usize)> {
     let view = step.output_views.get(k)?.as_ref()?;

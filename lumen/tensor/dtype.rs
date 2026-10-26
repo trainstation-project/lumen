@@ -1,9 +1,12 @@
+//! Element dtypes: the `DType` enum, the `Element` trait mapping Rust types to dtypes, the sub-byte and
+//! float8 storage types, and `dispatch_dtype!` for running generic code on a runtime dtype.
 use std::fmt;
 
 use super::scalar::Scalar;
 
 pub use half::{bf16, f16};
 
+/// A tensor element type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
     Bool,
@@ -19,16 +22,24 @@ pub enum DType {
     BF16,
     F32,
     F64,
+    /// 2-bit signed integer, stored one per byte.
     I2,
+    /// 4-bit signed integer, stored one per byte.
     I4,
+    /// 2-bit unsigned integer, stored one per byte.
     U2,
+    /// 4-bit unsigned integer, stored one per byte.
     U4,
+    /// 8-bit float, 4 exponent and 3 mantissa bits, no infinities.
     F8E4M3FN,
+    /// 8-bit IEEE-style float, 5 exponent and 2 mantissa bits.
     F8E5M2,
+    /// 8-bit float, 4 exponent and 3 mantissa bits with bias 11, no infinities or negative zero.
     F8E4M3B11FNUZ,
 }
 
 impl DType {
+    /// Bytes each element takes in memory (sub-byte types take a whole byte).
     pub const fn size_of(self) -> usize {
         use DType::*;
         match self {
@@ -39,6 +50,7 @@ impl DType {
         }
     }
 
+    /// Short name, such as `f32` or `bf16`.
     pub const fn name(self) -> &'static str {
         use DType::*;
         match self {
@@ -65,6 +77,7 @@ impl DType {
         }
     }
 
+    /// Bit width of a value, smaller than its storage for sub-byte types.
     pub const fn bits(self) -> usize {
         match self {
             DType::I2 | DType::U2 => 2,
@@ -73,6 +86,7 @@ impl DType {
         }
     }
 
+    /// NumPy-style name, such as `float32` or `bfloat16`.
     pub const fn full_name(self) -> &'static str {
         use DType::*;
         match self {
@@ -99,6 +113,7 @@ impl DType {
         }
     }
 
+    /// True for floating-point types, float8 included.
     pub const fn is_float(self) -> bool {
         matches!(
             self,
@@ -112,6 +127,7 @@ impl DType {
         )
     }
 
+    /// True for signed and unsigned integer types, sub-byte ones included.
     pub const fn is_int(self) -> bool {
         matches!(
             self,
@@ -131,19 +147,25 @@ impl DType {
     }
 }
 
+/// Formats as the short name.
 impl fmt::Display for DType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
+/// A Rust type that stores one tensor element of dtype `DTYPE`.
 pub trait Element: Copy + fmt::Debug + fmt::Display + 'static {
+    /// The dtype this type stores.
     const DTYPE: DType;
     const ZERO: Self;
+    /// Converts a scalar to this type, casting like Rust's `as`.
     fn from_scalar(v: Scalar) -> Self;
+    /// Widens to a scalar of the matching kind.
     fn to_scalar(self) -> Scalar;
 }
 
+/// Implements `Element` for a primitive number type with `as` casts.
 macro_rules! impl_element {
     ($t:ty, $dtype:expr, $scalar:ident) => {
         impl Element for $t {
@@ -189,20 +211,24 @@ impl Element for bool {
     }
 }
 
+/// Rounds `x` to f32, setting the lowest bit on inexact results, so a second rounding to a narrower float is correct.
 fn round_to_odd(x: f64) -> f32 {
     let f = x as f32;
     let bits = f.to_bits();
     if !f.is_finite() || f64::from(f) == x || bits & 1 == 1 {
         return f;
     }
+    // Step the truncated value one ulp away from zero when `x` lies beyond it.
     let outward = (f64::from(f) < x) != f.is_sign_negative();
     f32::from_bits(if outward { bits + 1 } else { bits - 1 })
 }
 
+/// Converts f64 to f16 with a single correct rounding.
 pub(crate) fn to_f16(x: f64) -> f16 {
     f16::from_f32(round_to_odd(x))
 }
 
+/// Converts f64 to bf16 with a single correct rounding.
 pub(crate) fn to_bf16(x: f64) -> bf16 {
     bf16::from_f32(round_to_odd(x))
 }
@@ -229,6 +255,7 @@ impl Element for bf16 {
     }
 }
 
+/// Format of a float8 type.
 #[derive(Clone, Copy)]
 struct Float8 {
     exponent: u32,
@@ -237,18 +264,24 @@ struct Float8 {
     kind: Kind,
 }
 
+/// How a float8 type spends its top exponent and the sign bit on special values.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
+    /// Top exponent holds infinities and NaNs.
     Ieee,
+    /// No infinities; only all-ones exponent and mantissa is NaN.
     Fn,
+    /// No infinities or negative zero; `0x80` is the only NaN.
     Fnuz,
 }
 
+/// `2^e` for a normal f64 exponent.
 fn pow2(e: i32) -> f64 {
     f64::from_bits(((e + 1023) as u64) << 52)
 }
 
 impl Float8 {
+    /// The value of float8 bit pattern `bits`.
     fn decode(self, bits: u8) -> f64 {
         let (e_max, m_max) = ((1u32 << self.exponent) - 1, (1u32 << self.mantissa) - 1);
         let sign = if bits & 0x80 != 0 { -1.0 } else { 1.0 };
@@ -269,6 +302,7 @@ impl Float8 {
         sign * value
     }
 
+    /// Rounds `x` to the nearest float8 bit pattern (ties to even); out-of-range values become inf or NaN.
     fn encode(self, x: f64) -> u8 {
         let nan = match self.kind {
             Kind::Ieee => 0x7E,
@@ -290,6 +324,7 @@ impl Float8 {
         }
         let min_exp = 1 - self.bias;
         let m = self.mantissa as i32;
+        // Subnormals are multiples of the smallest subnormal; normals round their mantissa at exponent `e`.
         let bits: u32 = if a < pow2(min_exp) {
             (a / pow2(min_exp - m)).round_ties_even() as u32
         } else {
@@ -313,6 +348,7 @@ impl Float8 {
     }
 }
 
+/// Defines a one-byte element type (sub-byte integer or float8) converted through f64 by `$from` / `$to`.
 macro_rules! narrow {
     ($(#[$doc:meta])* $name:ident, $dtype:expr, $from:expr, $to:expr) => {
         $(#[$doc])*
@@ -322,11 +358,13 @@ macro_rules! narrow {
         pub struct $name(pub u8);
 
         impl $name {
+            /// Encodes `x` into the type's byte.
             pub fn from_f64(x: f64) -> Self {
                 let from: fn(f64) -> u8 = $from;
                 $name(from(x))
             }
 
+            /// Decodes the byte to f64.
             pub fn to_f64(self) -> f64 {
                 let to: fn(u8) -> f64 = $to;
                 to(self.0)
@@ -366,6 +404,7 @@ macro_rules! narrow {
     };
 }
 
+/// Whether each dtype, indexed by discriminant, is a float.
 const DTYPE_IS_FLOAT: [bool; 20] = {
     let all = [
         DType::Bool,
@@ -398,14 +437,17 @@ const DTYPE_IS_FLOAT: [bool; 20] = {
     out
 };
 
+/// The low `bits` bits of `x` truncated to an integer, wrapping.
 fn wrap_bits(x: f64, bits: u32) -> u8 {
     ((x as i64) & ((1 << bits) - 1)) as u8
 }
 
+/// Sign-extends the low `bits` bits of `b`.
 fn signed_bits(b: u8, bits: u32) -> f64 {
     f64::from(((b << (8 - bits)) as i8) >> (8 - bits))
 }
 
+/// Float8 formats with their exponent bits, mantissa bits, bias and special values.
 const E4M3FN: Float8 = Float8 {
     exponent: 4,
     mantissa: 3,
@@ -425,6 +467,7 @@ const E4M3B11FNUZ: Float8 = Float8 {
     kind: Kind::Fnuz,
 };
 
+// The sub-byte integer and float8 element types.
 narrow!(i2, DType::I2, |x| wrap_bits(x, 2), |b| signed_bits(b, 2));
 narrow!(i4, DType::I4, |x| wrap_bits(x, 4), |b| signed_bits(b, 4));
 narrow!(u2, DType::U2, |x| wrap_bits(x, 2), f64::from);
@@ -440,6 +483,7 @@ narrow!(
     |b| E4M3B11FNUZ.decode(b)
 );
 
+/// Runs `$body` with type alias `$T` set to the Rust element type of runtime dtype `$dtype`.
 macro_rules! dispatch_dtype {
     ($dtype:expr, $T:ident => $body:expr) => {
         match $dtype {

@@ -1,3 +1,5 @@
+//! Metal `dot_general` kernels: picking the tile, collapsing operands into batched matmul form and launching.
+
 mod config;
 mod gemv;
 mod linear_cross_entropy;
@@ -20,20 +22,32 @@ use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
+/// Default float tile (rows, columns).
 const FLOAT_TILE: (usize, usize) = (128, 64);
+/// Float tile when M leaves a 33..=64-row remainder on the default tile.
 const MID_TILE: (usize, usize) = (64, 64);
+/// Float tile for small problems or a short last row tile.
 const SMALL_TILE: (usize, usize) = (32, 32);
+/// Tile for 32-bit and narrower integer outputs.
 const INT_TILE: (usize, usize) = (64, 64);
+/// Tile for 64-bit integer outputs.
 const WIDE_TILE: (usize, usize) = (32, 32);
+/// Below this many default tiles the small tile is used, for more parallelism.
 const SMALL_TILES: usize = 32;
 
+/// Operand dimension orders putting each operand in `[batch, M, K]` / `[batch, K, N]` form.
 pub(crate) struct MatmulOrder {
+    /// Lhs dims ordered batch, free (M), contracting (K).
     pub lhs: Vec<usize>,
+    /// Rhs dims ordered batch, contracting (K), free (N).
     pub rhs: Vec<usize>,
+    /// Where the batch and M groups end in `lhs`.
     pub lhs_split: (usize, usize),
+    /// Where the batch and K groups end in `rhs`.
     pub rhs_split: (usize, usize),
 }
 
+/// The batch/free/contracting dimension orders of a `dot_general`'s operands.
 pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> MatmulOrder {
     let DotGeneral {
         lhs_contracting,
@@ -58,6 +72,8 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
     }
 }
 
+/// Innermost stride of each of the three dim groups of `order` once collapsed, or `None` if a
+/// group's dims are not contiguous with each other.
 pub(crate) fn collapsed(
     ty: &TensorType,
     strides: &[usize],
@@ -74,6 +90,7 @@ pub(crate) fn collapsed(
     Some(out)
 }
 
+/// Whether operand `k` with `strides` can be read by the matmul kernels without a copy.
 pub(crate) fn reads_strided(
     p: &Primitive,
     operands: [&TensorType; 2],
@@ -88,7 +105,9 @@ pub(crate) fn reads_strided(
     collapsed(operands[k], strides, dims, split).is_some()
 }
 
+/// Whether to use the small or mid float tile for a `b x m x n` output, and the tile chosen.
 fn float_tiles(b: usize, m: usize, n: usize) -> (bool, bool, (usize, usize)) {
+    // Small tiles when few default tiles exist or the last row tile would be mostly empty.
     let large = b * m.div_ceil(FLOAT_TILE.0) * n.div_ceil(FLOAT_TILE.1);
     let small = large < SMALL_TILES || matches!(m % FLOAT_TILE.0, 1..=32);
     let mid = !small && matches!(m % FLOAT_TILE.0, 33..=64);
@@ -100,18 +119,25 @@ fn float_tiles(b: usize, m: usize, n: usize) -> (bool, bool, (usize, usize)) {
     (small, mid, tile)
 }
 
+/// Number of threadgroups the float matmul launches for a `b x m x n` output.
 pub(crate) fn float_groups(b: usize, m: usize, n: usize) -> usize {
     let (_, _, (tm, tn)) = float_tiles(b, m, n);
     b * m.div_ceil(tm) * n.div_ceil(tn)
 }
 
+/// Launch shape and parameters of one matmul.
 pub(crate) struct MatmulLaunch {
+    /// Whether the small float tile is used.
     pub small: bool,
+    /// Whether the mid float tile is used.
     pub mid: bool,
     pub grid: Grid,
+    /// `[M, N, K, lhs batch/M/K strides, rhs batch/K/N strides]`, in elements.
     pub p: [usize; 9],
 }
 
+/// Collapses `dot_general` operands into one batched matmul and sizes its grid; `tile` overrides
+/// the float tile choice. Errors when an operand's dims cannot be collapsed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_matmul(
     prim: &Primitive,
@@ -162,6 +188,7 @@ pub(crate) fn plan_matmul(
     })
 }
 
+/// Launches the precompiled matmul kernel for a plan step's `dot_general`.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -199,6 +226,8 @@ pub(crate) fn encode(
     )
 }
 
+/// Merges dims `(size, stride)` (size-1 dims dropped) into one, if each stride equals the next's
+/// size times stride; returns the total size and innermost stride.
 fn collapse(dims: impl IntoIterator<Item = (usize, usize)>) -> Option<(usize, usize)> {
     let dims: Vec<(usize, usize)> = dims.into_iter().filter(|d| d.0 != 1).collect();
     if dims.windows(2).any(|w| w[0].1 != w[1].0 * w[1].1) {

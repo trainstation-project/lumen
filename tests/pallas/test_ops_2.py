@@ -1,3 +1,5 @@
+"""dot_general, arithmetic, reshape, reduction, bitcast, padding, transpose and gather tests for lumen.pallas on TPU, ported from JAX."""
+
 import itertools
 import math
 import operator
@@ -41,6 +43,7 @@ def run(call, *args):
 
 
 def smem_on_tpu():
+    """Returns the memory space JAX's tests use for scalars on TPU."""
     return pl.SMEM
 
 
@@ -75,6 +78,7 @@ def np_dot_general(x, y, dimension_numbers):
     ids=["lhs_transposed", "rhs_transposed", "both_transposed"],
 )
 def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, shapes_and_dims_numbers):
+    """`dot_general` on operands transposed inside the kernel, with several free dimensions and optional batching."""
     x_shape_unbatched, y_shape_unbatched, dims_numbers_unbatched, x_perm_unbatched, y_perm_unbatched = (
         shapes_and_dims_numbers
     )
@@ -85,6 +89,7 @@ def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, s
         y_perm = tuple([0] + [i + 1 for i in y_perm_unbatched]) if y_perm_unbatched is not None else None
 
         def offset_by_one(x):
+            """Shifts dimension numbers past the added batch dimension."""
             return [a + 1 for a in x]
 
         dims_numbers = (
@@ -106,6 +111,7 @@ def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, s
     )
 
     def kernel(x_ref, y_ref, out_ref):
+        """Permutes the loaded operands as configured, then contracts them."""
         x_in_kernel = x_ref[...].permute(*x_perm) if x_perm else x_ref[...]
         y_in_kernel = y_ref[...].permute(*y_perm) if y_perm else y_ref[...]
         out_ref[...] = pl.dot_general(x_in_kernel, y_in_kernel, dimension_numbers=dims_numbers)
@@ -119,6 +125,7 @@ def test_dot_general_multiple_non_contracting_dims_with_transposes(batch_size, s
 @pytest.mark.parametrize("rhs_is_array", [True, False])
 @pytest.mark.parametrize("dtype", ["float32"])
 def test_matrix_array_like_dot_general(batch_size, lhs_non_contracting_shape, rhs_is_array, dtype):
+    """`dot_general` of a matrix with a vector or a one-row matrix along their last dimensions."""
     contracting_shape = 128
     rhs_non_contracting_shape = () if rhs_is_array else (1,)
     batch_shape = (batch_size,) if batch_size is not None else ()
@@ -132,6 +139,7 @@ def test_matrix_array_like_dot_general(batch_size, lhs_non_contracting_shape, rh
     expected = np_dot_general(lhs, rhs, dims_numbers)
 
     def kernel(lhs_ref, rhs_ref, out_ref):
+        """Contracts the operands with float32 accumulation."""
         out_ref[...] = pl.dot_general(
             lhs_ref[...], rhs_ref[...], dimension_numbers=dims_numbers, preferred_element_type="float32"
         )
@@ -145,6 +153,7 @@ def test_matrix_array_like_dot_general(batch_size, lhs_non_contracting_shape, rh
 @pytest.mark.parametrize("transpose_rhs", [True, False])
 @pytest.mark.parametrize("dtype", ["float32"])
 def test_dot_general_with_1d_lhs(batch_size, transpose_rhs, dtype):
+    """`dot_general` of a 1-D lhs with a possibly transposed matrix, optionally batched."""
     batch_shape = (batch_size,) if batch_size is not None else ()
     batch_dim = [0] if batch_size else []
     k = 256
@@ -161,6 +170,7 @@ def test_dot_general_with_1d_lhs(batch_size, transpose_rhs, dtype):
     expected = np_dot_general(lhs, rhs, dimension_numbers)
 
     def kernel(lhs_ref, rhs_ref, out_ref):
+        """Contracts the operands with float32 accumulation."""
         out_ref[...] = pl.dot_general(
             lhs_ref[...], rhs_ref[...], dimension_numbers=dimension_numbers, preferred_element_type="float32"
         )
@@ -171,7 +181,10 @@ def test_dot_general_with_1d_lhs(batch_size, transpose_rhs, dtype):
 
 @pytest.mark.parametrize("dtype, out_dtype", [("int32", "float32"), ("float32", "float32"), ("bfloat16", "bfloat16")])
 def test_true_divide(dtype, out_dtype):
+    """True division matches numpy, with int32 inputs divided as float32."""
+
     def kernel(x_ref, y_ref, o_ref):
+        """Divides the blocks, casting int32 operands to float32 first."""
         x, y = x_ref[...], y_ref[...]
         if dtype == "int32":
             x, y = x.to("float32"), y.to("float32")
@@ -190,7 +203,10 @@ def test_true_divide(dtype, out_dtype):
 
 
 def test_f16_true_divide_unsupported():
+    """float16 division is rejected on TPU."""
+
     def kernel(x_ref, y_ref, o_ref):
+        """Divides the two float16 blocks."""
         o_ref[...] = x_ref[...] / y_ref[...]
 
     call = pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct((2,), "float16"))
@@ -231,10 +247,12 @@ BINARY_CASES = [
 
 @pytest.mark.parametrize("name, f, np_f, dtype", BINARY_CASES)
 def test_binary_array(name, f, np_f, dtype):
+    """Each binary operator on vector blocks matches numpy."""
     if dtype == "float16":
         pytest.skip("float16 not supported on TPU")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Applies `f` to the two blocks."""
         o_ref[...] = f(x_ref[...], y_ref[...])
 
     x = np.array([1, 3, -4, -6, 2, 5, 4, -7]).astype(dtype)
@@ -249,10 +267,12 @@ def test_binary_array(name, f, np_f, dtype):
 
 @pytest.mark.parametrize("name, f, np_f, dtype", BINARY_CASES)
 def test_binary_scalar(name, f, np_f, dtype):
+    """Each binary operator on SMEM scalars matches numpy."""
     if np.dtype(dtype).itemsize == 2:
         pytest.skip("16-bit types are not supported on TPU")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Applies `f` to the two scalars."""
         o_ref[0] = f(x_ref[0], y_ref[0])
 
     call = pl.pallas_call(
@@ -273,11 +293,13 @@ def test_binary_scalar(name, f, np_f, dtype):
 )
 @pytest.mark.parametrize("dtype", ["float32", "int32", "int16", "int8"])
 def test_iota(shape_and_dimension, dtype):
+    """Integer iota along each dimension of several shapes."""
     shape, dimension = shape_and_dimension
     if dtype == "float32":
         pytest.skip("only int iota is supported on TPU")
 
     def kernel(o_ref):
+        """Fills the output with indices along `dimension`."""
         o_ref[...] = lumen.prims.iota(dtype, shape, dimension)
 
     view = [1] * len(shape)
@@ -289,9 +311,11 @@ def test_iota(shape_and_dimension, dtype):
 
 @pytest.mark.parametrize("in_shape, out_shape", [((2, 4), (8,)), ((2, 4), (8, 1)), ((2, 4), (1, 8)), ((64,), (32, 2))])
 def test_reshape(in_shape, out_shape):
+    """Skipped: general reshapes of blocks aren't supported on TPU."""
     pytest.skip("Not supported on TPU")
 
     def f(x_ref, o_ref):
+        """Reshapes the block to `out_shape`."""
         o_ref[...] = x_ref[...].reshape(out_shape)
 
     x = np.arange(int(np.prod(in_shape)), dtype=np.float32).reshape(in_shape)
@@ -318,12 +342,14 @@ def test_reshape(in_shape, out_shape):
     ids=str,
 )
 def test_reshape_noop_or_singleton_dims(in_shape, out_shape):
+    """Reshapes that only add or drop size-1 dimensions, including from a scalar in SMEM."""
     if not in_shape:
         in_specs = [pl.BlockSpec(memory_space=smem_on_tpu())]
     else:
         in_specs = [pl.BlockSpec()]
 
     def f(x_ref, o_ref):
+        """Reshapes the block to `out_shape`."""
         o_ref[...] = x_ref[...].reshape(out_shape)
 
     if not in_shape:
@@ -335,7 +361,10 @@ def test_reshape_noop_or_singleton_dims(in_shape, out_shape):
 
 
 def test_reshape_to_scalar():
+    """A one-element slice reshaped to a scalar can index a store."""
+
     def f(x_ref, o_ref):
+        """Zeroes the output, then fills row `x[1, 0]` with that value."""
         o_ref[...] = lumen.zeros(o_ref.shape, dtype=o_ref.dtype)
         array_val = x_ref[1:2, 0:1]
         scalar_val = array_val.reshape(())
@@ -350,10 +379,14 @@ def test_reshape_to_scalar():
 
 
 def test_num_programs():
+    """`pl.num_programs` reports the grid size inside every program."""
+
     def kernel(o_ref):
+        """Writes the grid size at this program's index."""
         o_ref[pl.program_id(0)] = pl.num_programs(0)
 
     def idx_map(i):
+        """Maps every program to the whole output block."""
         return (0,)
 
     grid_sizes = [4, 2, 5, 3]
@@ -369,9 +402,11 @@ def test_num_programs():
 
 
 def test_where_broadcasting():
+    """Skipped: broadcasting a boolean mask to 3-D isn't supported on TPU."""
     pytest.skip("Unsupported reshape vector<4xi1> -> vector<4x1x1xi1>")
 
     def copyitem(x_ref, in_idx_ref, out_idx_ref, o_ref):
+        """Copies item `in_idx` of `x` to item `out_idx` of the output and zeroes the rest."""
         mask = (lumen.arange(o_ref.shape[0], dtype="int32") == out_idx_ref[()])[:, None, None]
         o_ref[...] = F.where(mask, x_ref[in_idx_ref[()]], 0)
 
@@ -406,6 +441,7 @@ def test_where_broadcasting():
 )
 @pytest.mark.parametrize("dtype", ["int32", "int16", "int8", "bool"])
 def test_broadcast_in_dim(shape_spec, dtype):
+    """`broadcast_to` of scalars and blocks for int and bool dtypes."""
     in_shape, out_shape, dims = shape_spec
     if not in_shape:
         in_specs = [pl.BlockSpec(memory_space=smem_on_tpu())]
@@ -413,6 +449,7 @@ def test_broadcast_in_dim(shape_spec, dtype):
         in_specs = [pl.BlockSpec()]
 
     def f(x_ref, o_ref):
+        """Broadcasts the block to `out_shape`."""
         x = x_ref[...]
         o_ref[...] = x.broadcast_to(out_shape)
 
@@ -457,6 +494,7 @@ def test_broadcast_in_dim(shape_spec, dtype):
 @pytest.mark.parametrize("trans_x", [False, True])
 @pytest.mark.parametrize("trans_y", [False, True])
 def test_dot(lhs_and_rhs_shape, dtype, trans_x, trans_y):
+    """2-D matmuls with optionally transposed operands over many tile-aligned shapes."""
     lhs_shape, rhs_shape = lhs_and_rhs_shape
 
     final_lhs_shape = lhs_shape[::-1] if trans_x else lhs_shape
@@ -470,6 +508,7 @@ def test_dot(lhs_and_rhs_shape, dtype, trans_x, trans_y):
         pytest.skip("float16 type is not supported on TPU")
 
     def dot(x_ref, y_ref, o_ref):
+        """Multiplies the optionally transposed blocks with float32 accumulation."""
         x = x_ref[:, :]
         y = y_ref[:, :]
         x = x.t() if trans_x else x
@@ -493,9 +532,11 @@ _IINFO = {"int8": (-128, 127), "int4": (-8, 7)}
 @pytest.mark.parametrize("trans_x", [False, True])
 @pytest.mark.parametrize("trans_y", [False, True])
 def test_itof_dot_canonicalization(dtype, trans_x, trans_y):
+    """int8 and int4 matmuls accumulate exactly in int32."""
     lhs_shape = rhs_shape = out_shape = (256, 256)
 
     def dot(x_ref, y_ref, o_ref):
+        """Multiplies the optionally transposed blocks with int32 accumulation."""
         x = x_ref[:, :]
         y = y_ref[:, :]
         x = x.t() if trans_x else x
@@ -530,6 +571,7 @@ def test_itof_dot_canonicalization(dtype, trans_x, trans_y):
     ids=str,
 )
 def test_dot_general_multiple_batch_dims(shapes_and_dim_nums):
+    """`dot_general` with several batch dimensions, leading or not."""
     lhs_shape, rhs_shape, dim_nums = shapes_and_dim_nums
     rng = np.random.default_rng(0)
     lhs = rounded(rng.standard_normal(lhs_shape, dtype=np.float32), "bfloat16")
@@ -537,6 +579,7 @@ def test_dot_general_multiple_batch_dims(shapes_and_dim_nums):
     expected = np_dot_general(lhs, rhs, dim_nums)
 
     def kernel(x_ref, y_ref, o_ref):
+        """Contracts the operands with float32 accumulation."""
         o_ref[...] = pl.dot_general(x_ref[...], y_ref[...], dim_nums, preferred_element_type="float32")
 
     call = pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(expected.shape, "float32"))
@@ -557,6 +600,7 @@ def test_dot_general_multiple_batch_dims(shapes_and_dim_nums):
     ids=str,
 )
 def test_dot_general_multiple_contracting_dims(shapes_and_dim_nums):
+    """Skipped: Mosaic aborts on more than one contracting dimension."""
     pytest.skip("libtpu 0.0.48's Mosaic aborts on more than one contracting dimension (as under JAX)")
     lhs_shape, rhs_shape, dim_nums = shapes_and_dim_nums
     rng = np.random.default_rng(0)
@@ -565,6 +609,7 @@ def test_dot_general_multiple_contracting_dims(shapes_and_dim_nums):
     expected = np_dot_general(lhs, rhs, dim_nums)
 
     def kernel(x_ref, y_ref, o_ref):
+        """Contracts the operands with float32 accumulation."""
         o_ref[...] = pl.dot_general(x_ref[...], y_ref[...], dim_nums, preferred_element_type="float32")
 
     call = pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(expected.shape, "float32"))
@@ -572,7 +617,10 @@ def test_dot_general_multiple_contracting_dims(shapes_and_dim_nums):
 
 
 def test_strided_load():
+    """Loading every fourth row of a ref."""
+
     def kernel(x_ref, o_ref):
+        """Copies rows `0, 4, 8, ...`."""
         o_ref[...] = x_ref[::4]
 
     x = np.arange(64, dtype=np.float32).reshape((16, 4))
@@ -581,11 +629,13 @@ def test_strided_load():
 
 
 def test_broadcasted_load_store():
+    """Skipped: loads and stores with broadcast index arrays aren't implemented."""
     pytest.skip("Unimplemented primitive: broadcast_to")
 
     m, n = 16, 32
 
     def load(x_ref, o_ref):
+        """Adds 1 through broadcast row and column index arrays."""
         idx = (lumen.arange(m, dtype="int32")[:, None], lumen.arange(n, dtype="int32")[None, :])
         o_ref[idx] = x_ref[idx] + 1.0
 
@@ -595,11 +645,13 @@ def test_broadcasted_load_store():
 
 
 def test_swap():
+    """Skipped: `pl.swap` runs only in interpret mode on TPU."""
     pytest.skip("On TPU this is only supported in interpret mode")
 
     m, n = 16, 32
 
     def swap(_, _2, x_ref, y_ref):
+        """Swaps the contents of the aliased `x` and `y` refs."""
         x = x_ref[:]
         y = pl.swap(y_ref, (slice(None),), x)
         x_ref[:] = y
@@ -615,11 +667,13 @@ def test_swap():
 
 
 def test_masked_swap():
+    """Skipped: masked `pl.swap` isn't implemented on TPU."""
     pytest.skip("Not implemented on TPU")
 
     m, n = 16, 32
 
     def masked_swap(_, _2, mask_ref, x_ref, y_ref):
+        """Swaps `x` and `y` where the mask is set."""
         x = x_ref[:]
         y = pl.swap(y_ref, (slice(None),), x, mask=mask_ref[:])
         x_ref[:] = y
@@ -636,11 +690,13 @@ def test_masked_swap():
 
 
 def test_masked_oob_swap_slice():
+    """Skipped: masked out-of-bounds slices aren't supported on TPU."""
     pytest.skip("Not supported on TPU")
 
     m, n = 32, 16
 
     def masked_oob_swap_slice(_, _2, mask_ref, start_idx_ref, x_ref, y_ref):
+        """Swaps `x` with a dynamically placed slice of `y`, masking positions past its end."""
         x, mask = x_ref[:], mask_ref[:]
         y = pl.swap(y_ref, (pl.dslice(start_idx_ref[()], n)), x, mask=mask)
         x_ref[:] = y
@@ -668,10 +724,12 @@ def test_masked_oob_swap_slice():
 
 
 def test_reduce_only_dim():
+    """Summing a 1-D block down to a scalar in SMEM."""
     m = 32
     x = np.random.default_rng(0).standard_normal((m,), dtype=np.float32)
 
     def reduce(x_ref, y_ref):
+        """Sums the only dimension."""
         y_ref[...] = F.sum(x_ref[...], -1)
 
     call = pl.pallas_call(
@@ -699,6 +757,7 @@ _REDUCE_OPS = [
     ],
 )
 def test_array_reduce(op_name, op, np_op, dtype, axis):
+    """Sum, max, min, argmax and argmin along one axis match numpy over 20 random inputs."""
     if not isinstance(axis, int):
         pytest.skip("TODO: tuple axes are not yet supported")
     if dtype in ("float64", "int64", "uint64"):
@@ -712,6 +771,7 @@ def test_array_reduce(op_name, op, np_op, dtype, axis):
     rng = np.random.default_rng(0)
 
     def make_x():
+        """Returns a random input: a permutation for integers, normals rounded to `dtype` for floats."""
         if dtype.startswith(("int", "uint")):
             return rng.permutation(np.arange(m * n, dtype=dtype)).reshape(m, n)
         return rounded(rng.standard_normal((m, n), dtype=np.float32), dtype)
@@ -721,6 +781,7 @@ def test_array_reduce(op_name, op, np_op, dtype, axis):
     grid = tuple(a for i, a in enumerate((m, n)) if i != axis)
 
     def reduce(x_ref, y_ref):
+        """Applies the reduction along `axis`."""
         y_ref[...] = op(x_ref[...], axis)
 
     f = lumen.compile(pl.pallas_call(reduce, out_shape=out_shape, grid=grid), device="tpu")
@@ -734,17 +795,20 @@ def test_array_reduce(op_name, op, np_op, dtype, axis):
 @pytest.mark.parametrize("axis", [0, 1])
 @pytest.mark.parametrize("dtype", ["float16", "float32", "int32", "uint32"])
 def test_cumsum(dtype, axis):
+    """Skipped: cumsum isn't implemented on TPU."""
     pytest.skip("Not implemented on TPU")
 
     m, n = 32, 8
     rng = np.random.default_rng(0)
 
     def make_x():
+        """Returns a random input: a permutation for integers, normals for floats."""
         if dtype.startswith(("int", "uint")):
             return rng.permutation(np.arange(m * n, dtype=dtype)).reshape(m, n)
         return rng.standard_normal((m, n)).astype(dtype)
 
     def reduce(x_ref, y_ref):
+        """Computes the cumulative sum along `axis`."""
         x = x_ref[...]
         y_ref[...] = F.cumsum(x, axis)
 
@@ -759,9 +823,11 @@ def test_cumsum(dtype, axis):
     [(0, "float32"), (0, "bfloat16"), (1, "float32"), (1, "bfloat16"), (-1, "float32"), (-1, "bfloat16")],
 )
 def test_triu(k, dtype):
+    """`triu` with diagonal offsets matches numpy."""
     x = tpu(np.arange(128 * 256, dtype=np.float32).reshape((128, 256)), dtype)
 
     def kernel(x_ref, out_ref):
+        """Zeroes the block below diagonal `k`."""
         out_ref[...] = F.triu(x_ref[...], k)
 
     out = run(pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct((128, 256), dtype)), x)
@@ -785,12 +851,14 @@ _BITS = {"float16": 16, "int16": 16, "uint16": 16, "bfloat16": 16, "float32": 32
     ],
 )
 def test_bitcast_convert_type_array(in_dtype, out_dtype):
+    """Bitcasts between 32-bit dtypes reinterpret the bits like numpy's `view`."""
     if _BITS[in_dtype] != 32 and _BITS[out_dtype] != 32:
         pytest.skip("Only support bitcast between 32-bit types on TPU")
 
     m, n = 4, 4
 
     def convert(x_ref, y_ref):
+        """Bitcasts the block to `out_dtype`."""
         y_ref[...] = pl.bitcast(x_ref[...], out_dtype)
 
     x = np.arange(m * n, dtype=in_dtype).reshape((m, n))
@@ -799,9 +867,11 @@ def test_bitcast_convert_type_array(in_dtype, out_dtype):
 
 
 def test_bitcast_convert_type_scalar():
+    """Bitcasting an SMEM int32 scalar to float32."""
     x = np.array(42, np.int32)
 
     def convert(x_ref, y_ref):
+        """Bitcasts the scalar to float32."""
         y_ref[...] = pl.bitcast(x_ref[...], "float32")
 
     call = pl.pallas_call(
@@ -820,6 +890,7 @@ def test_bitcast_convert_type_scalar():
 @pytest.mark.parametrize("pad_type", ["constant", "wrap"])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_arbitrary_padding_jnp_pad(array_shapes, padding, pad_type, dtype):
+    """Constant and circular padding of 2-D blocks match `np.pad`."""
     x = tpu(np.arange(np.prod(array_shapes), dtype=np.float32).reshape(array_shapes), dtype)
     expected = np.pad(host(x), padding, mode=pad_type)
 
@@ -827,6 +898,7 @@ def test_arbitrary_padding_jnp_pad(array_shapes, padding, pad_type, dtype):
     mode = {"constant": "constant", "wrap": "circular"}[pad_type]
 
     def kernel(x_ref, o_ref):
+        """Pads the block by `flat`, last dimension's pair first."""
         o_ref[...] = F.pad(x_ref[...], flat, mode=mode)
 
     out = run(pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(expected.shape, dtype)), x)
@@ -835,9 +907,11 @@ def test_arbitrary_padding_jnp_pad(array_shapes, padding, pad_type, dtype):
 
 @pytest.mark.parametrize("n, m", [(128, 128), (256, 256)])
 def test_jnp_diagonal_pallas(n, m):
+    """`diagonal` of a square block."""
     x = np.arange(n * m, dtype=np.float32).reshape((n, m))
 
     def kernel(x_ref, out_ref):
+        """Extracts the main diagonal."""
         out_ref[...] = F.diagonal(x_ref[...])
 
     out = run(pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct((n,), "float32")), tpu(x))
@@ -849,9 +923,11 @@ def test_jnp_diagonal_pallas(n, m):
 @pytest.mark.parametrize("z_dim_size", [128 * i for i in range(1, 3)])
 @pytest.mark.parametrize("dtype", ["float32"])
 def test_jnp_swapaxes_major_minor(x_dim_size, y_dim_size, z_dim_size, dtype):
+    """Swapping the two major axes of a 3-D block."""
     x = np.arange(x_dim_size * y_dim_size * z_dim_size, dtype=dtype).reshape((x_dim_size, y_dim_size, z_dim_size))
 
     def kernel(x_ref, out_ref):
+        """Transposes the first two dimensions."""
         out_ref[...] = x_ref[...].transpose(0, 1)
 
     call = pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct((y_dim_size, x_dim_size, z_dim_size), dtype))
@@ -878,11 +954,13 @@ def test_jnp_swapaxes_major_minor(x_dim_size, y_dim_size, z_dim_size, dtype):
     ids=str,
 )
 def test_transpose(shape_and_axes):
+    """Permuting block dimensions matches `np.transpose`, including every permutation of a 5-D shape."""
     in_shape, transpose_axes = shape_and_axes
     x = np.arange(math.prod(in_shape), dtype=np.float32).reshape(in_shape)
     expected = np.transpose(x, axes=transpose_axes)
 
     def kernel(x_ref, out_ref):
+        """Permutes the block's dimensions."""
         out_ref[...] = x_ref[...].permute(*transpose_axes)
 
     call = pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(expected.shape, "float32"))
@@ -891,6 +969,7 @@ def test_transpose(shape_and_axes):
 
 @pytest.mark.parametrize("batch_size", range(1, 17))
 def test_8bit_gather(batch_size):
+    """Gathering int8 table rows by int8 indices across a grid of batches."""
     dtype = "int8"
     xspec = pl.BlockSpec((32, 128), lambda i: (i, 0))
     lspec = pl.BlockSpec((32, 128), lambda i: (0, 0))
@@ -899,6 +978,7 @@ def test_8bit_gather(batch_size):
     lut = np.random.default_rng(1234).integers(-128, 127, (32, 128), dtype=np.int8)
 
     def kernel(data_ref, lut_ref, output_ref):
+        """Looks up each index in the table along axis 0."""
         data_chunk = data_ref[...]
         lut_chunk = lut_ref[...]
         output_ref[...] = F.gather(lut_chunk, 0, data_chunk)
@@ -916,7 +996,10 @@ def test_8bit_gather(batch_size):
 
 
 def test_delay():
+    """`pl.delay` stalls without affecting the copied result."""
+
     def kernel(x_ref, o_ref):
+        """Waits 100000 cycles, then copies the input."""
         pl.delay(100_000)
         o_ref[...] = x_ref[...]
 
@@ -926,6 +1009,7 @@ def test_delay():
 
 
 def test_debug_print():
+    """Skipped: debug printing runs only in interpret mode."""
     pytest.skip("interpret mode")
 
 
@@ -944,6 +1028,7 @@ _PRETTY_INDICES = [
     ids=[str(i) for i in range(5)],
 )
 def test_load_pretty_print(expr, expected):
+    """Skipped: tests JAX's jaxpr pretty-printing of loads."""
     pytest.skip("JAX's jaxpr pretty-printing")
 
 
@@ -953,6 +1038,7 @@ def test_load_pretty_print(expr, expected):
     ids=[str(i) for i in range(5)],
 )
 def test_store_pretty_print(expr, expected):
+    """Skipped: tests JAX's jaxpr pretty-printing of stores."""
     pytest.skip("JAX's jaxpr pretty-printing")
 
 
@@ -973,4 +1059,5 @@ def test_store_pretty_print(expr, expected):
     ids=[str(i) for i in range(5)],
 )
 def test_swap_pretty_print(expr, expected):
+    """Skipped: tests JAX's jaxpr pretty-printing of swaps."""
     pytest.skip("JAX's jaxpr pretty-printing")

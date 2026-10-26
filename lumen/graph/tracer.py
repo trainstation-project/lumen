@@ -1,3 +1,5 @@
+"""Tracing Python functions into lumen graphs: ``TracedTensor``, ``compile`` and ``make_graph``."""
+
 import builtins
 import contextlib
 import dataclasses
@@ -21,6 +23,7 @@ __all__ = [
     "make_graph",
 ]
 
+# Stacks with one entry per open ``tracing`` context, innermost last.
 _TRACES = []
 _RNG = []
 _DEVICES = []
@@ -196,6 +199,7 @@ def compiler_config():
 
 
 def current_graph():
+    """The graph being traced into; raises outside ``lumen.compile``."""
     if not _TRACES:
         raise RuntimeError("lumen ops run only while tracing, inside a function passed to lumen.compile")
     return _TRACES[-1]
@@ -221,6 +225,7 @@ def _runtime(dynamic):
     bools at the slots ``(argument, path)`` in ``dynamic``."""
 
     def runtime(slot, value):
+        """Whether the scalar at ``slot`` is a runtime input rather than baked in."""
         return type(value) not in (int, bool) or slot in dynamic
 
     return runtime
@@ -274,11 +279,13 @@ class _Host:
     scalars' own inputs, or values it computes (``hoisted``)."""
 
     def __init__(self, device_graph, device):
+        """A host trace feeding ``device_graph`` on ``device``."""
         self.graph = Graph()
         self.device_graph, self.device = device_graph, device
         self.imports, self.hoisted, self.constants = {}, [], {}
 
     def owns(self, x):
+        """Whether ``x`` is a value of the host graph."""
         return isinstance(x, TracedTensor) and x.graph is self.graph
 
     def precreate(self, var, dtype, shape):
@@ -363,6 +370,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
         kinds[weights[t.storage_id].var] = ("weight", len(weights) - 1)
 
     def mapped(i, a):
+        """Argument ``i`` with its module weights and runtime scalars swapped for their graph inputs."""
         if isinstance(a, TracedTensor):
             return a
         return nn.map_tensors(a, lambda t: weights.get(t.storage_id, t), lambda path, v: inputs.get((i, path), v))
@@ -389,6 +397,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
             now = nn.at(traced[i], path)
             k = positions.get(slot)
             if k is None:
+                # A changed static scalar is reported so _settled retraces with it runtime, or pins it.
                 if isinstance(now, TracedTensor) or type(now) is not type(value) or now != value:
                     changed.append((slot, now))
             elif now is not scalars[k]:
@@ -400,11 +409,13 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     if host is not None:
         kinds.update({host.imports[v].var: ("hoisted", j) for j, v in enumerate(host.hoisted)})
     kinds.update({t.var: ("rng", k) for k, t in enumerate(rng["state"] or ())})
+    # Map each graph input to its kind and index, in the graph's input order.
     layout = [kinds[v] for v in graph.inputs()]
 
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
+    # Values reassigned during the trace become extra outputs after the returned ones.
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
     written_scalars = [k for k, t in enumerate(scalars) if (t.graph, t.var) != assigned_scalars[k]]
     on_host = [host is not None and (host.owns(scalars[k]) or scalars[k].recipe is not None) for k in written_scalars]
@@ -463,6 +474,7 @@ def _signature(args, runtime):
     shared = tuple(ids.index(i) for i in ids)
 
     def of(i, a):
+        """Argument ``i``'s part of the signature."""
         if isinstance(a, Tensor):
             return (a.dtype, tuple(a.shape))
         if nn.is_scalar(a) or isinstance(a, (nn.Module, list, tuple)):
@@ -590,6 +602,7 @@ def compile(fn, device=None):
         workspace, what ``fn`` returns (its outputs' structure), and the plan's
         inputs (the arguments, then the weights placed, and their blocks)."""
         target = named or _device(args, None)
+        # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
         for slot, value in _slots(args):
             if type(value) in (int, bool) and slot not in dynamic and slot not in pinned:
                 if seen.setdefault(slot, (type(value), value)) != (type(value), value):
@@ -632,6 +645,7 @@ def compile(fn, device=None):
         scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
 
         def inputs_for(plan):
+            """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""
             blocks = []
             for (positions, dimension), regions in zip(plan.packed, plan.interleaved):
                 block = _pack([logical[i] for i in positions], dimension, target, regions)
@@ -640,6 +654,7 @@ def compile(fn, device=None):
                 blocks.append(block)
             return [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
 
+        # Reuse the first cached plan whose packed weight blocks this call's weights can fill.
         for plan, workspace in entries:
             inputs = inputs_for(plan)
             if inputs is not None:
@@ -652,6 +667,7 @@ def compile(fn, device=None):
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)
         entries.append((plan, workspace))
         inputs = inputs_for(plan)
+        # Weights that cannot be packed in place get a plan without packing.
         if inputs is None:
             plan = Plan(graph, target, donate_into=donate, parameters=params, scalars=scalars)
             entries[-1] = plan, workspace
@@ -666,6 +682,8 @@ def compile(fn, device=None):
 
     @functools.wraps(fn)
     def compiled(*args):
+        """Run ``fn``'s plan for ``args``, compiling one for a new signature; see ``compile``."""
+        # Fast path: plain tensor arguments whose signature already has a plan with nothing to write back.
         if all(type(a) is Tensor for a in args):
             hit = fast.get((tuple([a._signature for a in args]), _compiler_flags()))
             if hit is not None:
@@ -676,6 +694,7 @@ def compile(fn, device=None):
                 outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
 
                 def returned(_):
+                    """The next plan output, copied to the host if its traced tensor was on the CPU."""
                     value, host = next(outputs)
                     return value.cpu() if host else value
 
@@ -698,6 +717,7 @@ def compile(fn, device=None):
         to_host = []
 
         def result_of(t):
+            """The next plan output for traced output ``t``, copied to the host when ``t`` is a CPU value."""
             value = next(outputs)
             host = ran and _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
             to_host.append(host)
@@ -712,6 +732,7 @@ def compile(fn, device=None):
                 signature = tuple([a._signature for a in args])
                 lone = isinstance(out, TracedTensor) and to_host == [False]
                 fast[signature, _compiler_flags()] = (plan, workspace, out, None if lone else to_host, latest[0])
+        # Write assigned weights, scalars and arguments back, and advance the random stream.
         if ran:
             weights = _weights(args)
             written, written_scalars, written_arguments, _ = plans[latest[0]][2]
@@ -764,12 +785,14 @@ def compile(fn, device=None):
         return data
 
     def dump_code(directory, *args, device=None):
+        """Write the code of every kernel the plan for ``args`` (default: the latest call's) runs to ``directory``."""
         graph, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
         from lumen import viz
 
         return viz.dump_code(graph, plan, lambda: plan.run_in(workspace, inputs), target, directory)
 
     def planned(name, args, device):
+        """Graph, a fresh plan on ``device``, ones-filled inputs and a workspace for ``args``' signature, for ``name``."""
         if args:
             prepare(args)
         elif not latest:
@@ -803,12 +826,14 @@ def make_graph(fn):
 
     @functools.wraps(fn)
     def graph(*args):
+        """The graph ``fn`` traces to on ``args``."""
         return _settled(fn, args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
 
     return graph
 
 
 def _is_float(dtype):
+    """Whether ``dtype`` names a floating-point dtype."""
     return "float" in dtype
 
 
@@ -819,6 +844,7 @@ def _accum_dtype(dtype):
 
 
 def _require_float(x, op):
+    """``x``, or a TypeError naming ``op`` if it is not floating-point."""
     if not _is_float(x.dtype):
         raise TypeError(f"{op} needs a floating-point tensor, got {x.dtype}: convert it with .to(dtype)")
     return x
@@ -855,6 +881,7 @@ def _scalar_fits(x, dtype):
 
 
 def _is_operand(x):
+    """Whether ``x`` can be an elementwise operand: a traced tensor or a Python scalar."""
     return isinstance(x, (TracedTensor, bool, int, float))
 
 
@@ -878,6 +905,7 @@ def _as_tensor(x, dtype, op):
 
 
 def _broadcast_shapes(*shapes):
+    """The NumPy broadcast of ``shapes``, aligned at the trailing dimensions."""
     ndim = builtins.max(len(s) for s in shapes)
     out = []
     for d in range(-ndim, 0):
@@ -891,6 +919,7 @@ def _broadcast_shapes(*shapes):
 
 
 def _broadcast_to(x, shape):
+    """``x`` broadcast to ``shape`` by adding leading dimensions and expanding size-1 ones."""
     if x.shape == shape:
         return x
     lead = len(shape) - x.ndim
@@ -939,17 +968,20 @@ def _sizes(args):
 
 
 def _min(x, y):
+    """Elementwise minimum; floats as ``-max(-x, -y)`` to keep ``max``'s NaN handling."""
     if _is_float(x.dtype):
         return prims.neg(prims.max(prims.neg(x), prims.neg(y)))
     return prims.select(prims.lt(y, x), y, x)
 
 
 def _le(x, y):
+    """Elementwise ``x <= y``."""
     less = prims.lt(x, y)
     return prims.select(less, less, prims.eq(x, y))
 
 
 def _ne(x, y):
+    """Elementwise ``x != y``, as ``(x == y) == False``."""
     return prims.eq(prims.eq(x, y), prims.full(x.shape, False, "bool"))
 
 
@@ -957,6 +989,7 @@ def _binary(prim, reflected=False):
     """An operator method: ``prim`` on the operands, promoted and broadcast."""
 
     def op(self, other):
+        """``prim`` of ``self`` and ``other`` (swapped if ``reflected``), or NotImplemented for a non-operand."""
         other = _lift(other)
         if not _is_operand(other):
             return NotImplemented
@@ -987,6 +1020,7 @@ def _floor_div(x, y):
 
 
 def _and(x, y):
+    """Elementwise logical or bitwise and."""
     return prims.and_(x, y)
 
 
@@ -1015,12 +1049,15 @@ def _power(x, y):
 
 
 def _true_div(x, y):
+    """``x / y`` (floats only); a constant or weak divisor is applied as a multiply by its reciprocal."""
+    # A static divisor folds into a multiply by its reciprocal.
     if isinstance(y, (int, float)) and not isinstance(y, bool) and y != 0:
         return _elementwise(prims.mul, _require_float(x, "true division (/)"), 1 / y)
     if isinstance(y, TracedTensor) and y.weak and not getattr(x, "weak", True):
         r = _true_div(1.0, y)
         r.weak = True
         return _elementwise(prims.mul, _require_float(x, "true division (/)"), r)
+    # The result is weak only if every tensor operand is.
     tensors = [v for v in (x, y) if isinstance(v, TracedTensor)]
     x, y = _operands("div", x, y)
     out = prims.div(_require_float(x, "true division (/)"), y)
@@ -1133,6 +1170,7 @@ class TracedTensor:
     )
 
     def __init__(self, graph, var, device=None):
+        """A traced value ``var`` of ``graph`` on ``device`` (default: the trace's)."""
         self.graph = graph
         self._var = var
         self._base, self._ops, self._seen, self._version = None, (), 0, 0
@@ -1155,27 +1193,34 @@ class TracedTensor:
         return self._var
 
     def __repr__(self):
+        """The value's graph variable, dtype and shape."""
         return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)})"
 
     def __bool__(self):
+        """Raises: a traced value has no data to branch on."""
         raise TypeError("a traced tensor has no value: control flow cannot depend on tensor data inside lumen.compile")
 
     __hash__ = object.__hash__
 
     @property
     def ndim(self):
+        """Number of dimensions."""
         return len(self.shape)
 
     def dim(self):
+        """Number of dimensions (torch's ``dim()``)."""
         return self.ndim
 
     def size(self, dim=None):
+        """The shape, or the size of dimension ``dim``."""
         return self.shape if dim is None else self.shape[_dim(dim, self.ndim)]
 
     def numel(self):
+        """Number of elements."""
         return math.prod(self.shape)
 
     def __len__(self):
+        """Size of the first dimension; raises for a 0-d tensor."""
         if not self.shape:
             raise TypeError("len() of a 0-d tensor")
         return self.shape[0]
@@ -1194,12 +1239,15 @@ class TracedTensor:
     __ge__ = _binary(_le, reflected=True)
 
     def __truediv__(self, other):
+        """``self / other`` (float division)."""
         return _true_div(self, other) if _is_operand(other) else NotImplemented
 
     def __rtruediv__(self, other):
+        """``other / self`` (float division)."""
         return _true_div(other, self) if _is_operand(other) else NotImplemented
 
     def __neg__(self):
+        """Elementwise negation."""
         return prims.neg(self)
 
     __and__ = _binary(prims.and_)
@@ -1218,15 +1266,19 @@ class TracedTensor:
     __rfloordiv__ = _binary(_floor_div, reflected=True)
 
     def __pow__(self, other):
+        """``self ** other``."""
         return _power(self, other) if _is_operand(other) else NotImplemented
 
     def __rpow__(self, other):
+        """``other ** self``."""
         return _elementwise(prims.pow, other, self) if _is_operand(other) else NotImplemented
 
     def __invert__(self):
+        """Logical not for bools, bitwise not for integers."""
         return prims.not_(self)
 
     def __abs__(self):
+        """Elementwise absolute value."""
         return prims.abs(self)
 
     def copy_(self, value):
@@ -1263,39 +1315,51 @@ class TracedTensor:
         return self.copy_(value)
 
     def add_(self, other, alpha=1):
+        """In-place ``self += alpha * other``."""
         return self._assign(self + (other if alpha == 1 else other * alpha), "add_")
 
     def sub_(self, other, alpha=1):
+        """In-place ``self -= alpha * other``."""
         return self._assign(self - (other if alpha == 1 else other * alpha), "sub_")
 
     def mul_(self, other):
+        """In-place ``self *= other``."""
         return self._assign(self * other, "mul_")
 
     def div_(self, other):
+        """In-place ``self /= other``."""
         return self._assign(self / other, "div_")
 
     def neg_(self):
+        """In-place negation."""
         return self._assign(-self, "neg_")
 
     def exp_(self):
+        """In-place ``exp`` of a float tensor."""
         return self._assign(prims.exp(_require_float(self, "exp_")), "exp_")
 
     def log_(self):
+        """In-place natural log of a float tensor."""
         return self._assign(prims.log(_require_float(self, "log_")), "log_")
 
     def sqrt_(self):
+        """In-place square root of a float tensor."""
         return self._assign(prims.sqrt(_require_float(self, "sqrt_")), "sqrt_")
 
     def tanh_(self):
+        """In-place ``tanh`` of a float tensor."""
         return self._assign(prims.tanh(_require_float(self, "tanh_")), "tanh_")
 
     def sigmoid_(self):
+        """In-place logistic sigmoid of a float tensor."""
         return self._assign(prims.logistic(_require_float(self, "sigmoid_")), "sigmoid_")
 
     def relu_(self):
+        """In-place ``max(self, 0)``."""
         return self._assign(_elementwise(prims.max, self, 0), "relu_")
 
     def clamp_(self, min=None, max=None):
+        """In-place clamp to ``[min, max]``; either bound may be None but not both."""
         if min is None and max is None:
             raise RuntimeError("clamp_: at least one of 'min' or 'max' must not be None")
         value = self if min is None else _elementwise(prims.max, self, min)
@@ -1303,9 +1367,11 @@ class TracedTensor:
         return self._assign(value, "clamp_")
 
     def clamp_min_(self, min):
+        """In-place lower clamp."""
         return self.clamp_(min=min)
 
     def clamp_max_(self, max):
+        """In-place upper clamp."""
         return self.clamp_(max=max)
 
     def uniform_(self, from_=0.0, to=1.0):
@@ -1318,9 +1384,11 @@ class TracedTensor:
         return self._assign(random._uniform(self.shape, self.dtype, from_, to), "uniform_")
 
     def zero_(self):
+        """Fill it with zeros (False for bool)."""
         return self.fill_(False if self.dtype == "bool" else 0)
 
     def fill_(self, value):
+        """Fill it with the 0-d ``value``, a scalar or tensor of its dtype."""
         value = _as_tensor(value, self.dtype, "fill_")
         if value.shape != ():
             raise RuntimeError(
@@ -1338,15 +1406,19 @@ class TracedTensor:
         return self._assign(prims.select(mask, value, self), "masked_fill_")
 
     def __iadd__(self, other):
+        """``self += other``, in place."""
         return self.add_(other)
 
     def __isub__(self, other):
+        """``self -= other``, in place."""
         return self.sub_(other)
 
     def __imul__(self, other):
+        """``self *= other``, in place."""
         return self.mul_(other)
 
     def __itruediv__(self, other):
+        """``self /= other``, in place."""
         return self.div_(other)
 
     def __setitem__(self, key, value):
@@ -1354,6 +1426,7 @@ class TracedTensor:
         Python scalar, or a tensor of its dtype broadcast to the view)."""
         view = self[key]
         base = view._base
+        # Skip a self-assignment of the very view being written (``x[k] = x[k]`` after an in-place op on it).
         if isinstance(value, TracedTensor) and value is not view and base is not None:
             if value._base is base and value._ops == view._ops and value._seen == base._version:
                 return
@@ -1361,6 +1434,7 @@ class TracedTensor:
         if value.dtype != self.dtype:
             raise TypeError(f"index assignment: got a {value.dtype} value for a {self.dtype} tensor")
         shape = value.shape
+        # Drop leading size-1 dims of the value so it can broadcast to a lower-rank view, as torch does.
         while len(shape) > view.ndim and shape[0] == 1:
             shape = shape[1:]
         try:
@@ -1396,9 +1470,11 @@ class TracedTensor:
                 leaf.grad = g
 
     def __matmul__(self, other):
+        """Raises: matmul needs explicit dtypes, through ``lumen.functional.matmul``."""
         raise TypeError("@ has no dtypes: use lumen.functional.matmul(x, y, accum_dtype, output_dtype)")
 
     def __rmatmul__(self, other):
+        """Raises: matmul needs explicit dtypes, through ``lumen.functional.matmul``."""
         raise TypeError("@ has no dtypes: use lumen.functional.matmul(x, y, accum_dtype, output_dtype)")
 
     def to(self, *args, dtype=None, device=None, non_blocking=False, copy=False):
@@ -1434,30 +1510,39 @@ class TracedTensor:
         return out
 
     def type_as(self, other):
+        """It cast to ``other``'s dtype."""
         return self.to(other.dtype)
 
     def float(self):
+        """It cast to float32."""
         return self.to("float32")
 
     def double(self):
+        """It cast to float64."""
         return self.to("float64")
 
     def half(self):
+        """It cast to float16."""
         return self.to("float16")
 
     def bfloat16(self):
+        """It cast to bfloat16."""
         return self.to("bfloat16")
 
     def int(self):
+        """It cast to int32."""
         return self.to("int32")
 
     def long(self):
+        """It cast to int64."""
         return self.to("int64")
 
     def bool(self):
+        """It cast to bool."""
         return self.to("bool")
 
     def reshape(self, *shape):
+        """It reshaped to ``shape`` (one ``-1`` inferred), a view of it when torch's strides allow one."""
         shape = list(_sizes(shape))
         if shape.count(-1) > 1:
             raise RuntimeError("only one dimension can be inferred")
@@ -1471,6 +1556,7 @@ class TracedTensor:
         if tuple(shape) == self.shape:
             return self
         out = prims.reshape(self, shape)
+        # Only a reshape torch could do without copying stays a view that sees later in-place writes.
         if _reshape_strides(self.shape, _strides(self), shape) is None:
             return out
         return _view(self, out, ("reshape", tuple(shape)))
@@ -1478,41 +1564,49 @@ class TracedTensor:
     view = reshape
 
     def flatten(self, start_dim=0, end_dim=-1):
+        """Dimensions ``start_dim..=end_dim`` merged into one."""
         if self.ndim == 0:
             return self.reshape(1)
         start, end = _dim(start_dim, self.ndim), _dim(end_dim, self.ndim)
         return self.reshape(self.shape[:start] + (-1,) + self.shape[end + 1 :])
 
     def unsqueeze(self, dim):
+        """A size-1 dimension inserted at ``dim``."""
         dim = _dim(dim, self.ndim + 1)
         return self.reshape(self.shape[:dim] + (1,) + self.shape[dim:])
 
     def squeeze(self, dim=None):
+        """Size-1 dimensions removed: those in ``dim``, or all if None."""
         dims = _dims(dim, self.ndim)
         return self.reshape(tuple(n for d, n in enumerate(self.shape) if not (d in dims and n == 1)))
 
     def permute(self, *dims):
+        """A view with its dimensions reordered to ``dims``."""
         dims = [_dim(d, self.ndim) for d in _sizes(dims)]
         if sorted(dims) != list(range(self.ndim)):
             raise RuntimeError(f"permute: {dims} is not a permutation of the dimensions of a {self.ndim}-d tensor")
         return self if dims == sorted(dims) else _view(self, prims.transpose(self, dims), ("permute", tuple(dims)))
 
     def transpose(self, dim0, dim1):
+        """A view with dimensions ``dim0`` and ``dim1`` swapped."""
         dims = list(range(self.ndim))
         a, b = _dim(dim0, self.ndim), _dim(dim1, self.ndim)
         dims[a], dims[b] = dims[b], dims[a]
         return self.permute(dims)
 
     def t(self):
+        """The transpose of a 2-d tensor; a 0-d or 1-d one as it is."""
         if self.ndim > 2:
             raise RuntimeError(f"t() expects a tensor with <= 2 dimensions, but self is {self.ndim}D")
         return self.transpose(0, -1) if self.ndim == 2 else self
 
     @property
     def mT(self):
+        """Its last two dimensions swapped."""
         return self.transpose(-2, -1)
 
     def expand(self, *sizes):
+        """It broadcast to ``sizes`` (``-1`` keeps a dimension), adding leading dimensions as needed."""
         sizes = _sizes(sizes)
         lead = len(sizes) - self.ndim
         if lead < 0:
@@ -1523,12 +1617,15 @@ class TracedTensor:
         return _broadcast_to(self, shape)
 
     def expand_as(self, other):
+        """It broadcast to ``other``'s shape."""
         return self.expand(other.shape)
 
     def broadcast_to(self, shape):
+        """It broadcast to ``shape``."""
         return self.expand(shape)
 
     def _slice(self, starts, limits):
+        """A view of the static block ``[starts, limits)``; itself if that is the whole tensor."""
         if list(starts) == [0] * self.ndim and list(limits) == list(self.shape):
             return self
         return _view(self, prims.slice(self, starts, limits), ("slice", tuple(starts), tuple(limits)))
@@ -1546,6 +1643,7 @@ class TracedTensor:
             raise IndexError("an index can only have a single ellipsis ('...')")
         if len(key) - len(ellipses) > self.ndim:
             raise IndexError(f"too many indices for tensor of dimension {self.ndim}")
+        # Expand the one ``...`` into full slices so the key has one entry per dimension.
         at = ellipses[0] if ellipses else len(key)
         fill = (slice(None),) * (self.ndim - (len(key) - len(ellipses)))
         key = key[:at] + fill + key[at + len(ellipses) :]
@@ -1566,6 +1664,7 @@ class TracedTensor:
             else:
                 raise TypeError(f"indices must be integers, slices or '...', got {type(k).__name__}")
         out = self._slice(starts, limits)
+        # Integer indices kept their dimension as size 1 in the slice; reshape drops them.
         return out if tuple(shape) == out.shape else out.reshape(shape)
 
     def narrow(self, dim, start, length):

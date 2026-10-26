@@ -1,3 +1,5 @@
+"""SGD and AdamW optimizers written as lumen modules so their state is traced with the step."""
+
 import lumen
 import lumen.functional as F
 
@@ -9,6 +11,7 @@ class SGD(lumen.nn.Module):
     lr: float
 
     def zero_grad(self):
+        """Clears every parameter's ``.grad``."""
         for p in self.params:
             p.grad = None
 
@@ -22,6 +25,8 @@ class SGD(lumen.nn.Module):
 
 
 class AdamW(lumen.nn.Module):
+    """AdamW with decoupled weight decay; moments ``m``/``v`` are float32 and ``t`` counts steps."""
+
     params: list
     m: list
     v: list
@@ -32,6 +37,7 @@ class AdamW(lumen.nn.Module):
     weight_decay: float
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0):
+        """Wraps ``params`` with fresh float32 meta moments unless ``m``/``v`` are given."""
         params = list(params)
 
         fields = dict(
@@ -45,10 +51,12 @@ class AdamW(lumen.nn.Module):
             weight_decay=weight_decay,
         )
 
+        # Fields are set directly, bypassing the module's own attribute handling.
         for name, value in fields.items():
             object.__setattr__(self, name, value)
 
     def zero_grad(self):
+        """Clears every parameter's ``.grad``."""
         for p in self.params:
             p.grad = None
 
@@ -58,6 +66,7 @@ class AdamW(lumen.nn.Module):
         per parameter in order: from ``lumen.grad``)."""
         b1, b2 = self.betas
         self.t = self.t + 1
+        # Bias corrections 1/(1 - beta**t), written with exp/log so ``t`` can be traced.
         c1 = 1.0 / (1.0 - F.exp(self.t * F.log(b1)))
         c2 = 1.0 / (1.0 - F.exp(self.t * F.log(b2)))
         grads = [p.grad for p in self.params] if grads is None else grads

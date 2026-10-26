@@ -1,3 +1,4 @@
+//! Per-device mesh setup: how each backend finds this process's rank and world size, and TPU slice env wiring.
 use crate::Device;
 use crate::device::DeviceBackend;
 use crate::device::cpu::Cpu;
@@ -6,9 +7,12 @@ use crate::device::meta::Meta;
 use crate::device::mps::Mps;
 use crate::device::tpu::Tpu;
 
+/// Env var holding the TPU host bounds, e.g. `2,2,1`.
 pub const TPU_TOPOLOGY: &str = "LUMEN_TPU_TOPOLOGY";
+/// Env var holding the comma-separated `host:port` slicebuilder address of every worker.
 pub const TPU_SLICEBUILDER_ADDRESSES: &str = "LUMEN_TPU_SLICEBUILDER_ADDRESSES";
 
+/// Joins the env-configured process group when WORLD_SIZE > 1 and returns `(rank, world_size)`.
 fn default_world() -> Result<(usize, usize), String> {
     if !super::is_initialized() && super::get_world_size()? > 1 {
         let (store, rank, world_size) =
@@ -18,7 +22,9 @@ fn default_world() -> Result<(usize, usize), String> {
     Ok((super::get_rank()?, super::get_world_size()?))
 }
 
+/// Device-specific hook that resolves this process's place in a mesh.
 pub trait MeshBackend: DeviceBackend {
+    /// Returns `(rank, world_size)` for a mesh of `_mesh_size` devices, initialising the process group if needed.
     fn world(&self, _mesh_size: usize) -> Result<(usize, usize), String> {
         default_world()
     }
@@ -28,6 +34,7 @@ impl MeshBackend for Cpu {}
 impl MeshBackend for Cuda {}
 impl MeshBackend for Meta {}
 
+/// Builds the libtpu env vars that make worker `rank` drive local chip `local_rank` of a multi-process slice.
 pub fn tpu_slice_env(
     topology: &str,
     addresses: &str,
@@ -46,6 +53,7 @@ pub fn tpu_slice_env(
             addresses.len()
         ));
     }
+    // workers past one slice's address list wrap around; the size check above means this is only the identity today
     let task = rank % addresses.len();
     let port = addresses[task]
         .rsplit_once(':')
@@ -56,6 +64,7 @@ pub fn tpu_slice_env(
                 addresses[task]
             )
         })?;
+    // each process owns one chip, so per-process chip bounds are all ones in the topology's rank
     let chip = match topology.split(',').count() {
         4 => "1,1,1,1",
         _ => "1,1,1",
@@ -82,6 +91,7 @@ pub fn tpu_slice_env(
     ])
 }
 
+/// Exports the slice env for this process before libtpu opens, so it claims only its own chip.
 fn join_tpu_slice() -> Result<(), String> {
     if Tpu.opened() {
         return Err(
@@ -110,6 +120,7 @@ fn join_tpu_slice() -> Result<(), String> {
 }
 
 impl MeshBackend for Tpu {
+    /// Joins the multi-process TPU slice before the process group when the world has several processes.
     fn world(&self, _mesh_size: usize) -> Result<(usize, usize), String> {
         if !super::is_initialized() && super::get_world_size()? > 1 {
             join_tpu_slice()?;
@@ -119,6 +130,7 @@ impl MeshBackend for Tpu {
 }
 
 impl MeshBackend for Mps {
+    /// Accepts only a mesh of the single MPS device in a single-process world.
     fn world(&self, mesh_size: usize) -> Result<(usize, usize), String> {
         self.check(0)?;
         let devices = self.device_count();
@@ -137,6 +149,7 @@ impl MeshBackend for Mps {
     }
 }
 
+/// Returns the mesh backend for a device type name such as `"tpu"`.
 pub fn mesh_backend(device_type: &str) -> Result<&'static dyn MeshBackend, String> {
     let device = Device::of_type(device_type, 0).ok_or_else(|| {
         format!("device_type must be one of cpu, mps, cuda, tpu, meta, got '{device_type}'")

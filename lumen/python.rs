@@ -1,7 +1,11 @@
+//! The `_native` Python extension module that registers every package's `_C` submodule.
+
 use pyo3::prelude::*;
 
+/// Registers a package's Python bindings into its `_C` submodule.
 type Register = fn(&Bound<'_, PyModule>) -> PyResult<()>;
 
+/// Each package name paired with the function that fills `lumen.<package>._C`.
 const PACKAGES: [(&str, Register); 12] = [
     ("device", crate::device::python::register),
     ("distributed", crate::distributed::python::register),
@@ -17,6 +21,7 @@ const PACKAGES: [(&str, Register); 12] = [
     ("safetensors", crate::safetensors::python::register),
 ];
 
+/// Builds `lumen._native`, creating each `lumen.<package>._C` submodule and inserting it into `sys.modules`.
 #[pymodule]
 #[pyo3(name = "_native")]
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {

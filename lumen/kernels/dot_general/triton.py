@@ -1,3 +1,5 @@
+"""Triton GEMM with generated operand prologues and a fused epilogue."""
+
 import triton
 import triton.language as tl
 
@@ -25,15 +27,20 @@ def gemm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
+    """One ``BLOCK_SIZE_M x BLOCK_SIZE_N`` output block of batch ``program_id(0)``: loads operands
+    through ``PROLOGUE_A``/``PROLOGUE_B`` and hands the accumulator to ``EPILOGUE``. With row or column
+    halves (``GROUP > 1``, not interleaved) it also accumulates the second half's product."""
     BLOCK_ID_L = tl.program_id(axis=0).to(tl.int64)
     BLOCK_ID = tl.program_id(axis=1)
 
+    # With halves, the grid covers only the first half of M (ROWS) or N; the second is offset by GRID_M/GRID_N.
     HALVES: tl.constexpr = GROUP > 1 and not INTERLEAVED
     GRID_M = M // GROUP if HALVES and ROWS else M
     GRID_N = N // GROUP if HALVES and not ROWS else N
     NUM_BLOCKS_M = tl.cdiv(GRID_M, BLOCK_SIZE_M)
     NUM_BLOCKS_N = tl.cdiv(GRID_N, BLOCK_SIZE_N)
 
+    # Grouped ordering: GROUP_SIZE_M row blocks share each column sweep, for L2 reuse.
     NUM_BLOCKS_IN_GROUP = GROUP_SIZE_M * NUM_BLOCKS_N
     GROUP_ID = BLOCK_ID // NUM_BLOCKS_IN_GROUP
 
@@ -85,10 +92,14 @@ def gemm_kernel(
         EPILOGUE(D_ptr, EXTRA, BLOCK_ID_L, BLOCK_M[:, None], BLOCK_N[None, :], D, MASK)
 
 
+# Accumulator dtypes Triton's dot supports.
 TL_DTYPES = {"float32": tl.float32, "float16": tl.float16, "bfloat16": tl.bfloat16}
 
 
 def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars, flags):
+    """Launches ``gemm_kernel`` on ``tensors`` (lhs, rhs, out) with ``sizes`` (L, M, K, N): ``config``
+    holds blocks, group size, stages and warps; ``specs`` the generated prologue/epilogue functions;
+    ``extra`` the epilogue's other operands (those in ``scalars`` passed by value)."""
     lhs, rhs, out = tensors
     if accum_dtype not in TL_DTYPES or (lhs.dtype, accum_dtype) == ("bfloat16", "bfloat16"):
         raise ValueError(f"dot_general: Triton's dot accumulates in float32 or float16, got {accum_dtype}")

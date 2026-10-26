@@ -1,3 +1,5 @@
+"""Local HTTP server for the dashboard: serves its static files and streams benchmark runs."""
+
 import argparse
 import functools
 import http.server
@@ -16,7 +18,10 @@ DEVICES = ("mps",)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    """Static file handler plus ``POST /api/benchmark/<op>?device=...`` that runs one benchmark."""
+
     def do_POST(self):
+        """Runs the named op's benchmark, streaming each result row and then the saved data as NDJSON."""
         prefix = "/api/benchmark/"
         url = urllib.parse.urlsplit(self.path)
         if not url.path.startswith(prefix):
@@ -29,6 +34,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(404, {"error": f"no benchmark for {name!r}; there are {', '.join(bench.OPS)}"})
         if not running.acquire(blocking=False):
             return self.reply(409, {"error": "a benchmark is already running; try again when it finishes"})
+            # Headers go out before running so rows can stream; later failures become an error line.
         try:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
@@ -45,10 +51,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             running.release()
 
     def line(self, body):
+        """Writes one NDJSON line and flushes it to the client."""
         self.wfile.write(json.dumps(body, ensure_ascii=False).encode() + b"\n")
         self.wfile.flush()
 
     def reply(self, status, body):
+        """Sends a complete JSON response with ``status``."""
         payload = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -58,6 +66,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
+    """Parses ``--port`` and serves the dashboard on localhost until interrupted."""
     parser = argparse.ArgumentParser(description="Serve the lumen dashboard and run its benchmarks on this machine.")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

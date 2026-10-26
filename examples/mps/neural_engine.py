@@ -1,3 +1,5 @@
+"""Compares an MLP's first-call latency, accuracy and per-call time with the MPS Neural Engine path off and on."""
+
 import time
 
 import numpy as np
@@ -10,25 +12,32 @@ TOKENS, DIM, HIDDEN, LAYERS, PROFILED_CALLS = 256, 1024, 2048, 2, 10
 
 
 class Block(lumen.nn.Module):
+    """Residual block `x + relu(x @ w1 + b1) @ w2` in float16 with float32 accumulation."""
+
     w1: lumen.Tensor
     b1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Applies the residual MLP block to `x`."""
         h = F.relu(F.matmul(x, self.w1, "float32", "float16") + self.b1)
         return x + F.matmul(h, self.w2, "float32", "float16")
 
 
 class MLP(lumen.nn.Module):
+    """Stack of residual `Block`s applied in order."""
+
     blocks: list
 
     def __call__(self, x):
+        """Runs `x` through every block."""
         for block in self.blocks:
             x = block(x)
         return x
 
 
 def meta(*shape):
+    """Returns a float16 meta-device placeholder of `shape` for tracing."""
     return lumen.empty(list(shape), lumen.float16, device="meta")
 
 
@@ -36,6 +45,7 @@ model = MLP([Block(meta(DIM, HIDDEN), meta(HIDDEN), meta(HIDDEN, DIM)) for _ in 
 
 
 def predict(model, x):
+    """Calls `model` on `x`; compiled for MPS below."""
     return model(x)
 
 
@@ -69,6 +79,7 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             lumen.mps.synchronize()
 
 events = prof.events()
+# split each profiled range into GPU time and CoreML (Neural Engine) host-kernel time per call
 for on in (False, True):
     name = f"neural engine {'on' if on else 'off'}"
     (r,) = [e for e in events if e["kind"] == "user_range" and e["name"] == name]

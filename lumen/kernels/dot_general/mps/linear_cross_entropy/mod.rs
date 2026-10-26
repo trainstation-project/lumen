@@ -1,3 +1,5 @@
+//! Fused `h @ w^T` plus cross entropy on Metal, without materializing the logits.
+
 use super::float_tiles;
 use crate::Tensor;
 use crate::graph::TensorType;
@@ -5,11 +7,14 @@ use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
+/// Bytes of scratch for the per-row, per-column-tile maxima and exp-sums.
 pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> usize {
     let (b, v) = (h.shape[0], w.shape[0]);
     2 * b * v.div_ceil(float_tiles(1, b, v).2.1) * 4
 }
 
+/// Launches the fused matmul writing per-tile softmax partials and target logits, then the
+/// combine that turns them into each row's loss (`out[..b]`) and log-sum-exp (`out[b..]`).
 pub(crate) fn encode_linear_cross_entropy(
     step: &Step,
     inputs: &[*const u8],
@@ -35,10 +40,12 @@ pub(crate) fn encode_linear_cross_entropy(
         _ => "",
     };
     let tiles = v.div_ceil(tn);
+    // Scratch holds `[b, tiles]` maxima followed by `[b, tiles]` sums.
     let (maxima, sums) = (
         scratch.cast_const(),
         unsafe { scratch.add(b * tiles * 4) }.cast_const(),
     );
+    // h is [b, d] row-major; w is [v, d], read as a [d, v] rhs with K stride 1 and N stride d.
     let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
     let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
     crate::profiler::next_launch("linear_cross_entropy (partials)", || {

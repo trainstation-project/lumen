@@ -1,3 +1,6 @@
+//! Algebraic simplification: identities, composed layout ops, transposes folded into dots, and casts
+//! and layout ops moved to where they are cheaper.
+
 use std::collections::HashMap;
 
 use super::cse::cse;
@@ -6,8 +9,12 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Element, Scalar};
 
+/// Simplifies `graph` node by node, then prunes and deduplicates it. `matched` says pattern-matching
+/// passes have run, enabling the rewrites that restructure (cast-into-dot, moved casts and layouts,
+/// transposed dots); otherwise only transposes of graph inputs fold into dots.
 pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
+    // Distinct readers of each value, counting graph outputs.
     let mut reads = vec![0usize; graph.types.len()];
     for n in nodes {
         for (k, &v) in n.inputs.iter().enumerate() {
@@ -19,6 +26,7 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     }
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+    // Producer index (in `out`) of each rewritten value, and whether it is a fresh value read once.
     let mut producer: HashMap<Var, usize> = HashMap::new();
     let mut once: HashMap<Var, bool> = HashMap::new();
     for &v in graph.inputs() {
@@ -57,6 +65,7 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 v
             }),
         };
+        // Intermediate nodes a rewrite created have a single reader by construction.
         for (k, n) in out.nodes().iter().enumerate().skip(first) {
             producer.insert(n.output, k);
             if n.output != value {
@@ -72,11 +81,16 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     cse(&out.prune().0)
 }
 
+/// The result of a local rewrite.
 enum Rewrite {
+    /// The node is replaced by an existing value.
     Value(Var),
+    /// The node is replaced by this primitive on these operands.
     Node(Primitive, Vec<Var>),
 }
 
+/// Local rewrite of `primitive` on `inputs`: identities (`x * 1`, `x + 0`, double negation, no-op casts,
+/// reshapes and transposes) and composition of consecutive layout ops.
 fn rewrite(
     out: &Graph,
     producer: &HashMap<Var, usize>,
@@ -121,6 +135,7 @@ fn rewrite(
                 inputs: x,
                 output,
                 ..
+            // A narrowing cast of a dot's sole use becomes the dot's output dtype.
             }) if matched
                 && accum_dtype == output_dtype
                 && accum_dtype.is_float()
@@ -174,6 +189,7 @@ fn rewrite(
                     inputs: x,
                     output,
                     ..
+                // Transposing a dot's result to (batch, rhs free, lhs free) is the dot with swapped operands.
                 }) if matched && once.get(output) == Some(&true) => {
                     swapped(out, dot, x, permutation)
                 }
@@ -209,10 +225,13 @@ fn rewrite(
     }
 }
 
+/// Node in `out` producing `v`.
 fn node_of<'a>(out: &'a Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<&'a Node> {
     producer.get(&v).map(|&i| &out.nodes()[i])
 }
 
+/// Moves ops so they run on the cheaper side: an elementwise op of reshaped/transposed operands runs
+/// before the rearrangement; a widening cast moves after layout ops; a narrowing cast moves before them.
 fn moved(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -324,6 +343,7 @@ fn moved(
     Some(out.apply(then, &[x]).expect("the primitive moved past"))
 }
 
+/// `v` cast to `dtype`, pushing the cast through single-use layout ops to their operands.
 fn cast_up(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -354,6 +374,7 @@ fn cast_up(
     }
 }
 
+/// The constant operand `n` restated in the shape before `rearrange`, or `None` when it isn't a constant.
 fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Primitive> {
     use Primitive::*;
     let shape = shape.to_vec();
@@ -398,10 +419,12 @@ fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Prim
     }
 }
 
+/// `value` rounded through `dtype`.
 fn round(dtype: DType, value: Scalar) -> Scalar {
     dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar())
 }
 
+/// `transpose(dot(x0, x1))` as `dot(x1, x0)` when the permutation swaps the two operands' free dims.
 fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Option<Rewrite> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -435,6 +458,8 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
     })
 }
 
+/// The dot with operand transposes (possibly under a cast) folded into its dimension numbers, when the
+/// free dims keep their order; `None` when nothing folds.
 fn folded(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -513,6 +538,7 @@ fn folded(
     })
 }
 
+/// The constant `v` holds when it is a broadcast, reshape or cast of a `full`.
 fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> {
     let mut v = v;
     loop {
@@ -527,15 +553,19 @@ fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> 
     }
 }
 
+/// Compiler pass running [`simplify_with`].
 pub(crate) struct Simplify {
+    /// Pattern-matching passes have run, so structural rewrites are allowed.
     pub(crate) matched: bool,
 }
 
 impl<M: Module> CompilerPass<M> for Simplify {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "simplify"
     }
 
+    /// Replaces the module's graph with its simplified version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = simplify_with(m.graph(), self.matched);
         Ok(())

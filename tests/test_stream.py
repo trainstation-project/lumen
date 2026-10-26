@@ -1,3 +1,5 @@
+"""Tests of lumen streams, events and the ``wait`` primitive."""
+
 import pytest
 
 import lumen
@@ -54,6 +56,7 @@ def test_events_time_the_work_between_them(device, triton_on_cuda):
     lumen.Stream(device).synchronize()
 
     def timed(reps):
+        """Device milliseconds between events around ``reps`` calls."""
         start, end = lumen.Event(device, enable_timing=True), lumen.Event(device, enable_timing=True)
         start.record()
         for _ in range(reps):
@@ -84,6 +87,7 @@ def test_events_need_timing_and_a_record():
 
 
 def test_a_stream_of_an_absent_device_raises():
+    """A stream of a device index that isn't present raises."""
     try:
         lumen.zeros([1], device="cuda:7")
     except RuntimeError:
@@ -95,6 +99,7 @@ def test_a_stream_of_an_absent_device_raises():
 
 @pytest.mark.mps
 def test_mps_synchronize_waits_for_queued_work():
+    """``lumen.mps.synchronize`` returns only after every queued fill has run."""
     try:
         t = lumen.zeros([1 << 20], device="mps")
     except RuntimeError as e:
@@ -108,6 +113,7 @@ def test_mps_synchronize_waits_for_queued_work():
 @pytest.mark.cuda
 @pytest.mark.parametrize("device", ["cuda", "cuda:0", lumen.device("cuda", 0)])
 def test_cuda_stream_forms(device):
+    """A CUDA stream can be named by type, by ``type:index`` or by a device."""
     try:
         t = lumen.zeros([1 << 20], device="cuda")
     except RuntimeError as e:
@@ -125,11 +131,14 @@ def _mps_heavy():
     import lumen.functional as F
 
     class Weight(lumen.nn.Module):
+        """A module holding one weight."""
+
         w: lumen.Tensor
 
     model = Weight(lumen.empty([1024, 1024], device="meta"))
 
     def heavy(m, x):
+        """Sixteen ReLU matmul layers, summed."""
         for _ in range(16):
             x = F.relu(F.matmul(x, m.w, "float32", "float32")) * 0.03
         return F.sum(x)
@@ -175,9 +184,12 @@ def test_mps_input_copies_run_in_order():
     import lumen.functional as F
 
     class Total(lumen.nn.Module):
+        """A module holding a running total."""
+
         acc: lumen.Tensor
 
     def add(m, x):
+        """Adds ``sum(x)`` into ``m.acc`` in place and returns it."""
         m.acc.copy_(m.acc + F.sum(x))
         return m.acc
 
@@ -235,6 +247,7 @@ def test_wait_primitive(device, triton_on_cuda):
     from lumen import prims
 
     def f(x):
+        """``sum(wait(2 exp x) * 3)``."""
         return F.sum(prims.wait(F.exp(x) * 2.0) * 3.0)
 
     graph = lumen.make_graph(f)(lumen.empty([4], device="meta"))

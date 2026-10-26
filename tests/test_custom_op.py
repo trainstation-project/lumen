@@ -1,3 +1,5 @@
+"""Tests of `custom_op`: mutated arguments and views written back, in-place versus copied memory, overlappable operands and errors."""
+
 import numpy as np
 import pytest
 
@@ -12,14 +14,17 @@ DEVICES = [
     pytest.param("tpu", marks=pytest.mark.tpu),
 ]
 
+# names of custom ops as they actually run, to check which calls a plan makes
 RUNS = []
 
 
 def _array(t):
+    """Copies a tensor's values to numpy."""
     return lumen.to_numpy(t)
 
 
 def _assign(t, values):
+    """Overwrites tensor `t` in place with float32 `values`."""
     t.copy_(lumen.from_numpy(np.asarray(values, np.float32)))
 
 
@@ -39,6 +44,7 @@ def swap_add(a: lumen.Tensor, b: lumen.Tensor, k: int) -> None:
 
 
 def _tensor(values, device):
+    """Builds a float32 tensor on `device`, skipping the test when the device is unavailable."""
     try:
         return lumen.from_numpy(np.asarray(values, np.float32)).to(device)
     except RuntimeError as e:
@@ -47,6 +53,7 @@ def _tensor(values, device):
 
 @pytest.fixture(autouse=True)
 def _clear_runs():
+    """Empties RUNS before every test."""
     RUNS.clear()
 
 
@@ -56,6 +63,7 @@ def test_mutated_argument_is_read_after_and_written_back(device, triton_on_cuda)
     tensor argument so mutated is written back into the caller's."""
 
     def step(x, y):
+        """Runs `axpy` into `y` and returns a value read from `y` after it."""
         axpy(2.0, x * 1.0, y)
         return y * 10.0
 
@@ -66,11 +74,13 @@ def test_mutated_argument_is_read_after_and_written_back(device, triton_on_cuda)
 
 
 def _plan(f, *shapes):
+    """Returns the CPU plan of `f` traced on meta tensors of `shapes`, as text."""
     args = [lumen.empty(list(s), device="meta") for s in shapes]
     return str(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "cpu"))
 
 
 def _call_line(plan):
+    """Returns the variable the plan's `test::axpy` step writes and its operands."""
     (line,) = [line for line in plan.splitlines() if "test::axpy" in line]
     written = line.split(":")[0].strip()
     operands = line.rsplit("] ", 1)[1].split()
@@ -83,6 +93,7 @@ def test_mutated_value_written_in_place(device, triton_on_cuda):
     its own memory: no copy."""
 
     def f(x):
+        """Mutates a fresh value nothing reads afterwards."""
         y = x + 1.0
         axpy(2.0, x, y)
         return y * 1.0
@@ -99,6 +110,7 @@ def test_old_value_read_after_is_copied(device, triton_on_cuda):
     is kept."""
 
     def f(x):
+        """Mutates `x * 2.0` while also recomputing `x * 2.0` afterwards."""
         y = x * 2.0
         axpy(1.0, x, y)
         return y * 1.0, x * 2.0
@@ -110,6 +122,8 @@ def test_old_value_read_after_is_copied(device, triton_on_cuda):
 
 
 class _Weights(lumen.nn.Module):
+    """Module holding a single weight `w`."""
+
     w: lumen.Tensor
 
 
@@ -120,6 +134,7 @@ def test_mutated_views_reach_their_bases(device, triton_on_cuda):
     calls alike both run, in order."""
 
     def step(m, x):
+        """Twice swaps-and-adds between a weight row and a slice of a value."""
         y = x * 1.0
         swap_add(m.w[0], y[1:3], 10)
         swap_add(m.w[0], y[1:3], 10)
@@ -140,6 +155,7 @@ def test_weight_mutated_in_place(device, triton_on_cuda):
     mutated in its own memory (donated), not copied back."""
 
     def step(m, x):
+        """Accumulates `x` into the weight."""
         axpy(1.0, x, m.w)
         return x * 1.0
 
@@ -162,6 +178,7 @@ def test_opaque_to_the_compilers():
     a call whose mutations nothing reads (nor writes back) is not made."""
 
     def twice(x):
+        """Calls the identical `axpy` twice on the same value."""
         y = x + 1.0
         axpy(1.0, x, y)
         axpy(1.0, x, y)
@@ -177,6 +194,7 @@ def test_opaque_to_the_compilers():
     RUNS.clear()
 
     def unused(x):
+        """Calls `axpy` on a value nothing reads afterwards."""
         y = x + 1.0
         axpy(1.0, x, y)
         return x * 2.0
@@ -192,10 +210,12 @@ def test_arguments_as_given():
 
     @custom_op("test::scale", mutates_args="out")
     def scale(x: lumen.Tensor, out: lumen.Tensor, *, by=3, label="s") -> None:
+        """Writes `x * by` into `out` and records the arguments it got."""
         seen.append((by, label))
         _assign(out, _array(x) * by)
 
     def f(x):
+        """Calls `scale` with a keyword overriding one default."""
         out = x * 0.0
         scale(x, out, label="t")
         return out * 1.0
@@ -232,6 +252,7 @@ def test_custom_op_errors():
 
     @custom_op("t::returns", mutates_args=("x",))
     def returns(x):
+        """Returns a value, which a custom op must not."""
         return 1
 
     with pytest.raises(Exception, match="returns nothing"):
@@ -242,10 +263,12 @@ def test_custom_op_errors():
         )
 
 
+# the (x, out) data pointers each `_square` call received
 POINTERS = []
 
 
 def _square(x, out):
+    """Writes `x * x` into `out`, recording both data pointers."""
     POINTERS.append((x.data_ptr(), out.data_ptr()))
     values = _array(x)
     _assign(out, values * values)
@@ -256,6 +279,7 @@ SQUARE_PLAIN = custom_op("test::square_plain", mutates_args=("out",))(_square)
 
 
 def _square_call(plan):
+    """Returns the variable the plan's `test::square` step writes and its two operands."""
     (line,) = [line for line in plan.splitlines() if "test::square" in line]
     written = line.split(":")[0].strip()
     x, out = line.rsplit("] ", 1)[1].split()
@@ -271,7 +295,10 @@ def test_overlappable_operand_memory_is_the_compilers_choice(device, triton_on_c
     its old value copied in. The values alike."""
 
     def using(op):
+        """Returns a function calling `op` where `out`'s old value is read after and `x` dies at the call."""
+
         def f(a):
+            """Squares `a + 1` into a zeroed value via `op`."""
             x = a + 1.0
             out = a * 0.0
             op(x, out)
@@ -304,6 +331,7 @@ def test_overlap_only_where_it_helps_and_is_safe():
     x read after the call: never x's memory."""
 
     def own(a):
+        """Squares into `out`, whose old value is dead, while `x` dies too."""
         x, out = a + 1.0, a * 0.0
         SQUARE(x, out)
         return out * 1.0
@@ -317,6 +345,7 @@ def test_overlap_only_where_it_helps_and_is_safe():
     assert x_pointer != out_pointer
 
     def x_read_after(a):
+        """Squares into `out` while `x` is still read after the call."""
         x, out = a + 1.0, a * 0.0
         SQUARE(x, out)
         return out * 1.0, x * 1.0, a * 0.0
@@ -331,6 +360,7 @@ def test_overlap_only_where_it_helps_and_is_safe():
 
 
 def test_overlappable_errors():
+    """`overlappable` must map a mutated argument to a distinct argument it only reads."""
     with pytest.raises(ValueError, match="does not mutate"):
         custom_op("t::f", mutates_args=("out",), overlappable={"x": "out"})(_square)
     with pytest.raises(ValueError, match="arguments it reads"):

@@ -1,3 +1,5 @@
+"""Pallas-style TPU kernel language: refs, control flow, DMAs and ops traced into a Mosaic kernel."""
+
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
 from lumen.pallas._C import Kernel
@@ -97,6 +99,7 @@ class ds:
     ``pl.dslice``)."""
 
     def __init__(self, start, size=None, stride=None):
+        """``ds(size)`` is ``ds(0, size)``."""
         if size is None:
             start, size = 0, start
         self.start, self.size, self.stride = start, size, 1 if stride is None else stride
@@ -115,11 +118,15 @@ class VMEM:
     as a ``BlockSpec``'s ``memory_space``, an operand staged in VMEM."""
 
     def __init__(self, shape, dtype):
+        """Records the buffer's shape and dtype."""
         self.shape, self.dtype = tuple(shape), dtype
 
 
 class VMEM_SHARED:
+    """A VMEM buffer of ``shape`` and ``dtype`` shared by a SparseCore's subcores."""
+
     def __init__(self, shape, dtype):
+        """Records the buffer's shape and dtype."""
         self.shape, self.dtype = tuple(shape), dtype
 
 
@@ -129,14 +136,19 @@ class SMEM:
     staged in SMEM, its elements read and written one at a time."""
 
     def __init__(self, shape, dtype):
+        """Records the buffer's shape and dtype."""
         self.shape, self.dtype = tuple(shape), dtype
 
 
 class _Semaphores:
+    """DMA semaphores of ``shape`` (one when ``()``), callable to make an array of them."""
+
     def __init__(self, shape=()):
+        """Records the semaphore array's shape."""
         self.shape = tuple(shape)
 
     def __call__(self, shape):
+        """DMA semaphores of ``shape``."""
         return _Semaphores(shape)
 
 
@@ -148,17 +160,24 @@ class SemaphoreType:
 
 
 class _At:
+    """``ref.at``: indexing it gives a window of the ref, or with a ref of offsets, an indexed (gathered) ref."""
+
     def __init__(self, ref):
+        """Wraps ``ref``."""
         self.ref = ref
 
     def __getitem__(self, index):
+        """A window of the ref, or ``_Indexed`` rows when ``index`` is a ref of offsets."""
         if isinstance(index, Ref):
             return _Indexed(self.ref, index)
         return self.ref._window(index)
 
 
 class _Indexed:
+    """Rows of ``ref`` picked by the offsets in ref ``offsets``, for an indirect DMA."""
+
     def __init__(self, ref, offsets):
+        """Records the ref, its offsets ref and their kernel."""
         self.ref, self.offsets, self.kernel = ref, offsets, ref.kernel
 
 
@@ -171,12 +190,14 @@ class Ref:
     a scalar's are a ``(1,)``'s)."""
 
     def __init__(self, kernel, var, shape=None):
+        """Ref of kernel variable ``var``; ``shape`` overrides the physical shape (``()`` reads a one-element ref as a scalar)."""
         self.kernel, self.var = kernel, var
         self.dtype, physical, self.space = kernel.ref_type(var)
         self.shape = tuple(physical) if shape is None else tuple(shape)
         self._scalar = self.shape == () and tuple(physical) == (1,)
 
     def __repr__(self):
+        """``Ref(%var, dtype[shape], space)``."""
         return f"Ref(%{self.var}, {self.dtype}{list(self.shape)}, {self.space})"
 
     def _not_an_operand(self, primitive):
@@ -189,10 +210,12 @@ class Ref:
 
     @property
     def ndim(self):
+        """Number of dimensions."""
         return len(self.shape)
 
     @property
     def at(self):
+        """Windows of the ref: ``ref.at[index]``."""
         return _At(self)
 
     def _window(self, index):
@@ -283,6 +306,7 @@ class Ref:
         return access
 
     def __getitem__(self, index):
+        """Loads ``index``: a strided VMEM load, an SMEM element, or a window loaded whole."""
         if self.space == "vmem" and self.dtype != "bool":
             access = self._access(index)
             starts = [_i32(a).var for a, _, _, _ in access]
@@ -300,12 +324,14 @@ class Ref:
             starts = [_i32(a).var for a, _, _ in strided]
             sizes, strides = [k for _, k, _ in strided], [s for _, _, s in strided]
             return TracedTensor(self.kernel, self.kernel.load_strided(window.var, starts, sizes, strides))
+        # A ref indexed down to no dimensions loads its single element as a scalar.
         if self.ndim and not window.ndim:
             window, _ = self._strided(index, squeezing=False)
             return TracedTensor(self.kernel, self.kernel.load(window.var)).reshape(())
         return TracedTensor(self.kernel, self.kernel.load(window.var))
 
     def __setitem__(self, index, value):
+        """Stores ``value`` (a traced value or Python scalar) at ``index``, as ``__getitem__`` reads it."""
         if isinstance(value, Ref):
             raise ValueError("Cannot store a Ref into another Ref. Did you forget to load from it using `[...]`?")
         if hasattr(value, "shape") and not isinstance(value, TracedTensor):
@@ -366,6 +392,9 @@ def kernel(body, *, scalars, rows, host_rows=None, scratch=(), name="kernel"):
 
 
 def sparse_core_kernel(body, *, refs, mesh, scratch=(), name="kernel"):
+    """``body`` traced as a SparseCore kernel over ``mesh``, lowered to Mosaic:
+    ``body(core, subcore, *refs, *scratch)``, the first two traced int32 indices,
+    then an HBM ref of each ``(dtype, shape)`` in ``refs`` and a ref of each ``scratch``."""
     k = Kernel.sparse_core([(dtype, list(shape)) for dtype, shape in refs], list(mesh))
     with tracer.tracing(k):
         params = k.params()
@@ -399,6 +428,7 @@ def when(cond):
     a traced bool scalar) holds (``pl.when``)."""
 
     def decorate(f):
+        """Traces ``f`` under ``cond``: inline when it is a Python bool, else in an ``if`` region."""
         if not isinstance(cond, TracedTensor):
             if cond:
                 f()
@@ -419,6 +449,7 @@ def _flatten(tree):
         leaves = [leaf for ls, _ in parts for leaf in ls]
 
         def rebuild(values):
+            """``tree`` rebuilt from its flattened ``values``."""
             out, at = [], 0
             for ls, r in parts:
                 out.append(r(values[at : at + len(ls)]))
@@ -494,6 +525,7 @@ def scan(f, init, xs=None, length=None):
         length = xs_leaves[0].shape[0]
 
     def body(_, carry):
+        """One iteration: ``f`` on the carry and zero placeholders for ``xs``, which must be empty."""
         x = rebuild([prims.full(v.shape[1:], 0, v.dtype) for v in xs_leaves])
         carry, ys = f(carry, x)
         ys_leaves, _ = _flatten(ys)
@@ -513,6 +545,7 @@ def loop(lower, upper, *, step=1, init_carry=None, unroll=None):
     del unroll
 
     def decorate(body):
+        """Traces ``body`` in a loop of ``ceil((upper - lower) / step)`` trips."""
         trips = (upper - lower + (step - 1 if step > 0 else step + 1)) // step
         if not isinstance(trips, TracedTensor):
             trips = max(trips, 0)
@@ -525,10 +558,14 @@ def loop(lower, upper, *, step=1, init_carry=None, unroll=None):
 
 
 class _Copy:
+    """A DMA from ``src`` to ``dst`` signalling ``sem``, direct or indirect (one side ``_Indexed``)."""
+
     def __init__(self, src, dst, sem):
+        """Records the source, destination and semaphore."""
         self.src, self.dst, self.sem = src, dst, sem
 
     def _issue(self, wait):
+        """Emits the DMA start (or, with ``wait``, its wait)."""
         indexed = [r for r in (self.src, self.dst) if isinstance(r, _Indexed)]
         if not indexed:
             self.src.kernel.dma(self.src.var, self.dst.var, self.sem.var, wait)
@@ -538,9 +575,11 @@ class _Copy:
         self.src.kernel.indirect_dma(src.var, dst.var, rows.offsets.var, self.sem.var, wait)
 
     def start(self):
+        """Starts the copy."""
         self._issue(False)
 
     def wait(self):
+        """Waits for the copy to finish."""
         self._issue(True)
 
 
@@ -566,38 +605,47 @@ def bitcast(x, dtype):
 
 
 def _bits(name, x, y):
+    """Bit op ``name`` of ``x`` and ``y`` (a Python scalar becomes ``x``'s type)."""
     return TracedTensor(x.graph, x.graph.bits(name, [x.var, _like(x, y).var]))
 
 
 def roll(x, shift, axis):
+    """``x`` rotated by ``shift`` elements along ``axis`` (``pltpu.roll``)."""
     return TracedTensor(x.graph, x.graph.bits("roll", [x.var, _i32(shift).var], axis=axis))
 
 
 def shift_left(x, y):
+    """``x << y`` elementwise."""
     return _bits("shift_left", x, y)
 
 
 def shift_right_logical(x, y):
+    """``x >> y`` elementwise, filling with zeros."""
     return _bits("shift_right_logical", x, y)
 
 
 def bitwise_and(x, y):
+    """``x & y`` elementwise."""
     return _bits("and", x, y)
 
 
 def bitwise_or(x, y):
+    """``x | y`` elementwise."""
     return _bits("or", x, y)
 
 
 def bitwise_xor(x, y):
+    """``x ^ y`` elementwise."""
     return prims.xor(x, _like(x, y))
 
 
 def bitwise_not(x):
+    """``~x`` elementwise."""
     return prims.not_(x)
 
 
 def shift_right_arithmetic(x, y):
+    """``x >> y`` elementwise, keeping the sign."""
     return prims.shift_right_arithmetic(x, _like(x, y))
 
 
@@ -617,6 +665,7 @@ def integer_pow(x, y):
 
 
 def reduce_precision(x, exponent_bits, mantissa_bits):
+    """``x`` rounded to a float of ``exponent_bits`` and ``mantissa_bits`` (``lax.reduce_precision``)."""
     return prims.reduce_precision(x, exponent_bits, mantissa_bits)
 
 
@@ -633,14 +682,17 @@ def delay(nanos):
 
 
 def population_count(x):
+    """Set bits of each element of ``x``."""
     return prims.population_count(x)
 
 
 def clz(x):
+    """Leading zero bits of each element of ``x``."""
     return prims.clz(x)
 
 
 def broadcasted_iota(dtype, shape, dimension):
+    """Indices along ``dimension`` of an array of ``shape`` (``lax.broadcasted_iota``)."""
     return prims.iota(dtype, tuple(shape), dimension)
 
 

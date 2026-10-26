@@ -1,9 +1,12 @@
+"""Pallas TPU block specs and ``emit_pipeline``: double-buffered HBM/VMEM block copies over a grid."""
+
 import math
 
 from lumen.graph import prims
 from lumen.graph.tracer import TracedTensor
 from lumen.tensor import Tensor
 
+# Stack of (current step index, grid) for the pipelines being traced.
 _GRID = []
 
 
@@ -21,10 +24,12 @@ def num_programs(axis):
     return _GRID[-1][1][axis]
 
 
+# Stack of grid axis names of the enclosing pallas_calls.
 _NAMES = []
 
 
 def _axis(name):
+    """Position of grid axis ``name`` in the innermost call that names it."""
     for names in reversed(_NAMES):
         if name in names:
             return names.index(name)
@@ -46,6 +51,7 @@ class Blocked:
     indices (an int's meaning)."""
 
     def __init__(self, block_size):
+        """Records the block size."""
         self.block_size = block_size
 
 
@@ -55,6 +61,7 @@ class Element:
     operand where it reaches past it (``pl.Element``)."""
 
     def __init__(self, block_size, padding=(0, 0)):
+        """Records the block size and high/low padding."""
         self.block_size, self.padding = block_size, tuple(padding)
 
 
@@ -63,6 +70,7 @@ class BoundedSlice:
     ``block_size`` (``pl.BoundedSlice``): not on a TPU."""
 
     def __init__(self, block_size):
+        """Records the block size."""
         self.block_size = block_size
 
 
@@ -75,21 +83,25 @@ class BlockSpec:
     operand's HBM ref as it is (``pallas_call``)."""
 
     def __init__(self, block_shape=None, index_map=None, *, memory_space=None):
+        """Records the block shape, index map and memory space."""
         self.block_shape = None if block_shape is None else tuple(block_shape)
         self.index_map, self.memory_space = index_map, memory_space
 
 
 def _scalar(x, dtype):
+    """``x`` as a traced scalar of ``dtype`` (traced tensors pass through)."""
     return x if isinstance(x, TracedTensor) else prims.full((), x, dtype)
 
 
 def _ne(a, b):
+    """``a != b``, folded to a Python bool when both are ints."""
     if not isinstance(a, TracedTensor) and not isinstance(b, TracedTensor):
         return a != b
     return _scalar(a, "int32") != _scalar(b, "int32")
 
 
 def _or(a, b):
+    """``a or b`` on Python or traced bools, folding constants."""
     from lumen import pallas as pl
 
     if isinstance(a, bool) and isinstance(b, bool):
@@ -104,10 +116,12 @@ def _or(a, b):
 
 
 def _not(a):
+    """``not a`` on a Python or traced bool."""
     return (not a) if isinstance(a, bool) else a == False  # noqa: E712 (a traced bool)
 
 
 def _and(a, b):
+    """``a and b`` on Python or traced bools, via De Morgan."""
     return _not(_or(_not(a), _not(b)))
 
 
@@ -169,6 +183,7 @@ def _padded(ref, shape):
     from lumen.kernels.tpu.pallas import view
 
     def tiles(s):
+        """Tile counts of ``s``: 128 lanes for the last dim and 8 32-bit sublanes for the one before."""
         if len(s) < 2:
             return list(s[:-1]) + [-(-n // 128) for n in s[-1:]]
         rows = 8 * (32 // _bits(ref.dtype))
@@ -186,6 +201,7 @@ class _Buffered:
     """An operand's HBM ref, its blocks, and its VMEM slots and semaphores."""
 
     def __init__(self, ref, spec, label, grid):
+        """Validates ``spec`` for ``ref`` and allocates two VMEM slots (one when there is a single step) and their DMA semaphores."""
         from lumen import pallas as pl
 
         self.ref, self.spec, self.label = ref, spec, label
@@ -206,6 +222,7 @@ class _Buffered:
             raise NotImplementedError("Element blocks padded below their operand are not supported yet")
         _check_block(label, self.sizes, ref.shape, ref.dtype)
         high = [e.padding[1] if e is not None else 0 for e in self.elements]
+        # Blocks reaching past the operand need it padded to whole blocks; if its tiles can't hold that, clip the copies instead.
         whole = [
             n + h if e is not None else max(n, -(-n // size) * size)
             for n, h, e, size in zip(ref.shape, high, self.elements, self.sizes)
@@ -216,6 +233,7 @@ class _Buffered:
                 self.ref = _padded(ref, whole)
             except NotImplementedError:
                 self.clip = [n != w for n, w in zip(ref.shape, whole)]
+        # Flat: a rank-1 block of whole tiles, double-buffered as one 1-D slot of twice its size.
         self.flat = len(self.sizes) == 1 and self.sizes[0] % (128 * (32 // _bits(ref.dtype))) == 0
         self.single = len(self.sizes) == 1 and not self.flat and math.prod(grid) == 1
         slots = (2 * self.sizes[0],) if self.flat else tuple(self.sizes) if self.single else (2, *self.sizes)
@@ -223,6 +241,7 @@ class _Buffered:
         self.sems = pl.scratch(pl.SemaphoreType.DMA((2,)))
 
     def block(self, indices, traced=False):
+        """The block indices ``index_map`` gives grid step ``indices``, checked to be integer scalars; ``traced`` explains captured-constant failures."""
         if self.spec.index_map is None:
             return (0,) * len(self.sizes)
         from .call import where
@@ -282,6 +301,7 @@ class _Buffered:
         return pl.make_async_copy(dst, src, sem) if to_hbm else pl.make_async_copy(src, dst, sem)
 
     def slot(self, counter):
+        """The VMEM slot and semaphore of buffer ``counter`` (its parity picks one of the two)."""
         from lumen import pallas as pl
 
         parity = pl.bitwise_and(counter, 1)
@@ -311,6 +331,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
     steps = math.prod(grid)
 
     def pipeline(*refs):
+        """Runs the pipeline over the HBM ``refs`` (inputs then outputs)."""
         if len(refs) != len(in_specs) + len(out_specs):
             raise TypeError(f"the pipeline takes {len(in_specs) + len(out_specs)} refs, got {len(refs)}")
         if steps == 0:
@@ -320,12 +341,15 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
         outs = [_Buffered(r, s, n, grid) for r, s, n in zip(refs[len(in_specs) :], out_specs, names[len(in_specs) :])]
         start = [0] * len(grid)
 
+        # Prefetch the first step's input blocks into slot 0.
         for b in ins:
             window, sem = b.slot(_scalar(0, "int32"))
             b.copy(b.block(start), window, sem).start()
 
         def step(s, carry):
+            """One grid step: prefetch the next inputs, wait on this step's, run ``body``, write outputs back."""
             index, previous, in_counters, out_counters = carry
+            # Inputs count [slots fetched, slots consumed]; outputs [slots written, slots waited on].
             first, last = s == 0, s == steps - 1
             following = _next(index, grid)
 
@@ -336,6 +360,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(fetch)
                 def _():
+                    """Starts the next step's input copy."""
                     b.copy(b.block(following), window, sem).start()
 
                 c[0] = _bump(c[0], fetch)
@@ -345,6 +370,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(changed)
                 def _():
+                    """Waits for this step's input block."""
                     b.copy(b.block(index), window, sem).wait()
 
             blocks = [b.view(b.slot(c[1])[0]) for b, c in zip(ins, in_counters)]
@@ -362,6 +388,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(done)
                 def _():
+                    """Starts writing this output block back once the next step leaves it."""
                     b.copy(b.block(index), window, sem, to_hbm=True).start()
 
                 c[0] = _bump(c[0], done)
@@ -370,6 +397,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
 
                 @pl.when(written)
                 def _():
+                    """Waits for the previous output block's write-back."""
                     b.copy(b.block(previous), window, sem, to_hbm=True).wait()
 
                 c[1] = _bump(c[1], written)
@@ -378,6 +406,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
             return following, index, in_counters, out_counters
 
         zero = _scalar(0, "int32")
+        # Input fetch counters start at 1: the prologue already filled slot 0.
         init = (
             [zero] * len(grid),
             [zero] * len(grid),
@@ -385,6 +414,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
             [[zero, zero] for _ in outs],
         )
         _, final, _, out_counters = pl.fori_loop(0, steps, step, init)
+        # Wait for the last outstanding output writes.
         for b, c in zip(outs, out_counters):
             window, sem = b.slot(c[1])
             b.copy(b.block(final), window, sem, to_hbm=True).wait()

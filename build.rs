@@ -1,6 +1,9 @@
+//! Build script: links CUDA/CUPTI when found, and compiles the Metal/CoreML and PJRT C shims
+//! for the `mps` and `tpu` features.
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// Emits cfg declarations and dispatches to the per-backend setup for each enabled feature.
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(lumen_cuda_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_mps_linked)");
@@ -26,6 +29,7 @@ fn main() {
     }
 }
 
+/// Compiles the PJRT C shim on Linux and sets `lumen_tpu_linked`.
 fn build_tpu_shim() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
@@ -41,6 +45,8 @@ fn build_tpu_shim() {
     println!("cargo:rustc-cfg=lumen_tpu_linked");
 }
 
+/// Links cudart (and CUPTI when present) and sets the matching `lumen_*_linked` cfgs,
+/// warning instead of failing when the libraries are missing.
 fn detect_cuda() {
     let Some((lib_dir, _)) = find_cudart() else {
         println!(
@@ -72,6 +78,8 @@ fn detect_cuda() {
     println!("cargo:rustc-cfg=lumen_cupti_linked");
 }
 
+/// Finds a directory holding the CUPTI library, searching `CUPTI_LIB_DIR`, the cudart directory
+/// and the usual `extras/CUPTI/lib64` locations.
 fn find_cupti(cudart_dir: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = env::var_os("CUPTI_LIB_DIR")
         .map(PathBuf::from)
@@ -96,6 +104,8 @@ fn find_cupti(cudart_dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// Compiles the Objective-C++ Metal/CoreML shims on macOS with the primitive kernels embedded,
+/// and links the Apple frameworks.
 fn build_mps_shim() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -134,6 +144,7 @@ fn build_mps_shim() {
     println!("cargo:rustc-cfg=lumen_mps_linked");
 }
 
+/// Metal sources concatenated into the shim's `kPrimitiveKernels` string.
 const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/kernels/mps/kernels.metal",
     "lumen/kernels/reduction/mps/kernels.metal",
@@ -150,6 +161,7 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/kernels/factory/mps/kernels.metal",
 ];
 
+/// Concatenates `sources` into an Objective-C raw string constant `name` written to `OUT_DIR/header`.
 fn embed_metal_source(sources: &[&str], name: &str, header: &str) {
     let text: String = sources
         .iter()
@@ -172,6 +184,7 @@ fn embed_metal_source(sources: &[&str], name: &str, header: &str) {
         .unwrap_or_else(|e| panic!("cannot write {header}: {e}"));
 }
 
+/// Locates the cudart library directory, returning it with the variable or path that found it.
 fn find_cudart() -> Option<(PathBuf, String)> {
     if let Some(dir) = env::var_os("CUDART_LIB_DIR") {
         let dir = PathBuf::from(dir);
@@ -217,6 +230,7 @@ fn find_cudart() -> Option<(PathBuf, String)> {
     None
 }
 
+/// Reports whether `dir` contains a shared or static cudart library.
 fn has_cudart(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;

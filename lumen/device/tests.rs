@@ -1,5 +1,8 @@
+//! Tests for device naming, availability checks and the TPU tiled layout.
+
 use super::{Device, DeviceBackend};
 
+/// Every device prints with its backend's name, and availability checks agree with device counts.
 #[test]
 fn every_device_has_a_backend() {
     for device in [
@@ -30,10 +33,12 @@ fn every_device_has_a_backend() {
     assert!(super::cpu::Cpu.check(1).is_err());
 }
 
+/// Tests of the TPU tiled memory layout.
 mod tpu_layout {
     use crate::DType;
     use crate::device::tpu::layout::Layout;
 
+    /// Each dtype and rank gets the tiling attribute Mosaic expects.
     #[test]
     fn the_layouts_mosaic_reads() {
         let attr = |dtype, shape: &[usize]| Layout::new(dtype, shape).unwrap().mosaic();
@@ -60,6 +65,7 @@ mod tpu_layout {
         );
     }
 
+    /// Storage size rounds every tensor up to whole tiles.
     #[test]
     fn tensors_take_whole_tiles() {
         let bytes = |dtype, shape: &[usize]| Layout::new(dtype, shape).unwrap().bytes();
@@ -74,6 +80,7 @@ mod tpu_layout {
         assert!(Layout::new(DType::F64, &[2, 2]).is_err());
     }
 
+    /// Tiling then untiling returns the original host bytes for many dtypes and shapes.
     #[test]
     fn tiles_round_trip() {
         for (dtype, shape) in [
@@ -104,6 +111,7 @@ mod tpu_layout {
         }
     }
 
+    /// Bfloat16 tiles pack rows 2k and 2k+1 of a column into one 32-bit word.
     #[test]
     fn a_bfloat16_word_holds_two_rows_of_a_column() {
         let layout = Layout::new(DType::BF16, &[16, 128]).unwrap();

@@ -1,3 +1,6 @@
+//! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
+//! through Triton kernels launched from Python.
+
 mod fusion;
 mod gemm;
 
@@ -21,25 +24,33 @@ use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
+/// A generated Triton loop kernel for one plan step.
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct Kernel {
     pub name: String,
+    /// Python source defining the kernel (and its helpers).
     pub source: String,
+    /// Per input, whether it is passed by value as a scalar.
     pub by_value: Vec<bool>,
+    /// Reduced elements each output processes per iteration; 1 for elementwise kernels.
     pub lanes: usize,
+    /// Programs per output of a split reduction; 1 otherwise.
     pub splits: usize,
 }
 
+/// A jit helper bound to a kernel's constexpr parameter.
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct Function {
+    /// The kernel parameter it is passed as (e.g. `LOAD0`, `STORE`).
     pub param: String,
     pub name: String,
     pub source: String,
 }
 
 impl Function {
+    /// Binds the generated `(name, source)` to parameter `param`.
     fn new(param: impl Into<String>, (name, source): (String, String)) -> Self {
         Function {
             param: param.into(),
@@ -49,6 +60,7 @@ impl Function {
     }
 }
 
+/// Launches a loop kernel over `n` outputs on `programs` programs with the given helper functions.
 pub type Loop = fn(
     kernel: &Kernel,
     config: &LoopConfig,
@@ -59,13 +71,16 @@ pub type Loop = fn(
     programs: usize,
 ) -> Result<(), String>;
 
+/// The loop launcher installed from Python.
 static LOOP: OnceLock<Loop> = OnceLock::new();
 
+/// Installs the loop launcher; later calls are ignored.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn set_loop(launch: Loop) {
     let _ = LOOP.set(launch);
 }
 
+/// Rejects graphs with half-precision transcendentals, which Triton's libdevice lacks.
 fn unsupported(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
         let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
@@ -80,10 +95,13 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
+/// A graph compiled for Triton, with the packs merge_dots creates.
 struct TritonModule<'a> {
     graph: Graph,
     options: &'a Options,
+    /// Inputs concatenated into each packed block.
     packed: Packs,
+    /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
 }
 
@@ -111,6 +129,8 @@ impl Blocks for TritonModule<'_> {
     }
 }
 
+/// Compiles `graph` for `device` with the Triton backend: runs the passes, plans the steps, generates
+/// loop kernels and autotunes GEMM and loop configs when enabled.
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
     let config = &options.config.cuda;
@@ -144,6 +164,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         interleaved,
         ..
     } = module;
+    // Packed blocks are appended as inputs after the original ones.
     let parameters = options.parameters.clone().map(|mut p| {
         p.resize(fused.inputs().len(), true);
         p
@@ -181,6 +202,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     Ok(plan)
 }
 
+/// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel.
 fn loop_kernel(step: &Step) -> Option<Kernel> {
     let by_value: Vec<bool> = step
         .inputs
@@ -228,11 +250,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
     })
 }
 
+/// Autotuning candidates for loop kernels.
 struct Loops;
 
 impl Kernels for Loops {
     type Config = LoopConfig;
 
+    /// Loop configs whose block covers the kernel's lanes and splits.
     fn configs(&self, step: &Step) -> Vec<LoopConfig> {
         let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
@@ -244,11 +268,13 @@ impl Kernels for Loops {
             .collect()
     }
 
+    /// The step launched with `config`.
     fn build(&mut self, _: &Step, config: LoopConfig) -> Tuned {
         Tuned::new(format!("{config:?}"), config)
     }
 }
 
+/// Times steps on `device` with CUDA events.
 struct Events {
     device: Device,
 }
@@ -256,10 +282,12 @@ struct Events {
 impl Timer for Events {
     type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor, Vec<Tensor>);
 
+    /// The device steps run on.
     fn device(&self) -> Device {
         self.device
     }
 
+    /// Zeroed inputs and outputs for `step`; scalars live on the CPU, and in-place ops write their operand.
     fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String> {
         let zeros = |ty: &TensorType, device| {
             Tensor::zeros(
@@ -287,6 +315,7 @@ impl Timer for Events {
         Ok(Some((loop_kernel(step), inputs, out, outs)))
     }
 
+    /// One run of the step.
     fn run(
         &self,
         (kernel, inputs, out, outs): &Self::Buffers,
@@ -297,6 +326,7 @@ impl Timer for Events {
     }
 }
 
+/// Runs `step` on the given buffers: GEMMs through the GEMM kernel, everything else through `kernel`.
 pub(crate) fn run(
     kernel: Option<&Kernel>,
     step: &Step,
@@ -306,6 +336,13 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
+        (Primitive::Wait, _) => {
+            crate::stream::stream_for(out.device())?.synchronize();
+            match out.data_ptr() == inputs[0].data_ptr() {
+                true => Ok(()),
+                false => copy(out, &inputs[0]),
+            }
+        }
         (
             Primitive::Fusion { .. }
             | Primitive::Cumsum { .. }
@@ -326,12 +363,14 @@ pub(crate) fn run(
             let config = step
                 .launch::<LoopConfig>()
                 .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
+            // Grid size: outputs, or lines for a scan, or picks for a scatter.
             let n = match step.primitive {
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
                 Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[axis]),
                 _ => Some(out.numel()),
             };
+            // In-place ops start from a copy of their operand.
             if let Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } = step.primitive
                 && out.data_ptr() != inputs[0].data_ptr()
             {
@@ -353,6 +392,7 @@ pub(crate) fn run(
             if kernel.splits == 1 {
                 return launch(kernel, config, &functions, inputs, out, n);
             }
+            // A split reduction writes per-split partials, then a second kernel combines them into `out`.
             let Primitive::Fusion { body, .. } = &step.primitive else {
                 unreachable!("a split reduction")
             };
@@ -376,6 +416,7 @@ pub(crate) fn run(
     }
 }
 
+/// Fills `t` with `value` using a Triton kernel.
 pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
     let (name, source) = codegen::fill(t.dtype());
     let kernel = Kernel {
@@ -397,6 +438,7 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
     )
 }
 
+/// Copies `src` into `dst`, which may have different strides, using a Triton kernel.
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     let mut body = Graph::new();
     let x = body.input(TensorType::new(src.dtype(), src.shape()));
@@ -423,6 +465,7 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     )
 }
 
+/// Whether the Triton kernel for `step` reads strided inputs directly.
 pub(crate) fn reads_strided(step: &Step) -> bool {
     matches!(
         step.primitive,
@@ -430,6 +473,7 @@ pub(crate) fn reads_strided(step: &Step) -> bool {
     )
 }
 
+/// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits.
 fn launch(
     kernel: &Kernel,
     config: &LoopConfig,

@@ -1,5 +1,8 @@
+/// Indices staged in threadgroup memory per pass of the scan kernel; also its threadgroup size.
 #define SCAN_BLOCK 256
 
+/// Thread per (outer, inner) position off the axis: adds every update row into `out` at its index,
+/// in index order, so duplicate indices sum deterministically without atomics.
 #define SCATTER_ADD(NAME, T, INAME, I)                                              \
     kernel void scatter_add_##NAME##_##INAME(device const T *updates [[buffer(0)]], \
                                              device const I *index [[buffer(1)]],   \
@@ -22,6 +25,8 @@
         }                                                                           \
     }
 
+/// Thread per output element: scans the indices in blocks staged in threadgroup memory and sums
+/// the updates whose index hits its axis position; suited to small `n * m`.
 #define SCATTER_ADD_SCAN(NAME, T, INAME, I)                                                     \
     kernel void scatter_add_scan_##NAME##_##INAME(device const T *updates [[buffer(0)]],        \
                                                   device const I *index [[buffer(1)]],          \
@@ -71,6 +76,7 @@
         }                                                                                       \
     }
 
+/// Both scatter kernels for element type `T`, with int32 and int64 indices.
 #define SCATTER_KERNELS(NAME, T)   \
     SCATTER_ADD(NAME, T, i32, int) \
     SCATTER_ADD(NAME, T, i64, long) SCATTER_ADD_SCAN(NAME, T, i32, int) SCATTER_ADD_SCAN(NAME, T, i64, long)

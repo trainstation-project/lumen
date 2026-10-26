@@ -1,19 +1,34 @@
+//! Pass replacing an unfused `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op that
+//! never materializes the logits.
+
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
+/// A matched linear cross entropy.
 pub(super) struct Found {
+    /// Hidden states `[b, d]`.
     pub(super) h: Var,
+    /// Weight, `[v, d]` or `[d, v]` when `transposed`.
     w: Var,
+    /// The dot contracts dim 0 of the weight, so it is `[d, v]`.
     transposed: bool,
+    /// Class index per row.
     pub(super) target: Var,
+    /// Nodes the fused op replaces.
     pub(super) members: Vec<usize>,
+    /// Node computing the per-row loss `lse - logit[target]`.
     pub(super) loss: usize,
+    /// Node computing the per-row logsumexp.
     pub(super) lse: usize,
+    /// Earliest node producing a result, where the fused op is emitted.
     first: usize,
+    /// The gather reading the target logits.
     pub(super) pick: usize,
 }
 
+/// Replaces every matched cross entropy with a `LinearCrossEntropy` whose `[2, b]` result holds the
+/// loss row and the lse row.
 fn linear_cross_entropy(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let (producer, readers) = uses(graph);
@@ -78,6 +93,7 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
     out
 }
 
+/// Producer node of each value and the nodes reading it.
 pub(super) fn uses(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     let mut producer = vec![None; graph.types.len()];
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -92,6 +108,8 @@ pub(super) fn uses(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     (producer, readers)
 }
 
+/// Matches the cross entropy over logits `h @ w` computed by dot node `dot`: max-shifted
+/// `logsumexp` along the classes, and the target logits gathered from the flattened logits.
 pub(super) fn matched(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -130,6 +148,7 @@ pub(super) fn matched(
         (&[k], false) => Some(k),
         _ => None,
     };
+    // The logits are read exactly by the row max, the shift and the flattening reshape.
     if readers[x].len() != 3 || graph.outputs().contains(&x) {
         return None;
     }
@@ -137,6 +156,7 @@ pub(super) fn matched(
     let max = find(&|n| matches!(&n.primitive, ReduceMax { axes } if axes == &[1]))?;
     let shift = find(&|n| matches!(n.primitive, Sub) && n.inputs[0] == x)?;
     let flat = find(&|n| matches!(&n.primitive, Reshape { new_sizes } if new_sizes == &[b * v]))?;
+    // The row max and its reshapes may only feed the shift's broadcast and the final lse add.
     let mut views = vec![max];
     let mut k = 0;
     while k < views.len() {
@@ -182,6 +202,7 @@ pub(super) fn matched(
         matches!(nodes[k].primitive, Sub)
             && nodes[k].inputs == [nodes[lse].output, nodes[pick].output]
     })?;
+    // The target must exist before the fused op is emitted.
     let defined = producer[target].is_none_or(|k| k < lse.min(pick));
     if !defined {
         return None;
@@ -203,6 +224,7 @@ pub(super) fn matched(
     })
 }
 
+/// The target `t` when index `at` is `iota(b) * v + t`, with `t` an int32/int64 `[b]` tensor.
 fn row_offsets_plus(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -242,13 +264,16 @@ fn row_offsets_plus(
     (t.shape == [b] && matches!(t.dtype, DType::I32 | DType::I64)).then_some(target)
 }
 
+/// Compiler pass running [`linear_cross_entropy`].
 pub(crate) struct LinearCrossEntropy;
 
 impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "linear_cross_entropy"
     }
 
+    /// Replaces the module's graph with its fused version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = linear_cross_entropy(m.graph());
         Ok(())

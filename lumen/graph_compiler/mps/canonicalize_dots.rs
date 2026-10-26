@@ -1,8 +1,12 @@
+//! Pass that transposes `DotGeneral` operands whose layout can't be collapsed into a plain batched matmul.
+
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::kernels::dot_general::mps::{collapsed, matmul_order};
 use crate::tensor::contiguous_strides;
 
+/// Rebuilds `graph` with explicit transposes in front of dot operands that `collapsed` can't view as a matrix,
+/// rewriting the dimension numbers to match the transposed layout.
 pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -33,6 +37,7 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
                         .apply(t, &[*input])
                         .expect("a permutation of its dimensions");
                 };
+                // A transposed lhs is laid out as batch, free, contracting dims in `order.lhs`.
                 if collapsed(
                     lhs,
                     &contiguous_strides(&lhs.shape),
@@ -45,6 +50,7 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
                     let (i, j) = order.lhs_split;
                     (lb, lc) = ((0..i).collect(), (j..order.lhs.len()).collect());
                 }
+                // A transposed rhs is laid out as batch, contracting, free dims in `order.rhs`.
                 if collapsed(
                     rhs,
                     &contiguous_strides(&rhs.shape),
@@ -78,6 +84,7 @@ pub(super) fn canonicalize_dots(graph: &Graph) -> Graph {
     out
 }
 
+/// Compiler pass running `canonicalize_dots` on the module's graph.
 pub(super) struct CanonicalizeDots;
 
 impl<M: Module> CompilerPass<M> for CanonicalizeDots {
@@ -85,6 +92,7 @@ impl<M: Module> CompilerPass<M> for CanonicalizeDots {
         "canonicalize_dots"
     }
 
+    /// Replaces the module's graph with its canonicalized form.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = canonicalize_dots(m.graph());
         Ok(())

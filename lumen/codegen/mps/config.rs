@@ -1,7 +1,11 @@
+//! Launch tunings for the generated elementwise loop kernel.
 use super::*;
 
+/// Launch shape for a generated kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tuning {
+    /// Elementwise loop: each thread handles `per_thread` elements in threadgroups of `group`;
+    /// `contiguous` gives each thread a contiguous run instead of a grid-strided one.
     Loop {
         per_thread: usize,
         group: usize,
@@ -9,15 +13,20 @@ pub(crate) enum Tuning {
     },
 }
 
+/// Thread count the default tuning aims to launch.
 const GRID_THREADS: usize = 32 << 10;
+/// Threadgroup sizes tried when autotuning.
 const LOOP_GROUPS: [usize; 5] = [64, 128, 256, 512, 1024];
+/// Default threadgroup size.
 const LOOP_GROUP: usize = 256;
 
+/// Most elements one thread may handle, from the per-thread byte budget and output dtype size.
 fn most_per_thread(body: &Graph) -> usize {
     let dtype = body.type_of(body.outputs()[0]).dtype;
     (crate::kernels::mps::BYTES_PER_THREAD / dtype.size_of()).max(1)
 }
 
+/// Default tuning: enough elements per thread to cap the grid near `GRID_THREADS`.
 pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
     let n = body.type_of(body.outputs()[0]).numel();
     Tuning::Loop {
@@ -27,6 +36,8 @@ pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
     }
 }
 
+/// Every power-of-two per-thread count up to the cap, crossed with threadgroup sizes and
+/// (when more than one element per thread) both access orders.
 pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
     let most = most_per_thread(body);
     let per_threads = (0..).map(|k| 1 << k).take_while(|&p| p <= most);

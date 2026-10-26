@@ -1,3 +1,5 @@
+"""PyTorch-compatible profiler API (``profile``, ``record_function``, ``key_averages``) over lumen's native profiler."""
+
 import enum
 import functools
 
@@ -64,10 +66,12 @@ class FunctionEventAvg:
     )
 
     def __init__(self, fields):
+        """Copies each slot's value from the native row dict ``fields``."""
         for name in self.__slots__:
             setattr(self, name, fields[name])
 
     def __repr__(self):
+        """Short summary with the row's key, main times and count."""
         return (
             f"<FunctionEventAvg key={self.key} self_cpu_time={self.self_cpu_time_total:.3f}us "
             f"cpu_time={self.cpu_time_total:.3f}us self_device_time={self.self_device_time_total:.3f}us "
@@ -80,6 +84,7 @@ class EventList(list):
     also renders PyTorch's summary table."""
 
     def __init__(self, rows, native, group_by_input_shape=False):
+        """Wraps ``rows`` and keeps the native profile ``native`` to render the table from."""
         super().__init__(rows)
         self._native = native
         self._group_by_input_shape = group_by_input_shape
@@ -101,6 +106,7 @@ class profile:
     and each kernel's strides: as a plan step reads and writes them."""
 
     def __init__(self, activities=None, profile_memory=False, record_shapes=False):
+        """Picks the activities to record (all supported ones when ``None``) and whether to track memory and shapes."""
         if activities is None:
             activities = supported_activities()
         self.activities = {ProfilerActivity(a) for a in activities}
@@ -109,6 +115,7 @@ class profile:
         self._result = None
 
     def start(self):
+        """Starts recording; events go to the native profiler until :meth:`stop`."""
         _C._profiler_start(
             sorted(a.value for a in self.activities),
             self.profile_memory,
@@ -116,17 +123,21 @@ class profile:
         )
 
     def stop(self):
+        """Stops recording and keeps the finished profile."""
         self._result = _C._profiler_stop()
 
     def __enter__(self):
+        """Starts profiling and returns the profiler."""
         self.start()
         return self
 
     def __exit__(self, *exc):
+        """Stops profiling; exceptions from the block propagate."""
         self.stop()
         return False
 
     def _profile(self):
+        """Returns the finished native profile, raising if profiling has not stopped yet."""
         if self._result is None:
             raise RuntimeError("the profiler has not finished; use it as a `with` block first")
         return self._result
@@ -173,10 +184,12 @@ class record_function:
     plan runs through them, as uncompiled code would."""
 
     def __init__(self, name):
+        """Prepares a range named ``name``; it starts on ``__enter__``."""
         self.name = name
         self._handle = None
 
     def __enter__(self):
+        """Opens the range in the profiler and as a scope in any active trace."""
         from lumen.graph import tracer
 
         tracer._enter_scope(self.name)
@@ -184,6 +197,7 @@ class record_function:
         return self
 
     def __exit__(self, *exc):
+        """Closes the profiler range and the trace scope."""
         from lumen.graph import tracer
 
         self._handle.exit()
@@ -192,8 +206,11 @@ class record_function:
         return False
 
     def __call__(self, fn):
+        """Wraps ``fn`` so each call runs inside this range."""
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            """Calls ``fn`` inside a fresh range of the same name."""
             with record_function(self.name):
                 return fn(*args, **kwargs)
 

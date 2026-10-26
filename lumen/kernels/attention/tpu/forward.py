@@ -1,3 +1,5 @@
+"""Pallas flash attention forward kernel for TPU, modeled on splash attention."""
+
 import lumen
 import lumen.functional as F
 from lumen import pallas as pl
@@ -46,12 +48,16 @@ def program(spec):
     outs = [x for x in (o, e) if x]
 
     def key_block(i, j):
+        """Key block fetched for query block `i` at step `j`."""
         return fetched(spec, i, j)
 
     grid = (*heads(spec), nq, nk)
 
     def kernel(rows, memory, result, m_ref, l_ref, acc_ref):
+        """Pipelines the attention blocks over the grid, reading `rows` of `memory` and writing into `result`."""
+
         def copy(src, dst):
+            """Copies `src` into `dst` with a blocking DMA."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
@@ -71,16 +77,19 @@ def program(spec):
             out_specs.append(vector(spec, lse, bq, query_rows))
 
         def body(qb, kb, vb, *rest):
+            """Accumulates one key block into the running softmax and output, finalizing after the last."""
             ids = [pl.program_id(a) for a in range(len(grid))]
             g, i, j = tuple(ids[:-2]), ids[-2], ids[-1]
 
             @pl.when(j == 0)
             def _():
+                """Resets the running max, sum and output at the first key block."""
                 m_ref[...] = lumen.full((bq, LANES), MASK, "float32")
                 l_ref[...] = zeros((bq, LANES))
                 acc_ref[...] = zeros((bq, hv))
 
             def compute(c, mask):
+                """Folds key chunk `c` into the online softmax, masking scores when `mask`."""
                 keys = slice(c * bkc, (c + 1) * bkc)
                 qk = scored(spec, pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32"))
                 if mask:
@@ -100,6 +109,7 @@ def program(spec):
 
             @pl.when(j == nk - 1)
             def _():
+                """Normalizes the output and writes it, its epilogue and the log-sum-exp."""
                 total = l_ref[...]
                 value = (acc_ref[...] * tile(1.0 / total, hv)).to(spec["o_dtype"])
                 for x, ref in zip(outs, rest):

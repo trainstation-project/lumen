@@ -1,12 +1,18 @@
+//! The primitive ops a graph node can apply, their names, and output type inference.
+
 use std::fmt;
 
 use super::{Graph, TensorType};
 use crate::{DType, Scalar};
 
+/// Joins the names of ops fused into one kernel in labels.
 pub const FUSION_SEPARATOR: &str = " → ";
+/// Name prefix of fusions run on the Apple Neural Engine through Core ML.
 pub const NEURAL_ENGINE: &str = "coreml_";
+/// Name of the fusion that groups a run of dynamic update slices.
 pub const UPDATES: &str = "dynamic_update_slices";
 
+/// Elementwise one-operand ops beyond the core set in `Primitive`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Sin,
@@ -31,6 +37,7 @@ pub enum UnaryOp {
     Cbrt,
     ErfInv,
     IsFinite,
+    /// Rounds a float to a format with the given exponent and mantissa widths.
     ReducePrecision {
         exponent_bits: u32,
         mantissa_bits: u32,
@@ -43,6 +50,7 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
+    /// The op's name in printed graphs and in Python's `prims`.
     pub fn name(&self) -> &'static str {
         use UnaryOp::*;
         match self {
@@ -77,6 +85,7 @@ impl UnaryOp {
         }
     }
 
+    /// Looks a parameter-free op up by its name; `ReducePrecision` is not found this way.
     pub fn of_name(name: &str) -> Option<Self> {
         use UnaryOp::*;
         [
@@ -113,6 +122,7 @@ impl UnaryOp {
     }
 }
 
+/// Elementwise two-operand ops beyond the core set in `Primitive`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinaryOp {
     Pow,
@@ -128,6 +138,7 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
+    /// The op's name in printed graphs and in Python's `prims`.
     pub fn name(&self) -> &'static str {
         use BinaryOp::*;
         match self {
@@ -144,6 +155,7 @@ impl BinaryOp {
         }
     }
 
+    /// Looks an op up by its name.
     pub fn of_name(name: &str) -> Option<Self> {
         use BinaryOp::*;
         [
@@ -163,6 +175,7 @@ impl BinaryOp {
     }
 }
 
+/// An op a graph node applies, with its static parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     Add,
@@ -172,18 +185,22 @@ pub enum Primitive {
     Max,
     Eq,
     Lt,
+    /// Elementwise negation.
     Neg,
     Exp,
     Log,
     Sqrt,
     Tanh,
     Logistic,
+    /// Converts to `new_dtype`.
     Cast {
         new_dtype: DType,
     },
     Unary(UnaryOp),
     Binary(BinaryOp),
+    /// Picks the second operand where the bool first one is true, else the third.
     Select,
+    /// Sums over `axes` (removed from the shape), accumulating and outputting `accum_dtype`.
     ReduceSum {
         axes: Vec<usize>,
         accum_dtype: DType,
@@ -191,11 +208,13 @@ pub enum Primitive {
     ReduceMax {
         axes: Vec<usize>,
     },
+    /// Running sum along `axis`, from the end when `reverse`.
     Cumsum {
         axis: usize,
         reverse: bool,
         accum_dtype: DType,
     },
+    /// Generalized matmul: batch dims first, then lhs free dims, then rhs free dims.
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
@@ -204,8 +223,11 @@ pub enum Primitive {
         accum_dtype: DType,
         output_dtype: DType,
     },
+    /// Returns its operand once the device work producing it has finished.
     Wait,
+    /// Copies a device value to the host.
     ToHost,
+    /// Copies a host value to the device.
     ToDevice,
     Reshape {
         new_sizes: Vec<usize>,
@@ -217,58 +239,74 @@ pub enum Primitive {
     Transpose {
         permutation: Vec<usize>,
     },
+    /// Static slice `[start, limit)` per dimension; `view` aliases the input's buffer.
     Slice {
         start_indices: Vec<usize>,
         limit_indices: Vec<usize>,
         view: bool,
     },
+    /// Slice of `slice_sizes` starting at runtime scalar indices, one operand per dimension.
     DynamicSlice {
         slice_sizes: Vec<usize>,
     },
+    /// Writes the update operand into the first at runtime scalar start indices.
     DynamicUpdateSlice,
+    /// Takes entries of the first operand at the integer indices along `axis`.
     Gather {
         axis: usize,
     },
+    /// Takes entries along `axis` with an index tensor of the operand's rank.
     TakeAlongAxis {
         axis: usize,
     },
+    /// Adds updates into the first operand at the indices along `axis`.
     ScatterAdd {
         axis: usize,
     },
+    /// Joins operands along `dimension`; `in_place` has producers write straight into its buffer.
     Concatenate {
         dimension: usize,
         in_place: bool,
     },
+    /// A constant tensor of `fill_value`.
     Full {
         shape: Vec<usize>,
         fill_value: Scalar,
         dtype: DType,
     },
+    /// Index along `dimension`, broadcast over `shape`.
     Iota {
         dtype: DType,
         shape: Vec<usize>,
         dimension: usize,
     },
+    /// Counter-based `u32` random bits from a `(seed, start)` pair of `u64` scalars, shifted by `offset`.
     RandomBits {
         shape: Vec<usize>,
         offset: u64,
     },
+    /// Per-row log-sum-exp and target logit of `h · wᵀ` without storing the logits: `f32 [2, B]`.
     LinearCrossEntropy,
+    /// A subgraph `body` run as one kernel; its value is the body's first output.
     Fusion {
         name: String,
         label: &'static str,
         body: Graph,
     },
+    /// The fusion's `index`-th extra output (1-based; the fusion's own value is output 0).
     FusionOutput {
         index: usize,
         ty: TensorType,
     },
+    /// A user custom op: Python function `kernel` mutating the operands at `mutated`; each
+    /// `(m, j)` of `overlappable` says mutated operand `m` may share memory with operand `j`.
     CustomCall {
         label: &'static str,
         kernel: usize,
         mutated: Vec<usize>,
         overlappable: Vec<(usize, usize)>,
     },
+    /// A `lumen.pallas` TPU kernel producing `outputs`.
     PallasCall {
         label: &'static str,
         kernel: usize,
@@ -277,6 +315,7 @@ pub enum Primitive {
 }
 
 impl Primitive {
+    /// Whether the op evaluates a transcendental function (counted separately in cost models).
     pub fn is_transcendental(&self) -> bool {
         use Primitive::*;
         use UnaryOp::*;
@@ -306,6 +345,7 @@ impl Primitive {
         }
     }
 
+    /// The op's display name; fusions and custom calls use their label.
     pub fn name(&self) -> &'static str {
         use Primitive::*;
         match self {
@@ -353,6 +393,7 @@ impl Primitive {
         }
     }
 
+    /// Accumulator dtypes the op uses, given its output dtype; a fusion's are its body's.
     pub fn accum_dtypes(&self, output: DType) -> Vec<DType> {
         use Primitive::*;
         match self {
@@ -369,8 +410,10 @@ impl Primitive {
         }
     }
 
+    /// Checks operand count and types and returns the output type, or an error naming the op.
     pub fn infer(&self, args: &[&TensorType]) -> Result<TensorType, String> {
         use Primitive::*;
+        // Number of operands; index ops take a scalar per dimension of the indexed tensor.
         let arity = match self {
             Full { .. } | Iota { .. } => 0,
             RandomBits { .. } => 2,
@@ -442,6 +485,7 @@ impl Primitive {
             Binary(op) => {
                 use BinaryOp::*;
                 let (x, y) = (args[0], args[1]);
+                // Integer powers of a float base are allowed with mixed dtypes.
                 if matches!(op, Pow) && x.dtype.is_float() && y.dtype.is_int() && x.shape == y.shape
                 {
                     return Ok(x.clone());
@@ -761,6 +805,7 @@ impl Primitive {
     }
 }
 
+/// Errors unless `dims` are distinct dimensions of a rank-`ndim` tensor.
 fn check_dims(dims: &[usize], ndim: usize, what: &str) -> Result<(), String> {
     for (i, &d) in dims.iter().enumerate() {
         if d >= ndim || dims[..i].contains(&d) {
@@ -770,10 +815,12 @@ fn check_dims(dims: &[usize], ndim: usize, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Dimensions `0..ndim` not listed in `used`, in order.
 pub(crate) fn free_dims(ndim: usize, used: &[usize]) -> impl Iterator<Item = usize> + '_ {
     (0..ndim).filter(move |d| !used.contains(d))
 }
 
+/// Prints a dim list as a Python tuple, with the one-element trailing comma.
 struct Tuple<'a>(&'a [usize]);
 
 impl fmt::Display for Tuple<'_> {
@@ -786,6 +833,7 @@ impl fmt::Display for Tuple<'_> {
     }
 }
 
+/// Output type of gathering `x` along `axis` with `indices`: the axis is replaced by the indices' shape.
 fn gathered(x: &TensorType, indices: &TensorType, axis: usize) -> Result<TensorType, String> {
     if axis >= x.shape.len() {
         return Err(format!("axis {axis} is not a dimension of {x}"));
@@ -804,6 +852,7 @@ fn gathered(x: &TensorType, indices: &TensorType, axis: usize) -> Result<TensorT
     Ok(TensorType::new(x.dtype, &shape))
 }
 
+/// Errors unless `indices` are int32 or int64 scalars of one dtype.
 fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> {
     let dtype = indices.first().map(|i| i.dtype);
     let valid = indices.iter().all(|i| {
@@ -821,6 +870,7 @@ fn check_indices(x: &TensorType, indices: &[&TensorType]) -> Result<(), String> 
     }
 }
 
+/// Errors unless `accum` is the operand's dtype, or f32/i32 for floats/ints narrower than 4 bytes.
 fn check_accum(x: &TensorType, accum: DType) -> Result<(), String> {
     let narrower = x.dtype.size_of() < 4;
     let widened = narrower

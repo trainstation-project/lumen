@@ -1,3 +1,5 @@
+//! Running GEMM steps (plain dots and dots with fused epilogues) through the Python Triton GEMM kernel.
+
 use std::sync::OnceLock;
 
 use super::Function;
@@ -9,6 +11,8 @@ use crate::graph_compiler::plan::{Step, Tuned};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
+/// Launches the Triton GEMM on `[lhs, rhs, out]` with `[batch, m, k, n]` sizes, the tile config, the
+/// generated prologue/epilogue jit functions and the epilogue's extra operands.
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
@@ -18,24 +22,33 @@ pub type Gemm = fn(
     epilogue: &Epilogue,
 ) -> Result<(), String>;
 
+/// Extra operands of a fused epilogue.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct Epilogue<'a> {
+    /// The fusion's inputs then its secondary outputs, passed to the epilogue in `EXTRA`.
     pub tensors: &'a [Tensor],
+    /// Indices of `tensors` passed by value as scalars.
     pub scalars: &'a [usize],
+    /// How the kernel shapes its accumulator for the epilogue.
     pub flags: codegen::EpilogueFlags,
 }
 
+/// The GEMM launcher installed from Python.
 static GEMM: OnceLock<Gemm> = OnceLock::new();
 
+/// Installs the GEMM launcher; later calls are ignored.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn set_gemm(gemm: Gemm) {
     let _ = GEMM.set(gemm);
 }
 
+/// A tensor's shape and strides.
 fn layout(t: &Tensor) -> (&[usize], &[usize]) {
     (t.shape(), t.strides())
 }
 
+/// Runs a dot or GEMM-epilogue fusion `step` with tile `config`, generating its strided prologues and
+/// epilogue; secondary fusion outputs go in `outs`.
 fn gemm(
     step: &Step,
     inputs: &[Tensor],
@@ -70,6 +83,7 @@ fn gemm(
         };
         return launch(tensors, code.sizes, accum, config, &functions, &plain);
     };
+    // A fusion: the dot computes into a contiguous tile and the epilogue writes the fusion's outputs.
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let operand = |k: usize| {
         let at = body.inputs().iter().position(|&v| v == dot.inputs[k]);
@@ -110,6 +124,7 @@ fn gemm(
     launch(tensors, code.sizes, accum, config, &functions, &fused)
 }
 
+/// Accumulator dtype of a `dot_general`.
 fn accum_dtype(dot: &Primitive) -> DType {
     let Primitive::DotGeneral { accum_dtype, .. } = dot else {
         unreachable!("a dot_general")
@@ -117,6 +132,7 @@ fn accum_dtype(dot: &Primitive) -> DType {
     *accum_dtype
 }
 
+/// Whether `step` runs on the GEMM kernel: a dot, or a fusion around one.
 pub(crate) fn is_gemm(step: &Step) -> bool {
     match &step.primitive {
         Primitive::DotGeneral { .. } => true,
@@ -125,8 +141,10 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
     }
 }
 
+/// A tuned GEMM launch with its config baked in.
 type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
+/// Runs GEMM `step` with its tuned config, or the untuned default.
 pub(crate) fn run(
     step: &Step,
     inputs: &[Tensor],
@@ -139,11 +157,13 @@ pub(crate) fn run(
     }
 }
 
+/// Autotuning candidates for GEMM steps.
 pub(crate) struct Gemms;
 
 impl Kernels for Gemms {
     type Config = Config;
 
+    /// Every GEMM config for a GEMM step, none otherwise.
     fn configs(&self, step: &Step) -> Vec<Config> {
         match is_gemm(step) {
             true => CONFIGS.to_vec(),
@@ -151,6 +171,7 @@ impl Kernels for Gemms {
         }
     }
 
+    /// A launch of `step` with `config`.
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
         let run: Run =
             Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, &config));

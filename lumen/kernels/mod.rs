@@ -1,3 +1,4 @@
+//! Kernel modules per op family and the dispatch table mapping an op and device to its kernel.
 pub(crate) mod attention;
 pub mod device_transfer;
 pub mod dot_general;
@@ -31,6 +32,7 @@ use std::sync::RwLock;
 
 use crate::device::Device;
 
+/// Device kind used to look up kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DispatchKey {
     Cpu,
@@ -41,6 +43,7 @@ pub enum DispatchKey {
 }
 
 impl DispatchKey {
+    /// Returns the dispatch key for `device`, ignoring its index.
     pub fn of(device: Device) -> Self {
         match device {
             Device::Cpu(_) => DispatchKey::Cpu,
@@ -52,24 +55,31 @@ impl DispatchKey {
     }
 }
 
+/// Kernels registered at runtime, type-erased, keyed by op name and dispatch key.
 type Dynamic = HashMap<(&'static str, DispatchKey), Box<dyn Any + Send + Sync>>;
 
+/// Global registry of runtime-registered kernels for every op.
 static DYNAMIC: RwLock<Option<Dynamic>> = RwLock::new(None);
 
+/// An op's dispatch entry: built-in kernels per device plus runtime registrations, all of kernel type `K`.
 pub struct Op<K: 'static> {
     name: &'static str,
+    /// Returns the built-in kernel for a key, if the op ships one.
     builtin: fn(DispatchKey) -> Option<K>,
 }
 
 impl<K: Copy + Send + Sync + 'static> Op<K> {
+    /// Declares an op with its built-in kernel lookup.
     pub const fn new(name: &'static str, builtin: fn(DispatchKey) -> Option<K>) -> Self {
         Op { name, builtin }
     }
 
+    /// Returns the op's name.
     pub fn name(&self) -> &'static str {
         self.name
     }
 
+    /// Registers `kernel` for `key`, failing when a built-in kernel already covers it.
     pub fn register(&self, key: DispatchKey, kernel: K) -> Result<(), String> {
         if (self.builtin)(key).is_some() {
             return Err(format!(
@@ -85,6 +95,7 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
         Ok(())
     }
 
+    /// Returns the built-in kernel for `key`, else a registered one.
     pub fn kernel(&self, key: DispatchKey) -> Option<K> {
         if let Some(kernel) = (self.builtin)(key) {
             return Some(kernel);
@@ -97,6 +108,7 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
             .copied()
     }
 
+    /// Removes the registered kernel for `key`, returning whether there was one.
     pub fn unregister(&self, key: DispatchKey) -> bool {
         let mut dynamic = DYNAMIC.write().unwrap_or_else(|e| e.into_inner());
         dynamic
@@ -104,6 +116,7 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
             .is_some_and(|map| map.remove(&(self.name, key)).is_some())
     }
 
+    /// Returns the kernel for `device`, panicking when none exists.
     pub fn dispatch(&self, device: Device) -> K {
         let key = DispatchKey::of(device);
         self.kernel(key)
@@ -111,9 +124,13 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
     }
 }
 
+/// Widest vector load or store a launcher is offered, in bytes.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 const MAX_VECTOR_BYTES: usize = 16;
 
+/// Returns the largest vector width in elements, at most `MAX_VECTOR_BYTES`, that a kernel can use on a tensor:
+/// dim 0 must be unit-stride with a size divisible by it, every other stride divisible by it, and `address`
+/// aligned to it.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn vector_size(
     shape: &[usize],

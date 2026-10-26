@@ -1,3 +1,9 @@
+// Flash attention backward templates: a key-block kernel computing dK and dV (and optionally dQ atomically)
+// and a query-block kernel computing dQ.
+
+/// Computes dK and dV for a block of ATTN_BQ keys of batch `b`, streaming BQ queries at a time.
+/// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
+/// With `DQ`, also adds each block's dS * K into `dq` with float atomics, so `dq` must start zeroed.
 template <typename T,
           uint D,
           uint DV,
@@ -47,6 +53,7 @@ inline void flash_attention_dkdv(device const T *q,
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = kblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
+    // The dQ path keeps this block's keys in threadgroup memory for the dS * K product.
     if constexpr (DQ) {
         dq += ix.dq(b);
         for (uint e = t; e < ATTN_BQ * D; e += 256) {
@@ -68,6 +75,7 @@ inline void flash_attention_dkdv(device const T *q,
     simdgroup_matrix<float, 8, 8> dkm[D / 8], dvm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) { dkm[c] = simdgroup_matrix<float, 8, 8>(0); }
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { dvm[c] = simdgroup_matrix<float, 8, 8>(0); }
+    // Causal: queries before `kblock`'s first key minus `offset` see none of its keys.
     uint first = 0;
     if (CAUSAL) {
         long lo = long(kblock * ATTN_BQ) - long(offset);
@@ -88,6 +96,7 @@ inline void flash_attention_dkdv(device const T *q,
             deltas[i] = q0 + i < sq ? delta[(q0 + i) * Ix::DELTA_COL] : 0.0f;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Work transposed: S^T = K Q^T and dP^T = V dO^T so rows stay keys.
         ATTN_UNROLL for (uint ic = 0; ic < BQ / 8; ++ic) {
             simdgroup_matrix<float, 8, 8> st(0), dpt(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
@@ -123,6 +132,7 @@ inline void flash_attention_dkdv(device const T *q,
                 simdgroup_load(qm, qs + ic * 8 * D + c * 8, D);
                 simdgroup_multiply_accumulate(dkm[c], dsm, qm, dkm[c]);
             }
+            // Stage dS^T for the cross-simdgroup dQ product below.
             if constexpr (DQ) {
                 simdgroup_store(dsm, dss + sg * ATTN_ROWS * BQ + ic * 8, BQ);
             }
@@ -161,6 +171,8 @@ inline void flash_attention_dkdv(device const T *q,
     }
 }
 
+/// Computes dQ for a block of ATTN_BQ queries of batch `b`, streaming BK keys at a time.
+/// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
 template <typename T,
           uint D,
           uint DV,

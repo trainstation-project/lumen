@@ -1,3 +1,4 @@
+//! Fuses each TPU matmul with the slices that split it, the concat stacking its lhs and its elementwise epilogues.
 use std::collections::HashMap;
 
 use super::super::place_concats::placeable;
@@ -6,8 +7,12 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Most equal-width slices of one dot an epilogue may combine.
 const MAX_TOGETHER: usize = 4;
 
+/// Splits a dot read only by slices that tile it along one of its last two axes.
+///
+/// Returns the axis and each slice's `(width, value)` in order; slice bounds must be lane-aligned.
 fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
     if graph.outputs().contains(&dot.output) {
         return None;
@@ -29,6 +34,7 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
             else {
                 return None;
             };
+            // Each slice must keep every other axis whole.
             let whole = (0..shape.len())
                 .filter(|&d| d != axis)
                 .all(|d| start_indices[d] == 0 && limit_indices[d] == shape[d]);
@@ -38,6 +44,7 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
             parts.push((start_indices[axis], limit_indices[axis], node.output));
         }
         parts.sort_unstable();
+        // The slices must tile the axis contiguously, end to end, on lane boundaries.
         let covers = parts.len() > 1
             && parts.first().is_some_and(|p| p.0 == 0)
             && parts.windows(2).all(|w| w[0].1 == w[1].0)
@@ -55,6 +62,10 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
     along(shape.len() - 1).or_else(|| along(shape.len() - 2))
 }
 
+/// Returns the concatenation producing `dot`'s lhs when it can be built inside the dot's fusion.
+///
+/// The concat must feed only dots as their lhs, not be placed in place, and join lane-aligned parts
+/// along one of the lhs's last two axes.
 fn stacked(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -84,14 +95,21 @@ fn stacked(
     fits.then_some(k)
 }
 
+/// What one dot fusion absorbs.
 struct Fused {
+    /// Split axis and `(width, value)` of each slice, as returned by `split`.
     parts: Option<(usize, Vec<(usize, Var)>)>,
+    /// Concat node stacking the lhs, built inside the fusion.
     stack: Option<usize>,
+    /// Sorted nodes rebuilt in the body: epilogues and the constants they read.
     inside: Vec<usize>,
+    /// Values the epilogues read from outside, passed after the dot's operands.
     extras: Vec<Var>,
+    /// Member values read outside the fusion, in variable order.
     outputs: Vec<Var>,
 }
 
+/// Plans a fusion for every dot worth fusing, indexed by the dot's node.
 fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -110,6 +128,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         let before = |v: Var| producer[v].is_none_or(|p| p < d);
         let parts = split(graph, dot);
         let stack = stacked(graph, &producer, &users, dot);
+        // Values computed by the fusion, keyed to the slice (part) they derive from.
         let mut member: HashMap<Var, usize> = match &parts {
             Some((_, parts)) => parts
                 .iter()
@@ -122,6 +141,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             Some((_, parts)) => &graph.type_of(parts[p].1).shape,
             None => &graph.type_of(dot.output).shape,
         };
+        // Epilogues may mix several parts only when they are a few equal slices along the last axis.
         let together = parts.as_ref().is_some_and(|(axis, parts)| {
             *axis + 1 == graph.type_of(dot.output).shape.len()
                 && parts.len() <= MAX_TOGETHER
@@ -129,6 +149,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         });
         let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
         let mut read_by: HashMap<Var, usize> = HashMap::new();
+        // Claim later elementwise readers of fusion values as epilogues, greedily in node order.
         for (u, un) in nodes.iter().enumerate().skip(d + 1) {
             if !epilogues || claimed[u] || !elementwise(&un.primitive) {
                 continue;
@@ -150,6 +171,8 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             if graph.type_of(un.output).shape != *shape_of(p) {
                 continue;
             }
+            // Every other operand must be a constant, a scalar broadcast, or a scalar or same-shape value
+            // computed before the dot; constants are rebuilt inside the body.
             let (mut constants, mut operands) = (Vec::new(), Vec::new());
             let fits = un
                 .inputs
@@ -190,6 +213,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
                     operands.push(*v);
                 }
             }
+            // Unless parts are fused together, a non-scalar operand may serve only one part.
             let shared = operands.iter().any(|v| {
                 !together
                     && !graph.type_of(*v).shape.is_empty()
@@ -241,6 +265,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     found
 }
 
+/// Rewrites `graph` with each planned dot replaced by a `dot_general` fusion.
 fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
     let nodes = graph.nodes();
     let found = fused(graph, epilogues);
@@ -249,6 +274,8 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // Stacking concats and absorbed epilogues are emitted inside their fusion; constants stay, as
+    // other nodes may still read them.
     let mut skipped = vec![false; nodes.len()];
     for f in found.iter().flatten() {
         if let Some(k) = f.stack {
@@ -280,6 +307,7 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         };
         let mut body = Graph::new();
         let mut within: HashMap<Var, Var> = HashMap::new();
+        // With a stacked lhs the fusion reads the concat's parts instead of the concat itself.
         let reads: Vec<Var> = match f.stack {
             Some(k) => nodes[k]
                 .inputs
@@ -304,6 +332,7 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
             .apply(node.primitive.clone(), &operands)
             .expect("the dot's operands");
         within.insert(node.output, dot);
+        // Rebuild the split slices inside the body and skip the originals when they come up.
         if let Some((axis, parts)) = &f.parts {
             let shape = body.type_of(dot).shape.clone();
             let mut start = 0;
@@ -333,6 +362,7 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
         }
         let outputs: Vec<Var> = f.outputs.iter().map(|v| within[v]).collect();
         body.set_outputs(&outputs).expect("the body's values");
+        // Count of merged dots, for the `Nx` label prefix.
         let members = match (&f.parts, f.stack) {
             (Some((_, parts)), _) => parts.len(),
             (None, Some(k)) => nodes[k].inputs.len(),
@@ -370,6 +400,7 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
     out
 }
 
+/// Fuses dots with their splitting slices, stacked lhs and, when enabled, elementwise epilogues.
 pub(in crate::graph_compiler::tpu) struct FuseDots;
 
 impl CompilerPass<TpuModule<'_>> for FuseDots {

@@ -1,19 +1,25 @@
+//! Tests of op dispatch between built-in and registered kernels, and of `vector_size`.
 use super::*;
 
+/// Test kernel type returning which registry it came from.
 type Kernel = fn() -> &'static str;
 
+/// Stands in for a built-in kernel.
 fn builtin() -> &'static str {
     "static"
 }
 
+/// Stands in for a runtime-registered kernel.
 fn registered() -> &'static str {
     "dynamic"
 }
 
+/// Stands in for a second registration replacing the first.
 fn replacement() -> &'static str {
     "replacement"
 }
 
+/// Built-in lookup with a kernel only for the CPU.
 fn cpu_only(key: DispatchKey) -> Option<Kernel> {
     match key {
         DispatchKey::Cpu => Some(builtin),
@@ -21,6 +27,7 @@ fn cpu_only(key: DispatchKey) -> Option<Kernel> {
     }
 }
 
+/// A device maps to the dispatch key of its kind, whatever its index.
 #[test]
 fn dispatch_keys_follow_the_device() {
     assert_eq!(DispatchKey::of(Device::Cpu(0)), DispatchKey::Cpu);
@@ -28,6 +35,7 @@ fn dispatch_keys_follow_the_device() {
     assert_eq!(DispatchKey::of(Device::Mps(0)), DispatchKey::Mps);
 }
 
+/// A built-in kernel wins and registering over it is rejected.
 #[test]
 fn the_static_registry_is_used_first() {
     static OP: Op<Kernel> = Op::new("test::static_first", cpu_only);
@@ -44,6 +52,7 @@ fn the_static_registry_is_used_first() {
     );
 }
 
+/// Registered kernels cover keys without a built-in, and re-registering replaces them.
 #[test]
 fn the_dynamic_registry_fills_in_missing_keys() {
     static OP: Op<Kernel> = Op::new("test::dynamic_fallback", cpu_only);
@@ -55,6 +64,7 @@ fn the_dynamic_registry_fills_in_missing_keys() {
     assert!(OP.kernel(DispatchKey::Cuda).is_none(), "per key");
 }
 
+/// Registrations are keyed by op name, so one op's kernel doesn't leak to another.
 #[test]
 fn dynamic_kernels_are_per_op() {
     static A: Op<Kernel> = Op::new("test::per_op_a", cpu_only);
@@ -63,6 +73,7 @@ fn dynamic_kernels_are_per_op() {
     assert!(B.kernel(DispatchKey::Cuda).is_none());
 }
 
+/// Dispatching a key with no kernel panics naming the op, key and device.
 #[test]
 #[should_panic(expected = "test::missing has no kernel for Cuda (cuda:1)")]
 fn a_missing_kernel_panics_with_the_op_and_key() {
@@ -70,6 +81,7 @@ fn a_missing_kernel_panics_with_the_op_and_key() {
     OP.dispatch(Device::Cuda(1));
 }
 
+/// The vector width shrinks until the size, strides and address all align to it.
 #[test]
 fn the_vector_size_is_the_widest_aligned_store() {
     assert_eq!(vector_size(&[1024], &[1], 4, 256), 4);

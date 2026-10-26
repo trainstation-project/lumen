@@ -1,3 +1,5 @@
+"""Helpers shared by the cross-entropy functions."""
+
 from lumen.functional.functions import eq
 from lumen.graph import prims
 

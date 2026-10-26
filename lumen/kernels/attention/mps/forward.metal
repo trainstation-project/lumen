@@ -1,12 +1,20 @@
+// Flash attention forward templates: a tiled simdgroup-matrix kernel for prefill and a per-query kernel for decode.
+
+/// Dropout functor that keeps every probability.
 struct NoDropout {
     template <typename U> inline U operator()(U x, uint, uint, uint) const { return x; }
 };
 
+// Each simdgroup owns ATTN_ROWS query rows; a threadgroup of ATTN_GROUPS simdgroups covers ATTN_BQ queries.
 #define ATTN_ROWS 8
 #define ATTN_GROUPS 8
 #define ATTN_BQ (ATTN_ROWS * ATTN_GROUPS)
 #define ATTN_UNROLL _Pragma("clang loop unroll(full)")
 
+/// Computes attention for one block of ATTN_BQ queries of batch `b` with 8x8 simdgroup matrices,
+/// streaming BK keys at a time through threadgroup memory with an online softmax.
+/// Writes `epi` of the output, optionally the raw output (`RAW`) and the row log-sum-exp (`LSE`).
+/// `offset` shifts the causal diagonal so query `i` sees keys up to `i + offset`.
 template <typename T,
           typename O,
           uint D,
@@ -58,11 +66,13 @@ inline void flash_attention(device const T *q,
     simdgroup_matrix<float, 8, 8> om[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { om[c] = simdgroup_matrix<float, 8, 8>(0); }
     float m = -INFINITY, l = 0;
+    // Causal blocks stop at the last key their last query can see.
     uint last = sk;
     if (CAUSAL) {
         long hi = long(min(qblock * ATTN_BQ + ATTN_BQ, sq)) + long(offset);
         last = uint(clamp(hi, 0l, long(sk)));
     }
+    // All 256 threads stage the next BK keys and values; rows past `sk` are zero-filled.
     for (uint k0 = 0; k0 < last; k0 += BK) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint e = t; e < BK * D; e += 256) {
@@ -91,8 +101,10 @@ inline void flash_attention(device const T *q,
                 mx = max(mx, e[u]);
             }
         }
+        // Each 8-wide row of a fragment is spread over lanes differing in bits 0 and 3.
         mx = max(mx, simd_shuffle_xor(mx, 1));
         mx = max(mx, simd_shuffle_xor(mx, 8));
+        // Rescale the running sum and output to the new running maximum.
         float m_new = max(m, mx);
         float factor = m_new == -INFINITY ? 1.0f : exp(m - m_new);
         simdgroup_matrix<T, 8, 8> pm[BK / 8];
@@ -136,6 +148,8 @@ inline void flash_attention(device const T *q,
     }
 }
 
+/// Computes attention for query `i` of batch `b`: each of the ATTN_GROUPS simdgroups takes every
+/// ATTN_GROUPS-th key with lanes splitting the head dims, then partial softmaxes merge in threadgroup memory.
 template <typename T,
           typename O,
           uint D,
@@ -169,6 +183,7 @@ inline void attention_decode(device const T *q,
                              uint t,
                              Epi epi = Epi(),
                              Drop drop = Drop()) {
+    // Each lane holds head dims `lane`, `lane + 32`, ... of the query and its output.
     constexpr uint QN = (D + 31) / 32, VN = (DV + 31) / 32;
     q += ix.q(b);
     k += ix.k(b);
@@ -218,6 +233,7 @@ inline void attention_decode(device const T *q,
             os[sg * DV + d] = ov[n];
         }
     }
+    // Merge per-simdgroup partials by rescaling each to the global maximum.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float mm = -INFINITY;
     for (uint g = 0; g < ATTN_GROUPS; ++g) {

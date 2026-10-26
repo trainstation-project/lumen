@@ -1,3 +1,5 @@
+"""pallas_call tests ported from JAX: grids, block specs, output shapes, element blocks, dots and splits on TPU."""
+
 import math
 
 import numpy as np
@@ -14,10 +16,12 @@ intx = "int32"
 
 
 def to_tpu(a):
+    """Copies numpy array `a` to the TPU."""
     return lumen.from_numpy(np.asarray(a)).to("tpu")
 
 
 def to_numpy(t):
+    """Copies tensor `t` to the host as numpy, widening bfloat16 to float32."""
     t = t.to("cpu")
     if t.dtype == "bfloat16":
         t = t.to(dtype="float32")
@@ -34,9 +38,11 @@ def run(f, *arrays):
 
 
 def test_add_one():
+    """A single-block kernel adds 1 to a vector."""
     x = np.ones((128,), floatx)
 
     def add_one(x_ref, o_ref):
+        """Adds 1 to the block."""
         o_ref[...] = x_ref[...] + 1.0
 
     out = run(lambda x: pl.pallas_call(add_one, out_shape=pl.ShapeDtypeStruct(x.shape, x.dtype))(x), x)
@@ -44,11 +50,13 @@ def test_add_one():
 
 
 def test_add_one_1d():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
     num_steps = 8
     x = np.ones((num_steps * 128,), floatx)
 
     def add_one(x_ref, o_ref):
+        """Adds 1 to the block."""
         o_ref[...] = x_ref[...] + 1.0
 
     out = run(
@@ -65,10 +73,12 @@ def test_add_one_1d():
 
 
 def test_add_one_2d():
+    """A grid of `(8, 128)` blocks each add 1."""
     num_steps = 8
     x = np.ones((num_steps * 8, 128), floatx)
 
     def kernel(x_ref, o_ref):
+        """Adds 1 to the block."""
         o_ref[...] = x_ref[...] + 1.0
 
     out = run(
@@ -85,7 +95,10 @@ def test_add_one_2d():
 
 
 def test_add_first():
+    """Adding the first row of a 2-D ref to a vector."""
+
     def kernel(x_ref, y_ref, o_ref):
+        """Adds row 0 of `y_ref` to `x`."""
         o_ref[...] = x_ref[...] + y_ref[0]
 
     x = np.arange(128).astype(np.float32)
@@ -95,7 +108,10 @@ def test_add_first():
 
 
 def test_add_xy_indexed():
+    """A row index computed from a reduction selects the row to load."""
+
     def kernel(x_ref, y_ref, o_ref):
+        """Loads the row of `x_ref` at the sum of `y_ref`."""
         idx = F.sum(y_ref[...]).to(y_ref.dtype)
         o_ref[...] = x_ref[idx]
 
@@ -106,9 +122,11 @@ def test_add_xy_indexed():
 
 
 def test_bool_array():
+    """A boolean block `or`ed with a Python bool."""
     x = np.ones((8, 128), dtype=np.bool_)
 
     def kernel(x_ref, o_ref):
+        """Stores `x or True`."""
         o_ref[...] = F.logical_or(x_ref[...], True)
 
     out = run(lambda x: pl.pallas_call(kernel, out_shape=pl.ShapeDtypeStruct(x.shape, "bool"))(x), x)
@@ -116,12 +134,14 @@ def test_bool_array():
 
 
 def test_no_outputs():
+    """A call with an empty `out_shape` returns an empty tuple."""
     x = np.arange(256, dtype=np.int32)
     result = run(lambda x: pl.pallas_call(lambda x_ref: None, ())(x), x)
     assert tuple(result) == ()
 
 
 def test_out_shape_is_singleton_tuple():
+    """A one-element tuple `out_shape` returns a one-element tuple."""
     x = np.arange(1024, dtype=np.int32).reshape((8, 128))
     result = run(
         lambda x: pl.pallas_call(lambda x_ref, o1_ref: None, out_shape=(pl.ShapeDtypeStruct(x.shape, "int32"),))(x), x
@@ -131,6 +151,7 @@ def test_out_shape_is_singleton_tuple():
 
 
 def test_out_shape_is_list():
+    """A list `out_shape` returns a tuple."""
     a = np.arange(1024, dtype=np.int32).reshape((8, 128))
     result = run(
         lambda a: pl.pallas_call(lambda x_ref, o1_ref: None, out_shape=[pl.ShapeDtypeStruct(a.shape, "int32")])(a), a
@@ -139,9 +160,11 @@ def test_out_shape_is_list():
 
 
 def test_out_shape_no_grid():
+    """Without a grid or specs the kernel sees the whole output."""
     o_ref_shape = None
 
     def kernel(o_ref):
+        """Records the output ref's shape and zeroes it."""
         nonlocal o_ref_shape
         o_ref_shape = o_ref.shape
         o_ref[...] = lumen.zeros(o_ref.shape, o_ref.dtype)
@@ -155,6 +178,7 @@ def _program_ids(out_specs):
     o_ref_shape = None
 
     def kernel(o_ref):
+        """Records the output ref's shape and fills it with the program id."""
         nonlocal o_ref_shape
         o_ref_shape = o_ref.shape
         o_ref[...] = lumen.full(o_ref.shape, pl.program_id(0), "int32")
@@ -167,34 +191,40 @@ def _program_ids(out_specs):
 
 
 def test_out_shape_no_block_spec():
+    """Without out_specs the single program sees the whole output."""
     pids, o_ref_shape = _program_ids(None)
     assert o_ref_shape == (128,)
     np.testing.assert_array_equal(pids, np.zeros(o_ref_shape, dtype=np.int32))
 
 
 def test_block_spec_no_block_shape_and_no_index_map():
+    """An empty BlockSpec maps the whole output to the single program."""
     pids, o_ref_shape = _program_ids(pl.BlockSpec())
     assert o_ref_shape == (128,)
     np.testing.assert_array_equal(pids, np.zeros(o_ref_shape, dtype=np.int32))
 
 
 def test_block_spec_no_block_shape():
+    """A BlockSpec with an index map but no block shape covers the whole output."""
     pids, o_ref_shape = _program_ids(pl.BlockSpec(None, lambda i: i))
     assert o_ref_shape == (128,)
     np.testing.assert_array_equal(pids, np.zeros(o_ref_shape, dtype=np.int32))
 
 
 def test_block_spec_no_index_map():
+    """A BlockSpec with a block shape but no index map covers block 0."""
     pids, o_ref_shape = _program_ids(pl.BlockSpec((128,)))
     assert o_ref_shape == (128,)
     np.testing.assert_array_equal(pids, np.zeros(o_ref_shape, dtype=np.int32))
 
 
 def test_store_reshaped_ref():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("Requires TPU sublane tiling (tested in tpu_pallas_test.py)")
     shape1, shape2 = (4, 3), (2, 6)
 
     def kernel(x_ref, o_ref):
+        """Copies through refs reshaped to `(2, 6)`."""
         o_ref.reshape(shape2)[...] = x_ref.reshape(shape2)[...]
 
     x = np.arange(12, dtype=np.float32).reshape(shape1)
@@ -203,12 +233,15 @@ def test_store_reshaped_ref():
 
 
 def matmul_block_spec(x, y, *, bm, bn, bk):
+    """Builds a tiled matmul `x @ y` over `(bm, bn)` output blocks, looping over `bk`-wide slices of `k`."""
     m, n, k = x.shape[0], y.shape[1], x.shape[1]
 
     def matmul_kernel(x_ref, y_ref, o_ref):
+        """Accumulates the block's matmul over `k` in float32."""
         acc = lumen.zeros(o_ref.shape, "float32")
 
         def body(i, acc):
+            """Adds the product of the `i`th `k` slices to `acc`."""
             x_block = x_ref[:, pl.ds(i * bk, bk)]
             y_block = y_ref[pl.ds(i * bk, bk), :]
             return acc + pl.dot(x_block, y_block, preferred_element_type="float32")
@@ -229,10 +262,14 @@ def matmul_block_spec(x, y, *, bm, bn, bk):
 
 
 def test_block_spec_with_padding():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
     def f(*, shape, block_shape):
+        """Runs a kernel writing each program's id into blocks of `block_shape` padded past `shape`."""
+
         def kernel(o1_ref):
+            """Fills its block with the program id."""
             assert o1_ref.shape == block_shape
             o1_ref[...] = lumen.full(o1_ref.shape, pl.program_id(0), "int32")
 
@@ -255,13 +292,16 @@ def test_block_spec_with_padding():
 
 @pytest.mark.parametrize("dtype_name", ["int32", "float32"])
 def test_block_spec_padding_is_nan(dtype_name):
+    """Skipped: NaN padding applies only in interpret mode."""
     pytest.skip("Only applicable for the interpret mode")
 
 
 def test_block_spec_mapped_dimension():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
     def add_vectors(x_ref, y_ref, o_ref):
+        """Adds rows 0 and 1, selected by index maps with a squeezed leading dimension."""
         o_ref[:] = x_ref[:] + y_ref[:]
 
     xy = np.arange(8.0, dtype=np.float32).reshape((2, 4))
@@ -329,14 +369,17 @@ def test_block_spec_mapped_dimension():
     ],
 )
 def test_block_spec_valid_block_shapes(shape, block_shape, dtype):
+    """Block shapes the TPU lowering accepts copy correctly; others raise its error."""
     rank = len(shape)
     assert rank == len(block_shape)
 
     def copy_kernel(x_ref, o_ref):
+        """Copies the block."""
         o_ref[...] = x_ref[...]
 
     grid = [(sd + bd - 1) // bd for sd, bd in zip(shape, block_shape)]
     x = np.arange(math.prod(shape), dtype=dtype).reshape(shape)
+    # mirror the TPU lowering's block shape rules to predict which error, if any, the call raises
 
     error = None
     if rank < 1:
@@ -359,6 +402,7 @@ def test_block_spec_valid_block_shapes(shape, block_shape, dtype):
             error = "last two dimensions of your block shape are divisible by 8 and 128"
 
     def f(x):
+        """Copies `x` block by block with the parametrized block shape."""
         return pl.pallas_call(
             copy_kernel,
             pl.ShapeDtypeStruct(x.shape, x.dtype),
@@ -375,10 +419,12 @@ def test_block_spec_valid_block_shapes(shape, block_shape, dtype):
 
 
 def test_const_args():
+    """A kernel capturing a numpy constant is rejected."""
     to_store = np.arange(128, dtype=np.float32).reshape((1, 128))
     x = np.arange(16 * 128, dtype=np.float32).reshape((16, 128))
 
     def kernel(src, dst):
+        """Stores the captured numpy array into the output."""
         dst[0:1] = to_store
 
     f = lambda x: pl.pallas_call(
@@ -407,6 +453,7 @@ def test_const_args():
     ],
 )
 def test_matmul_block_spec(m, n, k, dtype, bm, bn, bk):
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
     rng = np.random.default_rng(0)
     x = lumen.from_numpy(rng.standard_normal((m, k), dtype=np.float32)).to(dtype=dtype).to("tpu")
@@ -417,10 +464,12 @@ def test_matmul_block_spec(m, n, k, dtype, bm, bn, bk):
 
 
 def test_unused_ref():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
     m, n = 16, 32
 
     def dummy(_, o_ref):
+        """Fills the output through broadcast index arrays, ignoring the input."""
         o_ref[lumen.arange(m)[:, None], lumen.arange(n)[None, :]] = lumen.full(o_ref.shape, 1.0, o_ref.dtype)
 
     x = np.random.default_rng(0).standard_normal((m, n), dtype=np.float32)
@@ -429,10 +478,12 @@ def test_unused_ref():
 
 
 def test_using_pallas_slice():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
     m, n = 32, 4
 
     def slice_kernel(x_ref, y_ref):
+        """Copies the top-left `4x4` corner."""
         y_ref[:4, :4] = x_ref[:4, :4]
 
     x = np.random.default_rng(0).standard_normal((m, n), dtype=np.float32)
@@ -441,11 +492,15 @@ def test_using_pallas_slice():
 
 
 def test_pallas_trace_cache():
+    """Skipped: runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
 
 def test_pallas_call_under_disable_jit():
+    """A pallas_call adding 1 to a vector (JAX runs it under disable_jit)."""
+
     def add_one(x_ref, o_ref):
+        """Adds 1 to the block."""
         o_ref[...] = x_ref[...] + 1.0
 
     x = np.arange(8, dtype=np.float32)
@@ -477,15 +532,18 @@ def test_pallas_call_under_disable_jit():
     ],
 )
 def test_dot_precision(dtype, precision):
+    """Skipped: dot precision and algorithm presets apply only on GPU."""
     pytest.skip("`DotAlgorithmPreset` only supported on GPU.")
 
 
 @pytest.mark.parametrize("dtype", ["int8", "uint8"])
 def test_integer_dot(dtype):
+    """int8 matmuls accumulate exactly in int32."""
     if dtype == "uint8":
         pytest.skip("Not currently supported.")
 
     def dot_kernel(x_ref, y_ref, o_ref):
+        """Multiplies the blocks, accumulating in the output dtype."""
         o_ref[()] = pl.dot(x_ref[()], y_ref[()], preferred_element_type=o_ref.dtype)
 
     rng = np.random.default_rng(0)
@@ -498,21 +556,25 @@ def test_integer_dot(dtype):
 
 
 def test_dot_with_vector():
+    """Skipped: matrix-vector `jnp.dot` restrictions are GPU only."""
     pytest.skip("jnp.dot is only restricted to 2D on GPU in non-interpret mode.")
 
 
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_subbyte_load(dtype):
+    """Skipped: int4 loads apply only on GPU."""
     pytest.skip("`[u]int4` loads only supported on GPU.")
 
 
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_subbyte_load_non_contiguous(dtype):
+    """Skipped: int4 loads apply only on GPU."""
     pytest.skip("`[u]int4` loads only supported on GPU.")
 
 
 @pytest.mark.parametrize("transpose", [True, False])
 def test_float8_e4m3b11fnuz_dot(transpose):
+    """A bfloat16 by float8_e4m3b11fnuz matmul, optionally with the rhs transposed."""
     rng = np.random.default_rng(0)
     x = lumen.from_numpy(rng.standard_normal((2048, 1024), dtype=np.float32)).to(dtype="bfloat16").to("tpu")
     y = lumen.from_numpy(rng.standard_normal((1024, 1024), dtype=np.float32)).to(dtype="float8_e4m3b11fnuz").to("tpu")
@@ -521,6 +583,7 @@ def test_float8_e4m3b11fnuz_dot(transpose):
     expected = xs @ (ys.T if transpose else ys)
 
     def dot_kernel(x_ref, y_ref, o_ref):
+        """Multiplies the blocks in float32 and casts to bfloat16."""
         o_ref[...] = pl.dot(x_ref[...], y_ref[...], trans_b=transpose, preferred_element_type="float32").to(
             o_ref.dtype
         )
@@ -540,6 +603,7 @@ def test_float8_e4m3b11fnuz_dot(transpose):
     "shape, num_parts, axis", [((32,), 2, 0), ((32, 64), 4, 0), ((32, 16), 8, 1), ((32, 16, 2), 16, 1)]
 )
 def test_split(shape, num_parts, axis):
+    """`chunk` of a block into equal parts along an axis writes one output per part."""
     if shape[axis] == num_parts:
         pytest.skip("TPU doesn't support fully split axis.")
 
@@ -547,6 +611,7 @@ def test_split(shape, num_parts, axis):
     expected = np.split(x, num_parts, axis)
 
     def kernel(x_ref, *o_ref):
+        """Splits the block into `num_parts` along `axis`, one output each."""
         x_parts = x_ref[()].chunk(num_parts, axis)
         for o, x_part in zip(o_ref, x_parts):
             o[...] = x_part
@@ -559,21 +624,29 @@ def test_split(shape, num_parts, axis):
 
 
 def test_dce_unused_outputs():
+    """Skipped: jaxpr dead-code elimination has no lumen counterpart."""
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
 
 
 def test_dce_has_side_effects():
+    """Skipped: jaxpr dead-code elimination has no lumen counterpart."""
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
 
 
 @pytest.mark.parametrize("read_ref", [False, True])
 def test_dce_closed_over_ref(read_ref):
+    """Skipped: jaxpr dead-code elimination has no lumen counterpart."""
     pytest.skip("DCE of jaxprs: not meaningful for lumen")
 
 
 def test_block_spec_element():
+    """`pl.Element` block dimensions index by element offset, with high padding on a partial last block."""
+
     def show_program_ids(*, shape, block_shape, grid):
+        """Runs a kernel writing each program's id into `(8, 128)` element-indexed blocks."""
+
         def kernel(o1_ref):
+            """Fills its block with the program id."""
             assert o1_ref.shape == (8, 128)
             o1_ref[...] = lumen.full(o1_ref.shape, pl.program_id(0), "int32")
 
@@ -602,14 +675,17 @@ def test_block_spec_element():
 
 @pytest.mark.parametrize("dtype_name", ["int32", "float32"])
 def test_block_spec_element_padding_is_nan(dtype_name):
+    """Skipped: NaN padding applies only in interpret mode."""
     pytest.skip("Only applicable for the interpret mode")
 
 
 def test_element_indexing():
+    """Overlapping `pl.Element` input blocks at element offsets let each program read 16 rows."""
     shape = (16 * 8, 128)
     result_ty = pl.ShapeDtypeStruct((15 * 8, 128), "float32")
 
     def kernel(x_ref, o_ref):
+        """Adds the first and second 8 rows of the 16-row block."""
         o_ref[...] = x_ref[pl.ds(0, 8)] + x_ref[pl.ds(8, 8)]
 
     x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
@@ -632,10 +708,12 @@ def test_element_indexing():
 
 
 def test_unblocked_indexing_with_padding():
+    """A padded `pl.Element` block over a whole array."""
     shape = (8, 128)
     result_ty = pl.ShapeDtypeStruct((8, 128), "float32")
 
     def kernel(x_ref, y_ref):
+        """Copies the first 8 rows of the padded block."""
         y_ref[...] = x_ref[pl.ds(0, 8)]
 
     x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
@@ -653,9 +731,11 @@ def test_unblocked_indexing_with_padding():
 
 
 def test_block_spec_bounded_slice_static():
+    """`pl.BoundedSlice` block dimensions are rejected as unsupported."""
     shape = (16, 8, 128)
 
     def kernel(x_ref, o_ref):
+        """Copies the block."""
         o_ref[...] = x_ref[...]
 
     x = np.arange(np.prod(shape), dtype=np.int32).reshape(shape)

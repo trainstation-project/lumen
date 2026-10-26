@@ -1,3 +1,5 @@
+"""Ref indexing tests ported from JAX Pallas: ref.at views, strided and dynamic slices, scalar loads on TPU."""
+
 import numpy as np
 import pytest
 
@@ -55,107 +57,132 @@ _INDEXING_IDS = [
 
 
 def _maybe_ds_to_slice(x):
+    """Converts a `pl.ds` to the equivalent Python slice for numpy reference indexing."""
     if isinstance(x, pl.ds):
         return slice(x.start, x.start + x.size)
     return x
 
 
 def test_simple_ndindexer():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_invalid_ndindexer():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 @pytest.mark.parametrize("case", ["int_oob", "slice_oob", "Slice_2_2_oob", "Slice_0_4_oob"])
 def test_invalid_ndindexer_oob(case):
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_padding():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ellipsis():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_slices():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays_and_broadcasting():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays_and_invalid_broadcasting():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ref():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_transformed_ref():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_multiple_refs():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ref_and_int():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_indexer_with_all_types():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_symbolic_shape():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_symbolic_shape_full_slice():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 @pytest.mark.parametrize("case", ["slice_indexer", "int_indexer"])
 def test_ndindexer_with_symbolic_shape_skips_bounds_check(case):
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer():
+    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_multi_indexing_interpreter_only():
+    """Skipped: needs JAX's interpret mode."""
     pytest.skip("Only supported in interpret mode")
 
 
 def test_multi_indexing_destination_ref():
+    """Skipped: needs JAX's interpret mode."""
     pytest.skip("Only supported in interpret mode")
 
 
 def test_ellipsis_indexing_iterpret_only():
+    """Skipped: needs JAX's interpret mode."""
     pytest.skip("Only supported in interpret mode")
 
 
 def test_vmap_nd_indexing():
+    """Skipped: vmap of nd-indexing is not enabled."""
     pytest.skip("TODO(necula): enable this test; was in jax_triton.")
 
 
 @pytest.mark.parametrize("case", _INDEXING_TEST_CASES, ids=_INDEXING_IDS)
 def test_can_load_with_ref_at(case):
+    """Loads through chained `ref.at[...]` views match numpy indexing."""
     in_shape, indexers, out_shape = case
     dtype = "float32"
 
     def body(x_ref, y_ref):
+        """Narrows `x_ref` by all but the last indexer, then loads with the last."""
         for indexer in indexers[:-1]:
             x_ref = x_ref.at[indexer]
         x = x_ref[indexers[-1]]
@@ -175,10 +202,12 @@ def test_can_load_with_ref_at(case):
 
 @pytest.mark.parametrize("case", _INDEXING_TEST_CASES, ids=_INDEXING_IDS)
 def test_can_store_with_ref_at(case):
+    """Stores through chained `ref.at[...]` views land where numpy indexing puts them."""
     in_shape, indexers, val_shape = case
     dtype = "float32"
 
     def body(x_ref, y_ref):
+        """Zeroes the output, narrows it by all but the last indexer and stores the input there."""
         y_ref[...] = lumen.zeros(y_ref.shape, dtype=y_ref.dtype)
         for indexer in indexers[:-1]:
             y_ref = y_ref.at[indexer]
@@ -200,6 +229,7 @@ def test_can_store_with_ref_at(case):
 
 
 def _strided_cases(count=10):
+    """Returns `count` seeded random (ref shape, start indices, strides) cases."""
     rng = np.random.default_rng(0)
     cases = []
     for _ in range(count):
@@ -213,6 +243,7 @@ def _strided_cases(count=10):
 @pytest.mark.parametrize("slice_type", ["slice", "ds"])
 @pytest.mark.parametrize("ref_shape, indices, strides", _strided_cases())
 def test_strided_load_and_store(slice_type, ref_shape, indices, strides):
+    """Strided loads and stores via `slice` or `pl.ds` with a stride match numpy strided slicing."""
     ref_shape = (*ref_shape, 128)
     indices = (*indices, 0)
     strides = (*strides, 1)
@@ -220,6 +251,7 @@ def test_strided_load_and_store(slice_type, ref_shape, indices, strides):
     dtype = "float32"
 
     def body(x_ref, y_ref1, y_ref2):
+        """Loads a strided slice into `y_ref1`, then stores it back strided into `y_ref2`."""
         if slice_type == "slice":
             slices = tuple(slice(i, rs, s) for i, rs, s in zip(indices, ref_shape, strides))
         else:
@@ -239,6 +271,7 @@ def test_strided_load_and_store(slice_type, ref_shape, indices, strides):
 
 
 def _stride_0_cases(count=10):
+    """Returns `count` seeded random (shape, strides, indices) cases with stride 0 or 1 on the leading dims."""
     rng = np.random.default_rng(0)
     cases = []
     for _ in range(count):
@@ -252,9 +285,11 @@ def _stride_0_cases(count=10):
 
 @pytest.mark.parametrize("shape, strides, indices", _stride_0_cases())
 def test_load_and_broadcast_with_stride_0(shape, strides, indices):
+    """A `pl.ds` with stride 0 loads one index broadcast along that dimension."""
     dtype = "float32"
 
     def body(x_ref, y_ref):
+        """Loads with stride-0 `pl.ds` on the selected dims."""
         slices = tuple(pl.ds(i, n, s) for i, n, s in zip(indices, shape, strides))
         y_ref[...] = x_ref[slices]
 
@@ -266,15 +301,18 @@ def test_load_and_broadcast_with_stride_0(shape, strides, indices):
 
 
 def vmem_smem():
+    """Returns in_specs placing the first operand in VMEM and the second in SMEM."""
     return [pl.BlockSpec(memory_space=pl.VMEM), pl.BlockSpec(memory_space=pl.SMEM)]
 
 
 def test_load_with_dynamic_2nd_minor_index():
+    """Loads `k` rows starting at an SMEM-held index on the second-to-last dimension."""
     m, n = 32, 128
     k = 10
     start = 2
 
     def kernel(x_ref, indices, y_ref):
+        """Copies rows `indices[0]..indices[0] + k` of `x_ref`."""
         y_ref[...] = x_ref[pl.ds(indices[0], k)]
 
     x = np.arange(m * n, dtype=np.int32).reshape((m, n))
@@ -285,11 +323,13 @@ def test_load_with_dynamic_2nd_minor_index():
 
 
 def test_store_with_dynamic_2nd_minor_index():
+    """Stores into rows starting at an SMEM-held index on the second-to-last dimension."""
     m, n = 10, 128
     k = 32
     start = 2
 
     def kernel(x_ref, indices, y_ref):
+        """Writes `x_ref` into rows starting at `indices[0]`."""
         y_ref[pl.ds(indices[0], m)] = x_ref[...]
 
     x = np.arange(m * n, dtype=np.int32).reshape((m, n))
@@ -300,10 +340,12 @@ def test_store_with_dynamic_2nd_minor_index():
 
 
 def test_load_one_row_with_dynamic_2nd_minor_index():
+    """Loads a single row at a dynamic index from a 3-D ref."""
     b, m, n = 4, 16, 256
     start = 3
 
     def kernel(x_ref, indices, y_ref):
+        """Copies row `indices[0]` of every leading slice."""
         y_ref[...] = x_ref[:, pl.ds(indices[0], 1), :]
 
     x = np.arange(b * m * n, dtype=np.int32).reshape((b, m, n))
@@ -314,10 +356,12 @@ def test_load_one_row_with_dynamic_2nd_minor_index():
 
 
 def test_store_one_row_with_dynamic_2nd_minor_index():
+    """Stores a single row at a dynamic index into a 3-D ref."""
     b, m, n = 4, 16, 256
     start = 3
 
     def kernel(x_ref, indices, y_ref):
+        """Writes `x_ref` into row `indices[0]` of every leading slice."""
         y_ref[:, pl.ds(indices[0], 1), :] = x_ref[...]
 
     x = np.arange(b * 1 * n, dtype=np.int32).reshape((b, 1, n))
@@ -328,7 +372,10 @@ def test_store_one_row_with_dynamic_2nd_minor_index():
 
 
 def test_scalar_load_from_vmem():
+    """A scalar loaded from VMEM indexes both a store and a DMA between output slices."""
+
     def kernel(x_ref, o_ref, sem_ref):
+        """Writes `x[1, 2]` into output slice `x[1, 2]` and DMAs that slice into the next one."""
         o_ref[...] = lumen.zeros(o_ref.shape, dtype=o_ref.dtype)
         scalar_val = x_ref[1, 2]
         o_ref[scalar_val] = lumen.ones(o_ref.shape[1:], dtype=o_ref.dtype) * scalar_val
@@ -381,6 +428,7 @@ _ADVANCED_INDEXER_TEST_CASES = [
     ids=[str(i) for i in range(len(_ADVANCED_INDEXER_TEST_CASES))],
 )
 def test_advanced_indexer(in_shape, indexing_func):
+    """Skipped: numpy-style advanced indexing of refs is not supported on TPU."""
     pytest.skip("Advanced indexers are not supported on TPU")
 
     a = np.array([1, 1, 1, 1, 1], dtype=np.int32)
@@ -392,6 +440,7 @@ def test_advanced_indexer(in_shape, indexing_func):
     y = indexing_func(x, a, b, c, d)
 
     def kernel(x_ref, a_ref, b_ref, c_ref, d_ref, o_ref):
+        """Applies `indexing_func` to `x_ref` with the loaded index arrays."""
         a = a_ref[...]
         b = b_ref[...]
         c = c_ref[...]

@@ -1,3 +1,5 @@
+"""JVP and transpose rules for each differentiable primitive, registered on import."""
+
 from lumen.autograd.core import (
     UndefinedPrimal,
     _full,
@@ -64,6 +66,7 @@ deflinear(prims.to_device, lambda ct, x: [prims.to_host(ct)])
 
 
 def _transpose_transpose(ct, x, permutation):
+    """Transposes ``ct`` back by the inverse permutation."""
     inverse = sorted(range(len(permutation)), key=permutation.__getitem__)
     return [prims.transpose(ct, inverse)]
 
@@ -72,6 +75,7 @@ deflinear(prims.transpose, _transpose_transpose)
 
 
 def _reduce_sum_transpose(ct, x, axes, accum_dtype):
+    """Broadcasts ``ct`` back over the summed ``axes`` in ``x``'s dtype."""
     ct = prims.cast(ct, x.dtype) if ct.dtype != x.dtype else ct
     kept = [d for d in range(x.ndim) if d not in axes]
     return [prims.broadcast_in_dim(ct, x.shape, kept)]
@@ -81,6 +85,7 @@ deflinear(prims.reduce_sum, _reduce_sum_transpose)
 
 
 def _cumsum_transpose(ct, x, axis, reverse, accum_dtype):
+    """Cumulative sum of ``ct`` in the opposite direction, cast to ``x``'s dtype."""
     ct = prims.cumsum(ct, axis, not reverse, ct.dtype)
     return [prims.cast(ct, x.dtype) if ct.dtype != x.dtype else ct]
 
@@ -89,7 +94,9 @@ deflinear(prims.cumsum, _cumsum_transpose)
 
 
 def _broadcast_in_dim_transpose(ct, x, shape, broadcast_dimensions):
+    """Sums ``ct`` over the added and stretched dimensions, back to ``x``'s shape."""
     dims = broadcast_dimensions
+    # Size-1 input dims broadcast to a larger size were stretched and must be summed too.
     stretched = [dims[i] for i, n in enumerate(x.shape) if n == 1 and shape[dims[i]] != 1]
     axes = sorted([d for d in range(len(shape)) if d not in dims] + stretched)
     if axes:
@@ -102,6 +109,7 @@ deflinear(prims.broadcast_in_dim, _broadcast_in_dim_transpose)
 
 
 def _slice_transpose(ct, x, start_indices, limit_indices):
+    """Zero-pads ``ct`` on each dimension back to ``x``'s shape."""
     for d, (start, limit) in enumerate(zip(start_indices, limit_indices)):
         parts = []
         for size in (start, x.shape[d] - limit):
@@ -117,6 +125,7 @@ deflinear(prims.slice, _slice_transpose)
 
 
 def _concatenate_transpose(ct, *operands, dimension):
+    """Slices ``ct`` along ``dimension`` into each linear operand's cotangent."""
     cts, offset = [], 0
     for x in operands:
         size = x.shape[dimension]
@@ -135,6 +144,7 @@ deflinear(prims.concatenate, _concatenate_transpose)
 
 
 def _select_jvp(primals, tangents, out, **params):
+    """Selects between the branch tangents (zeros for a branch without one)."""
     pred, x, y = primals
     _, tx, ty = tangents
     if tx is None and ty is None:
@@ -143,6 +153,7 @@ def _select_jvp(primals, tangents, out, **params):
 
 
 def _select_transpose(ct, pred, x, y):
+    """Routes ``ct`` to the branch ``pred`` chose; none for ``pred``."""
     zeros = _full(ct, 0)
     return [
         None,
@@ -156,6 +167,7 @@ primitive_transposes[prims.select] = _select_transpose
 
 
 def _dynamic_slice_jvp(primals, tangents, out, slice_sizes):
+    """The same dynamic slice of ``x``'s tangent."""
     x, *indices = primals
     if tangents[0] is None:
         return None
@@ -163,10 +175,12 @@ def _dynamic_slice_jvp(primals, tangents, out, slice_sizes):
 
 
 def _dynamic_slice_transpose(ct, x, *indices, slice_sizes):
+    """Writes ``ct`` into zeros of ``x``'s shape at the slice's indices."""
     return [prims.dynamic_update_slice(_full(x, 0), ct, indices), *[None] * len(indices)]
 
 
 def _dynamic_update_slice_jvp(primals, tangents, out):
+    """Writes the update's tangent into the operand's tangent (zeros for one without)."""
     x, update, *indices = primals
     tx, tu = tangents[:2]
     if tx is None and tu is None:
@@ -176,6 +190,7 @@ def _dynamic_update_slice_jvp(primals, tangents, out):
 
 
 def _dynamic_update_slice_transpose(ct, x, update, *indices):
+    """Splits ``ct`` into the operand's (slice zeroed) and the update's (the slice)."""
     return [
         prims.dynamic_update_slice(ct, _full(update, 0), indices) if isinstance(x, UndefinedPrimal) else None,
         prims.dynamic_slice(ct, indices, update.shape) if isinstance(update, UndefinedPrimal) else None,
@@ -184,12 +199,14 @@ def _dynamic_update_slice_transpose(ct, x, update, *indices):
 
 
 def _gather_jvp(primals, tangents, out, axis):
+    """Gathers ``x``'s tangent at the same indices."""
     if tangents[0] is None:
         return None
     return prims.gather(tangents[0], primals[1], axis)
 
 
 def _gather_transpose(ct, x, indices, axis):
+    """Scatter-adds ``ct`` into zeros of ``x``'s shape, accumulating in the wider accumulator dtype."""
     accum = tracer._accum_dtype(x.dtype)
     ct = ct if ct.dtype == accum else prims.cast(ct, accum)
     out = prims.scatter_add(prims.full(x.shape, 0, accum), indices, ct, axis)
@@ -197,6 +214,7 @@ def _gather_transpose(ct, x, indices, axis):
 
 
 def _scatter_add_jvp(primals, tangents, out, axis):
+    """Scatter-adds the updates' tangent into the operand's (zeros for one without)."""
     x, indices, updates = primals
     tx, tu = tangents[0], tangents[2]
     if tx is None and tu is None:
@@ -206,6 +224,7 @@ def _scatter_add_jvp(primals, tangents, out, axis):
 
 
 def _scatter_add_transpose(ct, x, indices, updates, axis):
+    """Passes ``ct`` to the operand and gathers it at the indices for the updates."""
     return [
         ct if isinstance(x, UndefinedPrimal) else None,
         None,
@@ -214,13 +233,16 @@ def _scatter_add_transpose(ct, x, indices, updates, axis):
 
 
 def _take_along_axis_jvp(primals, tangents, out, axis):
+    """Takes ``x``'s tangent along ``axis`` at the same indices."""
     if tangents[0] is None:
         return None
     return prims.take_along_axis(tangents[0], primals[1], axis)
 
 
 def _take_along_axis_transpose(ct, x, indices, axis):
+    """Scatter-adds ``ct`` into a flattened ``x`` at each index's row-major offset."""
     dtype = "int64" if indices.dtype in ("int64", "uint64") else "int32"
+    # Row-major flat offset of every element, with ``indices`` substituted on ``axis``.
     flat, stride = None, 1
     for d in reversed(range(len(x.shape))):
         at = (indices if indices.dtype == dtype else prims.cast(indices, dtype)) if d == axis else None
@@ -252,6 +274,7 @@ defjvp(prims.mul, lambda t, out, x, y: prims.mul(t, y), lambda t, out, x, y: pri
 
 
 def _mul_transpose(ct, x, y):
+    """Multiplies ``ct`` by whichever operand is not the linear one."""
     if isinstance(x, UndefinedPrimal):
         return [prims.mul(ct, y), None]
     return [None, prims.mul(x, ct)]
@@ -281,6 +304,7 @@ defjvp(prims.logistic, lambda t, out, x: prims.mul(t, prims.mul(out, prims.sub(_
 
 
 def _reduce_max_jvp(t, out, x, axes):
+    """Averages the tangent over positions equal to the max (ties share evenly)."""
     kept = [d for d in range(x.ndim) if d not in axes]
     where = prims.cast(prims.eq(x, prims.broadcast_in_dim(out, x.shape, kept)), x.dtype)
     count = prims.reduce_sum(where, axes, x.dtype)
@@ -291,11 +315,13 @@ defjvp(prims.reduce_max, _reduce_max_jvp)
 
 
 def _dot(x, y, dims, params, output_dtype):
+    """``dot_general`` of ``x`` and ``y`` with ``dims``, ``params``' accumulator and ``output_dtype``."""
     (lc, rc), (lb, rb) = dims
     return prims.dot_general(x, y, ((lc, rc), (lb, rb)), params["accum_dtype"], output_dtype)
 
 
 def _dot_dims(params):
+    """``((lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch))`` from dot params."""
     p = params
     return (p["lhs_contracting"], p["rhs_contracting"]), (p["lhs_batch"], p["rhs_batch"])
 
@@ -308,6 +334,7 @@ defjvp(
 
 
 def _ranges_like(*xs):
+    """Consecutive index ranges, one per sequence in ``xs``, of matching lengths."""
     start = 0
     for x in xs:
         yield list(range(start, start + len(x)))
@@ -333,6 +360,7 @@ def _dot_transpose_lhs(ct, x, y, dims, params, swap_ans=False):
 
 
 def _dot_general_transpose(ct, x, y, **p):
+    """Cotangent of whichever dot operand is the ``UndefinedPrimal``."""
     (xc, yc), (xb, yb) = _dot_dims(p)
     if isinstance(x, UndefinedPrimal):
         return [_dot_transpose_lhs(ct, x, y, ((xc, yc), (xb, yb)), p), None]

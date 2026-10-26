@@ -1,3 +1,5 @@
+//! Lowers a graph to a `Plan`: an ordered list of kernel steps whose values are placed in
+//! caller inputs, fresh outputs or one shared workspace, and runs it on a device.
 use std::any::Any;
 use std::cmp::Reverse;
 use std::fmt;
@@ -12,13 +14,19 @@ use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
 
+/// Byte alignment of every value and scratch region in the workspace.
 pub const ALIGNMENT: usize = 256;
 
+/// Where a step reads or writes a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Buffer {
+    /// The caller's input `i`, or a donated input that holds an output.
     Input(usize),
+    /// The freshly allocated output `i`.
     Output(usize),
+    /// A byte offset into the shared workspace.
     Workspace(usize),
+    /// Input `i` passed as a host-side scalar.
     Scalar(usize),
 }
 
@@ -33,28 +41,43 @@ impl fmt::Display for Buffer {
     }
 }
 
+/// One kernel launch: a primitive with the buffers it reads and writes.
 #[derive(Debug, Clone)]
 pub struct Step {
     pub primitive: Primitive,
+    /// Name shown in profiles and error messages.
     pub label: &'static str,
+    /// Operand buffers with their types.
     pub inputs: Vec<(Buffer, TensorType)>,
+    /// Per operand, a strided view of its buffer, or `None` when it is read contiguously.
     pub views: Vec<Option<View>>,
+    /// The buffer and type the step writes.
     pub output: (Buffer, TensorType),
+    /// Further outputs of a multi-output fusion or custom call, in output index order.
     pub extra_outputs: Vec<(Buffer, TensorType)>,
+    /// Per output (main output first), where it is written inside a larger buffer, if anywhere.
     pub output_views: Vec<Option<View>>,
+    /// Workspace `(offset, bytes)` reserved for the kernel's own scratch.
     pub scratch: Option<(usize, usize)>,
+    /// Profiler scope stack the step was traced under.
     pub scope: Scope,
+    /// Python source locations `(file, line)` the step was traced from.
     pub sources: Vec<(&'static str, u32)>,
+    /// The autotuned kernel choice, if one was made.
     pub tuned: Option<Tuned>,
 }
 
+/// A kernel picked by autotuning, with the backend-specific launch parameters it needs.
 #[derive(Clone)]
 pub struct Tuned {
+    /// Name of the chosen kernel.
     pub kernel: String,
+    /// Backend launch configuration, recovered with `Step::launch`.
     launch: Arc<dyn Any + Send + Sync>,
 }
 
 impl Tuned {
+    /// Wraps a backend's launch configuration under the kernel name.
     pub(crate) fn new<L: Send + Sync + 'static>(kernel: String, launch: L) -> Self {
         Tuned {
             kernel,
@@ -70,10 +93,12 @@ impl fmt::Debug for Tuned {
 }
 
 impl Step {
+    /// The tuned launch configuration, if one of type `L` was stored.
     pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
         self.tuned.as_ref()?.launch.downcast_ref::<L>()
     }
 
+    /// Element strides each operand is read with: its view's, or contiguous ones.
     pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
         let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {
             Some(view) => view.strides.clone(),
@@ -86,6 +111,7 @@ impl Step {
             .collect()
     }
 
+    /// Element strides each output is written with: its view's, or contiguous ones.
     pub(crate) fn output_strides(&self) -> Vec<Vec<usize>> {
         std::iter::once(&self.output)
             .chain(&self.extra_outputs)
@@ -98,6 +124,7 @@ impl Step {
     }
 }
 
+/// Profiler ranges currently open for the scope stack of the step being run.
 #[derive(Default)]
 struct OpenScopes {
     scope: Scope,
@@ -105,6 +132,7 @@ struct OpenScopes {
 }
 
 impl OpenScopes {
+    /// Moves to `scope`, closing ranges it leaves and opening the ones it enters.
     fn enter(&mut self, scope: Scope) {
         let common = self
             .scope
@@ -112,6 +140,7 @@ impl OpenScopes {
             .zip(scope)
             .take_while(|(a, b)| a == b)
             .count();
+        // Keep ranges of the shared prefix open; close the rest and open the new suffix.
         while self.ranges.len() > common {
             self.ranges.pop();
         }
@@ -129,27 +158,44 @@ impl Drop for OpenScopes {
     }
 }
 
+/// Bytes of kernel scratch a primitive needs for the given operand and output types.
 pub type ScratchFn = fn(&Primitive, &[&TensorType], &TensorType) -> usize;
 
+/// Options controlling how `Plan::compile_with` places values.
 #[derive(Debug, Clone, Default)]
 pub struct PlanOptions {
+    /// Sizes the scratch each step needs; it is reserved in the workspace.
     pub scratch: Option<ScratchFn>,
+    /// Inputs whose buffers may hold any output of the same type.
     pub donate: Vec<usize>,
+    /// `(input, output)` pairs: the input's buffer may hold only that output.
     pub donate_into: Vec<(usize, usize)>,
+    /// Which inputs are parameters; `Some` makes an owned plan whose outputs stay in the
+    /// workspace or inputs and that runs with `Plan::run_in`.
     pub parameters: Option<Vec<bool>>,
+    /// Inputs passed as host scalars instead of device buffers.
     pub scalars: Vec<usize>,
+    /// Workspace bytes above which values are rematerialized instead of kept.
     pub memory_limit: Option<usize>,
+    /// `(block input, member inputs)` of packed parameter blocks; a member is not
+    /// overwritten while its block is still read.
     pub blocks: Vec<(usize, Vec<usize>)>,
+    /// Device-specific storage sizes and alignment; `None` means dense row-major.
     pub layout: Option<DeviceLayout>,
 }
 
+/// How a device stores tensors, for backends whose layout isn't dense row-major.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceLayout {
+    /// Bytes a value of the type occupies.
     pub bytes: fn(&TensorType) -> usize,
+    /// Whether two types share a storage layout, so a reshape between them moves no data.
     pub same: fn(&TensorType, &TensorType) -> bool,
+    /// Alignment a value of the type needs.
     pub align: fn(&TensorType) -> usize,
 }
 
+/// Least common multiple of `a` and `b`.
 pub(crate) fn lcm(a: usize, b: usize) -> usize {
     let (mut x, mut y) = (a, b);
     while y != 0 {
@@ -158,28 +204,45 @@ pub(crate) fn lcm(a: usize, b: usize) -> usize {
     a / x * b
 }
 
+/// A compiled program: its steps, where each value lives and the workspace size it needs.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Types of the inputs, including packed blocks after the program's own.
     inputs: Vec<TensorType>,
     outputs: Vec<TensorType>,
+    /// Per output, the input whose buffer it is written into.
     aliases: Vec<Option<usize>>,
+    /// Where each input is read from.
     inputs_at: Vec<Buffer>,
+    /// Per input, whether an owned plan treats it as a caller argument rather than a
+    /// parameter, copying it when needed.
     arguments: Vec<bool>,
+    /// Where each output is written; `Output(k)` unless the plan is owned.
     outputs_at: Vec<Buffer>,
     steps: Vec<Step>,
     workspace_bytes: usize,
+    /// Alignment the workspace's base address needs.
     workspace_alignment: usize,
+    /// Packed parameter blocks: member input positions and the dimension they are packed
+    /// along; their block tensors follow the regular inputs.
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
+    /// Per packed block, the region sizes `Tensor::pack` interleaves its members with.
     pub(crate) interleaved: Vec<Vec<usize>>,
+    /// Set when the program runs as host and device stages instead of `steps`.
     pub(crate) staged: Option<Box<Staged>>,
+    /// Per step, the compiled Triton kernel used on CUDA.
     pub(crate) triton: Option<Vec<Option<super::triton::Kernel>>>,
+    /// MPS launches captured per step, replayed on later runs.
     #[cfg(lumen_mps_linked)]
     launches: Launches,
 }
 
+/// Per step, the prepared MPS launch once captured (`None` when it can't be replayed).
 #[cfg(lumen_mps_linked)]
 type Launches = OnceLock<Vec<OnceLock<Option<crate::kernels::mps::Prepared>>>>;
 
+/// Whether an MPS step's launch can be captured once and replayed with new pointers:
+/// host-side work, custom calls and runtime scalar reads cannot.
 #[cfg(lumen_mps_linked)]
 fn replayable(step: &Step) -> bool {
     use Primitive::*;
@@ -195,6 +258,7 @@ fn replayable(step: &Step) -> bool {
             .any(|(b, _)| matches!(b, Buffer::Scalar(_)))
 }
 
+/// Bytes from the start of a (possibly strided) operand to one past its last element.
 #[cfg(lumen_mps_linked)]
 fn extent(ty: &TensorType, view: Option<&View>) -> usize {
     let size = ty.dtype.size_of();
@@ -212,36 +276,53 @@ fn extent(ty: &TensorType, view: Option<&View>) -> usize {
     }
 }
 
+/// A program split into host and device stages, each with its own plan.
 #[derive(Debug, Clone)]
 pub(crate) struct Staged {
+    /// The stages, in execution order.
     pub(crate) stages: Vec<Stage>,
+    /// Where each program output comes from.
     pub(crate) outputs: Vec<Source>,
 }
 
+/// One host or device part of a staged program.
 #[derive(Debug, Clone)]
 pub(crate) struct Stage {
+    /// Runs on the CPU rather than the device.
     pub(crate) host: bool,
     pub(crate) plan: Plan,
+    /// Where each of the stage's inputs comes from.
     pub(crate) inputs: Vec<Source>,
+    /// Indices of the parent plan's packed blocks this stage reads, after `inputs`.
     pub(crate) blocks: Vec<usize>,
+    /// Byte offset of this stage's workspace within the parent workspace.
     pub(crate) offset: usize,
 }
 
+/// Where a staged value comes from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Source {
+    /// Program input `i`.
     Input(usize),
+    /// Output `k` of stage `s`.
     Stage(usize, usize),
+    /// Output `k` of stage `s`, copied to the CPU.
     ToHost(usize, usize),
+    /// Output `k` of stage `s`, copied to the run's device.
     ToDevice(usize, usize),
 }
 
 impl Plan {
+    /// Compiles `graph` with default options.
     pub fn compile(graph: &Graph) -> Self {
         Self::compile_with(graph, &PlanOptions::default())
     }
 
+    /// Compiles `graph`, keeping whichever schedule needs the smallest workspace and
+    /// rematerializing values when that still exceeds `options.memory_limit`.
     pub fn compile_with(graph: &Graph, options: &PlanOptions) -> Self {
         let mut best = (graph.clone(), Self::compile_in_order(graph, options));
+        // Try the traced order plus list and DFS schedules.
         for order in [super::schedule::list(graph), super::schedule::dfs(graph)] {
             let scheduled = graph.reordered(&order);
             let plan = Self::compile_in_order(&scheduled, options);
@@ -260,6 +341,8 @@ impl Plan {
         }
     }
 
+    /// Compiles `graph` in its node order: aliases values onto shared buffers, assigns
+    /// inputs and outputs, and packs the rest into the workspace by live range.
     fn compile_in_order(graph: &Graph, options: &PlanOptions) -> Self {
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
@@ -274,6 +357,7 @@ impl Plan {
             None => graph.type_of(v).numel() * graph.type_of(v).dtype.size_of(),
         };
 
+        // Liveness: values the outputs depend on.
         let mut live = vec![false; n];
         for &v in graph.outputs() {
             live[v] = true;
@@ -285,6 +369,7 @@ impl Plan {
                 }
             }
         }
+        // For each value, the indices of the live nodes that read it.
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (t, node) in graph.nodes().iter().enumerate() {
             if live[node.output] {
@@ -300,10 +385,12 @@ impl Plan {
                 Primitive::Concatenate { in_place: true, .. }
             )
         };
+        // Operands of in-place concatenates are written straight into the result's buffer.
         let mut placed = vec![false; n];
         for node in graph.nodes().iter().filter(|node| in_place(node)) {
             node.inputs.iter().for_each(|&v| placed[v] = true);
         }
+        // `root[v]` is the value whose buffer `v` lives in; reshapes, waits and in-place writes alias it.
         let mut root: Vec<Var> = (0..n).collect();
         let mut view: Vec<Option<View>> = vec![None; n];
         let mut written_at: Vec<Option<View>> = vec![None; n];
@@ -311,6 +398,7 @@ impl Plan {
             if is_reshape(node) || matches!(node.primitive, Primitive::Wait) {
                 root[node.output] = root[node.inputs[0]];
             }
+            // Outputs an updating op writes over one of its operands, with that operand's position.
             let written: Vec<(Var, usize)> = match &node.primitive {
                 p if updates_operand(p) => vec![(node.output, 0)],
                 Primitive::CustomCall { mutated, .. } => {
@@ -334,6 +422,7 @@ impl Plan {
                 if !live[out] {
                     continue;
                 }
+                // Reuse the mutated operand's buffer, or one it may overlap, if nothing else needs it.
                 let candidates = std::iter::once(position).chain(
                     overlappable
                         .iter()
@@ -360,6 +449,7 @@ impl Plan {
                     }
                 }
             }
+            // Whether this node becomes a kernel step that writes its own output buffer.
             let neural_engine = matches!(&node.primitive, Primitive::Fusion { name, .. } if name.starts_with(NEURAL_ENGINE));
             let step = !neural_engine
                 && !in_place(node)
@@ -372,6 +462,7 @@ impl Plan {
                         | Primitive::Wait
                         | Primitive::FusionOutput { .. }
                 );
+            // Donated outputs are placed later, in the donor's buffer.
             let donated = graph.outputs().iter().enumerate().any(|(k, &o)| {
                 o == node.output
                     && (options
@@ -380,6 +471,7 @@ impl Plan {
                         .any(|&i| graph.type_of(graph.inputs()[i]) == graph.type_of(o))
                         || options.donate_into.iter().any(|&(_, j)| j == k))
             });
+            // Write over an operand whose buffer dies here, when the kernel reads it elementwise.
             if step && live[node.output] && !donated {
                 for &u in &node.inputs {
                     let r = root[u];
@@ -405,6 +497,7 @@ impl Plan {
                     written_at[v] = placements[v].as_ref().map(|(_, at)| at.clone());
                 }
             }
+            // A view slice reads its operand's buffer at an offset instead of copying.
             if let Primitive::Slice { view: true, .. } = node.primitive {
                 let x = node.inputs[0];
                 assert!(view[x].is_none(), "a view of a view");
@@ -414,6 +507,7 @@ impl Plan {
         }
         let is_view = |v: Var| view[v].is_some();
         let is_fusion_output = |p: &Primitive| matches!(p, Primitive::FusionOutput { .. });
+        // The nodes that become steps.
         let nodes: Vec<_> = graph
             .nodes()
             .iter()
@@ -426,6 +520,8 @@ impl Plan {
             })
             .collect();
 
+        // Inputs live in caller buffers; outputs of non-owned plans in fresh ones, and an
+        // output whose buffer is already taken gets a copy step.
         let owned = options.parameters.as_ref();
         let mut buffer: Vec<Option<Buffer>> = vec![None; n];
         for (i, &v) in graph.inputs().iter().enumerate() {
@@ -447,6 +543,7 @@ impl Plan {
             }
         }
 
+        // Live range of each buffer root, in step indices.
         let mut first = vec![usize::MAX; n];
         let mut last = vec![0; n];
         for (t, node) in nodes.iter().enumerate() {
@@ -459,6 +556,7 @@ impl Plan {
         for &(_, v) in &copies {
             last[root[v]] = nodes.len();
         }
+        // Extra outputs of multi-output fusions are written by the fusion's step.
         let mut extra: Vec<Vec<(usize, Var)>> = vec![Vec::new(); n];
         for node in graph.nodes().iter().filter(|n| live[n.output]) {
             if let Primitive::FusionOutput { index, .. } = node.primitive {
@@ -475,6 +573,7 @@ impl Plan {
             }
         }
 
+        // Place outputs in donated inputs that are not read after the output is first written.
         let mut aliases = vec![None; graph.outputs().len()];
         let paired = |i: usize| options.donate_into.iter().any(|&(j, _)| j == i);
         let mut donors: Vec<usize> = options.donate.clone();
@@ -509,6 +608,7 @@ impl Plan {
             }
         }
 
+        /// Something that needs room in the workspace.
         enum Region {
             Value(Var),
             Scratch(usize),
@@ -518,6 +618,7 @@ impl Plan {
             Some(l) => (l.align)(graph.type_of(v)).max(ALIGNMENT),
             None => ALIGNMENT,
         };
+        // Workspace regions: `(bytes, first step, last step, what)`.
         let mut regions: Vec<(usize, usize, usize, Region)> = (0..n)
             .filter(|&r| root[r] == r && buffer[r].is_none() && first[r] != usize::MAX)
             .map(|r| (bytes(r), first[r], last[r], Region::Value(r)))
@@ -532,6 +633,8 @@ impl Plan {
                 }
             }
         }
+        // Largest first, each at the lowest aligned offset that doesn't overlap a placed
+        // region whose live range intersects its own.
         regions.sort_by_key(|&(size, ..)| Reverse(size));
         let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut scratch_at = vec![None; nodes.len()];
@@ -616,6 +719,7 @@ impl Plan {
                 tuned: None,
             })
             .collect();
+        // Outputs that alias another buffer are copied out at the end.
         for (k, v) in copies {
             steps.push(Step {
                 primitive: Primitive::Reshape {
@@ -652,6 +756,7 @@ impl Plan {
         }
     }
 
+    /// Builds a staged plan whose stages run in order on the host or device.
     pub(crate) fn staged(
         inputs: Vec<TensorType>,
         outputs: Vec<TensorType>,
@@ -680,6 +785,7 @@ impl Plan {
         }
     }
 
+    /// Runs each stage, moving values between host and device, and gathers the outputs.
     fn run_staged(
         &self,
         staged: &Staged,
@@ -687,6 +793,7 @@ impl Plan {
         workspace: Option<&Tensor>,
         device: Device,
     ) -> Result<Vec<Tensor>, String> {
+        // Program inputs come first; packed blocks follow them.
         let n = self.inputs.len() - self.packed.len();
         let mut values: Vec<Vec<Tensor>> = Vec::with_capacity(staged.stages.len());
         let resolve = |values: &[Vec<Tensor>], source: Source| match source {
@@ -708,6 +815,8 @@ impl Plan {
         for stage in &staged.stages {
             let mut ins: Vec<Tensor> = stage.inputs.iter().map(|&s| resolve(&values, s)).collect();
             ins.extend(stage.blocks.iter().map(|&b| inputs[n + b].clone()));
+            // Host stages run on CPU copies; device stages run in their slice of the shared
+            // workspace when there is one.
             let outputs = match (stage.host, workspace) {
                 (true, _) => {
                     let ins: Vec<Tensor> = ins.iter().map(|t| t.to(Device::Cpu(0))).collect();
@@ -735,14 +844,17 @@ impl Plan {
             .collect())
     }
 
+    /// Types of all inputs, packed blocks included.
     pub(crate) fn input_types(&self) -> &[TensorType] {
         &self.inputs
     }
 
+    /// The steps in execution order.
     pub fn steps(&self) -> &[Step] {
         &self.steps
     }
 
+    /// Mutable steps; drops any captured MPS launches since they may no longer match.
     #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
     pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
         #[cfg(lumen_mps_linked)]
@@ -752,22 +864,27 @@ impl Plan {
         &mut self.steps
     }
 
+    /// Workspace bytes a run needs.
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
     }
 
+    /// Alignment the workspace must have.
     pub fn workspace_alignment(&self) -> usize {
         self.workspace_alignment
     }
 
+    /// Packed parameter blocks as `(member input positions, dimension)`.
     pub fn packed(&self) -> &[(Vec<usize>, usize)] {
         &self.packed
     }
 
+    /// Per packed block, the region sizes its members are interleaved with.
     pub fn interleaved(&self) -> &[Vec<usize>] {
         &self.interleaved
     }
 
+    /// Runs on the device of the first input (the CPU when there are none).
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         self.run_on(
             inputs,
@@ -775,6 +892,8 @@ impl Plan {
         )
     }
 
+    /// Runs on `device`, allocating the workspace and outputs; all inputs must already be there.
+    /// On the meta device it only returns empty outputs.
     pub fn run_on(&self, inputs: &[Tensor], device: Device) -> Result<Vec<Tensor>, String> {
         self.check_inputs(inputs)?;
         if let Some(t) = inputs.iter().find(|t| t.device() != device) {
@@ -823,6 +942,8 @@ impl Plan {
         Ok(outputs.into_iter().map(|t| t.to(device)).collect())
     }
 
+    /// Runs an owned plan in a caller-provided workspace; outputs placed in the workspace are
+    /// returned as views of it, so the next run overwrites them.
     pub fn run_in(&self, workspace: &Tensor, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         self.check_inputs(inputs)?;
         if let Some(staged) = &self.staged {
@@ -845,6 +966,7 @@ impl Plan {
         }
         let view =
             |offset: usize, ty: &TensorType| workspace.view_bytes(offset, ty.dtype, &ty.shape);
+        // Whether any step or output reads input `i`.
         let read = |i: usize| {
             let at = Buffer::Input(i);
             self.outputs_at.contains(&at)
@@ -866,6 +988,8 @@ impl Plan {
             .zip(&self.inputs_at)
             .enumerate()
         {
+            // Arguments that sit on another device or share storage with a donated input are copied;
+            // unread or stridedly readable parameters are used as given.
             let donated =
                 |j: &usize| self.aliases.contains(&Some(*j)) && inputs[*j].shares_storage_with(t);
             match *at {
@@ -900,6 +1024,8 @@ impl Plan {
             .collect()
     }
 
+    /// Whether every step reading input `i` accepts it with `strides`, so it needn't be made
+    /// contiguous first.
     fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {
         if self.triton.is_some() {
             let at = Buffer::Input(i);
@@ -949,6 +1075,7 @@ impl Plan {
         }
     }
 
+    /// Errors unless `inputs` match the plan's input dtypes and shapes.
     fn check_inputs(&self, inputs: &[Tensor]) -> Result<(), String> {
         if inputs.len() != self.inputs.len() {
             return Err(format!(
@@ -968,6 +1095,7 @@ impl Plan {
         Ok(())
     }
 
+    /// The device the kernels run on for `device`, erroring on steps it can't run.
     fn executor(&self, device: Device) -> Result<Device, String> {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
@@ -1017,6 +1145,7 @@ impl Plan {
         Ok(executor)
     }
 
+    /// Launches every step against the given input, output and workspace tensors.
     fn execute(
         &self,
         executor: Device,
@@ -1066,6 +1195,7 @@ impl Plan {
                 self.call_custom_op(step, op, executor, &tensor, workspace)?;
                 continue;
             }
+            // Non-contiguous inputs are read through views of their strides.
             let strided = |&(b, _): &(Buffer, TensorType)| match b {
                 Buffer::Input(i) if !inputs[i].is_contiguous() => Some(i),
                 _ => None,
@@ -1096,6 +1226,7 @@ impl Plan {
             });
             record.accum(|| step.primitive.accum_dtypes(step.output.1.dtype));
             record.strides(|| (step.input_strides(), step.output_strides()));
+            // Operand pointers, offset by their views, then the extra outputs.
             let args: Vec<*const u8> = step
                 .inputs
                 .iter()
@@ -1126,6 +1257,7 @@ impl Plan {
                     use crate::kernels::mps::{
                         Pointers, Unprepared, capture, encode, prepare, replay,
                     };
+                    // Capture each step's launch once and replay it with new pointers on later runs.
                     let replayed = !viewed && !crate::profiler::is_enabled() && replayable(step);
                     let Some(cell) = replayed.then(|| {
                         let steps = self
@@ -1217,6 +1349,8 @@ impl Plan {
 }
 
 impl Plan {
+    /// Runs a custom op: copies each mutated operand into its output buffer unless it already
+    /// lives there, then calls the registered kernel on the resulting tensors.
     fn call_custom_op<'a>(
         &self,
         step: &Step,
@@ -1314,6 +1448,7 @@ impl fmt::Display for Plan {
     }
 }
 
+/// Whether the primitive writes its result over its first operand.
 fn updates_operand(p: &Primitive) -> bool {
     match p {
         Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => true,
@@ -1322,6 +1457,8 @@ fn updates_operand(p: &Primitive) -> bool {
     }
 }
 
+/// Whether `node` can write `out` into buffer `r` while reading it: every read of `r`
+/// happens at the element being written.
 fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) -> bool {
     use Primitive::*;
     let elementwise = |p: &Primitive| {
@@ -1350,6 +1487,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
             .iter()
             .zip(body.inputs())
             .filter(|&(&v, _)| root[v] == r)
+            // Every use of the operand inside the body must be elementwise.
             .all(|(_, &b)| {
                 let (mut stack, mut seen) = (vec![b], vec![false; body.types.len()]);
                 while let Some(v) = stack.pop() {
@@ -1371,6 +1509,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
                 }
                 _ => None,
             });
+            // Only the mutated operand may live in `r`.
             let position = mutated[k.unwrap_or(0)];
             node.inputs
                 .iter()
@@ -1381,6 +1520,7 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
     }
 }
 
+/// Appends the unique source locations of `node` and, for fusions, of its body.
 fn sources_of(node: &Node, sources: &mut Vec<(&'static str, u32)>) {
     for &s in node.sources {
         if !sources.contains(&s) {

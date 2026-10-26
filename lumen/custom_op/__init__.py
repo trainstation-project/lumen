@@ -1,3 +1,5 @@
+"""User-defined custom ops: Python functions that mutate tensor arguments, called from compiled code."""
+
 import functools
 import inspect
 
@@ -17,6 +19,7 @@ def custom_op(name, fn=None, /, *, mutates_args, overlappable=None):
     (see the module). A decorator without ``fn``."""
 
     def wrap(fn):
+        """Wraps `fn` as a `CustomOp`."""
         return CustomOp(name, fn, mutates_args, overlappable)
 
     return wrap if fn is None else wrap(fn)
@@ -26,6 +29,7 @@ class CustomOp:
     """A custom op: call it inside a function ``lumen.compile`` compiles."""
 
     def __init__(self, name, fn, mutates_args, overlappable=None):
+        """Validates `mutates_args` and `overlappable` against `fn`'s signature."""
         mutates = (mutates_args,) if isinstance(mutates_args, str) else tuple(mutates_args)
         overlaps = {
             out: (inputs,) if isinstance(inputs, str) else tuple(inputs)
@@ -50,6 +54,9 @@ class CustomOp:
         functools.update_wrapper(self, fn)
 
     def __call__(self, *args, **kwargs):
+        """Records a custom call in the current trace; the mutated arguments take its results.
+
+        Raises unless called while tracing or when a mutated argument isn't a tensor."""
         if not tracer._TRACES:
             raise RuntimeError(f"{self.name}: a custom op runs in a function lumen.compile compiles")
         bound = self._signature.bind(*args, **kwargs)
@@ -72,11 +79,13 @@ class CustomOp:
         arguments, fn, signature = dict(bound.arguments), self._fn, self._signature
 
         def run(tensors):
+            """Calls `fn` with the traced tensor arguments replaced by runtime `tensors`."""
             call = inspect.BoundArguments(signature, {**arguments, **dict(zip(names, tensors))})
             if fn(*call.args, **call.kwargs) is not None:
                 raise TypeError("a custom op returns nothing: its results are the arguments it mutates")
 
         mutated = [names.index(name) for name in self.mutates_args]
+        # Overlap pairs as (mutated operand, read operand) positions among the tensor operands.
         overlappable = [
             (names.index(out), names.index(i))
             for out, inputs in self.overlappable.items()
@@ -88,4 +97,5 @@ class CustomOp:
             operands[m].copy_(value)
 
     def __repr__(self):
+        """Names the op and the arguments it mutates."""
         return f"<custom op {self.name} mutating {', '.join(self.mutates_args)}>"

@@ -1,3 +1,5 @@
+"""Tests of lumen's safetensors reader and writer."""
+
 import numpy as np
 import pytest
 
@@ -25,12 +27,14 @@ DTYPES = [
 
 
 def tensors():
+    """A small 2x3 tensor of each supported dtype, keyed by dtype."""
     values = np.arange(6).reshape(2, 3) % 5
     data = {dtype: (values != 0 if dtype == "bool" else values).tolist() for dtype in DTYPES}
     return {dtype: lumen.tensor(data[dtype], dtype=dtype) for dtype in DTYPES}
 
 
 def assert_same(expected, actual):
+    """Asserts ``actual`` has the same names, dtypes, shapes and values as ``expected``."""
     assert sorted(expected) == sorted(actual)
     for name, t in expected.items():
         assert (actual[name].dtype, list(actual[name].shape)) == (t.dtype, list(t.shape))
@@ -38,14 +42,17 @@ def assert_same(expected, actual):
 
 
 def test_bytes_round_trip():
+    """Tensors survive save/load in memory, and the header is the documented 8-byte length plus JSON."""
     ts = tensors()
     assert_same(ts, load(save(ts)))
+    # Header: little-endian u64 length, then compact JSON.
     data = save({"attn.0": lumen.tensor([[[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]])})
     assert data[:8] == (64).to_bytes(8, "little")
     assert data[8:72] == b'{"attn.0":{"dtype":"F32","shape":[1,2,3],"data_offsets":[0,24]}}'
 
 
 def test_files_and_safe_open(tmp_path):
+    """Files round-trip with metadata, ``safe_open`` reads lazily (also onto meta) and refuses use after closing."""
     path = tmp_path / "model.safetensors"
     ts = tensors()
     save_file(ts, path, metadata={"format": "lumen"})
@@ -66,6 +73,7 @@ def test_files_and_safe_open(tmp_path):
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_load_onto_device(tmp_path, device, triton_on_cuda):
+    """Device tensors save, and load back onto the device with the same values."""
     try:
         on_device = {k: v.to(device) for k, v in tensors().items()}
     except RuntimeError as e:
@@ -78,6 +86,7 @@ def test_load_onto_device(tmp_path, device, triton_on_cuda):
 
 
 def test_save_checks(tmp_path):
+    """Saving rejects non-dicts, non-tensors, shared storage, non-contiguous and meta tensors."""
     w = lumen.tensor([[1.0, 2.0], [3.0, 4.0]])
     with pytest.raises(ValueError, match="expected a dict|Expected a dict"):
         save([w])
@@ -92,6 +101,7 @@ def test_save_checks(tmp_path):
 
 
 def test_load_errors(tmp_path):
+    """Loading reports missing files, bad JSON and unsupported dtypes."""
     with pytest.raises(OSError):
         load_file(tmp_path / "missing.safetensors")
     with pytest.raises(ValueError, match="invalid JSON"):

@@ -1,7 +1,9 @@
+//! Lowers a lumen graph to a serialized Core ML `mlProgram` spec in the MIL dialect.
 use super::proto::Message;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::{DType, Scalar};
 
+/// Shape Core ML sees for a model input or output; scalars become `[1]`.
 pub(crate) fn io_shape(shape: &[usize]) -> Vec<usize> {
     match shape.is_empty() {
         true => vec![1],
@@ -9,6 +11,7 @@ pub(crate) fn io_shape(shape: &[usize]) -> Vec<usize> {
     }
 }
 
+/// MIL scalar type code and name for `dtype`, or an error for dtypes MIL programs can't compute.
 pub(crate) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
     Ok(match dtype {
         DType::F16 => (10, "fp16"),
@@ -23,6 +26,7 @@ pub(crate) fn mil_dtype(dtype: DType) -> Result<(i64, &'static str), String> {
     })
 }
 
+/// Core ML `ArrayFeatureType` data type code for a model input or output of `dtype`.
 pub(crate) fn array_dtype(dtype: DType) -> Result<i64, String> {
     match dtype {
         DType::F16 => Ok(65552),
@@ -34,6 +38,7 @@ pub(crate) fn array_dtype(dtype: DType) -> Result<i64, String> {
     }
 }
 
+/// Encodes a MIL `ValueType` for a tensor of type code `dtype` and `shape`.
 fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     let mut t = Message::new().int(1, dtype).int(2, shape.len() as i64);
     for &d in shape {
@@ -45,17 +50,20 @@ fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     Message::new().message(1, t)
 }
 
+/// Encodes an immediate MIL value of the given type wrapping `tensor`.
 fn value(dtype: i64, shape: &[usize], tensor: Message) -> Message {
     Message::new()
         .message(2, tensor_type(dtype, shape))
         .message(3, Message::new().message(1, tensor))
 }
 
+/// Encodes a scalar string MIL value (type code 2).
 fn string_value(s: &str) -> Message {
     let strings = Message::new().string(1, s);
     value(2, &[], Message::new().message(4, strings))
 }
 
+/// Encodes little-endian `data` as a MIL tensor value in the field matching `dtype`.
 fn tensor_value(dtype: DType, data: &[u8]) -> Message {
     let words = |n: usize| data.chunks_exact(n);
     match dtype {
@@ -76,6 +84,7 @@ fn tensor_value(dtype: DType, data: &[u8]) -> Message {
     }
 }
 
+/// Little-endian bytes of `value` converted to `dtype`.
 fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
     let f = match value {
         Scalar::Bool(b) => f64::from(u8::from(b)),
@@ -93,23 +102,33 @@ fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
     }
 }
 
+/// For each emitted named op, its MIL name and the index of the graph node it came from
+/// (`None` for ops emitted outside any node, such as output renames).
 pub(crate) type Owners = Vec<(String, Option<usize>)>;
 
+/// State while lowering one graph into MIL ops.
 struct Lower<'a> {
     graph: &'a Graph,
+    /// MIL operations emitted so far, in program order.
     ops: Vec<Message>,
+    /// Per graph value, its MIL name and the shape it currently has in the program; that shape can
+    /// keep size-1 dims where the value is broadcast, until `full` tiles it.
     vals: Vec<Option<(String, Vec<usize>)>>,
+    /// Counter for fresh `t{n}` names.
     names: usize,
+    /// Graph node being lowered, recorded in `owners`.
     node: Option<usize>,
     owners: Owners,
 }
 
 impl Lower<'_> {
+    /// Returns a new unique MIL value name.
     fn fresh(&mut self) -> String {
         self.names += 1;
         format!("t{}", self.names)
     }
 
+    /// Emits op `kind` with named `inputs` under a fresh name and returns that name.
     fn op(
         &mut self,
         kind: &str,
@@ -121,6 +140,7 @@ impl Lower<'_> {
         self.named(name, kind, inputs, dtype, shape)
     }
 
+    /// Emits op `kind` with named `inputs` producing `name` of `dtype` and `shape`.
     fn named(
         &mut self,
         name: String,
@@ -146,6 +166,7 @@ impl Lower<'_> {
         Ok(name)
     }
 
+    /// Emits a `const` op holding `data` and returns its name.
     fn constant(&mut self, dtype: DType, shape: &[usize], data: &[u8]) -> Result<String, String> {
         let name = self.fresh();
         let code = mil_dtype(dtype)?.0;
@@ -163,6 +184,7 @@ impl Lower<'_> {
         Ok(name)
     }
 
+    /// Emits a 1-D int32 constant of `values`.
     fn ints(&mut self, values: &[usize]) -> Result<String, String> {
         let data: Vec<u8> = values
             .iter()
@@ -171,14 +193,17 @@ impl Lower<'_> {
         self.constant(DType::I32, &[values.len()], &data)
     }
 
+    /// Emits a scalar int32 constant.
     fn int(&mut self, value: i64) -> Result<String, String> {
         self.constant(DType::I32, &[], &(value as i32).to_le_bytes())
     }
 
+    /// Emits a scalar bool constant.
     fn boolean(&mut self, value: bool) -> Result<String, String> {
         self.constant(DType::Bool, &[], &[u8::from(value)])
     }
 
+    /// Name of `v` at its full graph shape, tiling a compact broadcast value first.
     fn full(&mut self, v: Var) -> Result<String, String> {
         let ty = self.graph.type_of(v).clone();
         let (name, shape) = self.vals[v].clone().ok_or("a value before its producer")?;
@@ -197,6 +222,7 @@ impl Lower<'_> {
         Ok(tiled)
     }
 
+    /// Emits a reshape of `name` to `shape`.
     fn reshape(&mut self, name: String, dtype: DType, shape: &[usize]) -> Result<String, String> {
         let s = self.ints(shape)?;
         self.op(
@@ -207,6 +233,8 @@ impl Lower<'_> {
         )
     }
 
+    /// Emits a transpose of `name` by `perm`, skipping identity permutations, and returns the
+    /// result with its shape.
     fn transpose(
         &mut self,
         name: String,
@@ -228,6 +256,7 @@ impl Lower<'_> {
         Ok((name, out))
     }
 
+    /// Lowers one graph node to MIL ops and returns the result name with its program shape.
     fn lower_node(&mut self, node: &crate::graph::Node) -> Result<(String, Vec<usize>), String> {
         use Primitive::*;
         let graph = self.graph;
@@ -238,6 +267,7 @@ impl Lower<'_> {
                            params: &[&str]|
          -> Result<(String, Vec<usize>), String> {
             let mut args = Vec::new();
+            // Elementwise ops broadcast in MIL, so the result keeps the max of the operands' compact shapes.
             let mut shape = vec![1; ty.shape.len()];
             for (k, &p) in params.iter().enumerate() {
                 let (name, s) = this.vals[input(k)]
@@ -296,6 +326,7 @@ impl Lower<'_> {
                 fill_value,
                 dtype,
             } => {
+                // Constants stay at all-ones shape and are broadcast by consumers.
                 let ones = vec![1; shape.len()];
                 let name = self.constant(*dtype, &ones, &scalar_bytes(*dtype, *fill_value))?;
                 (name, ones)
@@ -305,6 +336,7 @@ impl Lower<'_> {
                 shape,
                 dimension,
             } => {
+                // Only the iota axis is materialized; the other dims broadcast.
                 let mut compact = vec![1; shape.len()];
                 compact[*dimension] = shape[*dimension];
                 let data: Vec<u8> = (0..shape[*dimension])
@@ -320,6 +352,8 @@ impl Lower<'_> {
                 let x = input(0);
                 let (name, xs) = self.vals[x].clone().ok_or("a value before its producer")?;
                 let dtype = ty.dtype;
+                // Order the operand's dims by their output position, then reshape to the output rank with
+                // size-1 dims for the broadcast axes.
                 let mut perm: Vec<usize> = (0..broadcast_dimensions.len()).collect();
                 perm.sort_by_key(|&i| broadcast_dimensions[i]);
                 let (name, xs) = self.transpose(name, dtype, &xs, &perm)?;
@@ -343,6 +377,7 @@ impl Lower<'_> {
                 let (name, xs) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
+                // A broadcast scalar can reshape without tiling; anything else must be materialized first.
                 if xs.iter().all(|&d| d == 1) {
                     let ones = vec![1; new_sizes.len()];
                     (self.reshape(name, ty.dtype, &ones)?, ones)
@@ -419,6 +454,7 @@ impl Lower<'_> {
                 let (n, it) = (graph.type_of(x).shape[*axis], graph.type_of(i).clone());
                 let x = self.full(x)?;
                 let i = self.full(i)?;
+                // Clamp gather indices into `[0, n)` since MIL gather does not validate them.
                 let lo = self.constant(it.dtype, &[], &scalar_bytes(it.dtype, Scalar::Int(0)))?;
                 let hi = self.constant(
                     it.dtype,
@@ -460,6 +496,7 @@ impl Lower<'_> {
         })
     }
 
+    /// Emits a scalar string constant.
     fn constant_string(&mut self, s: &str) -> Result<String, String> {
         let name = self.fresh();
         let op = Message::new()
@@ -476,6 +513,9 @@ impl Lower<'_> {
         Ok(name)
     }
 
+    /// Lowers a `DotGeneral` to a MIL `matmul` by transposing each operand to
+    /// `[batch, free, contracting]` / `[batch, contracting, free]` and folding the dims into a 2-D
+    /// or 3-D matmul.
     fn dot(&mut self, node: &crate::graph::Node) -> Result<(String, Vec<usize>), String> {
         let Primitive::DotGeneral {
             lhs_contracting,
@@ -494,6 +534,7 @@ impl Lower<'_> {
             graph.type_of(node.inputs[0]).clone(),
             graph.type_of(node.inputs[1]).clone(),
         );
+        // Compute in float16 only for f16-to-f16 dots; everything else is cast to float32.
         let dtype = match (l.dtype, *output_dtype) {
             (DType::F16, DType::F16) => DType::F16,
             (DType::F16 | DType::F32, DType::F32) => DType::F32,
@@ -567,6 +608,8 @@ impl Lower<'_> {
     }
 }
 
+/// Builds the Core ML model spec for `graph`, embedding inputs with `Some` bytes in `constants`
+/// as constants and exposing the rest as `in{k}` features; returns the spec bytes and op owners.
 pub(crate) fn lower(
     graph: &Graph,
     constants: &[Option<&[u8]>],
@@ -606,6 +649,7 @@ pub(crate) fn lower(
                         .string(1, &name)
                         .message(2, tensor_type(code, &io_shape(&ty.shape))),
                 );
+                // Rank-0 inputs are fed as `[1]` and reshaped back to scalars.
                 match ty.shape.is_empty() {
                     true => lower.reshape(name, ty.dtype, &[])?,
                     false => name,
@@ -626,6 +670,7 @@ pub(crate) fn lower(
         description = description.message(10, feature(&format!("out{k}"), &ty)?);
         let x = lower.full(v)?;
         let name = format!("out{k}");
+        // Outputs get their `out{k}` name via a final reshape or identity op.
         match ty.shape.is_empty() {
             true => {
                 let s = lower.ints(&[1])?;

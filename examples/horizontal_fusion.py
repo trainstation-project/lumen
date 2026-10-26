@@ -1,3 +1,5 @@
+"""Profiles an SGD step over many small parameters on MPS with horizontal fusion off and on."""
+
 import numpy as np
 from optim import SGD
 
@@ -10,10 +12,12 @@ rng = np.random.default_rng(0)
 
 
 def meta(shape):
+    """An uninitialised float32 meta tensor used to trace the step."""
     return lumen.empty(list(shape), lumen.float32, device="meta")
 
 
 def tensor(shape):
+    """A random float32 CPU tensor."""
     return lumen.from_numpy(rng.standard_normal(shape).astype(np.float32))
 
 
@@ -22,6 +26,7 @@ opt = SGD([meta(shape) for shape in shapes], lr=1e-2)
 
 
 def sgd_step(opt, *grads):
+    """Applies one SGD step and returns the last parameter so the step has an output."""
     opt.step(grads)
     return opt.params[-1]
 
@@ -31,6 +36,7 @@ sgd_step(opt, *(meta(shape) for shape in shapes))
 opt.load_state_dict({f"params.{k}": tensor(shape) for k, shape in enumerate(shapes)})
 
 grads = [[tensor(shape).to("mps") for shape in shapes] for _ in range(PROFILED_STEPS)]
+# Warm up both variants so compilation is outside the profiled range.
 for on in (False, True):
     lumen.config.compiler.mps.horizontal_fusion = on
     sgd_step(opt, *grads[0])
@@ -44,6 +50,7 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             lumen.mps.synchronize()
 
 events = prof.events()
+# Count kernels and MPS busy time that fall inside each labelled range.
 for on in (False, True):
     name = f"horizontal fusion {'on' if on else 'off'}"
     (r,) = [e for e in events if e["kind"] == "user_range" and e["name"] == name]

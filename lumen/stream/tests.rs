@@ -1,6 +1,9 @@
+//! Tests for creating and synchronizing device streams.
+
 use super::stream_for;
 use crate::Device;
 
+/// Every available device yields a stream that synchronizes.
 #[test]
 fn every_present_device_has_a_stream() {
     let devices = [
@@ -14,6 +17,7 @@ fn every_present_device_has_a_stream() {
     }
 }
 
+/// Device indices past the last present device yield an error instead of a stream.
 #[test]
 fn absent_devices_have_none() {
     let past_last = Device::Cuda(crate::device::cuda::CUDA.device_count());

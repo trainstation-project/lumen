@@ -1,10 +1,16 @@
+//! Common subexpression elimination.
+
 use std::collections::HashMap;
 
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
+/// Nodes already emitted, keyed by primitive name and (remapped) inputs; the full primitive
+/// disambiguates nodes sharing a name but differing in parameters.
 type Seen = HashMap<(&'static str, Vec<Var>), Vec<(Primitive, Var)>>;
 
+/// Rebuilds `graph` with duplicate nodes (same primitive and inputs, commutative inputs in any order)
+/// merged into one. Custom calls are never merged since they have side effects.
 pub(crate) fn cse(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -42,18 +48,22 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
     out
 }
 
+/// Primitives whose two operands can be swapped.
 fn commutative(p: &Primitive) -> bool {
     use Primitive::*;
     matches!(p, Add | Mul | Max | Eq)
 }
 
+/// Compiler pass running [`cse`].
 pub(crate) struct Cse;
 
 impl<M: Module> CompilerPass<M> for Cse {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "cse"
     }
 
+    /// Replaces the module's graph with its deduplicated version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = cse(m.graph());
         Ok(())

@@ -1,14 +1,23 @@
+//! Pass that splits long-K matmuls with too few output tiles into partial products summed over K chunks.
+
 use super::fusion::fusible;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::kernels::dot_general::mps::{float_groups, gemv};
 
+/// Threadgroup count a split GEMM aims to fill the GPU with.
 const GROUPS: usize = 256;
+/// Most K chunks a matmul is split into.
 const MAX_SPLIT: usize = 8;
+/// Smallest K chunk length.
 const MIN_CHUNK: usize = 256;
+/// Smallest K worth splitting.
 const MIN_K: usize = 2048;
 
+/// Rewrites eligible unbatched float matmuls into a batched dot over K chunks plus a sum over chunks.
+/// With `atomic`, an f32 split whose partials would outweigh its operands becomes a `split_k` fusion
+/// that accumulates atomically, unless `fuse` is set and a fusible node reads the result.
 pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
     let nodes = graph.nodes();
     let sliced = |v: Var| {
@@ -63,6 +72,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
             out.set_label(map[node.output], node.label);
             continue;
         };
+        // Split contracting dim `d` of `shape` into `[s, k / s]`, the chunk index becoming a batch dim.
         let reshaped = |shape: &[usize], d: usize| {
             let mut shape = shape.to_vec();
             let k = shape[d];
@@ -83,6 +93,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
             axes: vec![0],
             accum_dtype: *accum_dtype,
         };
+        // Bytes of the partial products written and read back, against the operand bytes.
         let partials = 2 * s * lhs.numel() / lhs.shape[l]
             * (rhs.numel() / rhs.shape[r])
             * accum_dtype.size_of();
@@ -126,6 +137,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
     out
 }
 
+/// The dot of a `split_k` fusion body (a dot followed by a sum over its leading axis).
 pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
     match body.nodes() {
         [dot, sum] => {
@@ -138,6 +150,8 @@ pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
     }
 }
 
+/// Number of K chunks for an `m` x `n` output with contraction `k`, or `None` when there are already
+/// enough tiles, K is short, or no power-of-two split leaves chunks of at least `MIN_CHUNK`.
 fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
     let groups = float_groups(1, m, n);
     if groups == 0 || 2 * groups >= GROUPS || k < MIN_K {
@@ -150,6 +164,7 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
     (s >= 2).then_some(s)
 }
 
+/// Compiler pass running `split_k`, atomically unless deterministic mode is on.
 pub(super) struct SplitK;
 
 impl<M: Module> CompilerPass<M> for SplitK {
@@ -157,6 +172,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
         "split_k"
     }
 
+    /// Splits the module's matmuls.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let config = &m.options().config.mps;
         *m.graph_mut() = split_k(m.graph(), !config.deterministic, config.fuse);

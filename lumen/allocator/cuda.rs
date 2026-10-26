@@ -1,3 +1,5 @@
+//! CUDA allocator: hands out blocks of one `cudaMalloc`ed static region per device.
+
 #[cfg(lumen_cuda_linked)]
 use std::collections::HashMap;
 #[cfg(lumen_cuda_linked)]
@@ -13,6 +15,7 @@ use crate::device::Device;
 #[cfg(lumen_cuda_linked)]
 use crate::device::cuda::CUDA;
 
+/// Raw CUDA runtime allocation entry points.
 #[cfg(lumen_cuda_linked)]
 mod ffi {
     use std::ffi::c_void;
@@ -24,6 +27,7 @@ mod ffi {
     }
 }
 
+/// `cudaMalloc`s `nbytes` on device `index`, panicking when it fails.
 #[cfg(lumen_cuda_linked)]
 fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
     CUDA.set_device(index);
@@ -36,6 +40,8 @@ fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
         })
 }
 
+/// Frees a `malloc`ed device pointer on device `index`.
+///
 /// # Safety
 /// `ptr` is a `malloc` of device `index`'s, not yet freed.
 #[cfg(lumen_cuda_linked)]
@@ -44,6 +50,7 @@ unsafe fn free(index: usize, ptr: NonNull<u8>) {
     unsafe { ffi::cudaFree(ptr.as_ptr().cast()) };
 }
 
+/// Allocator for one CUDA device, sub-allocating a lazily reserved static region.
 #[cfg(lumen_cuda_linked)]
 pub struct CudaAllocator {
     index: usize,
@@ -52,6 +59,7 @@ pub struct CudaAllocator {
 
 #[cfg(lumen_cuda_linked)]
 impl CudaAllocator {
+    /// Allocator for device `index` whose region reserves `capacity` bytes on first use.
     pub fn new(index: usize, capacity: usize) -> Self {
         CudaAllocator {
             index,
@@ -71,6 +79,7 @@ impl Allocator for CudaAllocator {
     }
 }
 
+/// Frees the device region if it was ever reserved.
 #[cfg(lumen_cuda_linked)]
 impl Drop for CudaAllocator {
     fn drop(&mut self) {
@@ -80,6 +89,7 @@ impl Drop for CudaAllocator {
     }
 }
 
+/// Returns the shared allocator for CUDA device `index`, creating it on first use.
 #[cfg(lumen_cuda_linked)]
 pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
     static ALLOCATORS: OnceLock<Mutex<HashMap<usize, Arc<dyn Allocator>>>> = OnceLock::new();

@@ -1,3 +1,5 @@
+"""Tests for running fixed-weight dots on Apple's Neural Engine through Core ML."""
+
 import json
 import platform
 
@@ -15,23 +17,28 @@ M, K, H = 256, 512, 1024
 
 
 class MLP(lumen.nn.Module):
+    """A two-layer float16 MLP: ``relu(x @ w1 + b1) @ w2``."""
+
     w1: lumen.Tensor
     b1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Returns the MLP of ``x`` in float16, its dots accumulated in float32."""
         h = F.relu(F.matmul(x, self.w1, "float32", "float16") + self.b1)
         return F.matmul(h, self.w2, "float32", "float16")
 
 
 @pytest.fixture
 def neural_engine():
+    """Turns on the Neural Engine for one test, then resets the compiler config."""
     lumen.config.compiler.mps.neural_engine = True
     yield
     lumen.config.compiler.reset()
 
 
 def _values(seed=0):
+    """Returns seeded float16 MLP weights ``(w1, b1, w2)``."""
     rng = np.random.default_rng(seed)
     w1 = (rng.standard_normal((K, H)) / np.sqrt(K)).astype(np.float16)
     b1 = rng.standard_normal(H).astype(np.float16)
@@ -59,10 +66,12 @@ def _compiled(fn, model, x):
 
 
 def _model():
+    """Returns an MLP of meta weights with the shapes of ``_values``."""
     return MLP(*(lumen.empty(list(a.shape), "float16", device="meta") for a in _values()))
 
 
 def _load(model, values):
+    """Copies numpy ``values`` into ``model``'s parameters in order."""
     for t, a in zip(model.parameters(), values):
         t.copy_(lumen.from_numpy(a))
 
@@ -122,10 +131,13 @@ def test_neural_engine_leaves_written_weights_on_mps(neural_engine):
     Engine; small dots stay on MPS too."""
 
     class Frozen(lumen.nn.Module):
+        """Wraps a frozen MLP and a weight the step trains."""
+
         mlp: MLP
         trained: lumen.Tensor
 
     def step(m, x):
+        """Applies the MLP and the trained weight, then halves the trained weight in place."""
         y = F.matmul(m.mlp(x), m.trained, "float32", "float16")
         m.trained.copy_(m.trained * 0.5)
         return y

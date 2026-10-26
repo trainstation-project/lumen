@@ -1,6 +1,10 @@
+//! Unit tests for the CPU allocator, the `Region` sub-allocator and each device backend's allocator.
+
+/// Tests of the host heap allocator.
 mod cpu {
     use crate::{Allocator, CpuAllocator};
 
+    /// `CpuAllocator::get` hands out one static instance.
     #[test]
     fn get_returns_the_same_global_instance() {
         let a = CpuAllocator::get();
@@ -8,6 +12,7 @@ mod cpu {
         assert!(std::ptr::addr_eq(a, b));
     }
 
+    /// Host allocations start on a 64-byte boundary.
     #[test]
     fn allocation_is_64_byte_aligned() {
         let data = CpuAllocator.allocate(256);
@@ -19,6 +24,7 @@ mod cpu {
         unsafe { CpuAllocator.deallocate(data, 256) };
     }
 
+    /// Allocated host bytes can be written and read back.
     #[test]
     fn can_write_and_read_back_through_the_pointer() {
         let data = CpuAllocator.allocate(64);
@@ -33,6 +39,7 @@ mod cpu {
         }
     }
 
+    /// A zero-byte allocation yields an aligned pointer that can be freed.
     #[test]
     fn zero_byte_allocation_is_safe() {
         let data = CpuAllocator.allocate(0);
@@ -40,6 +47,7 @@ mod cpu {
         unsafe { CpuAllocator.deallocate(data, 0) };
     }
 
+    /// Allocating and freeing sizes up to 2 KiB many times stays sound.
     #[test]
     fn repeated_alloc_and_free_cycles_do_not_crash() {
         for i in 0..100 {
@@ -50,6 +58,7 @@ mod cpu {
     }
 }
 
+/// Tests of `Region` backed by host memory.
 mod region {
     use std::ptr::NonNull;
     use std::sync::Arc;
@@ -58,6 +67,7 @@ mod region {
     use crate::allocator::Region;
     use crate::{Allocator, CpuAllocator, DataPtr, Device};
 
+    /// `Region` over CPU memory that counts how often its range is reserved and released.
     struct Host {
         region: Region,
         reservations: Arc<AtomicUsize>,
@@ -78,6 +88,7 @@ mod region {
         }
     }
 
+    /// Releases the reserved range back to the CPU allocator, counting the release.
     impl Drop for Host {
         fn drop(&mut self) {
             if let Some(base) = self.region.base() {
@@ -87,6 +98,7 @@ mod region {
         }
     }
 
+    /// Exposes the region's test accessors on `Host`.
     impl std::ops::Deref for Host {
         type Target = Region;
 
@@ -95,6 +107,7 @@ mod region {
         }
     }
 
+    /// Host-backed region of `capacity` bytes plus its reservation and release counters.
     fn counted(capacity: usize) -> (Host, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let (reservations, releases) =
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
@@ -106,14 +119,17 @@ mod region {
         (host, reservations, releases)
     }
 
+    /// Host-backed region of `capacity` bytes.
     fn allocator(capacity: usize) -> Host {
         counted(capacity).0
     }
 
+    /// Gives `nbytes` at `ptr` back to `allocator`.
     fn free(allocator: &Host, ptr: NonNull<u8>, nbytes: usize) {
         unsafe { Allocator::deallocate(allocator, ptr, nbytes) }
     }
 
+    /// The range is reserved on the first allocation and freed only when the allocator drops.
     #[test]
     fn the_region_is_reserved_once_and_released_with_the_allocator() {
         let (allocator, reservations, releases) = counted(1 << 20);
@@ -131,6 +147,7 @@ mod region {
         assert_eq!(releases.load(Ordering::Relaxed), 1);
     }
 
+    /// Dropping a `DataPtr` returns its bytes to the region.
     #[test]
     fn a_data_ptr_gives_its_allocation_back_on_drop() {
         let allocator = Arc::new(allocator(4096));
@@ -140,6 +157,7 @@ mod region {
         assert_eq!(allocator.live_bytes(), 0);
     }
 
+    /// Consecutive allocations land at increasing `ALIGNMENT` multiples.
     #[test]
     fn allocations_are_aligned_bumps() {
         let allocator = allocator(1 << 20);
@@ -153,6 +171,7 @@ mod region {
         assert_eq!(allocator.live_bytes(), 410);
     }
 
+    /// A freed block is reused by a later allocation that fits it.
     #[test]
     fn freed_memory_is_reused_while_others_are_live() {
         let allocator = allocator(1 << 20);
@@ -168,6 +187,7 @@ mod region {
         assert_eq!((allocator.used(), allocator.live_bytes()), (0, 0));
     }
 
+    /// Repeated alloc/free of temporaries next to live inputs keeps the high-water mark fixed.
     #[test]
     fn a_loop_with_live_inputs_does_not_grow() {
         let allocator = allocator(4096);
@@ -184,6 +204,7 @@ mod region {
         assert_eq!(allocator.used(), 1024 + 1000);
     }
 
+    /// Freeing neighbours in any order merges them back into one block.
     #[test]
     fn freed_neighbours_merge() {
         let allocator = allocator(1024);
@@ -196,6 +217,7 @@ mod region {
         assert_eq!(Allocator::allocate(&allocator, 1024), blocks[0]);
     }
 
+    /// `try_take` returns `None` when no free block fits.
     #[test]
     fn a_full_allocator_refuses_allocations() {
         let allocator = allocator(1024);
@@ -213,6 +235,7 @@ mod region {
         );
     }
 
+    /// An over-aligned block skips ahead and the skipped gap stays allocatable.
     #[test]
     fn aligned_allocations_start_at_their_alignment_and_leave_the_gap_free() {
         let allocator = allocator(1 << 16);
@@ -236,12 +259,14 @@ mod region {
         assert_eq!(whole.as_ptr().addr(), base, "freed blocks merge back");
     }
 
+    /// The out-of-memory panic points at `static_allocator_bytes`.
     #[test]
     #[should_panic(expected = "static_allocator_bytes")]
     fn allocating_past_the_end_names_the_setting() {
         Allocator::allocate(&allocator(1024), 2048);
     }
 
+    /// Zero-byte allocations take no space.
     #[test]
     fn zero_byte_allocations_are_fine() {
         let allocator = allocator(1024);
@@ -253,6 +278,7 @@ mod region {
         assert_eq!(allocator.used(), 0);
     }
 
+    /// Region memory can be written and read through the returned pointer.
     #[test]
     fn the_memory_is_usable() {
         let allocator = allocator(4096);
@@ -263,10 +289,12 @@ mod region {
     }
 }
 
+/// Tests of `allocator_for` across devices.
 mod devices {
     use crate::allocator::allocator_for;
     use crate::{Device, Storage, Tensor};
 
+    /// CPU tensors and storage always allocate.
     #[test]
     fn cpu_is_always_available() {
         assert!(allocator_for(Device::Cpu(0)).is_ok());
@@ -275,6 +303,7 @@ mod devices {
         assert_eq!(Storage::new(8, Device::Cpu(0)).device(), Device::Cpu(0));
     }
 
+    /// `allocator_for` returns the same allocator for repeated calls on every available device.
     #[test]
     fn every_device_has_one_shared_allocator() {
         use std::sync::Arc;
@@ -295,6 +324,7 @@ mod devices {
         }
     }
 
+    /// `Storage` can move to another thread.
     #[test]
     fn storage_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -305,6 +335,7 @@ mod devices {
             .unwrap();
     }
 
+    /// Missing CUDA, MPS or out-of-range devices yield an error instead of an allocator.
     #[test]
     fn unavailable_devices_are_reported() {
         if !crate::device::cuda::CUDA.is_available() {
@@ -318,6 +349,7 @@ mod devices {
         }
     }
 
+    /// Creating a tensor on a missing device panics.
     #[test]
     #[should_panic(expected = "is not available")]
     fn tensor_on_unavailable_device_panics() {
@@ -325,10 +357,12 @@ mod devices {
     }
 }
 
+/// CUDA allocator tests; the device ones run only with CUDA linked and a GPU present.
 mod cuda {
     use crate::Device;
     use crate::allocator::allocator_for;
 
+    /// CUDA reports available exactly when it has devices, and one past the last is rejected.
     #[test]
     fn availability_matches_the_device_count() {
         assert_eq!(
@@ -338,12 +372,14 @@ mod cuda {
         assert!(allocator_for(Device::Cuda(crate::device::cuda::CUDA.device_count())).is_err());
     }
 
+    /// Tests that need a CUDA device.
     #[cfg(lumen_cuda_linked)]
     mod device {
         use crate::allocator::allocator_for;
         use crate::allocator::{ALIGNMENT, CudaAllocator};
         use crate::{Allocator, Device, Storage};
 
+        /// Returns from the test early when no CUDA device is present.
         macro_rules! require_cuda {
             () => {
                 if !crate::device::cuda::CUDA.is_available() {
@@ -353,6 +389,7 @@ mod cuda {
             };
         }
 
+        /// Storage on the last CUDA device reports that device.
         #[test]
         fn reports_cuda_devices() {
             require_cuda!();
@@ -363,6 +400,7 @@ mod cuda {
             );
         }
 
+        /// Blocks are `ALIGNMENT`-spaced and freed space is reused from the start.
         #[test]
         fn the_allocator_reserves_device_memory_and_rewinds() {
             require_cuda!();
@@ -378,6 +416,7 @@ mod cuda {
             assert_eq!(allocator.allocate(8), a);
         }
 
+        /// `allocator_for` shares one allocator for `cuda:0`.
         #[test]
         fn get_returns_the_same_global_instance() {
             require_cuda!();
@@ -390,12 +429,14 @@ mod cuda {
     }
 }
 
+/// Metal allocator tests, run only when a Metal device is present.
 #[cfg(lumen_mps_linked)]
 mod mps {
     use crate::allocator::allocator_for;
     use crate::allocator::{ALIGNMENT, MpsAllocator};
     use crate::{Allocator, Device, Storage};
 
+    /// Returns from the test early when Metal is unavailable.
     macro_rules! require_mps {
         () => {
             if !crate::device::mps::MPS.is_available() {
@@ -405,16 +446,19 @@ mod mps {
         };
     }
 
+    /// Fresh 1 MiB MPS allocator separate from the shared one.
     fn fresh() -> MpsAllocator {
         MpsAllocator::new(1 << 20)
     }
 
+    /// Storage on MPS reports the MPS device.
     #[test]
     fn reports_mps_device() {
         require_mps!();
         assert_eq!(Storage::new(8, Device::Mps(0)).device(), Device::Mps(0));
     }
 
+    /// `allocator_for` shares one allocator for `mps:0`.
     #[test]
     fn get_returns_the_same_global_instance() {
         require_mps!();
@@ -425,6 +469,7 @@ mod mps {
         assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
+    /// MPS allocations live in unified memory the host can write and read.
     #[test]
     fn unified_memory_is_host_writable() {
         require_mps!();
@@ -437,6 +482,7 @@ mod mps {
         assert!(slice.iter().enumerate().all(|(i, &b)| b == (i % 251) as u8));
     }
 
+    /// Allocations are `ALIGNMENT`-spaced offsets into one Metal buffer.
     #[test]
     fn the_allocator_is_one_metal_buffer() {
         require_mps!();
@@ -448,11 +494,13 @@ mod mps {
     }
 }
 
+/// TPU allocator tests; the device ones run only with the TPU runtime linked and a TPU present.
 mod tpu {
     use crate::Device;
     use crate::allocator::allocator_for;
     use crate::device::DeviceBackend;
 
+    /// TPU reports available exactly when it has devices, and one past the last is rejected.
     #[test]
     fn availability_matches_the_device_count() {
         let tpu: &dyn DeviceBackend = crate::device::tpu::TPU;
@@ -461,6 +509,7 @@ mod tpu {
         assert!(missing.is_some_and(|e| e.starts_with("TPU device")));
     }
 
+    /// Tests that need a TPU device.
     #[cfg(lumen_tpu_linked)]
     mod device {
         use std::ptr::NonNull;
@@ -470,6 +519,7 @@ mod tpu {
         use crate::device::tpu::{ONE_AT_A_TIME, TPU, memory};
         use crate::{Allocator, DType, Device, Storage, Tensor, TensorOptions};
 
+        /// Serializes TPU tests and returns early when no TPU is present.
         macro_rules! require_tpu {
             () => {
                 let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -480,12 +530,14 @@ mod tpu {
             };
         }
 
+        /// Copies `nbytes` at `ptr` on `tpu:0` to the host.
         fn read(ptr: NonNull<u8>, nbytes: usize) -> Vec<u8> {
             let mut bytes = vec![0; nbytes];
             copy_to_host(0, ptr, &mut bytes).unwrap();
             bytes
         }
 
+        /// Storage on the last TPU reports that device, and TPU devices parse and print.
         #[test]
         fn reports_tpu_devices() {
             require_tpu!();
@@ -498,6 +550,7 @@ mod tpu {
             assert_eq!(Device::Tpu(1).to_string(), "tpu:1");
         }
 
+        /// Reserving takes device memory, freed blocks are reused, and dropping returns the memory.
         #[test]
         fn the_allocator_reserves_device_memory_and_rewinds() {
             require_tpu!();
@@ -518,6 +571,7 @@ mod tpu {
             assert!(memory(0).unwrap().0 < before + capacity);
         }
 
+        /// Reads of a whole block, a slice inside it and another block return the right lengths and bytes.
         #[test]
         fn allocations_read_back_at_their_offsets() {
             require_tpu!();
@@ -535,6 +589,7 @@ mod tpu {
             }
         }
 
+        /// Reading beyond the reserved buffer is an error.
         #[test]
         fn reads_past_the_region_fail() {
             require_tpu!();
@@ -545,6 +600,7 @@ mod tpu {
             unsafe { allocator.deallocate(a, 256) };
         }
 
+        /// Copying a TPU tensor to the host matches its raw device bytes.
         #[test]
         fn a_tpu_tensor_copies_to_the_host() {
             require_tpu!();

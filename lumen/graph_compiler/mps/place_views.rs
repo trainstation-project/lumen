@@ -1,3 +1,5 @@
+//! Pass that turns slices read only by GEMMs into strided views instead of copies.
+
 use super::{MpsModule, codegen};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::attention;
@@ -5,6 +7,7 @@ use crate::graph_compiler::pass::CompilerPass;
 use crate::kernels::dot_general::mps::reads_strided;
 use crate::tensor::contiguous_strides;
 
+/// Compiler pass marking slices as views where their readers allow it.
 pub(super) struct PlaceViews;
 
 impl<'a> CompilerPass<MpsModule<'a>> for PlaceViews {
@@ -12,6 +15,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceViews {
         "place_views"
     }
 
+    /// Sets `view` on each slice `dot_views` accepts.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         for v in dot_views(&m.graph) {
             let node = m.graph.nodes.iter_mut().find(|n| n.output == v);
@@ -23,6 +27,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceViews {
     }
 }
 
+/// Outputs of slices whose readers are all dots or GEMM fusions able to read the sliced input's strides.
 fn dot_views(graph: &Graph) -> Vec<Var> {
     let nodes = graph.nodes();
     let mut views = Vec::new();
@@ -54,6 +59,7 @@ fn dot_views(graph: &Graph) -> Vec<Var> {
     views
 }
 
+/// Whether fusion input `k` may be bound as a strided view: it is not attention and no dot reads it.
 pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
     let Some(&v) = body.inputs().get(k) else {
         return false;
@@ -67,6 +73,7 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
             .any(|n| template(&n.primitive) && n.inputs.contains(&v))
 }
 
+/// Whether GEMM fusion input `k` is read only by the dot, as one operand, in a layout it can stride through.
 pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
     let (Some(dot), Some(&v)) = (codegen::gemm_dot(body), body.inputs().get(k)) else {
         return false;

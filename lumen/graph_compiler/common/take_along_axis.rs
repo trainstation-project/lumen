@@ -1,7 +1,11 @@
+//! Pass lowering `take_along_axis` to a flat `gather`.
+
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
+/// Rewrites each `take_along_axis` as a gather from the flattened operand at flat positions built from
+/// iotas and the indices (int64 for 64-bit indices, int32 otherwise).
 pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -28,6 +32,7 @@ pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
         let mut apply = |p: Primitive, args: &[Var]| out.apply(p, args).expect("a flat position");
         let mut flat = None;
         let mut stride = 1;
+        // Flat position: sum over dims of the coordinate (the index along `axis`) times the stride.
         for d in (0..x.shape.len()).rev() {
             let at = match d == axis {
                 true if indices.dtype == dtype => inputs[1],
@@ -74,13 +79,16 @@ pub(crate) fn take_along_axis(graph: &Graph) -> Graph {
     out
 }
 
+/// Compiler pass running [`take_along_axis`].
 pub(crate) struct TakeAlongAxis;
 
 impl<M: Module> CompilerPass<M> for TakeAlongAxis {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "take_along_axis"
     }
 
+    /// Replaces the module's graph with its lowered version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = take_along_axis(m.graph());
         Ok(())

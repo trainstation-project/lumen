@@ -1,3 +1,5 @@
+"""Dumps the generated code of every kernel launch of a compiled program to a directory."""
+
 import importlib.util
 import pathlib
 import re
@@ -8,14 +10,17 @@ from .common import KERNELS, _traced_at, source_of, type_text
 
 
 def _slug(text):
+    """``text`` reduced to a filename-safe slug of at most 60 characters."""
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")[:60] or "step"
 
 
 def _snippet(text, anchor):
+    """The ``#define`` macro or function in ``text`` starting at the line beginning with ``anchor``, or all of ``text``."""
     lines = text.splitlines()
     start = next((k for k, line in enumerate(lines) if line.startswith(anchor)), None)
     if start is None:
         return text
+    # A macro ends at the first line without a continuation backslash; a function at its closing brace.
     if anchor.startswith("#define"):
         end = next((k for k in range(start, len(lines)) if not lines[k].endswith("\\")), len(lines) - 1)
     else:
@@ -24,6 +29,7 @@ def _snippet(text, anchor):
 
 
 def _launch_code(step, kernel, code):
+    """Source and file extension of a launch's kernel: captured code, a generated kernel, a fusion or a primitive's snippet."""
     from lumen.graph_compiler._C import _kernel_source
 
     if code is not None:
@@ -42,6 +48,7 @@ def _launch_code(step, kernel, code):
 
 
 def _header(step, at, ext):
+    """Comment header for a dumped kernel: the step, where it was traced and its graph."""
     fusion = step["fusion"]
     graph = fusion["body"] if fusion else step["text"]
     mark = "#" if ext in ("txt", "py") else "//"
@@ -50,12 +57,14 @@ def _header(step, at, ext):
 
 
 def _literal(value):
+    """Python literal for ``value``, spelling non-finite floats as ``float(...)``."""
     if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
         return f'float("{value}")'
     return repr(value)
 
 
 def program_source(graph, name="program"):
+    """Python source of a function named ``name`` that re-traces ``graph`` via ``prims.bind``."""
     names = {v: f"in{k}" for k, v in enumerate(graph.inputs())}
     lines = ["from lumen.graph import prims", "", ""]
     lines += [f"# {names[v]}: {type_text(*graph.type_of(v))}" for v in graph.inputs()]
@@ -76,6 +85,7 @@ def program_source(graph, name="program"):
 
 
 def _pallas(step, at, module, spec):
+    """Python script that rebuilds a launch's Mosaic program from its Pallas template ``module`` and JSON ``spec``."""
     return (
         _header(step, at, "txt")
         + f"import json\n\nfrom {module} import program\n\n"
@@ -84,6 +94,8 @@ def _pallas(step, at, module, spec):
 
 
 def dump_code(graph, plan, run, device, directory):
+    """Runs ``run`` capturing its kernel launches and writes each launch's code, the graph, the plan and an index
+    to ``directory``; returns the written kernel files."""
     from lumen.graph_compiler._C import _capture_launches, _captured_launches
 
     _capture_launches()
@@ -97,6 +109,7 @@ def dump_code(graph, plan, run, device, directory):
     steps = plan.steps()
     index, written = [], []
     templates = set()
+    # Drop launches outside this plan's steps.
     launches = [launch for launch in launches if launch[0] < len(steps)]
     for n, (at, label, kernel, code, template) in enumerate(launches):
         text, ext = _launch_code(steps[at], kernel, code)

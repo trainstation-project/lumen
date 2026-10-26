@@ -1,3 +1,5 @@
+"""pallas_call API tests ported from JAX: argument and spec validation errors, input/output aliasing and named grids on TPU."""
+
 import functools
 import re
 
@@ -12,10 +14,12 @@ pytestmark = pytest.mark.tpu
 
 
 def tpu(a):
+    """Copies numpy array `a` to the TPU."""
     return lumen.from_numpy(np.asarray(a)).to("tpu")
 
 
 def host(t):
+    """Copies tensor `t` to the host as numpy."""
     return lumen.to_numpy(t.to("cpu"))
 
 
@@ -31,6 +35,7 @@ def run(call, *args):
 
 
 def test_pallas_call_kernel_args_mismatch():
+    """A kernel taking fewer refs than the call passes fails with Python's arity error."""
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(lambda x_ref: None, out_shape=like(a))
     with pytest.raises(Exception, match="takes 1 positional argument but 2 were given"):
@@ -39,9 +44,11 @@ def test_pallas_call_kernel_args_mismatch():
 
 @pytest.mark.parametrize("returns", [0, ()], ids=["array", "empty_tuple"])
 def test_pallas_call_error_kernel_returns_something(returns):
+    """A kernel that returns a value is rejected with its name and location."""
     a = np.arange(256, dtype=np.int32)
 
     def my_kernel(x_ref, o1_ref, o2_ref):
+        """Returns a value instead of None."""
         return returns
 
     f = pl.pallas_call(my_kernel, out_shape=(like(a), like(a)))
@@ -53,6 +60,7 @@ def test_pallas_call_error_kernel_returns_something(returns):
 
 
 def test_pallas_call_kernel_with_no_signature_returns_something():
+    """A `*args` lambda kernel that returns a value is rejected."""
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(lambda *args: 0, out_shape=like(a))
     with pytest.raises(
@@ -63,6 +71,7 @@ def test_pallas_call_kernel_with_no_signature_returns_something():
 
 
 def test_pallas_call_in_specs_not_a_sequence():
+    """`in_specs` given as a single BlockSpec rather than a sequence is rejected."""
     a = np.arange(256, dtype=np.int32)
     with pytest.raises(Exception, match="`in_specs` must be a tuple or a list"):
         _ = pl.pallas_call(
@@ -73,6 +82,7 @@ def test_pallas_call_in_specs_not_a_sequence():
 
 
 def test_pallas_call_index_map_wrong_number_of_arguments():
+    """An index map taking more arguments than the grid has dimensions fails with Python's arity error."""
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(
         lambda x_ref, o1_ref: None,
@@ -84,9 +94,11 @@ def test_pallas_call_index_map_wrong_number_of_arguments():
 
 
 def test_pallas_call_index_map_wrong_number_of_results():
+    """An index map returning more indices than the block has dimensions is rejected."""
     a = np.arange(256, dtype=np.int32)
 
     def my_index_map():
+        """Returns two indices for a 1-D block."""
         return 0, 0
 
     f = pl.pallas_call(
@@ -104,9 +116,11 @@ def test_pallas_call_index_map_wrong_number_of_results():
 
 
 def test_pallas_call_index_map_wrong_return_type():
+    """An index map returning a float is rejected."""
     a = np.arange(256, dtype=np.int32)
 
     def my_index_map(i):
+        """Returns a float index."""
         return 5.0
 
     f = pl.pallas_call(
@@ -125,9 +139,11 @@ def test_pallas_call_index_map_wrong_return_type():
 
 
 def test_pallas_call_index_map_wrong_return_shape():
+    """An index map returning a vector is rejected."""
     a = np.arange(256, dtype=np.int32)
 
     def my_index_map(i):
+        """Returns a 4-element vector index."""
         return lumen.arange(4, dtype="int32")
 
     f = pl.pallas_call(
@@ -146,6 +162,7 @@ def test_pallas_call_index_map_wrong_return_shape():
 
 
 def test_pallas_call_index_map_captures_consts():
+    """An index map capturing a tensor constant is rejected."""
     a = np.arange(256, dtype=np.int32)
     index_map_result = np.array([0], dtype=np.int32)
     f = pl.pallas_call(
@@ -162,6 +179,7 @@ def test_pallas_call_index_map_captures_consts():
 
 
 def test_pallas_call_out_specs_mismatch_shape():
+    """`out_specs` with fewer entries than `out_shape` is rejected."""
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(
         lambda x_ref, o1_ref: None,
@@ -180,6 +198,7 @@ def test_pallas_call_out_specs_mismatch_shape():
 
 
 def test_pallas_call_block_shape_ndim_mismatch():
+    """A block shape whose rank differs from its array's is rejected for inputs and outputs."""
     a = np.arange(256, dtype=np.int32)
     f = pl.pallas_call(
         lambda x_ref, o1_ref: None,
@@ -205,6 +224,7 @@ def test_pallas_call_block_shape_ndim_mismatch():
 
 
 def test_pallas_call_input_output_aliases_errors():
+    """`input_output_aliases` with out-of-range indices or mismatched shapes or dtypes is rejected."""
     x = np.arange(8 * 128, dtype=np.int32).reshape((8, 128))
 
     with pytest.raises(
@@ -270,10 +290,12 @@ def test_pallas_call_input_output_aliases_errors():
 
 
 def test_pallas_error_for_ref_to_jax():
+    """Passing a Ref instead of its loaded value to an op is rejected."""
     m, n, k = 8, 16, 32
 
     @functools.partial(pl.pallas_call, out_shape=pl.ShapeDtypeStruct((m, n), "float32"))
     def dot_general_kernel(x_ref, y_ref, o_ref):
+        """Multiplies the refs themselves, forgetting `[...]`."""
         o_ref[...] = F.matmul(x_ref, y_ref, "float32", "float32")
 
     rng = np.random.default_rng(0)
@@ -288,8 +310,11 @@ def test_pallas_error_for_ref_to_jax():
 
 
 def test_pallas_error_for_writing_ref_to_ref():
+    """Storing a Ref into another Ref is rejected."""
+
     @functools.partial(pl.pallas_call, out_shape=pl.ShapeDtypeStruct((8, 128), "float32"))
     def kernel(x_ref, o_ref):
+        """Stores the input ref itself."""
         o_ref[...] = x_ref
 
     x = np.ones((8, 128), dtype=np.float32)
@@ -298,11 +323,13 @@ def test_pallas_error_for_writing_ref_to_ref():
 
 
 def test_vector_input_output_aliasing():
+    """A large vector input aliased to the output is updated in place across a grid."""
     size = 1024
     x = np.ones((32, size, size), np.float32)
     expected = x + 1
 
     def kernel(x_ref, y_ref):
+        """Adds 1 to the block."""
         y_ref[...] = x_ref[...] + 1.0
 
     f = pl.pallas_call(
@@ -317,10 +344,12 @@ def test_vector_input_output_aliasing():
 
 
 def test_scalar_input_output_aliasing():
+    """An SMEM scalar input aliased to the output."""
     x = np.array([41.0], dtype=np.float32)
     expected = x + 1.0
 
     def kernel(x_ref, y_ref):
+        """Adds 1 to the scalar."""
         y_ref[0] = x_ref[0] + 1.0
 
     scalar_smem_spec = pl.BlockSpec(block_shape=(1,), index_map=lambda *_: (0,), memory_space=pl.SMEM)
@@ -336,12 +365,14 @@ def test_scalar_input_output_aliasing():
 
 
 def test_mixed_scalar_vector_input_output_aliasing():
+    """SMEM scalar and VMEM vector inputs aliased to their outputs in one call."""
     x_scalar = np.array([41.0], dtype=np.float32)
     x_vector = np.arange(1024, dtype=np.float32).reshape((8, 128))
     expected_scalar = x_scalar + 1.0
     expected_vector = x_vector + 1.0
 
     def kernel(scalar_in_ref, vector_in_ref, scalar_out_ref, vector_out_ref):
+        """Adds 1 to the scalar and to the vector block."""
         scalar_out_ref[0] = scalar_in_ref[0] + 1.0
         vector_out_ref[:] = vector_in_ref[:] + 1.0
 
@@ -361,7 +392,10 @@ def test_mixed_scalar_vector_input_output_aliasing():
 
 
 def test_named_grid():
+    """A grid given as `(name, size)` pairs runs like an unnamed one."""
+
     def kernel(x_ref, y_ref):
+        """Copies the block."""
         y_ref[...] = x_ref[...]
 
     x = np.arange(2 * 8 * 128, dtype=np.int32).reshape((2, 8, 128))
@@ -376,7 +410,10 @@ def test_named_grid():
 
 
 def test_named_grid_reordered_names():
+    """Named grid axes listed in a different order than the index map's parameters."""
+
     def kernel(x_ref, y_ref):
+        """Copies the block."""
         y_ref[...] = x_ref[...]
 
     x = np.arange(4 * 16 * 128, dtype=np.int32).reshape((4, 16, 128))
@@ -391,7 +428,10 @@ def test_named_grid_reordered_names():
 
 
 def test_can_query_named_grid_size_in_kernel_via_psum():
+    """`pl.axis_size` reports each named grid axis's size inside the kernel."""
+
     def kernel(x_ref, y_ref):
+        """Checks the named axis sizes at trace time, then copies the block."""
         assert pl.axis_size("i") == 2
         assert pl.axis_size("j") == 4
         y_ref[...] = x_ref[...]
@@ -408,11 +448,15 @@ def test_can_query_named_grid_size_in_kernel_via_psum():
 
 
 def test_can_query_named_dynamic_grid_size_in_kernel_via_psum():
+    """Skipped: dynamic named grid sizes aren't supported."""
     pytest.skip("Not supported.")
 
 
 def test_can_query_named_grid_program_id_in_kernel_via_axis_index():
+    """`pl.axis_index` returns the program's index along a named grid axis."""
+
     def kernel(x_ref, y_ref):
+        """Adds the program's index along `i` to the block."""
         i_index = pl.axis_index("i")
         y_ref[...] = x_ref[...] + i_index
 
@@ -428,6 +472,7 @@ def test_can_query_named_grid_program_id_in_kernel_via_axis_index():
 
 
 def test_vmap_named_grid():
+    """Skipped: vmap of pallas_call has no lumen counterpart."""
     pytest.skip("vmap of pallas_call: not meaningful for lumen")
 
 
@@ -450,62 +495,77 @@ AD_IMPLS = [impl for _, impl in AD_TEST_CASES]
 
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_jvp(impl):
+    """Skipped: autodiff of Pallas kernels runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
 
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_pallas_around_grad(impl):
+    """Skipped: autodiff of Pallas kernels runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
 
 @pytest.mark.parametrize("impl", AD_IMPLS, ids=AD_IDS)
 def test_jvp_slice(impl):
+    """Skipped: autodiff of Pallas kernels runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
 
 def test_custom_jvp_call():
+    """Skipped: autodiff of Pallas kernels runs only in JAX's interpret mode on TPU."""
     pytest.skip("On TPU the test works only in interpret mode")
 
 
 def test_interpret_mode_out_of_bounds_access():
+    """Skipped: interpret mode has no lumen counterpart."""
     pytest.skip("interpret mode: not meaningful for lumen")
 
 
 def test_basic_runtime_assert():
+    """Skipped: a TPU can't recover from a halt."""
     pytest.skip("Cannot recover from halt.")
 
 
 def test_runtime_assert_is_noop_when_not_enabled():
+    """Skipped: checkify has no lumen counterpart."""
     pytest.skip("checkify: not meaningful for lumen")
 
 
 def test_pass_weird_tuple_into_pallas_call():
+    """Skipped: JAX hijax types have no lumen counterpart."""
     pytest.skip("hijax: not meaningful for lumen")
 
 
 def test_pass_sliced_array_into_pallas_call():
+    """Skipped: JAX hijax types have no lumen counterpart."""
     pytest.skip("hijax: not meaningful for lumen")
 
 
 def test_pass_hi_type_with_aliasing():
+    """Skipped: JAX hijax types have no lumen counterpart."""
     pytest.skip("hijax: not meaningful for lumen")
 
 
 def test_mixed_str_and_tuple_keys_in_device_id():
+    """Skipped: multi-device device_id handling has no lumen counterpart."""
     pytest.skip("device_id (multi-device): not meaningful for lumen")
 
 
 def test_core_barrier_x64():
+    """Skipped: multi-device device_id handling has no lumen counterpart."""
     pytest.skip("device_id (multi-device): not meaningful for lumen")
 
 
 def test_core_barrier_multi_axis_grid_lowering():
+    """Skipped: multi-device device_id handling has no lumen counterpart."""
     pytest.skip("device_id (multi-device): not meaningful for lumen")
 
 
 def test_interpret_non_core_grid_axis_in_device_id_rejected():
+    """Skipped: multi-device device_id handling has no lumen counterpart."""
     pytest.skip("device_id (multi-device): not meaningful for lumen")
 
 
 def test_canonicalize_device_id_duplicate_axis_key():
+    """Skipped: multi-device device_id handling has no lumen counterpart."""
     pytest.skip("device_id (multi-device): not meaningful for lumen")

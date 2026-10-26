@@ -1,3 +1,5 @@
+"""Helpers shared by the visualization tools: dtype names and kernel source lookup."""
+
 import pathlib
 import re
 
@@ -5,6 +7,7 @@ import lumen
 
 KERNELS = pathlib.Path(lumen.__file__).parent / "kernels"
 
+# Short dtype names used in visualizations, mapped to lumen dtype names.
 DTYPES = {
     "f32": "float32",
     "f16": "float16",
@@ -24,9 +27,11 @@ SHORT = {v: k for k, v in DTYPES.items()}
 
 
 def type_text(dtype, shape):
+    """Compact type string such as ``f32[64,128]``."""
     return f"{SHORT.get(dtype, dtype)}[{','.join(map(str, shape))}]"
 
 
+# (kernel name pattern, source file under lumen/kernels, line prefix where its code starts); first match wins.
 _SOURCES = [
     (r"^matmul_atomic_", "dot_general/mps/tiled/matmul_atomic.metal", "#define MATMUL_ATOMIC"),
     (r"^lce_partials", "dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal", "#define LCE_PARTIALS"),
@@ -59,6 +64,7 @@ def source_of(kernel):
 
 
 def _traced_at(sources):
+    """``file:line  code`` lines for each traced source location in ``sources``."""
     lines = []
     for file, line in sources:
         try:

@@ -1,3 +1,6 @@
+//! Pallas TPU kernel IR: a [`Kernel`] built op by op (refs, DMAs, structured control flow) and
+//! lowered to Mosaic by [`mosaic`].
+
 use crate::DType;
 use crate::graph::{Primitive, TensorType};
 
@@ -7,43 +10,65 @@ pub(crate) mod python;
 #[cfg(test)]
 mod tests;
 
+/// Index of a kernel variable (value, ref or semaphore) in its type table.
 pub type Var = usize;
 
+/// Memory space of a ref.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Space {
+    /// Unspecified memory (the TensorCore kernel's HBM operands).
     Any,
+    /// High-bandwidth memory, explicitly (SparseCore operands).
     Hbm,
+    /// Vector memory, local to a core.
     Vmem,
+    /// Vector memory shared by a SparseCore's subcores.
     VmemShared,
+    /// Scalar memory.
     Smem,
 }
 
+/// Type of a kernel variable.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
+    /// An SSA value (a vector or scalar).
     Value(TensorType),
+    /// A memref in a memory space.
     Ref(TensorType, Space),
+    /// An array of DMA semaphores of this shape (`[]` for one).
     Semaphore(Vec<usize>),
+    /// A tensor in device memory in the TPU tiled layout.
     View(TensorType, Tiled),
 }
 
+/// The tiled layout of a [`Type::View`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tiled {
+    /// Mosaic `#tpu.tiled` tiling attribute text.
     pub tiles: String,
+    /// Shape of one tile (the trailing dims).
     pub tile: Vec<usize>,
+    /// Element stride of each dimension in tile units.
     pub strides: Vec<usize>,
 }
 
+/// A kernel operation.
 #[derive(Clone, Debug)]
 pub enum Op {
+    /// A graph primitive on values.
     Prim(Primitive),
     Bitcast(DType),
+    /// A tiled view of the kernel's memory at a row.
     View,
     ShiftLeft,
     ShiftRight,
     And,
     Or,
+    /// Asserts an int32 scalar is a multiple of this.
     MultipleOf(usize),
+    /// Rotates a value along this axis by a dynamic shift.
     Roll(usize),
+    /// A window of a ref; `None` starts are taken from the dynamic inputs in order.
     Slice {
         starts: Vec<Option<usize>>,
         sizes: Vec<usize>,
@@ -53,24 +78,32 @@ pub enum Op {
     RefBitcast(DType),
     Load,
     Store,
+    /// Load with these per-dimension strides (0 broadcasts).
     StridedLoad(Vec<usize>),
+    /// Store with these per-dimension strides.
     StridedStore(Vec<usize>),
     DmaStart,
     DmaWait,
+    /// DMA start gathering/scattering rows by an offsets vector.
     IndirectDmaStart,
     IndirectDmaWait,
+    /// Stall for a number of nanoseconds.
     Delay,
+    /// `scf.if`, its outputs the branches' results.
     If {
         then: Block,
         otherwise: Option<Block>,
     },
+    /// `scf.while`: `before` computes the condition (its first result), `after` the next carry.
     While {
         before: Block,
         after: Block,
     },
+    /// `scf.for`: the block's first arg is the index, the rest the carry.
     For(Block),
 }
 
+/// One operation with its operand and result variables.
 #[derive(Clone, Debug)]
 pub struct Node {
     pub op: Op,
@@ -78,6 +111,7 @@ pub struct Node {
     pub outputs: Vec<Var>,
 }
 
+/// A region body: its arguments, operations and yielded results.
 #[derive(Clone, Debug, Default)]
 pub struct Block {
     pub args: Vec<Var>,
@@ -85,17 +119,18 @@ pub struct Block {
     pub results: Vec<Var>,
 }
 
+/// A control-flow region being built.
 #[derive(Debug)]
 enum Open {
+    /// An `if`: `then` is set once the else branch has begun.
     If {
         cond: Var,
         block: Block,
         then: Option<Block>,
     },
-    For {
-        inputs: Vec<Var>,
-        block: Block,
-    },
+    /// A for loop over the inputs `[lo, hi, carried..]`.
+    For { inputs: Vec<Var>, block: Block },
+    /// A while loop: `before` is set once the body has begun.
     While {
         inputs: Vec<Var>,
         block: Block,
@@ -103,21 +138,28 @@ enum Open {
     },
 }
 
+/// A Pallas TPU kernel under construction.
 #[derive(Debug)]
 pub struct Kernel {
+    /// Type of every variable, indexed by [`Var`].
     types: Vec<Type>,
     params: Vec<Var>,
     scratch: Vec<Var>,
     body: Block,
+    /// Control-flow regions currently open, innermost last.
     open: Vec<Open>,
+    /// SparseCore mesh `(cores, subcores)`; `None` for a TensorCore kernel.
     mesh: Option<[usize; 2]>,
 }
 
+/// A ref of `rows` 512-byte rows of device memory, as `uint32[rows, 1, 128]`.
 fn words(rows: usize) -> Type {
     Type::Ref(TensorType::new(DType::U32, &[rows, 1, 128]), Space::Any)
 }
 
 impl Kernel {
+    /// A TensorCore kernel whose parameters are an SMEM ref of `scalars` int32s, optional host
+    /// rows, then the device memory read and written (`rows` rows each).
     pub fn new(scalars: usize, host: Option<usize>, rows: usize) -> Self {
         let mut k = Kernel {
             types: Vec::new(),
@@ -137,6 +179,8 @@ impl Kernel {
         k
     }
 
+    /// A SparseCore kernel over `mesh` whose parameters are the core and subcore indices then an
+    /// HBM ref of each of `refs`.
     pub fn sparse_core(refs: &[TensorType], mesh: [usize; 2]) -> Self {
         let mut k = Kernel {
             types: Vec::new(),
@@ -158,31 +202,38 @@ impl Kernel {
         k
     }
 
+    /// The SparseCore mesh, if any.
     pub fn mesh(&self) -> Option<[usize; 2]> {
         self.mesh
     }
 
+    /// Adds a variable of type `ty`.
     fn var(&mut self, ty: Type) -> Var {
         self.types.push(ty);
         self.types.len() - 1
     }
 
+    /// Parameter variables, in argument order.
     pub fn params(&self) -> &[Var] {
         &self.params
     }
 
+    /// Scratch variables, in allocation order.
     pub fn scratch(&self) -> &[Var] {
         &self.scratch
     }
 
+    /// The top-level block.
     pub fn body(&self) -> &Block {
         &self.body
     }
 
+    /// Type of `var`.
     pub fn type_of(&self, var: Var) -> &Type {
         &self.types[var]
     }
 
+    /// Adds a scratch buffer: a VMEM or SMEM ref, semaphores, or shared VMEM on a SparseCore.
     pub fn alloc(&mut self, ty: Type) -> Result<Var, String> {
         match ty {
             Type::Ref(_, Space::Vmem | Space::Smem) | Type::Semaphore(_) => {}
@@ -198,6 +249,7 @@ impl Kernel {
         Ok(v)
     }
 
+    /// Errors if any of `vars` is not a variable of this kernel.
     fn check(&self, vars: &[Var]) -> Result<(), String> {
         match vars.iter().find(|&&v| v >= self.types.len()) {
             Some(v) => Err(format!("%{v} is not a value of this kernel")),
@@ -205,6 +257,7 @@ impl Kernel {
         }
     }
 
+    /// The innermost open block, where new nodes go.
     fn block(&mut self) -> &mut Block {
         match self.open.last_mut() {
             Some(Open::If { block, .. } | Open::For { block, .. } | Open::While { block, .. }) => {
@@ -214,6 +267,7 @@ impl Kernel {
         }
     }
 
+    /// Appends `op` to the current block with new outputs of `types`.
     fn push(&mut self, op: Op, inputs: &[Var], types: Vec<Type>) -> Vec<Var> {
         let outputs: Vec<Var> = types.into_iter().map(|t| self.var(t)).collect();
         self.block().nodes.push(Node {
@@ -224,6 +278,7 @@ impl Kernel {
         outputs
     }
 
+    /// `v`'s tensor type, if it is a value.
     fn value(&self, v: Var) -> Result<&TensorType, String> {
         match &self.types[v] {
             Type::Value(t) => Ok(t),
@@ -231,6 +286,7 @@ impl Kernel {
         }
     }
 
+    /// `v`'s tensor type and memory space, if it is a ref or view (views report `Any`).
     fn reference(&self, v: Var) -> Result<(&TensorType, Space), String> {
         match &self.types[v] {
             Type::Ref(t, space) => Ok((t, *space)),
@@ -239,6 +295,7 @@ impl Kernel {
         }
     }
 
+    /// Applies a graph primitive to values, inferring its output type.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check(inputs)?;
         let args = inputs
@@ -249,6 +306,7 @@ impl Kernel {
         Ok(self.push(Op::Prim(primitive), inputs, vec![Type::Value(ty)])[0])
     }
 
+    /// Applies a TPU bit op (`Bitcast`, shifts, `And`/`Or`, `Roll`, `MultipleOf`) after checking operand types.
     pub fn bits(&mut self, op: Op, inputs: &[Var]) -> Result<Var, String> {
         self.check(inputs)?;
         let a = self.value(inputs[0])?.clone();
@@ -285,6 +343,8 @@ impl Kernel {
         Ok(self.push(op, inputs, vec![Type::Value(ty)])[0])
     }
 
+    /// A window of a ref, view or semaphore array; dynamic starts must be int32 scalars and view
+    /// windows start on tile boundaries.
     pub fn slice(
         &mut self,
         src: Var,
@@ -369,6 +429,7 @@ impl Kernel {
         Ok(self.push(op, &inputs, vec![ty])[0])
     }
 
+    /// A tiled view of type `ty` over the kernel's memory starting at int32 row `row`.
     pub fn view(&mut self, memory: Var, row: Var, ty: TensorType) -> Result<Var, String> {
         self.check(&[memory, row])?;
         if self.mesh.is_some()
@@ -394,6 +455,7 @@ impl Kernel {
         Ok(self.push(Op::View, &[memory, row], vec![ty])[0])
     }
 
+    /// Rows of the kernel's device memory.
     fn rows(&self) -> usize {
         match &self.types[*self.params.last().expect("the memory")] {
             Type::Ref(t, _) => t.shape[0],
@@ -401,6 +463,7 @@ impl Kernel {
         }
     }
 
+    /// Ref `src` reshaped to `shape` (same element count); tiled views can't be reshaped.
     pub fn reshape(&mut self, src: Var, shape: Vec<usize>) -> Result<Var, String> {
         self.check(&[src])?;
         if let Type::View(..) = self.types[src] {
@@ -414,6 +477,7 @@ impl Kernel {
         Ok(self.push(Op::Reshape(shape), &[src], vec![ty])[0])
     }
 
+    /// Ref `src` reinterpreted as a same-width `dtype`.
     pub fn ref_bitcast(&mut self, src: Var, dtype: DType) -> Result<Var, String> {
         self.check(&[src])?;
         if let Type::View(..) = self.types[src] {
@@ -427,6 +491,7 @@ impl Kernel {
         Ok(self.push(Op::RefBitcast(dtype), &[src], vec![ty])[0])
     }
 
+    /// Loads a VMEM ref whole or an SMEM element at `indices`.
     pub fn load(&mut self, src: Var, indices: &[Var]) -> Result<Var, String> {
         self.check(&[src])?;
         self.check(indices)?;
@@ -448,6 +513,7 @@ impl Kernel {
         Ok(self.push(Op::Load, &inputs, vec![Type::Value(ty)])[0])
     }
 
+    /// Stores a value into a VMEM ref whole or an SMEM element at `indices`.
     pub fn store(&mut self, dst: Var, value: Var, indices: &[Var]) -> Result<(), String> {
         self.check(&[dst, value])?;
         self.check(indices)?;
@@ -471,6 +537,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Loads a `sizes` window of VMEM ref `src` at `starts` with `strides`.
     pub fn load_strided(
         &mut self,
         src: Var,
@@ -484,6 +551,7 @@ impl Kernel {
         Ok(self.push(Op::StridedLoad(strides.to_vec()), &inputs, vec![ty])[0])
     }
 
+    /// Stores `value` into a strided window of VMEM ref `dst` at `starts`.
     pub fn store_strided(
         &mut self,
         dst: Var,
@@ -505,6 +573,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Checks a strided access of `r` and returns its dtype.
     fn strided(
         &self,
         r: Var,
@@ -538,6 +607,7 @@ impl Kernel {
         Ok(t.dtype)
     }
 
+    /// Starts (or waits for) a DMA between two refs of one type on a single semaphore.
     pub fn dma(&mut self, src: Var, dst: Var, sem: Var, wait: bool) -> Result<(), String> {
         self.check(&[src, dst, sem])?;
         let (s, d) = (self.reference(src)?.0, self.reference(dst)?.0);
@@ -554,6 +624,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Starts (or waits for) a DMA moving one HBM row per offset to or from VMEM.
     pub fn indirect_dma(
         &mut self,
         src: Var,
@@ -597,6 +668,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Stalls for `nanos` (an int32 scalar) nanoseconds.
     pub fn delay(&mut self, nanos: Var) -> Result<(), String> {
         self.check(&[nanos])?;
         if *self.value(nanos)? != TensorType::new(DType::I32, &[]) {
@@ -606,6 +678,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Opens an `if` on a bool scalar.
     pub fn begin_if(&mut self, cond: Var) -> Result<(), String> {
         self.check(&[cond])?;
         if *self.value(cond)? != TensorType::new(DType::Bool, &[]) {
@@ -619,6 +692,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// Closes the then branch yielding `results` and opens the else branch.
     pub fn begin_else(&mut self, results: &[Var]) -> Result<(), String> {
         self.check(results)?;
         match self.open.last_mut() {
@@ -632,6 +706,7 @@ impl Kernel {
         }
     }
 
+    /// Closes the open `if`, the else branch yielding `results`; returns the `if`'s results.
     pub fn end_if(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::If { cond, block, then }) = self.open.pop() else {
@@ -663,6 +738,7 @@ impl Kernel {
         Ok(self.push(op, &[cond], types))
     }
 
+    /// Opens a while loop carrying `carried`; returns the condition block's arguments.
     pub fn begin_while(&mut self, carried: &[Var]) -> Result<Vec<Var>, String> {
         self.check(carried)?;
         let types = carried
@@ -682,6 +758,7 @@ impl Kernel {
         Ok(args)
     }
 
+    /// Ends the condition with `cond` and opens the body; returns the body's arguments.
     pub fn begin_while_body(&mut self, cond: Var) -> Result<Vec<Var>, String> {
         self.check(&[cond])?;
         if *self.value(cond)? != TensorType::new(DType::Bool, &[]) {
@@ -707,6 +784,7 @@ impl Kernel {
         Ok(args)
     }
 
+    /// Closes the while loop, its body yielding `results`; returns the loop's results.
     pub fn end_while(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::While {
@@ -730,6 +808,7 @@ impl Kernel {
         Ok(self.push(op, &inputs, types))
     }
 
+    /// Opens a for loop over int32 `lo..hi` carrying `carried`; returns the index and carried arguments.
     pub fn begin_for(
         &mut self,
         lo: Var,
@@ -760,6 +839,7 @@ impl Kernel {
         Ok((index, args))
     }
 
+    /// Closes the for loop, its body yielding `results`; returns the loop's results.
     pub fn end_for(&mut self, results: &[Var]) -> Result<Vec<Var>, String> {
         self.check(results)?;
         let Some(Open::For { inputs, mut block }) = self.open.pop() else {
@@ -775,6 +855,7 @@ impl Kernel {
         Ok(self.push(Op::For(block), &inputs, types))
     }
 
+    /// Whether no control-flow region is left open.
     pub fn is_closed(&self) -> bool {
         self.open.is_empty()
     }

@@ -1,3 +1,5 @@
+"""Flash attention: a traced attention whose backward recomputes probabilities from the log-sum-exp."""
+
 import math
 
 from lumen.autograd.function import Function
@@ -25,6 +27,7 @@ class _FlashAttention(Function):
 
     @staticmethod
     def forward(ctx, q, k, v, *, scale, causal, dropout_p):
+        """Traces attention of ``q``/``k``/``v`` (``[B, S, N, H]`` layout), saving inputs, output and per-row log-sum-exp."""
         n = q.shape[2]
         accum = _accum_dtype(q.dtype)
         s = _scores(q, _expand_heads(k, n), scale, causal)
@@ -36,6 +39,7 @@ class _FlashAttention(Function):
         ctx.keep = 1.0 / (1.0 - dropout_p)
         if ctx.dropped is not None:
             p = where(ctx.dropped, 0.0, p * ctx.keep)
+        # Contract Sk of p [B, N, Sq, Sk] with v [B, Sk, N, Hv]; the result is [B, N, Sq, Hv].
         o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
         o = o.permute(0, 2, 1, 3)
         ctx.scale, ctx.causal = scale, causal
@@ -44,18 +48,21 @@ class _FlashAttention(Function):
 
     @staticmethod
     def backward(ctx, do):
+        """Gradients of ``q``, ``k``, ``v`` from ``do``, recomputing transposed probabilities ``P^T`` from the saved log-sum-exp."""
         q, k, v, o = ctx.saved_tensors
         lse = ctx.saved_named_tensors["lse"]
         b, sq, n, _ = q.shape
         sk, nkv = k.shape[1], k.shape[2]
         dtype, accum = q.dtype, _accum_dtype(q.dtype)
         ke, ve = _expand_heads(k, n), _expand_heads(v, n)
+        # Work in the transposed [B, N, Sk, Sq] layout so dK and dV contract over the query axis directly.
         st = prims.dot_general(ke, q, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum) * ctx.scale
         if ctx.causal:
             keys = prims.iota("int64", st.shape, 2)
             queries = prims.iota("int64", st.shape, 3)
             st = where(le(keys, queries + (sk - sq)), st, float("-inf"))
         pt = exp(st - lse.reshape(b, n, 1, sq))
+        # D_i = rowsum(dO_i * O_i), the softmax backward's correction term, as [B, N, 1, Sq].
         d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum, accum)
         d = d.permute(0, 2, 1).reshape(b, n, 1, sq)
         dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
@@ -70,6 +77,7 @@ class _FlashAttention(Function):
         dk = prims.dot_general(dst, q, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
         dq = prims.dot_general(dst, ke, (((2,), (1,)), ((0, 1), (0, 2))), accum, accum)
         dq, dk, dv = (t.permute(0, 2, 1, 3) for t in (dq, dk, dv))
+        # Grouped-query attention: sum the gradients of the query heads sharing each key/value head.
         if nkv != n:
             dk = sum(dk.reshape(b, sk, nkv, n // nkv, k.shape[3]), 3)
             dv = sum(dv.reshape(b, sk, nkv, n // nkv, v.shape[3]), 3)
@@ -122,6 +130,7 @@ def flash_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
 
     if scale is None:
         scale = 1.0 / math.sqrt(h)
+    # The dropout threshold is dropout_p scaled to 32-bit random bits, which must stay below 2**32.
     if not 0.0 <= dropout_p or round(dropout_p * 2**32) >= 2**32:
         raise ValueError(f"flash_attention: dropout_p must be in [0, 1), got {dropout_p}")
 

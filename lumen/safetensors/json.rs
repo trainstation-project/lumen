@@ -1,5 +1,8 @@
+//! A minimal JSON parser and string writer for safetensors headers.
+
 use std::fmt::Write;
 
+/// A parsed JSON value; numbers keep their source text and objects keep member order.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Value {
     Null,
@@ -10,8 +13,10 @@ pub(crate) enum Value {
     Object(Vec<(String, Value)>),
 }
 
+/// Deepest array/object nesting accepted, so hostile headers cannot overflow the stack.
 const MAX_DEPTH: usize = 64;
 
+/// Parses one JSON document, allowing surrounding whitespace but nothing else after it.
 pub(crate) fn parse(text: &str) -> Result<Value, String> {
     let mut p = Parser {
         bytes: text.as_bytes(),
@@ -26,16 +31,19 @@ pub(crate) fn parse(text: &str) -> Result<Value, String> {
     Ok(value)
 }
 
+/// A cursor over the input bytes.
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl Parser<'_> {
+    /// An error message naming the current byte offset.
     fn error(&self, what: &str) -> String {
         format!("{what} at byte {}", self.pos)
     }
 
+    /// The byte at the cursor, or `None` at the end.
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
     }
@@ -46,6 +54,7 @@ impl Parser<'_> {
         }
     }
 
+    /// Consumes byte `b` or errors.
     fn expect(&mut self, b: u8) -> Result<(), String> {
         if self.peek() == Some(b) {
             self.pos += 1;
@@ -55,6 +64,7 @@ impl Parser<'_> {
         }
     }
 
+    /// Consumes the keyword `word` and returns `value`.
     fn literal(&mut self, word: &str, value: Value) -> Result<Value, String> {
         if self.bytes[self.pos..].starts_with(word.as_bytes()) {
             self.pos += word.len();
@@ -64,6 +74,7 @@ impl Parser<'_> {
         }
     }
 
+    /// Parses any value at the cursor; `depth` counts enclosing arrays and objects.
     fn value(&mut self, depth: usize) -> Result<Value, String> {
         if depth > MAX_DEPTH {
             return Err(self.error("nested too deeply"));
@@ -81,6 +92,7 @@ impl Parser<'_> {
         }
     }
 
+    /// Parses an object, keeping members in order and allowing duplicate keys.
     fn object(&mut self, depth: usize) -> Result<Value, String> {
         self.expect(b'{')?;
         let mut members = Vec::new();
@@ -111,6 +123,7 @@ impl Parser<'_> {
         }
     }
 
+    /// Parses an array.
     fn array(&mut self, depth: usize) -> Result<Value, String> {
         self.expect(b'[')?;
         let mut items = Vec::new();
@@ -134,8 +147,10 @@ impl Parser<'_> {
         }
     }
 
+    /// Checks a number against the JSON grammar (no leading zeros) and returns its text unparsed.
     fn number(&mut self) -> Result<Value, String> {
         let start = self.pos;
+        // Consumes a run of digits and reports whether there was at least one.
         let digits = |p: &mut Self| {
             let s = p.pos;
             while matches!(p.peek(), Some(b'0'..=b'9')) {
@@ -170,6 +185,7 @@ impl Parser<'_> {
         Ok(Value::Number(text.to_owned()))
     }
 
+    /// Reads the four hex digits of a `\u` escape.
     fn hex4(&mut self) -> Result<u32, String> {
         let digits = self
             .bytes
@@ -181,10 +197,12 @@ impl Parser<'_> {
         Ok(digits)
     }
 
+    /// Parses a string literal, decoding escapes including `\u` surrogate pairs.
     fn string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
         let mut out = String::new();
         loop {
+            // Copy the run of plain bytes at once; it stops at ASCII bytes, so it is valid UTF-8.
             let start = self.pos;
             while matches!(self.peek(), Some(c) if c != b'"' && c != b'\\' && c >= 0x20) {
                 self.pos += 1;
@@ -212,6 +230,8 @@ impl Parser<'_> {
                         b't' => out.push('\t'),
                         b'u' => {
                             let mut code = self.hex4()?;
+                            // A high surrogate must be followed by a `\u` low surrogate;
+                            // together they encode one code point above U+FFFF.
                             if (0xD800..0xDC00).contains(&code) {
                                 if !self.bytes[self.pos..].starts_with(b"\\u") {
                                     return Err(self.error("unpaired surrogate"));
@@ -238,6 +258,7 @@ impl Parser<'_> {
     }
 }
 
+/// Appends `s` to `out` as a quoted JSON string, escaping quotes, backslashes and control characters.
 pub(crate) fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {

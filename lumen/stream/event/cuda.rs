@@ -1,3 +1,4 @@
+//! CUDA events backed by `cudaEvent_t` on the default stream.
 use std::any::Any;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -7,12 +8,16 @@ use crate::device::Device;
 use crate::device::cuda::CUDA;
 use crate::stream::cuda::ffi;
 
+/// `cudaErrorNotReady`, returned by `cudaEventQuery` while work is pending.
 const NOT_READY: i32 = 600;
+/// `cudaEventDisableTiming` flag.
 const DISABLE_TIMING: u32 = 2;
 
+/// Event on one CUDA device.
 pub(super) struct CudaEvent {
     index: usize,
     timing: bool,
+    /// The CUDA event, created on first record.
     event: Option<*mut c_void>,
 }
 
@@ -20,6 +25,7 @@ unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
 
 impl CudaEvent {
+    /// Unrecorded event on device `index`; `timing` allows `elapsed_time` on it.
     pub(super) fn new(index: usize, timing: bool) -> Self {
         CudaEvent {
             index,
@@ -29,6 +35,7 @@ impl CudaEvent {
     }
 }
 
+/// Turns a CUDA return code into an error naming `call`.
 fn checked(err: i32, call: &str) -> Result<(), String> {
     match err {
         0 => Ok(()),

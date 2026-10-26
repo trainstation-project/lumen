@@ -1,3 +1,5 @@
+//! Metal source generation for fused graph bodies: picks a kernel shape (GEMV row, GEMM, row
+//! reduction, reduction, transpose or elementwise loop) and emits its source.
 pub(crate) mod ane;
 
 use std::collections::HashMap;
@@ -35,16 +37,19 @@ pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
 
+/// Threadgroup, thread, simdgroup and lane position parameters shared by generated kernels.
 pub(crate) const THREAD_ARGS: &str = indoc! {"
     uint3 group [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]"};
 
+/// Default launch tuning when `body` lowers to the elementwise loop, else `None`.
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
     is_loop(body).then(|| loop_tuning(body))
 }
 
+/// Candidate launch tunings to autotune when `body` lowers to the elementwise loop.
 pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
     match is_loop(body) {
         true => loop_tunings(body),
@@ -52,6 +57,7 @@ pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
     }
 }
 
+/// Whether `body` matches no specialized kernel shape and lowers to the elementwise loop.
 fn is_loop(body: &Graph) -> bool {
     row_dot(body).is_none()
         && gemm_dot(body).is_none()
@@ -60,6 +66,9 @@ fn is_loop(body: &Graph) -> bool {
         && transpose_tiling(body).is_none()
 }
 
+/// Generates the kernel for a fused `body`, returning its name and Metal source.
+/// `by_value[k]` passes input `k` as a constant scalar; `views` maps output index to the
+/// (element offset, strides) it writes through.
 pub(crate) fn kernel(
     body: &Graph,
     by_value: &[bool],
@@ -87,14 +96,18 @@ pub(crate) fn kernel(
     elementwise_kernel(body, by_value, views, tuning)
 }
 
+/// Whether the kernel chosen for `body` can write its outputs through strided views.
 pub(crate) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
 }
 
+/// Re-indents generated Metal source by bracket nesting so emitted kernels read cleanly.
 pub(crate) fn formatted(source: &str) -> String {
     let mut out = String::new();
     let mut open: Vec<(char, usize)> = Vec::new();
     let mut statement = 0;
+    // `open` stacks each unclosed bracket with the column its continuation lines align to;
+    // `statement` is the indent of the statement the current line belongs to.
     for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let indent = match open.last() {
             Some(&('{', column)) if line.starts_with('}') => column - 4,
@@ -144,10 +157,12 @@ pub(crate) fn formatted(source: &str) -> String {
     out
 }
 
+/// Opening of a call to input `k`'s load helper, to be followed by the index and `)`.
 pub(super) fn load(k: usize) -> String {
     format!("NAME_load{k}(in{k}, ")
 }
 
+/// Load helpers for every `NAME_load{k}` that `source` calls, each indexing contiguously.
 fn loads(source: &str) -> String {
     let mut ks: Vec<usize> = source
         .match_indices("NAME_load")
@@ -164,6 +179,7 @@ fn loads(source: &str) -> String {
     ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
 }
 
+/// Metal helper `{name}_load{k}` that reads `p` at `index` (an expression in `i`).
 fn load_helper(name: &str, k: usize, index: &str) -> String {
     formatdoc!(
         "
@@ -175,6 +191,8 @@ fn load_helper(name: &str, k: usize, index: &str) -> String {
     )
 }
 
+/// Rewrites input `k`'s contiguous load helper in `source` to read through `strides`, or `None`
+/// if `source` has no such helper.
 pub(crate) fn strided_load(
     source: &str,
     name: &str,
@@ -190,6 +208,8 @@ pub(crate) fn strided_load(
         .then(|| source.replace(&plain, &strided))
 }
 
+/// Prepends load helpers, names the kernel by a hash of its source and substitutes the name for
+/// `NAME`; returns `(name, formatted source)`.
 pub(super) fn named(source: String) -> (String, String) {
     let source = format!("{}{source}", loads(&source));
     let mut hasher = DefaultHasher::new();
@@ -198,6 +218,8 @@ pub(super) fn named(source: String) -> (String, String) {
     (name.clone(), formatted(&source.replace("NAME", &name)))
 }
 
+/// Kernel buffer parameters: device inputs, `out` of type `out`, extra outputs, `extra`
+/// declarations, then by-value scalar inputs; returns them with the next free buffer index.
 pub(super) fn io_params(
     body: &Graph,
     by_value: &[bool],
@@ -237,6 +259,7 @@ pub(super) fn io_params(
     (params, index)
 }
 
+/// Metal scalar type name for `dtype`.
 pub(crate) fn metal_type(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool => "bool",
@@ -255,6 +278,7 @@ pub(crate) fn metal_type(dtype: DType) -> &'static str {
     }
 }
 
+/// Metal functor struct name implementing an elementwise primitive.
 pub(super) fn functor(p: &Primitive) -> &'static str {
     use Primitive::*;
     match p {
@@ -274,6 +298,7 @@ pub(super) fn functor(p: &Primitive) -> &'static str {
     }
 }
 
+/// Metal expression that reproduces `value` in `dtype` bit-exactly via `as_type`.
 pub(super) fn constant(dtype: DType, value: Scalar) -> String {
     let bytes = element_arg(dtype, value);
     let bits = bytes

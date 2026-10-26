@@ -1,3 +1,6 @@
+"""Profiles the MPS kernels of the example transformer's training step, or of repeated matmuls,
+and prints a per-kernel time table."""
+
 import argparse
 import pathlib
 from collections import defaultdict
@@ -18,6 +21,7 @@ def gpu_events(run, steps):
     by launch order."""
 
     def events(steps, activities):
+        """GPU events of ``steps`` calls of ``run`` recorded under profiler ``activities``."""
         lumen.mps.synchronize()
         with profile(activities=activities, record_shapes=True) as prof:
             for _ in range(steps):
@@ -30,6 +34,7 @@ def gpu_events(run, steps):
     shaped = events(1, [ProfilerActivity.CPU, ProfilerActivity.MPS])
     timed = events(steps, [ProfilerActivity.MPS])
     assert len(timed) == steps * len(shaped), "every step launches the same kernels"
+    # Kernels launch in the same order every step, so timed[k::len(shaped)] are the launches of shaped[k].
     for k, e in enumerate(shaped):
         e["duration_us"] = float(np.median([t["duration_us"] for t in timed[k :: len(shaped)]]))
     return shaped
@@ -57,6 +62,7 @@ def transformer(steps, top):
     up to its training loop), its training step profiled on random
     batches."""
     source = (EXAMPLES / "transformer.py").read_text()
+    # Keep only the example's setup: cut its source before the training loop.
     source = source[: source.index("for step in range(STEPS + 1)")]
     import sys
 

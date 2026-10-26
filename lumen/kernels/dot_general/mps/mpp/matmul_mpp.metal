@@ -5,11 +5,13 @@
     #define LUMEN_MPP 1
 using namespace metal;
 
+/// Writes the in-bounds elements of cooperative tensor `sum`, the tile at (`row`, `col`), through `epi`.
 template <typename O, typename Out, typename Epi, typename C>
 inline void store_mpp(thread C &sum, device Out *out, int N, int M, int row, int col, ulong base, Epi epi) {
     // MPP tensors can contain invalid lanes at the edge of a tile.
     _Pragma("clang loop unroll(full)") for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
         if (sum.is_valid_element(i)) {
+            // MPP indices are innermost-first: at[0] is the column, at[1] the row.
             auto at = sum.get_multidimensional_index(i);
             int m = row + at[1], n = col + at[0];
             if (m < M && n < N) {
@@ -20,6 +22,7 @@ inline void store_mpp(thread C &sum, device Out *out, int N, int M, int row, int
     }
 }
 
+/// Writes `epi(first, second)` for each in-bounds element of a paired tile into an `H`-column output.
 template <typename O, typename Out, typename Epi, typename C>
 inline void store_mpp_pair(
     thread C &first, thread C &second, device Out *out, int H, int M, int row, int col, ulong base, Epi epi) {
@@ -35,6 +38,9 @@ inline void store_mpp_pair(
     }
 }
 
+/// Matmul of one `BM x BN` output tile with MPP `matmul2d`; `TL`/`TR` read lhs/rhs transposed.
+/// With `GROUP == 2` the rhs columns form two halves (or interleaved pairs) multiplied separately
+/// and combined by a two-argument epilogue into an `N / 2`-column output.
 template <typename T,
           typename A,
           typename O,
@@ -58,6 +64,7 @@ inline void matmul_mpp(
     const int M = int(p[0]), N = int(p[1]), K = int(p[2]);
     device T *l = (device T *)lhs + group.z * p[3];
     device T *r = (device T *)rhs + group.z * p[6];
+    // MPP extents and strides are innermost-first, so a row-major [M, K] lhs is extents (K, M).
     tensor<device T, extents, tensor_inline> a(
         l, TL ? extents(M, K) : extents(K, M), TL ? array<int32_t, 2>{1, int(p[5])} : array<int32_t, 2>{1, int(p[4])});
     tensor<device T, extents, tensor_inline> b(
@@ -66,6 +73,7 @@ inline void matmul_mpp(
     if constexpr (GROUP == 2) {
         constexpr int HN = BN / 2;
         const int H = N / 2, col = int(group.x) * HN;
+        // Views of the first and second column of each pair: adjacent with INTERLEAVED, else N/2 apart.
         const ulong s = TR ? p[8] : 1, step = INTERLEAVED ? 2 * s : s;
         const int stride = TR ? int(step) : int(p[7]);
         auto view = [&](ulong offset) {
@@ -79,6 +87,7 @@ inline void matmul_mpp(
         const ulong base = ulong(group.z) * M * H;
         device Out *o = out + base;
         if (row + BM <= M && col + HN <= H && K % BK == 0) {
+            // Exact tiles accumulate over fixed BK slices; edges fall back to dynamic extents.
             constexpr auto desc =
                 matmul2d_descriptor(BM, HN, BK, TL, TR, false, matmul2d_descriptor::mode::multiply_accumulate);
             matmul2d<desc, execution_simdgroups<SIMDS>> op;
@@ -179,6 +188,8 @@ inline void matmul_mpp(
     }
 }
 
+/// Multiplies one MPP tile and writes it to threadgroup `tile` at `offset`, element (r, c) landing
+/// at `r * rs * stride + c * cs`, so callers can interleave two half tiles.
 template <typename T, typename A, int BM, int BN, int BK, int SIMDS, bool TL, bool TR, typename TA, typename TB>
 inline void mpp_tile(thread TA &a,
                      thread TB &b,
@@ -245,6 +256,8 @@ inline void mpp_tile(thread TA &a,
     }
 }
 
+/// MPP matmul that writes the accumulator tile to threadgroup memory and stores it through the
+/// shared staged epilogue; paired halves (by rows or columns) are interleaved in the tile.
 template <typename T,
           typename A,
           typename O,
@@ -288,6 +301,7 @@ inline void matmul_mpp_staged(device const T *lhs,
     };
     const int row = int(group.y) * BM, col = int(group.x) * BN;
     constexpr bool HALVES = GROUP > 1 && !INTERLEAVED;
+    // Row halves: rows i and H + i of lhs land in adjacent tile rows.
     if constexpr (HALVES && ROWS) {
         const int H = M / 2;
         auto a0 = lhs_view(0, H);
@@ -296,6 +310,7 @@ inline void matmul_mpp_staged(device const T *lhs,
         mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a0, b, row / 2, col, H, N, K, tile, BN, 2, 1, 0);
         mpp_tile<T, A, BM / 2, BN, BK, SIMDS, TL, TR>(a1, b, row / 2, col, H, N, K, tile, BN, 2, 1, BN);
     } else if constexpr (HALVES) {
+        // Column halves: columns j and H + j of rhs land in adjacent tile columns.
         const int H = N / 2;
         auto a = lhs_view(0, M);
         auto b0 = rhs_view(0, H);

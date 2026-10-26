@@ -1,3 +1,5 @@
+//! Collects fusion members from roots and hosts and rebuilds the graph with `Fusion` nodes.
+
 use super::analysis::Analysis;
 use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
@@ -6,8 +8,11 @@ use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
+/// Per root node, its fusion's member nodes and the values it reads, both sorted.
 pub(super) type Fusions = Vec<Option<(Vec<usize>, Vec<Var>)>>;
 
+/// Gathers each unhosted root's fusion, splitting fusions that read more than `MAX_INPUTS` values
+/// by turning all their members into roots and retrying.
 pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>]) -> Fusions {
     let (graph, nodes, producer, live, fusible) =
         (a.graph, a.nodes, &a.producer, &a.live, &a.fusible);
@@ -50,6 +55,8 @@ pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>
     }
 }
 
+/// Moves a GEMM and its epilogue into the normalization row fusion that reads its result, when the
+/// row kernel can compute the dot itself; reverts the move if the resulting body doesn't fit.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn row_dots(
     a: &Analysis,
@@ -98,6 +105,7 @@ pub(super) fn row_dots(
                     .map(|h| nodes[h].output),
             )
             .collect();
+        // Every value the dot fusion writes must be read only at or after the row fusion.
         if !written.iter().all(|&w| read_by(w).iter().all(|&i| i >= f)) {
             continue;
         }
@@ -125,6 +133,8 @@ pub(super) fn row_dots(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Emits the fused graph, ordering steps so each runs after the values it reads, with hosted values
+/// exposed through `FusionOutput` nodes.
 pub(super) fn emitted(
     a: &Analysis,
     scalars: &[Var],
@@ -149,12 +159,14 @@ pub(super) fn emitted(
             hosts[f].push(h);
         }
     }
+    // Single-node fusions other than concatenations are emitted as the plain node.
     let alone = |i: usize| match &fusions[i] {
         Some((members, _)) => {
             members.len() == 1 && !matches!(nodes[i].primitive, Primitive::Concatenate { .. })
         }
         None => true,
     };
+    // Topological order over steps, since hosting can make a fusion read values produced later in node order.
     let order = {
         let mut ready = vec![false; n];
         graph.inputs().iter().for_each(|&v| ready[v] = true);
@@ -197,6 +209,7 @@ pub(super) fn emitted(
                 let body = body(graph, members, reads, node.output, &hosted);
                 let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
                 let name = kernel(&body, &by_value);
+                // Hide the slices and reshapes that split a paired GEMM's output from the label, and list the dot first.
                 let of_dot = |v: Var, layout: &dyn Fn(&Primitive) -> bool| {
                     producer[v].is_some_and(|d| members.contains(&d) && layout(&nodes[d].primitive))
                 };
@@ -258,6 +271,7 @@ pub(super) fn emitted(
     fused
 }
 
+/// Nodes reachable from `starts` through non-root producers, and the values read from outside them.
 fn members(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -289,6 +303,7 @@ fn members(
     (members, reads)
 }
 
+/// Builds a fusion body over `members` with `reads` as inputs and `root` then `hosted` as outputs.
 fn body(graph: &Graph, members: &[usize], reads: &[Var], root: Var, hosted: &[Var]) -> Graph {
     let mut body = Graph::new();
     let mut var = std::collections::HashMap::new();

@@ -1,15 +1,19 @@
+//! Reference interpreter: evaluates graphs element by element on the host in i128/f64, rounding to each result
+//! dtype, as the ground truth backends are tested against.
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::dtype::{dispatch_dtype, f8e4m3b11fnuz, f8e4m3fn, f8e5m2, to_bf16, to_f16};
 use crate::tensor::for_each_index;
 use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
+/// A tensor's elements flattened row-major: integers and bools widened to i128, floats to f64.
 #[derive(Debug, Clone)]
 enum Values {
     Int(Vec<i128>),
     Float(Vec<f64>),
 }
 
+/// Evaluates `graph` on `inputs` and returns its outputs as tensors on the first input's device.
 pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
     if inputs.len() != graph.inputs().len() {
         return Err(format!(
@@ -37,8 +41,10 @@ pub fn run(graph: &Graph, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
         .collect())
 }
 
+/// Evaluates every node of `graph` in order and returns the values of its outputs.
 fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
     let mut env: Vec<Option<Values>> = vec![None; graph.types.len()];
+    // extra outputs of multi-output fusions, read back by their FusionOutput nodes
     let mut extra: Vec<Vec<Values>> = vec![Vec::new(); graph.types.len()];
     for (&var, values) in graph.inputs().iter().zip(inputs) {
         env[var] = Some(values);
@@ -72,11 +78,13 @@ fn eval_graph(graph: &Graph, inputs: Vec<Values>) -> Vec<Values> {
         .collect()
 }
 
+/// Reads a tensor's elements into `Values`.
 fn load(t: &Tensor) -> Values {
     let dtype = t.dtype();
     dispatch_dtype!(dtype, T => from_scalars(t.to_vec::<T>().into_iter().map(Element::to_scalar), dtype))
 }
 
+/// Collects scalars into `Values`, wrapping integers to `dtype`'s range.
 fn from_scalars(scalars: impl Iterator<Item = Scalar>, dtype: DType) -> Values {
     if dtype.is_float() {
         Values::Float(scalars.map(Scalar::to_f64).collect())
@@ -93,6 +101,11 @@ fn from_scalars(scalars: impl Iterator<Item = Scalar>, dtype: DType) -> Values {
     }
 }
 
+/// Evaluates primitive `p` on raw host buffers and writes the result to `output`.
+///
+/// # Safety
+/// Each `inputs[i]` must point to `types[i].numel()` readable elements of `types[i].dtype`, and `output` to
+/// `out.numel()` writable elements of `out.dtype`.
 pub(crate) unsafe fn eval_raw(
     p: &Primitive,
     inputs: &[*const u8],
@@ -120,6 +133,7 @@ pub(crate) unsafe fn eval_raw(
     })
 }
 
+/// Converts values to elements of `T`.
 fn to_elements<T: Element>(values: &Values) -> Box<dyn Iterator<Item = T> + '_> {
     match values {
         Values::Int(v) => Box::new(v.iter().map(|&x| T::from_scalar(Scalar::Int(x as i64)))),
@@ -127,6 +141,7 @@ fn to_elements<T: Element>(values: &Values) -> Box<dyn Iterator<Item = T> + '_> 
     }
 }
 
+/// Builds a tensor of type `ty` on `device` from values.
 fn store(values: &Values, ty: &TensorType, device: Device) -> Tensor {
     dispatch_dtype!(ty.dtype, T => {
         let data: Vec<T> = to_elements(values).collect();
@@ -134,6 +149,7 @@ fn store(values: &Values, ty: &TensorType, device: Device) -> Tensor {
     })
 }
 
+/// Wraps an integer to `dtype` with two's complement overflow, including the 2- and 4-bit types.
 fn wrap(x: i128, dtype: DType) -> i128 {
     use DType::*;
     match dtype {
@@ -155,6 +171,7 @@ fn wrap(x: i128, dtype: DType) -> i128 {
     }
 }
 
+/// Rounds `x` to the nearest value representable in float `dtype`.
 fn round(x: f64, dtype: DType) -> f64 {
     match dtype {
         DType::F16 => to_f16(x).to_f64(),
@@ -168,6 +185,7 @@ fn round(x: f64, dtype: DType) -> f64 {
     }
 }
 
+/// Converts a float to integer `dtype` as a cast does: saturating, NaN to 0.
 fn saturate(x: f64, dtype: DType) -> i128 {
     use DType::*;
     match dtype {
@@ -186,6 +204,7 @@ fn saturate(x: f64, dtype: DType) -> i128 {
     }
 }
 
+/// Returns the identity of max for `dtype` as a single value.
 fn lowest(dtype: DType) -> Values {
     match dtype {
         d if d.is_float() => Values::Float(vec![f64::NEG_INFINITY]),
@@ -196,6 +215,7 @@ fn lowest(dtype: DType) -> Values {
     }
 }
 
+/// Minimum that propagates NaN.
 fn fmin(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         f64::NAN
@@ -204,6 +224,7 @@ fn fmin(x: f64, y: f64) -> f64 {
     }
 }
 
+/// Returns the bit width of `dtype`, counting bool as 1.
 fn bits(dtype: DType) -> u32 {
     match dtype {
         DType::Bool => 1,
@@ -211,6 +232,7 @@ fn bits(dtype: DType) -> u32 {
     }
 }
 
+/// Reinterprets the low `w` bits of `x` as a signed integer.
 fn signed_bits(x: i128, w: u32) -> i128 {
     let bits = unsigned_bits(x, w) as i128;
     if w > 0 && bits >= 1 << (w - 1) {
@@ -220,10 +242,12 @@ fn signed_bits(x: i128, w: u32) -> i128 {
     }
 }
 
+/// Returns the low `w` bits of `x`.
 fn unsigned_bits(x: i128, w: u32) -> u128 {
     (x as u128) & ((1u128 << w) - 1)
 }
 
+/// Inverse error function via Giles' single-precision polynomial approximation.
 fn erf_inv(x: f64) -> f64 {
     if x.abs() == 1.0 {
         return x * f64::INFINITY;
@@ -263,16 +287,20 @@ fn erf_inv(x: f64) -> f64 {
     p * x
 }
 
+/// Rounds `x` to a float with `exponent_bits` and `mantissa_bits`, like XLA's ReducePrecision: round to nearest
+/// even, overflow to infinity and underflow to signed zero.
 fn reduce_precision(x: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
     if x.is_nan() {
         return x;
     }
     let mut b = x.to_bits();
+    // round half to even on the dropped mantissa bits
     if mantissa_bits < 52 {
         let last = 1u64 << (52 - mantissa_bits);
         let bias = (last >> 1) - 1 + ((b & last) >> (52 - mantissa_bits));
         b = (b + bias) & !(last - 1);
     }
+    // clamp the exponent to the reduced range
     if exponent_bits < 11 {
         let reduced_bias = (1u64 << (exponent_bits - 1)) - 1;
         let exponent = b & 0x7FF0_0000_0000_0000;
@@ -286,6 +314,7 @@ fn reduce_precision(x: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
     f64::from_bits(b)
 }
 
+/// Returns the next representable value of float `dtype` after `x` towards `y`.
 fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
     if x.is_nan() || y.is_nan() {
         return f64::NAN;
@@ -293,6 +322,7 @@ fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
     if x == y {
         return y;
     }
+    // step the bit pattern by one ulp; from zero go to the smallest subnormal with the direction's sign
     let step = |bits: u64, sign: u64, up: bool| -> u64 {
         match bits & !sign {
             0 => (if y > x { 0 } else { sign }) | 1,
@@ -321,6 +351,7 @@ fn nextafter(x: f64, y: f64, dtype: DType) -> f64 {
     }
 }
 
+/// Maximum that propagates NaN.
 fn fmax(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         f64::NAN
@@ -329,6 +360,7 @@ fn fmax(x: f64, y: f64) -> f64 {
     }
 }
 
+/// Builds an `out`-shaped tensor whose element at each index is `x[source(index)]`.
 fn gather(x: &Values, out: &TensorType, source: impl Fn(&[usize]) -> usize) -> Values {
     let mut index = Vec::with_capacity(out.numel());
     if out.numel() > 0 {
@@ -340,12 +372,14 @@ fn gather(x: &Values, out: &TensorType, source: impl Fn(&[usize]) -> usize) -> V
     }
 }
 
+/// Returns the row-major flat offset of `idx` within `shape`.
 fn ravel(idx: impl IntoIterator<Item = usize>, shape: &[usize]) -> usize {
     idx.into_iter()
         .zip(shape)
         .fold(0, |flat, (i, n)| flat * n + i)
 }
 
+/// Reads integer indices into an axis of size `n`, clamped into range.
 fn taken(indices: &Values, n: usize) -> Vec<usize> {
     let Values::Int(v) = indices else {
         unreachable!("integer indices")
@@ -355,6 +389,7 @@ fn taken(indices: &Values, n: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Reads dynamic slice start indices, clamped so a slice of `sizes` stays inside `x`.
 fn starts(x: &TensorType, indices: &[&Values], sizes: &[usize]) -> Vec<usize> {
     indices
         .iter()
@@ -369,6 +404,7 @@ fn starts(x: &TensorType, indices: &[&Values], sizes: &[usize]) -> Vec<usize> {
         .collect()
 }
 
+/// Evaluates one primitive on `args` of `types`, producing a result of type `out`.
 fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType) -> Values {
     use Primitive::*;
     use Values::{Float, Int};
@@ -380,6 +416,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     Add => a + b,
                     Sub => a - b,
                     Mul => a.wrapping_mul(b),
+                    // integer division by zero yields -1, matching XLA
                     Div if b == 0 => -1,
                     Div => a / b,
                     Max => a.max(b),
@@ -483,12 +520,14 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     .iter()
                     .zip(y)
                     .map(|(&a, &b)| match op {
+                        // integer remainder by zero yields the dividend, matching XLA
                         B::Rem if b == 0 => a,
                         B::Rem => a % b,
                         B::Min => a.min(b),
                         B::And => wrap(a & b, dtype),
                         B::Or => wrap(a | b, dtype),
                         B::Xor => wrap(a ^ b, dtype),
+                        // shift amounts outside 0..bits saturate: 0, or -1 for arithmetic shifts of negatives
                         _ if b < 0 || b >= i128::from(w) => match op {
                             B::ShiftRightArithmetic if signed_bits(a, w) < 0 => wrap(-1, dtype),
                             _ => 0,
@@ -556,6 +595,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ReduceSum { .. } => Int(vec![0]),
                 _ => lowest(dtype),
             };
+            // flat output index each input element accumulates into
             let mut target = Vec::with_capacity(x.numel());
             if x.numel() > 0 {
                 for_each_index(&x.shape, |idx| {
@@ -696,6 +736,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             }
         }
         Cumsum { axis, reverse, .. } => {
+            // walk each line along `axis` of the `(outer, n, b)` view, backwards when reversed
             let shape = &types[0].shape;
             let n = shape[*axis];
             let b: usize = shape[axis + 1..].iter().product();
@@ -752,6 +793,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             )
             .collect();
             let contracted: Vec<usize> = lhs_contracting.iter().map(|&d| lhs.shape[d]).collect();
+            // per output element, the (lhs, rhs) flat offset pairs summed over the contracting dims
             let mut terms: Vec<Vec<(usize, usize)>> = Vec::with_capacity(out.numel());
             if out.numel() > 0 {
                 for_each_index(&out.shape, |idx| {
@@ -799,6 +841,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                     terms
                         .iter()
                         .map(|t| {
+                            // round each product and partial sum to the accumulator dtype, as a kernel would
                             let acc = t.iter().fold(0.0, |acc, &(i, j)| {
                                 round(acc + round(x[i] * y[j], *accum_dtype), *accum_dtype)
                             });
@@ -858,6 +901,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                         .collect(),
                 ),
             };
+            // per operand: its start along `d` and its offset in the flattened concatenation
             let (mut starts, mut bases) = (Vec::new(), Vec::new());
             let (mut start, mut base) = (0, 0);
             for t in types {
@@ -908,6 +952,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 unreachable!("float rows and weights, int classes")
             };
             let (b, d, v) = (types[0].shape[0], types[0].shape[1], types[1].shape[0]);
+            // float32 logits, then loss = logsumexp - logit[target]; output is losses followed by logsumexps
             let (mut loss, mut lse) = (Vec::with_capacity(b), Vec::with_capacity(b));
             for i in 0..b {
                 let logits: Vec<f64> = (0..v)
@@ -936,6 +981,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
     }
 }
 
+/// Elementwise select: `x` where `pred` is nonzero, else `y`.
 fn pick<T: Copy>(pred: &[i128], x: &[T], y: &[T]) -> Vec<T> {
     pred.iter()
         .zip(x.iter().zip(y))
@@ -943,11 +989,13 @@ fn pick<T: Copy>(pred: &[i128], x: &[T], y: &[T]) -> Vec<T> {
         .collect()
 }
 
+/// Returns the first 32-bit word of Philox4x32-10 for a 64-bit key and counter.
 pub(crate) fn philox_bits(key: u64, counter: u64) -> u32 {
     let counter = [counter as u32, (counter >> 32) as u32, 0, 0];
     philox4x32([key as u32, (key >> 32) as u32], counter)[0]
 }
 
+/// Philox4x32 with 10 rounds: maps a 2-word key and 4-word counter to 4 random words.
 pub(crate) fn philox4x32(mut k: [u32; 2], mut c: [u32; 4]) -> [u32; 4] {
     let mulhilo = |a: u32, b: u32| {
         let p = a as u64 * b as u64;

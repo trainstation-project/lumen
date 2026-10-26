@@ -1,3 +1,5 @@
+"""Tests of horizontal fusion on MPS: independent kernels merged into one launch."""
+
 import re
 
 import numpy as np
@@ -10,6 +12,7 @@ pytestmark = pytest.mark.mps
 
 
 def rand(*shape, seed=0):
+    """Standard normal float32 array of `shape` from `seed`."""
     return np.random.default_rng(seed).standard_normal(shape).astype(np.float32)
 
 
@@ -21,6 +24,7 @@ def compiler():
 
 
 def _device(*arrays):
+    """`arrays` on the MPS device; skips the test when MPS is unavailable."""
     try:
         return [lumen.from_numpy(a).to("mps") for a in arrays]
     except RuntimeError as e:
@@ -28,6 +32,7 @@ def _device(*arrays):
 
 
 def _steps(f, *args):
+    """The MPS plan steps of `f` traced on `args`."""
     return lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
 
 
@@ -38,6 +43,7 @@ def _merged(label):
 
 
 def _independent(a, b, c):
+    """Three independent elementwise computations of equal element count, one a lone cast."""
     return F.exp(a) * 2.0 + 1.0, (b - 1.0) * b, c.bfloat16()
 
 
@@ -78,6 +84,7 @@ def test_fusions_of_different_record_function_calls_are_not_fused():
     args = _device(rand(64, 32), rand(64, 32, seed=1))
 
     def in_calls(a, b):
+        """Each input's computation inside its own `record_function("layer")` range."""
         outs = []
         for x in (a, b):
             with lumen.profiler.record_function("layer"):
@@ -104,6 +111,7 @@ def test_dependent_fusions_are_not_fused():
     (a,) = _device(rand(64, 32))
 
     def f(a):
+        """`x` and a value computed from `x` through a reduction."""
         x = F.exp(a) + 1.0
         return x, x * F.sum(x)
 
@@ -122,6 +130,7 @@ def test_fusions_bind_at_most_a_kernels_buffers():
     args = _device(*arrays)
 
     def f(*xs):
+        """One independent elementwise fusion per input."""
         return tuple(x * 2.0 + float(k) for k, x in enumerate(xs))
 
     steps = _steps(f, *args)
@@ -134,6 +143,8 @@ def test_fusions_bind_at_most_a_kernels_buffers():
 
 
 class _Parameters(lumen.nn.Module):
+    """A module holding a list of parameter tensors."""
+
     xs: list
 
 
@@ -144,10 +155,13 @@ def test_in_place_updates_fused(compiler):
     shapes = [(64, 64), (64, 64), (32, 128), (4096,)]
 
     def run(horizontal):
+        """Compiles an in-place update step with `horizontal` fusion on or off, runs it three times on
+        fresh parameters and returns the parameters and the GPU kernels profiled."""
         compiler.horizontal_fusion = horizontal
         params = _Parameters([lumen.empty(list(s), "float32", device="meta") for s in shapes])
 
         def step(p, *grads):
+            """Updates every parameter in place from its gradient."""
             for x, g in zip(p.xs, grads):
                 x.copy_(x * 0.99 - 0.1 * g)
             return grads[0] * 1.0

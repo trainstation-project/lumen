@@ -1,10 +1,17 @@
+//! Node schedulers that reorder a graph's nodes to keep less memory live.
+
 use crate::graph::{Graph, Primitive, Var};
 
+/// Node-level dependency edges of a graph.
 struct Deps {
+    /// Per node, the sorted nodes it must run after.
     operands: Vec<Vec<usize>>,
+    /// Per node, the nodes that must run after it.
     users: Vec<Vec<usize>>,
 }
 
+/// Dependencies of each node on the producers of its inputs, with custom calls also chained in
+/// their original order since they may have side effects.
 fn deps(graph: &Graph) -> Deps {
     let nodes = graph.nodes();
     let mut producer = vec![None; graph.types.len()];
@@ -32,6 +39,7 @@ fn deps(graph: &Graph) -> Deps {
     Deps { operands, users }
 }
 
+/// Per value, the value whose storage it aliases through chains of reshapes (itself otherwise).
 fn roots(graph: &Graph) -> Vec<Var> {
     let mut root: Vec<Var> = (0..graph.types.len()).collect();
     for node in graph.nodes() {
@@ -42,11 +50,13 @@ fn roots(graph: &Graph) -> Vec<Var> {
     root
 }
 
+/// Size of value `v` in bytes.
 fn bytes(graph: &Graph, v: Var) -> i64 {
     let ty = graph.type_of(v);
     (ty.numel() * ty.dtype.size_of()) as i64
 }
 
+/// Whether node `i` allocates nothing worth tracking: an alias, a fusion output or a scalar.
 fn free(graph: &Graph, i: usize) -> bool {
     let node = &graph.nodes()[i];
     matches!(
@@ -55,10 +65,13 @@ fn free(graph: &Graph, i: usize) -> bool {
     ) || graph.type_of(node.output).numel() <= 1
 }
 
+/// Greedy list schedule: of the ready nodes, runs the one freeing the most bytes net of its output
+/// (free nodes first, then more users, then lower index); returns node indices in run order.
 pub(crate) fn list(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
     let Deps { operands, users } = deps(graph);
     let root = roots(graph);
+    // Graph inputs and outputs live for the whole run, so reading them last frees nothing.
     let mut pinned = vec![false; graph.types.len()];
     for &v in graph.inputs().iter().chain(graph.outputs()) {
         pinned[root[v]] = true;
@@ -111,6 +124,8 @@ pub(crate) fn list(graph: &Graph) -> Vec<usize> {
     order
 }
 
+/// Depth-first post-order schedule from the outputs, visiting each node's heavier operand
+/// subgraphs first so smaller ones are computed close to their use; returns node indices.
 pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
     let Deps { operands, users } = deps(graph);
@@ -118,6 +133,7 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
     let cap: i64 = (0..nodes.len())
         .map(|i| bytes(graph, nodes[i].output))
         .sum();
+    // Per node, a saturating estimate of its subgraph's extra users and output bytes, the visit order key.
     let mut stats = vec![(0i64, 0i64); nodes.len()];
     for i in 0..nodes.len() {
         let mut s = (
@@ -150,6 +166,7 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
             ops.sort_by_key(|&o| (stats[o].0, stats[o].1, std::cmp::Reverse(o)));
             ops
         };
+        // Iterative DFS: operands are popped from the end, so the largest-stat operand is visited first.
         let mut stack = vec![(start, sorted(start))];
         while let Some((i, ops)) = stack.last_mut() {
             match ops.pop() {
@@ -170,6 +187,7 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
 }
 
 impl Graph {
+    /// This graph with its nodes in `order` (indices into the current nodes); types and I/O unchanged.
     pub(crate) fn reordered(&self, order: &[usize]) -> Graph {
         Graph {
             types: self.types.clone(),

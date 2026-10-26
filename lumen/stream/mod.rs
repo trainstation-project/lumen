@@ -1,3 +1,6 @@
+//! Device streams: a handle to lumen's work queue on each device for host synchronization,
+//! and holds that stall a queue.
+
 mod cpu;
 #[cfg(lumen_cuda_linked)]
 pub mod cuda;
@@ -26,10 +29,13 @@ use std::sync::Arc;
 
 use crate::device::Device;
 
+/// A device's queue of lumen work.
 pub trait Stream: Send + Sync {
+    /// Blocks the host until all queued work finishes.
     fn synchronize(&self);
 }
 
+/// lumen's stream on `device`; errors if the device is not available.
 pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
     device.check()?;
     Ok(match device {
@@ -46,9 +52,11 @@ pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
     })
 }
 
+/// Keeps a device's queue stalled until dropped; holds nothing on devices without hold support.
 pub(crate) struct Hold(Option<Box<dyn FnOnce() + Send>>);
 
 impl Drop for Hold {
+    /// Releases the stalled queue.
     fn drop(&mut self) {
         if let Some(release) = self.0.take() {
             release();
@@ -56,6 +64,8 @@ impl Drop for Hold {
     }
 }
 
+/// Stalls `device`'s queue so work enqueued meanwhile does not start until the returned
+/// `Hold` drops; only CUDA and MPS queues are stalled, other devices get an empty hold.
 pub(crate) fn hold(device: Device) -> Result<Hold, String> {
     device.check()?;
     Ok(Hold(match device {

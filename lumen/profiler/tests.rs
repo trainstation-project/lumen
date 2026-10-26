@@ -1,15 +1,19 @@
+//! Tests for profiler sessions, event nesting, memory and device attribution, the summary table and Chrome traces.
 use std::sync::{Mutex, MutexGuard};
 
 use super::*;
 use crate::graph::TensorType;
 use crate::{DType, Tensor};
 
+/// Serializes tests, since the profiler session is process-global.
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Takes the test lock, ignoring poisoning from a failed test.
 fn exclusive() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Runs `f` in a session with `config` and returns the events recorded on this thread.
 fn profile(config: ProfilerConfig, f: impl FnOnce()) -> Profile {
     let _lock = exclusive();
     start(config).expect("no session running");
@@ -17,10 +21,12 @@ fn profile(config: ProfilerConfig, f: impl FnOnce()) -> Profile {
     stop().unwrap().for_thread(thread_id())
 }
 
+/// CPU-only config.
 fn cpu() -> ProfilerConfig {
     ProfilerConfig::default()
 }
 
+/// CPU config that also records memory events.
 fn with_memory() -> ProfilerConfig {
     ProfilerConfig {
         profile_memory: true,
@@ -28,22 +34,26 @@ fn with_memory() -> ProfilerConfig {
     }
 }
 
+/// Every event named `name`.
 fn named<'a>(p: &'a Profile, name: &str) -> Vec<&'a Event> {
     p.events().iter().filter(|e| e.name == name).collect()
 }
 
+/// The single event named `name`, failing unless there is exactly one.
 fn one<'a>(p: &'a Profile, name: &str) -> &'a Event {
     let found = named(p, name);
     assert_eq!(found.len(), 1, "expected one {name:?} in {:#?}", p.events());
     found[0]
 }
 
+/// The `key_averages` row named `name`.
 fn row<'a>(rows: &'a [EventAvg], name: &str) -> &'a EventAvg {
     rows.iter()
         .find(|r| r.name == name)
         .unwrap_or_else(|| panic!("no row {name:?}"))
 }
 
+/// Ranges opened with no session are inert, and stopping with none errors.
 #[test]
 fn nothing_is_recorded_without_a_session() {
     let _lock = exclusive();
@@ -54,6 +64,7 @@ fn nothing_is_recorded_without_a_session() {
     assert!(stop().is_err(), "no session to stop");
 }
 
+/// Starting a second session while one runs errors.
 #[test]
 fn only_one_session_runs_at_a_time() {
     let _lock = exclusive();
@@ -64,6 +75,7 @@ fn only_one_session_runs_at_a_time() {
     assert!(!is_enabled());
 }
 
+/// A range opened in one session and closed in the next is not recorded in either.
 #[test]
 fn events_from_an_earlier_session_are_dropped() {
     let _lock = exclusive();
@@ -76,6 +88,7 @@ fn events_from_an_earlier_session_are_dropped() {
     assert!(named(&p, "straddles").is_empty());
 }
 
+/// Nested ranges record their parent and the outer one's self time excludes the inner.
 #[test]
 fn record_function_ranges_nest() {
     let p = profile(cpu(), || {
@@ -97,6 +110,7 @@ fn record_function_ranges_nest() {
     assert_eq!(i.self_cpu_time_total, i.cpu_time_total);
 }
 
+/// Dropping guards out of order keeps parents right and empties the range stack.
 #[test]
 fn guards_dropped_out_of_order_are_tolerated() {
     let p = profile(cpu(), || {
@@ -111,6 +125,7 @@ fn guards_dropped_out_of_order_are_tolerated() {
     assert!(STACK.with(|s| s.borrow().is_empty()));
 }
 
+/// Tensor ops record nested internal ops, as PyTorch does.
 #[test]
 fn tensor_ops_are_recorded_nested_like_pytorch() {
     let p = profile(cpu(), || {
@@ -128,6 +143,7 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
     assert_eq!(row(&p.key_averages(false), "lumen::fill_").count, 1);
 }
 
+/// Op input and output types are recorded only with `record_shapes`.
 #[test]
 fn types_are_recorded_only_with_record_shapes() {
     let types = |record_shapes| {
@@ -161,6 +177,7 @@ fn types_are_recorded_only_with_record_shapes() {
     assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
 }
 
+/// A device kernel takes its op's types and accumulation dtypes, also in the trace.
 #[test]
 fn device_events_have_their_ops_types() {
     let config = ProfilerConfig {
@@ -195,6 +212,7 @@ fn device_events_have_their_ops_types() {
     assert!(trace.contains(tensors), "{trace}");
 }
 
+/// `key_averages(true)` splits rows by input types and strides, and the table shows them.
 #[test]
 fn rows_group_by_input_shape_with_their_shapes_and_strides() {
     let config = ProfilerConfig {
@@ -226,6 +244,7 @@ fn rows_group_by_input_shape_with_their_shapes_and_strides() {
     assert!(!p.table(None, None, false).contains("Input Shapes"));
 }
 
+/// Without the CPU activity only memory events are recorded.
 #[test]
 fn without_the_cpu_activity_no_ops_are_recorded() {
     let p = profile(
@@ -242,6 +261,7 @@ fn without_the_cpu_activity_no_ops_are_recorded() {
     assert_eq!(p.events().len(), 2, "one allocation, one free");
 }
 
+/// Events from another thread carry that thread's id, and `for_thread` filters by it.
 #[test]
 fn events_on_other_threads_carry_their_own_thread_id() {
     let _lock = exclusive();
@@ -264,6 +284,7 @@ fn events_on_other_threads_carry_their_own_thread_id() {
     assert!(p.for_thread(here).events().iter().all(|e| e.thread == here));
 }
 
+/// CPU allocations and frees are memory events under their op, summed into self and total memory.
 #[test]
 fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     let p = profile(with_memory(), || {
@@ -293,6 +314,7 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     );
 }
 
+/// Freeing a block allocated before the session records nothing.
 #[test]
 fn frees_of_blocks_allocated_before_the_session_are_not_reported() {
     let _lock = exclusive();
@@ -303,12 +325,14 @@ fn frees_of_blocks_allocated_before_the_session_are_not_reported() {
     assert!(named(&p, "[memory]").is_empty(), "{:#?}", p.events());
 }
 
+/// No memory events without `profile_memory`.
 #[test]
 fn memory_is_recorded_only_with_profile_memory() {
     let p = profile(cpu(), || drop(Tensor::zeros(&[8], DType::F32)));
     assert!(named(&p, "[memory]").is_empty());
 }
 
+/// A region's allocation and free report the region's allocated and reserved totals.
 #[test]
 fn region_reports_allocations_with_its_totals() {
     use crate::Allocator;
@@ -345,6 +369,7 @@ fn region_reports_allocations_with_its_totals() {
     );
 }
 
+/// A device kernel counts as its op's self device time and its ancestors' total device time.
 #[test]
 fn device_work_is_attributed_to_the_issuing_op() {
     let config = ProfilerConfig {
@@ -387,6 +412,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
     assert!(op_line.contains("100.00%"), "{table}");
 }
 
+/// Device work on a device whose activity is off is not recorded.
 #[test]
 fn device_work_needs_its_activity() {
     let p = profile(cpu(), || {
@@ -397,6 +423,7 @@ fn device_work_needs_its_activity() {
     assert!(named(&p, "Memset").is_empty());
 }
 
+/// The table has PyTorch's columns and sorts and limits its rows.
 #[test]
 fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
     let config = ProfilerConfig {
@@ -449,6 +476,7 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
     );
 }
 
+/// A CPU-only table has no device or memory columns.
 #[test]
 fn cpu_only_tables_omit_device_and_memory_columns() {
     let p = profile(cpu(), || {
@@ -459,6 +487,7 @@ fn cpu_only_tables_omit_device_and_memory_columns() {
     assert!(!table.contains("CUDA") && !table.contains("Mem"), "{table}");
 }
 
+/// `SortBy::parse` accepts PyTorch's names, including `cuda_*` aliases.
 #[test]
 fn sort_keys_parse_pytorchs_names() {
     assert_eq!(
@@ -477,6 +506,7 @@ fn sort_keys_parse_pytorchs_names() {
     assert_eq!(SortBy::parse("flops"), None);
 }
 
+/// Times and sizes format with PyTorch's units.
 #[test]
 fn times_and_sizes_format_like_pytorch() {
     use super::summary::{format_memory, format_time};
@@ -489,6 +519,7 @@ fn times_and_sizes_format_like_pytorch() {
     assert_eq!(format_memory(2 << 30), "2.00 Gb");
 }
 
+/// The Chrome trace has PyTorch's categories, args and escaped names.
 #[test]
 fn chrome_trace_has_pytorchs_event_layout() {
     let config = ProfilerConfig {
@@ -522,6 +553,7 @@ fn chrome_trace_has_pytorchs_event_layout() {
     assert_eq!(open, close, "balanced braces");
 }
 
+/// Host-run plan steps are drawn in a separate CPU process from the dispatching ops.
 #[test]
 fn host_kernels_are_apart_from_their_dispatch() {
     let mut g = crate::graph::Graph::new();
@@ -562,6 +594,7 @@ fn host_kernels_are_apart_from_their_dispatch() {
     }
 }
 
+/// `json_str` escapes quotes, backslashes and control characters.
 #[test]
 fn json_strings_escape_control_characters() {
     assert_eq!(
@@ -570,6 +603,7 @@ fn json_strings_escape_control_characters() {
     );
 }
 
+/// Asserts `gpu` falls within `op`, give or take `slack_ns`.
 #[cfg(lumen_cupti_linked)]
 fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(
@@ -580,16 +614,19 @@ fn within(gpu: &Event, op: &Event, slack_ns: u64) {
     assert!(gpu.end_ns >= gpu.start_ns);
 }
 
+/// Tests that need Metal.
 #[cfg(lumen_mps_linked)]
 mod mps {
     use super::*;
     use crate::TensorOptions;
     use crate::device::mps;
 
+    /// Tensor options for `dtype` on the first Metal device.
     fn on_mps(dtype: DType) -> TensorOptions {
         TensorOptions::new().dtype(dtype).device(Device::Mps(0))
     }
 
+    /// Metal kernels are timed in submission order without overlapping.
     #[test]
     fn metal_stream_work_runs_in_order() {
         if !mps::MPS.is_available() {
@@ -620,12 +657,14 @@ mod mps {
     }
 }
 
+/// Tests that need CUDA and CUPTI.
 #[cfg(lumen_cupti_linked)]
 mod cuda {
     use super::*;
     use crate::TensorOptions;
     use crate::device::cuda;
 
+    /// CUDA copies are timed as GPU events under the ops that issued them.
     #[test]
     fn cuda_copies_are_timed_on_the_gpu() {
         if !cuda::CUDA.is_available() {
@@ -659,6 +698,7 @@ mod cuda {
         );
     }
 
+    /// CUDA copies are not timed without the CUDA activity.
     #[test]
     fn cuda_work_is_not_timed_without_the_cuda_activity() {
         if !cuda::CUDA.is_available() {
@@ -672,6 +712,7 @@ mod cuda {
     }
 }
 
+/// Each user range gets a GPU-timeline span over the kernels launched inside it.
 #[test]
 fn ranges_are_annotated_on_the_gpu_timeline() {
     let config = ProfilerConfig {

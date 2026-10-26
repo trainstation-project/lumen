@@ -1,7 +1,11 @@
+//! Strength reduction of dots between vectors into elementwise multiply and reduce-sum.
+
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
+/// Rewrites float dots whose operands both have only size-1 free dims (batched inner products)
+/// as `reduce_sum(x * y)`, cast to the output dtype when it differs from the accumulator.
 pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -62,6 +66,8 @@ pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
     out
 }
 
+/// `reduce_sum(v * m)` over `m`'s contracting dims, with `v` laid out and broadcast onto `m`'s shape;
+/// the result is in dot output order (batch dims, then free dims).
 fn product(
     out: &mut Graph,
     (v, v_batch, v_contracting): (Var, &Vec<usize>, &Vec<usize>),
@@ -69,6 +75,7 @@ fn product(
     accum: DType,
 ) -> Var {
     let (v_ty, m_ty) = (out.type_of(v).clone(), out.type_of(m).clone());
+    // Pairs of matching (v dim, m dim) for batch and contracting dims, in m's dim order.
     let mut kept: Vec<(usize, usize)> = v_batch
         .iter()
         .zip(m_batch)
@@ -76,6 +83,7 @@ fn product(
         .map(|(&a, &b)| (a, b))
         .collect();
     kept.sort_by_key(|&(_, d)| d);
+    // Drop v's size-1 free dims, then permute its kept dims into m's order.
     let mut by_vector = kept.clone();
     by_vector.sort_unstable();
     let new_sizes: Vec<usize> = by_vector.iter().map(|&(d, _)| v_ty.shape[d]).collect();
@@ -125,6 +133,7 @@ fn product(
     }
 }
 
+/// `v` cast from `from` to `to`, unchanged when they match.
 fn cast_with(
     apply: &mut impl FnMut(Primitive, &[Var]) -> Var,
     v: Var,
@@ -137,6 +146,7 @@ fn cast_with(
     }
 }
 
+/// `v` reshaped to `shape`, unchanged when it already has it.
 fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     match out.type_of(v).shape == shape {
         true => v,
@@ -151,13 +161,16 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
     }
 }
 
+/// Compiler pass running [`reduce_vector_dots`].
 pub(crate) struct DotStrength;
 
 impl<M: Module> CompilerPass<M> for DotStrength {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_strength"
     }
 
+    /// Replaces the module's graph with its strength-reduced version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = reduce_vector_dots(m.graph());
         Ok(())

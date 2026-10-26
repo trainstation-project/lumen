@@ -1,3 +1,5 @@
+//! Host/device copy ops, dispatched to each backend's copy kernel.
+
 mod cpu;
 #[cfg(lumen_cuda_linked)]
 mod cuda;
@@ -10,12 +12,16 @@ use crate::Tensor;
 use crate::device::Device;
 use crate::kernels::{DispatchKey, Op};
 
+/// A copy kernel: writes all of `src`'s bytes into `dst`.
 pub type CopyKernel = fn(dst: &Tensor, src: &Tensor);
 
+/// Host-to-device copy op.
 pub static COPY_H2D: Op<CopyKernel> = Op::new(op_name!("copy_h2d"), h2d_kernels);
 
+/// Device-to-host copy op.
 pub static COPY_D2H: Op<CopyKernel> = Op::new(op_name!("copy_d2h"), d2h_kernels);
 
+/// The host-to-device kernel for a dispatch key, if the backend is built in.
 fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
     match key {
         DispatchKey::Cpu => Some(cpu::memcpy),
@@ -35,9 +41,11 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
     }
 }
 
+/// The device-to-host kernel for a dispatch key, if the backend is built in.
 fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     match key {
         DispatchKey::Cpu => Some(cpu::memcpy),
+        // MPS memory is host-visible, so reading it back is a plain memcpy.
         #[cfg(lumen_mps_linked)]
         DispatchKey::Mps => Some(cpu::memcpy),
         #[cfg(not(lumen_mps_linked))]
@@ -54,6 +62,7 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     }
 }
 
+/// Copies CPU tensor `src` into device tensor `dst` of the same dtype and size.
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);
     if dst.numel() == 0 {
@@ -63,6 +72,7 @@ pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     COPY_H2D.dispatch(dst.device())(dst, src);
 }
 
+/// Copies device tensor `src` into CPU tensor `dst`, waiting for `src`'s pending writes first.
 pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     check(dst, src, dst);
     if src.numel() == 0 {
@@ -73,6 +83,7 @@ pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     COPY_D2H.dispatch(src.device())(dst, src);
 }
 
+/// A profiler record for a copy on `device`; none for CPU-to-CPU copies.
 fn transfer(
     op: &Op<CopyKernel>,
     dst: &Tensor,
@@ -87,6 +98,7 @@ fn transfer(
     Some(guard)
 }
 
+/// Panics unless `host` is on CPU and the two tensors are distinct, contiguous and alike in dtype and size.
 fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
     assert_eq!(
         host.device(),

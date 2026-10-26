@@ -1,3 +1,5 @@
+"""Visualization of traced programs: generated kernel code and HTML graph pages."""
+
 from .code import dump_code, program_source
 from .common import source_of, type_text
 from .page import collect, write

@@ -1,6 +1,10 @@
+//! Tests of the MPS passes: loop fusion, dot merging and canonicalization, reduction and GEMM codegen,
+//! checked against the reference interpreter and, when a GPU is present, on device.
+
 use super::codegen::metal_type;
 use crate::graph_compiler::common::merge_dots::{Target, merge_dots};
 
+/// Dot merging target matching the MPS pipeline's.
 const MPS: Target = Target {
     reads: super::fusion::fusible,
     views: true,
@@ -18,10 +22,12 @@ use crate::graph_compiler::plan_tests::{data, mlp};
 use crate::kernels::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
+/// Shorthand for a tensor type.
 fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
+/// Runs MPS loop fusion with default config and normalization rows on `g`.
 fn fuse(g: &Graph) -> Graph {
     let config = MpsConfig::default();
     fusion::fuse(
@@ -33,6 +39,7 @@ fn fuse(g: &Graph) -> Graph {
     )
 }
 
+/// Fuses `g`, asserts the fused graph computes the same values on `inputs`, and returns its node names.
 fn fused_primitives(g: &Graph, inputs: &[Tensor]) -> Vec<&'static str> {
     let fused = fuse(g);
     let expected = reference::run(g, inputs).unwrap();
@@ -44,6 +51,7 @@ fn fused_primitives(g: &Graph, inputs: &[Tensor]) -> Vec<&'static str> {
     names(&fused)
 }
 
+/// Node primitive names of `g`, with every fusion named `fusion`.
 fn names(g: &Graph) -> Vec<&'static str> {
     let name = |p: &Primitive| match p {
         Fusion { .. } => "fusion",
@@ -52,10 +60,12 @@ fn names(g: &Graph) -> Vec<&'static str> {
     g.nodes().iter().map(|n| name(&n.primitive)).collect()
 }
 
+/// Applies `p` to `inputs`, panicking on a type error.
 fn apply(g: &mut Graph, p: Primitive, inputs: &[Var]) -> Var {
     g.apply(p, inputs).unwrap()
 }
 
+/// Gathers index with `uint` for small tables and `ulong` once byte offsets pass 2^32.
 #[test]
 fn gathers_from_tables_past_u32_index_in_ulong() {
     let source = |rows: usize| {
@@ -77,6 +87,7 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
     );
 }
 
+/// Elementwise, broadcast and transpose chains become one fusion labeled by its ops.
 #[test]
 fn fuses_elementwise_and_layout_chains() {
     let mut g = Graph::new();
@@ -110,12 +121,14 @@ fn fuses_elementwise_and_layout_chains() {
     );
 }
 
+/// An MLP fuses into one kernel per layer, split at its dots and reductions.
 #[test]
 fn reductions_and_contractions_are_boundaries() {
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2), data(&[16, 3], 3)];
     assert_eq!(fused_primitives(&mlp(), &inputs), ["fusion", "fusion"]);
 }
 
+/// A shared expensive value is hosted as an extra output; a shared cheap one is recomputed in each reader.
 #[test]
 fn only_cheap_values_are_recomputed() {
     let mut g = Graph::new();
@@ -138,6 +151,7 @@ fn only_cheap_values_are_recomputed() {
     assert_eq!(fused_primitives(&g, &[data(&[8], 1)]), ["fusion", "fusion"]);
 }
 
+/// A chain reading 40 inputs is split into fusions binding at most 29 buffers.
 #[test]
 fn fusions_fit_in_a_kernel() {
     let mut g = Graph::new();
@@ -154,6 +168,7 @@ fn fusions_fit_in_a_kernel() {
     }
 }
 
+/// Broadcasts, transposes, iota, select and casts fuse and match the reference for every dtype on device.
 #[test]
 fn fused_kernels_match_reference() {
     if !available() {
@@ -243,6 +258,7 @@ fn fused_kernels_match_reference() {
     }
 }
 
+/// Dots whose operand layout isn't collapsible get explicit transposes; plain matmuls stay untouched.
 #[test]
 fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     let mut g = Graph::new();
@@ -284,6 +300,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     assert_eq!(names(&super::canonicalize_dots(&g)), ["dot_general"]);
 }
 
+/// Large reductions get workspace scratch in the plan, and the generic plan refuses MPS inputs.
 #[test]
 fn mps_plans_hold_kernel_scratch() {
     if !available() {
@@ -308,6 +325,7 @@ fn mps_plans_hold_kernel_scratch() {
     assert!(generic.unwrap_err().contains("compile the graph for MPS"));
 }
 
+/// Two slices of one input fuse into the kernel reading them.
 #[test]
 fn slices_fuse_into_their_readers() {
     let mut g = Graph::new();
@@ -330,6 +348,7 @@ fn slices_fuse_into_their_readers() {
     }
 }
 
+/// Reference concatenation of `parts` along `dimension`, the layout of a packed block.
 fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     let mut g = Graph::new();
     let vars: Vec<Var> = parts
@@ -349,6 +368,7 @@ fn block(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// Reference interleaving of `parts` element by element along `dimension`.
 fn interleaved(parts: &[&Tensor], dimension: usize) -> Tensor {
     let mut g = Graph::new();
     let shape = parts[0].shape().to_vec();
@@ -383,6 +403,7 @@ fn interleaved(parts: &[&Tensor], dimension: usize) -> Tensor {
     reference::run(&g, &parts).unwrap().remove(0)
 }
 
+/// Transposes in fusions use threadgroup tiles exactly for shapes where the tiled kernel pays off.
 #[test]
 fn transposes_in_fusions_are_tiled() {
     let cases: [(&[usize], &[usize], bool); 6] = [
@@ -439,6 +460,7 @@ fn transposes_in_fusions_are_tiled() {
     }
 }
 
+/// Reductions pick row, column or grouped kernels after squeezing unit axes, with matching scratch.
 #[test]
 fn reductions_are_normalized() {
     use crate::kernels::reduction::mps::scratch_bytes;
@@ -479,6 +501,7 @@ fn reductions_are_normalized() {
     assert_eq!(spread, squeezed);
 }
 
+/// Half-precision reductions accumulate in float only when asked, including inside norm and softmax rows.
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
     use crate::kernels::reduction::mps::scratch_bytes;
@@ -568,6 +591,7 @@ fn hierarchical_reductions_keep_their_dtype() {
     }
 }
 
+/// Dots of weights scaled and cast elementwise merge when the elementwise ops match, sharing one cast.
 #[test]
 fn dots_of_weights_computed_elementwise_merge() {
     let dot = DotGeneral {
@@ -659,6 +683,7 @@ fn dots_of_weights_computed_elementwise_merge() {
     assert_eq!(packs, [(vec![1, 3], 0)], "{merged}");
 }
 
+/// Donated weights only merge when they pack along their leading axis, so stay contiguous.
 #[test]
 fn donated_weights_merge_only_contiguously() {
     let merged = |rhs_contracting: usize, shape: [usize; 2]| {
@@ -692,6 +717,7 @@ fn donated_weights_merge_only_contiguously() {
     assert_eq!(merged(1, [64, 32]), (along_first.clone(), along_first));
 }
 
+/// Only dots with the same accumulation dtype merge.
 #[test]
 fn dots_accumulating_in_other_dtypes_do_not_merge() {
     let dot = |accum_dtype| DotGeneral {
@@ -734,6 +760,7 @@ fn dots_accumulating_in_other_dtypes_do_not_merge() {
     assert_eq!(accums, [DType::F32, DType::BF16], "{merged}");
 }
 
+/// Dots sharing an operand merge into one GEMM, interleaving gated pairs, and match the reference.
 #[test]
 fn dots_sharing_an_operand_merge() {
     let matmul = DotGeneral {
@@ -843,6 +870,7 @@ fn dots_sharing_an_operand_merge() {
     }
 }
 
+/// Gate and up projections interleave, unless their concatenated block is read, which packs them side by side.
 #[test]
 fn gated_pairs_interleave_unless_their_block_is_read_side_by_side() {
     let linear = DotGeneral {
@@ -894,6 +922,7 @@ fn gated_pairs_interleave_unless_their_block_is_read_side_by_side() {
     );
 }
 
+/// A compiled plan with packed parameters runs on placed views of one shared block.
 #[test]
 fn owned_plans_read_packed_parameters() {
     if !available() {
@@ -968,6 +997,7 @@ fn owned_plans_read_packed_parameters() {
     }
 }
 
+/// Bias add and ReLU after a dot fuse into its GEMM epilogue.
 #[test]
 fn dots_fuse_their_epilogue() {
     let build = |read_twice: bool| {
@@ -1036,6 +1066,7 @@ fn dots_fuse_their_epilogue() {
     }
 }
 
+/// Slices of a dot's output read by later dots become strided views instead of copies.
 #[test]
 fn dots_read_slices_in_place() {
     let dot = |lc: usize, rc: usize| DotGeneral {
@@ -1106,6 +1137,7 @@ fn dots_read_slices_in_place() {
     }
 }
 
+/// Elementwise producers and consumers fuse into a sum or max reduction for every dtype and layout.
 #[test]
 fn reductions_fuse_their_inputs() {
     for (shape, axes) in [
@@ -1151,6 +1183,7 @@ fn reductions_fuse_their_inputs() {
     }
 }
 
+/// A cast, sum, mean and cast back run as one reduction with an epilogue, split into a final launch when large.
 #[test]
 fn reductions_apply_their_epilogue() {
     for (shape, axes, split) in [
@@ -1214,6 +1247,7 @@ fn reductions_apply_their_epilogue() {
     }
 }
 
+/// A reduction epilogue may read the reduced value more than once.
 #[test]
 fn reductions_apply_an_epilogue_reading_them_twice() {
     for (shape, split) in [(vec![64, 300], false), (vec![4, 200_000], true)] {
@@ -1242,6 +1276,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
     }
 }
 
+/// A softmax built from primitives becomes one row kernel with two row reductions.
 #[test]
 fn softmax_written_out_is_one_row_kernel() {
     let mut g = Graph::new();
@@ -1294,6 +1329,7 @@ fn softmax_written_out_is_one_row_kernel() {
     }
 }
 
+/// A fusion writes values other kernels also read as extra outputs instead of recomputing them.
 #[test]
 fn multi_output_fusion() {
     for (shape, axes) in [
@@ -1363,6 +1399,8 @@ fn multi_output_fusion() {
     assert_eq!(fused, ["fusion", "fusion_output", "fusion"]);
 }
 
+/// RMS norms, weighted or not and in either operand order, fuse into one row kernel unless an intermediate is read
+/// or the reduction isn't over the last axis.
 #[test]
 fn rms_norms_are_one_row_kernel() {
     let build = |weighted: bool, flip: bool, n: f64, axis: usize, leak: bool| {
@@ -1455,6 +1493,7 @@ fn rms_norms_are_one_row_kernel() {
     );
 }
 
+/// An RMS norm dividing by the square root directly, without epsilon, is still one row kernel.
 #[test]
 fn rms_norms_without_epsilon_are_one_row_kernel() {
     let mut g = Graph::new();
@@ -1501,6 +1540,7 @@ fn rms_norms_without_epsilon_are_one_row_kernel() {
     }
 }
 
+/// Division by a square root is generated as traced, never rewritten into `rsqrt`.
 #[test]
 fn division_by_sqrt_is_as_traced() {
     let mut g = Graph::new();
@@ -1551,6 +1591,7 @@ fn division_by_sqrt_is_as_traced() {
     }
 }
 
+/// The elementwise ops feeding an RMS norm and the weight transform after it fuse into its row kernel.
 #[test]
 fn rms_norm_row_kernels_fuse_their_input() {
     let mut g = Graph::new();
@@ -1623,6 +1664,7 @@ fn rms_norm_row_kernels_fuse_their_input() {
     }
 }
 
+/// Three dots read by one elementwise chain each get their own kernel rather than sharing an epilogue.
 #[test]
 fn dots_epilogues_do_not_overlap() {
     let mut g = Graph::new();
@@ -1660,6 +1702,7 @@ fn dots_epilogues_do_not_overlap() {
     assert_eq!(names, ["fusion", "fusion", "fusion"], "{names:?}");
 }
 
+/// Batched vector dots are strength-reduced to a multiply and a sum.
 #[test]
 fn vector_dots_are_reduced() {
     let mut g = Graph::new();
@@ -1687,6 +1730,8 @@ fn vector_dots_are_reduced() {
     }
 }
 
+/// Skinny long-K matmuls split K into chunks, atomically in f32 when allowed, keeping the accumulation dtype;
+/// large, short-K or unevenly divisible ones stay whole.
 #[test]
 fn skinny_dots_split_their_contraction() {
     let build_with = |m: usize, n: usize, k: usize, dtype: DType, accum: DType| {
@@ -1787,6 +1832,7 @@ fn skinny_dots_split_their_contraction() {
     }
 }
 
+/// Every tiled, MPP and skinny GEMM config computes plain and bias-fused matmuls like the reference.
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
     use super::autotune::{Gemms, matmul_of};
@@ -1882,6 +1928,7 @@ fn every_gemm_candidate_matches_the_reference() {
     }
 }
 
+/// Every tiled GEMM config stores column regions, row halves and concatenated expansions correctly.
 #[test]
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
     use super::autotune::{Gemms, matmul_of};
@@ -2034,6 +2081,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
     }
 }
 
+/// Every MPP config handles gated pairs (halves or interleaved) and an RMS norm wider than one tile.
 #[test]
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     use super::autotune::{Gemms, matmul_of};
@@ -2202,6 +2250,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     }
 }
 
+/// MPP and skinny GEMM candidates pick the expected epilogue layout flags and store every epilogue correctly.
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
     use super::autotune::{Gemms, matmul_of};
@@ -2490,6 +2539,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
     }
 }
 
+/// Every GEMM candidate accumulates in the dot's accumulation dtype, checked by summing 2^16 ones.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     use super::autotune::{Gemms, matmul_of};
@@ -2553,6 +2603,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     }
 }
 
+/// A dot written as multiply and sum, feeding an RMS norm over other rows, stays its own kernel: no fusion holds two sums.
 #[test]
 fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
     if !available() {
@@ -2651,6 +2702,7 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
     }
 }
 
+/// Every GEMV config stores plain, row-half and row-region epilogues for either vector side, bit-identical to the default.
 #[test]
 fn every_gemv_candidate_stores_every_epilogue() {
     use super::autotune::{Gemms, matmul_of};

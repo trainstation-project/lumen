@@ -1,3 +1,5 @@
+"""Rewrites matched attention subgraphs into one node with a flash-attention style backward."""
+
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.graph import prims, tracer
@@ -14,6 +16,7 @@ def substitute(tape):
         return tape
     graph = tracer.current_graph()
     for m in graph.attentions():
+        # Map each recorded output var to its tape index; tuple outputs belong to multi-output nodes.
         at = {entry[3]: k for k, entry in enumerate(tape) if not isinstance(entry[3], tuple)}
         if not all(v in at for v in m["members"]):
             continue
@@ -23,6 +26,7 @@ def substitute(tape):
         ctx.chain, ctx.causal, ctx.dropout = m["chain"], m["causal"], m["dropout"]
         q, k, v, o = (_value(m[name]) for name in ("q", "k", "v", "out"))
         mx, total = _value(m["max"]), _value(m["sum"])
+        # The softmax's max/sum drop the reduced key axis; restore it so they broadcast against ``o``.
         if mx.ndim < o.ndim:
             kept = [*mx.shape, 1]
             mx, total = prims.reshape(mx, kept), prims.reshape(total, kept)
@@ -34,6 +38,7 @@ def substitute(tape):
             {"function": _Attention, "ctx": ctx, "entries": [(0, q), (1, k), (2, v)], "nargs": 3},
             (o.var,),
         )
+        # Drop the attention's interior nodes and put the fused node where its output was recorded.
         tape = [node if e[3] == o.var else e for e in tape if e[3] not in members or e[3] == o.var]
     return tape
 
@@ -50,6 +55,7 @@ class _Attention(Function):
 
     @staticmethod
     def backward(ctx, do):
+        """Gradients of ``q``, ``k``, ``v`` from ``do``, recomputing the probabilities from the saved lse."""
         from lumen import functional as F
 
         q, k, v, o = ctx.saved_tensors
@@ -58,9 +64,11 @@ class _Attention(Function):
         lc1, rc1, lb1, rb1 = p1["lhs_contracting"], p1["rhs_contracting"], p1["lhs_batch"], p1["rhs_batch"]
         rc2, rb2 = p2["rhs_contracting"], p2["rhs_batch"]
         nb, accum, dtype = len(lb1), p1["accum_dtype"], q.dtype
+        # Free (non-batch, non-contracted) dimension of each operand: query rows, key rows, value columns.
         qf, kf, vf = _free(q.ndim, lb1, lc1), _free(k.ndim, rb1, rc1), _free(v.ndim, rb2, rc2)
         batch, sq, sk = list(o.shape[:nb]), o.shape[nb], k.shape[kf]
         every = tuple(range(nb))
+        # Scores are computed transposed as ``[batch..., sk, sq]`` and replay the forward's scale/round chain.
         st = prims.dot_general(k, q, ((rc1, lc1), (rb1, lb1)), accum, p1["output_dtype"])
         scale = 1.0
         for step in ctx.chain[1:]:
@@ -78,6 +86,7 @@ class _Attention(Function):
         pt = prims.exp(prims.sub(st, lse))
         g = do if do.dtype == dtype else prims.cast(do, dtype)
         rows = tuple(range(nb + 1))
+        # ``d = rowsum(do * o)``, the softmax backward's per-query correction term.
         d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum, accum)
         d = prims.broadcast_in_dim(prims.reshape(d, batch + [1, sq]), batch + [sk, sq], per_query)
         dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum, accum)
@@ -94,6 +103,7 @@ class _Attention(Function):
         dq = prims.dot_general(ds, k, (((nb,), (kf,)), (every, rb1)), accum, accum)
 
         def operand(grad, x, batch_dims, row, col):
+            """Permutes ``grad`` from ``[batch..., row, col]`` into ``x``'s layout and dtype."""
             order = {d: i for i, d in enumerate(batch_dims)} | {row: nb, col: nb + 1}
             perm = [order[d] for d in range(x.ndim)]
             grad = grad if perm == list(range(x.ndim)) else prims.transpose(grad, perm)

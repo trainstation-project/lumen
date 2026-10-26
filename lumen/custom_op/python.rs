@@ -1,3 +1,5 @@
+//! Python binding of `MetalKernel`.
+
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -5,6 +7,7 @@ use pyo3::types::PyBytes;
 use crate as core;
 use crate::tensor::python::PyTensor;
 
+/// Python `lumen.custom_op.MetalKernel`: a compiled Metal kernel callable from a custom op.
 #[pyclass(name = "MetalKernel", module = "lumen", frozen)]
 pub(crate) struct PyMetalKernel {
     inner: core::custom_op::mps::MetalKernel,
@@ -12,6 +15,7 @@ pub(crate) struct PyMetalKernel {
 
 #[pymethods]
 impl PyMetalKernel {
+    /// Compiles `source`, choosing kernel `name` when the source defines several.
     #[new]
     #[pyo3(signature = (source, name = None))]
     fn new(source: &str, name: Option<&str>) -> PyResult<Self> {
@@ -20,11 +24,14 @@ impl PyMetalKernel {
         Ok(PyMetalKernel { inner })
     }
 
+    /// Name of the compiled kernel function.
     #[getter]
     fn name(&self) -> &str {
         self.inner.name()
     }
 
+    /// Launches over `grid` threads or `threadgroups` groups (exactly one, up to 3-D); each of `args`
+    /// is `bytes` or an object with `tobytes()`, such as a NumPy scalar.
     #[pyo3(signature = (tensors, args = Vec::new(), *, grid = None, threadgroups = None))]
     fn launch(
         &self,
@@ -60,6 +67,7 @@ impl PyMetalKernel {
             .map_err(PyValueError::new_err)
     }
 
+    /// Shows the kernel name.
     fn __repr__(&self) -> String {
         format!(
             "<{}.MetalKernel {}>",
@@ -69,6 +77,7 @@ impl PyMetalKernel {
     }
 }
 
+/// Adds `MetalKernel` to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMetalKernel>()
 }

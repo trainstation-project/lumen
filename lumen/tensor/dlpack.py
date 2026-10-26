@@ -1,3 +1,5 @@
+"""DLPack export (``Tensor.__dlpack__``) and import (``from_dlpack``) for lumen tensors."""
+
 import enum
 
 from lumen._native import LIBRARY_NAME
@@ -16,6 +18,7 @@ class DLDeviceType(enum.IntEnum):
     kDLMetal = 8
 
 
+# lumen device type name to its DLPack device type.
 _DEVICE_TYPES = {
     "cpu": DLDeviceType.kDLCPU,
     "cuda": DLDeviceType.kDLCUDA,
@@ -85,12 +88,14 @@ def from_dlpack(ext_tensor):
     ``__dlpack__`` (a NumPy array, a PyTorch tensor, a lumen tensor), or a
     raw DLPack capsule, which is consumed and cannot be imported again."""
     if hasattr(ext_tensor, "__dlpack__"):
+        # Ask for a versioned capsule, and for CUDA sync on the legacy default stream lumen uses.
         kwargs = {"max_version": (1, 0)}
         device_type, _ = ext_tensor.__dlpack_device__()
         if device_type == DLDeviceType.kDLCUDA:
             kwargs["stream"] = 1
         try:
             capsule = ext_tensor.__dlpack__(**kwargs)
+        # Producers that predate DLPack 1.0 take no ``max_version``.
         except TypeError:
             del kwargs["max_version"]
             capsule = ext_tensor.__dlpack__(**kwargs)

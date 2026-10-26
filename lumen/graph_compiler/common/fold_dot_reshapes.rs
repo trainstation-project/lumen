@@ -1,6 +1,10 @@
+//! Pass folding a reshape that flattens leading dims into a 2-D dot's lhs.
+
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
+/// Rewrites `dot(reshape(x), w)`, where the reshape flattens `x`'s leading dims to a matrix with the
+/// same last dim, into `reshape(dot(x, w))` so the dot reads `x` directly.
 pub(crate) fn fold_dot_reshapes(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -66,13 +70,16 @@ pub(crate) fn fold_dot_reshapes(graph: &Graph) -> Graph {
     out
 }
 
+/// Compiler pass running [`fold_dot_reshapes`].
 pub(crate) struct FoldDotReshapes;
 
 impl<M: Module> CompilerPass<M> for FoldDotReshapes {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fold_dot_reshapes"
     }
 
+    /// Replaces the module's graph with its folded version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = fold_dot_reshapes(m.graph());
         Ok(())

@@ -1,3 +1,5 @@
+"""Grid-strided CuTe elementwise kernel over two tensor groups tiled at different vector widths."""
+
 from __future__ import annotations
 
 import cuda.bindings.driver as cuda
@@ -9,12 +11,17 @@ from lumen.cute_dsl_utils.elementwise import _load, _num_blocks, _store
 
 
 class ElementwisePackedCUDAKernel:
+    """Elementwise kernel over two groups of tensors: group 1 is tiled at half the vector width of group 2,
+    so one tile covers matching rows of both; subclasses implement `compute`."""
+
     def __init__(self, BLOCK_SIZE: int, M: int) -> ElementwisePackedCUDAKernel:
+        """`BLOCK_SIZE` threads per block (a multiple of 32), `M` value rows per thread."""
         self.BLOCK_SIZE = BLOCK_SIZE
         self.M = M
 
     @cute.jit
     def compute(self, *inputs):
+        """Maps the group-1 and group-2 input tiles to `(group-1 outputs, group-2 outputs)`."""
         raise NotImplementedError
 
     @cute.kernel
@@ -33,6 +40,7 @@ class ElementwisePackedCUDAKernel:
         shape_2: cute.Shape,
         TOTAL_TILES: Int32,
     ) -> None:
+        """Walks the tiles grid-strided; each tile index addresses the same rows in both groups."""
         BLOCK_ID, _, _ = cute.arch.block_idx()
         NUM_BLOCKS, _, _ = cute.arch.grid_dim()
         THREAD_ID, _, _ = cute.arch.thread_idx()
@@ -94,6 +102,8 @@ class ElementwisePackedCUDAKernel:
         mYs_2: list[cute.Tensor],
         stream: cuda.CUstream,
     ) -> None:
+        """Tiles both groups (shapes taken from the first input, or first output when a group has no
+        inputs) and launches one block per SM on `stream`."""
         vector_size = min([128 // i.element_type.width for i in mXs_1 + mXs_2 + mYs_1 + mYs_2])
 
         thr_layout = cute.make_ordered_layout((self.BLOCK_SIZE >> LOG_WARP_SIZE, WARP_SIZE), order=(1, 0))
@@ -118,6 +128,7 @@ class ElementwisePackedCUDAKernel:
         gYs_1 = [cute.zipped_divide(i, tiler_mn_1) for i in mYs_1]
         gYs_2 = [cute.zipped_divide(i, tiler_mn_2) for i in mYs_2]
 
+        # Copy atoms follow group 1's element types and are reused for group 2.
         copy_atoms = [
             cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), i.element_type)
             for i in (gYs_1 if const_expr(len(gXs_1) == 0) else gXs_1)

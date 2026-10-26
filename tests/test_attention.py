@@ -1,3 +1,6 @@
+"""Tests of flash attention, decode attention and their backward passes against a float64 reference,
+and of which written-out attentions the compilers match into the fused kernels."""
+
 import warnings
 
 import numpy as np
@@ -28,6 +31,9 @@ def reference(q, k, v, scale=None, causal=False):
 
 
 def tensors(device, dtype, *shapes, seed=0):
+    """Random float32 arrays of `shapes` as tensors of `dtype` on `device`, with their values as float32 arrays.
+
+    Skips the test when the device is unavailable."""
     rng = np.random.default_rng(seed)
     arrays = [rng.standard_normal(s).astype(np.float32) for s in shapes]
     try:
@@ -38,6 +44,7 @@ def tensors(device, dtype, *shapes, seed=0):
 
 
 def steps(f, *args, device="mps"):
+    """Step labels of `f` traced on `args` and planned for `device`."""
     return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()]
 
 
@@ -61,6 +68,7 @@ CPU_CASES = [
 
 
 def _ids(cases):
+    """Test ids of attention `cases`: the shape tuple, marked when causal."""
     return [f"{c[0]}{'-causal' if c[1] else ''}" for c in cases]
 
 
@@ -83,6 +91,7 @@ def test_flash_attention(device, case, dtype, triton_on_cuda):
     (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv))
 
     def f(q, k, v):
+        """Flash attention, causal when the case is."""
         return F.flash_attention(q, k, v, is_causal=causal)
 
     out = lumen.compile(f)(q, k, v)
@@ -110,11 +119,14 @@ DECODE_CASES = [
     ids=[f"cpu-{c}" for c in DECODE_CASES] + [f"mps-{c}" for c in DECODE_CASES] + [f"cuda-{c}" for c in DECODE_CASES],
 )
 def test_attention_decode(device, case, dtype, triton_on_cuda):
+    """Decode attention over a KV cache agrees with causal attention over its first `start + Sq` rows,
+    for several cache positions, and is one kernel on MPS."""
     b, sq, sk, n, nkv, h = case
     (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, h))
     q_, k_, v_ = arrays
 
     def f(q, k, v, start):
+        """Decode attention of `q` at cache position `start`."""
         return F.attention_decode(q, k, v, start)
 
     step = lumen.compile(f)
@@ -137,6 +149,7 @@ def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
     (q, k, v), _ = tensors(device, "float16", (1, 64, 4, 32), (1, 64, 2, 32), (1, 64, 2, 32))
 
     def f(q, k, v):
+        """Causal flash attention."""
         return F.flash_attention(q, k, v, is_causal=True)
 
     config = lumen.config.compiler.of(device)
@@ -189,6 +202,7 @@ def test_attention_the_kernels_cannot_take_runs_as_traced(device, triton_on_cuda
         (q, k, v), arrays = tensors(device, "float32", (1, 16, 2, h), (1, 16, 2, h), (1, 16, 2, h))
 
         def f(q, k, v):
+            """Non-causal flash attention."""
             return F.flash_attention(q, k, v)
 
         assert "flash_attention" not in steps(f, q, k, v, device=device)
@@ -197,7 +211,10 @@ def test_attention_the_kernels_cannot_take_runs_as_traced(device, triton_on_cuda
 
 
 def test_flash_attention_checks_its_operands():
+    """Flash attention rejects mismatched head counts, ranks and dtypes, and integer operands."""
+
     def call(q, k, v):
+        """Traces flash attention on `q`, `k`, `v`."""
         return lumen.make_graph(F.flash_attention)(q, k, v)
 
     m = lambda *s, dtype="float32": lumen.empty(list(s), dtype=dtype, device="meta")  # noqa: E731
@@ -250,6 +267,7 @@ def test_attention_epilogues_fuse(f, sq, device, triton_on_cuda):
 
 
 def _sources(f, *args):
+    """Generated kernel source of each step of `f` planned for MPS, by step label."""
     plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps")
     return {s["label"]: (s.get("fusion") or {}).get("source", "") for s in plan.steps()}
 
@@ -334,6 +352,7 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
     (q, k, v, w), arrays = tensors(device, dtype, *shapes)
 
     def loss(q, k, v, w):
+        """A weighted sum of attention's output, so every output element gets a distinct gradient."""
         return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
 
     grad = lumen.grad(loss, (0, 1, 2))
@@ -376,6 +395,7 @@ def test_attention_dropout_is_in_its_kernels(case, attention, dtype, determinist
     (q, k, v, w), arrays = tensors("mps", dtype, *shapes)
 
     def loss(q, k, v, w):
+        """A weighted sum of attention's output with dropout."""
         return F.sum((attention(q, k, v, is_causal=causal, dropout_p=0.25) * w).float())
 
     step = lumen.value_and_grad(loss, (0, 1, 2))
@@ -425,6 +445,7 @@ def test_written_attention_trains_with_flash_attention():
     m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([2, 4, 64, 32], [2, 2, 64, 32], [2, 4, 64, 32])]
 
     def loss(q, k, v):
+        """Sum of the written-out attention."""
         return F.sum(_written(q, k, v).float())
 
     labels = steps(lumen.grad(loss, (0, 1, 2)), *m)
@@ -441,6 +462,7 @@ def test_written_attention_backward_is_flash_attention(scale, device, triton_on_
     (q, k, v), arrays = tensors(device, "float32", (2, 40, 32), (2, 40, 32), (2, 40, 32))
 
     def loss(q, k, v):
+        """Sum of tanh of a written-out single-head attention with optionally scaled scores."""
         return F.sum(
             F.tanh(
                 F.matmul(
@@ -488,6 +510,7 @@ def test_attention_epilogue_fuses_in_training(sq):
     ts, _ = tensors("mps", "float32", *shapes)
 
     def block(q, k, v, x):
+        """Sum of tanh of a residual added to the attention output."""
         return F.sum(F.tanh(x + F.flash_attention(q, k, v, is_causal=True).reshape(sq, 128)))
 
     step = lumen.value_and_grad(block, (0, 1, 2, 3))
@@ -512,9 +535,11 @@ def test_log_sum_exp_is_written_only_for_training():
     m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 64, 4, 32], [1, 64, 2, 32], [1, 64, 2, 32])]
 
     def forward(q, k, v):
+        """Causal flash attention."""
         return F.flash_attention(q, k, v, is_causal=True)
 
     def source(f):
+        """Kernel source of the flash attention step in `f`'s MPS plan."""
         plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*m), "mps")
         (step,) = [s for s in plan.steps() if s["label"] == "flash_attention"]
         return step["fusion"]["source"]
@@ -530,6 +555,7 @@ def test_flash_attention_training_has_no_precision_warning():
     m = [lumen.empty(s, dtype="bfloat16", device="meta") for s in ([1, 16, 4, 32], [1, 16, 2, 32], [1, 16, 2, 32])]
 
     def loss(q, k, v):
+        """Sum of causal flash attention."""
         return F.sum(F.flash_attention(q, k, v, is_causal=True))
 
     with warnings.catch_warnings():

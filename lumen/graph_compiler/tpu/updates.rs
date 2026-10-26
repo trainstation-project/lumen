@@ -1,9 +1,11 @@
+//! Fuses chains of constant-offset `dynamic_update_slice`s into one in-place `updates` kernel.
 use super::TpuModule;
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, UPDATES, Var, intern};
 use crate::graph_compiler::pass::CompilerPass;
 use crate::tensor::scalar::Scalar;
 
+/// Whether `v` is made by a scalar `i32` integer fill, i.e. a compile-time start index.
 fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     producer[v].is_some_and(|p| {
         matches!(
@@ -13,6 +15,7 @@ fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     })
 }
 
+/// Finds chains of constant-start updates, each writing into the previous one's sole result.
 fn chains(graph: &Graph) -> Vec<Vec<usize>> {
     let nodes = graph.nodes();
     let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
@@ -21,6 +24,7 @@ fn chains(graph: &Graph) -> Vec<Vec<usize>> {
         producer[node.output] = Some(i);
         node.inputs.iter().for_each(|&v| readers[v] += 1);
     }
+    // An update whose start indices are all compile-time constants.
     let fixed = |node: &Node| {
         matches!(node.primitive, Primitive::DynamicUpdateSlice)
             && node.inputs[2..]
@@ -34,6 +38,7 @@ fn chains(graph: &Graph) -> Vec<Vec<usize>> {
             continue;
         }
         let operand = node.inputs[0];
+        // Extend the producer's chain when this update is its only reader and the update shapes match.
         let joined = producer[operand].filter(|&p| {
             fixed(&nodes[p])
                 && readers[operand] == 1
@@ -54,6 +59,7 @@ fn chains(graph: &Graph) -> Vec<Vec<usize>> {
     chains
 }
 
+/// Builds the fusion body for `chain`: operand and each update are inputs, starts are rebuilt as constants.
 fn body(graph: &Graph, chain: &[usize]) -> Graph {
     let nodes = graph.nodes();
     let mut out = Graph::new();
@@ -79,6 +85,7 @@ fn body(graph: &Graph, chain: &[usize]) -> Graph {
     out
 }
 
+/// Replaces each update chain with one `updates` fusion emitted at the chain's last node.
 pub(super) fn updates(graph: &Graph) -> Graph {
     let chains = chains(graph);
     if chains.is_empty() {
@@ -97,12 +104,14 @@ pub(super) fn updates(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        // Earlier chain members are folded into the fusion emitted at the chain's end.
         if merged[i] && last[i].is_none() {
             continue;
         }
         out.set_origin(node);
         if let Some(c) = last[i] {
             let chain = &chains[c];
+            // Reads are the chain's base operand followed by each update.
             let reads: Vec<Var> = std::iter::once(nodes[chain[0]].inputs[0])
                 .chain(chain.iter().map(|&d| nodes[d].inputs[1]))
                 .map(|v| map[v])
@@ -126,6 +135,7 @@ pub(super) fn updates(graph: &Graph) -> Graph {
     out
 }
 
+/// Merges constant-offset `dynamic_update_slice` chains into `updates` fusions.
 pub(in crate::graph_compiler::tpu) struct Updates;
 
 impl CompilerPass<TpuModule<'_>> for Updates {

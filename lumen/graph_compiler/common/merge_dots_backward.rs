@@ -1,20 +1,38 @@
+//! Backward counterpart of merge_dots: a sum of dots `g_i . a_i` over weights `a_i` that share a forward
+//! input becomes one dot of the concatenated cotangents and weights, and the weight gradients reading
+//! those cotangents become one dot sliced per weight.
+
 use crate::graph::{Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
+/// A sum of dots to merge.
 struct Group {
+    /// The final add of the sum.
     sum: usize,
+    /// The other adds of the sum.
     adds: Vec<usize>,
+    /// The summed dots, in the order of their forward dots.
     dots: Vec<usize>,
+    /// Transposes applied to each dot before the sum (all the same, or none).
     transposes: Vec<usize>,
+    /// Cotangent operand of each dot.
     g: Vec<Var>,
+    /// Weight operand of each dot.
     a: Vec<Var>,
+    /// Whether the cotangent is the lhs of the dots.
     g_first: bool,
+    /// Contracting dim of the cotangents, which they are concatenated along.
     g_dim: usize,
+    /// Contracting dim of the weights, which they are concatenated along.
     a_dim: usize,
+    /// The weight-gradient dots reading each cotangent, their common primitive (as if reading the
+    /// untransposed cotangent) and whether the cotangent is their lhs.
     weights: Option<(Vec<usize>, Primitive, bool)>,
 }
 
+/// Finds sums of same-shaped dots against weights used by one forward input and merges each into a
+/// single dot over concatenations.
 fn merge_dots_backward(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -38,6 +56,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
         _ => None,
     };
     let same = |a: usize, b: usize| nodes[a].primitive == nodes[b].primitive;
+    // Whether `v` is a graph input up to single-operand elementwise ops (a weight).
     let weight = |mut v: Var| loop {
         match producer[v] {
             None => break graph.inputs().contains(&v),
@@ -47,6 +66,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             Some(_) => break false,
         }
     };
+    // Dots reading `a` exactly once, with their other operand.
     let dots_of = |a: Var| -> Vec<(usize, Var)> {
         users[a]
             .iter()
@@ -61,6 +81,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             })
             .collect()
     };
+    // Dots reading `g` directly or through a transpose, as primitives on `g` itself.
     let reads_of = |g: Var| -> Vec<(usize, Var, Primitive, bool)> {
         let transposes = users[g].iter().filter_map(|&t| match &nodes[t].primitive {
             Primitive::Transpose { permutation } => Some((nodes[t].output, Some(permutation))),
@@ -82,6 +103,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
     };
     let mut groups: Vec<Group> = Vec::new();
     let mut taken = vec![false; nodes.len()];
+    // Walk sums from the last add, collecting single-use dot terms (maybe transposed) under its adds.
     for s in (0..nodes.len()).rev() {
         if taken[s] || !matches!(nodes[s].primitive, Primitive::Add) {
             continue;
@@ -131,6 +153,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             if !distinct(&g) || !distinct(&a) || !one_type(&g) || !one_type(&a) || !of_weights {
                 return None;
             }
+            // The weights' forward dots must all read the same `x`, and be the only such dots of `x`.
             let (x, forward) = dots_of(a[0]).into_iter().find_map(|(d1, x)| {
                 let forward: Vec<usize> = a
                     .iter()
@@ -155,6 +178,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             let dots: Vec<usize> = order.iter().map(|&j| terms[j]).collect();
             let g: Vec<Var> = order.iter().map(|&j| g[j]).collect();
             let a: Vec<Var> = order.iter().map(|&j| a[j]).collect();
+            // Weight-gradient dots: each cotangent against `x` with the same primitive.
             let weights = reads_of(g[0]).into_iter().find_map(|(f1, x1, dot, lhs)| {
                 let mut fs = vec![f1];
                 for &gi in &g[1..] {
@@ -198,6 +222,8 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
     rewrite(graph, &groups)
 }
 
+/// Rebuilds `graph` with each group's sum as one dot of concatenations and its weight gradients as
+/// slices of one dot, emitting nodes once their operands exist.
 fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
     let nodes = graph.nodes();
     let mut out = Graph::new();
@@ -208,6 +234,7 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
     let producer = |v: Var| nodes.iter().find(|n| n.output == v);
     let mut stacked: Vec<Option<Var>> = vec![None; groups.len()];
     let mut weights_dot: Vec<Option<Var>> = vec![None; groups.len()];
+    // A node's role: 0 for a group's sum, 1 for a node it absorbs, 2 + h for its h-th weight gradient.
     let role = |i: usize| -> Option<(usize, usize)> {
         groups.iter().enumerate().find_map(|(k, p)| {
             if p.sum == i {
@@ -298,6 +325,7 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         out.set_label(v, Some(intern(format!("{n}x {label}"))));
                         v
                     });
+                    // Weight gradient h is the h-th equal slice of the merged gradient.
                     let shape = out.type_of(merged).shape.clone();
                     let dimension = if g_lhs { 0 } else { x_rank - 1 };
                     let part = shape[dimension] / p.g.len();
@@ -347,6 +375,8 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
     out
 }
 
+/// `dot` rewritten to read the untransposed operand of `transpose(permutation)` on side `lhs`;
+/// `None` when the transpose reorders free dims.
 fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitive> {
     let Primitive::DotGeneral {
         mut lhs_contracting,
@@ -383,13 +413,16 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
     })
 }
 
+/// Compiler pass running [`merge_dots_backward`].
 pub(crate) struct MergeDotsBackward;
 
 impl<M: Module> CompilerPass<M> for MergeDotsBackward {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots_backward"
     }
 
+    /// Replaces the module's graph with its merged version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = merge_dots_backward(m.graph());
         Ok(())
