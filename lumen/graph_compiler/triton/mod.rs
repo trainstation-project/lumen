@@ -191,7 +191,7 @@ impl Timer for Events {
                 TensorOptions::new().dtype(ty.dtype).device(device),
             )
         };
-        let inputs = step
+        let inputs: Vec<Tensor> = step
             .inputs
             .iter()
             .map(|(b, ty)| match b {
@@ -199,11 +199,11 @@ impl Timer for Events {
                 _ => zeros(ty, self.device),
             })
             .collect();
-        Ok(Some((
-            loop_kernel(step),
-            inputs,
-            zeros(&step.output.1, self.device),
-        )))
+        let out = match step.primitive {
+            Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
+            _ => zeros(&step.output.1, self.device),
+        };
+        Ok(Some((loop_kernel(step), inputs, out)))
     }
 
     fn run(
