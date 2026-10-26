@@ -1245,6 +1245,9 @@ impl Plan {
                     _ if !src.is_contiguous() => {
                         out.copy_(src)?;
                     }
+                    Device::Cuda(_) => {
+                        out.copy_(src)?;
+                    }
                     #[cfg(lumen_tpu_linked)]
                     Device::Tpu(_) => {
                         return Err(format!("{}: custom ops do not run on TPU yet", step.label));
