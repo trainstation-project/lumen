@@ -687,9 +687,10 @@ struct Fused {
     body: Graph,
 }
 
-/// Collects the members, external reads, outputs and body graph of `row`, recomputing the layout ops
-/// and constants it reads that the backend can fuse, up to the values rows write (`written`).
-fn fusion(graph: &Graph, row: &Row, fusible: Fusible, written: &[bool]) -> Fused {
+/// Collects the members, external reads, outputs and body graph of `row`; with `recompute`, the
+/// layout ops and constants it reads that the backend can fuse are computed in it too, up to the
+/// values rows write (`written`).
+fn fusion(graph: &Graph, row: &Row, fusible: Fusible, written: &[bool], recompute: bool) -> Fused {
     let nodes = graph.nodes();
     let mut members: Vec<usize> = row
         .inner
@@ -715,6 +716,7 @@ fn fusion(graph: &Graph, row: &Row, fusible: Fusible, written: &[bool]) -> Fused
                 | Primitive::Full { .. }
                 | Primitive::Iota { .. }
         ) && fusible(graph, &nodes[k])
+            && recompute
     };
     let mut computed = members.clone();
     let mut reads: Vec<Var> = Vec::new();
@@ -828,10 +830,14 @@ pub(crate) fn fused(
         }
     }
     for row in rows {
-        let f = fusion(graph, row, fusible, &written);
-        if !fits(&f.body) || !convex(graph, &f) || !sealed(graph, &f) {
+        // Recomputing the row's reads, or failing that reading them, whichever the backend can run.
+        let found = [true, false].into_iter().find_map(|recompute| {
+            let f = fusion(graph, row, fusible, &written, recompute);
+            (fits(&f.body) && convex(graph, &f) && sealed(graph, &f)).then_some(f)
+        });
+        let Some(f) = found else {
             continue;
-        }
+        };
         f.members
             .iter()
             .filter(|j| !f.cloned.contains(j))
@@ -869,6 +875,66 @@ pub(crate) fn fused(
         deferred.is_empty(),
         "every node reads values computed before it"
     );
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    compacted(&out)
+}
+
+/// `graph` without dead values, each `row` fusion writing only the outputs still read (a value a row
+/// once exposed can go unread once its readers recompute it).
+fn compacted(graph: &Graph) -> Graph {
+    let (graph, _) = graph.prune();
+    let nodes = graph.nodes();
+    let mut read: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+    for node in nodes {
+        if let Primitive::FusionOutput { index, .. } = node.primitive {
+            read[node.inputs[0]].push(index);
+        }
+    }
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+    // New position of each kept output of each row fusion, by its old index.
+    let mut position: Vec<Vec<Option<usize>>> = vec![Vec::new(); graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    for node in nodes {
+        out.set_origin(node);
+        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let primitive = match &node.primitive {
+            Primitive::Fusion { name, label, body } if name == "row" => {
+                let mut kept = read[node.output].clone();
+                kept.sort_unstable();
+                kept.dedup();
+                let mut at = vec![None; body.outputs().len()];
+                at[0] = Some(0);
+                kept.iter()
+                    .enumerate()
+                    .for_each(|(k, &i)| at[i] = Some(k + 1));
+                position[node.output] = at;
+                let outputs: Vec<Var> = std::iter::once(0)
+                    .chain(kept)
+                    .map(|i| body.outputs()[i])
+                    .collect();
+                let mut written = body.clone();
+                written.set_outputs(&outputs).expect("the row's values");
+                Primitive::Fusion {
+                    name: name.clone(),
+                    label,
+                    body: written.prune().0,
+                }
+            }
+            Primitive::FusionOutput { index, ty } if !position[node.inputs[0]].is_empty() => {
+                Primitive::FusionOutput {
+                    index: position[node.inputs[0]][*index].expect("a kept output"),
+                    ty: ty.clone(),
+                }
+            }
+            p => p.clone(),
+        };
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(map[node.output], node.label);
+    }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out

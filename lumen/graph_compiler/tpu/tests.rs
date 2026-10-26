@@ -93,9 +93,12 @@ fn rows_fuse_where_what_others_read_of_them_is_written() {
     let dx = apply(&mut g, Add, &[ds, dm]);
     g.set_outputs(&[dx, dy]).unwrap();
     // `e`, `totals` and `ties` are read by several diamonds, so a fusion must expose them as outputs.
-    let rows =
-        crate::graph_compiler::common::diamonds::diamonds(&g, crate::codegen::tpu::row::fusible);
-    let fused = super::diamonds::fused(&g, &rows);
+    let (fusible, fits) = (
+        crate::codegen::tpu::row::fusible,
+        crate::codegen::tpu::row::fits,
+    );
+    let rows = crate::graph_compiler::common::diamonds::diamonds(&g, fusible);
+    let fused = crate::graph_compiler::common::diamonds::fused(&g, &rows, fusible, fits);
     let inputs: Vec<Tensor> = (0..2)
         .map(|k| {
             let values: Vec<f32> = (0..12)
