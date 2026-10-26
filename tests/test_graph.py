@@ -222,12 +222,18 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, trit
 def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
     """With ``use_triton_backend``, each loop fusion on CUDA (elementwise
     ops, broadcasts, transposes, slices, iota and constants) is one generated
-    Triton kernel computing what the CPU does."""
+    Triton kernel computing what the CPU does; bfloat16's functions are
+    float32's, cast as the program asks."""
     a, b = rand(48, 80), rand(80, 48, seed=1)
+
+    def wide(f):
+        return lambda v: f(v.to(dtype="float32")).to(dtype=v.dtype)
+
+    exp, tanh, sqrt, sigmoid, log = map(wide, (F.exp, F.tanh, F.sqrt, F.sigmoid, F.log))
     fns = [
-        lambda x, y: F.exp(x) * 2.0 + F.tanh(y.t()),
-        lambda x, y: F.where(x > y.t(), F.sqrt(F.relu(x)), F.sigmoid(-x)) / (F.maximum(x, y.t()) + 3.0),
-        lambda x, y: F.log(x * x + 1.0)[:, 8:40] - y.t()[:, :32] + prims.iota(x.dtype, (48, 32), 1),
+        lambda x, y: exp(x) * 2.0 + tanh(y.t()),
+        lambda x, y: F.where(x > y.t(), sqrt(F.relu(x)), sigmoid(-x)) / (F.maximum(x, y.t()) + 3.0),
+        lambda x, y: log(x * x + 1.0)[:, 8:40] - y.t()[:, :32] + prims.iota(x.dtype, (48, 32), 1),
         lambda x, y: (x < y.t(), (x * 4.0).to(dtype="int32")),
     ]
     tol = {"float32": 1e-5, "bfloat16": 2**-7}[dtype]

@@ -60,7 +60,22 @@ pub(crate) fn set_loop(launch: Loop) {
     let _ = LOOP.set(launch);
 }
 
+fn unsupported(graph: &Graph) -> Result<(), String> {
+    for node in graph.nodes() {
+        let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
+        if node.primitive.is_transcendental() && matches!(x.dtype, DType::F16 | DType::BF16) {
+            return Err(format!(
+                "{}: has no {} kernel on Triton, got {x}: convert to float32 first (x.to(dtype=float32))",
+                node.primitive.name(),
+                x.dtype.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+    unsupported(graph)?;
     let mut module = GraphModule {
         graph: graph.clone(),
         device,

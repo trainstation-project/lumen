@@ -277,6 +277,35 @@ pub enum Primitive {
 }
 
 impl Primitive {
+    pub fn is_transcendental(&self) -> bool {
+        use Primitive::*;
+        use UnaryOp::*;
+        match self {
+            Exp | Log | Sqrt | Tanh | Logistic | Binary(BinaryOp::Pow) => true,
+            Unary(op) => matches!(
+                op,
+                Sin | Cos
+                    | Tan
+                    | Asin
+                    | Acos
+                    | Atan
+                    | Sinh
+                    | Cosh
+                    | Asinh
+                    | Acosh
+                    | Atanh
+                    | Log1p
+                    | Expm1
+                    | Exp2
+                    | Log2
+                    | Rsqrt
+                    | Cbrt
+                    | ErfInv
+            ),
+            _ => false,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         use Primitive::*;
         match self {

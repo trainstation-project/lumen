@@ -292,7 +292,22 @@ impl Emitter<'_> {
         if operand.is_float() {
             let (a, _) = self.computed(&x, operand);
             let value = match op {
-                Pow if !other.is_float() => format!("libdevice.pow({a}, {y}.to(tl.int32))"),
+                Pow if !other.is_float() && (other.bits() < 32 || other == DType::I32) => {
+                    format!("libdevice.pow({a}, {y}.to(tl.int32))")
+                }
+                Pow if !other.is_float() && operand == DType::F64 => {
+                    format!("libdevice.pow({a}, {y}.to(tl.float64))")
+                }
+                Pow if !other.is_float() => {
+                    let most = (1u32 << 31) - 2;
+                    let low = match other {
+                        DType::I64 => format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})"),
+                        _ => y.clone(),
+                    };
+                    format!(
+                        "libdevice.pow({a}, tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32))"
+                    )
+                }
                 Pow => format!("libdevice.pow({a}, {})", self.computed(&y, operand).0),
                 Rem => format!("libdevice.fmod({a}, {})", self.computed(&y, operand).0),
                 Min => {
@@ -560,12 +575,8 @@ impl Emitter<'_> {
                     }
                     Neg => format!("-{}", self.value(node.inputs[0], idx)),
                     Exp | Log | Sqrt | Tanh | Logistic => {
-                        let x = self.value(node.inputs[0], idx);
-                        let a = match half {
-                            true => format!("{x}.to(tl.float32)"),
-                            false => x,
-                        };
-                        let f = match &node.primitive {
+                        let a = self.value(node.inputs[0], idx);
+                        match &node.primitive {
                             Exp => format!("libdevice.exp({a})"),
                             Log => format!("libdevice.log({a})"),
                             Sqrt if ty.dtype == DType::F64 => format!("libdevice.sqrt({a})"),
@@ -575,10 +586,6 @@ impl Emitter<'_> {
                                 format!("1.0 / (1.0 + libdevice.exp(-{a}))")
                             }
                             _ => format!("tl.div_rn(1.0, 1.0 + libdevice.exp(-{a}))"),
-                        };
-                        match half {
-                            true => format!("({f}).to({t})"),
-                            false => f,
                         }
                     }
                     Cast { .. } => {
