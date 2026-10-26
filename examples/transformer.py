@@ -1,3 +1,5 @@
+"""Trains a small decoder-only transformer on MPS on arithmetic token sequences, then profiles and dumps the compiled step."""
+
 import numpy as np
 from optim import AdamW
 
@@ -18,8 +20,11 @@ lumen.config.compiler.mps.fused_linear_cross_entropy = True
 
 
 class _MLP(lumen.autograd.Function):
+    """SwiGLU-style gated MLP with bfloat16 matmuls and a hand-written backward that saves bfloat16 activations."""
+
     @staticmethod
     def forward(ctx, x, wg, wu, wd):
+        """Returns ``(sigmoid(x @ wg.T) * (x @ wu.T)) @ wd.T`` in float32 and saves the gate and up activations."""
         g = F.matmul(x, wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         u = F.matmul(x, wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
 
@@ -38,8 +43,10 @@ class _MLP(lumen.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
+        """Gradients of ``x`` (bfloat16) and of ``wg``, ``wu``, ``wd`` (float32) from ``dy``."""
         x, g_sig, u, wg, wu, wd = ctx.saved_tensors
 
+        # Recompute h from the saved bfloat16 gate and up activations instead of saving it.
         g_sig_f32 = g_sig.float()
         u_f32 = u.float()
 
@@ -74,6 +81,7 @@ class Embedding(lumen.nn.Module):
     positions: lumen.Tensor
 
     def __call__(self, ids):
+        """Looks up ``ids`` and adds the position rows, flattened to ``[batch * seq, dim]``."""
         batch, seq = ids.shape
         return (self.tokens[ids] + self.positions).reshape(batch * seq, self.tokens.shape[1])
 
@@ -90,6 +98,7 @@ class Attention(lumen.nn.Module):
 
     @lumen.profiler.record_function("attention")
     def __call__(self, x, batch, dropout_p):
+        """Attends ``x`` of ``batch`` sequences; ``dropout_p`` is accepted but unused."""
         tokens, dim = x.shape
         q, k, v = (
             F.matmul(x.bfloat16(), w.t().bfloat16(), accum_dtype="float32", output_dtype="bfloat16").reshape(
@@ -98,6 +107,7 @@ class Attention(lumen.nn.Module):
             for w in (self.wq, self.wk, self.wv)
         )
 
+        # Move heads ahead of the sequence: [batch, heads, seq, head_dim].
         q = q.transpose(-2, -3)
         k = k.transpose(-2, -3)
         v = v.transpose(-2, -3)
@@ -119,7 +129,9 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
+        """Runs the gated MLP through ``_MLP`` and its custom backward."""
         return _MLP.apply(x, self.wg, self.wu, self.wd)
+        # Unreachable: the same MLP with autograd-derived backward, kept for comparison.
         g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         g = F.sigmoid(g)
         u = F.matmul(x, self.wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
@@ -136,6 +148,7 @@ class Block(lumen.nn.Module):
 
     @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
+        """Applies the attention and MLP sub-blocks, each after an RMSNorm, to ``x`` of ``batch`` sequences."""
         r = x
         with lumen.profiler.record_function("attention rmsnorm"):
             x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.attn.norm).bfloat16()
@@ -148,6 +161,8 @@ class Block(lumen.nn.Module):
 
 
 class Transformer(lumen.nn.Module):
+    """Embedding, a stack of ``Block`` layers and a final RMSNorm; ``head`` is used by the loss."""
+
     embed: Embedding
     layers: list
     norm: lumen.Tensor
@@ -186,6 +201,7 @@ def train_step(model, opt, x, y):
         loss = cross_entropy(model(x[i], dropout_p=DROPOUT), model.head, y[i])
         loss.backward()
 
+    # Normalise every gradient by the sum of all gradient entries.
     c = 0
     for p in model.parameters():
         c += F.sum(p.grad)
@@ -199,6 +215,7 @@ def train_step(model, opt, x, y):
 
 
 def meta(*shape, dtype):
+    """An uninitialised meta tensor of ``shape`` used for tracing."""
     return lumen.empty(list(shape), dtype, device="meta")
 
 
@@ -235,6 +252,7 @@ rng = np.random.default_rng(0)
 
 
 def init(name, shape):
+    """Initial weights: ones for norms, ``N(0, 1/fan_in)`` for matrices."""
     if len(shape) == 1:
         return np.ones(shape, np.float32)
     return (rng.standard_normal(shape) / np.sqrt(shape[1])).astype(np.float32)

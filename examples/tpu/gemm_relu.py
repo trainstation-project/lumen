@@ -1,3 +1,5 @@
+"""Runs a compiled bfloat16 `relu(x @ w)` on TPU, checks it against numpy, and profiles it."""
+
 import numpy as np
 
 import lumen
@@ -15,6 +17,7 @@ w = lumen.from_numpy(b).to(dtype="bfloat16").to("tpu:0")
 
 @lumen.compile
 def gemm_relu(x, w):
+    """Returns `relu(x @ w)` in bfloat16, accumulating the matmul in float32."""
     return F.relu(F.matmul(x, w, "float32", "bfloat16"))
 
 
@@ -23,6 +26,7 @@ assert y.device == "tpu:0" and y.dtype == "bfloat16"
 
 
 def host(t):
+    """Copies `t` to the host as a float32 numpy array."""
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 

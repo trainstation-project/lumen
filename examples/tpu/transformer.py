@@ -1,8 +1,11 @@
+"""Trains a small transformer on arithmetic token sequences on TPU, then profiles and dumps its train step."""
+
 import sys
 from pathlib import Path
 
 import numpy as np
 
+# Makes the sibling `examples/optim.py` importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from optim import AdamW  # noqa: E402
 
@@ -19,8 +22,11 @@ lumen.config.compiler.tpu.fused_linear_cross_entropy_chunk_size = 64
 
 
 class _MLP(lumen.autograd.Function):
+    """Sigmoid-gated GLU MLP with a hand-written backward that saves bfloat16 activations instead of float32 ones."""
+
     @staticmethod
     def forward(ctx, x, wg, wu, wd):
+        """Returns `(sigmoid(x @ wg.T) * (x @ wu.T)) @ wd.T` in float32, saving bfloat16 activations for backward."""
         g = F.matmul(x, wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         u = F.matmul(x, wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
 
@@ -39,6 +45,7 @@ class _MLP(lumen.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
+        """Returns the gradients of `x`, `wg`, `wu` and `wd`, recomputing `h` from the saved gate and up projections."""
         x, g_sig, u, wg, wu, wd = ctx.saved_tensors
 
         g_sig_f32 = g_sig.float()
@@ -53,6 +60,7 @@ class _MLP(lumen.autograd.Function):
 
         du = (dh.float() * g_sig_f32).bfloat16()
         dg_sig = dh * u_f32
+        # Sigmoid derivative: s * (1 - s).
         dg = (dg_sig.float() * g_sig_f32 * (1 - g_sig_f32)).bfloat16()
 
         dx = F.matmul(dg, wg.bfloat16(), "float32", "float32")
@@ -75,6 +83,7 @@ class Embedding(lumen.nn.Module):
     positions: lumen.Tensor
 
     def __call__(self, ids):
+        """Returns the embedded tokens of `ids` flattened to `[batch * seq, dim]`."""
         batch, seq = ids.shape
         return (self.tokens[ids] + self.positions).reshape(batch * seq, self.tokens.shape[1])
 
@@ -91,6 +100,7 @@ class Attention(lumen.nn.Module):
 
     @lumen.profiler.record_function("attention")
     def __call__(self, x, batch, dropout_p):
+        """Returns the attention output projected by `wo`, float32 `[batch * seq, dim]`."""
         tokens, dim = x.shape
         q, k, v = (
             F.matmul(x.bfloat16(), w.t().bfloat16(), accum_dtype="float32", output_dtype="bfloat16").reshape(
@@ -99,6 +109,7 @@ class Attention(lumen.nn.Module):
             for w in (self.wq, self.wk, self.wv)
         )
 
+        # Heads move ahead of the sequence axis: [batch, heads, seq, head_dim].
         q = q.transpose(-2, -3)
         k = k.transpose(-2, -3)
         v = v.transpose(-2, -3)
@@ -120,7 +131,9 @@ class MLP(lumen.nn.Module):
 
     @lumen.profiler.record_function("mlp")
     def __call__(self, x):
+        """Returns the gated MLP of `x` through the custom `_MLP` autograd function."""
         return _MLP.apply(x, self.wg, self.wu, self.wd)
+        # Unreachable reference version of `_MLP.forward`.
         g = F.matmul(x, self.wg.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
         g = F.sigmoid(g)
         u = F.matmul(x, self.wu.t().bfloat16(), accum_dtype="float32", output_dtype="float32")
@@ -137,6 +150,7 @@ class Block(lumen.nn.Module):
 
     @lumen.profiler.record_function("block")
     def __call__(self, x, batch, dropout_p):
+        """Returns `x` after the attention and MLP residual updates."""
         r = x
         # with lumen.profiler.record_function("attention rmsnorm"):
         #     x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.attn.norm).bfloat16()
@@ -151,6 +165,8 @@ class Block(lumen.nn.Module):
 
 
 class Transformer(lumen.nn.Module):
+    """Token embedding, transformer blocks and a final norm; the vocab head is applied by the loss."""
+
     embed: Embedding
     layers: list
     norm: lumen.Tensor
@@ -195,6 +211,7 @@ def train_step(model, opt, x, y):
     for p in grads:
         c += F.sum(p.grad)
 
+    # Scales every gradient by the sum of all gradient entries.
     for p in grads:
         p.grad = p.grad / c
 
@@ -204,6 +221,7 @@ def train_step(model, opt, x, y):
 
 
 def meta(*shape, dtype):
+    """Returns an empty meta tensor of `shape` and `dtype`, used to trace without real data."""
     return lumen.empty(list(shape), dtype, device="meta")
 
 
@@ -240,6 +258,7 @@ rng = np.random.default_rng(0)
 
 
 def init(name, shape):
+    """Returns ones for 1-D parameters and fan-in-scaled normal weights otherwise."""
     if len(shape) == 1:
         return np.ones(shape, np.float32)
     return (rng.standard_normal(shape) / np.sqrt(shape[1])).astype(np.float32)

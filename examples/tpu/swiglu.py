@@ -1,3 +1,5 @@
+"""Runs a compiled SwiGLU MLP block on TPU, checks it against numpy, and profiles it."""
+
 import numpy as np
 
 import lumen
@@ -8,16 +10,20 @@ M, D, H, PROFILED_CALLS = 4096, 4096, 8192, 10
 
 
 class SwiGLU(lumen.nn.Module):
+    """SwiGLU gate `silu(x @ w1.T) * (x @ w3.T)` with weights `w1`, `w3` of shape [H, D]."""
+
     w1: lumen.Tensor
     w3: lumen.Tensor
 
     def __call__(self, x):
+        """Returns the bfloat16 SwiGLU of `x`, computed in float32."""
         g, u = F.matmul(x, self.w1.t(), "float32", "float32"), F.matmul(x, self.w3.t(), "float32", "float32")
         x = g * F.sigmoid(g) * u
         return x.to("bfloat16")
 
 
 def meta(*shape):
+    """Returns an empty bfloat16 meta tensor of `shape`, used to trace without real data."""
     return lumen.empty(list(shape), "bfloat16", "meta")
 
 
@@ -38,10 +44,12 @@ assert y.device == "tpu:0" and y.dtype == "bfloat16"
 
 
 def host(t):
+    """Copies `t` to the host as a float32 numpy array."""
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 
 def rounded(v):
+    """Rounds numpy array `v` through bfloat16 and back to float32."""
     return host(lumen.from_numpy(v).to(dtype="bfloat16"))
 
 
