@@ -11,6 +11,7 @@ pub(crate) mod horizontal;
 pub(crate) mod loops;
 pub(crate) mod multi_output;
 pub(crate) mod simplify;
+pub(crate) mod split_k;
 
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod chunked_cross_entropy;
