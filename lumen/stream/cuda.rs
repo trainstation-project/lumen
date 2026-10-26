@@ -16,6 +16,7 @@ pub(crate) mod ffi {
         pub fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
         pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
         pub fn cudaStreamSynchronize(stream: *mut c_void) -> i32;
+        pub fn cudaStreamCreateWithFlags(stream: *mut *mut c_void, flags: u32) -> i32;
         pub fn cudaStreamWaitEvent(stream: *mut c_void, event: *mut c_void, flags: u32) -> i32;
         pub fn cudaEventDestroy(event: *mut c_void) -> i32;
         pub fn cudaEventQuery(event: *mut c_void) -> i32;
@@ -62,7 +63,7 @@ pub fn synchronize_external(device_index: usize, stream: usize) {
 }
 
 /// `cudaEventDisableTiming`: the event only orders work, so skip recording timestamps.
-const EVENT_DISABLE_TIMING: u32 = 2;
+pub(crate) const EVENT_DISABLE_TIMING: u32 = 2;
 
 /// Makes external stream `stream` on device `device_index` wait for the work queued so far
 /// on the default stream, without blocking the host; panics if a CUDA call fails.

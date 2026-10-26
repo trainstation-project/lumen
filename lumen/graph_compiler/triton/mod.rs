@@ -363,7 +363,22 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
-        (Primitive::Wait, _) => {
+        #[cfg(lumen_cuda_linked)]
+        (
+            Primitive::AllReduce { .. }
+            | Primitive::AllGather { .. }
+            | Primitive::ReduceScatter { .. },
+            _,
+        ) => crate::distributed::nccl::run(&step.primitive, &inputs[0], out),
+        (Primitive::DeviceWait, _) => {
+            #[cfg(lumen_cuda_linked)]
+            crate::distributed::nccl::device_wait(&inputs[0])?;
+            match out.data_ptr() == inputs[0].data_ptr() {
+                true => Ok(()),
+                false => copy(out, &inputs[0]),
+            }
+        }
+        (Primitive::HostWait, _) => {
             crate::stream::stream_for(out.device())?.synchronize();
             match out.data_ptr() == inputs[0].data_ptr() {
                 true => Ok(()),

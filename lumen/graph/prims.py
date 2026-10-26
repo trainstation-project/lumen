@@ -23,7 +23,11 @@ __all__ = [
     "cumsum",
     "dot_general",
     "reshape",
-    "wait",
+    "host_wait",
+    "device_wait",
+    "all_reduce",
+    "all_gather",
+    "reduce_scatter",
     "to_host",
     "to_device",
     "broadcast_in_dim",
@@ -226,10 +230,35 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
     )
 
 
-def wait(x):
-    """``x``, once the device work producing it has finished: the host
-    blocks until then (PyTorch: ``wait_tensor``). In place: no copy."""
-    return bind("wait", x)
+def host_wait(x):
+    """``x``, once the device has finished all work queued before it: the
+    host blocks until then (PyTorch: ``torch.cuda.synchronize``). In place:
+    no copy."""
+    return bind("host_wait", x)
+
+
+def device_wait(x):
+    """``x``, once the asynchronous work producing it (a collective) has finished: the device's later work
+    waits for it, the host doesn't (PyTorch's ``wait_tensor`` after a functional collective). In place: no
+    copy."""
+    return bind("device_wait", x)
+
+
+def all_reduce(x, op, ranks):
+    """``x`` combined across the processes ``ranks`` with ``op`` (``"sum"``, ``"max"`` or ``"min"``); every one
+    of them gets the result (PyTorch's functional ``all_reduce``; NCCL's ``ncclAllReduce`` on CUDA)."""
+    return bind("all_reduce", x, op=op, ranks=tuple(ranks))
+
+
+def all_gather(x, ranks):
+    """Every process in ``ranks``'s ``x`` stacked along a new leading axis, in ``ranks``' order (``ncclAllGather``)."""
+    return bind("all_gather", x, ranks=tuple(ranks))
+
+
+def reduce_scatter(x, op, ranks):
+    """``x`` (a leading axis of one row per process in ``ranks``) combined across them with ``op``; the process at
+    position ``r`` of ``ranks`` gets row ``r`` (``ncclReduceScatter``)."""
+    return bind("reduce_scatter", x, op=op, ranks=tuple(ranks))
 
 
 def to_host(x):

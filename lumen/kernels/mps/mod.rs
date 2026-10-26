@@ -267,6 +267,13 @@ pub(crate) fn encode(
     if let Concatenate { .. } = step.primitive {
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
     }
+    if let AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } | DeviceWait = step.primitive
+    {
+        return Err(format!(
+            "{}: collectives across processes run on CUDA (NCCL); an MPS mesh is one process",
+            step.label
+        ));
+    }
 
     let encode = match step.primitive {
         Add
@@ -292,6 +299,9 @@ pub(crate) fn encode(
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
             unreachable!("encoded above")
         }
+        AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } | DeviceWait => {
+            unreachable!("rejected above")
+        }
         DotGeneral { .. } => super::dot_general::mps::encode,
 
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
@@ -299,7 +309,7 @@ pub(crate) fn encode(
         }
         DynamicSlice { .. } | DynamicUpdateSlice => super::dynamic_slice::mps::encode,
         ScatterAdd { .. } => super::scatter_add::mps::encode,
-        Wait => super::wait::encode,
+        HostWait => super::wait::encode,
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")
         }

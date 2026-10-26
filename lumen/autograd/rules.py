@@ -60,7 +60,8 @@ def _cast_transpose(ct, x, new_dtype):
 
 deflinear(prims.cast, _cast_transpose)
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
-deflinear(prims.wait, lambda ct, x: [ct])
+deflinear(prims.host_wait, lambda ct, x: [ct])
+deflinear(prims.device_wait, lambda ct, x: [ct])
 deflinear(prims.to_host, lambda ct, x: [prims.to_device(ct)])
 deflinear(prims.to_device, lambda ct, x: [prims.to_host(ct)])
 
@@ -82,6 +83,48 @@ def _reduce_sum_transpose(ct, x, axes, accum_dtype):
 
 
 deflinear(prims.reduce_sum, _reduce_sum_transpose)
+
+
+def _summed(name, op):
+    """Rejects differentiating a collective that combines with ``op`` other than a sum."""
+    if op != "sum":
+        raise NotImplementedError(f"{name}: only a sum is differentiable, got op={op!r}")
+
+
+def _all_reduce_jvp(primals, tangents, out, op, ranks):
+    """The tangents summed across ``ranks``, as the values are."""
+    _summed("all_reduce", op)
+    return None if tangents[0] is None else prims.device_wait(prims.all_reduce(tangents[0], op, ranks))
+
+
+def _all_reduce_transpose(ct, x, op, ranks):
+    """Every rank's cotangent summed across ``ranks``: each rank's value reached every result."""
+    _summed("all_reduce", op)
+    return [prims.device_wait(prims.all_reduce(ct, op, ranks))]
+
+
+def _all_gather_transpose(ct, x, ranks):
+    """Each rank's row of the gathered cotangent, summed across ``ranks``."""
+    return [prims.device_wait(prims.reduce_scatter(ct, "sum", ranks))]
+
+
+def _reduce_scatter_jvp(primals, tangents, out, op, ranks):
+    """The tangents reduce-scattered, as the values are."""
+    _summed("reduce_scatter", op)
+    return None if tangents[0] is None else prims.device_wait(prims.reduce_scatter(tangents[0], op, ranks))
+
+
+def _reduce_scatter_transpose(ct, x, op, ranks):
+    """Every rank's cotangent gathered: each row of ``x`` reached the rank that kept it."""
+    _summed("reduce_scatter", op)
+    return [prims.device_wait(prims.all_gather(ct, ranks))]
+
+
+primitive_jvps[prims.all_reduce] = _all_reduce_jvp
+primitive_transposes[prims.all_reduce] = _all_reduce_transpose
+deflinear(prims.all_gather, _all_gather_transpose)
+primitive_jvps[prims.reduce_scatter] = _reduce_scatter_jvp
+primitive_transposes[prims.reduce_scatter] = _reduce_scatter_transpose
 
 
 def _cumsum_transpose(ct, x, axis, reverse, accum_dtype):
