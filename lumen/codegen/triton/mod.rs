@@ -20,7 +20,9 @@ mod gemm;
 mod indexing;
 mod reduction;
 
-pub(crate) use attention::{attention_load, attention_score, attention_store};
+pub(crate) use attention::{
+    attention_atomic_add, attention_load, attention_score, attention_store,
+};
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED,
     UNTUNED_LOOP, untuned_attention,

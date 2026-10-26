@@ -100,6 +100,7 @@ def dkdv_kernel(
     DELTA,
     DK,
     DV,
+    DQ,
     SQ,
     SK,
     SHIFT,
@@ -120,10 +121,12 @@ def dkdv_kernel(
     CAUSAL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    ADD_DQ: tl.constexpr = None,
 ):
     """dK and dV of ``BLOCK_N`` keys of batch ``program_id(1)``, summed over the blocks of ``BLOCK_M``
     queries that see them, on transposed scores ``S^T = K Q^T``: ``P^T = exp(S^T - lse)``,
-    ``dV += P^T dO``, ``dS^T = P^T (V dO^T - delta) SCALE`` and ``dK += dS^T Q``."""
+    ``dV += P^T dO``, ``dS^T = P^T (V dO^T - delta) SCALE`` and ``dK += dS^T Q``. With ``ADD_DQ``, also adds
+    each block's ``dS K`` to the zeroed float32 ``DQ`` atomically (summed in no fixed order)."""
     start = tl.program_id(0) * BLOCK_N
     b = tl.program_id(1).to(tl.int64)
     keys = (start + tl.arange(0, BLOCK_N)).to(tl.int64)
@@ -154,6 +157,9 @@ def dkdv_kernel(
         dpt = tl.dot(v, tl.trans(do), input_precision="ieee", out_dtype=tl.float32)
         dst = pt * (dpt - delta[None, :]) * SCALE
         dk_acc = tl.dot(dst.to(q.dtype), q, dk_acc, input_precision="ieee", out_dtype=tl.float32)
+        if ADD_DQ is not None:
+            dq = tl.dot(tl.trans(dst.to(k.dtype)), k, input_precision="ieee", out_dtype=tl.float32)
+            ADD_DQ(DQ, b, rows[:, None], dh[None, :], dq, (rows < SQ)[:, None] & (dh < H)[None, :])
     STORE_DK(DK, b, keys[:, None], dh[None, :], dk_acc, k_mask)
     STORE_DV(DV, b, keys[:, None], dv[None, :], dv_acc, v_mask)
 
@@ -249,6 +255,8 @@ def attention(kernel, tensors, specs, sizes, causal, scale, config):
     else:
         args.update(SCALE=scale)
     blocks = triton.cdiv(sk, block_n) if kernel == "dkdv" else triton.cdiv(sq, block_m)
+    if kernel == "dkdv" and len(tensors) == 8:
+        tensors = [*tensors, None]
     # An optional tensor the kernel doesn't read is passed as the first one, never dereferenced.
     tensors = [t if t is not None else tensors[0] for t in tensors]
     KERNELS[kernel][(blocks, batch)](*tensors, **args)

@@ -27,6 +27,7 @@ class CudaConfig(CompilerConfig):
     horizontal_fusion: bool = True
     multi_output_fusion: bool = True
     split_k: bool = True
+    deterministic: bool = False
 
 class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""
