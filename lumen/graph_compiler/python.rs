@@ -313,7 +313,9 @@ fn triton_loop(
     Python::attach(|py| {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         // Inputs passed by value (scalars) are named by position for the launcher.
-        let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| kernel.by_value[k]).collect();
+        let scalars: Vec<usize> = (0..kernel.by_value.len())
+            .filter(|&k| kernel.by_value[k])
+            .collect();
         py.import("lumen.codegen.triton")?
             .getattr("launch")?
             .call1((

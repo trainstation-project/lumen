@@ -357,6 +357,37 @@ def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cu
 
 
 @pytest.mark.parametrize("device", [CUDA])
+def test_triton_independent_loops_are_one_kernel(device, triton_on_cuda):
+    """Independent loop fusions of as many elements (of other shapes, one
+    reading a transpose, one a lone cast) run as one Triton kernel writing
+    every output, each what it was alone, bit for bit; with
+    ``horizontal_fusion`` off, a kernel each."""
+
+    def f(a, b, c):
+        """Three independent elementwise computations of 2048 elements each."""
+        return F.exp(a) * 2.0 + 1.0, (b.t() - 3.0) * b.t(), c.bfloat16()
+
+    arrays = rand(64, 32), rand(64, 32, seed=1), rand(16, 128, seed=2)
+    try:
+        args = [lumen.from_numpy(v).to(device) for v in arrays]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
+    assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 2, [s["label"] for s in steps]
+    got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
+    lumen.config.compiler.cuda.horizontal_fusion = False
+    try:
+        assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()) == 3
+        alone = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
+    finally:
+        lumen.config.compiler.cuda.horizontal_fusion = True
+    want = lumen.compile(f)(*(lumen.from_numpy(v) for v in arrays))
+    for g, a, w in zip(got, alone, want):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
+
+
+@pytest.mark.parametrize("device", [CUDA])
 def test_triton_matmul_epilogues_fuse(device, triton_on_cuda):
     """The elementwise ops applied to a matmul's result (a bias, an
     activation, a transposed input, a cast, a reshape, a batched matmul's)

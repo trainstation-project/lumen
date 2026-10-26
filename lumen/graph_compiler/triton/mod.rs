@@ -3,6 +3,7 @@
 
 mod fusion;
 mod gemm;
+mod horizontal;
 
 use std::sync::OnceLock;
 
@@ -11,6 +12,7 @@ pub(crate) use crate::codegen::triton::Config;
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
+use horizontal::HorizontalFusion;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::clamp_indices::ClampIndices;
@@ -154,10 +156,11 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
-    pipeline
-        .add(Simplify { matched: true })
-        .add(LoopFusion)
-        .run(&mut module)?;
+    pipeline.add(Simplify { matched: true }).add(LoopFusion);
+    if config.horizontal_fusion {
+        pipeline.add(HorizontalFusion);
+    }
+    pipeline.run(&mut module)?;
     let TritonModule {
         graph: fused,
         packed,
@@ -360,6 +363,18 @@ pub(crate) fn run(
                 .collect();
             let store = Function::new("STORE", codegen::store(out.shape(), out.strides()));
             let mut functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
+            // An elementwise fusion's other outputs follow its inputs, each with its own store.
+            let outs: &[Tensor] = match &step.primitive {
+                Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => outs,
+                _ => &[],
+            };
+            for (k, t) in outs.iter().enumerate() {
+                functions.push(Function::new(
+                    format!("STORE{}", k + 1),
+                    codegen::store(t.shape(), t.strides()),
+                ));
+            }
+            let inputs: &[Tensor] = &[inputs, outs].concat();
             let config = step
                 .launch::<LoopConfig>()
                 .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
