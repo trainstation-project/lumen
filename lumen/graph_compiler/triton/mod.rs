@@ -4,6 +4,7 @@
 mod fusion;
 mod gemm;
 mod horizontal;
+mod split_k;
 
 use std::sync::OnceLock;
 
@@ -13,6 +14,7 @@ use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
+use split_k::SplitK;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::clamp_indices::ClampIndices;
@@ -160,7 +162,11 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
-    pipeline.add(Simplify { matched: true }).add(LoopFusion {
+    pipeline.add(Simplify { matched: true });
+    if config.split_k {
+        pipeline.add(SplitK);
+    }
+    pipeline.add(LoopFusion {
         multi_output: config.multi_output_fusion,
     });
     if config.horizontal_fusion {
