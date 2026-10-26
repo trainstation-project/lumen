@@ -5,7 +5,7 @@
 use indoc::writedoc;
 
 use super::config::MOST_ROW_COLUMNS;
-use super::reduction::{Reduction, combine, lowest};
+use super::reduction::{Reduction, combine, lowest, reduce_along};
 use super::*;
 use crate::graph_compiler::elementwise;
 
@@ -88,10 +88,13 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             true => "0".to_string(),
             false => lowest(a),
         };
-        let reduced = emitter.local(format!(
-            "tl.reduce(tl.where(mask, {x}, tl.full([], {init}, {acc})), 1, NAME_combine{k})[:, None]"
-        ));
-        emitter.reduced.insert(node.output, reduced);
+        let masked = format!("tl.where(mask, {x}, tl.full([], {init}, {acc}))");
+        let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
+        let value = emitter.local(format!("{call}[:, None]"));
+        emitter.reduced.insert(node.output, value);
+        if !call.starts_with("tl.reduce") {
+            continue;
+        }
         writedoc!(
             combines,
             "
