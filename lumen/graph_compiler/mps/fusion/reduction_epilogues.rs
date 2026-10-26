@@ -1,15 +1,23 @@
+//! Finds elementwise epilogues that can run inside the kernel of the reduction feeding them.
+
 use super::analysis::Analysis;
 use super::{constant, elementwise};
 use crate::graph::Primitive;
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
+/// Reduction epilogue assignment, indexed by node.
 pub(super) struct ReductionEpilogues {
+    /// For the last node of an epilogue, the reduction it belongs to.
     pub(super) epilogue: Vec<Option<usize>>,
+    /// For a reduction, the last node of its epilogue.
     pub(super) ends: Vec<Option<usize>>,
+    /// Whether a node sits strictly inside some reduction's epilogue.
     pub(super) inside: Vec<bool>,
 }
 
+/// For each fusible reduction outside normalization rows, takes the longest following chain of
+/// elementwise ops and reshapes over its result and constants whose intermediates nobody else reads.
 pub(super) fn reduction_epilogues(
     a: &Analysis,
     rows: &[Row],
@@ -51,6 +59,7 @@ pub(super) fn reduction_epilogues(
             }
             taken.push(u);
             after[un.output] = true;
+            // The chain may end here only if every earlier member is read solely within the chain.
             let inside = taken[..taken.len() - 1].iter().all(|&t| {
                 let v = nodes[t].output;
                 !is_output[v] && users[v].iter().all(|r| taken.contains(r))

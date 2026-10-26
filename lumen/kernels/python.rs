@@ -1,3 +1,5 @@
+//! Python kernel registration: compiles a Python launcher per dtype/shape/strides and calls it, or its TVM FFI
+//! function directly, when the op runs.
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
@@ -12,29 +14,42 @@ use crate::tensor::dtype::{DType, Element, dispatch_dtype};
 use crate::tensor::python::{PyTensor, dtype_name};
 use crate::tensor::scalar::Scalar;
 
+/// Index into `KERNELS` of a registered Python kernel factory.
 #[derive(Debug, Clone, Copy)]
 pub struct KernelHandle(usize);
 
+/// Registered Python kernel factories with the op each was registered for.
 static KERNELS: RwLock<Vec<(&'static str, Py<PyAny>)>> = RwLock::new(Vec::new());
 
+/// Ops that accept Python kernels and the signature their kernels must follow.
 const OP_SIGNATURES: &[(&str, &str)] = &[(op_name!("dummy_op"), LAUNCHER_SIGNATURE)];
 
+/// A kernel factory is called with the tensor layout and returns a launcher called per launch.
 const LAUNCHER_SIGNATURE: &str =
     "(dtype, shape, strides, vector_size) -> launch(address, value, stream)";
 
+/// Cache key for a compiled launcher: kernel handle, dtype, shape, strides and vector size.
 type LauncherKey = (usize, DType, Vec<usize>, Vec<usize>, usize);
+/// Compiled launchers per layout.
 static LAUNCHERS: Mutex<Option<HashMap<LauncherKey, Launcher>>> = Mutex::new(None);
 
+/// A compiled launcher returned by a kernel factory.
 enum Launcher {
+    /// A TVM FFI function, called natively without taking the GIL.
     TvmFfi {
+        /// Raw TVM FFI function handle.
         handle: usize,
+        /// Keeps the Python launcher alive.
         _owner: Py<PyAny>,
+        /// Keeps the TVM FFI function object alive so `handle` stays valid.
         _function: Py<PyAny>,
     },
+    /// Any other Python callable, called under the GIL.
     Python(Py<PyAny>),
 }
 
 impl Launcher {
+    /// Wraps a launcher, unwrapping it to a native TVM FFI handle when it exposes one and loading libtvm_ffi.
     fn new(py: Python<'_>, launcher: Bound<'_, PyAny>) -> PyResult<Self> {
         let function = if launcher.hasattr("__tvm_ffi_object__")? {
             launcher.call_method0("__tvm_ffi_object__")?
@@ -57,8 +72,10 @@ impl Launcher {
     }
 }
 
+/// Stream argument passed to launchers: the device's default stream.
 const STREAM: usize = 0;
 
+/// Returns the Python-kernel op table backing op `name`.
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
         n if n == core::kernels::dummy_op::DUMMY_OP.name() => &core::kernels::dummy_op::DUMMY_OP_PY,
@@ -66,6 +83,7 @@ fn python_op(name: &str) -> &'static Op<KernelHandle> {
     }
 }
 
+/// Returns the static op name for `name`, or a `KeyError` listing the ops that accept Python kernels.
 fn check_op(name: &str) -> PyResult<&'static str> {
     OP_SIGNATURES
         .iter()
@@ -81,6 +99,8 @@ fn check_op(name: &str) -> PyResult<&'static str> {
 }
 
 impl KernelHandle {
+    /// Runs this Python kernel on a tensor described by its layout and data address, compiling a launcher for
+    /// the layout on first use; returns false when the handle no longer belongs to `op`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch(
         self,
@@ -94,6 +114,7 @@ impl KernelHandle {
     ) -> bool {
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
         let vector_size = core::kernels::vector_size(shape, strides, dtype.size_of(), address);
+        // fast path: a cached TVM FFI launcher runs without attaching to Python
         let run = || {
             #[cfg(lumen_cuda_linked)]
             if let core::Device::Cuda(index) = device {
@@ -131,6 +152,7 @@ impl KernelHandle {
         run()
     }
 
+    /// Calls a cached Python launcher, or compiles one through the kernel factory, caches it and runs it.
     fn launch_python(
         self,
         py: Python<'_>,
@@ -189,11 +211,15 @@ impl KernelHandle {
     }
 }
 
+/// Outcome of the Python side of a launch.
 enum Step {
+    /// The launcher ran under the GIL; false when no kernel for the op was found.
     Done(bool),
+    /// The launcher is a TVM FFI function still to be called with this handle.
     TvmFfi(usize),
 }
 
+/// Converts a scalar argument to the matching Python int, float or bool.
 fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;
     match value {
@@ -203,10 +229,12 @@ fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// Returns the Python kernel registered for `op` on `key`, if any.
 pub(crate) fn handle_for(op: &str, key: DispatchKey) -> Option<KernelHandle> {
     python_op(op).kernel(key)
 }
 
+/// Removes the Python kernel for `name` on `device`; returns false when the device is unavailable or had none.
 #[pyfunction]
 #[pyo3(signature = (name, device))]
 fn _unregister_kernel(py: Python<'_>, name: &str, device: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -218,6 +246,7 @@ fn _unregister_kernel(py: Python<'_>, name: &str, device: &Bound<'_, PyAny>) -> 
     Ok(python_op(name).unregister(DispatchKey::of(device)))
 }
 
+/// Registers a callable kernel factory for op `name` on a non-CPU `device`.
 #[pyfunction]
 #[pyo3(signature = (name, device, kernel))]
 fn _register_kernel(
@@ -248,6 +277,7 @@ fn _register_kernel(
         .map_err(PyRuntimeError::new_err)
 }
 
+/// Lists `(op, signature)` for every op that accepts Python kernels.
 #[pyfunction]
 fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
     let _ = py;
@@ -257,12 +287,14 @@ fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Runs `dummy_op` on `t` with `value`, for testing registered kernels.
 #[pyfunction]
 fn _dummy_op(t: &PyTensor, value: &Bound<'_, PyAny>) -> PyResult<()> {
     core::kernels::dummy_op::dummy_op(&t.inner, core::tensor::python::to_scalar(value)?);
     Ok(())
 }
 
+/// Adds the kernel registration functions to the `lumen.kernels._C` module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_dummy_op, m)?)?;
     m.add_function(wrap_pyfunction!(_register_kernel, m)?)?;

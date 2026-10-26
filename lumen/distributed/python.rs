@@ -1,3 +1,4 @@
+//! Python bindings for `lumen.distributed`: `TCPStore`, `DeviceMesh` and the process group functions.
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
@@ -6,6 +7,7 @@ use std::time::Duration;
 
 use super::{DeviceMesh, TcpStore};
 
+/// Converts a Python timeout (seconds or a `timedelta`) to a `Duration`, defaulting to `DEFAULT_TIMEOUT` for `None`.
 fn duration(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Duration> {
     let Some(timeout) = timeout.filter(|t| !t.is_none()) else {
         return Ok(super::DEFAULT_TIMEOUT);
@@ -21,6 +23,7 @@ fn duration(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Duration> {
     })
 }
 
+/// Maps the `-1` "unset" sentinel of a Python int argument to `None`, rejecting other negatives.
 fn index(name: &str, value: i64) -> PyResult<Option<usize>> {
     match value {
         -1 => Ok(None),
@@ -31,6 +34,7 @@ fn index(name: &str, value: i64) -> PyResult<Option<usize>> {
     }
 }
 
+/// Key-value store over TCP shared by every rank of a job; one process hosts it with `is_master=True`.
 #[pyclass(name = "TCPStore", module = "lumen.distributed", frozen)]
 pub(crate) struct PyTcpStore {
     store: Arc<TcpStore>,
@@ -38,6 +42,7 @@ pub(crate) struct PyTcpStore {
 
 #[pymethods]
 impl PyTcpStore {
+    /// Hosts or connects to the store at `host_name:port`.
     #[new]
     #[pyo3(signature = (host_name, port, *, is_master = false, timeout = None))]
     fn new(
@@ -56,16 +61,19 @@ impl PyTcpStore {
         })
     }
 
+    /// Host name the store was created with.
     #[getter]
     fn host(&self) -> &str {
         self.store.host()
     }
 
+    /// Port the store listens on.
     #[getter]
     fn port(&self) -> u16 {
         self.store.port()
     }
 
+    /// Stores `value` (str or bytes) under `key`.
     fn set(&self, py: Python<'_>, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let value: Vec<u8> = match value.extract::<String>() {
             Ok(text) => text.into_bytes(),
@@ -75,6 +83,7 @@ impl PyTcpStore {
             .map_err(PyRuntimeError::new_err)
     }
 
+    /// Returns the bytes under `key`, waiting for it to be set.
     fn get<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyBytes>> {
         let value = py
             .detach(|| self.store.get(key))
@@ -82,11 +91,13 @@ impl PyTcpStore {
         Ok(PyBytes::new(py, &value))
     }
 
+    /// Atomically adds `amount` to the integer counter at `key` and returns the new value.
     fn add(&self, py: Python<'_>, key: &str, amount: i64) -> PyResult<i64> {
         py.detach(|| self.store.add(key, amount))
             .map_err(PyRuntimeError::new_err)
     }
 
+    /// Blocks until every key in `keys` is set, up to `timeout` or the store's own timeout.
     #[pyo3(signature = (keys, timeout = None))]
     fn wait(
         &self,
@@ -104,6 +115,7 @@ impl PyTcpStore {
     }
 }
 
+/// Initialises the default process group from `store` or by rendezvous at `init_method` (env:// by default).
 #[pyfunction]
 #[pyo3(signature = (*, init_method = None, timeout = None, world_size = -1, rank = -1, store = None))]
 fn init_process_group(
@@ -140,16 +152,19 @@ fn init_process_group(
         .map_err(PyRuntimeError::new_err)
 }
 
+/// Tears down the default process group.
 #[pyfunction]
 fn destroy_process_group() -> PyResult<()> {
     super::destroy_process_group().map_err(PyRuntimeError::new_err)
 }
 
+/// Reports whether the default process group is initialised.
 #[pyfunction]
 fn is_initialized() -> bool {
     super::is_initialized()
 }
 
+/// Flattens a nested sequence of ranks row-major into `ranks`, recording each level's length in `shape`.
 fn flatten_mesh(
     mesh: &Bound<'_, PyAny>,
     depth: usize,
@@ -172,6 +187,7 @@ fn flatten_mesh(
         .try_iter()
         .map_err(|_| PyTypeError::new_err("the mesh must be a nested sequence of ranks"))?
         .collect::<PyResult<_>>()?;
+    // the first row at a depth sets that dimension's size; later rows must match it
     match shape.get(depth) {
         None if ranks.is_empty() => shape.push(rows.len()),
         Some(&size) if size == rows.len() => {}
@@ -187,6 +203,7 @@ fn flatten_mesh(
     Ok(())
 }
 
+/// Rebuilds the nested Python list of `ranks` laid out row-major over `shape`.
 fn nested<'py>(py: Python<'py>, shape: &[usize], ranks: &[usize]) -> PyResult<Bound<'py, PyAny>> {
     match shape {
         [] => Ok(ranks[0].into_pyobject(py)?.into_any()),
@@ -200,6 +217,7 @@ fn nested<'py>(py: Python<'py>, shape: &[usize], ranks: &[usize]) -> PyResult<Bo
     }
 }
 
+/// Python view of a `DeviceMesh` for the calling process.
 #[pyclass(
     name = "DeviceMesh",
     module = "lumen.distributed",
@@ -214,6 +232,7 @@ pub(crate) struct PyDeviceMesh {
 }
 
 impl PyDeviceMesh {
+    /// Resolves this process's rank on `device_type` and builds the mesh, initialising the process group if needed.
     fn build(
         py: Python<'_>,
         device_type: &str,
@@ -230,6 +249,7 @@ impl PyDeviceMesh {
         Ok(PyDeviceMesh { mesh })
     }
 
+    /// Resolves a mesh dimension given as a name, a possibly negative index, or `None` for a 1-D mesh.
     fn mesh_dim(&self, mesh_dim: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
         let Some(mesh_dim) = mesh_dim.filter(|d| !d.is_none()) else {
             return match self.mesh.ndim() {
@@ -258,6 +278,7 @@ impl PyDeviceMesh {
 
 #[pymethods]
 impl PyDeviceMesh {
+    /// Builds a mesh on `device_type` from a nested sequence of ranks.
     #[new]
     #[pyo3(signature = (device_type, mesh, *, mesh_dim_names = None))]
     fn new(
@@ -271,16 +292,19 @@ impl PyDeviceMesh {
         Self::build(py, device_type, shape, ranks, mesh_dim_names)
     }
 
+    /// Canonical device type name.
     #[getter]
     fn device_type(&self) -> &'static str {
         self.mesh.device_type()
     }
 
+    /// The mesh's ranks as a nested list.
     #[getter]
     fn mesh<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         nested(py, self.mesh.shape(), self.mesh.ranks())
     }
 
+    /// Dimension names as a tuple, or `None`.
     #[getter]
     fn mesh_dim_names<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
         self.mesh
@@ -289,16 +313,19 @@ impl PyDeviceMesh {
             .transpose()
     }
 
+    /// Size of each mesh dimension.
     #[getter]
     fn shape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, self.mesh.shape())
     }
 
+    /// Number of mesh dimensions.
     #[getter]
     fn ndim(&self) -> usize {
         self.mesh.ndim()
     }
 
+    /// Returns the total rank count, or the size of `mesh_dim` when given.
     #[pyo3(signature = (mesh_dim = None))]
     fn size(&self, mesh_dim: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
         match mesh_dim.filter(|d| !d.is_none()) {
@@ -307,10 +334,12 @@ impl PyDeviceMesh {
         }
     }
 
+    /// Returns this process's global rank.
     fn get_rank(&self) -> usize {
         self.mesh.rank()
     }
 
+    /// Returns this process's coordinate along `mesh_dim`.
     #[pyo3(signature = (mesh_dim = None))]
     fn get_local_rank(&self, mesh_dim: Option<&Bound<'_, PyAny>>) -> PyResult<usize> {
         self.mesh
@@ -318,10 +347,12 @@ impl PyDeviceMesh {
             .map_err(PyRuntimeError::new_err)
     }
 
+    /// Returns this process's coordinate in the mesh, or `None` if it is not a member.
     fn get_coordinate(&self) -> Option<Vec<usize>> {
         self.mesh.coordinate()
     }
 
+    /// Returns the submesh over one or more named dimensions that contains this process.
     fn __getitem__(&self, mesh_dim_names: &Bound<'_, PyAny>) -> PyResult<Self> {
         let names: Vec<String> = match mesh_dim_names.extract::<String>() {
             Ok(name) => vec![name],
@@ -335,6 +366,7 @@ impl PyDeviceMesh {
         Ok(PyDeviceMesh { mesh })
     }
 
+    /// Formats the mesh like its constructor call.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let mesh = self.mesh(py)?.repr()?;
         Ok(match self.mesh_dim_names(py)? {
@@ -348,6 +380,7 @@ impl PyDeviceMesh {
     }
 }
 
+/// Builds a mesh of `mesh_shape` over ranks `0..product(mesh_shape)`.
 #[pyfunction]
 #[pyo3(signature = (device_type, mesh_shape, *, mesh_dim_names = None))]
 fn init_device_mesh(
@@ -366,16 +399,19 @@ fn init_device_mesh(
     )
 }
 
+/// Returns this process's rank in the default group, or `RANK` before it is initialised.
 #[pyfunction]
 fn get_rank() -> PyResult<usize> {
     super::get_rank().map_err(PyRuntimeError::new_err)
 }
 
+/// Returns the default group's world size, or `WORLD_SIZE` before it is initialised.
 #[pyfunction]
 fn get_world_size() -> PyResult<usize> {
     super::get_world_size().map_err(PyRuntimeError::new_err)
 }
 
+/// Adds the distributed classes and functions to the `lumen.distributed._C` module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDeviceMesh>()?;
     m.add_class::<PyTcpStore>()?;

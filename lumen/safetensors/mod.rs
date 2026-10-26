@@ -1,3 +1,6 @@
+//! Reads and writes safetensors files: an 8-byte little-endian header length, a JSON header
+//! giving each tensor's dtype, shape and byte range, then the tensors' packed bytes.
+
 mod json;
 #[cfg(feature = "python")]
 pub(crate) mod python;
@@ -12,27 +15,43 @@ use std::path::Path;
 use crate::{DType, Device, Tensor, TensorOptions};
 use json::Value;
 
+/// Largest JSON header, in bytes, that is read or written.
 pub const MAX_HEADER_SIZE: usize = 100_000_000;
 
+/// Bytes in the header-length prefix.
 const N_LEN: usize = size_of::<u64>();
 
+/// Why reading or writing a safetensors file failed.
 #[derive(Debug)]
 pub enum Error {
+    /// The header is not UTF-8.
     InvalidHeader(std::str::Utf8Error),
+    /// The header is not valid JSON or not shaped like a safetensors header.
     InvalidHeaderDeserialization(String),
     HeaderTooLarge,
+    /// The input is shorter than the header-length prefix.
     HeaderTooSmall,
+    /// The header length points past the end of the input.
     InvalidHeaderLength,
     TensorNotFound(String),
+    /// A tensor's byte range does not match its shape and dtype.
     TensorInvalidInfo,
+    /// A tensor's byte range does not start where the previous one ended, or is reversed.
     InvalidOffset(String),
     Io(io::Error),
+    /// The tensors' bytes do not end exactly at the end of the input.
     MetadataIncompleteBuffer,
+    /// A shape's element or bit count overflows `usize`.
     ValidationOverflow,
+    /// A sub-byte dtype tensor ends partway through a byte.
     MisalignedSlice,
+    /// Tensor name and dtype name of a dtype lumen has no equivalent for.
     UnsupportedDtype(String, String),
+    /// A tensor to save is not contiguous.
     NotContiguous(String),
+    /// A tensor to save is on the meta device and has no data.
     MetaTensor(String),
+    /// The host is big-endian, but the format stores little-endian bytes.
     BigEndian,
 }
 
@@ -90,6 +109,9 @@ impl From<io::Error> for Error {
     }
 }
 
+/// Dtypes the safetensors format names, including ones lumen cannot load.
+///
+/// Declaration order roughly follows width, which `prepare` relies on to align tensors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(non_camel_case_types)]
 pub enum Dtype {
@@ -117,6 +139,7 @@ pub enum Dtype {
     U64,
 }
 
+/// Each dtype with its header name and width in bits.
 const DTYPES: [(Dtype, &str, usize); 22] = [
     (Dtype::BOOL, "BOOL", 8),
     (Dtype::F4, "F4", 4),
@@ -143,6 +166,7 @@ const DTYPES: [(Dtype, &str, usize); 22] = [
 ];
 
 impl Dtype {
+    /// This dtype's row in `DTYPES`.
     fn entry(self) -> &'static (Dtype, &'static str, usize) {
         DTYPES
             .iter()
@@ -150,18 +174,22 @@ impl Dtype {
             .expect("every dtype is listed")
     }
 
+    /// The name headers use for this dtype.
     pub fn name(self) -> &'static str {
         self.entry().1
     }
 
+    /// Width of one element in bits.
     pub fn bitsize(self) -> usize {
         self.entry().2
     }
 
+    /// The dtype a header names, or `None` for an unknown name.
     fn parse(name: &str) -> Option<Self> {
         DTYPES.iter().find(|e| e.1 == name).map(|e| e.0)
     }
 
+    /// The matching lumen dtype, or `None` for dtypes lumen lacks.
     pub fn to_lumen(self) -> Option<DType> {
         Some(match self {
             Dtype::BOOL => DType::Bool,
@@ -181,6 +209,7 @@ impl Dtype {
         })
     }
 
+    /// The matching safetensors dtype, or `None` for lumen dtypes the format lacks.
     pub fn from_lumen(dtype: DType) -> Option<Self> {
         Some(match dtype {
             DType::Bool => Dtype::BOOL,
@@ -207,21 +236,29 @@ impl fmt::Display for Dtype {
     }
 }
 
+/// One tensor's header entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TensorInfo {
     pub dtype: Dtype,
     pub shape: Vec<usize>,
+    /// Byte range `[start, end)` relative to the start of the data section.
     pub data_offsets: (usize, usize),
 }
 
+/// A validated header: optional string metadata plus tensors packed back to back.
 #[derive(Debug, Clone)]
 pub struct Metadata {
+    /// The `__metadata__` map.
     metadata: Option<BTreeMap<String, String>>,
+    /// Tensors in data-offset order.
     tensors: Vec<(String, TensorInfo)>,
+    /// Position of each tensor name in `tensors`.
     index: HashMap<String, usize>,
 }
 
 impl Metadata {
+    /// Builds a header from tensors in data order, rejecting duplicate names and byte ranges
+    /// that do not tile the data section from offset 0.
     pub fn new(
         metadata: Option<BTreeMap<String, String>>,
         tensors: Vec<(String, TensorInfo)>,
@@ -243,6 +280,8 @@ impl Metadata {
         Ok(metadata)
     }
 
+    /// Checks the tensors are packed back to back from 0 with sizes matching shape and dtype;
+    /// returns the data section's length.
     fn validate(&self) -> Result<usize, Error> {
         let mut start = 0;
         for (name, info) in &self.tensors {
@@ -269,22 +308,27 @@ impl Metadata {
         Ok(start)
     }
 
+    /// The entry for tensor `name`.
     pub fn info(&self, name: &str) -> Option<&TensorInfo> {
         self.index.get(name).map(|&i| &self.tensors[i].1)
     }
 
+    /// Every tensor in data-offset order.
     pub fn tensors(&self) -> &[(String, TensorInfo)] {
         &self.tensors
     }
 
+    /// The `__metadata__` map, if the header has one.
     pub fn metadata(&self) -> Option<&BTreeMap<String, String>> {
         self.metadata.as_ref()
     }
 
+    /// Length of the data section in bytes.
     pub fn data_len(&self) -> usize {
         self.tensors.last().map_or(0, |(_, t)| t.data_offsets.1)
     }
 
+    /// Parses JSON header text, separating `__metadata__` and ordering tensors by data offset.
     fn parse(header: &str) -> Result<Self, Error> {
         let bad = |msg: String| Error::InvalidHeaderDeserialization(msg);
         let Value::Object(members) = json::parse(header).map_err(bad)? else {
@@ -307,6 +351,7 @@ impl Metadata {
         Metadata::new(metadata, tensors)
     }
 
+    /// Writes the header as compact JSON: `__metadata__` first, then tensors in data order.
     fn to_json(&self) -> String {
         let mut out = String::from("{");
         if let Some(metadata) = &self.metadata {
@@ -342,6 +387,7 @@ impl Metadata {
     }
 }
 
+/// Reads a JSON number as a nonnegative integer.
 fn parse_usize(v: &Value) -> Result<usize, String> {
     match v {
         Value::Number(n) => n
@@ -351,6 +397,7 @@ fn parse_usize(v: &Value) -> Result<usize, String> {
     }
 }
 
+/// Reads `__metadata__` as a string-to-string map; JSON `null` means none.
 fn parse_string_map(value: Value) -> Result<Option<BTreeMap<String, String>>, String> {
     match value {
         Value::Null => Ok(None),
@@ -370,6 +417,7 @@ fn parse_string_map(value: Value) -> Result<Option<BTreeMap<String, String>>, St
     }
 }
 
+/// Reads one tensor's `dtype`, `shape` and `data_offsets` from its header entry.
 fn parse_info(value: Value) -> Result<TensorInfo, String> {
     let Value::Object(fields) = value else {
         return Err("not an object".into());
@@ -400,8 +448,11 @@ fn parse_info(value: Value) -> Result<TensorInfo, String> {
     })
 }
 
+/// `(name, tensor)` pairs in the order their bytes are written.
 type Named<'a> = Vec<(&'a str, &'a Tensor)>;
 
+/// Checks tensors can be saved and lays them out: returns the space-padded header and the
+/// tensors in data order.
 fn prepare<'a>(
     tensors: &[(&'a str, &'a Tensor)],
     metadata: Option<BTreeMap<String, String>>,
@@ -415,6 +466,7 @@ fn prepare<'a>(
             return Err(Error::UnsupportedDtype(name.to_owned(), dtype));
         }
     }
+    // Widest dtypes first (then by name) keeps every tensor's offset a multiple of its element size.
     let mut order = tensors.to_vec();
     order.sort_by(|(ln, lt), (rn, rt)| {
         Dtype::from_lumen(rt.dtype())
@@ -442,6 +494,7 @@ fn prepare<'a>(
         offset += n;
     }
     let mut header = Metadata::new(metadata, infos)?.to_json().into_bytes();
+    // Pad with spaces so the data section starts 8-byte aligned.
     header.resize(header.len().next_multiple_of(N_LEN), b' ');
     if header.len() > MAX_HEADER_SIZE {
         return Err(Error::HeaderTooLarge);
@@ -449,6 +502,7 @@ fn prepare<'a>(
     Ok((header, order))
 }
 
+/// Whether the host can read and write `device`'s tensor memory through `data_ptr`.
 fn host_accessible(device: Device) -> bool {
     match device {
         Device::Cpu(_) | Device::Meta(_) => true,
@@ -458,6 +512,8 @@ fn host_accessible(device: Device) -> bool {
     }
 }
 
+/// Calls `f` with `t`'s raw bytes once its pending work finishes, copying it to the CPU
+/// first when the host cannot read its device.
 fn with_bytes<R>(t: &Tensor, f: impl FnOnce(&[u8]) -> R) -> R {
     let n = t.numel() * t.dtype().size_of();
     if n == 0 {
@@ -470,6 +526,7 @@ fn with_bytes<R>(t: &Tensor, f: impl FnOnce(&[u8]) -> R) -> R {
     f(unsafe { std::slice::from_raw_parts(t.data_ptr().cast_const(), n) })
 }
 
+/// Serializes named tensors and optional string metadata into an in-memory safetensors file.
 pub fn serialize(
     tensors: &[(&str, &Tensor)],
     metadata: Option<BTreeMap<String, String>>,
@@ -488,6 +545,10 @@ pub fn serialize(
     Ok(out)
 }
 
+/// Writes named tensors and optional string metadata to a safetensors file at `path`.
+///
+/// Writes a temporary file beside `path` and renames it over `path`, so a failed write leaves
+/// no partial file.
 pub fn save_file(
     tensors: &[(&str, &Tensor)],
     metadata: Option<BTreeMap<String, String>>,
@@ -517,6 +578,7 @@ pub fn save_file(
     })
 }
 
+/// Reads the header-length prefix, rejecting lengths over `MAX_HEADER_SIZE`.
 fn header_len(prefix: &[u8]) -> Result<usize, Error> {
     let bytes: [u8; N_LEN] = prefix
         .get(..N_LEN)
@@ -532,6 +594,7 @@ fn header_len(prefix: &[u8]) -> Result<usize, Error> {
     Ok(n)
 }
 
+/// Parses `n` header bytes and checks the tensors exactly fill the rest of a `file_len`-byte file.
 fn parse_header(bytes: &[u8], n: usize, file_len: usize) -> Result<Metadata, Error> {
     let text = std::str::from_utf8(bytes).map_err(Error::InvalidHeader)?;
     let metadata = Metadata::parse(text)?;
@@ -542,6 +605,7 @@ fn parse_header(bytes: &[u8], n: usize, file_len: usize) -> Result<Metadata, Err
     Ok(metadata)
 }
 
+/// Parses the header of a serialized buffer; returns the header length and its contents.
 pub fn read_metadata(buffer: &[u8]) -> Result<(usize, Metadata), Error> {
     let n = header_len(buffer)?;
     let header = N_LEN
@@ -551,6 +615,8 @@ pub fn read_metadata(buffer: &[u8]) -> Result<(usize, Metadata), Error> {
     Ok((n, parse_header(header, n, buffer.len())?))
 }
 
+/// Allocates tensor `name` on `device` and has `fill` write its raw bytes; stages through
+/// the CPU for devices the host cannot write, and reads nothing for the meta device.
 fn load_tensor(
     name: &str,
     info: &TensorInfo,
@@ -578,6 +644,7 @@ fn load_tensor(
     if n > 0 {
         let bytes = unsafe { std::slice::from_raw_parts_mut(t.data_ptr(), n) };
         fill(bytes)?;
+        // Files may store any nonzero byte as true; lumen bools are 0 or 1.
         if dtype == DType::Bool {
             for b in bytes {
                 *b = (*b != 0) as u8;
@@ -587,6 +654,7 @@ fn load_tensor(
     Ok(if host == device { t } else { t.to(device) })
 }
 
+/// Loads every tensor in a serialized buffer onto `device`, in data order.
 pub fn deserialize(buffer: &[u8], device: Device) -> Result<Vec<(String, Tensor)>, Error> {
     let (n, metadata) = read_metadata(buffer)?;
     let data = &buffer[N_LEN + n..];
@@ -604,14 +672,17 @@ pub fn deserialize(buffer: &[u8], device: Device) -> Result<Vec<(String, Tensor)
         .collect()
 }
 
+/// An open safetensors file whose header is parsed up front and whose tensors are read on demand.
 #[derive(Debug)]
 pub struct SafeTensorsFile {
     file: std::fs::File,
+    /// File offset where the data section begins.
     data_start: u64,
     metadata: Metadata,
 }
 
 impl SafeTensorsFile {
+    /// Opens `path` and reads and validates its header; tensor data stays on disk.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let file_len: usize = file
@@ -638,10 +709,12 @@ impl SafeTensorsFile {
         })
     }
 
+    /// The parsed header.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
+    /// Reads tensor `name` from disk onto `device`.
     pub fn tensor(&self, name: &str, device: Device) -> Result<Tensor, Error> {
         let info = self
             .metadata
@@ -651,6 +724,7 @@ impl SafeTensorsFile {
         load_tensor(name, info, device, |dst| read_at(&self.file, dst, start))
     }
 
+    /// Reads every tensor, in data order, onto `device`.
     pub fn tensors(&self, device: Device) -> Result<Vec<(String, Tensor)>, Error> {
         self.metadata
             .tensors
@@ -660,15 +734,18 @@ impl SafeTensorsFile {
     }
 }
 
+/// Loads every tensor in the safetensors file at `path` onto `device`.
 pub fn load_file(path: impl AsRef<Path>, device: Device) -> Result<Vec<(String, Tensor)>, Error> {
     SafeTensorsFile::open(path)?.tensors(device)
 }
 
+/// Fills `buf` with the bytes of `file` starting at `offset`.
 #[cfg(unix)]
 fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
 }
 
+/// Fills `buf` with the bytes of `file` starting at `offset`, seeking where positional reads are unavailable.
 #[cfg(not(unix))]
 fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};

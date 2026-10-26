@@ -1,4 +1,7 @@
+// Layout kernels that copy a strided view into a contiguous buffer, per element byte width.
 
+/// Copies one strided row per grid row `gid.y` into contiguous `out`, its `inner` elements `inner_stride` apart;
+/// the row's start comes from the outer `sizes` and `strides`.
 #define GATHER(NAME, E)                                                      \
     kernel void gather_##NAME(device const E *in [[buffer(0)]],              \
                               device E *out [[buffer(1)]],                   \
@@ -16,6 +19,8 @@
         }                                                                    \
     }
 
+/// Transposes 32x32 tiles through threadgroup memory per batch `group.z`: reads are coalesced along
+/// `a` (unit stride in `in`) and writes along `b` (unit stride in `out`). Launched with 16x16 threads.
 #define TRANSPOSE(NAME, E)                                                       \
     kernel void transpose_##NAME(device const E *in [[buffer(0)]],               \
                                  device E *out [[buffer(1)]],                    \

@@ -3,6 +3,7 @@
 template <typename T> struct Pair {
     T first, second;
 };
+/// Unsigned integer type `N` bytes wide, used to move packed vectors of any element type.
 template <uint N> struct Bytes;
 template <> struct Bytes<16> {
     using type = uint4;
@@ -24,8 +25,12 @@ template <> struct Bytes<1> {
 #define SG_BK 16
 #define SMALL_BK 32
 #define SG_COLS 2
+/// Elements of the lhs threadgroup tile: big enough for a `BM x BK` slice and for reuse as
+/// `S` simdgroups' 64-element staging areas of accumulator type `A`.
 #define SG_LT(BM, BK, T, A) SG_LT_OF(BM, BK, T, A, 8)
 #define SG_LT_OF(BM, BK, T, A, S) (BM * BK > S * 64 * sizeof(A) / sizeof(T) ? BM * BK : S * 64 * sizeof(A) / sizeof(T))
+/// Stores one 8x8 accumulator fragment (this lane's two values `f`) at (`mb`, `nb`) through the
+/// epilogue: grouped, paired, direct, or via `stage` for edges, expanded and atomic outputs.
 template <typename A,
           typename O,
           typename Out,
@@ -46,6 +51,7 @@ inline void store_block(vec<A, 2> f,
                         threadgroup A *stage,
                         uint lane,
                         Epi epi) {
+    // Grouped by rows: gather each column's eight fragment rows into one lane via shuffles.
     if constexpr (!ATOMIC && GROUP == 8 && ROWS) {
         const uint at = frag_row(lane);
         vec<O, 2> window[8];
@@ -116,6 +122,8 @@ inline void store_block(vec<A, 2> f,
     }
 }
 
+/// Stores a `BM x BN` float tile from threadgroup memory fragment by fragment through
+/// `store_block`, skipping fragments past `limit` rows or `N` columns.
 template <typename A,
           typename O,
           typename Out,
@@ -151,6 +159,9 @@ inline void store_staged(threadgroup const float *tile,
     }
 }
 
+/// Simdgroup-matrix matmul of one `BM x BN` output tile: K slices of `BK` are loaded into
+/// threadgroup memory (vectorized when contiguous and aligned), multiplied as 8x8 fragments and
+/// stored through `epi` (or handed to its `tile` hook when `TILE`).
 template <typename T,
           typename A,
           typename O,
@@ -203,6 +214,7 @@ inline void matmul_sg_impl(device const T *lhs,
     device const T *r = rhs + group.z * p[6] + ulong(br) * rk + cn * p[8];
     const bool full_m = m0 + BM <= M, full_n = n0 + BN <= N;
     T ra[LA], rb[LB];
+    /// Loads this thread's lhs and rhs elements of the K slice at `k0` into registers.
     auto fetch = [&](ulong k0) {
         bool full_k = k0 + BK <= K;
         if (full_m && full_k) {
@@ -233,6 +245,7 @@ inline void matmul_sg_impl(device const T *lhs,
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }
     }
+    /// Multiplies the shared tiles into this simdgroup's accumulators.
     auto mma = [&]() {
         UNROLL for (uint kk = 0; kk < BK; kk += 8) {
             simdgroup_matrix<T, 8, 8> a[FM], b[FN];
@@ -244,6 +257,7 @@ inline void matmul_sg_impl(device const T *lhs,
             UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * BN + sx * FN * 8 + j * 8, BN); }
             simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) {
+                // Odd fragment rows walk the columns in reverse (serpentine order).
                 UNROLL for (uint j = 0; j < FN; ++j) {
                     const uint s = i % 2 ? FN - 1 - j : j;
                     simdgroup_multiply_accumulate(c[i][s], a[i], b[s], c[i][s]);
@@ -269,6 +283,7 @@ inline void matmul_sg_impl(device const T *lhs,
         CA va[PA];
         CB vb[PB];
         const bool whole = full_m && n0 + BN <= N;
+        /// Loads this thread's packed lhs and rhs vectors of the next K slice and advances.
         auto fetch_v = [&](ulong k0) {
             if (whole && k0 + BK <= K) {
                 // The vector fast path can load without bounds checks for full tiles.

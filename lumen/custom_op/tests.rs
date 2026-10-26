@@ -1,6 +1,9 @@
+//! Tests of user Metal kernels.
+
 use super::mps::*;
 use crate::{Device, Tensor};
 
+/// Compiles an axpy kernel, rejects CPU tensors and checks the result on MPS; skips without MPS.
 #[test]
 fn a_custom_kernel_launches_into_the_mps_stream() {
     const AXPY: &str =

@@ -1,5 +1,7 @@
+//! `Scalar`, a dtype-less bool, integer or float value used for fills and constants.
 use super::dtype::{DType, bf16, f16};
 
+/// A bool, integer or float value without a fixed dtype.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {
     Bool(bool),
@@ -8,6 +10,7 @@ pub enum Scalar {
 }
 
 impl Scalar {
+    /// The dtype a tensor made from this scalar gets: bool, i64 or the default float dtype.
     pub fn inferred_dtype(self) -> DType {
         match self {
             Scalar::Bool(_) => DType::Bool,
@@ -16,6 +19,7 @@ impl Scalar {
         }
     }
 
+    /// The value as f64, with `true` as 1.
     pub fn to_f64(self) -> f64 {
         match self {
             Scalar::Bool(b) => b as u8 as f64,
@@ -31,6 +35,7 @@ impl From<bool> for Scalar {
     }
 }
 
+/// Implements `From` for integer types as `Scalar::Int`.
 macro_rules! from_int {
     ($($t:ty),*) => {$(
         impl From<$t> for Scalar {
@@ -42,6 +47,7 @@ macro_rules! from_int {
 }
 from_int!(i8, i16, i32, i64, u8, u16, u32, u64, usize);
 
+/// Implements `From` for float types as `Scalar::Float`.
 macro_rules! from_float {
     ($($t:ty),*) => {$(
         impl From<$t> for Scalar {

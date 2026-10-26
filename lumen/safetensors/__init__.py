@@ -1,3 +1,5 @@
+"""Saving and loading lumen tensors in the safetensors format, mirroring ``safetensors.torch``."""
+
 import os
 
 from lumen.safetensors._C import _safetensors_deserialize, _safetensors_save_file, _safetensors_serialize, safe_open

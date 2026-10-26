@@ -1,3 +1,5 @@
+//! TPU elementwise loops: encodes a fused loop as a spec for `lumen.kernels.elementwise.tpu` and launches it.
+
 use std::collections::HashMap;
 
 use super::indexing::{Dim, Plan, layout, plan};
@@ -9,6 +11,8 @@ use crate::kernels::dot_general::tpu::block;
 use crate::kernels::elementwise::tpu::{blocks, gcd};
 use crate::kernels::tpu::{Launch, launch};
 
+/// The JSON node for `p` in an indexed loop, carrying its block `shape` and, for an iota,
+/// the `[grid dim, block, offset]` its indices start from.
 fn indexed_node(
     p: &Primitive,
     args: &[usize],
@@ -35,6 +39,7 @@ fn indexed_node(
             )
         }
         Primitive::Reshape { .. } | Primitive::Slice { .. } => String::new(),
+        // Other primitives reuse the params of their plain node.
         p => {
             let plain = node(p, args);
             let start = plain.find("\"params\": {").expect("params") + "\"params\": {".len();
@@ -48,6 +53,8 @@ fn indexed_node(
     )
 }
 
+/// Launches a loop with layout primitives (slices, transposes, broadcasts), each value read in
+/// blocks placed by the indexing plan; `rows` are the input pointers followed by the output.
 fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a loop fusion")
@@ -60,6 +67,7 @@ fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> 
         true => Vec::new(),
         false => plan.block(plan.maps[v].as_ref().expect("a value of the loop")),
     };
+    // Each operand dim is either a grid dim and block offset, or `-1` and a fixed element offset.
     let index_of = |map: &[Dim]| -> Vec<[i64; 2]> {
         map.iter()
             .map(|m| match *m {
@@ -131,6 +139,10 @@ fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> 
     launch(index, launched)
 }
 
+/// Launches the fused elementwise loop `step` on TPU `index`, writing into `output`.
+///
+/// Loops with layout primitives go through the indexed path; otherwise every operand must have
+/// the output's shape or be a scalar.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -197,11 +209,13 @@ pub(crate) fn encode(
     }
     let window = window(step, 0);
     let mut blocks = blocks(&out.shape, &dtypes)?;
+    // A windowed output needs a column block that divides both the row width and the window start.
     if let Some((_, start)) = window {
         let n = *out.shape.last().expect("a matrix");
         blocks[2] = block(gcd(n, start), 128, 2048)
             .ok_or_else(|| format!("{} on TPU: a window of no whole columns' block", step.label))?;
     }
+    // A leading block of 1 is left out of the kernel name.
     let leading = blocks.len() == 3 && blocks[0] == 1;
     let shown: Vec<String> = blocks
         .iter()
@@ -224,6 +238,7 @@ pub(crate) fn encode(
         blocks,
         window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
     );
+    // Pointers past the step's own inputs follow the output in the launch order.
     let n = step.inputs.len();
     let rows: Vec<*const u8> = inputs[..n]
         .iter()

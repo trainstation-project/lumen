@@ -1,28 +1,46 @@
+//! Horizontal fusion: merges independent kernels of the same kind into one launch.
+
 use std::collections::HashMap;
 
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 
+/// Most nodes in one horizontal group.
 const MAX_MEMBERS: usize = 32;
 
+/// Groups per key still accepting members; the oldest is closed when more open.
 const MAX_OPEN: usize = 4;
 
+/// Most bytes whose buffer lifetime a group may extend by moving reads later or writes earlier.
 const MAX_EXTENDED_BYTES: usize = 16 << 20;
 
+/// Nodes fused into one kernel.
 struct Group {
+    /// Member node indices, in graph order.
     members: Vec<usize>,
+    /// Values the members read, deduplicated and sorted.
     reads: Vec<Var>,
+    /// Number of values the members produce.
     values: usize,
+    /// Earliest node position the group can run at, after all its operands exist.
     at: usize,
 }
 
+/// A backend's rules for horizontal fusion.
 pub(crate) trait Target {
+    /// Whether `node` may join a horizontal group.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool;
+    /// Nodes with equal keys (in the same scope) may share a group.
     fn key(&self, graph: &Graph, node: &Node) -> Vec<usize>;
+    /// Whether `members` fit one kernel taking `buffers` buffers.
     fn fits(&self, graph: &Graph, members: &[usize], buffers: usize) -> bool;
+    /// Final check of a group's fused body.
     fn accepts(&self, graph: &Graph, members: &[usize], body: &Graph) -> bool;
+    /// Requests a kernel for `body`, with inputs flagged in `by_value` passed by value; returns its name.
     fn kernel(&mut self, body: &Graph, by_value: &[bool]) -> String;
 }
 
+/// Groups independent candidate nodes with equal keys into fusions, keeping the graph acyclic and
+/// bounding how much buffer lifetime grows. `scalars` are values passed to kernels by value.
 pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -30,6 +48,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
+    // Values each node produces, including the extra outputs of a fusion (its `FusionOutput` readers).
     let mut values: Vec<Vec<Var>> = nodes.iter().map(|node| vec![node.output]).collect();
     let mut output_of = vec![false; nodes.len()];
     let mut extra: Vec<Vec<(usize, Var)>> = vec![Vec::new(); nodes.len()];
@@ -50,6 +69,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
     }
     let last_read = |v: Var| readers[v].iter().copied().max();
     let successors = |i: usize| values[i].iter().flat_map(|&v| readers[v].iter().copied());
+    // Whether some path from the members' readers leads back into the members.
     let cycles = |members: &[usize], group_of: &[Option<usize>], groups: &[Group]| {
         let (mut seen, mut stack) = (vec![false; nodes.len()], Vec::new());
         stack.extend(members.iter().flat_map(|&m| successors(m)));
@@ -74,6 +94,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
             false => p,
         })
     };
+    // Whether a node outside any group, before `at`, depends on a member and would have to wait.
     let defers = |members: &[usize], at: usize, group_of: &[Option<usize>], groups: &[Group]| {
         let before = |m: &usize| successors(*m).filter(|&r| r < at).collect::<Vec<_>>();
         let mut stack: Vec<usize> = members.iter().flat_map(before).collect();
@@ -107,6 +128,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
         mine.sort_unstable();
         mine.dedup();
         let count = values[c].len();
+        // Joining `g` runs the group at `at`: reads before it live longer, members after it write earlier.
         let joins = |g: &Group| {
             let mut all = g.reads.clone();
             all.extend(&mine);
@@ -181,6 +203,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
         output_of[i] && producer[nodes[i].inputs[0]].is_some_and(|p| group_of[p].is_some())
     };
 
+    // Emit nodes in an order where each group runs once all its reads are ready.
     let order = {
         let mut ready = vec![false; n];
         graph.inputs().iter().for_each(|&v| ready[v] = true);
@@ -271,6 +294,7 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
     out
 }
 
+/// Display label of a node, using a fusion's own label.
 fn label(graph: &Graph, node: &Node) -> &'static str {
     match &node.primitive {
         Primitive::Fusion { label, .. } => label,
@@ -278,6 +302,8 @@ fn label(graph: &Graph, node: &Node) -> &'static str {
     }
 }
 
+/// The fused body of `members` reading `reads` (inlining member fusions), and the graph values its
+/// outputs correspond to.
 fn body(graph: &Graph, members: &[usize], reads: &[Var], values: &[Vec<Var>]) -> (Graph, Vec<Var>) {
     let mut body = Graph::new();
     let mut var: HashMap<Var, Var> = HashMap::new();

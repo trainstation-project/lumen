@@ -1,3 +1,5 @@
+//! Triton loop fusion: groups elementwise chains, reductions and GEMM epilogues into Triton kernels.
+
 use crate::codegen::regions::gemm_regions;
 use crate::codegen::triton::fusible;
 use crate::graph::{Graph, Primitive, Var};
@@ -5,32 +7,47 @@ use crate::graph_compiler::common::loops::fused;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
+/// Compiler pass fusing nodes into Triton loop kernels.
 pub(super) struct LoopFusion;
 
 impl<M: Module> CompilerPass<M> for LoopFusion {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "loop_fusion"
     }
 
+    /// Replaces each group with a `loop` fusion rooted at its last node.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let graph = m.graph();
         let (group, extra) = groups(graph);
         *m.graph_mut() = fused(
             graph,
             &group,
-            |root, _| ("loop", root),
+            |root, members| {
+                let main = members.iter().find(|&&k| {
+                    let p = &graph.nodes()[k].primitive;
+                    reduction(p) || matches!(p, Primitive::DotGeneral { .. })
+                });
+                ("loop", *main.unwrap_or(&root))
+            },
             |root| extra[root].clone(),
         );
         Ok(())
     }
 }
 
+/// A GEMM with an epilogue over its output column regions, claimed before ordinary grouping.
 struct Claim {
+    /// The dot, its region chains and constants only they read.
     members: Vec<usize>,
+    /// Last node whose value leaves the group; the fusion's root.
     main: usize,
+    /// Other values that leave the group, as extra fusion outputs.
     extra: Vec<Var>,
 }
 
+/// Claims each dot whose output is split into column regions, with the elementwise chains reading
+/// each region, when every value leaving a region has the region's element count.
 fn claims(graph: &Graph) -> Vec<Claim> {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -52,6 +69,7 @@ fn claims(graph: &Graph) -> Vec<Claim> {
         let Some(regions) = gemm_regions(graph, node) else {
             continue;
         };
+        // Per region: the slice/reshape nodes leading from the dot to each member.
         let mut sets: Vec<Vec<usize>> = regions
             .iter()
             .map(|c| {
@@ -78,6 +96,7 @@ fn claims(graph: &Graph) -> Vec<Claim> {
             }
         }
         let shape = &graph.type_of(node.output).shape;
+        // The nodes each region set exposes, and the last of them, when that is a valid fusion root.
         let ends = |sets: &[Vec<usize>]| -> Option<(Vec<usize>, usize)> {
             let mut ends = Vec::new();
             for (c, set) in regions.iter().zip(sets) {
@@ -108,6 +127,7 @@ fn claims(graph: &Graph) -> Vec<Claim> {
         let mut best = ends(&sets).map(|e| (sets.clone(), e));
         let mut depends = vec![false; n];
         depends[node.output] = true;
+        // Extend regions with later elementwise/reshape nodes reading one region; keep the last valid state.
         for (u, un) in nodes.iter().enumerate().skip(i + 1) {
             depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
             if region_of[un.output].is_some() {
@@ -142,6 +162,7 @@ fn claims(graph: &Graph) -> Vec<Claim> {
         let mut members: Vec<usize> = std::iter::once(i)
             .chain(sets.into_iter().flatten())
             .collect();
+        // Pull in constant producers that only the members read.
         let mut k = 0;
         while k < members.len() {
             for &v in &nodes[members[k]].inputs {
@@ -178,6 +199,8 @@ fn claims(graph: &Graph) -> Vec<Claim> {
     found
 }
 
+/// Assigns each node the root of its loop group (claims first, then joining readers' groups going
+/// backwards), and the extra outputs of each root.
 fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -206,6 +229,7 @@ fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
         if group[i].is_some() || (!fusible(graph, node) && !dot) {
             continue;
         }
+        // Join the readers' group when they all share one that isn't a claim and doesn't feed a dot.
         let mut joined = match readers[node.output].split_first() {
             Some((&first, rest)) if !graph.outputs().contains(&node.output) => {
                 group[first].filter(|&g| rest.iter().all(|&r| group[r] == Some(g)))
@@ -216,12 +240,14 @@ fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
             .iter()
             .any(|&r| matches!(nodes[r].primitive, Primitive::DotGeneral { .. }));
         joined = joined.filter(|&g| !operand && !closed[g]);
+        // A group holds at most one reduction or dot, whose value must reach the root elementwise.
         let reduction = reduction(&node.primitive);
         if reduction || dot {
             joined = joined.filter(|&g| {
                 !reduces[g] && !dots[g] && epilogue(graph, &readers, &group, node.output, g)
             });
         }
+        // A dot or reshape that joins nothing stays unfused.
         if joined.is_none() && (dot || matches!(node.primitive, Primitive::Reshape { .. })) {
             continue;
         }
@@ -233,10 +259,13 @@ fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
     (group, extra)
 }
 
+/// Whether `p` is a sum or max reduction.
 fn reduction(p: &Primitive) -> bool {
     matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. })
 }
 
+/// Whether every node of group `g` downstream of value `reduced` is elementwise (no broadcast, layout
+/// change or gather), so each output element reads one reduced element.
 fn epilogue(
     graph: &Graph,
     readers: &[Vec<usize>],

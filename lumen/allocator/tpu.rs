@@ -1,3 +1,5 @@
+//! TPU allocator: one runtime buffer per device holds every tensor, addressed in 512-byte rows.
+
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -7,18 +9,24 @@ use super::{Allocator, Region};
 use crate::device::Device;
 use crate::device::tpu::{error, ffi};
 
+/// Runtime buffer backing a TPU device's region.
 struct Reserved {
+    /// Runtime handle of the buffer; a run replaces it with its result buffer.
     buffer: NonNull<c_void>,
+    /// Device address of the buffer's first byte.
     base: usize,
     size: usize,
 }
 
 unsafe impl Send for Reserved {}
 
+/// Bytes per row of the TPU region; allocations are whole rows.
 pub(crate) const ROW: usize = 512;
 
+/// Row-count granularity of the region: highly composite so common tile heights divide it.
 const TILE_ROWS: usize = 8 * 64 * 9 * 5 * 7;
 
+/// Allocator for one TPU device, sub-allocating a single reserved runtime buffer.
 pub struct TpuAllocator {
     index: usize,
     region: Region,
@@ -26,6 +34,7 @@ pub struct TpuAllocator {
 }
 
 impl TpuAllocator {
+    /// Allocator for device `index`, rounding `capacity` down to a whole number of `TILE_ROWS` rows.
     pub fn new(index: usize, capacity: usize) -> Self {
         let unit = TILE_ROWS * ROW;
         let capacity = match capacity >= unit {
@@ -39,6 +48,7 @@ impl TpuAllocator {
         }
     }
 
+    /// Allocates the runtime buffer of `nbytes` (whole rows) and returns its device address.
     fn reserve(&self, nbytes: usize) -> NonNull<u8> {
         let nbytes = nbytes - nbytes % ROW;
         let mut base = 0;
@@ -59,10 +69,12 @@ impl TpuAllocator {
         ptr
     }
 
+    /// Locks the reserved buffer, ignoring poisoning.
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Reserved>> {
         self.reserved.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Copies `dst.len()` bytes at `ptr` from the device buffer into `dst`.
     fn read(&self, ptr: NonNull<u8>, dst: &mut [u8]) -> Result<(), String> {
         let reserved = self.lock();
         let Some(&Reserved { buffer, base, size }) = reserved.as_ref() else {
@@ -91,6 +103,7 @@ impl TpuAllocator {
         }
     }
 
+    /// Converts device pointers into row indices of the buffer, rejecting unaligned or outside ones.
     fn rows_of(&self, ptrs: &[*const u8]) -> Result<Vec<i32>, String> {
         let reserved = self.lock();
         let Some(&Reserved { base, size, .. }) = reserved.as_ref() else {
@@ -110,6 +123,7 @@ impl TpuAllocator {
         ptrs.iter().map(row).collect()
     }
 
+    /// Runs `executable` on the buffer with `scalars` and `host` bytes as extra inputs.
     fn run(&self, executable: *mut c_void, scalars: &[i32], host: &[u8]) -> Result<(), String> {
         let mut reserved = self.lock();
         let Some(Reserved { buffer, .. }) = reserved.as_mut() else {
@@ -127,6 +141,7 @@ impl TpuAllocator {
                 &mut region,
             )
         };
+        // The run donates the buffer and hands back its output as the new region.
         *buffer = NonNull::new(region).expect("a run's result is the region");
         match failed {
             0 => Ok(()),
@@ -134,6 +149,7 @@ impl TpuAllocator {
         }
     }
 
+    /// Blocks until work queued on the buffer finishes; nothing to wait for when unreserved.
     fn wait(&self) -> Result<(), String> {
         let reserved = self.lock();
         let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
@@ -145,6 +161,7 @@ impl TpuAllocator {
         }
     }
 
+    /// Event that fires when the buffer is ready, `None` when nothing is reserved.
     fn ready_event(&self) -> Result<Option<NonNull<c_void>>, String> {
         let reserved = self.lock();
         let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
@@ -156,27 +173,32 @@ impl TpuAllocator {
         }
     }
 
+    /// Rows in the reserved buffer, 0 when unreserved.
     fn rows(&self) -> usize {
         self.lock().as_ref().map_or(0, |r| r.size / ROW)
     }
 }
 
 impl Allocator for TpuAllocator {
+    /// Takes whole rows at a row-aligned offset.
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         self.allocate_aligned(nbytes, ROW)
     }
 
+    /// Takes `nbytes` rounded up to whole rows at a multiple of `alignment` (at least a row).
     fn allocate_aligned(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
         let nbytes = nbytes.next_multiple_of(ROW);
         self.region
             .take_aligned(nbytes, alignment.max(ROW), |n| self.reserve(n), || {})
     }
 
+    /// Returns the rows of a block from `allocate`.
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
         self.region.give(ptr, nbytes.next_multiple_of(ROW))
     }
 }
 
+/// Frees the runtime buffer if it was reserved.
 impl Drop for TpuAllocator {
     fn drop(&mut self) {
         if let Some(Reserved { buffer, .. }) = self.lock().take() {
@@ -185,6 +207,7 @@ impl Drop for TpuAllocator {
     }
 }
 
+/// Locks the per-device TPU allocator table.
 fn allocators() -> std::sync::MutexGuard<'static, HashMap<usize, Arc<TpuAllocator>>> {
     static ALLOCATORS: OnceLock<Mutex<HashMap<usize, Arc<TpuAllocator>>>> = OnceLock::new();
     ALLOCATORS
@@ -193,6 +216,7 @@ fn allocators() -> std::sync::MutexGuard<'static, HashMap<usize, Arc<TpuAllocato
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Returns the shared allocator for TPU device `index`, creating it on first use.
 pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
     let capacity = super::config::static_allocator_bytes();
     let mut allocators = allocators();
@@ -202,11 +226,13 @@ pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
     Arc::clone(allocator) as Arc<dyn Allocator>
 }
 
+/// Allocator of device `index`, or an error if nothing was ever allocated there.
 fn allocated(index: usize) -> Result<Arc<TpuAllocator>, String> {
     let allocator = allocators().get(&index).cloned();
     allocator.ok_or_else(|| format!("nothing is allocated on tpu:{index}"))
 }
 
+/// Runs `executable` on TPU `index`'s buffer.
 pub(crate) fn run(
     index: usize,
     executable: *mut c_void,
@@ -216,24 +242,29 @@ pub(crate) fn run(
     allocated(index)?.run(executable, scalars, host)
 }
 
+/// Row indices of `ptrs` in TPU `index`'s buffer.
 pub(crate) fn rows_of(index: usize, ptrs: &[*const u8]) -> Result<Vec<i32>, String> {
     allocated(index)?.rows_of(ptrs)
 }
 
+/// Waits for TPU `index`'s pending work; a no-op when it has no allocator.
 pub(crate) fn wait(index: usize) -> Result<(), String> {
     let allocator = allocators().get(&index).cloned();
     allocator.map_or(Ok(()), |a| a.wait())
 }
 
+/// Readiness event of TPU `index`'s buffer, `None` when it has none.
 pub(crate) fn ready_event(index: usize) -> Result<Option<NonNull<c_void>>, String> {
     let allocator = allocators().get(&index).cloned();
     allocator.map_or(Ok(None), |a| a.ready_event())
 }
 
+/// Rows in TPU `index`'s reserved buffer.
 pub(crate) fn rows(index: usize) -> Result<usize, String> {
     Ok(allocated(index)?.rows())
 }
 
+/// Copies bytes at `ptr` on TPU `index` into `dst`.
 pub(crate) fn copy_to_host(index: usize, ptr: NonNull<u8>, dst: &mut [u8]) -> Result<(), String> {
     allocated(index)?.read(ptr, dst)
 }

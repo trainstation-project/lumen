@@ -1,3 +1,6 @@
+//! TPU kernel launching: lowers Pallas kernels to Mosaic through Python, chains them into one StableHLO
+//! program over the device memory region, and batches launches into a single executable run.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -7,6 +10,7 @@ use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 
+/// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.kernels.tpu.pallas`.
 #[cfg(feature = "python")]
 fn lower(module: &str, spec: &str) -> Result<String, String> {
     use pyo3::prelude::*;
@@ -18,6 +22,7 @@ fn lower(module: &str, spec: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Fails: TPU kernels are traced from Python.
 #[cfg(not(feature = "python"))]
 fn lower(module: &str, _spec: &str) -> Result<String, String> {
     Err(format!(
@@ -25,42 +30,54 @@ fn lower(module: &str, _spec: &str) -> Result<String, String> {
     ))
 }
 
+/// Scoped VMEM bytes granted to each TensorCore kernel.
 const VMEM_LIMIT: usize = 100 << 20;
 
+/// SparseCore mesh: cores by subcores.
 pub(crate) const SPARSE_CORE_MESH: [usize; 2] = [2, 16];
 
+/// Where a SparseCore kernel's indices come from.
 #[derive(Clone, Debug)]
 pub(crate) enum Values {
-    Rows {
-        scalar: usize,
-        shape: Vec<usize>,
-    },
+    /// Read from device memory at the row in scalar `scalar`, a tensor of `shape` stored TPU-tiled.
+    Rows { scalar: usize, shape: Vec<usize> },
+    /// Computed: flat positions over `dims` with the given `strides`.
     Iota {
         dims: Vec<usize>,
         strides: Vec<usize>,
     },
 }
 
+/// One index operand of a SparseCore kernel.
 #[derive(Clone, Debug)]
 pub(crate) struct Indices {
     pub(crate) values: Values,
+    /// Scalar holding the base row the indices are offset from.
     pub(crate) base: usize,
 }
 
+/// A launch that runs on the SparseCore.
 #[derive(Clone, Debug)]
 pub(crate) struct SparseCore {
+    /// Words per row of the view the kernel indexes (a multiple of 128).
     pub(crate) width: usize,
+    /// Indices per operand, padded by repeating the last.
     pub(crate) count: usize,
+    /// Index operands, in order.
     pub(crate) indices: Vec<Indices>,
+    /// Whether the kernel's scalars are passed as an operand too.
     pub(crate) scalars: bool,
 }
 
+/// A StableHLO function body under construction.
 struct Hlo {
     body: String,
+    /// Counter for fresh value names.
     names: usize,
 }
 
 impl Hlo {
+    /// Emits `text` producing type `ty`; returns its name.
     fn op(&mut self, text: &str, ty: &str) -> String {
         self.names += 1;
         let name = format!("%h{}", self.names);
@@ -68,6 +85,7 @@ impl Hlo {
         name
     }
 
+    /// Emits `rhs` as a new value; returns its name.
     fn assign(&mut self, rhs: &str) -> String {
         self.names += 1;
         let name = format!("%h{}", self.names);
@@ -75,14 +93,17 @@ impl Hlo {
         name
     }
 
+    /// An `i64` constant of type `ty`.
     fn constant(&mut self, value: i64, ty: &str) -> String {
         self.assign(&format!("stablehlo.constant dense<{value}> : {ty}"))
     }
 
+    /// Reshape of `x` from type `from` to `to`.
     fn reshape(&mut self, x: &str, from: &str, to: &str) -> String {
         self.op(&format!("\"stablehlo.reshape\"({x}) : ({from})"), to)
     }
 
+    /// Transpose of `x` by `permutation` (comma-separated).
     fn transpose(&mut self, x: &str, from: &str, to: &str, permutation: &str) -> String {
         self.op(
             &format!("\"stablehlo.transpose\"({x}) {{permutation = array<i64: {permutation}>}} : ({from})"),
@@ -90,10 +111,12 @@ impl Hlo {
         )
     }
 
+    /// Elementwise `op` of `a` and `b`, both of type `ty`.
     fn binary(&mut self, op: &str, a: &str, b: &str, ty: &str) -> String {
         self.op(&format!("\"stablehlo.{op}\"({a}, {b}) : ({ty}, {ty})"), ty)
     }
 
+    /// Scalar `i32` broadcast to `n` elements.
     fn splat(&mut self, scalar: &str, n: usize) -> String {
         self.op(
             &format!("\"stablehlo.broadcast_in_dim\"({scalar}) {{broadcast_dimensions = array<i64>}} : (tensor<i32>)"),
@@ -101,6 +124,7 @@ impl Hlo {
         )
     }
 
+    /// Scalar `j` of the `count` launch scalars.
     fn scalar(&mut self, scalars: &str, count: usize, j: usize) -> String {
         let one = self.op(
             &format!(
@@ -114,6 +138,8 @@ impl Hlo {
     }
 }
 
+/// Emits the row offsets (in rows of the SparseCore view) one index operand of `sparse` reads, padded
+/// to `sparse.count`.
 fn indices(
     h: &mut Hlo,
     memory: &str,
@@ -127,6 +153,7 @@ fn indices(
         Values::Rows { scalar: j, shape } => {
             let r = shape.len();
             let n: usize = shape.iter().product();
+            // Rank > 1 index tensors are stored in (8, 128) tiles padded to whole tiles.
             let (lead, m, s) = match r {
                 1 => (1, 1, shape[0]),
                 _ => (shape[..r - 2].iter().product(), shape[r - 2], shape[r - 1]),
@@ -148,6 +175,7 @@ fn indices(
             );
             let mut x_t = total_t;
             if r > 1 {
+                // Untile: (tile row, tile col, 8, 128) -> (rows, cols), then drop the padding.
                 let tiles = format!("tensor<{lead}x{}x{}x8x128xui32>", mp / 8, sp / 128);
                 x = h.reshape(&x, &x_t, &tiles);
                 let rows_t = format!("tensor<{lead}x{}x8x{}x128xui32>", mp / 8, sp / 128);
@@ -190,6 +218,7 @@ fn indices(
             ));
             let mut sum: Option<String> = None;
             let mut inner = 1;
+            // Flat position: the coordinate of each dim (div/mod of the iota) times its stride.
             for (&d, &stride) in dims.iter().zip(strides).rev() {
                 let mut term = i.clone();
                 if inner != 1 {
@@ -215,6 +244,7 @@ fn indices(
     };
     let ty = format!("tensor<{n}xi32>");
     let row = scalar(h, of.base);
+    // Offset by the base row, converted to rows of the view.
     let c = h.constant(column as i64, "tensor<i32>");
     let base = h.binary("divide", &row, &c, "tensor<i32>");
     let base = h.splat(&base, n);
@@ -239,6 +269,8 @@ fn indices(
     out
 }
 
+/// Emits a SparseCore custom call on `memory` viewed as `[x, width]` rows, with its index operands;
+/// returns the updated memory region.
 fn sparse_core_call(
     h: &mut Hlo,
     memory: &str,
@@ -259,6 +291,7 @@ fn sparse_core_call(
     let tiles = format!("tensor<{}x{column}x8x128xui32>", x / 8);
     let rows_t = format!("tensor<{}x8x{column}x128xui32>", x / 8);
     let view_t = format!("tensor<{x}x{}xui32>", sparse.width);
+    // The memory region holds (8, 128) word tiles; view it as plain rows of `width` words and back.
     let t = h.reshape(memory, &region, &tiles);
     let t = h.transpose(&t, &tiles, &rows_t, "0, 2, 1, 3");
     let view = h.reshape(&t, &rows_t, &view_t);
@@ -300,6 +333,8 @@ fn sparse_core_call(
     h.reshape(&t, &tiles, &region)
 }
 
+/// StableHLO module chaining `kernels` (name, Mosaic, scalar count, SparseCore) on the memory region of
+/// `rows` rows: each reads its slice of the scalars, the optional `host` rows, and updates memory in place.
 fn program(
     kernels: &[(&str, &str, usize, Option<&SparseCore>)],
     host: Option<usize>,
@@ -389,6 +424,7 @@ fn program(
     )
 }
 
+/// Standard base64 with padding.
 fn base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -407,11 +443,14 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// A compiled TPU executable handle.
 #[derive(Clone, Copy)]
 struct Executable(*mut c_void);
 
+// SAFETY: the handle is only used under the TPU runtime's own locking.
 unsafe impl Send for Executable {}
 
+/// Mosaic of `module` for `spec`, cached per `(module, spec)`.
 fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
     let key = format!("{module} {spec}");
@@ -429,14 +468,19 @@ fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
     Ok(mosaic)
 }
 
+/// A kernel lowered and ready to chain into a program.
 struct Lowered {
     module: String,
     spec: String,
+    /// Mosaic source of the kernel.
     mosaic: Arc<str>,
+    /// Row offsets of its buffers, then its scalars.
     scalars: Vec<i32>,
+    /// Set when the kernel runs on the SparseCore.
     sparse: Option<Box<SparseCore>>,
 }
 
+/// The executable running `launches` on device `index`, compiled once per launch sequence.
 fn compiled(
     index: usize,
     launches: &[Lowered],
@@ -482,6 +526,7 @@ fn compiled(
     Ok(Executable(executable))
 }
 
+/// Runs `launches` as one executable on device `index`, with `host` bytes as extra rows.
 fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
     if launches.is_empty() {
         return Ok(());
@@ -503,20 +548,26 @@ fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", what()))
 }
 
+// Per thread, the stack of open batches: device index and the launches collected so far.
 thread_local! {
     static BATCHES: RefCell<Vec<(usize, Vec<Lowered>)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Collects TPU launches on one device so they run as a single executable; dropping it unrun
+/// discards them.
 pub(crate) struct Batch {
+    /// Whether `run` consumed the batch.
     ran: bool,
 }
 
 impl Batch {
+    /// Opens a batch on device `index`.
     pub(crate) fn new(index: usize) -> Batch {
         BATCHES.with(|b| b.borrow_mut().push((index, Vec::new())));
         Batch { ran: false }
     }
 
+    /// Runs every launch collected in the batch.
     pub(crate) fn run(mut self) -> Result<(), String> {
         self.ran = true;
         let (index, launches) = BATCHES.with(|b| b.borrow_mut().pop()).expect("a batch");
@@ -524,6 +575,7 @@ impl Batch {
     }
 }
 
+/// Runs the launches pending in the innermost batch now, when it is on device `index`.
 pub(crate) fn flush(index: usize) -> Result<(), String> {
     let pending = BATCHES.with(|b| match b.borrow_mut().last_mut() {
         Some((i, launches)) if *i == index => std::mem::take(launches),
@@ -536,6 +588,7 @@ pub(crate) fn flush(index: usize) -> Result<(), String> {
 }
 
 impl Drop for Batch {
+    /// Discards the batch's launches unless it ran.
     fn drop(&mut self) {
         if !self.ran {
             BATCHES.with(|b| b.borrow_mut().pop());
@@ -543,16 +596,26 @@ impl Drop for Batch {
     }
 }
 
+/// One kernel launch request.
 pub(crate) struct Launch<'a> {
+    /// Python module whose `program(spec)` lowers the kernel.
     pub(crate) module: &'a str,
+    /// Name shown in profiles.
     pub(crate) kernel: String,
+    /// JSON object fields describing the kernel (without braces); the device fields are added.
     pub(crate) spec: String,
+    /// Buffers the kernel reads and writes, passed as their row offsets.
     pub(crate) rows: &'a [*const u8],
+    /// Extra `i32` scalars after the row offsets.
     pub(crate) scalars: &'a [i32],
+    /// Host bytes passed as whole extra rows.
     pub(crate) host: &'a [u8],
+    /// Runs on the SparseCore when set.
     pub(crate) sparse: Option<SparseCore>,
 }
 
+/// Lowers `launch` and adds it to the open batch on device `index`, or runs it now. A launch with host
+/// data runs on its own after flushing the batch.
 pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
     let scalars = launch.rows.len() + launch.scalars.len();
@@ -601,6 +664,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     }
 }
 
+/// Runs plan `step` on TPU device `index`, dispatching to the kernel for its primitive or fusion kind.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -635,6 +699,7 @@ pub(crate) fn encode(
             super::dynamic_slice::tpu::encode(index, step, inputs, output)
         }
         Primitive::PallasCall { kernel, .. } => {
+            // Pallas kernels see their inputs, then the output, then any scratch buffers.
             let n = step.inputs.len();
             let rows: Vec<*const u8> = inputs[..n]
                 .iter()

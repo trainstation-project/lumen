@@ -1,5 +1,11 @@
+/// Metal sum and max reductions: strided one-thread-per-output, grouped lanes per output, and contiguous
+/// row/column layouts split into chunks. Defining TEMPLATES_ONLY keeps the templates and skips instantiation.
+
+/// Threads per threadgroup for the cooperative reductions.
 #define REDUCE_THREADS 256
 
+/// Reduces output `i` alone: walks the `count` reduced elements of an arbitrarily strided input and writes
+/// `epi(result)`. `k*` describe the kept dims and `r*` the reduced dims.
 template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce(In in,
                    device O *out,
@@ -21,6 +27,7 @@ inline void reduce(In in,
     out[i] = epi(r);
 }
 
+/// Instantiates the one-thread-per-output reduction as kernel `OP_NAME` reading T and accumulating in A.
 #define REDUCE(OP, FN, NAME, T, A)                                                          \
     kernel void OP##_##NAME(device const T *in [[buffer(0)]],                               \
                             device A *out [[buffer(1)]],                                    \
@@ -36,12 +43,15 @@ inline void reduce(In in,
         reduce<FN, A>(in, out, init, nk, ksizes, kstrides, nr, rsizes, rstrides, count, i); \
     }
 
+/// Butterfly shuffle across a SIMD group, widened for types `simd_shuffle_xor` doesn't take directly.
 template <typename A> inline A lane_xor(A v, ushort m) { return simd_shuffle_xor(v, m); }
 inline bfloat lane_xor(bfloat v, ushort m) { return bfloat(simd_shuffle_xor(float(v), m)); }
 inline bool lane_xor(bool v, ushort m) { return simd_shuffle_xor(uint(v), m) != 0; }
 inline long lane_xor(long v, ushort m) { return as_type<long>(simd_shuffle_xor(as_type<uint2>(v), m)); }
 inline ulong lane_xor(ulong v, ushort m) { return as_type<ulong>(simd_shuffle_xor(as_type<uint2>(v), m)); }
 
+/// Reduces each output with `lanes` cooperating threads (a power of two), REDUCE_THREADS / lanes outputs per
+/// threadgroup, combining partials with SIMD shuffles when lanes >= 32 and threadgroup memory otherwise.
 template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_grouped(In in,
                            device O *out,
@@ -59,10 +69,12 @@ inline void reduce_grouped(In in,
                            uint g,
                            uint t,
                            Epi epi = Epi()) {
+    // `lanes` consecutive threads share output `i`
     uint lane = t % lanes, i = g * (REDUCE_THREADS / lanes) + t / lanes;
     A r = init;
     if (i < outputs) {
         ulong base = offset_of(i, nk, ksizes, kstrides);
+        // contiguous reduced axis: each lane reads V consecutive elements so loads are at least 4 bytes wide
         if (nr == 1 && rstrides[0] == 1) {
             constexpr uint V = sizeof(decltype(in[0])) >= 4 ? 1 : 4 / sizeof(decltype(in[0]));
             uint j = lane * V;
@@ -80,6 +92,7 @@ inline void reduce_grouped(In in,
             }
         }
     }
+    // whole SIMD groups per output: shuffle within each, then lane 0 folds the other SIMD groups' partials
     if (lanes >= 32) {
         for (ushort m = 16; m > 0; m /= 2) {
             r = Op::apply(r, lane_xor(r, m));
@@ -101,6 +114,7 @@ inline void reduce_grouped(In in,
         }
         return;
     }
+    // fewer than 32 lanes: tree reduction in threadgroup memory
     shared[t] = r;
     for (uint s = lanes / 2; s > 0; s /= 2) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -113,6 +127,7 @@ inline void reduce_grouped(In in,
     }
 }
 
+/// Instantiates the grouped reduction as kernel `OP_grouped_NAME` on a 16x16 threadgroup.
 #define GROUPED(OP, FN, NAME, T, A)                                                 \
     kernel void OP##_grouped_##NAME(device const T *in [[buffer(0)]],               \
                                     device A *out [[buffer(1)]],                    \
@@ -146,6 +161,7 @@ inline void reduce_grouped(In in,
                               tid.y * 16 + tid.x);                                  \
     }
 
+/// Instantiation helpers: same-type sum, half/bfloat sums accumulated in float, and max.
 #define REDUCE_SUM(NAME, T) REDUCE(reduce_sum, Add, NAME, T, T) GROUPED(reduce_sum, Add, NAME, T, T)
 #define REDUCE_SUM_F32(NAME, T) \
     REDUCE(reduce_sum, Add, NAME##_f32, T, float) GROUPED(reduce_sum, Add, NAME##_f32, T, float)
@@ -158,6 +174,8 @@ REDUCE_SUM_F32(bf16, bfloat)
 FOR_ALL(REDUCE_MAX)
 #endif
 
+/// Reduces chunk `group.x` of contiguous row `group.y` with REDUCE_THREADS threads and writes one partial per
+/// (row, chunk) to `out[row * chunks + chunk]`.
 template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_rows(In in,
                         device O *out,
@@ -171,6 +189,7 @@ inline void reduce_rows(In in,
     ulong start = ulong(group.x) * chunk, end = start + chunk < count ? start + chunk : count;
     ulong row = ulong(group.y) * count;
     A r0 = Op::template identity<A>(), r1 = r0, r2 = r0, r3 = r0;
+    // four independent accumulators per thread to overlap loads
     ulong j = start + t;
     for (; j + 3 * REDUCE_THREADS < end; j += 4 * REDUCE_THREADS) {
         r0 = Op::apply(r0, A(in[row + j]));
@@ -193,6 +212,8 @@ inline void reduce_rows(In in,
     }
 }
 
+/// Reduces the middle axis of an `(a, count, cols)` contiguous input: thread `i` covers column `b` of outer
+/// index `a` over chunk `p` of the reduced axis and writes one partial.
 template <typename Op, typename A, typename In, typename O, typename Epi = Same>
 inline void reduce_cols(
     In in, device O *out, uint cols, ulong count, ulong chunk, uint chunks, uint i, Epi epi = Epi()) {
@@ -213,6 +234,7 @@ inline void reduce_cols(
     out[i] = epi(Op::apply(Op::apply(r0, r1), Op::apply(r2, r3)));
 }
 
+/// Instantiates the row-chunk reduction as kernel KERNEL from I to O.
 #define ROWS(KERNEL, FN, I, O)                                                                      \
     kernel void KERNEL(device const I *in [[buffer(0)]],                                            \
                        device O *out [[buffer(1)]],                                                 \
@@ -226,6 +248,7 @@ inline void reduce_cols(
         reduce_rows<FN, O>(in, out, count, chunk, shared, group, groups.x, tid.y * size.x + tid.x); \
     }
 
+/// Instantiates the column-chunk reduction as kernel KERNEL from I to O.
 #define COLS(KERNEL, FN, I, O)                                      \
     kernel void KERNEL(device const I *in [[buffer(0)]],            \
                        device O *out [[buffer(1)]],                 \
@@ -237,6 +260,7 @@ inline void reduce_cols(
         reduce_cols<FN, O>(in, out, cols, count, chunk, chunks, i); \
     }
 
+/// Row and column kernels for one op and element type, plus float-accumulating sums for half and bfloat.
 #define LAYOUTS(OP, FN, NAME, T)     \
     ROWS(OP##_rows_##NAME, FN, T, T) \
     COLS(OP##_cols_##NAME, FN, T, T)

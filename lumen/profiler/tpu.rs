@@ -1,3 +1,5 @@
+//! TPU kernel timing: records launches during a session, then matches them to the custom-call runs
+//! in the device profile (an XSpace protobuf) and records each as a device event.
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -5,10 +7,13 @@ use super::GpuContext;
 use crate::device::Device;
 use crate::device::tpu::{TPU, error, ffi};
 
+/// Recorded launches: `(device index, context, kernel name, host time it was launched or last seen running)`.
 type Launches = Vec<(usize, GpuContext, String, u64)>;
 
+/// Launches recorded in the running session, if any.
 static SESSION: Mutex<Option<Launches>> = Mutex::new(None);
 
+/// Waits for every TPU to go idle, then starts the device profiler.
 pub(crate) fn start() -> Result<(), String> {
     for index in 0..TPU.device_count() {
         crate::allocator::tpu::wait(index)?;
@@ -20,6 +25,7 @@ pub(crate) fn start() -> Result<(), String> {
     Ok(())
 }
 
+/// Records a launch of `kernel` on TPU `index`, when TPUs are being profiled.
 pub(crate) fn launched(index: usize, kernel: &str) {
     let Some(context) = super::gpu_context(Device::Tpu(index)) else {
         return;
@@ -29,6 +35,7 @@ pub(crate) fn launched(index: usize, kernel: &str) {
     }
 }
 
+/// Marks the last `count` launches on TPU `index` as having run by now.
 pub(crate) fn ran(index: usize, count: usize) {
     let now = super::now_ns();
     if let Some(s) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -38,6 +45,7 @@ pub(crate) fn ran(index: usize, count: usize) {
     }
 }
 
+/// Stops the device profiler and records each launch with its device run, named after its op via `name_of`.
 pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String> {
     let Some(launches) = SESSION.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return Ok(());
@@ -54,6 +62,7 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
         unsafe { ffi::lumen_tpu_profiler_free() };
         return Err(e);
     }
+    // Launches and device runs pair up in order, per device.
     let space = unsafe { std::slice::from_raw_parts(data, size) };
     let mut runs = runs(space);
     unsafe { ffi::lumen_tpu_profiler_free() };
@@ -64,6 +73,7 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
             Some((launch, device_runs.pop_front()?))
         })
         .collect();
+    // Device times move onto the host clock by the smallest shift that puts no run before its launch.
     let shift = ran
         .iter()
         .map(|((.., launched), (start, _))| i128::from(*launched) - i128::from(*start))
@@ -81,10 +91,13 @@ pub(crate) fn stop(name_of: impl Fn(u64) -> Option<String>) -> Result<(), String
     Ok(())
 }
 
+/// Each device's custom-call runs as `(start, end)` nanoseconds on the device clock, in order.
 type Runs = VecDeque<(u64, u64)>;
 
+/// Reads `Runs` per TPU out of a serialized XSpace.
 fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
     let mut out = Vec::new();
+    // XSpace.planes (1); each XPlane has name (2), lines (3) and event_metadata (4).
     for plane in Fields(space).filter_map(|(n, v)| (n == 1).then_some(v)) {
         let plane = plane.bytes();
         let name = field(plane, 2).map(Value::bytes).unwrap_or_default();
@@ -95,6 +108,7 @@ fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
         else {
             continue;
         };
+        // Metadata ids of the plane's custom-call ops.
         let calls: Vec<u64> = Fields(plane)
             .filter_map(|(n, v)| (n == 4).then_some(v.bytes()))
             .filter_map(|entry| {
@@ -104,6 +118,7 @@ fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
             })
             .collect();
         let mut device = VecDeque::new();
+        // Events on the "XLA Ops" line, whose offsets and durations are picoseconds.
         for line in Fields(plane).filter_map(|(n, v)| (n == 3).then_some(v.bytes())) {
             if field(line, 2).map(Value::bytes) != Some(b"XLA Ops".as_slice()) {
                 continue;
@@ -124,13 +139,17 @@ fn runs(space: &[u8]) -> Vec<(usize, Runs)> {
     out
 }
 
+/// A decoded protobuf field value.
 #[derive(Clone, Copy)]
 enum Value<'a> {
+    /// A varint or fixed-width integer.
     Int(u64),
+    /// A length-delimited payload.
     Bytes(&'a [u8]),
 }
 
 impl<'a> Value<'a> {
+    /// The integer, or 0 for a payload.
     fn int(self) -> u64 {
         match self {
             Value::Int(v) => v,
@@ -138,6 +157,7 @@ impl<'a> Value<'a> {
         }
     }
 
+    /// The payload, or empty for an integer.
     fn bytes(self) -> &'a [u8] {
         match self {
             Value::Bytes(b) => b,
@@ -146,9 +166,11 @@ impl<'a> Value<'a> {
     }
 }
 
+/// Iterator over the `(field number, value)` pairs of a protobuf message; stops at an unsupported wire type.
 struct Fields<'a>(&'a [u8]);
 
 impl<'a> Fields<'a> {
+    /// Reads a base-128 varint.
     fn varint(&mut self) -> Option<u64> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
@@ -162,6 +184,7 @@ impl<'a> Fields<'a> {
         None
     }
 
+    /// Takes the next `n` bytes.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (taken, rest) = self.0.split_at_checked(n)?;
         self.0 = rest;
@@ -172,6 +195,7 @@ impl<'a> Fields<'a> {
 impl<'a> Iterator for Fields<'a> {
     type Item = (u64, Value<'a>);
 
+    /// Decodes the next field from its key's wire type (varint, 64-bit, length-delimited or 32-bit).
     fn next(&mut self) -> Option<Self::Item> {
         let key = self.varint()?;
         let fixed = |b: &[u8]| b.iter().rev().fold(0u64, |v, &x| v << 8 | u64::from(x));
@@ -192,6 +216,7 @@ impl<'a> Iterator for Fields<'a> {
     }
 }
 
+/// The first field numbered `number` in `message`.
 fn field(message: &[u8], number: u64) -> Option<Value<'_>> {
     Fields(message).find_map(|(n, v)| (n == number).then_some(v))
 }

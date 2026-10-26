@@ -1,3 +1,6 @@
+//! Graph compiler entry points: runs the frontend passes on a traced graph and lowers it to a
+//! [`Plan`] for the target device, plus helpers shared by the device backends.
+
 pub(crate) mod common;
 pub mod config;
 mod cpu;
@@ -27,12 +30,18 @@ use pass::{GraphModule, Pipeline};
 pub use plan::{Plan, PlanOptions};
 pub(crate) use plan::{Source, Stage, Staged};
 
+/// Per-compilation options: compiler configs and how the graph's inputs may be used.
 #[derive(Debug, Clone)]
 pub struct Options {
+    /// Inputs whose buffers may be reused for any output of the same type.
     pub config: Configs,
+    /// `(input, output)` pairs: the input's buffer may hold only that output.
     pub donate: Vec<usize>,
+    /// Per-input mask of parameters; `Some` compiles an owned plan that keeps its outputs.
     pub donate_into: Vec<(usize, usize)>,
+    /// Per-input mask of parameters that may be packed together into one block (e.g. merged dot weights).
     pub parameters: Option<Vec<bool>>,
+    /// Per-input mask of inputs passed as host scalars instead of device buffers.
     pub packable: Vec<bool>,
     pub scalars: Vec<bool>,
 }
@@ -50,10 +59,13 @@ impl Default for Options {
     }
 }
 
+/// Compiles `graph` for `device` with default options.
 pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
     compile_with(graph, device, &Options::default())
 }
 
+/// Runs the frontend passes (CSE, simplify) and compiles `graph` for `device`, splitting it into
+/// per-device stages when it moves values between devices.
 pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
@@ -64,6 +76,7 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         .add(Cse)
         .add(Simplify { matched: false })
         .run(&mut module)?;
+    // Graphs with transfers or host-only parts are compiled as stages; otherwise one device plan.
     let graph = &module.graph;
     if device != Device::Cpu(0)
         && let Some(plan) = stages::compile(graph, device, options)?
@@ -73,6 +86,7 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
     device_compile(&stages::without_transfers(graph), device, options)
 }
 
+/// Dispatches a single-device graph to its backend; anything without one runs on the CPU backend.
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
         Device::Cuda(_) if options.config.cuda.use_triton_backend => {
@@ -85,10 +99,12 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
     }
 }
 
+/// Indices of the `true` entries of `mask`.
 fn positions(mask: &[bool]) -> Vec<usize> {
     (0..mask.len()).filter(|&i| mask[i]).collect()
 }
 
+/// Whether `p` is an elementwise primitive that fusion can merge into a loop.
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
@@ -113,8 +129,11 @@ pub(crate) fn elementwise(p: &Primitive) -> bool {
     )
 }
 
+/// Groups `sources` that are joined by chains of elementwise nodes: returns, per source, a
+/// representative index shared by every source in its group.
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
+    // Union-find root with path halving.
     fn root(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
             parent[i] = parent[parent[i]];
@@ -129,6 +148,7 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
         of[v] = vec![k];
         source[v] = true;
     }
+    // of[v] lists the sources that reach v through elementwise nodes only; a node merges the groups of its inputs.
     for node in graph.nodes() {
         if source[node.output] || !elementwise(&node.primitive) {
             continue;
@@ -145,6 +165,7 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
     (0..sources.len()).map(|k| root(&mut parent, k)).collect()
 }
 
+/// Whether `v` is computed only from `Full` constants through views and elementwise ops.
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     use Primitive::*;
@@ -162,6 +183,8 @@ pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> boo
     }
 }
 
+/// Interned label of a fusion of `members`: their labels joined by the fusion separator, leaving
+/// out constant members unless every member is constant.
 pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
     let nodes = graph.nodes();
     let names = |all: bool| -> Vec<&str> {

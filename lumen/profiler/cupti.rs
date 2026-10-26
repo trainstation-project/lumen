@@ -1,3 +1,4 @@
+//! CUDA kernel and copy timing through CUPTI's activity API, tied back to the ops that launched them.
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
@@ -7,10 +8,13 @@ use std::sync::{Mutex, Once};
 use super::GpuContext;
 use crate::device::Device;
 
+/// The subset of the CUPTI C API the profiler uses.
 mod ffi {
     use std::ffi::c_void;
 
+    /// CUPTI callback asking for an activity buffer: sets its pointer, size and max record count.
     pub type BufferRequested = unsafe extern "C" fn(*mut *mut u8, *mut usize, *mut usize);
+    /// CUPTI callback handing back a filled buffer with `valid` bytes of records.
     pub type BufferCompleted = unsafe extern "C" fn(*mut c_void, u32, *mut u8, usize, usize);
 
     #[link(name = "cupti")]
@@ -32,16 +36,20 @@ mod ffi {
         pub fn cuptiGetTimestamp(timestamp: *mut u64) -> i32;
     }
 
+    /// `CUpti_ActivityKind` values.
     pub const KIND_MEMCPY: u32 = 1;
     pub const KIND_MEMSET: u32 = 2;
     pub const KIND_RUNTIME: u32 = 4;
     pub const KIND_DRIVER: u32 = 5;
     pub const KIND_CONCURRENT_KERNEL: u32 = 10;
     pub const KIND_EXTERNAL_CORRELATION: u32 = 39;
+    /// `CUpti_ExternalCorrelationKind` used for lumen's own launch ids.
     pub const EXTERNAL_CUSTOM0: u32 = 3;
+    /// `cuptiActivityFlushAll` flag to flush incomplete buffers too.
     pub const FLUSH_FORCED: u32 = 1;
 }
 
+/// Activity kinds recorded while profiling.
 const KINDS: [u32; 6] = [
     ffi::KIND_CONCURRENT_KERNEL,
     ffi::KIND_MEMCPY,
@@ -51,7 +59,9 @@ const KINDS: [u32; 6] = [
     ffi::KIND_EXTERNAL_CORRELATION,
 ];
 
+/// An activity record the profiler keeps.
 enum Record {
+    /// A kernel, memcpy or memset with CUPTI timestamps and its CUDA correlation id.
     Work {
         name: String,
         start: u64,
@@ -59,17 +69,21 @@ enum Record {
         device: u32,
         correlation: u32,
     },
-    External {
-        id: u64,
-        correlation: u32,
-    },
+    /// Ties CUDA correlation id `correlation` to lumen's external id `id`.
+    External { id: u64, correlation: u32 },
 }
 
 impl Record {
+    /// Decodes one activity record, or `None` for kinds the profiler ignores.
+    ///
+    /// # Safety
+    ///
+    /// `record` must point to a valid CUPTI activity record.
     unsafe fn read(record: *const u8) -> Option<Record> {
         let at = |offset: usize| unsafe { record.add(offset) };
         let u32_at = |offset| unsafe { at(offset).cast::<u32>().read_unaligned() };
         let u64_at = |offset| unsafe { at(offset).cast::<u64>().read_unaligned() };
+        // Field offsets follow the CUPTI activity record structs.
         match u32_at(0) {
             ffi::KIND_CONCURRENT_KERNEL => {
                 let name = unsafe { at(104).cast::<*const c_char>().read_unaligned() };
@@ -104,6 +118,7 @@ impl Record {
         }
     }
 
+    /// Display name of a memset or memcpy record, by copy direction.
     fn name(kind: u32, copy_kind: u8) -> &'static str {
         match (kind, copy_kind) {
             (ffi::KIND_MEMSET, _) => "Memset",
@@ -115,16 +130,26 @@ impl Record {
     }
 }
 
+/// Records CUPTI has delivered since profiling started.
 static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
+/// Profiler context of each lumen launch id pushed as an external correlation.
 static CONTEXTS: Mutex<Option<HashMap<u64, GpuContext>>> = Mutex::new(None);
+/// Next external correlation id.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// `(CUPTI timestamp, profiler timestamp)` taken together at start, to convert CUPTI times.
 static CLOCK: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
+/// Size and alignment of each activity buffer handed to CUPTI.
 const BUFFER: Layout = match Layout::from_size_align(1 << 20, 8) {
     Ok(layout) => layout,
     Err(_) => panic!("CUPTI buffer layout"),
 };
 
+/// Allocates an activity buffer for CUPTI; size 0 when allocation fails.
+///
+/// # Safety
+///
+/// Called by CUPTI with valid out-pointers.
 unsafe extern "C" fn buffer_requested(buffer: *mut *mut u8, size: *mut usize, max: *mut usize) {
     unsafe {
         *buffer = std::alloc::alloc(BUFFER);
@@ -137,6 +162,11 @@ unsafe extern "C" fn buffer_requested(buffer: *mut *mut u8, size: *mut usize, ma
     }
 }
 
+/// Decodes a filled activity buffer into `RECORDS` and frees it.
+///
+/// # Safety
+///
+/// Called by CUPTI with a buffer from `buffer_requested` holding `valid` bytes of records.
 unsafe extern "C" fn buffer_completed(
     _context: *mut c_void,
     _stream: u32,
@@ -159,6 +189,7 @@ unsafe extern "C" fn buffer_completed(
     unsafe { std::alloc::dealloc(buffer, BUFFER) };
 }
 
+/// Enables CUPTI activity recording and pairs the CUPTI clock with the profiler's.
 pub(crate) fn start() {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
@@ -172,6 +203,7 @@ pub(crate) fn start() {
     *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = Some((cupti_ns, super::now_ns()));
 }
 
+/// Runs `work`, tagging the CUDA launches it makes with a fresh id tied to the current profiler context.
 pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
     let Some(context) = super::gpu_context(device) else {
         return work();
@@ -189,6 +221,7 @@ pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Flushes and disables CUPTI, then records each kernel or copy under the context of the launch that issued it.
 pub(crate) fn stop() {
     let Some((cupti_ns, profiler_ns)) = CLOCK.lock().unwrap_or_else(|e| e.into_inner()).take()
     else {
@@ -214,6 +247,7 @@ pub(crate) fn stop() {
             Record::Work { .. } => None,
         })
         .collect();
+    // CUPTI timestamps shifted onto the profiler clock.
     let to_ns = |t: u64| (profiler_ns + t).saturating_sub(cupti_ns);
     for record in records {
         let Record::Work {

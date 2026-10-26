@@ -1,3 +1,5 @@
+"""Pallas programs for fused elementwise kernels on TPU, plain and with layout primitives."""
+
 import math
 
 from lumen import pallas as pl
@@ -14,18 +16,23 @@ def _indexed(spec):
     shape, grid, blocks, inputs = spec["shape"], tuple(spec["grid"]), spec["blocks"], spec["inputs"]
 
     def block_spec(block, index):
+        """Pallas block spec whose block index is grid axis ``d`` plus ``a`` per dimension, or ``a`` when ``d`` is ``-1``."""
         return pl.BlockSpec(
             tuple(block), lambda *ids, index=index: tuple(ids[d] + a if d >= 0 else a for d, a in index)
         )
 
     out_view, out_index = tuple(shape), [[d, 0] for d in range(len(shape))]
+    # A windowed output is a column slice of a wider buffer: shift its last block index by the window start.
     if spec["window"]:
         whole, start = spec["window"]
         out_view = (*shape[:-1], whole)
         out_index[-1] = [len(shape) - 1, start // blocks[-1]]
 
     def kernel(rows, memory, result):
+        """Reads each operand (0-d ones once into VMEM, the rest pipelined) and writes the fused result block by block."""
+
         def copy(src, dst):
+            """Copies ``src`` to ``dst`` by DMA and waits for it."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
@@ -42,6 +49,7 @@ def _indexed(spec):
         out = pallas.view(result, rows[len(inputs)], out_view, spec["output"])
 
         def body(*refs):
+            """Evaluates the fused nodes on one block of each operand and stores the result."""
             ids = [pl.program_id(a) for a in range(len(grid))]
             given = iter(refs[:-1])
             values = [read[i] if i in read else next(given)[...] for i in range(len(inputs))]
@@ -81,6 +89,7 @@ def program(spec):
         block = pl.BlockSpec((b,), lambda i: (i,))
         grid = (view[0] // b,)
     out_view, out_block = view, block
+    # A windowed first output writes its columns at ``start`` of a buffer ``whole`` wide.
     if spec["window"]:
         whole, start = spec["window"]
         out_view = (view[0], m, whole)
@@ -91,11 +100,15 @@ def program(spec):
     shape_of = (1,) if scalar else block_shape
 
     def apply(values):
+        """Evaluates the fused nodes on the operand values and returns the requested results."""
         values = computed(spec["nodes"], values, shape_of)
         return [values[r] for r in spec["results"]]
 
     def kernel(rows, memory, result):
+        """Reads broadcast operands once into VMEM, pipelines the rest and writes every output."""
+
         def copy(src, dst):
+            """Copies ``src`` to ``dst`` by DMA and waits for it."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
@@ -120,11 +133,13 @@ def program(spec):
             return
 
         def body(*blocks):
+            """Computes one block of every output from one block of each pipelined operand."""
             given = iter(blocks)
             values = [read[i] if i in read else next(given)[...] for i in range(len(dtypes))]
             for ref, value in zip(blocks[len(piped) :], apply(values)):
                 ref[...] = value
 
+        # Only the first output can be windowed into a wider buffer.
         o_specs = [out_block] + [block] * (len(outputs) - 1)
         pl.emit_pipeline(body, grid=grid, in_specs=[block] * len(piped), out_specs=o_specs)(*piped, *outs)
 

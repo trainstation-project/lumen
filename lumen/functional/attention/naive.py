@@ -1,3 +1,5 @@
+"""Attention written out as its primitives (scores, softmax, weighted sum)."""
+
 import math
 
 from lumen.functional.functions import dropout, le, softmax, where
@@ -54,6 +56,7 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
             "with N a multiple of Nkv"
         )
 
+    # Grouped-query attention: repeat each key/value head for its group of query heads.
     if nkv != n:
         g = n // nkv
         k = k.unsqueeze(3).expand(b, sk, nkv, g, h).reshape(b, sk, n, h)

@@ -1,10 +1,15 @@
+//! Metal source for row kernels: bodies whose reductions run over the last axis (softmax, norms),
+//! computed one row per threadgroup or SIMD group with values kept in registers between passes.
 use super::*;
 use crate::kernels::dot_general::mps::GemmConfig;
 
+/// Body reductions over the last axis, excluding the first output; empty for plain reductions.
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
     reductions_of_rows(body, true)
 }
 
+/// Body reductions that keep the last axis (per-column partial sums written per row group),
+/// present only alongside row reductions.
 pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
     match row_reductions(body).is_empty() {
         true => Vec::new(),
@@ -12,6 +17,7 @@ pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
     }
 }
 
+/// Rows and row length of the first row reduction's operand.
 pub(super) fn row_shape(body: &Graph) -> (usize, usize) {
     let reductions = row_reductions(body);
     let x = body.type_of(reductions.first().expect("a row reduction").inputs[0]);
@@ -19,6 +25,8 @@ pub(super) fn row_shape(body: &Graph) -> (usize, usize) {
     (x.numel() / n, n)
 }
 
+/// Threadgroups the row kernel launches: the partials' leading dim, one per `SIMD_ROWS` rows, or
+/// one per row.
 pub(crate) fn row_groups(body: &Graph) -> usize {
     let (rows, _) = row_shape(body);
     match row_partials(body).first() {
@@ -28,10 +36,13 @@ pub(crate) fn row_groups(body: &Graph) -> usize {
     }
 }
 
+/// Rows one threadgroup handles in the SIMD form, one per SIMD group.
 pub(super) const SIMD_ROWS: usize = 8;
 
+/// Longest row the SIMD form handles with one SIMD group per row.
 pub(super) const SIMD_ROW: usize = 256;
 
+/// Whether rows are short enough and reductions SIMD-reducible to give each row one SIMD group.
 pub(crate) fn simd_rows(body: &Graph) -> bool {
     let (_, n) = row_shape(body);
     let simd = |r: &&Node| {
@@ -44,6 +55,7 @@ pub(crate) fn simd_rows(body: &Graph) -> bool {
     n <= SIMD_ROW && reductions.iter().all(simd)
 }
 
+/// Body reductions other than the first output that include (`last`) or exclude the last axis.
 pub(super) fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
     if reduction_root(body).is_some() {
         return Vec::new();
@@ -62,6 +74,9 @@ pub(super) fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
         .collect()
 }
 
+/// Generates the row kernel for `body`: one pass over each row per group of independent
+/// reductions, then a final pass writing the outputs. `tile` carries the original body, dot and
+/// GEMM config when the rows come from a fused matmul.
 pub(super) fn row_kernel(
     body: &Graph,
     by_value: &[bool],
@@ -73,6 +88,7 @@ pub(super) fn row_kernel(
     let out_type = body.type_of(out);
     let (rows, n) = row_shape(body);
     let mut e = Emitter::new(body, by_value);
+    // A value is per-row when it has one element per row and is never broadcast along the last axis.
     let per_row = |v: Var| {
         body.type_of(v).numel() == rows
             && body
@@ -93,6 +109,8 @@ pub(super) fn row_kernel(
                     }
                 })
     };
+    // Mark values that are the same across a row (constants, per-row values and reduction results),
+    // so the emitter hoists them out of the per-element loop.
     let mut constant = vec![false; body.types.len()];
     for &v in body.inputs() {
         constant[v] = body.type_of(v).numel() == 1;
@@ -123,6 +141,8 @@ pub(super) fn row_kernel(
         ),
     };
     let reads = |v: Var, of: &[Var]| depends_on(body, v, of);
+    // Group reductions into passes: a reduction joins the current pass unless it reads one of its
+    // results; a max followed by its softmax sum becomes one online-softmax step.
     let mut passes: Vec<Vec<(usize, bool)>> = Vec::new();
     let mut k = 0;
     while k < reductions.len() {
@@ -159,12 +179,14 @@ pub(super) fn row_kernel(
         false => reduce::REDUCE_THREADS,
     };
     let per_thread = n.div_ceil(lanes);
+    // Keep element values in registers across passes when each thread's share of the row fits.
     let mut kept = match per_thread <= config.row_cache {
         true => kept_values(body, &e.invariant, &roots),
         false => Vec::new(),
     };
     let wide = tile.is_some() && n > ROW_TILE;
     let tiles = n.div_ceil(ROW_TILE);
+    // Wide matmul rows get their first pass from per-tile partials, so nothing is kept from it.
     if wide {
         kept.retain(|&(_, p)| p > 0);
     }
@@ -200,6 +222,8 @@ pub(super) fn row_kernel(
             )
         }
     };
+    // Emits the values of pass `k`'s roots, reading values kept by earlier passes and storing those
+    // that later passes reuse.
     let pass = |e: &mut Emitter, k: usize| {
         (e.lines, e.hoisted) = (String::new(), String::new());
         (e.values, e.indices) = (HashMap::new(), HashMap::new());
@@ -235,6 +259,7 @@ pub(super) fn row_kernel(
                 "a reduction of rows"
             );
             let a = metal_type(body.type_of(r.output).dtype);
+            // Online softmax: track the running max and the sum rescaled to it in one sweep.
             if online {
                 let sum = reductions[k + 1];
                 writeln!(init, "    {a} m{k} = -INFINITY, s{k} = 0;").unwrap();
@@ -347,6 +372,8 @@ pub(super) fn row_kernel(
     let value = &values[0];
     let (mut once, mut each) = (String::new(), String::new());
     let (mut init, mut written) = (String::new(), String::new());
+    // Column partial outputs accumulate per thread across the group's rows, then sum across SIMD
+    // groups before the store.
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
         if let Some(p) = partials.iter().position(|p| p.output == v) {
             let a = metal_type(body.type_of(v).dtype);
@@ -464,6 +491,7 @@ pub(super) fn row_kernel(
             .unwrap()
         }
     }
+    // Within a row `j % n` is just the column `c`.
     let source = source.replace(&format!("(j) % {n}u"), "c");
     let partials_of = |&(k, _): &(usize, bool)| {
         let a = metal_type(body.type_of(reductions[k].output).dtype);
@@ -476,6 +504,8 @@ pub(super) fn row_kernel(
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
     let signature = format!("kernel void NAME({params}{THREAD_ARGS})");
     let staged = body.inputs().len() - 1;
+    // A fused matmul either stages the whole row block in one kernel or, for wide rows, adds a
+    // tiles kernel that the row kernel reads partials from.
     let prelude = match tile {
         Some((real, by_value, dot, _)) if !wide => {
             let source = read_staged(&source, staged, |x| format!("staged[({x}) - m0n]"));
@@ -544,6 +574,7 @@ pub(super) fn row_kernel(
     ))
 }
 
+/// Whether `v` depends on any of `of` through the body's nodes.
 pub(super) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
     let (mut stack, mut seen) = (vec![v], Vec::new());
@@ -559,6 +590,8 @@ pub(super) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
     false
 }
 
+/// Whether `max` and `sum` form a softmax denominator: `sum(exp(x - broadcast(max(x))))` over the
+/// same axes and dtype.
 pub(super) fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
     use Primitive::*;
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
@@ -595,6 +628,8 @@ pub(super) fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
         && sub.is_some_and(|d| d.inputs[0] == max.inputs[0] && of_max(d.inputs[1]))
 }
 
+/// Values that later passes recompute from an earlier pass's inputs, each with the first pass
+/// that computes it, so they can be kept in registers instead.
 pub(super) fn kept_values(
     body: &Graph,
     invariant: &[bool],
@@ -638,6 +673,7 @@ pub(super) fn kept_values(
     kept
 }
 
+/// Metal functor that combines a reduction's values.
 pub(super) fn functor_of_reduction(p: &Primitive) -> &'static str {
     match p {
         Primitive::ReduceSum { .. } => "Add",

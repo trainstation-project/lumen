@@ -6,6 +6,8 @@
 // A threadgroup computes one 64 x 64 output tile in K-sized slices of 16.
 #define MM_TILE 64
 #define MM_TK 16
+/// Batched integer matmul: each 256-thread threadgroup computes one 64 x 64 output tile of
+/// `[batch, M, N]`, accumulating in `A` and writing `O`.
 template <typename T, typename A, typename O>
 inline void matmul_impl(device const T *lhs,
                         device const T *rhs,
@@ -46,6 +48,7 @@ inline void matmul_impl(device const T *lhs,
     // Loads are first staged in registers. While the current shared-memory
     // tile is being multiplied, the next K tile can be prefetched here.
     T ra[L], rb[L];
+    /// Loads this thread's lhs and rhs elements of the K tile starting at `k0` into registers.
     auto fetch = [&](ulong k0) {
         bool full_k = k0 + MM_TK <= K;
         if (full_m && full_k) {
@@ -127,6 +130,7 @@ inline void matmul_impl(device const T *lhs,
     }
 }
 
+/// Kernel parameters shared by every integer matmul.
 #define MATMUL_ARGS(T, O)                                                                              \
     device const T *lhs [[buffer(0)]], device const T *rhs [[buffer(1)]], device O *out [[buffer(2)]], \
         constant ulong *p [[buffer(3)]], uint3 group [[threadgroup_position_in_grid]],                 \
@@ -141,6 +145,7 @@ inline void matmul_impl(device const T *lhs,
         matmul_impl<T, A, O>(lhs, rhs, out, p, lt, rt, group, tid.xy); \
     }
 
+/// Same-type, int32-accumulating and int32-output kernels for one narrow operand type.
 #define MATMUL_NARROW(N, T)        \
     MATMUL(N##_##N##_##N, T, T, T) \
     MATMUL(N##_i32_##N, T, int, T) \

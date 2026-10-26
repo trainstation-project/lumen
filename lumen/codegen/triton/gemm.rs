@@ -1,3 +1,6 @@
+//! Triton GEMM helpers: operand prologues, the output epilogue, and fused elementwise epilogues
+//! that consume column regions of the GEMM output.
+
 use std::fmt::Write;
 
 use indoc::formatdoc;
@@ -6,15 +9,23 @@ use super::{Emitter, at, gather_index, load, named, triton_type};
 use crate::codegen::regions::{Columns, Region, gemm_regions};
 use crate::graph::{Graph, Node, Primitive, Var};
 
+/// Generated pieces of one GEMM kernel.
 pub(crate) struct GemmCode {
+    /// `[batch, m, k, n]` extents of the dot.
     pub(crate) sizes: [usize; 4],
+    /// `(name, source)` of the jit function loading an A tile at `(l, m, k)`.
     pub(crate) prologue_a: (String, String),
+    /// `(name, source)` of the jit function loading a B tile at `(l, k, n)`.
     pub(crate) prologue_b: (String, String),
+    /// `(name, source)` of the jit function storing the output tile.
     pub(crate) epilogue: (String, String),
 }
 
+/// A tensor's `(shape, strides)` in elements.
 type Layout<'a> = (&'a [usize], &'a [usize]);
 
+/// Lowers a `dot_general` with arbitrary batch/free/contracting dims and strided operands to a
+/// `[l, m, k] x [l, k, n]` GEMM by generating strided load and store helpers.
 pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> GemmCode {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -26,6 +37,7 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     else {
         unreachable!("a dot_general")
     };
+    // Dims that are neither contracting nor batch, in operand order; they flatten into m or n.
     let free = |rank: usize, contracting: &[usize], batch: &[usize]| -> Vec<usize> {
         (0..rank)
             .filter(|d| !contracting.contains(d) && !batch.contains(d))
@@ -34,6 +46,7 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     let lhs_free = free(lhs.0.len(), lhs_contracting, lhs_batch);
     let rhs_free = free(rhs.0.len(), rhs_contracting, rhs_batch);
     let (batch, rows) = (lhs_batch.len(), lhs_free.len());
+    // The output is laid out as batch dims, then lhs free dims, then rhs free dims.
     let out_dims: Vec<usize> = (0..out.0.len()).collect();
     let (out_batch, out_rows, out_cols) = (
         &out_dims[..batch],
@@ -41,6 +54,7 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
         &out_dims[batch + rows..],
     );
     let size = |shape: &[usize], dims: &[usize]| dims.iter().map(|&d| shape[d]).product();
+    // Flattened index offset of each logical coordinate (`l`, `m`/`n`, `k`) through the operand's strides.
     let address = |terms: [(&str, Layout, &[usize]); 3]| -> String {
         let offsets: Vec<String> = terms
             .iter()
@@ -104,25 +118,33 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     }
 }
 
+/// The fusion body's `dot_general`, if it has one.
 pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
     body.nodes()
         .iter()
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
+/// How the GEMM kernel shapes its accumulator for a fused epilogue.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct EpilogueFlags {
+    /// Region members are interleaved along the axis rather than laid out as contiguous parts.
     pub(crate) interleaved: bool,
+    /// Number of separate accumulators (contiguous parts) the kernel produces; 1 for a single one.
     pub(crate) group: usize,
+    /// The regions split the row axis instead of the last (column) axis.
     pub(crate) rows: bool,
 }
 
 impl EpilogueFlags {
+    /// Whether the kernel keeps one accumulator per contiguous part of the output.
     fn halves(&self) -> bool {
         self.group > 1 && !self.interleaved
     }
 }
 
+/// Chooses the accumulator layout: one accumulator per member when a single group region reads
+/// contiguous parts of the dot output, otherwise one interleaved accumulator.
 pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
     let rank = body.type_of(dot.output).shape.len();
     let Some(regions) = gemm_regions(body, dot) else {
@@ -147,11 +169,14 @@ pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
     }
 }
 
+/// Whether `v` is one of `on` or is computed from any of them in `body`.
 fn depends(body: &Graph, v: Var, on: &[Var]) -> bool {
     let producer = body.nodes().iter().find(|n| n.output == v);
     on.contains(&v) || producer.is_some_and(|n| n.inputs.iter().any(|&u| depends(body, u, on)))
 }
 
+/// Emits code splitting tile `x` into `k` (a power of two) interleaved parts along columns or rows
+/// via reshape and repeated `tl.split`; returns the part names ordered by member index.
 fn split(code: &mut String, x: &str, k: usize, columns: bool, name: &str) -> Vec<String> {
     let bits = k.ilog2() as usize;
     let twos = vec!["2"; bits].join(", ");
@@ -160,6 +185,7 @@ fn split(code: &mut String, x: &str, k: usize, columns: bool, name: &str) -> Vec
             code,
             "    {name} = tl.reshape({x}, ({x}.shape[0], {x}.shape[1] // {k}, {twos}))"
         ),
+        // Rows: move the k-sized split axes after the column axis so `tl.split` peels them off.
         false => {
             let order: Vec<String> = std::iter::once(0)
                 .chain(std::iter::once(bits + 1))
@@ -174,6 +200,7 @@ fn split(code: &mut String, x: &str, k: usize, columns: bool, name: &str) -> Vec
         }
     }
     .unwrap();
+    // Each split level halves every part; the bit set at `level` becomes part of the member index.
     let mut parts = vec![(name.to_string(), 0)];
     for level in 0..bits {
         parts = parts
@@ -191,10 +218,13 @@ fn split(code: &mut String, x: &str, k: usize, columns: bool, name: &str) -> Vec
     parts.into_iter().map(|(p, _)| p).collect()
 }
 
+/// Indents every line of `lines` by four spaces.
 fn indented(lines: &str) -> String {
     lines.lines().map(|l| format!("    {l}\n")).collect()
 }
 
+/// Generates the GEMM epilogue jit function that computes the fused body's outputs from the
+/// accumulator tile `value` and stores them, one guarded block per output column region.
 pub(crate) fn epilogue(
     body: &Graph,
     by_value: &[bool],
@@ -213,6 +243,7 @@ pub(crate) fn epilogue(
             source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n"
         })
         .collect();
+    // Extra inputs and secondary output pointers arrive packed in the `EXTRA` tuple.
     let mut code: String = (0..inputs.len())
         .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
         .collect();
@@ -274,6 +305,7 @@ pub(crate) fn epilogue(
             .unwrap();
             seeds.push((members[0], format!("r{r}_a0")));
         }
+        // Flat index of the tile within the region's own (narrower) output.
         let index = match columns {
             true => format!("l * {} + m * {size} + r{r}_local", rows * size),
             false => format!("l * {} + r{r}_local * {cols} + n", size * cols),
@@ -302,6 +334,7 @@ pub(crate) fn epilogue(
         }
         locals = emitter.locals;
         let block = format!("{}{stores}", emitter.lines);
+        // Skip regions the tile doesn't overlap; in halves mode each tile covers every part.
         match flags.halves() {
             false => write!(
                 code,

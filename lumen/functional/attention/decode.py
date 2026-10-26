@@ -1,3 +1,5 @@
+"""Causal attention of new query tokens against a KV cache."""
+
 import math
 
 from lumen.functional.attention.utils import _expand_heads
@@ -9,6 +11,11 @@ __all__ = ["attention_decode"]
 
 
 def attention_decode(query, key, value, start, scale=None):
+    """Attends query tokens to ``key``/``value`` cache rows, query row ``i`` seeing keys ``0..=start + i``.
+
+    Shapes are ``[B, Sq, N, H]``, ``[B, Sk, Nkv, H]``, ``[B, Sk, Nkv, Hv]`` with ``N`` a multiple of ``Nkv``;
+    ``start`` is an int or a 0-d integer tensor; returns ``[B, Sq, N, Hv]`` in the query dtype.
+    """
     q, k, v, start = _lift(query), _lift(key), _lift(value), _lift(start)
 
     for name, t in (("query", q), ("key", k), ("value", v)):
@@ -36,6 +43,7 @@ def attention_decode(query, key, value, start, scale=None):
         scale = 1.0 / math.sqrt(h)
 
     accum = _accum_dtype(q.dtype)
+    # Scores are [B, N, Sq, Sk]: contract H, batch over B and the head axis.
     s = prims.dot_general(q, _expand_heads(k, n), (((3,), (3,)), ((0, 2), (0, 2))), accum, accum) * scale
     index = start.dtype if isinstance(start, TracedTensor) else "int32"
     rows = prims.iota(index, s.shape, 2)
@@ -44,5 +52,6 @@ def attention_decode(query, key, value, start, scale=None):
     m = amax(s, -1, keepdim=True)
     e = exp(s - m)
     p = (e / sum(e, -1, keepdim=True)).to(q.dtype)
+    # Contract Sk of p [B, N, Sq, Sk] with v [B, Sk, N, Hv], giving [B, N, Sq, Hv].
     o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
     return o.permute(0, 2, 1, 3)

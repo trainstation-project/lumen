@@ -1,3 +1,5 @@
+//! Metal kernel launching: per-primitive encode dispatch, pipeline caching, argument packing,
+//! and capturing launches so a plan can replay them against new buffer addresses.
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
@@ -11,6 +13,7 @@ use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar, Tensor};
 
 unsafe extern "C" {
+    /// Looks up kernel `name` and dispatches it once; returns nonzero on failure.
     fn lumen_mps_launch_kernel(
         name: *const c_char,
         buffers: *const *const u8,
@@ -24,7 +27,9 @@ unsafe extern "C" {
         done: Completion,
         context: *mut c_void,
     ) -> i32;
+    /// Returns the compute pipeline for kernel `name`, or null if no such kernel exists.
     fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
+    /// Dispatches an already-built pipeline; `groups` says whether `grid` counts threadgroups, `group` is the threadgroup size (0 for the default).
     fn lumen_mps_launch_pipeline(
         pipeline: *mut c_void,
         buffers: *const *const u8,
@@ -41,6 +46,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+/// A kernel launch recorded by `capture` instead of dispatched, with its raw buffer addresses.
 pub(crate) struct Captured {
     pipeline: *mut c_void,
     buffers: Vec<*const u8>,
@@ -52,16 +58,21 @@ pub(crate) struct Captured {
     label: &'static str,
 }
 
+/// Where a captured buffer pointer lives, as a byte offset into one of the plan's allocations.
 #[derive(Debug, Clone, Copy)]
 enum Slot {
+    /// A null buffer pointer.
     Null,
     Workspace(usize),
+    /// Operand index and byte offset into it.
     Operand(usize, usize),
     Output(usize),
 }
 
+/// A captured launch with its buffers rewritten as `Slot`s so it can run against other allocations.
 #[derive(Debug, Clone)]
 struct Replay {
+    /// The compute pipeline pointer, stored as an integer.
     pipeline: usize,
     buffers: Vec<Slot>,
     args: Vec<Vec<u8>>,
@@ -72,9 +83,11 @@ struct Replay {
     label: &'static str,
 }
 
+/// A plan's captured launches, ready to replay.
 #[derive(Debug, Clone)]
 pub(crate) struct Prepared(Vec<Replay>);
 
+/// Base address and byte length of each allocation a plan's kernels may touch.
 pub(crate) struct Pointers<'a> {
     pub(crate) workspace: (*const u8, usize),
     pub(crate) operands: &'a [(*const u8, usize)],
@@ -82,6 +95,7 @@ pub(crate) struct Pointers<'a> {
 }
 
 impl Pointers<'_> {
+    /// Finds the allocation containing `p`; errors when none or more than one operand/output does.
     fn slot(&self, p: *const u8) -> Result<Slot, Unprepared> {
         let within = |(base, len): (*const u8, usize)| {
             let at = (p as usize).wrapping_sub(base as usize);
@@ -106,6 +120,7 @@ impl Pointers<'_> {
         }
     }
 
+    /// Rebuilds a pointer from `slot` against these allocations.
     fn pointer(&self, slot: Slot) -> *const u8 {
         match slot {
             Slot::Null => std::ptr::null(),
@@ -116,11 +131,15 @@ impl Pointers<'_> {
     }
 }
 
+/// Why captured launches could not be turned into a `Prepared` replay.
 pub(crate) enum Unprepared {
+    /// A buffer pointer falls inside more than one operand or output.
     Ambiguous,
+    /// A buffer pointer falls inside no known allocation.
     Unplaced,
 }
 
+/// Rewrites captured launches' buffer pointers as slots relative to the allocations in `at`.
 pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared, Unprepared> {
     let launches = captured.into_iter().map(|c| {
         let buffers = c
@@ -142,6 +161,7 @@ pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared
     launches.collect::<Result<_, _>>().map(Prepared)
 }
 
+/// Dispatches prepared launches against the allocations in `at`; only the last launch holds `keep`.
 pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> Result<(), String> {
     let Some((last, first)) = prepared.0.split_last() else {
         return Ok(());
@@ -168,6 +188,7 @@ thread_local! {
     static CAPTURED: RefCell<Option<Vec<Captured>>> = const { RefCell::new(None) };
 }
 
+/// Runs `encode` with launches recorded rather than dispatched, returning what it launched.
 pub(crate) fn capture(
     encode: impl FnOnce() -> Result<(), String>,
 ) -> Result<Vec<Captured>, String> {
@@ -177,8 +198,10 @@ pub(crate) fn capture(
     encoded.map(|()| captured)
 }
 
+/// Most argument buffers a kernel launch can carry.
 const MAX_ARGS: usize = 31;
 
+/// Returns the cached compute pipeline for `kernel`, building it on first use.
 fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     static PIPELINES: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
     let mut pipelines = PIPELINES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -196,10 +219,13 @@ fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     Ok(pipeline)
 }
 
+/// A specialized encoder a step carries in its launch slot: `(step, inputs, output, scratch, keep)`.
 pub(crate) type Encode = Box<
     dyn Fn(&Step, &[*const u8], *mut u8, *mut u8, Vec<Tensor>) -> Result<(), String> + Send + Sync,
 >;
 
+/// Encodes one plan step's kernels into the MPS stream, routing by primitive to its kernel family.
+/// Errors when the output has more elements than 32-bit kernel indices reach.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -216,6 +242,7 @@ pub(crate) fn encode(
         ));
     }
 
+    // A step-specific encoder applies only when no input is read through a view.
     if let Some(encode) = step
         .launch::<Encode>()
         .filter(|_| step.views.iter().all(Option::is_none))
@@ -286,6 +313,7 @@ pub(crate) fn encode(
     encode(step, inputs, output, keep)
 }
 
+/// Scratch bytes a step's kernels need beyond its output, for primitives that use any.
 pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
     match p {
         Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
@@ -303,14 +331,17 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
     }
 }
 
+/// Packs a `u32` kernel argument.
 pub(crate) fn u32_arg(v: u32) -> Vec<u8> {
     v.to_ne_bytes().to_vec()
 }
 
+/// Packs a `usize` as a `u64` kernel argument.
 pub(crate) fn u64_arg(v: usize) -> Vec<u8> {
     (v as u64).to_ne_bytes().to_vec()
 }
 
+/// Packs dimensions as a `u64` array argument; empty becomes `[0]` so the buffer is never zero-sized.
 pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u64> = v.into_iter().map(|d| d as u64).collect();
     if v.is_empty() {
@@ -319,6 +350,7 @@ pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     as_bytes(&v).to_vec()
 }
 
+/// Packs dimensions as a `u32` array argument; empty becomes `[0]` so the buffer is never zero-sized.
 pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u32> = v.into_iter().map(|d| d as u32).collect();
     if v.is_empty() {
@@ -327,13 +359,17 @@ pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     as_bytes(&v).to_vec()
 }
 
+/// Packs `value` converted to `dtype` as a single-element argument.
 pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
     dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec())
 }
 
+/// Bytes each elementwise thread handles; matches `BYTES_PER_THREAD` in `kernels.metal`.
 pub(crate) const BYTES_PER_THREAD: usize = 16;
+/// Thread count above which elementwise grids start giving threads several elements.
 const GRID_THREADS: usize = 32 << 10;
 
+/// One-dimensional grid for an elementwise kernel over `n` elements, giving each thread up to 16 bytes once `n` is large.
 pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
     let most = (BYTES_PER_THREAD / dtype.size_of()).max(1);
     Grid::Threads([n.div_ceil((n / GRID_THREADS).clamp(1, most)), 1, 1])
@@ -341,6 +377,7 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
 
 pub(crate) use crate::custom_op::mps::Grid;
 
+/// Launches `kernel` with the step's `inputs` followed by `output` as buffers.
 pub(crate) fn launch_step(
     step: &Step,
     kernel: &str,
@@ -355,6 +392,7 @@ pub(crate) fn launch_step(
     launch(kernel, &buffers, args, grid, keep, step.label)
 }
 
+/// Dispatches an empty `event_marker` kernel whose completion signals `recorded`, fenced on both sides.
 pub(crate) fn mark_event(
     recorded: std::sync::Arc<crate::stream::event::Recorded>,
 ) -> Result<(), String> {
@@ -385,6 +423,7 @@ pub(crate) fn mark_event(
     Ok(())
 }
 
+/// Launches `kernel`, or records it when inside `capture`; a grid with a zero dimension is skipped.
 pub(crate) fn launch(
     kernel: &str,
     buffers: &[*const u8],
@@ -437,6 +476,7 @@ pub(crate) fn launch(
     )
 }
 
+/// Submits one pipeline dispatch to the MPS stream, with `keep` held until it completes.
 fn dispatch(
     pipeline: *mut c_void,
     buffers: &[*const u8],

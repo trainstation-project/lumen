@@ -1,16 +1,22 @@
+//! Splits a graph that moves values between host and device into alternating device and host
+//! stages, compiles each, and joins them into one staged [`Plan`].
+
 use super::Options;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::plan::{ALIGNMENT, lcm};
 use crate::graph_compiler::{Plan, Source, Stage, Staged};
 
+/// Where a value must be computed.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Place {
+    /// On either side: depends on no placed value (constants, host scalars).
     Free,
     Host,
     Device,
 }
 
+/// `graph` with every `ToHost`/`ToDevice` node removed and its readers wired to the moved value.
 pub(crate) fn without_transfers(graph: &Graph) -> Graph {
     let transfer = |p: &Primitive| matches!(p, Primitive::ToHost | Primitive::ToDevice);
     if !graph.nodes().iter().any(|n| transfer(&n.primitive)) {
@@ -36,23 +42,33 @@ pub(crate) fn without_transfers(graph: &Graph) -> Graph {
     out
 }
 
+/// Per-value placement of a graph into stages.
 struct Placement<'a> {
     graph: &'a Graph,
     place: Vec<Place>,
+    /// The value each one is an alias of: a transfer to where its input already is aliases it.
     alias: Vec<Var>,
+    /// Stage computing each value: even stages run on the device, odd ones on the host.
     stage: Vec<Option<usize>>,
+    /// For a transfer that crosses sides, the value it moves.
     crossing: Vec<Option<Var>>,
     producer: Vec<Option<usize>>,
 }
 
+/// A stage's graph under construction.
 struct Builder {
     host: bool,
     graph: Graph,
+    /// Per value of the original graph, its value in this stage's graph.
     map: Vec<Option<Var>>,
+    /// Where each of this stage's inputs comes from.
     inputs: Vec<Source>,
+    /// Original values this stage exports, in output order.
     outputs: Vec<Var>,
 }
 
+/// Compiles a graph that touches the host as a staged plan; `None` when everything stays on
+/// `device`, so the caller compiles it as one plan.
 pub(crate) fn compile(
     graph: &Graph,
     device: Device,
@@ -71,6 +87,7 @@ pub(crate) fn compile(
             outputs: Vec::new(),
         })
         .collect();
+    // Build each non-aliased, non-transfer value in its stage; free values are pulled in on demand.
     for node in graph.nodes() {
         let v = node.output;
         if let (Some(s), None, true) = (p.stage[v], p.crossing[v], p.alias[v] == v) {
@@ -91,6 +108,7 @@ pub(crate) fn compile(
             }
         })
         .collect();
+    // Drop stages that export nothing and renumber the sources pointing at the rest.
     let kept: Vec<usize> = (0..count)
         .filter(|&s| !builders[s].outputs.is_empty())
         .collect();
@@ -104,6 +122,7 @@ pub(crate) fn compile(
         }
     };
     let outputs: Vec<Source> = outputs.into_iter().map(renumber).collect();
+    // The last stage reading each program input: only it may donate that input's buffer.
     let mut last = vec![None; graph.inputs().len()];
     for (index, &s) in kept.iter().enumerate() {
         for source in &builders[s].inputs {
@@ -163,6 +182,7 @@ pub(crate) fn compile(
                 .collect();
             super::device_compile(&b.graph, device, &stage_options)?
         };
+        // Lift the stage's packed blocks to program-level input positions, appended after the program inputs.
         let mut blocks = Vec::new();
         for (j, (positions, dimension)) in plan.packed().iter().enumerate() {
             let positions = positions
@@ -175,6 +195,7 @@ pub(crate) fn compile(
             block_types.push(plan.input_types()[inputs.len() + j].clone());
         }
         steps.extend(plan.steps().iter().cloned());
+        // Device stages share one workspace, each at its own aligned offset; host stages use none.
         let offset = workspace_bytes.next_multiple_of(plan.workspace_alignment());
         if !b.host {
             workspace_alignment = lcm(workspace_alignment, plan.workspace_alignment());
@@ -211,6 +232,8 @@ pub(crate) fn compile(
     )))
 }
 
+/// Assigns each value a side and stage, propagating forward; errors when a node mixes host and
+/// device operands, and returns `None` when nothing is on the host.
 fn place<'a>(
     graph: &'a Graph,
     device: Device,
@@ -241,6 +264,8 @@ fn place<'a>(
                     Primitive::ToHost => Place::Host,
                     _ => Place::Device,
                 };
+                // A transfer to the side its input is on (or a free input) is a no-op alias;
+                // otherwise it starts the next stage.
                 if p.place[u] == Place::Free || p.place[u] == to {
                     (p.place[v], p.alias[v], p.stage[v]) = (p.place[u], u, p.stage[u]);
                 } else {
@@ -269,6 +294,8 @@ fn place<'a>(
     Ok(p.place.contains(&Place::Host).then_some(p))
 }
 
+/// `v`'s value in stage `s`'s graph, computing it there (with its operands) when it belongs to
+/// `s` or is free, otherwise adding a stage input fed from where it lives.
 fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
     let v = p.alias[v];
     if let Some(b) = builders[s].map[v] {
@@ -300,6 +327,8 @@ fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
     b
 }
 
+/// Where a value comes from as a stage input: a program input, an earlier stage's output, or a
+/// transfer of one across sides.
 fn source(p: &Placement, builders: &mut [Builder], v: Var) -> Source {
     if let Some(i) = p.graph.inputs().iter().position(|&u| u == v) {
         return Source::Input(i);
@@ -322,6 +351,7 @@ fn source(p: &Placement, builders: &mut [Builder], v: Var) -> Source {
     }
 }
 
+/// Index of `v` among `b`'s outputs, adding it if not yet exported.
 fn export(b: &mut Builder, v: Var) -> usize {
     b.outputs.iter().position(|&o| o == v).unwrap_or_else(|| {
         b.outputs.push(v);

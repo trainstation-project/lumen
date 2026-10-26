@@ -1,11 +1,17 @@
+//! Block-size selection for elementwise Pallas kernels on TPU.
+
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::kernels::dot_general::tpu::block;
 
+/// Upper bound in bytes on one block including its batched leading dimension.
 const BLOCK_BYTES: usize = 1 << 20;
 
+/// Byte budget for all operand blocks streamed together, split evenly across dtypes.
 const STREAM_BYTES: usize = 32 << 20;
 
+/// Picks a Pallas block shape for an elementwise op over `shape`: one block length for rank < 2,
+/// otherwise `[leading, rows, columns]` made of whole TPU tiles for every dtype in `dtypes`.
 pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
     if shape.len() < 2 {
@@ -14,6 +20,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
             block(n, 1024, 64 * 1024).ok_or_else(|| failed("its length"))?,
         ]);
     }
+    // The row tile is the tallest sublane count among the dtypes, so blocks align for all of them.
     let rows = dtypes
         .iter()
         .map(|&d| Layout::new(d, &[1, 1]).map(|l| l.rows))
@@ -27,6 +34,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
     let lead: usize = shape[..shape.len() - 2].iter().product();
     let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
     let budget = STREAM_BYTES / dtypes.len();
+    // Halve rows first, then columns, while the block still divides the shape in whole tiles.
     while bm * bn * width > budget {
         let halves = |b: usize, unit: usize, of: usize| {
             (b / 2).is_multiple_of(unit) && of.is_multiple_of(b / 2)
@@ -39,6 +47,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
             break;
         }
     }
+    // Bytes of one padded (bm, bn) tile; batch as many leading rows as fit in BLOCK_BYTES.
     let tile = bm.div_ceil(rows) * rows * bn.div_ceil(128) * 128 * width;
     let bl = (1..=lead)
         .rev()
@@ -47,6 +56,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
     Ok(vec![bl, bm, bn])
 }
 
+/// Greatest common divisor of `a` and `b`.
 pub(crate) fn gcd(a: usize, b: usize) -> usize {
     match b {
         0 => a,

@@ -1,9 +1,11 @@
+//! Fuses normalization diamonds (row reductions broadcast back over their rows) into `row` kernels.
 use super::TpuModule;
 use crate::codegen::tpu::row::{fits, fusible};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::common::diamonds::{Row, diamonds};
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Replaces normalization diamonds the TPU row kernel supports with `row` fusions.
 pub(super) struct Diamonds;
 
 impl CompilerPass<TpuModule<'_>> for Diamonds {
@@ -17,13 +19,18 @@ impl CompilerPass<TpuModule<'_>> for Diamonds {
     }
 }
 
+/// A candidate `row` fusion extracted from a diamond.
 struct Fused {
+    /// Sorted node indices folded into the fusion.
     members: Vec<usize>,
+    /// Values read from outside the fusion, in body input order.
     reads: Vec<Var>,
+    /// Values the fusion produces: the root's first, then the row's extra outputs.
     outputs: Vec<Var>,
     body: Graph,
 }
 
+/// Collects the members, external reads, outputs and body graph of `row`.
 fn fusion(graph: &Graph, row: &Row) -> Fused {
     let nodes = graph.nodes();
     let mut members: Vec<usize> = row
@@ -69,6 +76,7 @@ fn fusion(graph: &Graph, row: &Row) -> Fused {
     }
 }
 
+/// Whether no read of `f` depends on one of its members, so the fusion can be emitted as one node.
 fn convex(graph: &Graph, f: &Fused) -> bool {
     let mut after = vec![false; graph.types.len()];
     for (i, node) in graph.nodes().iter().enumerate() {
@@ -78,6 +86,7 @@ fn convex(graph: &Graph, f: &Fused) -> bool {
     !f.reads.iter().any(|&v| after[v])
 }
 
+/// Whether every member value not exposed as an output is read only inside the fusion.
 fn sealed(graph: &Graph, f: &Fused) -> bool {
     let inside = |v: Var| {
         let readers = graph
@@ -97,6 +106,7 @@ fn sealed(graph: &Graph, f: &Fused) -> bool {
         .all(|v| f.outputs.contains(&v) || inside(v))
 }
 
+/// Rewrites `graph` with each valid row fusion replacing its members.
 pub(super) fn fused(graph: &Graph, rows: &[Row]) -> Graph {
     let nodes = graph.nodes();
     let mut root: Vec<Option<Fused>> = (0..nodes.len()).map(|_| None).collect();
@@ -117,6 +127,8 @@ pub(super) fn fused(graph: &Graph, rows: &[Row]) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // Emit nodes in order but defer any whose reads aren't mapped yet: a fusion emitted at its root
+    // may read values made later in the graph, and its readers then wait for it.
     let mut deferred: Vec<usize> = Vec::new();
     for i in 0..nodes.len() {
         if member[i] && root[i].is_none() {
@@ -143,6 +155,7 @@ pub(super) fn fused(graph: &Graph, rows: &[Row]) -> Graph {
     out
 }
 
+/// Copies `node` unchanged into `out`.
 fn copy(out: &mut Graph, map: &mut [Var], node: &Node) {
     out.set_origin(node);
     let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
@@ -152,6 +165,7 @@ fn copy(out: &mut Graph, map: &mut [Var], node: &Node) {
     out.set_label(map[node.output], node.label);
 }
 
+/// Emits `f` as a `row` fusion, with extra outputs exposed through `FusionOutput` nodes.
 fn emit(out: &mut Graph, map: &mut [Var], graph: &Graph, node: &Node, f: Fused) {
     out.set_origin(node);
     let nodes = graph.nodes();

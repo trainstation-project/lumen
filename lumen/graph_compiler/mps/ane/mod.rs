@@ -1,3 +1,6 @@
+//! Offloads float16 GEMM regions that read fixed weights to the Apple Neural Engine through Core ML,
+//! and runs those programs on a host thread synchronized with the Metal command stream by shared events.
+
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -12,9 +15,13 @@ use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
+// Core ML bridge implemented in the Objective-C shim.
 unsafe extern "C" {
+    /// Compiles a serialized MIL model spec; returns null and sets `error` on failure.
     fn lumen_coreml_compile(spec: *const u8, len: usize, error: *mut *mut c_char) -> *mut c_void;
+    /// Lists, one tab-separated line per op output, the device Core ML placed it on.
     fn lumen_coreml_devices(model: *mut c_void) -> *mut c_char;
+    /// Runs the model on strided inputs into contiguous outputs; returns nonzero and sets `error` on failure.
     fn lumen_coreml_predict(
         model: *mut c_void,
         n_in: usize,
@@ -30,16 +37,24 @@ unsafe extern "C" {
         out_shapes: *const i64,
         error: *mut *mut c_char,
     ) -> i32;
+    /// Releases a model returned by `lumen_coreml_compile`.
     fn lumen_coreml_free(model: *mut c_void);
+    /// Releases a string returned by the shim.
     fn lumen_coreml_free_string(s: *mut c_char);
+    /// Encodes a shared-event signal of `value` into the Metal command buffer.
     fn lumen_coreml_encode_signal(command_buffer: *mut c_void, value: u64);
+    /// Encodes a wait for the shared event to reach `value` into the Metal command buffer.
     fn lumen_coreml_encode_wait(command_buffer: *mut c_void, value: u64);
+    /// Blocks the calling thread until the shared event reaches `value`.
     fn lumen_coreml_host_wait(value: u64);
+    /// Sets the shared event to `value` from the host.
     fn lumen_coreml_host_signal(value: u64);
 }
 
+/// Smallest multiply-accumulate count for a GEMM to be worth seeding a Neural Engine region.
 const MIN_MACS: usize = 1 << 24;
 
+/// Owned handle to a compiled Core ML model.
 struct Program {
     model: *mut c_void,
 }
@@ -53,6 +68,7 @@ impl Drop for Program {
     }
 }
 
+/// Copies a shim-allocated C string into a `String` and frees it; null gives an empty string.
 fn take(s: *mut c_char) -> String {
     if s.is_null() {
         return String::new();
@@ -62,11 +78,14 @@ fn take(s: *mut c_char) -> String {
     out
 }
 
+/// Core ML array dtype code passed to the shim for `dtype`.
 fn code(dtype: DType) -> Result<i32, String> {
     mil::array_dtype(dtype).map(|c| c as i32)
 }
 
 impl Program {
+    /// Compiles `body` with the given inputs baked in as constants.
+    /// Also returns the body nodes whose outputs Core ML placed off the Neural Engine.
     fn compile(
         body: &Graph,
         constants: &[Option<&[u8]>],
@@ -81,6 +100,7 @@ impl Program {
             ));
         }
         let program = Program { model };
+        // Each line is `output<TAB>op<TAB>device`; map non-ANE outputs back to their body nodes.
         let devices = take(unsafe { lumen_coreml_devices(model) });
         let off = devices
             .lines()
@@ -99,6 +119,7 @@ impl Program {
         Ok((program, off))
     }
 
+    /// Runs the model synchronously; inputs carry their element strides (empty for scalars).
     fn predict(
         &self,
         inputs: &[(*const u8, &TensorType, Vec<usize>)],
@@ -154,19 +175,27 @@ impl Program {
     }
 }
 
+/// A registered Neural Engine program, compiled lazily on first run.
 struct Entry {
+    /// The region's graph.
     body: Graph,
+    /// Per body input, whether it is a fixed weight baked into the program.
     constant: Vec<bool>,
+    /// The compiled model, `None` until first run or after invalidation.
     program: Option<Arc<Program>>,
 }
 
+/// Neural Engine programs keyed by their fusion name.
 static PROGRAMS: Mutex<BTreeMap<String, Entry>> = Mutex::new(BTreeMap::new());
+/// Counter giving each Neural Engine fusion a unique name.
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+/// Locks the program registry, ignoring poisoning.
 fn programs() -> std::sync::MutexGuard<'static, BTreeMap<String, Entry>> {
     PROGRAMS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether the MIL lowering supports `node`'s primitive and all its dtypes.
 fn lowerable(graph: &Graph, node: &crate::graph::Node) -> bool {
     use Primitive::*;
     let supported = match &node.primitive {
@@ -187,6 +216,8 @@ fn lowerable(graph: &Graph, node: &crate::graph::Node) -> bool {
     supported && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
+/// Rewrites `graph`, moving regions seeded by large float16 GEMMs over fixed weights into Core ML fusions.
+/// `fixed[i]` says whether graph input `i` is a weight that never changes between runs.
 fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     let nodes = graph.nodes();
     let n = graph.types.len();
@@ -198,6 +229,7 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     }
     let mut output = vec![false; n];
     graph.outputs().iter().for_each(|&v| output[v] = true);
+    // A value is a "weight" when it is computable from fixed inputs alone, so Core ML can fold it in.
     let mut weight = vec![false; n];
     for (&v, &f) in graph.inputs().iter().zip(fixed) {
         weight[v] = f;
@@ -205,6 +237,7 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     for node in nodes {
         weight[node.output] = lowerable(graph, node) && node.inputs.iter().all(|&v| weight[v]);
     }
+    // Only float16 GEMMs go to the ANE; a region node may read non-weights only if they are narrow types.
     let float16_dot = |node: &crate::graph::Node| {
         matches!(node.primitive, Primitive::DotGeneral { .. })
             && node
@@ -226,6 +259,7 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
             && node.inputs.iter().chain([&node.output]).all(narrow)
             && (!dot || (float16_dot(node) && node.inputs.iter().any(|&v| weight[v])))
     };
+    // Seeds are big float16 GEMMs with exactly one operand derived from weights.
     let seed = |node: &crate::graph::Node| {
         let Primitive::DotGeneral {
             lhs_contracting, ..
@@ -247,6 +281,8 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
         if region[s].is_some() || !seed(&nodes[s]) {
             continue;
         }
+        // Grow forward from the seed: take computable readers of region values, and taint anything
+        // depending on a value that left the region so the region stays convex.
         let (mut inside, mut tainted) = (vec![false; n], vec![false; n]);
         inside[nodes[s].output] = true;
         let mut members = vec![s];
@@ -263,6 +299,8 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
                 tainted[node.output] = true;
             }
         }
+        // Compile with zeroed weights to learn placement; drop nodes Core ML keeps off the ANE
+        // (and what depends on them) and retry a few times.
         let mut built = None;
         for _ in 0..4 {
             let b = build(
@@ -314,14 +352,21 @@ fn offload(graph: &Graph, fixed: &[bool]) -> Graph {
     rewrite(graph, &region, regions)
 }
 
+/// A region lowered into a standalone body graph.
 struct Built {
     body: Graph,
+    /// Original values the body reads, in body input order.
     reads: Vec<Var>,
+    /// Per read, whether it is a fixed graph input.
     constant: Vec<bool>,
+    /// Original values the region exposes, in body output order.
     outputs: Vec<Var>,
+    /// Original node indices in the body, in graph order.
     nodes: Vec<usize>,
 }
 
+/// Builds the body for region `members`, pulling in the weight-only producers they need.
+/// Returns `None` when no member value is read outside the region.
 fn build(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -338,6 +383,7 @@ fn build(
         .iter()
         .flat_map(|&k| nodes[k].inputs.clone())
         .collect();
+    // Recompute weight-derived operands inside the body so they become Core ML constants.
     while let Some(v) = stack.pop() {
         if let Some(p) = producer[v].filter(|&p| weight[v] && !all[p]) {
             all[p] = true;
@@ -354,6 +400,7 @@ fn build(
             }
         }
     }
+    // Expose member values that are graph outputs or read by nodes outside the region.
     let member = |k: usize| members.contains(&k);
     let outputs: Vec<Var> = members
         .iter()
@@ -392,6 +439,7 @@ fn build(
     })
 }
 
+/// Rebuilds `graph` with each region replaced by a Neural Engine `Fusion` and its `FusionOutput`s.
 fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Built)>) -> Graph {
     let nodes = graph.nodes();
     let mut out = Graph::new();
@@ -399,6 +447,8 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // Nodes and regions wait until all their reads are mapped, since a region may read values
+    // produced by nodes that come after its first member.
     let mut waiting: Vec<Result<usize, usize>> = Vec::new();
     let mut queued = vec![false; regions.len()];
     let mut regions: Vec<Option<(Vec<usize>, Built)>> = regions.into_iter().map(Some).collect();
@@ -480,6 +530,7 @@ fn rewrite(graph: &Graph, region: &[Option<usize>], regions: Vec<(Vec<usize>, Bu
     out
 }
 
+/// Gathers a strided tensor into a contiguous byte buffer.
 fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
     let size = ty.dtype.size_of();
     let mut bytes = Vec::with_capacity(ty.numel() * size);
@@ -496,6 +547,8 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
     bytes
 }
 
+/// Queues the Neural Engine fusion `step` on the Core ML thread, compiling it with its weights on first use.
+/// The Metal stream signals before the job runs and waits until it finishes; `keep` stays alive until then.
 pub(super) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -515,6 +568,7 @@ pub(super) fn encode(
         None => contiguous_strides(&step.inputs[k].1.shape),
     };
     if entry.program.is_none() {
+        // Constants are read from device memory, so the stream must finish producing them first.
         crate::stream::mps::synchronize();
         let _compile = crate::profiler::record_host_kernel("coreml (compile)");
         let data: Vec<Option<Vec<u8>>> = (0..inputs.len())
@@ -541,6 +595,7 @@ pub(super) fn encode(
                 .map(|(&p, (_, ty))| (p.cast_mut(), ty.clone())),
         )
         .collect();
+    // Back-to-back Core ML jobs with nothing encoded in between reuse the previous completion as readiness.
     let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
     let ready = match *last {
         Some((encoded, done)) if encoded == crate::stream::mps::encoded() => done,
@@ -571,23 +626,34 @@ pub(super) fn encode(
     Ok(())
 }
 
+/// Last shared-event value handed out.
 static EVENT: AtomicU64 = AtomicU64::new(0);
 
+/// Stream position and completion event of the last queued Core ML job.
 static LAST: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
+/// One Core ML prediction queued for the host thread.
 struct Job {
+    /// The compiled model to run.
     program: Arc<Program>,
+    /// Input pointers, types and element strides.
     ins: Vec<(*const u8, TensorType, Vec<usize>)>,
+    /// Output pointers and types.
     outs: Vec<(*mut u8, TensorType)>,
+    /// Event value to wait for before reading inputs.
     ready: u64,
+    /// Event value to signal after writing outputs.
     done: u64,
+    /// Tensors kept alive until the job finishes.
     _keep: Vec<Tensor>,
     label: &'static str,
+    /// Profiler context to record the run in, if profiling.
     profile: Option<crate::profiler::GpuContext>,
 }
 
 unsafe impl Send for Job {}
 
+/// Sender to the Core ML worker thread, starting it on first use.
 fn jobs() -> Sender<Job> {
     static JOBS: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
     let sender = JOBS.get_or_init(|| {
@@ -608,6 +674,7 @@ fn jobs() -> Sender<Job> {
         .clone()
 }
 
+/// Runs one job on the worker thread between its ready and done events.
 fn run(job: Job) {
     unsafe { lumen_coreml_host_wait(job.ready) };
     let start = crate::profiler::now_ns();
@@ -633,6 +700,7 @@ fn run(job: Job) {
 }
 
 #[cfg(feature = "python")]
+/// Forgets the compiled programs of `steps` so their next run recompiles with fresh weights.
 pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
     let mut programs = programs();
     for step in steps {
@@ -644,6 +712,7 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
     }
 }
 
+/// Compiler pass offloading eligible regions to the Neural Engine.
 pub(super) struct NeuralEngine;
 
 impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
@@ -651,6 +720,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
         "neural_engine"
     }
 
+    /// Marks parameters and packed blocks that are never donated as fixed weights, then offloads.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let options = m.options;
         let written = |i: usize| {

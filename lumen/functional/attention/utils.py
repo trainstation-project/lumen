@@ -1,3 +1,5 @@
+"""Helpers shared by the attention implementations."""
+
 from lumen.functional.functions import le, where
 from lumen.graph import prims
 from lumen.graph.tracer import (
@@ -23,5 +25,6 @@ def _scores(q, k, scale, causal):
         sq, sk = s.shape[2], s.shape[3]
         rows = prims.iota("int64", s.shape, 2)
         cols = prims.iota("int64", s.shape, 3)
+        # Align the last query with the last key so a shorter query block sees the whole prefix.
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
     return s

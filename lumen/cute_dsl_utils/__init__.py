@@ -1,3 +1,5 @@
+"""CuTe DSL helpers for lumen's CUDA kernels: activations, dtype mapping, and grid-strided elementwise kernels."""
+
 from .activations import sigmoid, tanh
 from .constants import get_cute_dtype
 from .elementwise import ElementwiseCUDAKernel, get_compiled_elementwise_cuda_kernel

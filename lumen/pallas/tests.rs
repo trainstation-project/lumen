@@ -1,12 +1,16 @@
+//! Tests of building Pallas TPU kernels and the Mosaic text they lower to.
+
 use super::mosaic::lower;
 use super::{Kernel, Op, Space, Type};
 use crate::graph::{Primitive, TensorType};
 use crate::{DType, Scalar};
 
+/// The type of an int32 scalar.
 fn i32_scalar() -> TensorType {
     TensorType::new(DType::I32, &[])
 }
 
+/// Adds an int32 constant `v` to `k`, returning its variable.
 fn constant(k: &mut Kernel, v: i64) -> usize {
     let full = Primitive::Full {
         shape: vec![],
@@ -16,6 +20,7 @@ fn constant(k: &mut Kernel, v: i64) -> usize {
     k.apply(full, &[]).unwrap()
 }
 
+/// A host-to-memory copy loads its row from SMEM and lowers to a DMA start and wait.
 #[test]
 fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
     let mut k = Kernel::new(1, Some(4), 64);
@@ -53,6 +58,7 @@ fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
     }
 }
 
+/// A for loop with a first-step `if` accumulates a matmul in a VMEM ref.
 #[test]
 fn a_loop_accumulates_a_matmul_in_vmem() {
     let mut k = Kernel::new(1, None, 64);
@@ -109,6 +115,7 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
     }
 }
 
+/// Shifts and bitcasts unpack a bfloat16 from a 32-bit word.
 #[test]
 fn bit_ops_unpack_a_bfloat16_word() {
     let mut k = Kernel::new(1, None, 64);
@@ -150,6 +157,7 @@ fn bit_ops_unpack_a_bfloat16_word() {
     }
 }
 
+/// Integer and float constants lower bit-exactly, including -inf.
 #[test]
 fn constants_are_exact() {
     let mut k = Kernel::new(1, None, 64);
@@ -172,6 +180,7 @@ fn constants_are_exact() {
     assert!(text.contains("{value = 0xFF800000 : f32}"), "{text}");
 }
 
+/// Loads from HBM or whole SMEM, HBM allocations, out-of-range slices and unclosed regions fail.
 #[test]
 fn kernels_refuse_what_tpus_cannot_do() {
     let mut k = Kernel::new(1, None, 64);
@@ -204,6 +213,7 @@ fn kernels_refuse_what_tpus_cannot_do() {
     assert!(lower(&k, "closed").is_ok());
 }
 
+/// A SparseCore kernel gathers HBM rows by VMEM offsets with an indirect DMA.
 #[test]
 fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
     let view = TensorType::new(DType::U32, &[64, 256]);
@@ -250,6 +260,7 @@ fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
     }
 }
 
+/// `pow` with an integer exponent lowers via `|x|` and restores the sign from the exponent's parity.
 #[test]
 fn an_integer_power_takes_its_sign_from_the_exponents_parity() {
     let mut k = Kernel::new(1, None, 64);

@@ -1,26 +1,40 @@
+//! Metal source for transposes fused with elementwise ops, staged through threadgroup tiles so
+//! both the reads and the writes are coalesced.
 use super::*;
 
+/// How a body's output is tiled for a transpose kernel.
 pub(crate) struct TransposeTiling {
+    /// Transpose nodes read into threadgroup tiles, all sharing the same tiling.
     heroes: Vec<Var>,
+    /// Output elements along the merged dims that are contiguous in the transposed input.
     a: usize,
+    /// Output elements along the merged innermost dims, contiguous in the output.
     b: usize,
+    /// Output stride of the `a` dims.
     a_stride: usize,
+    /// `(size, output stride)` of each remaining dim, flattened into the grid's z axis.
     batch: Vec<(usize, usize)>,
 }
 
 impl TransposeTiling {
+    /// Launch grid: one threadgroup per `TILE` x `TILE` tile of each batch.
     pub(crate) fn grid(&self) -> crate::kernels::mps::Grid {
         let batches = self.batch.iter().map(|d| d.0).product();
         crate::kernels::mps::Grid::Groups([self.a.div_ceil(TILE), self.b.div_ceil(TILE), batches])
     }
 }
 
+/// Side of the square tile one threadgroup transposes.
 pub(super) const TILE: usize = 32;
 
+/// Smallest extent on both tiled sides worth staging through a tile.
 pub(super) const MIN_TILED: usize = 16;
 
+/// Most transposes one kernel stages, each needing its own threadgroup tile.
 pub(crate) const MAX_HEROES: usize = 4;
 
+/// Tiling for a body whose output is computed elementwise from transposes that swap a contiguous
+/// input axis with the output's innermost axis, or `None` if no transpose qualifies.
 pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
     use Primitive::*;
     if gemm_dot(body).is_some()
@@ -39,6 +53,8 @@ pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
     for &v in body.outputs() {
         used[v] = true;
     }
+    // A node is at the output when it has the output's shape and reaches it only through
+    // elementwise ops, so the tile can be read back at output positions.
     let mut at_output = vec![false; body.types.len()];
     for node in nodes.iter().rev() {
         let v = node.output;
@@ -73,6 +89,8 @@ pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
             return None;
         }
         let xs = contiguous_strides(&body.type_of(node.inputs[0]).shape);
+        // Merge adjacent output dims that stay contiguous in the input into runs of
+        // (first dim, last dim, input stride).
         let mut runs: Vec<(usize, usize, usize)> = Vec::new();
         for d in (0..out.shape.len()).filter(|&d| out.shape[d] != 1) {
             let stride = xs[permutation[d]];
@@ -111,6 +129,8 @@ pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
     })
 }
 
+/// Generates the tiled transpose kernel: loads each hero transpose's input into a tile at input
+/// order, then computes and stores the outputs reading the tile transposed.
 pub(super) fn transpose_kernel(
     body: &Graph,
     by_value: &[bool],
@@ -126,6 +146,7 @@ pub(super) fn transpose_kernel(
     let mut source = String::new();
     for (k, &h) in tiling.heroes.iter().enumerate() {
         let t = metal_type(body.type_of(h).dtype);
+        // One column of padding avoids threadgroup memory bank conflicts on the transposed read.
         writeln!(source, "    threadgroup {t} tile{k}[{TILE}][{}];", TILE + 1).unwrap();
     }
     writeln!(source, "    uint base = {base};").unwrap();

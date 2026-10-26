@@ -1,3 +1,6 @@
+/// Matmul for few output rows: each threadgroup covers `R` rows and a `BLOCK`-column block;
+/// threads own `V` columns each and split K into `THREADS / (BLOCK / V)` strided parts, whose
+/// partial sums are reduced through threadgroup `partials` (rows padded to `BLOCK + 1`).
 template <typename T,
           typename A,
           typename O,
@@ -47,6 +50,7 @@ inline void matmul_skinny(device const T *lhs,
     UNROLL for (uint r = 0; r < R; ++r) {
         UNROLL for (uint i = 0; i < V; ++i) { acc[r][i] = 0; }
     }
+    // With column halves, each lane's V columns alternate between the first and second half of N.
     constexpr uint HALVES = HALF_COLUMNS ? 2 : 1, HV = V / HALVES, HW = HV < 4 ? HV : 4;
     const ulong second = HALF_COLUMNS ? N / 2 : 0;
     if (n0 + V <= N && rk % HW == 0 && second % HW == 0 && ulong(b) % (HW * sizeof(T)) == 0) {

@@ -1,9 +1,13 @@
+"""``pallas_call``: a Pallas kernel as a traced op, lowered to Mosaic when the TPU plan builds it."""
+
 from lumen.graph import prims, tracer
 
 from .pipeline import _NAMES, BoundedSlice
 
+# Builders of each pallas_call's Mosaic program, indexed by the handle stored in its node.
 _CALLS = []
 
+# ``memory_space`` of an operand left in HBM, passed to the kernel as is.
 ANY = "any"
 
 
@@ -11,6 +15,7 @@ class ShapeDtypeStruct:
     """An output's ``shape`` and ``dtype`` (``jax.ShapeDtypeStruct``)."""
 
     def __init__(self, shape, dtype):
+        """Records the output's shape and dtype."""
         self.shape, self.dtype = tuple(shape), str(dtype)
 
 
@@ -45,11 +50,13 @@ def pallas_call(
     single = not isinstance(out_shape, (list, tuple))
     outs = [out_shape] if single else list(out_shape)
     grid = (grid,) if isinstance(grid, int) else tuple(grid)
+    # Named grid axes, ``(name, size)`` pairs, for ``pl.program_id`` by name.
     names = [a[0] for a in grid] if grid and all(isinstance(a, tuple) for a in grid) else []
     grid = tuple(a[1] for a in grid) if names else grid
     label = f"pallas_call[{name or getattr(kernel, '__name__', 'kernel')}]"
 
     def call(*args):
+        """Records the kernel as one ``pallas_call`` node on ``args`` and returns its outputs."""
         if isinstance(out_specs, (list, tuple)) and not single and len(out_specs) != len(outs):
             raise ValueError(
                 "Pytree for `out_specs` and `out_shape` do not match. There are 1 mismatches, including:\n"
@@ -62,15 +69,18 @@ def pallas_call(
         _check_aliases(aliases, types[: len(args)], types[len(args) :])
 
         def build(spec):
+            """Traces the kernel into a Mosaic program for the launch ``spec``."""
             from . import kernel as trace
 
             def body(scalars, memory, result):
+                """Views the scalar-addressed rows as refs, applies aliases, then runs the kernel."""
                 from lumen.kernels.tpu.pallas import view
 
                 refs = [
                     view(memory if i < len(args) else result, scalars[i], shape, dtype)
                     for i, (dtype, shape) in enumerate(types)
                 ]
+                # An aliased output starts as a copy of its input.
                 if aliases:
                     from . import SemaphoreType, make_async_copy, scratch
 
@@ -92,6 +102,7 @@ def pallas_call(
         first = prims.bind(
             "pallas_call", *args, op=label, kernel=handle, outputs=[(o.dtype, list(o.shape)) for o in outs]
         )
+        # Outputs after the first are projections of the one node.
         rest = [
             prims.bind("fusion_output", first, index=k, dtype=o.dtype, shape=o.shape)
             for k, o in enumerate(outs[1:], 1)
@@ -119,6 +130,7 @@ def _check_aliases(aliases, ins, outs):
     (dtype and shape each) out of range or of different types."""
 
     def abstract(t):
+        """``dtype[d0,d1,...]``, as JAX prints an abstract value."""
         return f"{t[0]}[{','.join(map(str, t[1]))}]"
 
     for i, o in aliases.items():
@@ -135,6 +147,7 @@ def _check_aliases(aliases, ins, outs):
 
 
 def _specs(specs, count):
+    """``specs`` as a list (``count`` Nones for None, a single spec wrapped)."""
     if specs is None:
         return [None] * count
     return list(specs) if isinstance(specs, (list, tuple)) else [specs]
@@ -157,6 +170,7 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         space = None if spec is None else spec.memory_space
         if space == ANY:
             continue
+        # Operands without a block shape (or without a grid) are staged whole; others are pipelined.
         if (
             space is SMEM
             or (space is VMEM or whole or spec is None or not grid)
@@ -168,6 +182,7 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
     sem = scratch(SemaphoreType.DMA) if staged else None
 
     def copy(src, dst):
+        """Blocking DMA of ``src`` into ``dst``."""
         c = make_async_copy(src, dst, sem)
         c.start()
         c.wait()
@@ -183,6 +198,7 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         specs = [s if s is not None else BlockSpec() for s in specs]
 
         def body(*blocks):
+            """One pipeline step: substitutes the current blocks and runs the kernel."""
             for i, b in zip(piped, blocks):
                 args[i] = b
             _call(kernel, *args, *extra)
@@ -198,6 +214,7 @@ def _run(kernel, ins, outs, grid, in_specs, out_specs, scratch_shapes):
         )(*[refs[i] for i in piped])
     else:
         _call(kernel, *args, *extra)
+    # Staged outputs are copied back to HBM after the kernel.
     for i, _ in staged:
         if i >= len(ins):
             copy(args[i], refs[i])

@@ -1,3 +1,5 @@
+//! TPU `dot_general` (with a fused elementwise epilogue): picks VMEM-sized blocks and launches the Pallas program.
+
 use crate::DType;
 use crate::codegen::tpu::gemm::Epilogue;
 use crate::device::tpu::layout::Layout;
@@ -6,17 +8,23 @@ use crate::graph::Var;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::tpu::{Launch, launch};
 
+/// A dot's operands viewed as `[batch, lead.., m, k] x [batch, k, n]`.
 #[derive(Debug, PartialEq)]
 struct Form {
+    /// Product of the shared batch dimensions.
     batch: usize,
+    /// Product of the lhs's extra free dimensions before `m`, which share one rhs batch.
     lead: usize,
     m: usize,
     n: usize,
     k: usize,
+    /// Whether the rhs is stored `[n, k]`.
     transposed: bool,
+    /// Whether the lhs is stored `[k, m]`.
     lhs_transposed: bool,
 }
 
+/// The [`Form`] of a dot with operand shapes `lhs` and `rhs`, or why the TPU kernel can't run it.
 fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -63,6 +71,7 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     })
 }
 
+/// Greatest common divisor.
 fn gcd(a: usize, b: usize) -> usize {
     match b {
         0 => a,
@@ -70,6 +79,7 @@ fn gcd(a: usize, b: usize) -> usize {
     }
 }
 
+/// The largest block dividing `n` that is a multiple of `unit` and at most `cap`; `n` itself when it fits.
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     if n <= cap {
         return Some(n);
@@ -80,8 +90,10 @@ pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
         .find(|&b| n.is_multiple_of(b))
 }
 
+/// VMEM budget for one dot's blocks, in bytes.
 const VMEM: usize = 88 << 20;
 
+/// Starting `(m, n, k)` block caps for `dtype` operands with contraction length `k`.
 pub(crate) fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     match dtype {
         DType::F32 => (2048, 1024, 1024),
@@ -90,6 +102,8 @@ pub(crate) fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     }
 }
 
+/// VMEM bytes a block choice needs: double-buffered operand and streamed blocks, float32
+/// accumulators when K is split, and float32 operand copies.
 fn footprint(
     bm: usize,
     bn: usize,
@@ -110,6 +124,7 @@ fn footprint(
     bytes
 }
 
+/// Sublane rows of one TPU tile of `dtype`; only float32 and bfloat16 are supported.
 fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     match dtype {
         DType::F32 => Ok(8),
@@ -120,6 +135,7 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     }
 }
 
+/// Launches the dot (or dot-plus-epilogue fusion) of a plan step on TPU device `index`.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -172,6 +188,7 @@ pub(crate) fn encode(
     if e.rows && windows.iter().any(Option::is_some) {
         return Err("dot_general on TPU: members of rows written into a wider buffer".into());
     }
+    // Blocks must divide every member and window start so none straddles two members.
     let starts: Vec<usize> = windows.iter().flatten().map(|w| w.1).collect();
     let unit_n = gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true);
     let whole_m = gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m);
@@ -199,6 +216,7 @@ pub(crate) fn encode(
     }
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, whole_k);
     let mut blocks;
+    // Shrink the K, then N, then M caps until the blocks fit in VMEM.
     loop {
         blocks = (
             block(whole_m, if f.lhs_transposed { 128 } else { unit_m }, cap_m),
@@ -230,6 +248,7 @@ pub(crate) fn encode(
             _ => break,
         }
     }
+    // Halve wide N blocks when the grid would have fewer than four steps.
     while let (Some(bm), Some(bn), Some(bk)) = blocks {
         let steps = f.batch * f.lead * (f.m / bm) * (f.n / bn) * (f.k / bk);
         if steps >= 4 || cap_n <= 256 || bn < 512 {

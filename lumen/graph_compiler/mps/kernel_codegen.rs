@@ -1,3 +1,5 @@
+//! Pass that generates Metal source for every requested kernel and gives each fusion its kernel name.
+
 use std::collections::HashMap;
 
 use super::alone::wrapped;
@@ -8,6 +10,7 @@ use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Compiler pass turning pending kernel requests into generated kernels.
 pub(super) struct Codegen;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
@@ -15,8 +18,11 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
         "codegen"
     }
 
+    /// Unmarks in-place concatenations that fusion invalidated, then generates each pending fusion's kernel
+    /// with the strided output views it writes into.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config.mps;
+        // Concatenations no longer valid in place get copied by their own loop kernel.
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {
@@ -43,6 +49,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                 request(kernels, Kernel::Loop(Vec::new()))
             });
         }
+        // Output views per fusion, keyed by output index, for fusions writing straight into a placed buffer.
         let placements = m.graph.placements();
         let mut views: HashMap<Var, HashMap<usize, (usize, Vec<usize>)>> = HashMap::new();
         for node in &m.graph.nodes {

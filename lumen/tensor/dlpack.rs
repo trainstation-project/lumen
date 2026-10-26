@@ -1,3 +1,5 @@
+//! DLPack interop: exporting tensors as (versioned or legacy) DLPack capsules that share their memory,
+//! and adopting capsules from other libraries as tensors whose storage releases the producer when freed.
 use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
@@ -13,19 +15,23 @@ use crate::tensor::dtype::DType;
 use crate::tensor::storage::Storage;
 use crate::{Device, Tensor};
 
+/// `DLDeviceType` codes for the devices lumen exports.
 const K_DL_CPU: i32 = 1;
 const K_DL_CUDA: i32 = 2;
 const K_DL_METAL: i32 = 8;
 
+/// `DLDataTypeCode` values.
 const K_DL_INT: u8 = 0;
 const K_DL_UINT: u8 = 1;
 const K_DL_FLOAT: u8 = 2;
 const K_DL_BFLOAT: u8 = 4;
 const K_DL_BOOL: u8 = 6;
 
+/// DLPack version lumen produces and the newest major version it reads.
 const DLPACK_MAJOR_VERSION: u32 = 1;
 const DLPACK_MINOR_VERSION: u32 = 0;
 
+/// `DLDevice` from `dlpack.h`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DLDevice {
@@ -33,6 +39,7 @@ struct DLDevice {
     device_id: i32,
 }
 
+/// `DLDataType` from `dlpack.h`: type code, bits per lane and lane count.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DLDataType {
@@ -41,17 +48,22 @@ struct DLDataType {
     lanes: u16,
 }
 
+/// `DLTensor` from `dlpack.h`: a borrowed strided view of device memory.
 #[repr(C)]
 struct DLTensor {
     data: *mut c_void,
     device: DLDevice,
     ndim: i32,
     dtype: DLDataType,
+    /// Sizes, `ndim` of them.
     shape: *mut i64,
+    /// Strides in elements; null means contiguous.
     strides: *mut i64,
+    /// Bytes from `data` to the first element.
     byte_offset: u64,
 }
 
+/// Legacy (pre-1.0) `DLManagedTensor`, carried in a `"dltensor"` capsule.
 #[repr(C)]
 struct DLManagedTensor {
     dl_tensor: DLTensor,
@@ -59,12 +71,14 @@ struct DLManagedTensor {
     deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
 }
 
+/// `DLPackVersion` from `dlpack.h`.
 #[repr(C)]
 struct DLPackVersion {
     major: u32,
     minor: u32,
 }
 
+/// DLPack 1.0 `DLManagedTensorVersioned`, carried in a `"dltensor_versioned"` capsule.
 #[repr(C)]
 struct DLManagedTensorVersioned {
     version: DLPackVersion,
@@ -74,15 +88,23 @@ struct DLManagedTensorVersioned {
     dl_tensor: DLTensor,
 }
 
+/// The legacy and versioned managed-tensor structs, so export and import are written once for both.
 trait Managed: Sized + 'static {
+    /// Capsule name for an unconsumed tensor.
     const CAPSULE: &'static CStr;
+    /// Capsule name after a consumer has taken ownership.
     const USED: &'static CStr;
 
+    /// Builds the managed struct around `dl_tensor` with `deleter` and no context yet.
     fn new(dl_tensor: DLTensor, deleter: unsafe extern "C" fn(*mut Self)) -> Self;
+    /// The described tensor.
     fn dl_tensor(&self) -> &DLTensor;
+    /// The producer's context pointer, for setting it after construction.
     fn manager_ctx(&mut self) -> &mut *mut c_void;
+    /// The producer's deleter, called once the consumer is done.
     fn deleter(&self) -> Option<unsafe extern "C" fn(*mut Self)>;
 
+    /// Errors when the capsule's DLPack version is newer than lumen reads.
     fn check_version(&self) -> PyResult<()> {
         Ok(())
     }
@@ -154,6 +176,7 @@ impl Managed for DLManagedTensorVersioned {
 }
 
 #[allow(dead_code)]
+/// Owner behind an exported capsule: keeps the tensor and its shape and stride arrays alive.
 struct LumenDLMTensor<T> {
     handle: Tensor,
     shape: Vec<i64>,
@@ -161,6 +184,11 @@ struct LumenDLMTensor<T> {
     tensor: T,
 }
 
+/// Frees the `LumenDLMTensor` behind an exported managed tensor.
+///
+/// # Safety
+///
+/// `arg` must come from `to_managed::<T>` and not have been deleted already.
 unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
     unsafe {
         drop(Box::from_raw(
@@ -169,10 +197,12 @@ unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
     }
 }
 
+/// Exports `t` as a heap-allocated managed tensor after waiting for its pending writes.
 fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
     t.wait_();
     let shape: Vec<i64> = t.shape().iter().map(|&d| d as i64).collect();
     let strides: Vec<i64> = t.strides().iter().map(|&s| s as i64).collect();
+    // Metal buffers are exported by base pointer plus byte offset, since a buffer pointer cannot be offset.
     let (data, byte_offset) = match t.device() {
         Device::Mps(_) => (
             t.storage().data_ptr(),
@@ -201,6 +231,11 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
     }
 }
 
+/// Capsule destructor: deletes the managed tensor unless a consumer renamed the capsule to take it.
+///
+/// # Safety
+///
+/// `capsule` must be a live capsule object.
 unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject) {
     unsafe {
         if ffi::PyCapsule_IsValid(capsule, T::CAPSULE.as_ptr()) == 0 {
@@ -213,6 +248,7 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
     }
 }
 
+/// Wraps `t` in a DLPack capsule of kind `T`; meta and TPU tensors cannot be exported.
 fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
     if t.device() == Device::Meta(0) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -235,10 +271,12 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
     }
 }
 
+/// Exports `t` as a legacy `"dltensor"` capsule.
 pub(crate) fn to_dlpack<'py>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
     to_capsule::<DLManagedTensor>(py, t)
 }
 
+/// Exports `t` as a DLPack 1.0 `"dltensor_versioned"` capsule.
 pub(crate) fn to_dlpack_versioned<'py>(
     py: Python<'py>,
     t: &Tensor,
@@ -246,6 +284,7 @@ pub(crate) fn to_dlpack_versioned<'py>(
     to_capsule::<DLManagedTensorVersioned>(py, t)
 }
 
+/// The `DLDevice` for an exportable device.
 fn dl_device(device: Device) -> DLDevice {
     let (device_type, device_id) = match device {
         Device::Cpu(_) => (K_DL_CPU, 0),
@@ -261,6 +300,7 @@ fn dl_device(device: Device) -> DLDevice {
     }
 }
 
+/// The `DLDataType` for `dtype`; types DLPack has no code for are exported as unsigned of the same width.
 fn dl_dtype(dtype: DType) -> DLDataType {
     let code = match dtype {
         DType::Bool => K_DL_BOOL,
@@ -277,6 +317,7 @@ fn dl_dtype(dtype: DType) -> DLDataType {
     }
 }
 
+/// Imports a versioned or legacy DLPack capsule as a tensor sharing its memory, consuming the capsule.
 pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     let is = |name: &CStr| unsafe { ffi::PyCapsule_IsValid(capsule.as_ptr(), name.as_ptr()) } != 0;
     if is(DLManagedTensorVersioned::CAPSULE) {
@@ -291,6 +332,7 @@ pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     }
 }
 
+/// Reads and validates the managed tensor in `capsule`, marks the capsule used and adopts the memory.
 fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     let managed = unsafe { ffi::PyCapsule_GetPointer(capsule.as_ptr(), T::CAPSULE.as_ptr()) };
     let managed = managed.cast::<T>();
@@ -303,16 +345,20 @@ fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> 
     Ok(adopt(managed, layout))
 }
 
+/// A DLPack tensor's layout in lumen's terms.
 struct DLLayout {
     data: *mut u8,
     device: Device,
     dtype: DType,
     shape: Vec<usize>,
     strides: Vec<usize>,
+    /// Element offset of the first element from `data`.
     offset: usize,
+    /// Bytes from `data` to one past the furthest element.
     nbytes: usize,
 }
 
+/// Validates a `DLTensor` (device, dtype, non-negative sizes and strides, aligned offset) and converts its layout.
 fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     let device = device_of(dl.device)?;
     allocator_for(device).map_err(PyBufferError::new_err)?;
@@ -350,6 +396,7 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
         )));
     }
     let offset = byte_offset / size;
+    // Extent from `data` to the furthest element, which bounds the adopted buffer.
     let nbytes = if shape.contains(&0) {
         0
     } else {
@@ -372,12 +419,14 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     })
 }
 
+/// A producer's managed tensor, released through its deleter when lumen frees the adopted memory.
 struct Producer<T>(*mut T);
 
 unsafe impl<T> Send for Producer<T> {}
 unsafe impl<T> Sync for Producer<T> {}
 
 impl<T: Managed> Producer<T> {
+    /// Calls the producer's deleter with the GIL held.
     fn release(self) {
         Python::attach(|_| unsafe {
             if let Some(deleter) = (*self.0).deleter() {
@@ -387,8 +436,11 @@ impl<T: Managed> Producer<T> {
     }
 }
 
+/// Allocator for adopted storage: freeing the adopted buffer releases the producer instead of freeing memory.
 struct Adopted<T> {
+    /// The device's own allocator, used for any other block.
     device: Arc<dyn Allocator>,
+    /// Address of the adopted buffer and its producer, until released.
     buffer: Mutex<Option<(usize, Producer<T>)>>,
 }
 
@@ -410,6 +462,7 @@ impl<T: Managed> Allocator for Adopted<T> {
     }
 }
 
+/// Wraps a producer's memory in a tensor whose storage releases `managed` when dropped.
 fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
     let data = NonNull::new(layout.data).unwrap_or(NonNull::dangling());
     let allocator = Adopted {
@@ -427,6 +480,7 @@ fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
     )
 }
 
+/// The lumen device for a `DLDevice`.
 fn device_of(device: DLDevice) -> PyResult<Device> {
     match device.device_type {
         K_DL_CPU => Ok(Device::Cpu(0)),
@@ -438,6 +492,7 @@ fn device_of(device: DLDevice) -> PyResult<Device> {
     }
 }
 
+/// The lumen dtype for a single-lane `DLDataType`.
 fn dtype_of(dtype: DLDataType) -> PyResult<DType> {
     let unsupported = || {
         PyBufferError::new_err(format!(

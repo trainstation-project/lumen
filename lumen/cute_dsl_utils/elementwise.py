@@ -1,3 +1,5 @@
+"""Base class for grid-strided CuTe elementwise CUDA kernels and their compile cache."""
+
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -17,6 +19,8 @@ LOG_WARP_SIZE = 5
 def _load(
     gX: cute.Tensor, rC: cute.Tensor, thr_copy, copy_atom: cute.CopyAtom, block_coord, is_within_boundary
 ) -> cute.TensorSSA:
+    """Loads this thread's values of tile `block_coord` of `gX` into registers, predicated by `rC` on
+    a partial tile."""
     bX = gX[block_coord]
     tX = thr_copy.partition_S(bX)
     rX = cute.make_rmem_tensor_like(tX)
@@ -39,6 +43,7 @@ def _store(
     block_coord,
     is_within_boundary,
 ) -> None:
+    """Stores this thread's values `y` into tile `block_coord` of `gY`, predicated by `rC` on a partial tile."""
     bY = gY[block_coord]
     tY = thr_copy.partition_D(bY)
     rY = cute.make_rmem_tensor_like(tY)
@@ -61,11 +66,16 @@ def _num_blocks(mXs: list[cute.Tensor], mYs: list[cute.Tensor]) -> int:
 
 
 class ElementwiseCUDAKernel:
+    """An elementwise kernel over same-shaped 2-D tensors: subclasses implement `compute`; each thread
+    handles `M` rows of 128-bit vectors per tile."""
+
     def __init__(self, BLOCK_SIZE: int, M: int) -> ElementwiseCUDAKernel:
+        """`BLOCK_SIZE` threads per block (a multiple of 32), `M` value rows per thread."""
         self.BLOCK_SIZE = BLOCK_SIZE
         self.M = M
 
     def compute(self, xs: list[cute.TensorSSA]) -> list[cute.TensorSSA]:
+        """Maps the loaded input register tiles to output register tiles."""
         raise NotImplementedError
 
     @cute.kernel
@@ -80,6 +90,7 @@ class ElementwiseCUDAKernel:
         shape: cute.Shape,
         TOTAL_TILES: Int32,
     ) -> None:
+        """Walks the tiles grid-strided, loading every input, applying `compute` and storing every output."""
         BLOCK_ID, _, _ = cute.arch.block_idx()
         NUM_BLOCKS, _, _ = cute.arch.grid_dim()
         THREAD_ID, _, _ = cute.arch.thread_idx()
@@ -120,12 +131,15 @@ class ElementwiseCUDAKernel:
 
     @cute.jit
     def __call__(self, mXs: list[cute.Tensor], mYs: list[cute.Tensor], stream: cuda.CUstream) -> None:
+        """Tiles the tensors (all shaped like `mXs[0]`) and launches one block per SM on `stream`."""
+        # Elements per 128-bit access, limited by the widest dtype among the tensors.
         vector_size = min([128 // i.element_type.width for i in mXs + mYs])
 
         thr_layout = cute.make_ordered_layout((self.BLOCK_SIZE >> LOG_WARP_SIZE, WARP_SIZE), order=(1, 0))
         val_layout = cute.make_ordered_layout((self.M, vector_size), order=(1, 0))
         tiler_mn, _ = cute.make_layout_tv(thr_layout, val_layout)
 
+        # Identity tensor of coordinates, tiled like the data, for the partial-tile bounds checks.
         mC = cute.make_identity_tensor(mXs[0].shape)
         gC = cute.zipped_divide(mC, tiler_mn)
 
@@ -175,6 +189,7 @@ def get_compiled_elementwise_cuda_kernel(
     kernel = caller_op.cache.get(key)
 
     if kernel is None:
+        # Each argument becomes a fake tensor with symbolic shape and the promised column divisibility.
         fake_tensors = []
         for example_tensors, divisibility_list in zip(example_tensors_list, divisibility_list_list):
             if example_tensors is None:

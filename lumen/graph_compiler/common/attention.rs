@@ -1,3 +1,6 @@
+//! Pattern matching of flash attention (forward and backward) in traced graphs, and the rewrite that
+//! replaces each match with a single fusion kernel.
+
 use std::collections::HashMap;
 
 use crate::DType;
@@ -5,66 +8,107 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
 use crate::graph_compiler::constant;
 use crate::tensor::contiguous_strides;
 
+/// How a kernel reads (or writes) a `[batch.., row, col]` operand as a strided view of `base`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Access {
+    /// Graph value whose buffer holds the data.
     pub base: Var,
+    /// Element offset of the view in `base`.
     pub offset: usize,
+    /// `(stride, divisor)` per batch dim: index `i` addresses `i / divisor * stride`.
     pub batch: Vec<(usize, usize)>,
+    /// Element stride of the row dim.
     pub row: usize,
+    /// Element stride of the column dim.
     pub col: usize,
 }
 
+/// A matched `softmax(scores(Q K^T)) V` attention.
 #[derive(Debug, Clone)]
 pub(crate) struct Attention {
+    /// Node whose output is the attention as written (the second dot or its trailing transposes).
     pub root: usize,
     pub q: Access,
     pub k: Access,
     pub v: Access,
+    /// Where the attention output is written.
     pub out: Access,
+    /// Batch extents (leading dims of the scores).
     pub batch: Vec<usize>,
+    /// Query count.
     pub sq: usize,
+    /// Key count.
     pub sk: usize,
+    /// Head dim of Q and K.
     pub h: usize,
+    /// Head dim of V.
     pub hv: usize,
+    /// Ops applied to the raw `Q K^T` before softmax, in order.
     pub scores: Vec<Score>,
+    /// Causal diagonal: key `k` is kept for query `q` when `k <= q + causal (+ offset)`.
     pub causal: Option<i64>,
+    /// Runtime scalar added to the causal diagonal.
     pub offset: Option<Var>,
+    /// Node computing `max + log(sum)` when the graph also reads the logsumexp.
     pub lse: Option<usize>,
+    /// The `Q K^T` dot node.
     pub dot1: usize,
+    /// The `P V` dot node.
     pub dot2: usize,
+    /// Row max of the scores.
     pub max: Var,
+    /// Row sum of the exponentials.
     pub sum: Var,
+    /// Dtype of Q, K and V.
     pub dtype: DType,
+    /// Dtype of the written output.
     pub out_dtype: DType,
     pub dropout: Option<Dropout>,
 }
 
+/// Dropout on the attention probabilities, from `random_bits` compared against a threshold.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Dropout {
+    /// Seed operand of `random_bits`.
     pub seed: Var,
+    /// Counter start operand of `random_bits`.
     pub start: Var,
+    /// Static counter offset of `random_bits`.
     pub offset: u64,
+    /// Probabilities whose random bits are below this are dropped.
     pub threshold: u32,
+    /// Scale applied to the kept probabilities.
     pub scale: f64,
+    /// The boolean drop mask value in the graph.
     pub mask: Var,
 }
 
+/// One op applied to the attention scores.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Score {
+    /// Rounds to the dtype (a cast).
     Round(DType),
+    /// Multiplies by a constant, computing in the dtype.
     Mul(f64, DType),
 }
 
+/// A matched flash-attention backward: gradients of Q, K and V from the transposed scores `S^T`.
 #[derive(Debug, Clone)]
 pub(crate) struct Backward {
+    /// Node writing dV and where it writes, when dV is computed.
     pub dv_out: Option<(usize, Access)>,
+    /// Node writing dK and where it writes, when dK is computed.
     pub dk_out: Option<(usize, Access)>,
+    /// Node writing dQ and where it writes, when dQ is computed.
     pub dq_out: Option<(usize, Access)>,
     pub q: Access,
     pub k: Access,
     pub v: Access,
+    /// Gradient of the attention output.
     pub d_o: Access,
+    /// Per-query logsumexp saved by the forward pass.
     pub lse: Access,
+    /// Per-query `rowsum(dO * O)`.
     pub delta: Access,
     pub batch: Vec<usize>,
     pub sq: usize,
@@ -73,17 +117,22 @@ pub(crate) struct Backward {
     pub hv: usize,
     pub scores: Vec<Score>,
     pub causal: Option<i64>,
+    /// Constant scale applied to dS.
     pub ds_scale: f64,
     pub dtype: DType,
     pub dropout: Option<Dropout>,
 }
 
+/// Largest head dim the backward kernel supports.
 pub(crate) const MAX_BACKWARD_HEAD: usize = 128;
 
+/// The first attention backward found in a fusion body.
 pub(crate) fn backward_of_body(body: &Graph) -> Option<Backward> {
     backward_of_body_into(body, HashMap::new())
 }
 
+/// The first attention backward in `body`, where `views` gives `(offset, strides)` of body outputs
+/// (by output index) that are written into a view of a larger buffer.
 pub(crate) fn backward_of_body_into(
     body: &Graph,
     views: HashMap<usize, (usize, Vec<usize>)>,
@@ -96,6 +145,7 @@ pub(crate) fn backward_of_body_into(
     (0..body.nodes().len()).find_map(|i| m.backward(i))
 }
 
+/// Extracts the subgraph computing `outputs` from `bases` as a standalone body with `bases` as inputs.
 pub(crate) fn body_of(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -135,6 +185,8 @@ pub(crate) fn body_of(
     body
 }
 
+/// Replaces each matched attention backward with fusion kernels named by `kernel`: one computing
+/// dK, dV and dQ when `together` says so and the order allows, otherwise one for dK/dV and one for dQ.
 pub(crate) fn fuse_backward(
     graph: &Graph,
     together: impl Fn(&Backward) -> bool,
@@ -165,6 +217,7 @@ pub(crate) fn fuse_backward(
         if let Some(d) = &b.dropout {
             bases.extend([d.seed, d.start]);
         }
+        // A fusion goes after its last operand is produced and before any of its outputs is read.
         let ready = bases.iter().filter_map(|&v| m.producer[v]).max();
         let read_after = |outs: &[usize]| {
             let first = *outs.iter().min().expect("a dot");
@@ -187,6 +240,7 @@ pub(crate) fn fuse_backward(
     if fusions.is_empty() {
         return graph.clone();
     }
+    // Rebuild the graph, dropping the fused dots and placing each fusion at its insertion point.
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     for &v in graph.inputs() {
@@ -229,12 +283,15 @@ pub(crate) fn fuse_backward(
     out
 }
 
+/// Whether every element offset of a `rows x cols` view fits in 32 bits.
 fn fits32(acc: &Access, rows: usize, cols: usize) -> bool {
     (acc.row * (rows - 1) + acc.col * (cols - 1)) < (1 << 32)
 }
 
+/// Largest head dim the forward kernel supports.
 pub(crate) const MAX_HEAD: usize = 256;
 
+/// Every live forward attention in `graph`; `runtime_offsets` allows a runtime causal offset.
 pub(crate) fn attentions(graph: &Graph, runtime_offsets: bool) -> Vec<Attention> {
     let m = Matcher {
         runtime_offsets,
@@ -250,6 +307,7 @@ pub(crate) fn attentions(graph: &Graph, runtime_offsets: bool) -> Vec<Attention>
     found
 }
 
+/// Each attention traced in `graph` with the values computed between its operands and output.
 pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
     let nodes = graph.nodes();
     let mut producer = vec![None; graph.types.len()];
@@ -277,20 +335,28 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
         .collect()
 }
 
+/// The attention in a fusion body, allowing a runtime causal offset.
 pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
     attentions(body, true).into_iter().next()
 }
 
+/// An attention to fuse: the match, its epilogue chain, the node the fusion replaces, the epilogue's
+/// extra inputs, and whether the raw attention value is also kept as an output.
 type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
 
+/// Whether the kernel can read an epilogue input.
 pub(crate) type Leaves = fn(&Graph, Var) -> bool;
 
+/// Which elementwise epilogues may be fused into the attention kernel.
 #[derive(Clone, Copy)]
 pub(crate) struct Epilogues {
     pub(crate) leaves: Leaves,
+    /// Only fuse chains that do more than reshape, keeping the value before the trailing reshapes.
     pub(crate) reshaped: bool,
 }
 
+/// Replaces each forward attention, with its elementwise epilogue when `epilogues` allows, by a fusion
+/// kernel named by `kernel`. `scalars` are values passed by value, which the fusion can't read.
 pub(crate) fn fuse(
     graph: &Graph,
     epilogues: Option<Epilogues>,
@@ -301,12 +367,14 @@ pub(crate) fn fuse(
     let m = Matcher::new(graph);
     let found: Vec<Fused> = attentions(graph, runtime_offsets)
         .into_iter()
+        // A runtime causal offset must be a buffer the kernel can read.
         .filter(|a| a.offset.is_none_or(|v| !scalars.contains(&v)))
         .map(|a| {
             let (mut chain, mut leaves, mut kept) = match epilogues {
                 Some(e) => m.epilogue(a.root, scalars, e.leaves, e.reshaped),
                 None => (Vec::new(), Vec::new(), false),
             };
+            // Drop the epilogue when the raw attention or the logsumexp is read before the chain ends.
             let read_after =
                 |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
             let end = chain.last().copied().unwrap_or(a.root);
@@ -336,6 +404,7 @@ pub(crate) fn fuse(
     }
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
+        // The logsumexp is a fusion output, so its node goes unless it is read before the fusion.
         if found
             .iter()
             .any(|(a, _, end, _, _)| a.lse == Some(i) && i > *end)
@@ -395,6 +464,7 @@ pub(crate) fn fuse(
                 .apply(Primitive::FusionOutput { index, ty }, &[fused])
                 .expect("the fusion's output");
         }
+        // Restore the attention value in its original shape for its other readers.
         if let Some(r) = raw.filter(|&r| r != root) {
             let new_sizes = graph.type_of(root).shape.clone();
             map[root] = out
@@ -407,18 +477,28 @@ pub(crate) fn fuse(
     out
 }
 
+/// Graph indices used to match attention patterns.
 struct Matcher<'a> {
     graph: &'a Graph,
+    /// Node producing each value.
     producer: Vec<Option<usize>>,
+    /// Live nodes reading each value, in order.
     readers: Vec<Vec<usize>>,
+    /// Whether each value is a graph output.
     output: Vec<bool>,
+    /// Whether each node feeds a graph output (all nodes while still tracing).
     live: Vec<bool>,
+    /// Match dQ only as the dot or a single transpose of it (for a kernel writing all three gradients).
     plain_dq: bool,
+    /// Allow a causal offset from a rank-0 integer input.
     runtime_offsets: bool,
+    /// Body outputs written into a view: `(offset, strides)` of their buffer.
     views: HashMap<Var, (usize, Vec<usize>)>,
 }
 
 impl<'a> Matcher<'a> {
+    /// Follows the single-reader elementwise/reshape chain after `root` whose other operands are
+    /// readable leaves. Returns the chain's nodes, its leaves, and whether `root` has other readers.
     fn epilogue(
         &self,
         root: usize,
@@ -433,6 +513,7 @@ impl<'a> Matcher<'a> {
         loop {
             let v = nodes[end].output;
             let u = match (&self.readers[v][..], end == root) {
+                // The root may have other readers: then the raw value is kept as a fusion output.
                 ([u], _) if !self.output[v] => *u,
                 ([u, ..], true) => {
                     kept = true;
@@ -473,6 +554,8 @@ impl<'a> Matcher<'a> {
         (chain, leaves, kept)
     }
 
+    /// Collects the values `v` reads, looking through constants, broadcasts, reshapes and casts; false
+    /// when one is a by-value scalar input.
     fn leaves(&self, v: Var, scalars: &[Var], leaves: &mut Vec<Var>) -> bool {
         use Primitive::*;
         let Some(n) = self.node(v) else {
@@ -491,6 +574,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// Matcher over `graph` with producers, readers and liveness computed.
     fn new(graph: &'a Graph) -> Self {
         let nodes = graph.nodes();
         let n = graph.types.len();
@@ -529,14 +613,17 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// Node producing `v`, if any.
     fn node(&self, v: Var) -> Option<&'a Node> {
         self.producer[v].map(|i| &self.graph.nodes()[i])
     }
 
+    /// Whether `v` has exactly one reader and isn't a graph output.
     fn single(&self, v: Var) -> bool {
         !self.output[v] && self.readers[v].len() == 1
     }
 
+    /// `v` with a single-use cast removed.
     fn uncast(&self, v: Var) -> Var {
         match self.node(v) {
             Some(n) if matches!(n.primitive, Primitive::Cast { .. }) && self.single(v) => {
@@ -546,6 +633,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// `v` with single-use broadcasts and reshapes removed; `shared` may have several readers.
     fn unbroadcast(&self, mut v: Var, shared: Option<Var>) -> Var {
         while let Some(n) = self.node(v) {
             match n.primitive {
@@ -560,6 +648,7 @@ impl<'a> Matcher<'a> {
         v
     }
 
+    /// The constant `v` holds when it is a broadcast, reshape or cast of a `full`.
     fn scalar(&self, v: Var) -> Option<f64> {
         if !constant(self.graph, &self.producer, v) {
             return None;
@@ -577,6 +666,8 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// Matches `select(mask, 0, x * scale)` dropout on a `shape`d tensor. Returns `x`, the dropout,
+    /// and the dtype the scaling computes in.
     fn dropout(&self, v: Var, shape: &[usize], transposed: bool) -> Option<(Var, Dropout, DType)> {
         use Primitive::*;
         let n = self
@@ -599,6 +690,8 @@ impl<'a> Matcher<'a> {
         Some((x, dropout, self.graph.type_of(m).dtype))
     }
 
+    /// Matches a drop mask `random_bits < threshold` of `shape`, transposed in its last two dims when
+    /// `transposed`.
     fn mask(&self, v: Var, shape: &[usize], transposed: bool) -> Option<Dropout> {
         use Primitive::*;
         let rank = shape.len();
@@ -631,6 +724,8 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// Matches the attention backward around `exp` node `i`, computing `P^T = exp(S^T - lse)`, with
+    /// `dV = P^T dO`, `dS = P^T * (V dO^T - delta) * scale`, `dK = dS Q` and `dQ = dS^T K`.
     fn backward(&self, i: usize) -> Option<Backward> {
         use Primitive::*;
         let nodes = self.graph.nodes();
@@ -688,6 +783,7 @@ impl<'a> Matcher<'a> {
                 .iter()
                 .any(|&u| u != pt && self.scalar(u).is_some())
         };
+        // Readers of P^T: the dV dot (possibly through dropout or a cast) and the dS product.
         for &r in &self.readers[pt] {
             match &nodes[r].primitive {
                 Mul if dv.is_none() && scaled(r) => {
@@ -775,6 +871,7 @@ impl<'a> Matcher<'a> {
         {
             ds = nodes[c].output;
         }
+        // Readers of dS are the dK and dQ dots, told apart by contracting dim and other operand.
         let (mut dk, mut dq) = (None, None);
         for &r in &self.readers[ds] {
             let (lc, rc, lb, _, acc, out) = dot(r)?;
@@ -863,6 +960,8 @@ impl<'a> Matcher<'a> {
         })
     }
 
+    /// Follows dot `i` through transposes (and with `chain`, reshapes and one float cast) to where it
+    /// is written; returns that node and the write as an [`Access`] over the dot's dims.
     fn written(&self, i: usize, nb: usize, chain: bool) -> Option<(usize, Access)> {
         use Primitive::*;
         let nodes = self.graph.nodes();
@@ -888,6 +987,7 @@ impl<'a> Matcher<'a> {
             Some(view) => view.clone(),
             None => (0, contiguous_strides(&self.graph.type_of(value).shape)),
         };
+        // Map the written buffer's (stride, divisor) dims back through the path to the dot's dims.
         let mut dims: Vec<(usize, usize)> = strides.into_iter().map(|s| (s, 1)).collect();
         for &k in path[1..].iter().rev() {
             let node = &nodes[k];
@@ -921,6 +1021,8 @@ impl<'a> Matcher<'a> {
         Some((root, out))
     }
 
+    /// Walks back from scores `x` through casts, one constant scale and one causal mask to the
+    /// `Q K^T` dot. Returns the dot, the score ops in application order and the causal mask.
     fn scores(
         &self,
         x: Var,
@@ -971,6 +1073,7 @@ impl<'a> Matcher<'a> {
         Some((s, scores, causal))
     }
 
+    /// Node computing the logsumexp `m + log(l)`, when the max and sum feed only it and the softmax.
     fn lse(&self, m: Var, l: Var) -> Option<usize> {
         let nodes = self.graph.nodes();
         let two = |v: Var| self.readers[v].len() == 2 && !self.output[v];
@@ -988,6 +1091,7 @@ impl<'a> Matcher<'a> {
         (is_log && f32 && nodes[add].inputs.contains(&m)).then_some(add)
     }
 
+    /// Operand of `v` when `v` is a last-axis reduction accepted by `is`.
     fn reduced(&self, v: Var, is: fn(&Primitive) -> bool, shared: Option<Var>) -> Option<Var> {
         let n = self.node(v)?;
         let x = *n.inputs.first()?;
@@ -1000,6 +1104,7 @@ impl<'a> Matcher<'a> {
         (is(&n.primitive) && axes.as_slice() == [last] && read).then_some(x)
     }
 
+    /// Matches `softmax(scores) V` at dot node `i`, with optional dropout on the probabilities.
     fn attention(&self, i: usize) -> Option<Attention> {
         use Primitive::*;
         let nodes = self.graph.nodes();
@@ -1144,6 +1249,7 @@ impl<'a> Matcher<'a> {
         })
     }
 
+    /// Access of `v` with batch dims `b` and the given row/col dims, which must be undivided.
     fn access(&self, v: Var, b: &[usize], row: usize, col: usize) -> Option<Access> {
         let (base, offset, dims) = self.view(v);
         let one = |d: usize| (dims[d].1 == 1).then_some(dims[d].0);
@@ -1156,6 +1262,8 @@ impl<'a> Matcher<'a> {
         })
     }
 
+    /// Matches a causal mask `key < query + c` (or `<=` built as `lt | eq`) on iota coordinates.
+    /// Returns the diagonal offset and an optional runtime offset; `transposed` swaps query and key dims.
     fn causal(&self, v: Var, nb: usize, transposed: bool) -> Option<Causal> {
         use Primitive::*;
         let shape = self.graph.type_of(v).shape.clone();
@@ -1189,6 +1297,7 @@ impl<'a> Matcher<'a> {
                 _ => return None,
             }
         }
+        // The mask must compare exactly `key - query`; size-1 dims accept either coefficient.
         let (query, key) = if transposed {
             (nb + 1, nb)
         } else {
@@ -1207,10 +1316,12 @@ impl<'a> Matcher<'a> {
             Some((v, -1)) => Some(v),
             Some(_) => return None,
         };
+        // Normalize to "kept when key <= query + c".
         let c0 = a.constant - b.constant;
         Some((if inclusive { -c0 } else { -c0 - 1 }, offset))
     }
 
+    /// `v` with broadcasts and unit reshapes removed, and for each of its dims the outer dim it maps to.
     fn broadcast_dims(&self, mut v: Var) -> (Var, Vec<Option<usize>>) {
         let mut dims: Vec<Option<usize>> =
             (0..self.graph.type_of(v).shape.len()).map(Some).collect();
@@ -1236,6 +1347,7 @@ impl<'a> Matcher<'a> {
         (v, dims)
     }
 
+    /// `v` as an affine function of its coordinates plus a constant and an optional runtime scalar.
     fn affine(&self, v: Var) -> Option<Affine> {
         use Primitive::*;
         let ty = self.graph.type_of(v);
@@ -1310,6 +1422,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// `v` as a view of a base value: the base, element offset and `(stride, divisor)` per dim.
     fn view(&self, v: Var) -> (Var, usize, Vec<(usize, usize)>) {
         use Primitive::*;
         let own = || {
@@ -1370,14 +1483,17 @@ impl<'a> Matcher<'a> {
     }
 }
 
+/// Causal diagonal offset and optional runtime offset value.
 type Causal = (i64, Option<Var>);
 
+/// An integer tensor as `coefficients . coords + constant + coefficient * var`.
 struct Affine {
     coefficients: Vec<i64>,
     constant: i64,
     term: Option<(Var, i64)>,
 }
 
+/// Sum of two runtime terms; `None` when they cancel or name different values.
 fn sum_terms(a: Option<(Var, i64)>, b: Option<(Var, i64)>) -> Option<(Var, i64)> {
     match (a, b) {
         (Some((v, x)), Some((w, y))) if v == w => (x + y != 0).then_some((v, x + y)),
@@ -1386,6 +1502,7 @@ fn sum_terms(a: Option<(Var, i64)>, b: Option<(Var, i64)>) -> Option<(Var, i64)>
     }
 }
 
+/// For a reshape that only adds or drops size-1 dims, the outer dim each inner dim maps to.
 fn unit_reshape(inner: &[usize], outer: &[usize]) -> Option<Vec<Option<usize>>> {
     let kept =
         |shape: &[usize]| -> Vec<usize> { (0..shape.len()).filter(|&d| shape[d] != 1).collect() };
@@ -1400,6 +1517,8 @@ fn unit_reshape(inner: &[usize], outer: &[usize]) -> Option<Vec<Option<usize>>> 
     Some(map)
 }
 
+/// Re-expresses per-dim `(stride, divisor)` of a view of shape `from` after reshaping it to `shape`,
+/// or `None` when the result isn't a strided view.
 fn reshaped(
     from: &[usize],
     dims: &[(usize, usize)],
@@ -1414,6 +1533,7 @@ fn reshaped(
     let outs: Vec<usize> = (0..shape.len()).filter(|&d| shape[d] != 1).collect();
     let mut out = vec![(0, 1); shape.len()];
     let (mut a, mut b) = (0, 0);
+    // Pair up runs of input and output dims with equal products.
     while a < ins.len() || b < outs.len() {
         let (mut pa, mut pb) = (ins.get(a)?.0, shape[*outs.get(b)?]);
         let (a0, b0) = (a, b);
@@ -1430,6 +1550,7 @@ fn reshaped(
         let targets = &outs[b0..=b];
         match (group, targets) {
             ([(_, d)], [t]) => out[*t] = *d,
+            // Splitting an undivided dim: strides follow the output shape.
             ([(_, (s, 1))], ts) => {
                 let mut stride = *s;
                 for &t in ts.iter().rev() {
@@ -1437,6 +1558,7 @@ fn reshaped(
                     stride *= shape[t];
                 }
             }
+            // Merging dims: trailing broadcast dims become a divisor, otherwise they must be contiguous.
             (gs, [t]) => {
                 let (_, (s0, d0)) = gs[0];
                 let rest = &gs[1..];

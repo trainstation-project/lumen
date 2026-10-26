@@ -1,12 +1,15 @@
+//! Tests for the TPU graph compiler passes.
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::kernels::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
+/// Applies `p` to `inputs`, panicking on a type error.
 fn apply(g: &mut Graph, p: Primitive, inputs: &[Var]) -> Var {
     g.apply(p, inputs).unwrap()
 }
 
+/// Sums a `[3, 4]` value over its rows into `[3]`, through a reshape round trip.
 fn sum(g: &mut Graph, v: Var) -> Var {
     let axes = vec![1];
     let s = apply(
@@ -27,6 +30,7 @@ fn sum(g: &mut Graph, v: Var) -> Var {
     apply(g, Reshape { new_sizes: vec![3] }, &[r])
 }
 
+/// Broadcasts a `[3]` value back over the rows of a `[3, 4]` value.
 fn rows(g: &mut Graph, v: Var) -> Var {
     let broadcast = BroadcastInDim {
         shape: vec![3, 4],
@@ -35,6 +39,7 @@ fn rows(g: &mut Graph, v: Var) -> Var {
     apply(g, broadcast, &[v])
 }
 
+/// Softmax-with-ties backward diamonds fuse into row kernels that still compute the same values.
 #[test]
 fn rows_fuse_where_what_others_read_of_them_is_written() {
     let mut g = Graph::new();
@@ -87,6 +92,7 @@ fn rows_fuse_where_what_others_read_of_them_is_written() {
     let dm = apply(&mut g, Mul, &[dm, ties]);
     let dx = apply(&mut g, Add, &[ds, dm]);
     g.set_outputs(&[dx, dy]).unwrap();
+    // `e`, `totals` and `ties` are read by several diamonds, so a fusion must expose them as outputs.
     let rows =
         crate::graph_compiler::common::diamonds::diamonds(&g, crate::codegen::tpu::row::fusible);
     let fused = super::diamonds::fused(&g, &rows);

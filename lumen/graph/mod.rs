@@ -1,3 +1,6 @@
+//! The traced dataflow graph: typed values, nodes applying primitives, scopes and source lines,
+//! plus pruning, in-place placement views and precision warnings.
+
 pub(crate) mod custom;
 pub mod primitive;
 #[cfg(feature = "python")]
@@ -14,6 +17,7 @@ pub use primitive::{BinaryOp, FUSION_SEPARATOR, NEURAL_ENGINE, Primitive, UPDATE
 use crate::DType;
 use crate::tensor::contiguous_strides;
 
+/// The dtype and shape of a graph value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TensorType {
     pub dtype: DType,
@@ -21,6 +25,7 @@ pub struct TensorType {
 }
 
 impl TensorType {
+    /// Builds a type from a dtype and a shape slice.
     pub fn new(dtype: DType, shape: &[usize]) -> Self {
         TensorType {
             dtype,
@@ -28,6 +33,7 @@ impl TensorType {
         }
     }
 
+    /// Number of elements, the product of the shape.
     pub fn numel(&self) -> usize {
         self.shape.iter().product()
     }
@@ -40,38 +46,53 @@ impl fmt::Display for TensorType {
     }
 }
 
+/// Index of a value in a graph's type table.
 pub type Var = usize;
 
+/// One primitive application producing a single output value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub primitive: Primitive,
+    /// Values the primitive reads, in operand order.
     pub inputs: Vec<Var>,
     pub output: Var,
+    /// Named ranges the node was traced inside, outermost first.
     pub scope: Scope,
+    /// Python source lines the node came from.
     pub sources: Lines,
+    /// Display name overriding the primitive's own, set for fused or renamed nodes.
     pub label: Option<&'static str>,
 }
 
+/// Interned stack of named ranges a node was traced in.
 pub type Scope = &'static [Range];
 
+/// Interned list of `(file, line)` source locations.
 pub type Lines = &'static [(&'static str, u32)];
 
+/// One entry of a scope: a range name and which call of it this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Range {
     pub name: &'static str,
+    /// Distinguishes separate invocations of the same named range.
     pub call: u64,
 }
 
+/// A traced program: value types, inputs, nodes in topological order and outputs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
+    /// Type of every value, indexed by `Var`.
     pub(crate) types: Vec<TensorType>,
     pub(crate) inputs: Vec<Var>,
     pub(crate) nodes: Vec<Node>,
     pub(crate) outputs: Vec<Var>,
+    /// Scope stamped on nodes appended next.
     pub(crate) scope: Scope,
+    /// Source lines stamped on nodes appended next.
     pub(crate) sources: Lines,
 }
 
+/// Where a value lives inside another value's buffer: element offset and strides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
     pub offset: usize,
@@ -79,25 +100,30 @@ pub struct View {
 }
 
 impl Graph {
+    /// Creates an empty graph.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a graph input of type `ty` and returns its value.
     pub fn input(&mut self, ty: TensorType) -> Var {
         self.types.push(ty);
         self.inputs.push(self.types.len() - 1);
         self.types.len() - 1
     }
 
+    /// Sets the scope stamped on nodes appended from now on.
     pub fn set_scope(&mut self, scope: Scope) {
         self.scope = scope;
     }
 
+    /// Makes nodes appended from now on inherit `node`'s scope and source lines.
     pub fn set_origin(&mut self, node: &Node) {
         self.scope = node.scope;
         self.sources = node.sources;
     }
 
+    /// Makes nodes appended from now on inherit the first node's scope and the union of all their source lines.
     pub fn set_origins(&mut self, nodes: &[&Node]) {
         self.scope = nodes.first().map_or(&[], |n| n.scope);
         let mut lines = Vec::new();
@@ -109,6 +135,7 @@ impl Graph {
         self.sources = intern_lines(&lines);
     }
 
+    /// Appends a node applying `primitive` to `inputs`, inferring and returning its output value.
     pub fn apply(&mut self, primitive: Primitive, inputs: &[Var]) -> Result<Var, String> {
         self.check_vars(inputs)?;
         let args: Vec<&TensorType> = inputs.iter().map(|&v| &self.types[v]).collect();
@@ -126,6 +153,7 @@ impl Graph {
         Ok(output)
     }
 
+    /// Overrides the source lines of the node that produces `v`.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub(crate) fn set_sources(&mut self, v: Var, sources: Lines) {
         if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
@@ -133,19 +161,24 @@ impl Graph {
         }
     }
 
+    /// Overrides the display label of the node that produces `v`.
     pub(crate) fn set_label(&mut self, v: Var, label: Option<&'static str>) {
         if let Some(node) = self.nodes.iter_mut().rev().find(|n| n.output == v) {
             node.label = label;
         }
     }
 
+    /// Marks `outputs` as the graph's results.
     pub fn set_outputs(&mut self, outputs: &[Var]) -> Result<(), String> {
         self.check_vars(outputs)?;
         self.outputs = outputs.to_vec();
         Ok(())
     }
 
+    /// Copies the graph keeping only nodes that reach an output; also returns the old-to-new value map
+    /// (`None` for dropped values). All inputs are kept.
     pub fn prune(&self) -> (Graph, Vec<Option<Var>>) {
+        // Walk nodes backwards marking every value an output depends on.
         let mut live = vec![false; self.types.len()];
         for &v in &self.outputs {
             live[v] = true;
@@ -185,6 +218,7 @@ impl Graph {
         (pruned, map)
     }
 
+    /// Errors if any of `vars` is not a value of this graph.
     fn check_vars(&self, vars: &[Var]) -> Result<(), String> {
         match vars.iter().find(|&&v| v >= self.types.len()) {
             Some(v) => Err(format!("%{v} is not a value of this graph")),
@@ -192,15 +226,19 @@ impl Graph {
         }
     }
 
+    /// Type of value `var`.
     pub fn type_of(&self, var: Var) -> &TensorType {
         &self.types[var]
     }
 
+    /// View of the `k`-th operand of concatenate `node` inside its output buffer.
+    /// Panics if `node` is not a concatenate.
     pub fn slot(&self, node: &Node, k: usize) -> View {
         let Primitive::Concatenate { dimension, .. } = node.primitive else {
             panic!("{}: not a concatenate", node.primitive)
         };
         let strides = contiguous_strides(&self.types[node.output].shape);
+        // The slot starts after the earlier operands' extents along the concatenated dimension.
         let before: usize = node.inputs[..k]
             .iter()
             .map(|&v| self.types[v].shape[dimension])
@@ -211,6 +249,8 @@ impl Graph {
         }
     }
 
+    /// For each value stored inside another's buffer (view slices, operands of in-place concatenates),
+    /// the host value and the view; `None` for values with their own storage.
     pub fn placements(&self) -> Vec<Option<(Var, View)>> {
         let mut placed = vec![None; self.types.len()];
         for node in &self.nodes {
@@ -236,18 +276,22 @@ impl Graph {
         placed
     }
 
+    /// The graph's input values.
     pub fn inputs(&self) -> &[Var] {
         &self.inputs
     }
 
+    /// The graph's nodes in topological order.
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
+    /// The graph's output values.
     pub fn outputs(&self) -> &[Var] {
         &self.outputs
     }
 
+    /// Display name of `node`: its explicit label, else a name spelling out casts and mixed-precision dots.
     pub fn label(&self, node: &Node) -> &'static str {
         if let Some(label) = node.label {
             return label;
@@ -271,6 +315,8 @@ impl Graph {
         }
     }
 
+    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output and then
+    /// cast back up downstream; returns `(accumulation, cast, message)` for each.
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
@@ -289,6 +335,7 @@ impl Graph {
             if accum_dtype.size_of() <= narrow.size_of() {
                 continue;
             }
+            // Follow same-dtype readers from the narrow output until a widening cast; another reduction stops the search.
             let mut stack = vec![(node.output, Vec::new())];
             let mut seen = vec![false; self.types.len()];
             while let Some((v, path)) = stack.pop() {
@@ -341,6 +388,7 @@ impl Graph {
     }
 }
 
+/// Returns a `'static` copy of `label`, leaking each distinct string once.
 pub(crate) fn intern(label: String) -> &'static str {
     static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
     let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -352,6 +400,7 @@ pub(crate) fn intern(label: String) -> &'static str {
     interned
 }
 
+/// Returns a `'static` copy of `lines`, leaking each distinct list once.
 pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
     static LINES: Mutex<BTreeSet<Lines>> = Mutex::new(BTreeSet::new());
     let mut interned = LINES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -363,6 +412,7 @@ pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
     lines
 }
 
+/// Returns a `'static` copy of `ranges`, leaking each distinct scope once.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
     static SCOPES: Mutex<BTreeSet<Scope>> = Mutex::new(BTreeSet::new());

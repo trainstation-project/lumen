@@ -1,20 +1,33 @@
+//! Expression emitter that turns a fused body's values into Metal statements at a given index.
 use super::*;
 
+/// Builds Metal locals for body values, memoizing each `(value, index)` pair.
 pub(super) struct Emitter<'a> {
     pub(super) body: &'a Graph,
+    /// Node index producing each non-input value.
     pub(super) producer: HashMap<Var, usize>,
+    /// Emitted statements, in order.
     pub(super) lines: String,
+    /// Local already holding each value at each index expression.
     pub(super) values: HashMap<(Var, String), String>,
+    /// Local already holding each index expression.
     pub(super) indices: HashMap<String, String>,
+    /// Counter for fresh local names.
     pub(super) locals: usize,
+    /// Inputs passed as constant scalars rather than buffers.
     pub(super) by_value: &'a [bool],
+    /// Values that are constant across the inner index (per row), computed once into `hoisted`.
     pub(super) invariant: Vec<bool>,
+    /// Locals holding invariant values, or values supplied by the enclosing kernel.
     pub(super) row_locals: HashMap<Var, String>,
+    /// Statements computing invariant values, emitted before the inner loop.
     pub(super) hoisted: String,
+    /// Whether any tensor exceeds `u32` elements, so indices need `ulong`.
     pub(super) wide: bool,
 }
 
 impl<'a> Emitter<'a> {
+    /// Starts an emitter over `body` with nothing emitted.
     pub(super) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
         Emitter {
             body,
@@ -36,11 +49,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Returns a new unique local name starting with `prefix`.
     pub(super) fn fresh(&mut self, prefix: &str) -> String {
         self.locals += 1;
         format!("{prefix}{}", self.locals - 1)
     }
 
+    /// Binds an index expression to a local (reused if already bound); plain `j` and literals
+    /// are returned as is.
     pub(super) fn index(&mut self, expr: String) -> String {
         if expr == "j" || expr.parse::<u64>().is_ok() {
             return expr;
@@ -55,6 +71,7 @@ impl<'a> Emitter<'a> {
         name
     }
 
+    /// Index into a layout node's operand for output index `idx`.
     pub(super) fn operand_index(&mut self, node: &Node, idx: String) -> String {
         use Primitive::*;
         let body = self.body;
@@ -91,6 +108,8 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Local holding `v` at `idx`; invariant values are computed once at `row` (or `0` for
+    /// scalars) into the hoisted prelude.
     pub(super) fn value(&mut self, v: Var, idx: String) -> String {
         if !self.invariant[v] {
             return self.element(v, idx);
@@ -98,6 +117,7 @@ impl<'a> Emitter<'a> {
         if let Some(name) = self.row_locals.get(&v) {
             return name.clone();
         }
+        // Emit the invariant value into a fresh buffer with empty caches, then restore the loop's.
         let lines = std::mem::take(&mut self.lines);
         let caches = (
             std::mem::take(&mut self.values),
@@ -115,6 +135,7 @@ impl<'a> Emitter<'a> {
         name
     }
 
+    /// Emits the statements computing `v` at flat index `idx` and returns the local holding it.
     pub(super) fn element(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
         if let Some(name) = self.values.get(&key) {
@@ -184,6 +205,8 @@ impl<'a> Emitter<'a> {
                         return self.value(node.inputs[0], i);
                     }
                     Gather { axis } => {
+                        // Split `idx` into outer, gathered and inner parts; the index operand broadcasts when it has
+                        // fewer rows than the output.
                         let x = body.type_of(node.inputs[0]);
                         let m = body.type_of(node.inputs[1]).numel();
                         let n = x.shape[*axis];
@@ -217,6 +240,8 @@ impl<'a> Emitter<'a> {
                     Concatenate { dimension, .. } => {
                         let d = *dimension;
                         let span = contiguous_strides(&ty.shape)[d];
+                        // Coordinate along the concatenated dim, then one branch per operand with the index rebased
+                        // into that operand.
                         let mut c = idx.clone();
                         if span != 1 {
                             c = format!("{c} / {span}u");
@@ -238,6 +263,7 @@ impl<'a> Emitter<'a> {
                                 _ => format!("else if ({c} < {}u)", start + n),
                             };
                             writeln!(self.lines, "        {branch} {{").unwrap();
+                            // Each branch has its own scope, so locals cached inside it can't be reused after it.
                             let saved = (self.values.clone(), self.indices.clone());
                             let mut terms = Vec::new();
                             if outer != 1 {
@@ -286,6 +312,8 @@ impl<'a> Emitter<'a> {
     }
 }
 
+/// Metal expression of the strided offset for flat index `idx` into `shape`, merging adjacent
+/// dims that stay contiguous under `strides` into one divide/modulo term.
 pub(super) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
     struct Run {

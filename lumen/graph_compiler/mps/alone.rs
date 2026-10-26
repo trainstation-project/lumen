@@ -1,9 +1,12 @@
+//! Pass that wraps lone GEMMs, concatenations, gathers and elementwise nodes left outside any fusion into single-node `Fusion` kernels.
+
 use super::{Kernel, MpsModule, request};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Compiler pass wrapping every remaining kernel-worthy node in its own one-node fusion.
 pub(super) struct Alone;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Alone {
@@ -11,8 +14,10 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
         "alone"
     }
 
+    /// Drops by-value scalars that some unfused consumer still reads, then wraps lone nodes in `Loop` kernels.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let graph = &m.graph;
+        // A scalar input can stay by-value only if every reader becomes a fusion kernel that takes it as a constant.
         let by_value = |i: &usize| {
             let v = graph.inputs()[*i];
             let fused =
@@ -37,6 +42,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
     }
 }
 
+/// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather or an elementwise op.
 fn alone(graph: &Graph, n: &Node) -> bool {
     let float = |v: Var| {
         matches!(
@@ -56,6 +62,8 @@ fn alone(graph: &Graph, n: &Node) -> bool {
     ) || elementwise(&n.primitive)
 }
 
+/// Rebuilds `graph`, replacing each node `wraps` accepts by a `Fusion` whose body is that node alone.
+/// `kernel` gets one flag per distinct input saying whether it is in `scalars` and returns the kernel name.
 pub(super) fn wrapped(
     graph: &Graph,
     scalars: &[Var],
@@ -70,6 +78,7 @@ pub(super) fn wrapped(
     for node in graph.nodes() {
         out.set_origin(node);
         if wraps(node) {
+            // Deduplicate operands so a value read twice becomes a single fusion input.
             let mut reads: Vec<Var> = Vec::new();
             for &v in &node.inputs {
                 if !reads.contains(&v) {

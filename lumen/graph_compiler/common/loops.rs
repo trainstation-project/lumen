@@ -1,10 +1,14 @@
+//! Helpers for loop fusion: building fusion bodies from node groups and rewriting a graph with them.
+
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::label;
 
+/// Nodes up to `root` assigned to the group rooted at `root`.
 pub(crate) fn members(group: &[Option<usize>], root: usize) -> Vec<usize> {
     (0..=root).filter(|&j| group[j] == Some(root)).collect()
 }
 
+/// The body of a loop over `members`, outputting `root`'s value then `extra`, and the graph values it reads.
 pub(crate) fn body(
     graph: &Graph,
     members: &[usize],
@@ -40,6 +44,8 @@ pub(crate) fn body(
     (body, reads)
 }
 
+/// Replaces each group (`group[i]` names the root of node `i`'s group) by a fusion at its root.
+/// `kind` gives a root's kernel name and the node whose origin the fusion takes; `extra` its extra outputs.
 pub(crate) fn fused(
     graph: &Graph,
     group: &[Option<usize>],

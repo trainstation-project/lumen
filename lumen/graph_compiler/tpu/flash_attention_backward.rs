@@ -1,11 +1,16 @@
+//! Builds `flash_attention_backward` fusions and adapts attention fusion outputs to TPU kernel layouts.
 use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Moves the dot computing a backward fusion's `delta` input inside the fusion body.
+///
+/// The fusion then reads the dot's operands, through any reshape/transpose chains, instead of `delta`.
 fn delta_inside(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let producer = |v: Var| nodes.iter().find(|n| n.output == v);
+    // Walk back through reshapes and transposes to the value they were applied to.
     let unshaped = |mut v: Var| {
         let mut chain = Vec::new();
         while let Some(n) = producer(v).filter(|n| {
@@ -42,6 +47,7 @@ fn delta_inside(graph: &Graph) -> Graph {
             let mut within: Vec<Var> = vec![0; body.types.len()];
             let mut reads = Vec::new();
             let mut outer: Vec<(Var, Var)> = Vec::new();
+            // Keep every body input except `delta`, which is now computed inside.
             for (j, &v) in body.inputs().iter().enumerate() {
                 if j != k {
                     within[v] = inner.input(body.type_of(v).clone());
@@ -50,6 +56,7 @@ fn delta_inside(graph: &Graph) -> Graph {
                 }
             }
             let mut sides = Vec::new();
+            // Reuse an existing read when the dot's operand is already a fusion input.
             for (base, chain) in &operands {
                 let base = *base;
                 let mut x = match outer.iter().find(|(o, _)| *o == base) {
@@ -98,6 +105,7 @@ fn delta_inside(graph: &Graph) -> Graph {
     out
 }
 
+/// Indices of the attention fusion's outputs written with rows narrower than their last axis.
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
     let wide = |acc: &attention::Access| {
         let shape = &body.type_of(acc.base).shape;
@@ -126,6 +134,9 @@ fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
         .collect()
 }
 
+/// Round-trips each such attention output through a reshape merging its last two axes.
+///
+/// Outputs already read by a reshape or sum are left for `reshaped_outputs` to fold instead.
 fn merged_outputs(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -173,6 +184,7 @@ fn merged_outputs(graph: &Graph) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // `FusionOutput` nodes read the fusion itself, not the reshaped round trip.
     let mut own: Vec<Var> = vec![0; graph.types.len()];
     for node in nodes {
         out.set_origin(node);
@@ -189,6 +201,8 @@ fn merged_outputs(graph: &Graph) -> Graph {
             .expect("a node of the graph");
         out.set_label(v, node.label);
         (map[node.output], own[node.output]) = (v, v);
+        // Readers take the value through the merged shape, which matches how the kernel writes
+        // these rows.
         if merged[node.output] {
             let shape = &graph.type_of(node.output).shape;
             let r = shape.len();
@@ -212,6 +226,7 @@ fn merged_outputs(graph: &Graph) -> Graph {
     out
 }
 
+/// Folds reshape, sum and cast chains reading attention outputs into the fusion bodies.
 fn reshaped_outputs(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -228,10 +243,14 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
     let reshape = |r: usize| matches!(nodes[r].primitive, Primitive::Reshape { .. });
     let reduce = |r: usize| matches!(nodes[r].primitive, Primitive::ReduceSum { .. });
     let cast = |r: usize| matches!(nodes[r].primitive, Primitive::Cast { .. });
+    // A value read by exactly one node and not a graph output.
     let alone = |v: Var| match readers[v].as_slice() {
         [r] if !graph.outputs().contains(&v) => Some(*r),
         _ => None,
     };
+    // A sole reshape or sum reader starts the chain; otherwise take the first reshape among many
+    // readers. Further sole sums, casts and reshapes after them extend it only when the output has
+    // one reader.
     let chain = |v: Var| {
         let first = readers[v].iter().copied().find(|&r| reshape(r));
         let mut chain: Vec<usize> = match alone(v) {
@@ -257,6 +276,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         if !attention(&node.primitive) {
             continue;
         }
+        // Forward fusions fold only their primary output.
         let forward =
             matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
         let mut values = vec![(0, node.output)];
@@ -281,7 +301,9 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // The rebuilt fusion behind each original fusion value, for its `FusionOutput` readers.
     let mut fused_as: Vec<Option<Var>> = vec![None; graph.types.len()];
+    // The chain folded onto output `index` of fusion node `f`, if any.
     let folded = |f: usize, index: usize| {
         by_fusion[f]
             .iter()
@@ -301,6 +323,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
                 _ => map[v],
             })
             .collect();
+        // Where this node's value comes from: output `index` of fusion node `f`.
         let at = match node.primitive {
             Primitive::FusionOutput { index, .. } => {
                 Some((graph_producer(graph, node.inputs[0]), index))
@@ -309,6 +332,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
             _ => None,
         };
         let chain = at.and_then(|(f, index)| folded(f, index));
+        // Append each folded chain to its output in the body; `FusionOutput`s take the chain's final type.
         let primitive = match &node.primitive {
             Primitive::Fusion { name, label, body } if !by_fusion[i].is_empty() => {
                 let mut body = body.clone();
@@ -341,6 +365,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
         fused_as[node.output] = Some(fused);
         if let Some(chain) = chain {
             map[nodes[*chain.last().expect("a chain")].output] = fused;
+            // A lone reshape folded out of several readers: restore the traced shape for the rest.
             if chain.len() == 1 && reshape(chain[0]) {
                 let back = Primitive::Reshape {
                     new_sizes: graph.type_of(node.output).shape.clone(),
@@ -354,6 +379,7 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
     out
 }
 
+/// Index of the node producing `v`.
 fn graph_producer(graph: &Graph, v: Var) -> usize {
     graph
         .nodes()
@@ -362,6 +388,7 @@ fn graph_producer(graph: &Graph, v: Var) -> usize {
         .expect("a node's value")
 }
 
+/// Checks that the TPU codegen supports every attention fusion left in `graph`.
 fn attentions(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
         if let Primitive::Fusion { name, body, .. } = &node.primitive {
@@ -377,6 +404,7 @@ fn attentions(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
+/// Fuses flash-attention backward, folds output layout chains and the `delta` dot into the fusions.
 pub(super) struct FlashAttentionBackward;
 
 impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {

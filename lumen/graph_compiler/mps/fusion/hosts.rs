@@ -1,3 +1,5 @@
+//! Picks fusion roots and the hosts that absorb other fusions' values as extra outputs.
+
 use super::analysis::Analysis;
 use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
@@ -6,6 +8,8 @@ use crate::graph::{Graph, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
+/// Whether each node ends a fusion and must be materialized: unfusible nodes, reductions outside
+/// epilogues, epilogue ends, row roots, outputs, values read by unfusible nodes and shared expensive ops.
 pub(super) fn roots(
     a: &Analysis,
     rows: &[Row],
@@ -44,6 +48,8 @@ pub(super) fn roots(
         .collect()
 }
 
+/// For each root, a later fusion that can also write its value as an extra output (multi-output fusion),
+/// plus GEMM auxiliary outputs and row outputs and partials hosted by their row.
 pub(super) fn hosts(
     a: &Analysis,
     rows: &[Row],
@@ -78,6 +84,7 @@ pub(super) fn hosts(
         let Some(&first) = users[node.output].first().filter(|_| candidate) else {
             continue;
         };
+        // Follow single-reader non-roots to the fusion that will consume this value.
         let reader = first;
         let mut first = first;
         while !root[first] && users[nodes[first].output].len() == 1 {
@@ -107,6 +114,8 @@ pub(super) fn hosts(
     host
 }
 
+/// Whether `v` is reached from fusion root `r` (or its reduction input) through elementwise ops of
+/// the same fusion, so the host can write it at the index it already computes.
 fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, v: Var) -> bool {
     let nodes = graph.nodes();
     let start = match is_reduction(&nodes[r]) {

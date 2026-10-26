@@ -1,3 +1,5 @@
+"""Lowers lumen.pallas TPU kernels to Mosaic for the Rust TPU runtime, and views into device memory."""
+
 import importlib
 import json
 

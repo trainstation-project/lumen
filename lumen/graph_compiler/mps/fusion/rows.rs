@@ -1,7 +1,11 @@
+//! Grows normalization rows forward over the elementwise ops that consume them.
+
 use super::analysis::Analysis;
 use super::elementwise;
 use crate::graph_compiler::common::diamonds::Row;
 
+/// Extends each row's root through its first elementwise reader while that keeps the row a single kernel,
+/// adding the old root to the row's outputs when others still read it and it can't be recomputed.
 pub(super) fn extended(a: &Analysis, rows: &[Row]) -> Vec<Row> {
     let (nodes, users, is_output, fusible) = (a.nodes, &a.users, &a.is_output, &a.fusible);
     let depends = |v, k| a.depends(v, k);

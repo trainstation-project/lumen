@@ -1,20 +1,31 @@
+//! The epilogue of a fused TPU GEMM: the dot's output pieces and the elementwise nodes after it.
+
 use std::collections::HashMap;
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 
+/// A fused GEMM's structure: a concatenated lhs, the dot output's slices and the nodes applied to them.
 pub(crate) struct Epilogue {
+    /// Sizes of the concatenated lhs pieces along `lhs_axis`; empty when the lhs is not a concatenation.
     pub(crate) lhs: Vec<usize>,
     pub(crate) lhs_axis: usize,
+    /// Whether a node or extra input mixes values of different output pieces.
     pub(crate) together: bool,
+    /// Whether the pieces split the dot output along its rows rather than its last axis.
     pub(crate) rows: bool,
+    /// The width of each output piece along the split axis.
     pub(crate) widths: Vec<usize>,
+    /// Each extra input's dtype, whether it is a scalar, and the piece that reads it.
     pub(crate) inputs: Vec<(DType, bool, usize)>,
+    /// The epilogue nodes as JSON, indexing pieces, then extra inputs, then earlier nodes.
     pub(crate) nodes: Vec<String>,
+    /// Each body output's value index, piece and dtype.
     pub(crate) outputs: Vec<(usize, usize, DType)>,
 }
 
 impl Epilogue {
+    /// Reads the epilogue of the GEMM fusion `body`, returning it with the body's dot node.
     pub(crate) fn of(body: &Graph) -> (Epilogue, &Node) {
         let all = body.nodes();
         let at = all
@@ -22,6 +33,7 @@ impl Epilogue {
             .position(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
             .expect("a dot");
         let dot = &all[at];
+        // A concatenated lhs comes from horizontally fused GEMMs sharing their rhs.
         let (lhs, lhs_axis) = match all[..at].iter().find(|n| n.output == dot.inputs[0]) {
             Some(Node {
                 primitive: Primitive::Concatenate { dimension, .. },
@@ -36,6 +48,7 @@ impl Epilogue {
             ),
             _ => (Vec::new(), 0),
         };
+        // Inputs after the lhs pieces and the rhs are the epilogue's extra operands.
         let first = lhs.len().max(1) + 1;
         let extras = &body.inputs()[first..];
         let shape = &body.type_of(dot.output).shape;
@@ -49,6 +62,7 @@ impl Epilogue {
         for (k, &v) in extras.iter().enumerate() {
             value.insert(v, results + k);
         }
+        // The split axis is the one along which the first slice is narrower than the dot output.
         let axis = slices
             .first()
             .map_or(shape.len() - 1, |n| match &n.primitive {
@@ -84,6 +98,7 @@ impl Epilogue {
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
             nodes.push(super::node(&node.primitive, &args));
             value.insert(node.output, results + extras.len() + nodes.len() - 1);
+            // Track which piece each value comes from to tell whether pieces stay independent.
             let mut of: Vec<usize> = node
                 .inputs
                 .iter()
@@ -128,6 +143,7 @@ impl Epilogue {
         (epilogue, dot)
     }
 
+    /// An epilogue that writes the `n`-wide dot output unchanged as `output`.
     pub(crate) fn plain(n: usize, output: DType) -> Epilogue {
         Epilogue {
             lhs: Vec::new(),

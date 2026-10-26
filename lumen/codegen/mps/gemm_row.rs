@@ -1,8 +1,13 @@
+//! Metal source for a matmul fused with row reductions over its output (e.g. a projection
+//! followed by softmax or a norm), either in one tile or across column tiles.
 use super::*;
 use crate::kernels::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
 
+/// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;
 
+/// The single unbatched float matmul in a body whose row reductions can run over its output
+/// rows, or `None` when the body doesn't fit that kernel.
 pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     let dot = gemm_dot(body)?;
     let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
@@ -33,6 +38,8 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     fits.then_some(dot)
 }
 
+/// Indices of the leading row reductions that can be partially reduced per tile (none reads an
+/// earlier one's result), or `None` if a softmax pair or a non-SIMD-reducible dtype prevents it.
 pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     let reductions = row_reductions(body);
     if reductions
@@ -58,6 +65,8 @@ pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     first.iter().all(simd).then_some(first)
 }
 
+/// For a multi-tile row matmul, byte offsets into scratch of the dot value (first) and each
+/// tile-reduction's partials, and the total scratch size.
 pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
     let dot = row_dot(body)?;
     let (rows, n) = row_shape(body);
@@ -76,6 +85,8 @@ pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
     Some((offsets, at))
 }
 
+/// Generates `NAME_tiles`, the first pass of a multi-tile row matmul: computes the dot, stores
+/// its value to `dotv` and each per-tile partial of the `first` reductions to `tiles{k}`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn gemm_tiles(
     body: &Graph,
@@ -101,12 +112,14 @@ pub(super) fn gemm_tiles(
     };
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (tile, tiles) = (ROW_TILE, n.div_ceil(ROW_TILE));
+    // MPP and GEMV kernels tile by config, so the partial's tile index comes from the column.
     let mpp = gemm.filter(|c| c.algorithm != Algorithm::Tiled);
     let at = match mpp {
         Some(_) => format!("(uint(n0) + c0) / {tile}u"),
         None => "group.x".to_owned(),
     };
     let mut extra = vec![format!("device {o} *dotv")];
+    // The rows body reads the dot value as one extra input after the original ones.
     let mut read = by_value.to_vec();
     read.resize(body.inputs().len(), false);
     read.push(false);
@@ -254,6 +267,8 @@ pub(super) fn gemm_tiles(
     )
 }
 
+/// Generates the row kernel for a matmul fused with row reductions, by rebuilding the body with
+/// the dot's value as an extra input and handing the dot to the row kernel.
 pub(super) fn gemm_row_kernel(
     body: &Graph,
     by_value: &[bool],
@@ -288,6 +303,8 @@ pub(super) fn gemm_row_kernel(
     )
 }
 
+/// Replaces each call to input `k`'s load helper in `source` with `staged(index)`, leaving
+/// occurrences inside longer identifiers alone.
 pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
     let name = load(k);
     let (mut out, mut rest) = (String::new(), source);
@@ -321,6 +338,8 @@ pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> Strin
     out
 }
 
+/// Generates a single-tile row matmul: each threadgroup stages a `ROW_TILE` x `n` block of the
+/// dot in threadgroup memory, then runs the row `source` over its rows.
 pub(super) fn gemm_rows(
     body: &Graph,
     by_value: &[bool],

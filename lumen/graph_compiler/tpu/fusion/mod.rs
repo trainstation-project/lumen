@@ -1,3 +1,4 @@
+//! TPU fusion passes: dot epilogues, row-wise dot fusion, loop/reduction fusion and horizontal fusion.
 mod dot_epilogues;
 mod dot_rows;
 mod emit;
@@ -11,6 +12,7 @@ pub(super) use horizontal::HorizontalFusion;
 use super::TpuModule;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Groups elementwise and reduction nodes into `loop` and `reduction` fusions.
 pub(super) struct LoopFusion;
 
 impl CompilerPass<TpuModule<'_>> for LoopFusion {

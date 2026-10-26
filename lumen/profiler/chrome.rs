@@ -1,24 +1,31 @@
+//! Chrome trace (Perfetto / `chrome://tracing`) export of profiler events, in PyTorch's trace layout.
 use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::{Event, EventKind};
 use crate::device::Device;
 
+/// Trace thread id device kernels are drawn on (PyTorch's default stream 7).
 const GPU_TID: u64 = 7;
+/// Trace thread id for device-side copies of user ranges.
 const ANNOTATION_TID: u64 = 8;
 
+/// Trace process id for kernels run on the host, kept apart from the CPU dispatch process.
 pub(crate) fn host_pid() -> u64 {
     (1 << 32) + u64::from(std::process::id())
 }
 
+/// Trace process id for Core ML (Neural Engine) kernels.
 fn neural_engine_pid() -> u64 {
     (2 << 32) + u64::from(std::process::id())
 }
 
+/// Trace process id for TPU `i`.
 fn tpu_pid(i: usize) -> u64 {
     (3 << 32) + i as u64
 }
 
+/// Trace process id events on `device` are drawn under.
 fn pid(device: Device) -> u64 {
     match device {
         Device::Cpu(_) => std::process::id().into(),
@@ -28,6 +35,7 @@ fn pid(device: Device) -> u64 {
     }
 }
 
+/// PyTorch's `(device type, device index)` pair for `device` in memory events.
 fn device_type(device: Device) -> (i32, i64) {
     match device {
         Device::Cpu(_) => (0, -1),
@@ -38,6 +46,7 @@ fn device_type(device: Device) -> (i32, i64) {
     }
 }
 
+/// Display name of `device`'s trace process.
 fn process_name(device: Device) -> String {
     match device {
         Device::Cpu(_) => "CPU".to_owned(),
@@ -48,10 +57,12 @@ fn process_name(device: Device) -> String {
     }
 }
 
+/// Formats nanoseconds as microseconds with three decimals.
 fn us(ns: u64) -> String {
     format!("{}.{:03}", ns / 1000, ns % 1000)
 }
 
+/// Quotes and escapes `s` as a JSON string.
 pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -72,6 +83,7 @@ pub(crate) fn json_str(s: &str) -> String {
     out
 }
 
+/// Trace `args` entries (each prefixed with a comma) for an event's tensor types, strides and accumulation dtypes.
 fn types_args(e: &Event) -> String {
     let mut args = String::new();
     let sides = [
@@ -102,6 +114,7 @@ fn types_args(e: &Event) -> String {
     args
 }
 
+/// Renders `events` as a Chrome trace JSON document.
 pub(crate) fn trace(events: &[Event]) -> String {
     let mut out: Vec<String> = Vec::new();
     let cpu_pid = pid(Device::Cpu(0));
@@ -111,6 +124,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
     let mut neural_engine = false;
     for e in events {
         match e.kind {
+            // Core ML kernels get their own Neural Engine process.
             EventKind::HostKernel if e.name.starts_with("coreml") => {
                 neural_engine = true;
                 out.push(format!(
@@ -135,6 +149,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
                     us(e.duration_ns()),
                     types_args(e),
                 ));
+                // A flow arrow from the issuing op to the kernel.
                 if let Some(op) = e.parent.and_then(|p| events.iter().find(|o| o.id == p)) {
                     out.push(format!(
                         "{{\"ph\":\"s\",\"id\":{correlation},\"pid\":{cpu_pid},\"tid\":{},\"ts\":{},\"cat\":\"ac2g\",\"name\":\"ac2g\"}}",
@@ -214,6 +229,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
         }
     }
 
+    // Each user range gets a span per device covering the kernels issued inside it.
     let by_id: HashMap<u64, &Event> = events.iter().map(|e| (e.id, e)).collect();
     let mut spans: HashMap<(u64, Device), (u64, u64)> = HashMap::new();
     let work = |e: &&Event| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel);
@@ -240,6 +256,7 @@ pub(crate) fn trace(events: &[Event]) -> String {
         ));
     }
 
+    // Process and thread names and sort order.
     out.push(format!(
         "{{\"ph\":\"M\",\"name\":\"process_name\",\"pid\":{cpu_pid},\"tid\":0,\"args\":{{\"name\":\"CPU dispatch\"}}}}"
     ));

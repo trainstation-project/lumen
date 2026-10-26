@@ -1,20 +1,32 @@
+//! Triton sources for fused reductions (sum/max, optionally split across programs) and cumulative sums.
+
 use super::*;
 use crate::graph::TensorType;
 
+/// Most lanes per output when the reduced axis is innermost.
 const ROW_LANES: usize = 256;
+/// Most lanes per output for a split reduction over the innermost axis.
 const SPLIT_ROW_LANES: usize = 512;
+/// Most lanes per output when the reduced axis is strided (outputs are contiguous instead).
 const COLUMN_LANES: usize = 16;
+/// Reductions with fewer outputs than this are split across programs to fill the GPU.
 const SPLIT_BELOW: usize = 1024;
+/// Reduced elements each split aims to cover.
 const SPLIT_SPAN: usize = 8192;
+/// Upper bound on splits per output.
 const MOST_SPLITS: usize = 512;
 
+/// A generated reduction kernel and its launch shape.
 pub(crate) struct Reduction {
     pub name: String,
     pub source: String,
+    /// Reduced elements each output processes per loop iteration.
     pub lanes: usize,
+    /// Programs per output; above 1 the kernel writes partials and `NAME_final` combines them.
     pub splits: usize,
 }
 
+/// The body's `reduce_sum`/`reduce_max` node, if it has one.
 pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     body.nodes().iter().find(|n| {
         matches!(
@@ -24,13 +36,17 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     })
 }
 
+/// 2-D tile a reduction or scan program works on: outputs along one axis, reduced lanes along the other.
 struct Tile {
     lanes: usize,
+    /// Outputs index rows and lanes index columns (the reduced axis is innermost in memory).
     rows: bool,
 }
 
 impl Tile {
+    /// Tile for `count` reduced elements; lanes are the next power of two capped per orientation.
     fn new(shape: &[usize], reduced: impl Fn(usize) -> bool, count: usize, split: bool) -> Self {
+        // Lanes go along the minor axis when the innermost non-unit dim is reduced, for coalesced loads.
         let rows = shape.iter().rposition(|&n| n != 1).is_none_or(reduced);
         let most = match (rows, split) {
             (true, false) => ROW_LANES,
@@ -43,10 +59,12 @@ impl Tile {
         }
     }
 
+    /// Triton expression for the number of outputs per program.
     fn outputs(&self) -> String {
         format!("BLOCK_SIZE // {}", self.lanes)
     }
 
+    /// Triton shape of the tile.
     fn shape(&self) -> String {
         match self.rows {
             true => format!("[{}, {}]", self.outputs(), self.lanes),
@@ -54,10 +72,12 @@ impl Tile {
         }
     }
 
+    /// Tile axis the lanes run along.
     fn axis(&self) -> usize {
         if self.rows { 1 } else { 0 }
     }
 
+    /// Broadcasts an outputs vector and a lanes vector to the tile and combines them with `op`.
     fn join(&self, outer: &str, inner: &str, op: &str) -> String {
         match self.rows {
             true => format!("{outer}[:, None] {op} {inner}[None, :]"),
@@ -65,6 +85,7 @@ impl Tile {
         }
     }
 
+    /// Broadcasts an outputs vector to the tile.
     fn spread(&self, outer: &str) -> String {
         match self.rows {
             true => format!("{outer}[:, None]"),
@@ -73,6 +94,7 @@ impl Tile {
     }
 }
 
+/// Combine expression of `a` and `b` for a sum or a max; bool max is `or`, float max propagates NaN.
 fn combine(sum: bool, dtype: DType) -> &'static str {
     match (sum, dtype) {
         (true, _) => "a + b",
@@ -82,6 +104,7 @@ fn combine(sum: bool, dtype: DType) -> &'static str {
     }
 }
 
+/// Identity of max for `dtype`: `-inf` for floats, the minimum for signed ints, 0 otherwise.
 fn lowest(dtype: DType) -> String {
     match dtype {
         d if d.is_float() => "float(\"-inf\")".into(),
@@ -92,10 +115,13 @@ fn lowest(dtype: DType) -> String {
     }
 }
 
+/// Indents every line of `lines` by four spaces.
 fn indented(lines: &str) -> String {
     lines.lines().map(|l| format!("    {l}\n")).collect()
 }
 
+/// Generates a kernel reducing `root`'s operand (computed by the prologue part of `body`) and applying
+/// the rest of `body` to the result. Small output counts split the reduced axis across programs.
 pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reduction {
     let x = body.type_of(root.inputs[0]);
     let a = body.type_of(root.output).dtype;
@@ -105,6 +131,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         Primitive::ReduceMax { axes } => (axes, false),
         p => unreachable!("{p} is not a reduction"),
     };
+    // Flat offsets split into a kept part (`o`) and a reduced part (`r`), summed to address the input.
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = (0..x.shape.len()).filter(|d| !axes.contains(d)).collect();
     let mut reduced = axes.clone();
@@ -126,6 +153,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         true => element,
         false => format!("{element}.to({acc})"),
     };
+    // The epilogue starts with the reduced value bound at output index `o`.
     let mut epilogue = Emitter::new(body, by_value);
     epilogue.locals = prologue.locals;
     epilogue
@@ -142,7 +170,9 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
     let (combine, init) = (combine(sum, a), lowest(a));
     let init = if sum { "0".into() } else { init };
     let (lines, tail) = (indented(&prologue.lines), &epilogue.lines);
+    // Each split covers a whole number of lane-sized chunks.
     let per = count.div_ceil(splits).div_ceil(lanes) * lanes;
+    // Split programs are numbered split-major: `s` picks the split, the remainder the output block.
     let (block, range, finish) = match splits {
         1 => (
             "tl.program_id(0)".to_string(),
@@ -161,7 +191,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         "
         @triton.jit
         def NAME_combine(a, b):
-            return {combine}
+            return ({combine}).to(a.dtype)
 
 
         @triton.jit
@@ -181,6 +211,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
             reduced = tl.reduce(acc, {axis}, NAME_combine)
         {finish}"
     );
+    // Second pass: each program combines the partials of its outputs, padded to a power of two.
     if splits > 1 {
         let parts = splits.next_power_of_two();
         let params = params(by_value, Some("partials"), true);
@@ -211,6 +242,8 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
     }
 }
 
+/// Generates an inclusive cumulative sum along `axis` accumulating in `a`, walking the axis backwards
+/// when `reverse`. Returns `(name, source, lanes)`.
 pub(crate) fn scan(
     x: &TensorType,
     axis: usize,
@@ -222,6 +255,7 @@ pub(crate) fn scan(
     let inner: usize = x.shape[axis + 1..].iter().product();
     let tile = Tile::new(&x.shape, |d| d == axis, length, false);
     let (lanes, outputs, axis) = (tile.lanes, tile.outputs(), tile.axis());
+    // Offset of each output's line: outer index times the axis span plus the inner index.
     let line = format!("(o // {inner}) * {} + o % {inner}", length * inner);
     let step = match reverse {
         true => format!("({} - k) * {inner}", length.max(1) - 1),
@@ -241,7 +275,7 @@ pub(crate) fn scan(
         "
         @triton.jit
         def NAME_combine(a, b):
-            return a + b
+            return (a + b).to(a.dtype)
 
 
         @triton.jit

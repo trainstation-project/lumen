@@ -1,3 +1,5 @@
+//! Pass that marks concatenations whose operands can be written straight into the concatenated buffer.
+
 use std::collections::HashMap;
 
 use super::{Kernel, MpsModule, PENDING, codegen, fusion};
@@ -5,6 +7,7 @@ use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Compiler pass marking eligible concatenations in place.
 pub(super) struct PlaceConcats;
 
 impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
@@ -12,6 +15,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
         "place_concats"
     }
 
+    /// Marks the concatenations `in_place_concats` accepts before fusion.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         for c in in_place_concats(&m.graph, &m.kernels, true) {
             if let Primitive::Concatenate { in_place, .. } = &mut m.graph.nodes[c].primitive {
@@ -22,6 +26,9 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
     }
 }
 
+/// Live concatenations whose every operand is read only there and produced by a kernel able to write
+/// a strided slot, with at least one written by the attention backward kernel.
+/// Before fusion, fusible layout and elementwise producers also count as able to write their slot.
 pub(super) fn in_place_concats(
     graph: &Graph,
     kernels: &[Kernel],
@@ -43,6 +50,7 @@ pub(super) fn in_place_concats(
             }
         }
     }
+    // The kernel request behind a still-pending fusion.
     let kernel = |node: &Node| match &node.primitive {
         Primitive::Fusion { name, .. } => name
             .strip_prefix(PENDING)
@@ -59,6 +67,8 @@ pub(super) fn in_place_concats(
             .inputs
             .iter()
             .enumerate()
+            // Per operand: `Some(true)` for an attention backward write, `Some(false)` for another
+            // writer, `None` when it can't be written in place.
             .map(|(k, &v)| {
                 let other =
                     |r: &&usize| !matches!(nodes[**r].primitive, Primitive::FusionOutput { .. });
@@ -73,6 +83,7 @@ pub(super) fn in_place_concats(
                 let fused = &nodes[f];
                 match (kernel(fused), &fused.primitive) {
                     (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
+                        // The atomically accumulated dQ output can't target a strided slot.
                         let atomic = body.outputs().len() == 3 && index == 2;
                         let at = graph.slot(node, k);
                         let views = HashMap::from([(index, (at.offset, at.strides))]);

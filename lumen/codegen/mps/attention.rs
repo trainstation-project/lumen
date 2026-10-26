@@ -1,6 +1,10 @@
+//! Metal source for fused flash-attention forward and backward kernels.
 use super::*;
 
+/// Generates the fused attention forward kernel for `body`, with an optional elementwise
+/// epilogue, raw-score/LSE outputs and dropout; returns its name and source.
 pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) {
+    // With dropout, the last two body inputs are the seed and offset passed as constants.
     let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
     let input = |base: Var| {
         let k = body.inputs().iter().position(|&v| v == base);
@@ -25,6 +29,8 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     let out = body.outputs()[0];
     let root = body.nodes()[a.root].output;
     let w = metal_type(body.type_of(out).dtype);
+    // When the body's output isn't the attention node itself, emit a functor computing it from
+    // the attention row value `r`.
     let (epilogue, epi) = match out == root {
         true => (String::new(), String::new()),
         false => {
@@ -97,6 +103,7 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
         None => offset.to_string(),
     };
     let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
+    // Short query sequences use the decode kernel, which splits keys across threadgroups.
     let call = match decodes(a) {
         true => formatdoc!(
             "
@@ -133,6 +140,7 @@ pub(crate) fn attention_kernel(body: &Graph, a: &Attention) -> (String, String) 
     ))
 }
 
+/// Buffer parameters for the dropout seed and stream offset starting at buffer `first`.
 pub(super) fn random_state(first: usize) -> [String; 2] {
     [
         format!("constant ulong &seed [[buffer({first})]]"),
@@ -140,6 +148,8 @@ pub(super) fn random_state(first: usize) -> [String; 2] {
     ]
 }
 
+/// Metal functor that applies dropout to element `(b, i, j)` of an `sq` x `sk` score matrix
+/// using Philox bits, scaling kept values.
 pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> String {
     let t = metal_type(dtype);
     let scale = constant(dtype, Scalar::Float(d.scale));
@@ -158,6 +168,8 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
     )
 }
 
+/// Metal `NAME_ix` method returning the element offset of operand `name` for flattened batch
+/// index `b`, plus its row and column strides.
 pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
     let up = name.to_uppercase();
     let mut code = formatdoc!(
@@ -173,6 +185,8 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
     if !batch.is_empty() {
         writeln!(code, "uint rest = b;").unwrap();
     }
+    // Peel batch dims from innermost to outermost; `div` maps broadcast batch dims (e.g. shared KV
+    // heads) onto the operand's smaller dim.
     for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate().rev() {
         let last = k == 0;
         let idx = match last {
@@ -200,6 +214,7 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
     code
 }
 
+/// Metal functor applying the score transforms (rounding casts and scalings) in order.
 pub(super) fn score_functor(scores: &[Score]) -> String {
     let mut score = "s".to_string();
     for step in scores {
@@ -219,6 +234,7 @@ pub(super) fn score_functor(scores: &[Score]) -> String {
     )
 }
 
+/// Generates the fused attention backward kernel computing dK/dV, dQ, or both in one pass.
 pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, String) {
     let input = |base: Var| {
         let k = body.inputs().iter().position(|&v| v == base);
@@ -271,6 +287,7 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
         let (node, _) = out.as_ref().expect("a computed gradient");
         metal_type(body.type_of(body.nodes()[*node].output).dtype)
     };
+    // When dK/dV and dQ are fused, dQ is accumulated atomically across key blocks in float.
     for (k, out) in outs.iter().enumerate() {
         let ty = match *out {
             "dq" if dkdv => "atomic_float",
@@ -358,6 +375,7 @@ pub(crate) fn attention_backward_kernel(body: &Graph, b: &Backward) -> (String, 
     ))
 }
 
+/// Query rows per block for the backward kernel, the largest that fits in threadgroup memory.
 pub(super) fn backward_block(b: &Backward) -> usize {
     let bytes = |n: usize| n * (b.h + b.hv) * b.dtype.size_of() + 2 * n * 4;
     [32, 16, 8]
@@ -366,6 +384,8 @@ pub(super) fn backward_block(b: &Backward) -> usize {
         .unwrap_or(8)
 }
 
+/// Query rows per block when dQ is fused into the dK/dV kernel, or `None` if even 16 rows
+/// don't fit in threadgroup memory alongside the key tile.
 pub(crate) fn backward_block_with_dq(b: &Backward) -> Option<usize> {
     const KEYS: usize = 64;
     let t = b.dtype.size_of();
@@ -373,10 +393,12 @@ pub(crate) fn backward_block_with_dq(b: &Backward) -> Option<usize> {
     [32, 16].into_iter().find(|&n| bytes(n) <= 28 << 10)
 }
 
+/// Whether the forward uses the decode kernel (few query rows).
 pub(crate) fn decodes(a: &Attention) -> bool {
     a.sq <= 8
 }
 
+/// Keys per block for the forward kernel, the largest whose K/V tiles fit in threadgroup memory.
 pub(super) fn key_block(a: &Attention) -> usize {
     let t = a.dtype.size_of();
     let bytes = |bk: usize| bk * (a.h + a.hv) * t;

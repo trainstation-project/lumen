@@ -1,3 +1,5 @@
+"""Python wrappers that record each lumen primitive into the graph being traced."""
+
 from lumen.graph import tracer
 
 __all__ = [
@@ -82,6 +84,7 @@ def bind(name, *operands, **params):
     graph = tracer.current_graph()
     operands = [tracer._lift(x) for x in operands]
     host = tracer._HOSTS[-1] if tracer._HOSTS else None
+    # Scalar-only work may run on the host graph; device ops read host values as imported scalar inputs.
     if host is not None:
         out = host.bind(name, operands, params)
         if out is not None:
@@ -98,23 +101,29 @@ def bind(name, *operands, **params):
     var = graph.apply(name, inputs, params)
     tracer._record(name, inputs, params, var)
     out = tracer.TracedTensor(graph, var)
+    # A unary op keeps a weak (Python-scalar) operand weak only when its type is unchanged.
     out.weak = len(operands) == 1 and operands[0].weak and graph.type_of(var) == graph.type_of(inputs[0])
+    # Ops on constants alone keep a recipe so the host can replay them.
     if all(x.recipe is not None for x in operands):
         out.recipe = (name, params, operands)
+    # Results computed from any CPU operand, or copied to the host, live on the CPU.
     if name == "to_host" or (name != "to_device" and any(tracer._device_type(x.device) == "cpu" for x in operands)):
         out.device = "cpu:0"
     return out
 
 
 def add(x, y):
+    """Elementwise ``x + y``."""
     return bind("add", x, y)
 
 
 def sub(x, y):
+    """Elementwise ``x - y``."""
     return bind("sub", x, y)
 
 
 def mul(x, y):
+    """Elementwise ``x * y``."""
     return bind("mul", x, y)
 
 
@@ -129,42 +138,52 @@ def max(x, y):
 
 
 def eq(x, y):
+    """Elementwise ``x == y`` as bool."""
     return bind("eq", x, y)
 
 
 def lt(x, y):
+    """Elementwise ``x < y`` as bool."""
     return bind("lt", x, y)
 
 
 def neg(x):
+    """Elementwise ``-x``."""
     return bind("neg", x)
 
 
 def exp(x):
+    """Elementwise ``e**x``."""
     return bind("exp", x)
 
 
 def log(x):
+    """Elementwise natural logarithm."""
     return bind("log", x)
 
 
 def sqrt(x):
+    """Elementwise square root."""
     return bind("sqrt", x)
 
 
 def tanh(x):
+    """Elementwise hyperbolic tangent."""
     return bind("tanh", x)
 
 
 def logistic(x):
+    """Elementwise sigmoid ``1 / (1 + e**-x)``."""
     return bind("logistic", x)
 
 
 def cast(x, new_dtype):
+    """``x`` converted elementwise to ``new_dtype``."""
     return bind("cast", x, new_dtype=new_dtype)
 
 
 def select(pred, on_true, on_false):
+    """``on_true`` where the bool ``pred`` holds, else ``on_false``."""
     return bind("select", pred, on_true, on_false)
 
 
@@ -175,6 +194,7 @@ def reduce_sum(x, axes, accum_dtype):
 
 
 def reduce_max(x, axes):
+    """The maximum over ``axes``, in ``x``'s dtype."""
     return bind("reduce_max", x, axes=tuple(axes))
 
 
@@ -226,6 +246,7 @@ def to_device(x):
 
 
 def reshape(x, new_sizes):
+    """``x``'s elements in row-major order with shape ``new_sizes``."""
     return bind("reshape", x, new_sizes=tuple(new_sizes))
 
 
@@ -236,6 +257,7 @@ def broadcast_in_dim(x, shape, broadcast_dimensions):
 
 
 def transpose(x, permutation):
+    """``x`` with result dimension ``i`` taken from operand dimension ``permutation[i]``."""
     return bind("transpose", x, permutation=tuple(permutation))
 
 
@@ -319,6 +341,7 @@ def concatenate(operands, dimension):
 
 
 def full(shape, fill_value, dtype):
+    """A tensor of ``shape`` and ``dtype`` filled with ``fill_value``."""
     return bind("full", shape=tuple(shape), fill_value=fill_value, dtype=dtype)
 
 
@@ -344,150 +367,187 @@ def iota(dtype, shape, dimension):
 
 
 def sin(x):
+    """Elementwise sine."""
     return bind("sin", x)
 
 
 def cos(x):
+    """Elementwise cosine."""
     return bind("cos", x)
 
 
 def tan(x):
+    """Elementwise tangent."""
     return bind("tan", x)
 
 
 def asin(x):
+    """Elementwise arcsine."""
     return bind("asin", x)
 
 
 def acos(x):
+    """Elementwise arccosine."""
     return bind("acos", x)
 
 
 def atan(x):
+    """Elementwise arctangent."""
     return bind("atan", x)
 
 
 def sinh(x):
+    """Elementwise hyperbolic sine."""
     return bind("sinh", x)
 
 
 def cosh(x):
+    """Elementwise hyperbolic cosine."""
     return bind("cosh", x)
 
 
 def asinh(x):
+    """Elementwise inverse hyperbolic sine."""
     return bind("asinh", x)
 
 
 def acosh(x):
+    """Elementwise inverse hyperbolic cosine."""
     return bind("acosh", x)
 
 
 def atanh(x):
+    """Elementwise inverse hyperbolic tangent."""
     return bind("atanh", x)
 
 
 def floor(x):
+    """Elementwise round toward negative infinity."""
     return bind("floor", x)
 
 
 def ceil(x):
+    """Elementwise round toward positive infinity."""
     return bind("ceil", x)
 
 
 def round(x):
+    """Elementwise round to nearest integer value."""
     return bind("round", x)
 
 
 def log1p(x):
+    """Elementwise ``log(1 + x)``, accurate near zero."""
     return bind("log1p", x)
 
 
 def expm1(x):
+    """Elementwise ``e**x - 1``, accurate near zero."""
     return bind("expm1", x)
 
 
 def exp2(x):
+    """Elementwise ``2**x``."""
     return bind("exp2", x)
 
 
 def log2(x):
+    """Elementwise base-2 logarithm."""
     return bind("log2", x)
 
 
 def rsqrt(x):
+    """Elementwise ``1 / sqrt(x)``."""
     return bind("rsqrt", x)
 
 
 def cbrt(x):
+    """Elementwise cube root."""
     return bind("cbrt", x)
 
 
 def erf_inv(x):
+    """Elementwise inverse error function."""
     return bind("erf_inv", x)
 
 
 def is_finite(x):
+    """Elementwise bool: neither infinite nor NaN."""
     return bind("is_finite", x)
 
 
 def abs(x):
+    """Elementwise absolute value."""
     return bind("abs", x)
 
 
 def sign(x):
+    """Elementwise sign: -1, 0 or 1 (NaN for NaN)."""
     return bind("sign", x)
 
 
 def not_(x):
+    """Elementwise logical not for bool, bitwise not for integers."""
     return bind("not", x)
 
 
 def population_count(x):
+    """Elementwise number of set bits."""
     return bind("population_count", x)
 
 
 def clz(x):
+    """Elementwise number of leading zero bits."""
     return bind("clz", x)
 
 
 def pow(x, y):
+    """Elementwise ``x**y``."""
     return bind("pow", x, y)
 
 
 def rem(x, y):
+    """Elementwise remainder with the sign of ``x`` (C ``fmod``)."""
     return bind("rem", x, y)
 
 
 def min(x, y):
+    """Elementwise minimum, propagating NaN."""
     return bind("min", x, y)
 
 
 def and_(x, y):
+    """Elementwise logical and for bool, bitwise and for integers."""
     return bind("and", x, y)
 
 
 def or_(x, y):
+    """Elementwise logical or for bool, bitwise or for integers."""
     return bind("or", x, y)
 
 
 def xor(x, y):
+    """Elementwise logical xor for bool, bitwise xor for integers."""
     return bind("xor", x, y)
 
 
 def shift_left(x, y):
+    """Elementwise ``x << y``."""
     return bind("shift_left", x, y)
 
 
 def shift_right_logical(x, y):
+    """Elementwise ``x >> y`` filling with zeros."""
     return bind("shift_right_logical", x, y)
 
 
 def shift_right_arithmetic(x, y):
+    """Elementwise ``x >> y`` filling with the sign bit."""
     return bind("shift_right_arithmetic", x, y)
 
 
 def nextafter(x, y):
+    """Elementwise next representable value after ``x`` toward ``y``."""
     return bind("nextafter", x, y)
 
 

@@ -1,3 +1,4 @@
+//! The default process group (rank, world size and shared TCP store), env:// and tcp:// rendezvous, and `DeviceMesh`.
 pub mod backend;
 #[cfg(feature = "python")]
 pub(crate) mod python;
@@ -13,23 +14,30 @@ use crate::Device;
 pub use backend::{MeshBackend, mesh_backend};
 pub use store::TcpStore;
 
+/// How long rendezvous and store waits block before failing.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Store counter every rank increments when it joins the default group.
 const JOINED: &str = "init_process_group/joined";
+/// Store key the last rank to join sets so every rank can proceed.
 const READY: &str = "init_process_group/ready";
 
+/// The initialised default process group.
 struct World {
     rank: usize,
     world_size: usize,
     store: Arc<TcpStore>,
 }
 
+/// The default process group, `None` until `init_process_group`.
 static WORLD: Mutex<Option<World>> = Mutex::new(None);
 
+/// Locks the default group, recovering the guard if a holder panicked.
 fn world() -> std::sync::MutexGuard<'static, Option<World>> {
     WORLD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Parses env var `name` as an index, returning `default` when it is unset.
 pub(crate) fn env_index(name: &str, default: usize) -> Result<usize, String> {
     match std::env::var(name) {
         Err(_) => Ok(default),
@@ -39,15 +47,18 @@ pub(crate) fn env_index(name: &str, default: usize) -> Result<usize, String> {
     }
 }
 
+/// Reads env var `name`, failing with an env:// rendezvous error when it is unset.
 fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("env:// rendezvous: {name} is not set"))
 }
 
+/// Parses env var `name` as an index, failing when it is unset.
 fn required_env_index(name: &str) -> Result<usize, String> {
     required_env(name)?;
     env_index(name, 0)
 }
 
+/// Returns this process's rank from the default group, or `RANK` (default 0) before it is initialised.
 pub fn get_rank() -> Result<usize, String> {
     match &*world() {
         Some(world) => Ok(world.rank),
@@ -55,6 +66,7 @@ pub fn get_rank() -> Result<usize, String> {
     }
 }
 
+/// Returns the world size from the default group, or `WORLD_SIZE` (default 1) before it is initialised.
 pub fn get_world_size() -> Result<usize, String> {
     match &*world() {
         Some(world) => Ok(world.world_size),
@@ -62,14 +74,20 @@ pub fn get_world_size() -> Result<usize, String> {
     }
 }
 
+/// Reports whether the default process group has been initialised.
 pub fn is_initialized() -> bool {
     world().is_some()
 }
 
+/// Returns the default group's store, or `None` before it is initialised.
 pub fn default_store() -> Option<Arc<TcpStore>> {
     world().as_ref().map(|w| w.store.clone())
 }
 
+/// Connects to (or, on rank 0, hosts) the TCP store named by `init_method` and returns it with the rank and world size.
+///
+/// `env://` reads `MASTER_ADDR`, `MASTER_PORT` and, unless given, `RANK` and `WORLD_SIZE`; `tcp://host:port` needs
+/// `rank` and `world_size` passed explicitly.
 pub fn rendezvous(
     init_method: &str,
     rank: Option<usize>,
@@ -106,6 +124,7 @@ pub fn rendezvous(
     Ok((Arc::new(store), rank, world_size))
 }
 
+/// Makes `store` the default group for `rank`, blocking until all `world_size` ranks have joined.
 pub fn init_process_group(
     store: Arc<TcpStore>,
     rank: usize,
@@ -119,6 +138,7 @@ pub fn init_process_group(
             "rank {rank} is outside the world of size {world_size}"
         ));
     }
+    // the last rank to join releases the barrier for everyone
     if store.add(JOINED, 1)? == world_size as i64 {
         store.set(READY, b"")?;
     }
@@ -131,6 +151,7 @@ pub fn init_process_group(
     Ok(())
 }
 
+/// Drops the default process group, failing if none is initialised.
 pub fn destroy_process_group() -> Result<(), String> {
     world()
         .take()
@@ -138,16 +159,21 @@ pub fn destroy_process_group() -> Result<(), String> {
         .ok_or_else(|| "the default process group is not initialized".into())
 }
 
+/// An n-dimensional grid of process ranks on one device type, as seen from `rank`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceMesh {
+    /// Canonical backend name, e.g. `"tpu"`.
     device_type: &'static str,
     shape: Vec<usize>,
+    /// Ranks in row-major order over `shape`.
     ranks: Vec<usize>,
     dim_names: Option<Vec<String>>,
+    /// The rank of the process holding this mesh, which may lie outside it.
     rank: usize,
 }
 
 impl DeviceMesh {
+    /// Validates and builds a mesh of `shape` over `ranks` for a world of `world_size` processes.
     pub fn new(
         device_type: &str,
         shape: Vec<usize>,
@@ -203,34 +229,42 @@ impl DeviceMesh {
         })
     }
 
+    /// Returns the canonical device type name.
     pub fn device_type(&self) -> &'static str {
         self.device_type
     }
 
+    /// Returns the size of each mesh dimension.
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
+    /// Returns the ranks in row-major mesh order.
     pub fn ranks(&self) -> &[usize] {
         &self.ranks
     }
 
+    /// Returns the dimension names, if the mesh has any.
     pub fn dim_names(&self) -> Option<&[String]> {
         self.dim_names.as_deref()
     }
 
+    /// Returns the rank of the process holding this mesh.
     pub fn rank(&self) -> usize {
         self.rank
     }
 
+    /// Returns the number of mesh dimensions.
     pub fn ndim(&self) -> usize {
         self.shape.len()
     }
 
+    /// Returns the total number of ranks in the mesh.
     pub fn size(&self) -> usize {
         self.ranks.len()
     }
 
+    /// Returns the index of the dimension called `name`.
     pub fn dim(&self, name: &str) -> Result<usize, String> {
         let names = self.dim_names.as_ref().ok_or_else(|| {
             format!("cannot find mesh dimension '{name}': the mesh has no mesh_dim_names")
@@ -240,6 +274,7 @@ impl DeviceMesh {
         })
     }
 
+    /// Returns row-major strides over the mesh shape.
     fn strides(&self) -> Vec<usize> {
         let mut strides = vec![1; self.ndim()];
         for d in (0..self.ndim() - 1).rev() {
@@ -248,6 +283,7 @@ impl DeviceMesh {
         strides
     }
 
+    /// Returns this process's row-major coordinate in the mesh, or `None` if its rank isn't in it.
     pub fn coordinate(&self) -> Option<Vec<usize>> {
         let flat = self.ranks.iter().position(|&r| r == self.rank)?;
         Some(
@@ -259,6 +295,7 @@ impl DeviceMesh {
         )
     }
 
+    /// Returns this process's coordinate along mesh dimension `dim`.
     pub fn local_rank(&self, dim: usize) -> Result<usize, String> {
         let coordinate = self
             .coordinate()
@@ -266,6 +303,7 @@ impl DeviceMesh {
         Ok(coordinate[dim])
     }
 
+    /// Returns the submesh over the named dimensions that contains this process, keeping its other coordinates fixed.
     pub fn slice(&self, names: &[String]) -> Result<DeviceMesh, String> {
         let dims = names
             .iter()
@@ -281,6 +319,7 @@ impl DeviceMesh {
             )
         })?;
         let strides = self.strides();
+        // flat offset of this process's position along the dimensions not being kept
         let base: usize = (0..self.ndim())
             .filter(|d| !dims.contains(d))
             .map(|d| coordinate[d] * strides[d])
@@ -288,6 +327,7 @@ impl DeviceMesh {
         let shape: Vec<usize> = dims.iter().map(|&d| self.shape[d]).collect();
         let count: usize = shape.iter().product();
         let ranks = (0..count)
+            // decompose `i` row-major over the kept dims and add their strides to the base offset
             .map(|i| {
                 let mut rest = i;
                 let mut flat = base;

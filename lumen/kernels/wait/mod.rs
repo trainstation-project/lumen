@@ -1,10 +1,15 @@
+//! The `wait` op, which blocks until all queued work on a tensor's device has finished.
+
 use crate::Tensor;
 use crate::device::Device;
 use crate::kernels::{DispatchKey, Op};
 
+/// Kernel that blocks until the device holding the tensor is idle.
 pub type WaitKernel = fn(&Tensor);
+/// The registered `lumen::wait` op.
 pub static WAIT: Op<WaitKernel> = Op::new(op_name!("wait"), kernels);
 
+/// Returns the wait kernel for a dispatch key; CPU and Meta have nothing to wait for.
 fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     match key {
         DispatchKey::Cpu | DispatchKey::Meta => Some(|_| {}),
@@ -24,6 +29,7 @@ fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     }
 }
 
+/// Plan step that waits on the first kept tensor's device before continuing.
 #[cfg(lumen_mps_linked)]
 pub(crate) fn encode(
     _step: &crate::graph_compiler::plan::Step,
@@ -35,6 +41,7 @@ pub(crate) fn encode(
     Ok(())
 }
 
+/// Blocks until all work queued on `t`'s device has completed; a no-op on CPU.
 pub fn wait(t: &Tensor) {
     if t.device() == Device::Cpu(0) {
         return;

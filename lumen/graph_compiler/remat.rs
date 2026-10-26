@@ -1,6 +1,10 @@
+//! Rematerialization: lowers a plan's peak workspace under a memory limit by recomputing large
+//! values just before their later readers instead of keeping them live.
+
 use super::Plan;
 use crate::graph::{Graph, Node, Primitive, Var};
 
+/// Whether `node` can be cloned: not a custom call, reshape alias or part of a multi-output fusion.
 fn recomputable(graph: &Graph, node: &Node) -> bool {
     let multi_output = graph.nodes().iter().any(|n| {
         matches!(n.primitive, Primitive::FusionOutput { .. }) && n.inputs[0] == node.output
@@ -14,12 +18,15 @@ fn recomputable(graph: &Graph, node: &Node) -> bool {
         )
 }
 
+/// A copy of `graph` where node `i` (and its recomputable producers up to `depth` levels back) is
+/// recomputed right before the `k`th reader of its output, which that and later readers then use.
 fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
     let v = graph.nodes[i].output;
     let at = (i + 1..graph.nodes.len())
         .filter(|&j| graph.nodes[j].inputs.contains(&v))
         .nth(k)
         .expect("a kth reader");
+    // Gather the producers to recompute too, breadth-first, `depth` levels above node `i`.
     let mut block = vec![i];
     let mut level = vec![i];
     for _ in 0..depth {
@@ -40,6 +47,7 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
     block.sort_unstable();
     let mut g = graph.clone();
     let mut copies = Vec::new();
+    // Insert clones in order before `at`, rewiring each to earlier clones of its inputs.
     for (n, &j) in block.iter().enumerate() {
         let node = &graph.nodes[j];
         let copy = g.types.len();
@@ -82,6 +90,8 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
     g
 }
 
+/// Estimated live bytes at each node, counting each value (reshapes alias their input) from its
+/// first write to its last read, outputs live to the end.
 fn usage(graph: &Graph) -> Vec<usize> {
     let n = graph.nodes.len();
     let mut root: Vec<Var> = (0..graph.types.len()).collect();
@@ -103,6 +113,7 @@ fn usage(graph: &Graph) -> Vec<usize> {
     for &o in &graph.outputs {
         last[root[o]] = n;
     }
+    // Difference array: add a value's bytes at its first write and remove them after its last read.
     let mut delta = vec![0i64; n + 2];
     for r in (0..graph.types.len()).filter(|&r| root[r] == r && first[r] != usize::MAX) {
         if last[r] < first[r] {
@@ -123,6 +134,8 @@ fn usage(graph: &Graph) -> Vec<usize> {
         .collect()
 }
 
+/// Greedily recomputes values across the live-bytes peak until `plan`'s workspace fits in `limit`,
+/// returning the smallest plan found.
 pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -> Plan) -> Plan {
     const MIN_REMAT_BYTES: usize = 64 << 10;
     const MAX_DEPTH: usize = 2;
@@ -146,6 +159,7 @@ pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -
             if peak <= target {
                 break;
             }
+            // Candidates: large values computed before the peak, not read at it, but read after it.
             let mut pick: Option<((usize, usize), Graph)> = None;
             for (i, node) in graph.nodes[..peak_at].iter().enumerate() {
                 let ty = graph.type_of(node.output);
@@ -171,6 +185,7 @@ pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -
                     }
                 }
             }
+            // Accept a recompute that lowers the peak, or at least the bytes live at the peak node.
             match pick {
                 Some(((p, at), candidate)) if p < peak || at + MIN_REMAT_BYTES <= peak => {
                     graph = candidate;
@@ -186,6 +201,7 @@ pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -
         if measured.workspace_bytes() >= best.workspace_bytes() {
             break;
         }
+        // Retarget the model's peak by its gap to the measured workspace (alignment, scratch).
         let model = usage(&graph).into_iter().max().unwrap_or(0);
         target = limit.saturating_sub(measured.workspace_bytes().saturating_sub(model));
         best = measured;

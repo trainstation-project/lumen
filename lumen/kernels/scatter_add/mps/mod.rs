@@ -1,12 +1,18 @@
+//! Metal launch of `scatter_add`: copies the operand into the output, then adds the updates in.
+
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, launch, u64_arg};
 use crate::{DType, Tensor};
 
+/// Most threads per grid row; larger launches spill into more rows.
 const ROW: usize = 1 << 20;
 
+/// Largest `n * m` (axis length times index count) for which each output element scans all indices.
 const SCAN: usize = 1 << 16;
 
+/// Encodes `out = x` with `updates` rows added at `indices` along the step's axis; inputs are
+/// `[x, indices, updates]`.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -23,6 +29,8 @@ pub(crate) fn encode(
     };
     let (n, m) = (x.shape[axis], indices.numel());
     let inner: usize = x.shape[axis + 1..].iter().product();
+    // The scan kernel runs a thread per output element; the serial one a thread per position
+    // off the axis, looping over the indices in order.
     let scan = n * m <= SCAN;
     let total = match scan {
         true => step.output.1.numel(),
@@ -34,6 +42,7 @@ pub(crate) fn encode(
             step.label
         ));
     }
+    // Copy x into the output first unless they already share a buffer.
     if output.cast_const() != inputs[0] {
         let name = step.label;
         crate::kernels::dynamic_slice::mps::copy(inputs[0], output, x, keep.clone(), name)?;

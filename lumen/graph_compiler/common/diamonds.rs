@@ -1,17 +1,28 @@
+//! Detection of row-normalization patterns ("diamonds"): a value combined with a broadcast of its own
+//! last-axis reduction, which a backend can run as one row kernel.
+
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::{constant, elementwise};
 
+/// Whether the backend can put a node in a row kernel.
 pub(crate) type Fusible = fn(&Graph, &Node) -> bool;
 
+/// Nodes of one row kernel, as node indices into the graph.
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
+    /// Last node of the row; its output is the kernel's main result.
     pub root: usize,
+    /// Last-axis reductions computed inside the row.
     pub reductions: Vec<usize>,
+    /// Other nodes computed inside the row.
     pub inner: Vec<usize>,
+    /// Nodes whose values are also read outside the row (or are graph outputs).
     pub outputs: Vec<usize>,
+    /// Partial column sums a backend attached to the row.
     pub partials: Vec<usize>,
 }
 
+/// Every row kernel in `graph`, built from diamonds and then grown backwards and forwards.
 pub(crate) fn diamonds(graph: &Graph, fusible: Fusible) -> Vec<Row> {
     let finder = Finder::new(graph, fusible);
     let mut rows: Vec<Row> = Vec::new();
@@ -26,6 +37,7 @@ pub(crate) fn diamonds(graph: &Graph, fusible: Fusible) -> Vec<Row> {
         if row.inner.iter().any(|&n| taken(n)) {
             continue;
         }
+        // A diamond over the root of an earlier row, read only here, absorbs that row (chained norms).
         let earlier = finder.producer[producer].and_then(|p| rows.iter().position(|r| r.root == p));
         if let Some(k) = earlier {
             let mut inside = row.inner.clone();
@@ -45,6 +57,8 @@ pub(crate) fn diamonds(graph: &Graph, fusible: Fusible) -> Vec<Row> {
     rows
 }
 
+/// Grows rows backwards from each free elementwise root, absorbing same-shaped producers, per-row
+/// values and earlier rows, so a pattern with several reductions becomes one row.
 fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -78,6 +92,7 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
         };
         let ty = graph.type_of(root.output);
         let rows_of: &[Row] = rows;
+        // Flood-fill earlier nodes that fit a layout of `rows` elements with rows of `n`.
         let grow = |rows: usize, n: usize| -> (Vec<bool>, Vec<usize>, Vec<usize>) {
             let each = rows / n;
             let shaped = |v: Var| {
@@ -102,10 +117,12 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
                 let read_inside = !finder.output[v]
                     && !finder.readers[v].is_empty()
                     && finder.readers[v].iter().all(|&r| inside[r]);
+                // Per-row values may also be read after the root: they become row outputs.
                 let read_after = !finder.output[v]
                     && per_row(v)
                     && finder.readers[v].iter().any(|&r| inside[r])
                     && finder.readers[v].iter().all(|&r| inside[r] || r > i);
+                // Index arithmetic is recomputed by readers rather than claimed by the row.
                 let shared = !read_inside && indices(graph, &finder.producer, v);
                 if !finder.live[k] || inside[k] || !(read_inside || read_after) || shared {
                     continue;
@@ -155,6 +172,7 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             (inside, absorbed, outputs)
         };
         let reduces = |inside: &[bool]| (0..i).any(|k| inside[k] && is_reduction(k));
+        // Prefer the root's own row length; a per-row root takes the length of a reduction feeding it.
         let mut grown = match ty.shape.last() {
             Some(&n) if n > 1 => Some(grow(ty.numel(), n)),
             _ => None,
@@ -196,6 +214,7 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
     }
 }
 
+/// Whether `v` is computed only from iotas and constants through layout and elementwise ops.
 fn indices(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     let Some(p) = producer[v] else { return false };
     let node = &graph.nodes()[p];
@@ -209,6 +228,8 @@ fn indices(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     }
 }
 
+/// Moves each row's root forward to a later elementwise consumer whose cheap input cone reaches the
+/// row, so that consumer is computed in the row kernel too.
 fn consumed(finder: &Finder, rows: &mut [Row]) {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -248,6 +269,7 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                         | Primitive::Iota { .. }
                 )
         };
+        // Candidates are the last elementwise nodes of a chain, tried from the end of the graph.
         let candidate = |c: usize| {
             finder.live[c]
                 && elementwise(&nodes[c].primitive)
@@ -313,6 +335,7 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                     outside.extend(readers);
                 }
             }
+            // Leaves must not depend on readers of the row's outputs, or the row would wait on itself.
             let depends = |v: Var| {
                 let (mut stack, mut seen) = (vec![v], vec![false; graph.types.len()]);
                 while let Some(v) = stack.pop() {
@@ -346,6 +369,7 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
     }
 }
 
+/// Length of the reduced last axis behind per-row value `root`, through elementwise and layout ops.
 fn row_length(finder: &Finder, root: usize) -> Option<usize> {
     let graph = finder.graph;
     let nodes = graph.nodes();
@@ -383,16 +407,23 @@ fn row_length(finder: &Finder, root: usize) -> Option<usize> {
     None
 }
 
+/// Producers, readers and liveness of a graph's values, for row matching.
 pub(crate) struct Finder<'a> {
     graph: &'a Graph,
+    /// Whether the backend can fuse a node.
     fusible: Fusible,
+    /// Node producing each value.
     pub(crate) producer: Vec<Option<usize>>,
+    /// Live nodes reading each value.
     pub(crate) readers: Vec<Vec<usize>>,
+    /// Whether each value is a graph output.
     pub(crate) output: Vec<bool>,
+    /// Whether each node feeds a graph output.
     pub(crate) live: Vec<bool>,
 }
 
 impl<'a> Finder<'a> {
+    /// Finder over `graph` with uses and liveness computed.
     pub(crate) fn new(graph: &'a Graph, fusible: Fusible) -> Self {
         let nodes = graph.nodes();
         let n = graph.types.len();
@@ -428,10 +459,12 @@ impl<'a> Finder<'a> {
         }
     }
 
+    /// Whether `v` isn't an output and only `nodes` read it.
     fn read_only_by(&self, v: Var, nodes: &[usize]) -> bool {
         !self.output[v] && self.readers[v].iter().all(|r| nodes.contains(r))
     }
 
+    /// Whether `v` is a constant or a broadcast graph input (the same for every element of a row).
     fn splat(&self, v: Var) -> bool {
         let graph_input = |v: Var| self.producer[v].is_none();
         constant(self.graph, &self.producer, v)
@@ -442,6 +475,8 @@ impl<'a> Finder<'a> {
             })
     }
 
+    /// Whether node `i` is a reshape or an elementwise op on one non-splat value; it must be
+    /// single-use unless `shared`.
     fn trivial(&self, i: usize, shared: bool) -> bool {
         let node = &self.graph.nodes()[i];
         if !shared && (self.output[node.output] || self.readers[node.output].len() > 1) {
@@ -455,6 +490,7 @@ impl<'a> Finder<'a> {
         }
     }
 
+    /// The non-splat operand of node `i`.
     fn through(&self, i: usize) -> Var {
         let inputs = &self.graph.nodes()[i].inputs;
         match inputs.len() > 1 && self.splat(inputs[0]) {
@@ -463,6 +499,7 @@ impl<'a> Finder<'a> {
         }
     }
 
+    /// Walks back from `v` through trivial nodes to one matching `is`; returns it and the path.
     fn edge(
         &self,
         mut v: Var,
@@ -483,6 +520,8 @@ impl<'a> Finder<'a> {
         }
     }
 
+    /// The row rooted at elementwise node `i` combining a value with a broadcast of its reduction,
+    /// and the value both sides derive from.
     fn diamond(&self, i: usize) -> Option<(Row, Var)> {
         let nodes = self.graph.nodes();
         let root = &nodes[i];
@@ -503,6 +542,8 @@ impl<'a> Finder<'a> {
             .find_map(|&(side, reduced)| self.closed(i, side, reduced))
     }
 
+    /// Matches `side op broadcast(reduce(x))` at node `i` where `side` and `x` derive from the same value
+    /// through trivial ops; also absorbs single-use elementwise producers of that value.
     fn closed(&self, i: usize, side: Var, reduced: Var) -> Option<(Row, Var)> {
         let nodes = self.graph.nodes();
         let ty = self.graph.type_of(nodes[i].output);
@@ -557,6 +598,7 @@ impl<'a> Finder<'a> {
             v = self.through(k);
         }
         inner.push(r);
+        // Pull in elementwise ops above the shared value that only the row reads.
         while let Some(k) = self.producer[producer] {
             let node = &nodes[k];
             let mut inside = inner.clone();
@@ -585,6 +627,8 @@ impl<'a> Finder<'a> {
         Some((row, producer))
     }
 
+    /// Row nodes whose values are needed outside the row; `None` when one is read before the root
+    /// or the broadcast is read by something that can't fuse.
     fn outputs(
         &self,
         root: usize,

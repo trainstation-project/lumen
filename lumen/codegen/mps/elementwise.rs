@@ -1,5 +1,7 @@
+//! Generated elementwise loop kernel and the output store helpers shared with other kernels.
 use super::*;
 
+/// Generates a loop kernel computing every body output elementwise under `tuning`.
 pub(super) fn elementwise_kernel(
     body: &Graph,
     by_value: &[bool],
@@ -41,6 +43,8 @@ pub(super) fn elementwise_kernel(
     ))
 }
 
+/// Per-output `NAME_store{k}` helpers and the calls storing `result` and `extra` at index `j`;
+/// outputs in `views` are written at their offset and strides instead of contiguously.
 pub(super) fn written(
     body: &Graph,
     views: &HashMap<usize, (usize, Vec<usize>)>,
@@ -61,6 +65,8 @@ pub(super) fn written(
                 let shape = &body.type_of(body.outputs()[k]).shape;
                 let mut at = format!("{offset}ul");
                 let mut inner = 1;
+                // Decompose the flat index into coordinates innermost-first, skipping size-1 dims; the modulo
+                // is dropped on the outermost non-trivial dim.
                 for (d, (&n, &stride)) in shape.iter().zip(strides).enumerate().rev() {
                     if n == 1 {
                         continue;

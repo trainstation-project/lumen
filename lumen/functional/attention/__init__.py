@@ -1,3 +1,5 @@
+"""Attention variants: naive, flash and single-query KV-cache decode."""
+
 from lumen.functional.attention.decode import attention_decode
 from lumen.functional.attention.flash import flash_attention
 from lumen.functional.attention.naive import naive_attention

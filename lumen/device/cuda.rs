@@ -1,5 +1,8 @@
+//! The CUDA device backend, querying the CUDA runtime when lumen is linked against it.
+
 use super::DeviceBackend;
 
+/// CUDA runtime and driver entry points used for device discovery and selection.
 #[cfg(lumen_cuda_linked)]
 mod ffi {
     use std::ffi::c_void;
@@ -17,14 +20,18 @@ mod ffi {
     }
 }
 
+/// The CUDA backend; reports no devices when built without CUDA.
 pub struct Cuda;
+/// Shared handle to the CUDA backend.
 pub static CUDA: &dyn DeviceBackend = &Cuda;
 
 impl DeviceBackend for Cuda {
+    /// Returns `"cuda"`.
     fn name(&self) -> &'static str {
         "cuda"
     }
 
+    /// Number of visible CUDA devices, or 0 if the runtime call fails or CUDA is not linked.
     fn device_count(&self) -> usize {
         #[cfg(lumen_cuda_linked)]
         {
@@ -40,6 +47,7 @@ impl DeviceBackend for Cuda {
         }
     }
 
+    /// Like the default check, but mentions when lumen was built without CUDA.
     fn check(&self, index: usize) -> Result<(), String> {
         let count = self.device_count();
         if index < count {
@@ -54,6 +62,7 @@ impl DeviceBackend for Cuda {
         ))
     }
 
+    /// Makes `index` the current CUDA device unless it already is and has a live context.
     #[cfg(lumen_cuda_linked)]
     fn set_device(&self, index: usize) {
         let mut current = -1;

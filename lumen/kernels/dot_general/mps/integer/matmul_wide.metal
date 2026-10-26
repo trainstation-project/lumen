@@ -1,6 +1,7 @@
 #define WIDE_TILE 32
 // The 64-bit integer variant uses a smaller tile to reduce register and
 // threadgroup-memory pressure. Each thread computes a 2 x 2 output block.
+/// Batched 64-bit integer matmul over 32 x 32 output tiles, accumulating in `T`.
 template <typename T>
 inline void matmul_wide_impl(device const T *lhs,
                              device const T *rhs,

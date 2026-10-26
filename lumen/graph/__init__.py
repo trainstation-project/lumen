@@ -1,3 +1,5 @@
+"""Graph tracing package: the Rust `Graph`, the Python tracer and `compile`, and the primitive ops."""
+
 from lumen.graph._C import Graph
 
 # isort: off

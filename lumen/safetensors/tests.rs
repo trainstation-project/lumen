@@ -1,13 +1,17 @@
+//! Tests for safetensors serialization, parsing, validation and file round trips.
+
 use std::collections::BTreeMap;
 
 use super::*;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{Element, Scalar};
 
+/// An f32 tensor of `values` with `shape`.
 fn f32s(values: &[f32], shape: &[usize]) -> Tensor {
     Tensor::from_slice(values, DType::F32).reshape(shape)
 }
 
+/// Asserts `result` is an error matching `expected`.
 fn assert_err(result: Result<impl std::fmt::Debug, Error>, expected: fn(&Error) -> bool) {
     match result {
         Err(e) if expected(&e) => {}
@@ -15,6 +19,7 @@ fn assert_err(result: Result<impl std::fmt::Debug, Error>, expected: fn(&Error) 
     }
 }
 
+/// A small tensor serializes to exactly the expected bytes.
 #[test]
 fn serialization_is_byte_for_byte() {
     let attn = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1, 2, 3]);
@@ -32,6 +37,7 @@ fn serialization_is_byte_for_byte() {
     read_metadata(&out).unwrap();
 }
 
+/// The header is padded with spaces to a multiple of eight bytes.
 #[test]
 fn header_is_padded_to_eight_bytes() {
     let attn = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 2, 3]);
@@ -48,6 +54,7 @@ fn header_is_padded_to_eight_bytes() {
     );
 }
 
+/// Files with no tensors serialize correctly, with and without metadata.
 #[test]
 fn empty_files_and_metadata() {
     let out = serialize(&[], None).unwrap();
@@ -70,6 +77,7 @@ fn empty_files_and_metadata() {
     assert_eq!(metadata.metadata().unwrap()["framework"], "pt");
 }
 
+/// A hand-written file loads with the right name, shape, dtype and data.
 #[test]
 fn deserialization() {
     let serialized = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
@@ -83,6 +91,7 @@ fn deserialization() {
     assert_eq!(t.to_vec::<i32>(), [0; 4]);
 }
 
+/// Scalar shapes and tensors with no elements load.
 #[test]
 fn empty_shapes_and_zero_sized_tensors() {
     let serialized = b"8\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[],\"data_offsets\":[0,4]}}\x00\x00\x00\x00";
@@ -94,6 +103,7 @@ fn empty_shapes_and_zero_sized_tensors() {
     assert_eq!(loaded[0].1.shape(), [2, 0]);
 }
 
+/// Tensors whose byte ranges overlap are rejected.
 #[test]
 fn overlapping_offsets_are_rejected() {
     let mut header = String::from("{");
@@ -114,6 +124,7 @@ fn overlapping_offsets_are_rejected() {
     });
 }
 
+/// Data longer or shorter than the tensors need is rejected.
 #[test]
 fn incomplete_buffers_are_rejected() {
     let extra = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00extra_bogus_data_for_polyglot_file";
@@ -126,6 +137,7 @@ fn incomplete_buffers_are_rejected() {
     });
 }
 
+/// Each kind of malformed header gives its own error.
 #[test]
 fn malformed_headers_are_rejected() {
     let too_large = b"<\x00\x00\x00\x00\xff\xff\xff{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
@@ -149,6 +161,7 @@ fn malformed_headers_are_rejected() {
     });
 }
 
+/// Whitespace around the header JSON is accepted.
 #[test]
 fn headers_may_be_padded_with_whitespace() {
     let (_, m) = read_metadata(b"\x06\x00\x00\x00\x00\x00\x00\x00{}\x0D\x20\x09\x0A").unwrap();
@@ -157,6 +170,7 @@ fn headers_may_be_padded_with_whitespace() {
     assert!(m.tensors().is_empty());
 }
 
+/// Shapes whose element or byte counts overflow are rejected.
 #[test]
 fn overflowing_shapes_are_rejected() {
     let shape = b"O\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,18446744073709551614],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
@@ -169,6 +183,7 @@ fn overflowing_shapes_are_rejected() {
     });
 }
 
+/// Serializing refuses headers over `MAX_HEADER_SIZE`.
 #[test]
 #[cfg_attr(miri, ignore = "a header of MAX_HEADER_SIZE bytes, too slow for Miri")]
 fn oversized_headers_are_not_written() {
@@ -178,6 +193,7 @@ fn oversized_headers_are_not_written() {
     });
 }
 
+/// Every lumen dtype safetensors can store.
 const DTYPES: [DType; 13] = [
     DType::Bool,
     DType::U8,
@@ -194,6 +210,7 @@ const DTYPES: [DType; 13] = [
     DType::F64,
 ];
 
+/// One 2x3 tensor of small values per dtype in `DTYPES`, named `t_<dtype>`.
 fn tensors() -> Vec<(String, Tensor)> {
     DTYPES
         .iter()
@@ -206,14 +223,17 @@ fn tensors() -> Vec<(String, Tensor)> {
         .collect()
 }
 
+/// `t`'s values as f64, for comparing tensors of any dtype.
 fn as_f64(t: &Tensor) -> Vec<f64> {
     dispatch_dtype!(t.dtype(), T => t.to_vec::<T>().into_iter().map(|v| v.to_scalar().to_f64()).collect())
 }
 
+/// Borrows owned `(name, tensor)` pairs.
 fn named(tensors: &[(String, Tensor)]) -> Vec<(&str, &Tensor)> {
     tensors.iter().map(|(n, t)| (n.as_str(), t)).collect()
 }
 
+/// Asserts both lists hold the same names, dtypes, shapes and values, in any order.
 fn assert_same(expected: &[(String, Tensor)], actual: &[(String, Tensor)]) {
     let mut actual: Vec<_> = actual.iter().collect();
     actual.sort_by(|a, b| a.0.cmp(&b.0));
@@ -226,6 +246,7 @@ fn assert_same(expected: &[(String, Tensor)], actual: &[(String, Tensor)]) {
     }
 }
 
+/// Every dtype round trips through bytes, and each tensor's offset is aligned to its element size.
 #[test]
 fn every_dtype_round_trips() {
     let tensors = tensors();
@@ -239,6 +260,7 @@ fn every_dtype_round_trips() {
     }
 }
 
+/// `save_file` writes the same bytes as `serialize`, and `SafeTensorsFile` reads them back.
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn files_round_trip_with_metadata() {
@@ -267,6 +289,7 @@ fn files_round_trip_with_metadata() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Names needing JSON escapes survive a round trip.
 #[test]
 fn names_need_escaping() {
     let t = f32s(&[1.0], &[1]);
@@ -275,6 +298,7 @@ fn names_need_escaping() {
     assert_eq!(deserialize(&bytes, Device::Cpu(0)).unwrap()[0].0, name);
 }
 
+/// Non-contiguous tensors are refused, while contiguous views save fine.
 #[test]
 fn saving_needs_contiguous_tensors() {
     let t = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]).transpose(0, 1);
@@ -286,6 +310,7 @@ fn saving_needs_contiguous_tensors() {
     assert_eq!(loaded[0].1.to_vec::<f32>(), [3.0, 4.0, 5.0]);
 }
 
+/// Loading a dtype lumen lacks names the tensor and dtype.
 #[test]
 fn unsupported_dtypes_name_the_tensor() {
     let header = "{\"w\":{\"dtype\":\"F8_E4M3\",\"shape\":[2],\"data_offsets\":[0,2]}}";
@@ -299,6 +324,7 @@ fn unsupported_dtypes_name_the_tensor() {
     );
 }
 
+/// Any nonzero byte in a BOOL tensor loads as true.
 #[test]
 fn bools_load_as_zero_or_one() {
     let header = "{\"b\":{\"dtype\":\"BOOL\",\"shape\":[3],\"data_offsets\":[0,3]}}";
@@ -309,6 +335,7 @@ fn bools_load_as_zero_or_one() {
     assert_eq!(loaded[0].1.to_vec::<bool>(), [false, true, true]);
 }
 
+/// Tensors load onto MPS and serialize from it to the same bytes.
 #[test]
 fn tensors_load_onto_mps() {
     if !crate::device::mps::MPS.is_available() {
@@ -326,6 +353,7 @@ fn tensors_load_onto_mps() {
     assert_eq!(serialize(&named(&on_mps), None).unwrap(), bytes);
 }
 
+/// Loading onto meta keeps shapes and dtypes, and meta tensors cannot be saved.
 #[test]
 fn meta_tensors_load_from_the_header_and_do_not_save() {
     let tensors = tensors();

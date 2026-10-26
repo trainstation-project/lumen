@@ -1,3 +1,6 @@
+//! A minimal TCP key-value store for rendezvous: a threaded server on the master rank and a blocking client.
+//!
+//! Wire format: a one-byte opcode, then little-endian `u64` lengths/values and length-prefixed byte strings.
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -6,18 +9,27 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Request opcode: store a value.
 const SET: u8 = 0;
+/// Request opcode: read a value, waiting until it exists.
 const GET: u8 = 1;
+/// Request opcode: add to an integer counter.
 const ADD: u8 = 2;
+/// Request opcode: wait until a set of keys exists.
 const WAIT: u8 = 3;
 
+/// Reply status: the request succeeded.
 const FOUND: u8 = 0;
+/// Reply status: the awaited keys did not appear before the timeout.
 const TIMED_OUT: u8 = 1;
 
+/// Pause between attempts while the server isn't accepting connections yet.
 const CONNECT_RETRY: Duration = Duration::from_millis(10);
 
+/// The server's key to bytes map.
 type Values = HashMap<String, Vec<u8>>;
 
+/// Server-side table whose condvar wakes waiters whenever a key changes.
 #[derive(Default)]
 struct Table {
     values: Mutex<Values>,
@@ -25,10 +37,12 @@ struct Table {
 }
 
 impl Table {
+    /// Locks the map, recovering it if a holder panicked.
     fn lock(&self) -> MutexGuard<'_, Values> {
         self.values.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Blocks until all `keys` exist and returns the locked map, or `None` once `timeout` elapses.
     fn wait_for(&self, keys: &[String], timeout: Duration) -> Option<MutexGuard<'_, Values>> {
         let deadline = Instant::now() + timeout;
         let mut values = self.lock();
@@ -43,11 +57,13 @@ impl Table {
         Some(values)
     }
 
+    /// Stores `value` under `key` and wakes waiters.
     fn set(&self, key: String, value: Vec<u8>) {
         self.lock().insert(key, value);
         self.changed.notify_all();
     }
 
+    /// Adds `amount` to the decimal integer at `key` (0 if absent or unparsable) and returns the sum.
     fn add(&self, key: String, amount: i64) -> i64 {
         let mut values = self.lock();
         let current = values
@@ -62,46 +78,55 @@ impl Table {
     }
 }
 
+/// Writes `value` as 8 little-endian bytes.
 fn write_u64(stream: &mut TcpStream, value: u64) -> std::io::Result<()> {
     stream.write_all(&value.to_le_bytes())
 }
 
+/// Reads 8 little-endian bytes as a `u64`.
 fn read_u64(stream: &mut TcpStream) -> std::io::Result<u64> {
     let mut bytes = [0; 8];
     stream.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
 }
 
+/// Writes a single byte.
 fn write_u8(stream: &mut TcpStream, value: u8) -> std::io::Result<()> {
     stream.write_all(&[value])
 }
 
+/// Reads a single byte.
 fn read_u8(stream: &mut TcpStream) -> std::io::Result<u8> {
     let mut byte = [0];
     stream.read_exact(&mut byte)?;
     Ok(byte[0])
 }
 
+/// Writes `bytes` prefixed by their length.
 fn write_bytes(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
     write_u64(stream, bytes.len() as u64)?;
     stream.write_all(bytes)
 }
 
+/// Reads a length-prefixed byte string.
 fn read_bytes(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut bytes = vec![0; read_u64(stream)? as usize];
     stream.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 
+/// Reads a length-prefixed UTF-8 key.
 fn read_key(stream: &mut TcpStream) -> std::io::Result<String> {
     String::from_utf8(read_bytes(stream)?)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Reads a timeout sent as whole milliseconds.
 fn read_timeout(stream: &mut TcpStream) -> std::io::Result<Duration> {
     Ok(Duration::from_millis(read_u64(stream)?))
 }
 
+/// Reads one request from `stream`, serves it against `table` and writes the reply.
 fn answer(stream: &mut TcpStream, table: &Table) -> std::io::Result<()> {
     match read_u8(stream)? {
         SET => {
@@ -143,12 +168,14 @@ fn answer(stream: &mut TcpStream, table: &Table) -> std::io::Result<()> {
     }
 }
 
+/// Background store server; dropping it stops the accept loop.
 struct Server {
     address: SocketAddr,
     stopped: Arc<AtomicBool>,
 }
 
 impl Server {
+    /// Listens on `port` (0 picks a free one) and serves each connection on its own thread.
     fn start(port: u16) -> Result<Self, String> {
         let listener = TcpListener::bind(("0.0.0.0", port))
             .map_err(|e| format!("the store cannot listen on port {port}: {e}"))?;
@@ -171,21 +198,27 @@ impl Server {
 }
 
 impl Drop for Server {
+    /// Stops the accept loop.
     fn drop(&mut self) {
+        // wake the blocking accept with a throwaway connection so the loop sees `stopped`
         self.stopped.store(true, Ordering::Release);
         let _ = TcpStream::connect(("127.0.0.1", self.address.port()));
     }
 }
 
+/// Client connection to a store, also owning the server when this process is the master.
 pub struct TcpStore {
     host: String,
     port: u16,
+    /// Default wait for `get` and the process group barrier.
     timeout: Duration,
     stream: Mutex<TcpStream>,
+    /// Keeps the server alive for as long as the master's client.
     _server: Option<Server>,
 }
 
 impl TcpStore {
+    /// Starts the server when `is_master`, then connects to `host:port`, retrying until `timeout`.
     pub fn new(host: &str, port: u16, is_master: bool, timeout: Duration) -> Result<Self, String> {
         let server = is_master.then(|| Server::start(port)).transpose()?;
         let port = server.as_ref().map_or(port, |s| s.address.port());
@@ -199,6 +232,7 @@ impl TcpStore {
         })
     }
 
+    /// Connects to `host:port`, retrying every `CONNECT_RETRY` until `timeout` so workers may start before the master.
     fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -228,18 +262,22 @@ impl TcpStore {
         }
     }
 
+    /// Returns the host this client connected to.
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// Returns the store's port, the bound one when this process picked port 0.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// Returns the default timeout for blocking reads.
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
 
+    /// Runs one request/reply exchange under the connection lock.
     fn request<T>(
         &self,
         send: impl FnOnce(&mut TcpStream) -> std::io::Result<T>,
@@ -248,10 +286,12 @@ impl TcpStore {
         send(&mut stream).map_err(|e| format!("lost the store at {}:{}: {e}", self.host, self.port))
     }
 
+    /// Formats the timeout error for `keys`.
     fn timed_out(&self, keys: &[&str], timeout: Duration) -> String {
         format!("timed out after {timeout:?} waiting for {keys:?} in the store")
     }
 
+    /// Stores `value` under `key`.
     pub fn set(&self, key: &str, value: &[u8]) -> Result<(), String> {
         self.request(|s| {
             write_u8(s, SET)?;
@@ -261,6 +301,7 @@ impl TcpStore {
         })
     }
 
+    /// Returns the value under `key`, waiting up to the store's timeout for it to be set.
     pub fn get(&self, key: &str) -> Result<Vec<u8>, String> {
         let timeout = self.timeout;
         let value = self.request(|s| {
@@ -275,6 +316,7 @@ impl TcpStore {
         value.ok_or_else(|| self.timed_out(&[key], timeout))
     }
 
+    /// Atomically adds `amount` to the counter at `key` and returns the new value.
     pub fn add(&self, key: &str, amount: i64) -> Result<i64, String> {
         self.request(|s| {
             write_u8(s, ADD)?;
@@ -284,6 +326,7 @@ impl TcpStore {
         })
     }
 
+    /// Blocks until every key in `keys` exists or `timeout` elapses.
     pub fn wait(&self, keys: &[&str], timeout: Duration) -> Result<(), String> {
         let found = self.request(|s| {
             write_u8(s, WAIT)?;

@@ -1,19 +1,29 @@
+//! Block planning for TPU loops with layout primitives: maps every value's dims onto the output's
+//! grid and picks block sizes every operand can be read in as whole tiles.
+
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
 
+/// Lanes of a TPU vreg: a tiled array's last-dim unit.
 const LANES: usize = 128;
 
+/// Block unit of a rank-1 array, which is tiled in flat chunks.
 const FLAT: usize = 1024;
 
+/// Most elements one block may hold.
 const BLOCK_ELEMENTS: usize = 1 << 18;
 
+/// Where one dim of a value's block sits relative to the output's grid.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Dim {
+    /// Follows output dim `d`, shifted by `offset` elements.
     Out { d: usize, offset: usize },
+    /// A single index fixed at `offset`, independent of the grid.
     One { offset: usize },
 }
 
 impl Dim {
+    /// The same dim read `by` elements further along.
     fn shifted(self, by: usize) -> Dim {
         match self {
             Dim::Out { d, offset } => Dim::Out {
@@ -27,14 +37,18 @@ impl Dim {
     }
 }
 
+/// Block sizes along each output dim and, per value, how its dims follow them.
 #[cfg_attr(not(lumen_tpu_linked), allow(dead_code))]
 pub(crate) struct Plan {
+    /// Block size along each output dim.
     pub(crate) blocks: Vec<usize>,
+    /// Each value's per-dim map, `None` for values with no block (scalars, unreached values).
     pub(crate) maps: Vec<Option<Vec<Dim>>>,
 }
 
 #[cfg_attr(not(lumen_tpu_linked), allow(dead_code))]
 impl Plan {
+    /// The block shape a value with dim map `map` is read in.
     pub(crate) fn block(&self, map: &[Dim]) -> Vec<usize> {
         map.iter()
             .map(|m| match *m {
@@ -45,6 +59,7 @@ impl Plan {
     }
 }
 
+/// Whether `p` only moves or generates elements, which needs the indexed loop.
 pub(crate) fn layout(p: &Primitive) -> bool {
     matches!(
         p,
@@ -56,6 +71,8 @@ pub(crate) fn layout(p: &Primitive) -> bool {
     )
 }
 
+/// Walks the loop back from its output, giving each value the dim map it is read at;
+/// fails when a value is read at two different places or a primitive can't be mapped.
 fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
     let root = body.outputs()[0];
     let rank = body.type_of(root).shape.len();
@@ -80,6 +97,7 @@ fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
             } => {
                 let x = x.expect("an operand");
                 let xt = body.type_of(x);
+                // A broadcast size-1 dim stays at index 0 rather than following the grid.
                 let xm = broadcast_dimensions
                     .iter()
                     .enumerate()
@@ -93,6 +111,7 @@ fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
             Primitive::Reshape { .. } => {
                 let x = x.expect("an operand");
                 let (xs, os) = (&body.type_of(x).shape, &body.type_of(node.output).shape);
+                // Only reshapes that add or drop unit dims are mappable.
                 let wide = |s: &[usize]| (0..s.len()).filter(|&k| s[k] != 1).collect::<Vec<_>>();
                 let (xw, ow) = (wide(xs), wide(os));
                 if xw.len() != ow.len() || xw.iter().zip(&ow).any(|(&a, &b)| xs[a] != os[b]) {
@@ -135,6 +154,7 @@ fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
     Ok(maps)
 }
 
+/// Whether `t` read through `map` with output blocks `blocks` takes whole tiles at block-aligned offsets.
 fn readable(t: &TensorType, map: &[Dim], blocks: &[usize]) -> bool {
     let Ok(layout) = Layout::new(t.dtype, &t.shape) else {
         return false;
@@ -145,6 +165,7 @@ fn readable(t: &TensorType, map: &[Dim], blocks: &[usize]) -> bool {
             Dim::Out { d, offset } => (blocks[d], offset),
             Dim::One { offset } => (1, offset),
         };
+        // Rank-1 arrays are tiled flat; otherwise the last two dims are tiled by lanes and sublane rows.
         let unit = match (rank, rank - k) {
             (1, _) => FLAT,
             (_, 1) => LANES,
@@ -156,6 +177,8 @@ fn readable(t: &TensorType, map: &[Dim], blocks: &[usize]) -> bool {
     })
 }
 
+/// Block sizes for a dim of `n`: `n` itself if at most `cap`, then the multiples of `unit` up to
+/// `cap` that divide `n`, largest first.
 fn candidates(n: usize, unit: usize, cap: usize) -> Vec<usize> {
     let mut out: Vec<usize> = Vec::new();
     if n <= cap {
@@ -170,6 +193,8 @@ fn candidates(n: usize, unit: usize, cap: usize) -> Vec<usize> {
     out
 }
 
+/// Picks blocks for the loop `body` that every operand and the output read in whole tiles, with
+/// the last block dividing `window` (the output's column offset in a wider matrix).
 pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
     let maps = maps(body)?;
     let root = body.outputs()[0];
@@ -203,6 +228,7 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
                     .into_iter()
                     .filter(|b| *b > 512),
             );
+            // Prefer the widest column block, then the tallest row block that fits.
             'search: for bn in candidates(n, LANES, 2048) {
                 for &bm in &rows {
                     let mut blocks = vec![1; rank];

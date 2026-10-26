@@ -1,3 +1,6 @@
+//! MPS loop fusion: groups elementwise chains, reductions, normalization rows and GEMM epilogues
+//! into `Fusion` nodes, each compiled to one Metal kernel.
+
 mod analysis;
 mod dot_epilogues;
 mod emit;
@@ -13,10 +16,14 @@ use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
+/// Most buffers a loop fusion may read.
 const MAX_INPUTS: usize = 29;
 
+/// Most extra outputs a GEMM epilogue may write besides its main one.
 const MAX_AUX: usize = 4;
 
+/// Whether `node` can live inside a loop fusion kernel: loop ops, gathers and reductions under
+/// 2^32 elements, none touching float64.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     let loop_op = matches!(
@@ -57,6 +64,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || gather || reduction) && !f64
 }
 
+/// Whether `node` is a sum or max reduction.
 fn is_reduction(node: &Node) -> bool {
     matches!(
         node.primitive,
@@ -64,6 +72,7 @@ fn is_reduction(node: &Node) -> bool {
     )
 }
 
+/// Whether `node` is costly enough per element that recomputing it in each reader is a bad trade.
 fn expensive(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
     match node.primitive {
@@ -73,6 +82,7 @@ fn expensive(graph: &Graph, node: &Node) -> bool {
     }
 }
 
+/// Fuses `graph` given its normalization `rows` and by-value `scalars`; `kernel` names each fusion body's kernel.
 pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
@@ -100,6 +110,7 @@ pub(super) fn fuse(
     )
 }
 
+/// Compiler pass running loop fusion, then optional horizontal fusion.
 pub(super) struct LoopFusion;
 
 impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
@@ -107,9 +118,11 @@ impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
         "loop_fusion"
     }
 
+    /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config.mps;
         let requested = m.kernels.len();
+        // Dropping a scalar that some unfused node reads changes kernel signatures, so fuse again from scratch.
         let graph = loop {
             m.kernels.truncate(requested);
             let kernels = &mut m.kernels;

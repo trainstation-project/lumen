@@ -1,3 +1,4 @@
+//! Tensors: dtypes, scalars, storage, parameters, and the Python and DLPack bindings.
 #[cfg(feature = "python")]
 pub(crate) mod dlpack;
 pub mod dtype;

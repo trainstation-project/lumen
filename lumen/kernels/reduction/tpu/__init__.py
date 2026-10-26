@@ -1,3 +1,5 @@
+"""Pallas TPU reduction program: a sum or max over rows, columns or everything, with fused prologue and epilogue."""
+
 import math
 
 import lumen
@@ -8,6 +10,7 @@ from lumen.kernels.tpu import pallas
 
 
 def _identity(name, dtype, shape):
+    """Returns a `shape` tensor of `dtype` filled with the identity of reduction `name` (0 for sum, the lowest value for max)."""
     if name == "sum":
         return lumen.full(shape, 0, dtype)
     if dtype in ("float32", "bfloat16", "float16"):
@@ -100,6 +103,8 @@ def program(spec):
     steps = math.prod(grid[len(grid) - reduced :])
 
     def reduce(x):
+        """Reduces a block over the schedule's axes, keeping a 1-element shape for total reductions."""
+        # total max of 32-bit ints or non-float32 values goes through float32, exactly for ints via 16-bit halves
         if name == "sum":
             r = F.sum(x.to(accum), s["axes"])
         elif total and accum in ("int32", "uint32"):
@@ -111,15 +116,20 @@ def program(spec):
         return r.expand((1,)) if total else r
 
     def combine(a, b):
+        """Folds a block's partial into the running accumulator."""
         return a + b if name == "sum" else F.maximum(a, b)
 
     def kernel(rows, memory, result, acc):
+        """Pallas kernel body: reads scalar operands, then pipelines operand blocks through the reduction."""
+
         def copy(src, dst):
+            """Copies `src` to `dst` with a blocking DMA."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
 
         read = {}
+        # scalar operands, and output-shaped operands of a total reduction, are read once up front
         for i, (dtype, kind) in enumerate(inputs):
             if kind == "scalar" or (kind == "out" and total):
                 v = pl.scratch(pl.VMEM((1,), dtype))
@@ -133,11 +143,13 @@ def program(spec):
         out = pallas.view(result, rows[len(inputs)], o_view, spec["output"])
 
         def finish(r, given):
+            """Runs the epilogue on reduced value `r` with operands from `read` or the current `given` blocks."""
             values = [read.get(i, given.get(i)) for i in range(len(inputs))]
             values += [None] * len(spec["prologue"]) + [r]
             return computed(spec["epilogue"], values, o_block)[spec["result"]]
 
         def body(*refs):
+            """Pipeline step: reduces one operand block and accumulates it, finishing the output block on its last step."""
             blocks = dict(zip(ins + outs, refs))
             values = [read[i] if i in read else blocks[i][...] if i in ins else None for i in range(len(inputs))]
             partial = reduce(computed(spec["prologue"], values, x_block)[spec["operand"]])
@@ -145,6 +157,7 @@ def program(spec):
                 refs[-1][...] = finish(partial, {i: blocks[i][...] for i in outs})
                 return
             ids = [pl.program_id(a) for a in range(len(grid) - reduced, len(grid))]
+            # first/last step of the reduced grid axes for the current output block
             first = last = None
             for a, k in zip(ids, grid[len(grid) - reduced :]):
                 first = (a == 0) if first is None else first & (a == 0)
@@ -152,6 +165,7 @@ def program(spec):
 
             @pl.when(first)
             def _():
+                """Resets the accumulator before the first reduced block."""
                 acc[...] = _identity(name, accum, o_block)
 
             acc[...] = combine(acc[...], partial)
@@ -159,9 +173,11 @@ def program(spec):
 
                 @pl.when(last)
                 def _():
+                    """Writes the finished output block after the last reduced block."""
                     refs[-1][...] = finish(acc[...], {i: blocks[i][...] for i in outs})
 
         if total:
+            # a scalar result has no output block spec: finish in VMEM after the pipeline and DMA it out
             pl.emit_pipeline(body, grid=grid, in_specs=specs, out_specs=[])(*piped)
             vmem = pl.scratch(pl.VMEM((1,), spec["output"]))
             vmem[...] = finish(acc[...], {})

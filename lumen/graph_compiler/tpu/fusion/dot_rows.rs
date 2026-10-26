@@ -1,8 +1,10 @@
+//! Fuses a matmul into the normalization `row` fusion that consumes its whole output rows.
 use super::super::TpuModule;
 use crate::codegen::tpu::row::{Kind, kinds};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::pass::CompilerPass;
 
+/// Whether `dot` is an unbatched matmul of a rank-2+ lhs contracted on its last axis with a 2-D rhs.
 fn plain(graph: &Graph, dot: &Node) -> bool {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -21,6 +23,7 @@ fn plain(graph: &Graph, dot: &Node) -> bool {
         && rhs_contracting.len() == 1
 }
 
+/// Finds the plain dot feeding `row` as a full-row operand, returning the dot's node and operand slot.
 fn joined(graph: &Graph, producer: &[Option<usize>], row: &Node) -> Option<(usize, usize)> {
     let Primitive::Fusion { name, body, .. } = &row.primitive else {
         return None;
@@ -30,6 +33,7 @@ fn joined(graph: &Graph, producer: &[Option<usize>], row: &Node) -> Option<(usiz
     }
     let kinds = kinds(body)?;
     let nodes = graph.nodes();
+    // The dot's result must be read whole by the row kernel, by nothing else, and not escape the graph.
     row.inputs.iter().enumerate().find_map(|(at, &v)| {
         let d = producer[v]?;
         let only = nodes
@@ -44,6 +48,7 @@ fn joined(graph: &Graph, producer: &[Option<usize>], row: &Node) -> Option<(usiz
     })
 }
 
+/// Builds the `dot_row` body: the dot's operands and the row's other reads in, the row's values out.
 fn body(graph: &Graph, dot: &Node, row: &Node, at: usize) -> Graph {
     let Primitive::Fusion { body: rows, .. } = &row.primitive else {
         unreachable!("a row fusion")
@@ -63,6 +68,7 @@ fn body(graph: &Graph, dot: &Node, row: &Node, at: usize) -> Graph {
         .expect("the dot");
     let mut map: Vec<Var> = vec![usize::MAX; rows.types.len()];
     let mut others = others.into_iter();
+    // Slot `at` of the row now reads the in-body product; the rest map to the new inputs in order.
     for (k, &v) in rows.inputs().iter().enumerate() {
         map[v] = match k == at {
             true => product,
@@ -80,6 +86,7 @@ fn body(graph: &Graph, dot: &Node, row: &Node, at: usize) -> Graph {
     out
 }
 
+/// Replaces each matched row fusion and its feeding dot with one `dot_row` fusion.
 pub(super) fn dot_rows(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
@@ -105,12 +112,14 @@ pub(super) fn dot_rows(graph: &Graph) -> Graph {
         map[v] = out.input(graph.type_of(v).clone());
     }
     for (i, node) in nodes.iter().enumerate() {
+        // Taken dots are emitted inside the `dot_row` fusion of their row.
         if taken[i] {
             continue;
         }
         out.set_origin(node);
         if let Some((d, at)) = dot_of[i] {
             let dot = &nodes[d];
+            // Reads are the dot's lhs and rhs followed by the row's remaining operands.
             let reads: Vec<Var> = [dot.inputs[0], dot.inputs[1]]
                 .into_iter()
                 .chain(
@@ -142,6 +151,7 @@ pub(super) fn dot_rows(graph: &Graph) -> Graph {
     out
 }
 
+/// Fuses dots into the row fusions that read them when contraction epilogues are enabled.
 pub(in crate::graph_compiler::tpu) struct DotRows;
 
 impl CompilerPass<TpuModule<'_>> for DotRows {

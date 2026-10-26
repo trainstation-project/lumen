@@ -1,7 +1,11 @@
+//! Configs for the simdgroup-matrix tiled matmul.
+
 use std::sync::OnceLock;
 
 use super::super::{Algorithm, GemmConfig, MAX_THREADGROUP_BYTES};
 
+/// Every tiled config autotuning tries, filtered to balanced fragment counts, whole cooperative
+/// loads and tiles that fit in threadgroup memory.
 pub(crate) fn configs() -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<Vec<GemmConfig>> = OnceLock::new();
     CONFIGS.get_or_init(|| {
@@ -10,6 +14,7 @@ pub(crate) fn configs() -> &'static [GemmConfig] {
             let simds = threads / 32;
             for cols in [1, 2, 4].into_iter().filter(|c| simds % c == 0) {
                 let rows = simds / cols;
+                // `rows x cols` simdgroups, each owning `fm x fn_` 8x8 fragments.
                 for (bm, bn, bk) in [32, 64, 128]
                     .into_iter()
                     .flat_map(|bm| [32, 64, 128].map(move |bn| (bm, bn)))
@@ -50,6 +55,7 @@ pub(crate) fn configs() -> &'static [GemmConfig] {
     })
 }
 
+/// The precompiled default, mid and small tiled configs, with their kernel-name suffixes.
 pub(crate) const DEFAULT_CONFIGS: [(&str, GemmConfig); 3] = [
     (
         "",

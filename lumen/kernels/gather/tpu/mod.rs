@@ -1,3 +1,5 @@
+//! Encodes row gathers from `[vocab, width]` tables on TPU, on the SparseCore when the layout allows.
+
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
@@ -5,16 +7,22 @@ use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
 
+/// TPU lane width.
 const LANES: usize = 128;
 
+/// Most bytes of fetched tiles per output block.
 const BLOCK_BYTES: usize = 8 << 20;
 
+/// Most indices loaded into scalar memory at once.
 const WINDOW: usize = 8192;
 
+/// Most output rows per block.
 const ROWS: usize = 64;
 
+/// Most bytes one SparseCore chunk of gathered rows may take.
 const SPARSE_CORE_CHUNK: usize = 128 << 10;
 
+/// Encodes a gather of table rows at int32 indices along axis 0, rejecting layouts the kernels don't cover.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -37,6 +45,7 @@ pub(crate) fn encode(
         return Ok(());
     }
     let tile = Layout::new(table.dtype, &[1, 1])?.rows;
+    // `tile` table rows share one TPU tile; output blocks hold whole tiles of rows.
     let rank = ids.shape.len();
     let s = ids.shape[rank - 1];
     let r = if rank >= 2 { ids.shape[rank - 2] } else { 1 };
@@ -44,6 +53,7 @@ pub(crate) fn encode(
         1 => vec![s],
         _ => vec![ids.shape[..rank - 2].iter().product(), r, s],
     };
+    // Index windows read `rw` rows of `cw` indices; they must tile the index array.
     let rw = match r {
         _ if rank == 1 => 1,
         r if r.is_multiple_of(8) => 8,
@@ -84,6 +94,8 @@ pub(crate) fn encode(
     launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
 }
 
+/// Encodes the gather on the SparseCore when rows are 32-bit, whole lanes and tile-aligned in the shared region;
+/// returns whether it did.
 fn sparse_core(
     index: usize,
     step: &Step,
@@ -113,6 +125,7 @@ fn sparse_core(
     }
     let n = ids.numel();
     let s = ids.shape[ids.shape.len() - 1];
+    // Indices map to consecutive output rows unless padding of a ragged last index dim breaks that.
     let linear = n == s || s.is_multiple_of(8);
     let workers = SPARSE_CORE_MESH[0] * SPARSE_CORE_MESH[1];
     let count = n.next_multiple_of(k * workers);

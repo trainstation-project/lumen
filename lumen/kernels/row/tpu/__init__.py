@@ -1,3 +1,5 @@
+"""Pallas TPU kernel for row fusions: elementwise and per-row work over blocks of whole rows."""
+
 from lumen import pallas as pl
 from lumen.codegen.tpu import per_row
 from lumen.kernels.tpu import pallas
@@ -22,7 +24,10 @@ def program(spec):
     inputs, outputs = spec["inputs"], spec["outputs"]
 
     def kernel(refs, memory, result):
+        """Pallas kernel body: reads scalar operands, then pipelines row blocks through the fused nodes."""
+
         def copy(src, dst):
+            """Copies `src` to `dst` with a blocking DMA."""
             c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
             c.start()
             c.wait()
@@ -42,6 +47,7 @@ def program(spec):
         ]
 
         def body(*refs_):
+            """Pipeline step: computes the fused nodes on one block of rows and writes each output block."""
             given = iter(refs_[: len(piped)])
             values = []
             for i, (_, kind) in enumerate(inputs):
@@ -49,6 +55,7 @@ def program(spec):
                     values.append(read[i])
                     continue
                 v = next(given)[...]
+                # per-column operands arrive as `(n,)` blocks and broadcast against rows as `(1, n)`
                 values.append(v.reshape(1, n) if kind == "lanes" else v)
             values = per_row(spec["nodes"], values, shapes)
             for ref, (k, _, _) in zip(refs_[len(piped) :], outputs):

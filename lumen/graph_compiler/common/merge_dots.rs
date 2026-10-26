@@ -1,3 +1,6 @@
+//! Merges dots that share one operand and whose other operands are packable inputs (e.g. the Q, K and
+//! V projections of one activation) into a single dot against a packed weight block.
+
 use std::collections::HashMap;
 
 use crate::graph::primitive::free_dims;
@@ -5,32 +8,52 @@ use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::graph_compiler::{combined, elementwise};
 
+/// What the backend supports for merged dots.
 pub(crate) struct Target {
+    /// Whether a node reads its operands in place, so slices of a merged result need no copy.
     pub(crate) reads: fn(&Graph, &Node) -> bool,
+    /// Whether slices of a merged block or result can be read as strided views.
     pub(crate) views: bool,
+    /// Tile size the block's two trailing dims must be multiples of to be used whole.
     pub(crate) lanes: usize,
+    /// GEMM column tile width an interleaved region must be a multiple of.
     pub(crate) columns: usize,
 }
 
+/// Dots that can merge into one.
 struct Group {
+    /// Operand every dot shares.
     shared: Var,
+    /// Position (0 = lhs, 1 = rhs) of the shared operand.
     side: usize,
+    /// The dots' common primitive.
     primitive: Primitive,
+    /// Type of the other operand with the concatenation dim zeroed, which members must match.
     other: TensorType,
+    /// Dim of the other operand the weights are concatenated along.
     dimension: usize,
+    /// Elementwise ops each weight goes through before the dot, replayed on the block.
     chain: Vec<Link>,
+    /// Member dot nodes.
     nodes: Vec<usize>,
+    /// Packable input behind each member's other operand.
     weights: Vec<Var>,
 }
 
+/// One elementwise op on a weight on its way to the dot.
 #[derive(Debug, Clone, PartialEq)]
 struct Link {
     primitive: Primitive,
+    /// Operand position and scalar `full` of a broadcast constant operand.
     splat: Option<(usize, Primitive)>,
 }
 
+/// Per packed block: the graph input positions it concatenates and the dim it concatenates along.
 pub(crate) type Packs = Vec<(Vec<usize>, usize)>;
 
+/// Merges dots sharing an operand whose other operands derive from `packable` inputs into one dot
+/// against a new input (the packed block), slicing each member's result back out. Returns the graph,
+/// the packs, and per block the interleaved region sizes (all 1s when not interleaved).
 pub(crate) fn merge_dots(
     graph: &Graph,
     packable: &[bool],
@@ -46,6 +69,7 @@ pub(crate) fn merge_dots(
         matches!(node.primitive, Primitive::Concatenate { .. })
             && node.inputs.iter().all(|&v| is_packable(v))
     };
+    // Reads of each value, not counting concatenates of packable inputs (those become the block).
     let mut reads = vec![0; graph.types.len()];
     for &v in nodes
         .iter()
@@ -76,6 +100,7 @@ pub(crate) fn merge_dots(
         matches!(&f.primitive, Primitive::Full { shape, .. } if shape.is_empty())
             .then(|| f.primitive.clone())
     };
+    // The packable input behind `v` and the single-use elementwise chain from it to `v`.
     let weight_of = |v: Var| -> Option<(Var, Vec<Link>)> {
         let (mut chain, mut x) = (Vec::new(), v);
         while position[x].is_none() {
@@ -104,6 +129,7 @@ pub(crate) fn merge_dots(
         chain.reverse();
         Some((x, chain))
     };
+    // Values only read in place (by dots or by nodes the target reads in place), so slicing is free.
     let mut read_in_place = vec![true; graph.types.len()];
     if !target.views {
         for &v in graph.outputs() {
@@ -131,6 +157,8 @@ pub(crate) fn merge_dots(
                 continue;
             };
             let i = position[w].expect("a packable input");
+            // A block concatenated along a non-leading dim stores each weight strided, which is only
+            // possible when the weight is neither donated nor read elsewhere.
             let strided = other.shape[..dimension].iter().any(|&n| n != 1);
             if strided && (donated.get(i) == Some(&true) || !alone[w]) {
                 continue;
@@ -184,6 +212,7 @@ pub(crate) fn merge_dots(
             )),
         }
     }
+    // Groups whose results only partly interleave are split into the interleaved part and the rest.
     let mut groups: Vec<Group> = groups
         .into_iter()
         .flat_map(|g| match interleaves(graph, &g, target.columns) {
@@ -206,6 +235,7 @@ pub(crate) fn merge_dots(
         let side = groups[k].side;
         groups[k].nodes.retain(|&i| !merged[i]);
         let weights: Vec<Var> = groups[k].nodes.iter().map(|&i| weight(side, i)).collect();
+        // A group with the same weights as an earlier block (e.g. its backward) reuses that block.
         let earlier = (0..k).find(|&e| {
             let (g, b) = (&groups[k], &groups[e]);
             reuses[e].is_none()
@@ -260,6 +290,7 @@ pub(crate) fn merge_dots(
     let mut parted = vec![false; graph.types.len()];
     let mut chains: Vec<Option<Var>> = vec![None; groups.len()];
     let mut parts: Vec<(Vec<Var>, usize, Var)> = Vec::new();
+    // Rebuild the graph: the first member of each group emits the block and the merged dot.
     for (i, node) in nodes.iter().enumerate() {
         out.set_origin(node);
         if parted[node.output] {
@@ -329,6 +360,7 @@ pub(crate) fn merge_dots(
                 g.dimension,
                 value,
             ));
+            // Other readers of a chained weight read their slice of the chained block.
             if layouts[k].is_none() && !g.chain.is_empty() {
                 let shape = out.type_of(value).shape.clone();
                 let mut start = 0;
@@ -354,6 +386,7 @@ pub(crate) fn merge_dots(
             let result = out
                 .apply(g.primitive.clone(), &operands)
                 .expect("the dots' dimension numbers");
+            // The result dim the members' outputs are concatenated along.
             let rank = out.type_of(result).shape.len();
             let dimension = match g.side {
                 0 => rank - 1,
@@ -391,6 +424,7 @@ pub(crate) fn merge_dots(
         if merged[i] {
             continue;
         }
+        // Gradient concatenates and slices of interleaved groups follow the interleaved layout.
         if let (
             Some(k),
             Primitive::Concatenate {
@@ -417,6 +451,7 @@ pub(crate) fn merge_dots(
             );
             continue;
         }
+        // A concatenate of exactly a block's parts is the block itself.
         if let Primitive::Concatenate { dimension, .. } = node.primitive
             && let Some(&(_, _, block)) = blocks
                 .iter()
@@ -438,6 +473,7 @@ pub(crate) fn merge_dots(
 }
 
 impl Group {
+    /// The group restricted to `members` (indices into its nodes).
     fn subset(&self, members: &[usize]) -> Group {
         Group {
             shared: self.shared,
@@ -452,13 +488,18 @@ impl Group {
     }
 }
 
+/// How members are laid out along the concatenated dim: consecutive regions, each interleaving its
+/// members element by element.
 #[derive(Clone, Debug)]
 struct Layout {
+    /// Members per region, in member order.
     regions: Vec<usize>,
+    /// Extent of each member along the dim.
     sizes: Vec<usize>,
 }
 
 impl Layout {
+    /// Where member `j` lives: its region's offset, the region's member count, and `j`'s index in it.
     fn region_of(&self, j: usize) -> (usize, usize, usize) {
         let (mut member, mut offset) = (0, 0);
         for &k in &self.regions {
@@ -472,6 +513,8 @@ impl Layout {
     }
 }
 
+/// Member `j` of `value`, laid out by `layout` along `axis`, reshaped to `shape`. `cache` shares the
+/// region slices and reshapes between members.
 fn member_of(
     out: &mut Graph,
     cache: &mut HashMap<(Var, usize, usize), Var>,
@@ -500,6 +543,7 @@ fn member_of(
     if k == 1 {
         return region;
     }
+    // Split the axis into (n, k) tuples and pick column `within`.
     let mut tuples = out.type_of(region).shape.clone();
     tuples.splice(axis..=axis, [n, k]);
     let reshaped = *cache.entry((region, axis, usize::MAX)).or_insert_with(|| {
@@ -522,6 +566,7 @@ fn member_of(
     out.apply(back, &[one]).expect("the member's elements")
 }
 
+/// Builds a value laid out by `layout` along `axis` from per-member `parts`.
 fn arrange(out: &mut Graph, parts: &[Var], axis: usize, layout: &Layout) -> Var {
     let mut regions = Vec::new();
     let mut member = 0;
@@ -566,12 +611,18 @@ fn arrange(out: &mut Graph, parts: &[Var], axis: usize, layout: &Layout) -> Var 
     }
 }
 
+/// Graph rewrites an interleaved layout needs in the backward pass.
 #[derive(Default)]
 struct Interleaving {
+    /// Concatenate nodes of per-member gradients to rearrange into the layout.
     cotangents: Vec<usize>,
+    /// `(slice node, member, axis)` for slices taking a member out of a product with the block.
     slices: Vec<(usize, usize, usize)>,
 }
 
+/// Orders the group's members so those whose results are combined elementwise share interleaved
+/// regions aligned to `columns`. Returns the order, members left out, the layout, and backward rewrites;
+/// `None` when nothing interleaves or the backward can't follow the layout.
 fn interleaves(
     graph: &Graph,
     g: &Group,
@@ -627,6 +678,8 @@ fn interleaves(
     Some((order, rest, layout, rewrites))
 }
 
+/// Checks every dot reading a concatenation of the `weights` or `operands` contracts it against a
+/// concatenation of per-member gradients, and finds those and the slices of their products.
 fn backward(
     graph: &Graph,
     dimension: usize,
@@ -682,6 +735,7 @@ fn backward(
             contractions.push(r);
         }
     }
+    // Start of each member along the dim, in the plain concatenated order.
     let offsets: Vec<usize> = layout
         .sizes
         .iter()
@@ -752,6 +806,7 @@ fn backward(
     Some(found)
 }
 
+/// Contracting dims of a dot's operand `side`.
 fn contracting(p: &Primitive, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -767,6 +822,7 @@ fn contracting(p: &Primitive, side: usize) -> Vec<usize> {
     }
 }
 
+/// Batch and contracting dims of a dot's operand `side`.
 fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -784,23 +840,29 @@ fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
     }
 }
 
+/// Dim to concatenate weights along: the last free dim of the operand not at `side`.
 fn concat_dimension(p: &Primitive, side: usize, rank: usize) -> Option<usize> {
     free_dims(rank, &used_dims(p, 1 - side)).last()
 }
 
+/// A module that keeps the packs and interleaved layouts merged dots create.
 pub(crate) trait Blocks {
+    /// The module's packs and interleaved region sizes, for writing.
     fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>);
 }
 
+/// Compiler pass running [`merge_dots`].
 pub(crate) struct MergeDots {
     pub(crate) target: Target,
 }
 
 impl<T: Module + Blocks> CompilerPass<T> for MergeDots {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots"
     }
 
+    /// Merges dots, recording the packs on the module; donated inputs can't be stored strided.
     fn apply(&mut self, m: &mut T) -> Result<(), String> {
         let options = m.options();
         let donated: Vec<bool> = (0..options.packable.len())

@@ -1,3 +1,5 @@
+//! Plans the Pallas `dynamic_update_slice` kernel on TPU: block sizes, the windows each update
+//! touches, and whether the touched region can stay resident in VMEM.
 use crate::DType;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
@@ -6,14 +8,22 @@ use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
 
+/// Lane width of a TPU tile.
 const LANES: usize = 128;
+/// Element budget for one staged `bm` x `bn` piece of an aligned update.
 const STAGED: usize = 1 << 20;
+/// Element budget for one streamed `gm` x `width` window of an unaligned update.
 const STREAMED: usize = 1 << 19;
+/// Byte budget for one row block of the operand-to-output copy.
 const COPY_BYTES: usize = 2 << 20;
+/// Updates kept in flight when each update fits in one block.
 const DEPTH: usize = 8;
 
+/// Most bytes of the output region all updates touch that may be kept in VMEM.
 const RESIDENT: usize = 48 << 20;
 
+/// Launches the `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or
+/// a fusion of several updates at constant starts (clamped into range here).
 pub(crate) fn encode(
     index: usize,
     step: &Step,
@@ -27,6 +37,7 @@ pub(crate) fn encode(
         ))
     };
     let rank = operand.shape.len();
+    // A fusion carries its updates' starts as constants; read and clamp them at compile time.
     let fixed: Option<Vec<i32>> = match &step.primitive {
         Primitive::Fusion { body, .. } => {
             let nodes = body.nodes();
@@ -69,6 +80,7 @@ pub(crate) fn encode(
     if update.numel() == 0 {
         return Ok(());
     }
+    // Sizes padded to whole TPU tiles (`tile` rows by `LANES` columns).
     let tile = layout.rows;
     let (rows, cols) = (operand.shape[rank - 2], operand.shape[rank - 1]);
     let (ur, uc) = (update.shape[rank - 2], update.shape[rank - 1]);
@@ -77,6 +89,7 @@ pub(crate) fn encode(
     let bn = block(ucp, LANES, (STAGED / tile).max(LANES)).unwrap_or(LANES);
     let bm = block(urp, tile, (STAGED / bn / tile * tile).max(tile)).unwrap_or(tile);
     let single = update.shape[..rank - 2].iter().product::<usize>() == 1 && urp == bm && ucp == bn;
+    // An unaligned window spans one extra lane block unless the update covers every column.
     let width = match uc == cols {
         true => ucp,
         false => (ucp + LANES).min(cp),
@@ -85,7 +98,9 @@ pub(crate) fn encode(
         true => urp,
         false => block(urp, tile, (STREAMED / width / tile * tile).max(tile)).unwrap_or(tile),
     };
+    // Whether the update's last two dims end on tile boundaries (or at the operand's edges).
     let whole = (ur.is_multiple_of(tile) || ur == rows) && (uc.is_multiple_of(LANES) || uc == cols);
+    // Tile-aligned window each constant-start update writes, per dim as (start, end).
     let windows: Vec<Vec<(usize, usize)>> = fixed
         .iter()
         .flat_map(|starts| starts.chunks(rank))
@@ -108,6 +123,7 @@ pub(crate) fn encode(
     let overlap = |p: &[(usize, usize)], q: &[(usize, usize)]| {
         p.iter().zip(q).all(|(x, y)| x.0 < y.1 && y.0 < x.1)
     };
+    // Overlapping windows must be applied in order rather than overlapped in flight.
     let ordered = windows
         .iter()
         .enumerate()
@@ -124,6 +140,7 @@ pub(crate) fn encode(
         });
     let lone_update = update.shape[..rank - 2].iter().product::<usize>() == 1;
     let direct = fixed.is_some() && aligned && lone_update;
+    // Keep the box covering all windows in VMEM when every update lands in the same leading slab.
     let resident = match fixed.is_some() && (direct || ordered && small) && one_slab {
         true => {
             let (top, bottom) = windows.iter().fold((usize::MAX, 0), |(t, b), w| {
@@ -148,6 +165,7 @@ pub(crate) fn encode(
         block(length, tile, cap).unwrap_or(tile)
     };
     let lone = operand.shape[..rank - 2].iter().product::<usize>() == 1;
+    // When the resident updates exactly cover full-width rows, only the rows outside them need copying.
     let ranges = match resident {
         Some((top, bottom, 0, right, _, true)) if right == cp && lone => {
             vec![(0, top), (bottom, rp - bottom)]

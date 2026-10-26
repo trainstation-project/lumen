@@ -1,3 +1,5 @@
+"""Unreduced cross entropy on logits, with a hand-written logsumexp-based gradient."""
+
 import math
 
 from lumen.autograd.function import Function
@@ -14,15 +16,18 @@ class _CrossEntropy(Function):
 
     @staticmethod
     def forward(ctx, x, target):
+        """Per-row `logsumexp(x) - x[target]`; saves the logsumexp for backward."""
         m = amax(x, -1, keepdim=True)
         lse = m.reshape(*target.shape) + log(sum(exp(x - m), -1))
         ctx.save_for_backward(x, target, lse)
+        # Read each row's target logit by gathering from the flattened logits.
         rows, n = math.prod(target.shape), x.shape[-1]
         at = prims.iota(target.dtype, [rows], 0) * n + target.reshape(rows)
         return lse - prims.gather(x.reshape(rows * n), at, 0).reshape(*target.shape)
 
     @staticmethod
     def backward(ctx, g):
+        """Gradient `(softmax(x) - one_hot(target)) * g` for `x`; none for `target`."""
         x, target, lse = ctx.saved_tensors
         p = exp(x - lse.reshape(*target.shape, 1))
         return (p - _one_hot(target, x.shape[-1], x.dtype)) * g.reshape(*target.shape, 1), None

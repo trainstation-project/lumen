@@ -1,17 +1,22 @@
+//! A finished profile and its PyTorch-style per-name summary (`key_averages`, `table`).
 use std::collections::HashMap;
 
 use super::{Event, EventKind, ProfilerConfig};
 use crate::device::Device;
 
+/// The events of a finished profiler session and the config it ran with.
 #[derive(Debug, Clone)]
 pub struct Profile {
     events: Vec<Event>,
     config: ProfilerConfig,
 }
 
+/// One `key_averages` row: totals over every event with one name. Times in nanoseconds, memory in bytes;
+/// "self" excludes nested ranges.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventAvg {
     pub name: String,
+    /// True when the row counts device kernels rather than host ranges.
     pub is_device_event: bool,
     pub count: u64,
     pub cpu_time_total: u64,
@@ -22,20 +27,25 @@ pub struct EventAvg {
     pub self_cpu_memory_usage: i64,
     pub device_memory_usage: i64,
     pub self_device_memory_usage: i64,
+    /// Input types joined into one string, when grouping by input shape.
     pub input_shapes: String,
+    /// Input strides joined into one string, when grouping by input shape.
     pub input_strides: String,
 }
 
 impl EventAvg {
+    /// Mean CPU time per call.
     pub fn cpu_time_avg(&self) -> u64 {
         self.cpu_time_total / self.count.max(1)
     }
 
+    /// Mean device time per call.
     pub fn device_time_avg(&self) -> u64 {
         self.device_time_total / self.count.max(1)
     }
 }
 
+/// Column a summary table is sorted by, descending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
     CpuTimeTotal,
@@ -50,6 +60,7 @@ pub enum SortBy {
 }
 
 impl SortBy {
+    /// Parses a PyTorch `sort_by` name, accepting `cuda_*` aliases for the device columns.
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "cpu_time_total" => SortBy::CpuTimeTotal,
@@ -65,6 +76,7 @@ impl SortBy {
         })
     }
 
+    /// The row's value for this column.
     fn key(self, avg: &EventAvg) -> i128 {
         match self {
             SortBy::CpuTimeTotal => avg.cpu_time_total.into(),
@@ -80,10 +92,14 @@ impl SortBy {
     }
 }
 
+/// Per-range sums used to fill a `key_averages` row.
 #[derive(Default, Clone, Copy)]
 struct Totals {
+    /// Duration of direct child ranges, subtracted for self CPU time.
     child_cpu: u64,
+    /// Device time of kernels launched directly in the range.
     self_device: u64,
+    /// Device time of kernels launched anywhere inside the range.
     device: u64,
     self_cpu_mem: i64,
     cpu_mem: i64,
@@ -92,18 +108,22 @@ struct Totals {
 }
 
 impl Profile {
+    /// Wraps a session's sorted events.
     pub(crate) fn new(events: Vec<Event>, config: ProfilerConfig) -> Self {
         Profile { events, config }
     }
 
+    /// Every event, by start time.
     pub fn events(&self) -> &[Event] {
         &self.events
     }
 
+    /// The config the session ran with.
     pub fn config(&self) -> &ProfilerConfig {
         &self.config
     }
 
+    /// The events recorded on profiler thread `thread`.
     pub fn for_thread(&self, thread: u64) -> Profile {
         Profile {
             events: self
@@ -116,6 +136,7 @@ impl Profile {
         }
     }
 
+    /// Totals for each host range, from its direct children and everything nested below it.
     fn totals(&self) -> HashMap<u64, Totals> {
         let ranges: HashMap<u64, &Event> = self
             .events
@@ -151,6 +172,7 @@ impl Profile {
                 EventKind::Memory => (0, 0, event.bytes),
                 _ => continue,
             };
+            // Inclusive device time and memory go to every enclosing range.
             let mut ancestor = Some(parent);
             while let Some(id) = ancestor {
                 let t = totals.get_mut(&id).unwrap();
@@ -163,6 +185,7 @@ impl Profile {
         totals
     }
 
+    /// Per-name totals in first-seen order; with `group_by_input_shape`, per name, input types and strides.
     pub fn key_averages(&self, group_by_input_shape: bool) -> Vec<EventAvg> {
         let totals = self.totals();
         let names: HashMap<u64, &str> = self
@@ -177,6 +200,7 @@ impl Profile {
             if event.kind == EventKind::Memory {
                 continue;
             }
+            // A kernel named like its own op is already counted in that op's device time.
             let op = event.parent.and_then(|p| names.get(&p));
             if event.kind == EventKind::Gpu && op == Some(&event.name.as_str()) {
                 continue;
@@ -231,6 +255,7 @@ impl Profile {
             .collect()
     }
 
+    /// Device column label: the one device kind seen, `CUDA` when none, `DEVICE` when mixed.
     fn device_name(&self) -> &'static str {
         let (mut cuda, mut mps, mut tpu) = (false, false, false);
         for e in &self.events {
@@ -251,6 +276,7 @@ impl Profile {
         }
     }
 
+    /// Renders the PyTorch-style summary table, sorted by `sort_by` and cut to `row_limit` rows.
     pub fn table(
         &self,
         sort_by: Option<SortBy>,
@@ -407,15 +433,18 @@ impl Profile {
         out
     }
 
+    /// The profile as Chrome trace JSON.
     pub fn chrome_trace(&self) -> String {
         super::chrome::trace(&self.events)
     }
 
+    /// Writes the Chrome trace JSON to `path`.
     pub fn export_chrome_trace(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         std::fs::write(path, self.chrome_trace())
     }
 }
 
+/// Cuts `s` to `width` characters, ending in `...` when shortened.
 fn truncate(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         s.to_owned()
@@ -425,6 +454,7 @@ fn truncate(s: &str, width: usize) -> String {
     }
 }
 
+/// `part` as a percentage of `whole`, two decimals.
 fn percent(part: u64, whole: u64) -> String {
     if whole == 0 {
         "0.00%".to_owned()
@@ -433,6 +463,7 @@ fn percent(part: u64, whole: u64) -> String {
     }
 }
 
+/// Nanoseconds as seconds, milliseconds or microseconds, three decimals.
 pub(crate) fn format_time(ns: u64) -> String {
     let us = ns as f64 / 1000.0;
     if us >= 1e6 {
@@ -444,6 +475,7 @@ pub(crate) fn format_time(ns: u64) -> String {
     }
 }
 
+/// Bytes in PyTorch's `b` / `Kb` / `Mb` / `Gb` units.
 pub(crate) fn format_memory(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
