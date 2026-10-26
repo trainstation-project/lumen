@@ -1,5 +1,7 @@
 //! The default process group (rank, world size and shared TCP store), env:// and tcp:// rendezvous, and `DeviceMesh`.
 pub mod backend;
+#[cfg(lumen_cuda_linked)]
+pub(crate) mod nccl;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub mod store;

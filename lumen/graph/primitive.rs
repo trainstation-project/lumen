@@ -123,6 +123,25 @@ impl UnaryOp {
 }
 
 /// Elementwise two-operand ops beyond the core set in `Primitive`.
+/// How a collective combines the values its ranks contribute.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reduction {
+    Sum,
+    Max,
+    Min,
+}
+
+impl Reduction {
+    /// The reduction's name in graph text and the Python API.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Reduction::Sum => "sum",
+            Reduction::Max => "max",
+            Reduction::Min => "min",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinaryOp {
     Pow,
@@ -225,6 +244,21 @@ pub enum Primitive {
     },
     /// Returns its operand once the device work producing it has finished.
     Wait,
+    /// Combines the operand across the processes `ranks` with `op`; each gets the result.
+    AllReduce {
+        op: Reduction,
+        ranks: Vec<usize>,
+    },
+    /// Stacks every process in `ranks`'s operand along a new leading axis, in `ranks`' order.
+    AllGather {
+        ranks: Vec<usize>,
+    },
+    /// Combines the operand across `ranks` with `op` and gives the process at position `r` of `ranks` row `r`
+    /// of the leading axis, which has one row per process.
+    ReduceScatter {
+        op: Reduction,
+        ranks: Vec<usize>,
+    },
     /// Copies a device value to the host.
     ToHost,
     /// Copies a host value to the device.
@@ -371,6 +405,9 @@ impl Primitive {
             Cumsum { .. } => "cumsum",
             DotGeneral { .. } => "dot_general",
             Wait => "wait",
+            AllReduce { .. } => "all_reduce",
+            AllGather { .. } => "all_gather",
+            ReduceScatter { .. } => "reduce_scatter",
             ToHost => "to_host",
             ToDevice => "to_device",
             Reshape { .. } => "reshape",
@@ -507,7 +544,24 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            Wait | ToHost | ToDevice => Ok(args[0].clone()),
+            Wait | ToHost | ToDevice | AllReduce { .. } => Ok(args[0].clone()),
+            AllGather { ranks } => {
+                let x = args[0];
+                let shape: Vec<usize> = std::iter::once(ranks.len())
+                    .chain(x.shape.iter().copied())
+                    .collect();
+                Ok(TensorType::new(x.dtype, &shape))
+            }
+            ReduceScatter { ranks, .. } => {
+                let x = args[0];
+                match x.shape.split_first() {
+                    Some((&n, rest)) if n == ranks.len() => Ok(TensorType::new(x.dtype, rest)),
+                    _ => err(format!(
+                        "{x} has no leading axis of one row for each of the {} processes",
+                        ranks.len()
+                    )),
+                }
+            }
             Select => {
                 let (pred, x, y) = (args[0], args[1], args[2]);
                 if pred.dtype != DType::Bool || pred.shape != x.shape {
@@ -957,6 +1011,10 @@ impl fmt::Display for Primitive {
                 Tuple(shape)
             ),
             Transpose { permutation } => write!(f, "[permutation={}]", Tuple(permutation)),
+            AllReduce { op, ranks } | ReduceScatter { op, ranks } => {
+                write!(f, "[op={} ranks={}]", op.name(), Tuple(ranks))
+            }
+            AllGather { ranks } => write!(f, "[ranks={}]", Tuple(ranks)),
             Gather { axis } | ScatterAdd { axis } | TakeAlongAxis { axis } => {
                 write!(f, "[axis={axis}]")
             }

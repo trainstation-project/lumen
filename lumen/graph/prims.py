@@ -24,6 +24,9 @@ __all__ = [
     "dot_general",
     "reshape",
     "wait",
+    "all_reduce",
+    "all_gather",
+    "reduce_scatter",
     "to_host",
     "to_device",
     "broadcast_in_dim",
@@ -230,6 +233,23 @@ def wait(x):
     """``x``, once the device work producing it has finished: the host
     blocks until then (PyTorch: ``wait_tensor``). In place: no copy."""
     return bind("wait", x)
+
+
+def all_reduce(x, op, ranks):
+    """``x`` combined across the processes ``ranks`` with ``op`` (``"sum"``, ``"max"`` or ``"min"``); every one
+    of them gets the result (PyTorch's functional ``all_reduce``; NCCL's ``ncclAllReduce`` on CUDA)."""
+    return bind("all_reduce", x, op=op, ranks=tuple(ranks))
+
+
+def all_gather(x, ranks):
+    """Every process in ``ranks``'s ``x`` stacked along a new leading axis, in ``ranks``' order (``ncclAllGather``)."""
+    return bind("all_gather", x, ranks=tuple(ranks))
+
+
+def reduce_scatter(x, op, ranks):
+    """``x`` (a leading axis of one row per process in ``ranks``) combined across them with ``op``; the process at
+    position ``r`` of ``ranks`` gets row ``r`` (``ncclReduceScatter``)."""
+    return bind("reduce_scatter", x, op=op, ranks=tuple(ranks))
 
 
 def to_host(x):

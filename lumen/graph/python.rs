@@ -15,6 +15,19 @@ pub(crate) struct PyGraph {
 }
 
 /// Builds the primitive called `name` from its Python keyword parameters, as `lumen.graph.prims` passes them.
+/// Parses a collective's `op` parameter: `"sum"`, `"max"` or `"min"`.
+fn reduction(op: &str) -> PyResult<crate::graph::Reduction> {
+    use crate::graph::Reduction::*;
+    match op {
+        "sum" => Ok(Sum),
+        "max" => Ok(Max),
+        "min" => Ok(Min),
+        _ => Err(PyValueError::new_err(format!(
+            "a collective reduces with \"sum\", \"max\" or \"min\", got {op:?}"
+        ))),
+    }
+}
+
 pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
     use Primitive::*;
     let get = |key: &str| {
@@ -63,6 +76,17 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             output_dtype: dtype("output_dtype")?,
         },
         "wait" => Wait,
+        "all_reduce" => AllReduce {
+            op: reduction(&get("op")?.extract::<String>()?)?,
+            ranks: dims("ranks")?,
+        },
+        "all_gather" => AllGather {
+            ranks: dims("ranks")?,
+        },
+        "reduce_scatter" => ReduceScatter {
+            op: reduction(&get("op")?.extract::<String>()?)?,
+            ranks: dims("ranks")?,
+        },
         "to_host" => ToHost,
         "to_device" => ToDevice,
         "reshape" => Reshape {
@@ -382,6 +406,11 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
         Gather { axis } | TakeAlongAxis { axis } | ScatterAdd { axis } => {
             d.set_item("axis", axis)?
         }
+        AllReduce { op, ranks } | ReduceScatter { op, ranks } => {
+            d.set_item("op", op.name())?;
+            d.set_item("ranks", ranks.clone())?;
+        }
+        AllGather { ranks } => d.set_item("ranks", ranks.clone())?,
         CustomCall {
             label,
             kernel,

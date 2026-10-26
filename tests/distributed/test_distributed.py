@@ -1,4 +1,5 @@
-"""Tests of lumen.distributed: device meshes, the TCP store, process groups and multi-process launches."""
+"""Tests of lumen.distributed: device meshes, the TCP store, process groups, collectives and multi-process
+launches."""
 
 import json
 import os
@@ -7,10 +8,23 @@ import subprocess
 import sys
 from datetime import timedelta
 
+import numpy as np
 import pytest
+from helpers import CUDA, MPS, TPU, meta
 
 import lumen
-from lumen.distributed import DeviceMesh, TCPStore, get_rank, get_world_size, init_device_mesh, is_initialized
+from lumen.distributed import (
+    DeviceMesh,
+    TCPStore,
+    all_gather,
+    all_reduce,
+    get_rank,
+    get_world_size,
+    init_device_mesh,
+    is_initialized,
+    reduce_scatter,
+)
+from lumen.graph import prims
 
 # Environment variables a launcher like torchrun sets for each process.
 LAUNCHER = ("RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
@@ -303,3 +317,120 @@ def test_a_process_per_tpu_chip_in_one_slice():
         assert r["chips"] == 1
         assert r["coordinate"] == list(divmod(rank, 2))
         assert r["value"] == [[float(rank)] * 128] * 8
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_collectives_of_one_process_are_its_values(device, triton_on_cuda):
+    """In a world of one process, every collective is its operand (gathered and scattered along any dim) and
+    compiles to no collective step, on any device."""
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    try:
+        X = lumen.from_numpy(x).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def f(t):
+        """Every collective of ``t``, over the whole (one-process) world."""
+        return all_reduce(t), all_reduce(t, "max"), all_gather(t, 1), reduce_scatter(t, 2)
+
+    for out in lumen.compile(f)(X):
+        np.testing.assert_array_equal(lumen.to_numpy(out.to("cpu")), x)
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(X), device).steps()]
+    assert not any(c in label for label in labels for c in ("all_reduce", "all_gather", "reduce_scatter"))
+
+
+def test_collective_primitives_type_and_print():
+    """A collective records its group's ranks: ``all_gather`` stacks a leading axis of one row per process,
+    ``reduce_scatter`` takes one off, and the graph prints the op and ranks."""
+    graph = lumen.make_graph(
+        lambda x, y: (
+            prims.all_reduce(x, "max", [0, 2]),
+            prims.all_gather(x, [0, 2]),
+            prims.reduce_scatter(y, "sum", [0, 2]),
+        )
+    )(meta(3, 4), meta(2, 5))
+    text = str(graph)
+    assert "all_reduce[op=max ranks=(0, 2)]" in text and "all_gather[ranks=(0, 2)]" in text
+    assert "reduce_scatter[op=sum ranks=(0, 2)]" in text
+    assert "f32[2,3,4] = all_gather" in text and "f32[5] = reduce_scatter" in text
+    with pytest.raises(ValueError, match="one row for each of the 2 processes"):
+        lumen.make_graph(lambda y: prims.reduce_scatter(y, "sum", [0, 2]))(meta(3, 5))
+
+
+# Run in each process on its own GPU: every collective over the world in three dtypes, their gradients, and,
+# with 8 processes, all-reduces over a 2x4 mesh's slices.
+COLLECTIVES_PROGRAM = """
+import json, os
+import numpy as np
+import lumen
+import lumen.functional as F
+from lumen.distributed import all_gather, all_reduce, init_device_mesh, init_process_group, reduce_scatter
+
+lumen.config.compiler.cuda.use_triton_backend = True
+init_process_group()
+rank, n = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
+device = f"cuda:{rank}"
+host = lambda t: lumen.to_numpy(t.to(dtype="float32").to("cpu")).tolist()
+x = np.arange(12, dtype=np.float32).reshape(3, 4) + 100 * rank
+y = np.arange(4 * n * n, dtype=np.float32).reshape(2 * n, 2 * n) + rank
+out = {"rank": rank}
+for dtype in ("float32", "bfloat16", "int32"):
+    X, Y = (lumen.from_numpy(v).to(device).to(dtype=dtype) for v in (x, y))
+    f = lambda X, Y: (all_reduce(X), all_reduce(X, "max"), all_reduce(X, "min"), all_gather(X, 0),
+                      all_gather(X, 1), reduce_scatter(Y, 0), reduce_scatter(Y, 1))
+    out[dtype] = [host(t) for t in lumen.compile(f)(X, Y)]
+X, Y = lumen.from_numpy(x).to(device), lumen.from_numpy(y).to(device)
+grads = lumen.compile(lumen.grad(lambda X, Y: F.sum(all_reduce(X) * (rank + 1))
+                                 + F.sum(all_gather(X, 1) * (rank + 1))
+                                 + F.sum(reduce_scatter(Y, 0) * (rank + 1)), (0, 1)))(X, Y)
+out["grads"] = [host(g) for g in grads]
+if n == 8:
+    mesh = init_device_mesh("cuda", (2, 4), mesh_dim_names=("dp", "tp"))
+    r = lumen.from_numpy(np.full((2,), float(rank), np.float32)).to(device)
+    g = lambda r: (all_reduce(r, group=mesh["tp"]), all_reduce(r, group=mesh["dp"]), all_reduce(r, group=mesh))
+    out["mesh"] = [host(t) for t in lumen.compile(g)(r)]
+print(json.dumps(out))
+"""
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_collectives_across_gpus_match_numpy(world_size):
+    """A process per GPU reduces, gathers and scatters each other's tensors through NCCL, in float32, bfloat16
+    and int32, along any dim; their gradients transpose into one another; with 8 processes, a 2x4 mesh's
+    slices reduce over their own ranks."""
+    gpus = "import lumen; print(lumen.cuda.device_count())"
+    count = int(
+        subprocess.run([sys.executable, "-c", gpus], capture_output=True, text=True, check=True).stdout.split()[-1]
+    )
+    if count < world_size:
+        pytest.skip(f"needs {world_size} GPUs, found {count}")
+    results = launch(COLLECTIVES_PROGRAM, world_size)
+    n = world_size
+    xs = [np.arange(12, dtype=np.float32).reshape(3, 4) + 100 * r for r in range(n)]
+    ys = [np.arange(4 * n * n, dtype=np.float32).reshape(2 * n, 2 * n) + r for r in range(n)]
+    total = sum(ys)
+    for rank, r in enumerate(results):
+        for dtype in ("float32", "bfloat16", "int32"):
+            got = [np.array(v) for v in r[dtype]]
+            # bfloat16 sums round once per rank's addition: n roundings of 2^-8 each.
+            rtol = n * 2**-8 if dtype == "bfloat16" else 0
+            expected = [
+                sum(xs),
+                np.max(xs, 0),
+                np.min(xs, 0),
+                np.concatenate(xs, 0),
+                np.concatenate(xs, 1),
+                np.split(total, n, 0)[rank],
+                np.split(total, n, 1)[rank],
+            ]
+            for g, e in zip(got, expected):
+                np.testing.assert_allclose(g, e, rtol=rtol, atol=0, err_msg=dtype)
+        scale = n * (n + 1) / 2
+        gx, gy = (np.array(g) for g in r["grads"])
+        np.testing.assert_array_equal(gx, np.full((3, 4), 2 * scale))
+        rows = np.repeat(np.arange(1, n + 1, dtype=np.float32), 2)
+        np.testing.assert_array_equal(gy, np.broadcast_to(rows[:, None], (2 * n, 2 * n)))
+        if n == 8:
+            dp, tp = divmod(rank, 4)
+            assert r["mesh"] == [[float(sum(range(4 * dp, 4 * dp + 4)))] * 2, [float(tp + tp + 4)] * 2, [28.0] * 2]

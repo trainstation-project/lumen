@@ -634,6 +634,12 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             panic!("{label}: a custom op's function runs in a plan (lumen.compile), on tensors")
         }
         PallasCall { label, .. } => panic!("{label}: a lumen.pallas kernel runs on a TPU"),
+        AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } => {
+            panic!(
+                "{}: collectives across processes run on CUDA (NCCL)",
+                p.name()
+            )
+        }
         DynamicSlice { slice_sizes } => {
             let x = types[0];
             let starts = starts(x, &args[1..], slice_sizes);
