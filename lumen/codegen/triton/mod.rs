@@ -84,8 +84,9 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 }
 
 /// Kernel parameter list: inputs (`in{k}`), optional `extra`, `out`, `n`, a `LOAD{k}` helper per
-/// by-reference input, optional `STORE` helper and `BLOCK_SIZE`, one per line.
-fn params(by_value: &[bool], extra: Option<&str>, store: bool) -> String {
+/// by-reference input, `stores` store helpers (`STORE`, then `STORE{k}` from 1) and `BLOCK_SIZE`,
+/// one per line.
+fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> String {
     let inputs = (0..by_value.len())
         .map(|k| format!("in{k}"))
         .chain(extra.map(String::from));
@@ -95,18 +96,43 @@ fn params(by_value: &[bool], extra: Option<&str>, store: bool) -> String {
     inputs
         .chain(["out".into(), "n".into()])
         .chain(loads)
-        .chain(store.then(|| "STORE: tl.constexpr".into()))
+        .chain((0..stores).map(|k| match k {
+            0 => "STORE: tl.constexpr".into(),
+            k => format!("STORE{k}: tl.constexpr"),
+        }))
         .chain(["BLOCK_SIZE: tl.constexpr".into()])
         .map(|p| format!("    {p},\n"))
         .collect()
 }
 
-/// Generates the elementwise kernel computing the body's first output at each flat index `j`.
-/// Returns `(name, source)`; inputs flagged in `by_value` arrive as scalars.
+/// Generates the elementwise kernel computing every output of the body at each flat index `j`.
+/// Returns `(name, source)`; inputs flagged in `by_value` arrive as scalars. The first output is
+/// `out` stored through `STORE`; output `k` after it is `out{k}`, a parameter right after the
+/// inputs, stored through `STORE{k}`.
 pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     let mut emitter = Emitter::new(body, by_value);
-    let result = emitter.value(body.outputs()[0], "j".into());
-    let params = params(by_value, None, true);
+    let results: Vec<String> = body
+        .outputs()
+        .iter()
+        .map(|&v| emitter.value(v, "j".into()))
+        .collect();
+    let extra = (1..results.len())
+        .map(|k| format!("out{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let params = params(
+        by_value,
+        (!extra.is_empty()).then_some(extra.as_str()),
+        results.len(),
+    );
+    let stores: String = results
+        .iter()
+        .enumerate()
+        .map(|(k, result)| match k {
+            0 => format!("    STORE(out, j, {result}, mask)\n"),
+            k => format!("    STORE{k}(out{k}, j, {result}, mask)\n"),
+        })
+        .collect();
     let lines = &emitter.lines;
     let source = formatdoc!(
         "
@@ -115,8 +141,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
         {params}):
             j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = j < n
-        {lines}    STORE(out, j, {result}, mask)
-        "
+        {lines}{stores}"
     );
     named("fusion", source)
 }

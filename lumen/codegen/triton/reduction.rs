@@ -186,7 +186,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         ),
     };
     let block = block.replace("{outputs}", &outputs);
-    let kernel_params = params(by_value, None, splits == 1);
+    let kernel_params = params(by_value, None, usize::from(splits == 1));
     let mut source = formatdoc!(
         "
         @triton.jit
@@ -214,7 +214,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
     // Second pass: each program combines the partials of its outputs, padded to a power of two.
     if splits > 1 {
         let parts = splits.next_power_of_two();
-        let params = params(by_value, Some("partials"), true);
+        let params = params(by_value, Some("partials"), 1);
         source += &formatdoc!(
             "
 
@@ -270,7 +270,7 @@ pub(crate) fn scan(
         true => "LOAD0(in0, j, mask)".to_string(),
         false => format!("LOAD0(in0, j, mask).to({acc})"),
     };
-    let params = params(&[false], None, true);
+    let params = params(&[false], None, 1);
     let source = formatdoc!(
         "
         @triton.jit

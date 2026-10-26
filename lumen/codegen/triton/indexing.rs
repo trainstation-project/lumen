@@ -34,7 +34,7 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
         true => "j * 0".to_string(),
         false => terms.join(" + "),
     };
-    let params = params(by_value, None, true);
+    let params = params(by_value, None, 1);
     let source = formatdoc!(
         "
         @triton.jit
@@ -53,7 +53,7 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
 pub(crate) fn scatter_add(x: &TensorType, axis: usize, picks: usize) -> (String, String) {
     let after: usize = x.shape[axis + 1..].iter().product();
     let length = x.shape[axis];
-    let params = params(&[false; 3], None, true).replace(
+    let params = params(&[false; 3], None, 1).replace(
         "    BLOCK_SIZE: tl.constexpr,",
         "    OUTLOAD: tl.constexpr,\n    BLOCK_SIZE: tl.constexpr,",
     );
