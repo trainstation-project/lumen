@@ -1,3 +1,5 @@
+"""Tests for the Python profiler: ops and user ranges, memory and shape recording, tables, Chrome traces, device kernels and ranges inside compiled functions."""
+
 import json
 
 import pytest
@@ -11,10 +13,12 @@ CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 
 
 def _names(prof, kind=None):
+    """Returns the names of ``prof``'s events, only those of ``kind`` when given."""
     return [e["name"] for e in prof.events() if kind is None or e["kind"] == kind]
 
 
 def test_records_ops_and_user_ranges_nested():
+    """Ops nest under the user range they ran in, and internal ops under their op."""
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         with record_function("outer"):
             lumen.zeros([2, 3])
@@ -27,8 +31,11 @@ def test_records_ops_and_user_ranges_nested():
 
 
 def test_record_function_works_as_a_decorator():
+    """Ops called from a decorated function nest under its range."""
+
     @record_function("decorated")
     def work():
+        """Returns a tensor of ones inside the ``decorated`` range."""
         return lumen.ones([4])
 
     with profile(activities=[ProfilerActivity.CPU]) as prof:
@@ -38,11 +45,13 @@ def test_record_function_works_as_a_decorator():
 
 
 def test_record_function_is_free_without_a_profiler():
+    """A range with no profiler running records nothing and raises nothing."""
     with record_function("nobody is listening"):
         lumen.zeros([1])
 
 
 def test_key_averages_rows_and_table():
+    """``key_averages`` sums calls, times and memory per name, and the table shows PyTorch's columns."""
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         for _ in range(3):
             lumen.zeros([256])
@@ -60,6 +69,7 @@ def test_key_averages_rows_and_table():
 
 
 def test_table_rejects_unknown_sort_keys():
+    """``table`` raises ``ValueError`` for an unknown ``sort_by``."""
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         lumen.zeros([1])
     with pytest.raises(ValueError):
@@ -67,6 +77,7 @@ def test_table_rejects_unknown_sort_keys():
 
 
 def test_memory_events_carry_pytorchs_fields():
+    """An allocation and its free are memory events with matching addresses and opposite sizes."""
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         t = lumen.zeros([10], dtype=lumen.float64)
         del t
@@ -77,6 +88,7 @@ def test_memory_events_carry_pytorchs_fields():
 
 
 def test_record_shapes():
+    """With ``record_shapes`` an op records its output dtype and shape."""
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         lumen.zeros([2, 5])
     zeros = next(e for e in prof.events() if e["name"] == "lumen::zeros")
@@ -84,6 +96,7 @@ def test_record_shapes():
 
 
 def test_plans_record_their_steps_types():
+    """A compiled function's steps are ops with their input and output types, without a ``lumen::plan`` wrapper."""
     f = lumen.compile(lambda x, y: F.sum(x * y, -1))
     x, y = lumen.ones([2, 3], dtype="int32"), lumen.ones([2, 3], dtype="int32")
     f(x, y)
@@ -96,6 +109,7 @@ def test_plans_record_their_steps_types():
 
 
 def test_chrome_trace_is_valid_json_in_pytorchs_layout(tmp_path):
+    """The exported trace is JSON with PyTorch's op, annotation and memory events."""
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True, record_shapes=True) as prof:
         with record_function('name with "quotes"'):
             lumen.arange(8)
@@ -118,6 +132,7 @@ def test_chrome_trace_is_valid_json_in_pytorchs_layout(tmp_path):
 
 
 def test_only_one_profiler_at_a_time():
+    """Starting a profiler inside another raises."""
     with profile(activities=[ProfilerActivity.CPU]):
         with pytest.raises(RuntimeError, match="already running"):
             with profile(activities=[ProfilerActivity.CPU]):
@@ -125,22 +140,26 @@ def test_only_one_profiler_at_a_time():
 
 
 def test_results_need_a_finished_session():
+    """Reading results before the session has run raises."""
     prof = profile(activities=[ProfilerActivity.CPU])
     with pytest.raises(RuntimeError, match="not finished"):
         prof.key_averages()
 
 
 def test_supported_activities_always_include_cpu():
+    """CPU is always a supported activity."""
     assert ProfilerActivity.CPU in lumen.profiler.supported_activities()
 
 
 def test_unknown_activity_names_are_rejected():
+    """An unknown activity name raises ``ValueError``."""
     with pytest.raises(ValueError):
         profile(activities=["npu"])
 
 
 @pytest.mark.cuda
 def test_cuda_copies_are_timed_on_the_gpu():
+    """CUDA host-to-device and device-to-host copies are timed as GPU events."""
     if ProfilerActivity.CUDA not in lumen.profiler.supported_activities():
         pytest.skip("cuda not available in this build")
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
@@ -150,6 +169,7 @@ def test_cuda_copies_are_timed_on_the_gpu():
 
 
 def _trace(prof):
+    """Returns ``prof``'s Chrome trace as a string, written through a temporary file."""
     import os
     import tempfile
 
@@ -165,6 +185,7 @@ def _trace(prof):
 
 @pytest.mark.mps
 def test_kernels_record_their_steps_types():
+    """Metal kernels carry their step's input and output types."""
     try:
         x = lumen.ones([4, 8], device="mps")
     except RuntimeError as e:
@@ -359,6 +380,7 @@ def test_device_transfers_are_profiled():
     by_id = {e["id"]: e for e in events}
 
     def one(name, kind):
+        """Returns the single event named ``name`` of ``kind``."""
         (event,) = [e for e in events if e["name"] == name and e["kind"] == kind]
         return event
 
@@ -382,9 +404,11 @@ def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_
 
     @record_function("inner")
     def inner(x, w):
+        """Returns the float32 matmul of ``x`` and ``w`` inside the ``inner`` range."""
         return F.matmul(x, w, "float32", "float32")
 
     def f(x, w):
+        """Returns ``exp(sum(x @ w)) + 1`` with the matmul and its reduction inside the ``outer`` range."""
         with record_function("outer"):
             y = inner(x, w)
             z = F.exp(F.sum(y, -1))
@@ -434,6 +458,7 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, trito
     plan interleaves: a range each run of one call's steps)."""
 
     def f(x, w):
+        """Returns the summed square of ``x`` after two matmuls by ``w``, each in a ``layer`` range."""
         for _ in range(2):
             with record_function("layer"):
                 x = F.matmul(x, w, "float32", "float32")
@@ -465,6 +490,7 @@ def test_record_function_holds_its_ops_gradients_as_backward(device, triton_on_c
     ``outer (backward)`` / ``inner (backward)``."""
 
     def f(x, w):
+        """Returns ``sum(exp(sum(x @ w)))`` with the matmul in ``inner`` nested in ``outer``."""
         with record_function("outer"):
             with record_function("inner"):
                 y = F.matmul(x, w, "float32", "float32")
@@ -486,6 +512,7 @@ def test_record_function_holds_its_ops_gradients_as_backward(device, triton_on_c
     by_id = {e["id"]: e for e in events}
 
     def ranges(e):
+        """Returns the names of the ranges enclosing event ``e``, outermost first."""
         names = []
         while e.get("parent") in by_id:
             e = by_id[e["parent"]]

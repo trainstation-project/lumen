@@ -1,3 +1,5 @@
+"""Tests for tracing, graphs, plans and compiled programs: semantics, fusion, devices, modules and training steps."""
+
 import dataclasses
 import re
 import warnings
@@ -22,10 +24,12 @@ def run(fn, *args):
 
 
 def rand(*shape, dtype=np.float32, seed=0):
+    """Standard normal array of `shape` from a seeded generator."""
     return np.random.default_rng(seed).standard_normal(shape).astype(dtype)
 
 
 def test_graph_text():
+    """A traced graph prints as its primitives with types and parameters."""
     graph = lumen.make_graph(lambda x: F.sum(F.exp(x), -1))(lumen.zeros([2, 3]))
     assert str(graph) == (
         "{ lambda %0:f32[2,3]. let\n"
@@ -36,10 +40,12 @@ def test_graph_text():
 
 
 def test_traces_once_per_signature():
+    """A compiled function retraces only for new shapes, dtypes or Python scalar values."""
     traces = []
 
     @lumen.compile
     def f(x, scale):
+        """Records each trace's input shape and scales `x`."""
         traces.append(x.shape)
         return x * scale
 
@@ -57,12 +63,14 @@ def test_traces_once_per_signature():
 
 
 def test_multiple_outputs_and_passthrough():
+    """A program may return an input unchanged alongside computed values."""
     x = lumen.tensor([1.0, 2.0])
     a, b = run(lambda x: (x, x + 1), x)
     assert a.tolist() == [1.0, 2.0] and b.tolist() == [2.0, 3.0]
 
 
 def test_ops_need_a_trace():
+    """Primitives outside a trace raise, and eager tensor arithmetic is not supported."""
     with pytest.raises(RuntimeError, match="while tracing"):
         prims.full((2,), 1.0, "float32")
     with pytest.raises(TypeError):
@@ -70,7 +78,10 @@ def test_ops_need_a_trace():
 
 
 def test_data_dependent_control_flow_is_rejected():
+    """Branching on a traced value raises a TypeError."""
+
     def f(x):
+        """Branches on the sign of the sum of `x`."""
         return x if F.sum(x) > 0 else -x
 
     with pytest.raises(TypeError, match="control flow"):
@@ -78,12 +89,16 @@ def test_data_dependent_control_flow_is_rejected():
 
 
 def test_must_return_traced_tensors():
+    """A program returning a non-tensor raises a TypeError."""
     with pytest.raises(TypeError):
         lumen.compile(lambda x: 1.0)(lumen.ones([2]))
 
 
 def test_factories_record_primitives_while_tracing():
+    """Factories called while tracing become graph nodes broadcast like operands."""
+
     def f(x):
+        """Adds tensors from each factory to `x`."""
         return x + lumen.ones([3]) + lumen.full([2, 3], 2.0) + lumen.arange(3) + lumen.zeros([3])
 
     x = lumen.zeros([2, 3])
@@ -96,6 +111,7 @@ def test_factories_record_primitives_while_tracing():
 
 
 def test_prims_do_not_broadcast_or_promote():
+    """Primitives need operands of one type and float ops float operands."""
     x, y = lumen.zeros([2, 3]), lumen.zeros([3])
     with pytest.raises(ValueError, match="same type"):
         lumen.compile(prims.add)(x, y)
@@ -106,9 +122,11 @@ def test_prims_do_not_broadcast_or_promote():
 
 
 def test_prims_compose():
+    """Primitives compose into a program numpy agrees with."""
     x = rand(2, 3)
 
     def f(x):
+        """Where `x` is below its row max, `x` plus its column index, else the row max."""
         m = prims.broadcast_in_dim(prims.reduce_max(x, (1,)), (2, 3), (0,))
         i = prims.iota("float32", (2, 3), 1)
         return prims.select(prims.lt(x, m), prims.add(x, i), m)
@@ -118,6 +136,7 @@ def test_prims_compose():
 
 
 def test_no_implicit_dtype_changes():
+    """Python scalars take the tensor's dtype, and mixed dtypes raise instead of promoting."""
     i, f = lumen.tensor([1, 2]), lumen.tensor([1.0, 2.0])
     half = lumen.tensor([1.0], dtype="float16")
     assert run(lambda i: i * 2, i).dtype == np.int64
@@ -151,6 +170,7 @@ def test_no_implicit_dtype_changes():
 
 
 def test_broadcasting():
+    """Operators broadcast as numpy does, and incompatible shapes raise."""
     a, b = rand(4, 1, 3), rand(5, 1, seed=1)
     np.testing.assert_allclose(
         run(lambda a, b: a * b - a, lumen.from_numpy(a), lumen.from_numpy(b)), a * b - a, rtol=1e-6
@@ -160,6 +180,7 @@ def test_broadcasting():
 
 
 def test_a_matmul_names_its_dtypes():
+    """`@` and an einsum without dtypes raise, asking for them."""
     x = lumen.empty([2, 3], device="meta")
     with pytest.raises(TypeError, match="@ has no dtypes"):
         lumen.make_graph(lambda x: x @ x.t())(x)
@@ -172,16 +193,19 @@ def test_a_matmul_names_its_dtypes():
     [((3,), (3,)), ((2, 3), (3,)), ((3,), (3, 4)), ((2, 3), (3, 4)), ((5, 2, 3), (3, 4)), ((1, 2, 3), (4, 3, 2))],
 )
 def test_matmul(a_shape, b_shape):
+    """F.matmul of vectors, matrices and batches matches numpy."""
     a, b = rand(*a_shape), rand(*b_shape, seed=1)
     out = run(lambda a, b: F.matmul(a, b, "float32", a.dtype), lumen.from_numpy(a), lumen.from_numpy(b))
     np.testing.assert_allclose(out, a @ b, rtol=1e-5, atol=1e-6)
 
 
 def floats(t):
+    """`t` on the host as float32 numpy."""
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 
 def placed(shape, dtype, device, seed=0):
+    """A seeded standard normal tensor of `shape` as `dtype` on `device`."""
     a = np.random.default_rng(seed).standard_normal(shape, dtype=np.float32)
     return lumen.from_numpy(a).to(dtype=dtype).to(device)
 
@@ -227,6 +251,7 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
     a, b = rand(48, 80), rand(80, 48, seed=1)
 
     def wide(f):
+        """`f` computed in float32 and cast back to the input's dtype."""
         return lambda v: f(v.to(dtype="float32")).to(dtype=v.dtype)
 
     exp, tanh, sqrt, sigmoid, log = map(wide, (F.exp, F.tanh, F.sqrt, F.sigmoid, F.log))
@@ -257,6 +282,7 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
 
 
 def triton_agrees(device, f, arrays, tol):
+    """`f` compiled on `device` and on the CPU gives the same dtype and values within `tol` (exactly when 0)."""
     on_cpu = [lumen.from_numpy(np.ascontiguousarray(v)) for v in arrays]
     try:
         on_device = [v.to(device) for v in on_cpu]
@@ -339,6 +365,7 @@ def test_triton_matmul_epilogues_fuse(device, triton_on_cuda):
     batched = rand(2, 32, 96, seed=4)
 
     def mm(x, y):
+        """float32 matmul."""
         return F.matmul(x, y, "float32", "float32")
 
     fns = [
@@ -400,6 +427,7 @@ def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
     dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
 
     def strided(kind, run):
+        """Runs `run`, checking a new `kind` kernel indexes its input with strides; returns the result."""
         before = set(triton.kernels)
         out = lumen.to_numpy(run())
         new = [triton.compiled(name, None) for name in set(triton.kernels) - before if name.startswith(kind)]
@@ -543,6 +571,7 @@ def test_matmul_folds_a_batch_times_a_matrix():
 
 
 def test_reductions():
+    """sum, mean and max over all or some dims match numpy; mean of integers raises."""
     x = rand(2, 3, 4)
     t = lumen.from_numpy(x)
     np.testing.assert_allclose(run(lambda x: F.sum(x), t), x.sum(), rtol=1e-5)
@@ -557,6 +586,7 @@ def test_reductions():
 
 
 def test_softmax_and_friends():
+    """softmax, log_softmax, sigmoid and relu match numpy."""
     x = rand(3, 5)
     e = np.exp(x - x.max(-1, keepdims=True))
     t = lumen.from_numpy(x)
@@ -570,6 +600,7 @@ def test_softmax_and_friends():
 
 
 def test_comparisons_and_where():
+    """Comparison operators, where, minimum and NaN-propagating maximum match numpy."""
     x, y = rand(6), rand(6, seed=1)
     tx, ty = lumen.from_numpy(x), lumen.from_numpy(y)
     for op in ("__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__"):
@@ -581,6 +612,7 @@ def test_comparisons_and_where():
 
 
 def test_shape_methods():
+    """reshape, view, flatten, permute, transpose, mT, squeeze and expand follow numpy; bad shapes and dims raise."""
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     t = lumen.from_numpy(x)
     cases = {
@@ -603,6 +635,7 @@ def test_shape_methods():
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_results_on_input_device(device, triton_on_cuda):
+    """A compiled program's result lands on its input's device."""
     try:
         x = lumen.tensor([[1.0, 2.0], [3.0, 4.0]], device=device)
     except RuntimeError as e:
@@ -622,6 +655,7 @@ def test_mps_kernels_match_cpu(device, dtype, triton_on_cuda):
         pytest.skip(str(e))
 
     def block(x, wq, wk, w1):
+        """Attention-like block with a residual, returning a row mean, column max and absolute sum."""
         scores = (
             F.matmul(F.matmul(x, wq, "float32", x.dtype), F.matmul(x, wk, "float32", x.dtype).t(), "float32", x.dtype)
             * 0.25
@@ -641,6 +675,7 @@ def test_mps_kernels_match_cpu(device, dtype, triton_on_cuda):
 
 
 def test_plan():
+    """A plan folds the reshape away, sizes its workspace and checks input dtypes when run."""
     graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
     plan = lumen.graph_compiler.Plan(graph)
     assert "reshape" not in str(plan)
@@ -654,6 +689,7 @@ def test_plan():
 
 
 def test_graph_and_plan_describe_themselves():
+    """`Graph.nodes` and `Plan.steps` describe primitives, inputs and outputs."""
     graph = lumen.make_graph(lambda x: F.sum(F.exp(x * 2.0), -1))(lumen.zeros([2, 3]))
     nodes = graph.nodes()
     assert [n["primitive"] for n in nodes] == ["full", "broadcast_in_dim", "mul", "exp", "reduce_sum"]
@@ -666,6 +702,7 @@ def test_graph_and_plan_describe_themselves():
 
 @pytest.mark.mps
 def test_mps_plan_steps_and_profiled_kernels():
+    """An MPS plan of a row reduction is one fused `reduce_rows` kernel, profiled under its kernel name."""
     try:
         x = lumen.ones([64, 2048], device="mps")
     except RuntimeError as e:
@@ -710,6 +747,7 @@ def test_short_rows_reduce_several_a_threadgroup(device, n, triton_on_cuda):
 
 
 def test_meta_tensors_have_no_data():
+    """Meta tensors have shapes and dtypes but every data read raises."""
     x = lumen.empty([2, 3], device="meta")
     assert (x.device, x.shape, x.dtype) == ("meta:0", [2, 3], "float32")
     assert repr(x) == "Tensor(shape=[2, 3], dtype=f32, device=meta)"
@@ -722,7 +760,10 @@ def test_meta_tensors_have_no_data():
 
 
 def test_tracing_and_running_on_meta_tensors():
+    """Programs trace and run on meta tensors, yielding meta results."""
+
     def f(x, w):
+        """relu of a matmul and a row sum."""
         return F.relu(F.matmul(x, w, "float32", x.dtype)), F.sum(x, -1)
 
     x, w = lumen.empty([8, 4], device="meta"), lumen.empty([4, 16], device="meta")
@@ -733,9 +774,11 @@ def test_tracing_and_running_on_meta_tensors():
 
 
 def test_compiled_init_runs_once_per_call(tmp_path):
+    """An input-less compiled program traces once, and its result is a view of the workspace."""
     calls = []
 
     def init():
+        """Counts its calls and builds a constant."""
         calls.append(1)
         return lumen.full([2, 3], 0.5) + lumen.arange(3)
 
@@ -750,6 +793,7 @@ def test_compiled_init_runs_once_per_call(tmp_path):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_compiled_init_on_device(device, tmp_path, triton_on_cuda):
+    """Input-less programs run on the device they are compiled for, and graph dumps report it."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -772,10 +816,13 @@ def test_compiled_init_on_device(device, tmp_path, triton_on_cuda):
 
 
 class Affine(lumen.nn.Module):
+    """Affine layer `x @ w + b`."""
+
     w: lumen.Tensor
     b: lumen.Tensor
 
     def __call__(self, x):
+        """Applies the layer to `x`."""
         return F.matmul(x, self.w, "float32", x.dtype) + self.b
 
 
@@ -787,16 +834,19 @@ class Stack(lumen.nn.Module):
     scale: float
 
     def __call__(self, x):
+        """Applies each layer then scales."""
         for layer in self.layers:
             x = layer(x) * self.scale
         return x
 
 
 def meta(*shape):
+    """An empty float32 meta tensor of `shape`."""
     return lumen.empty(list(shape), device="meta")
 
 
 def test_modules_are_frozen_dataclasses_of_weights():
+    """Modules list parameters once each, coerce static fields, freeze the rest, and validate state dicts."""
     shared = meta(4)
     m = Stack([Affine(meta(4, 4), shared), Affine(meta(4, 4), shared)], 0.5)
     assert [n for n, _ in m.named_parameters()] == ["layers.0.w", "layers.0.b", "layers.1.w"]
@@ -851,6 +901,7 @@ def test_module_weights_are_placed_once_and_shared(device, triton_on_cuda):
 
 
 def test_results_are_views_of_the_workspace():
+    """Each call's result is a view of the same workspace, overwritten by the next call."""
     f = lumen.compile(lambda x: x * 2.0)
     a = f(lumen.ones([3]))
     assert a.tolist() == [2.0] * 3
@@ -861,6 +912,7 @@ def test_results_are_views_of_the_workspace():
 
 @pytest.mark.mps
 def test_mps_plans_put_copies_and_scratch_in_the_workspace():
+    """MPS plans transpose dot operands as separate steps and give large reductions workspace scratch."""
     try:
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
@@ -878,6 +930,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
 
 
 def test_indexing_and_splitting_follow_numpy():
+    """Integer, slice, ellipsis and narrow indexing and split/chunk follow numpy; invalid indices raise."""
     x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     t = lumen.from_numpy(x)
     cases = {
@@ -924,6 +977,7 @@ def test_packed_weights_are_one_matmul(device, triton_on_cuda):
         pytest.skip(str(e))
 
     def gated(x, w13):
+        """relu of one half of the packed matmul times the other."""
         gate, up = F.matmul(x, w13, "float32", x.dtype).chunk(2, -1)
         return F.relu(gate) * up
 
@@ -942,6 +996,7 @@ def test_packed_weights_are_one_matmul(device, triton_on_cuda):
 
 @pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 def test_concatenate(device, triton_on_cuda):
+    """prims.concatenate joins empty and non-empty operands along a dim and rejects mismatched shapes."""
     a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
     try:
         args = [lumen.from_numpy(v).to(device) for v in (a, b, c)]
@@ -954,10 +1009,13 @@ def test_concatenate(device, triton_on_cuda):
 
 
 class Gated(lumen.nn.Module):
+    """Gated MLP projection `relu(x @ w1) * (x @ w3)`."""
+
     w1: lumen.Tensor
     w3: lumen.Tensor
 
     def __call__(self, x):
+        """Applies the gated projection to `x`."""
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
@@ -1004,11 +1062,14 @@ def test_dots_sharing_an_operand_merge(device, triton_on_cuda):
 
 
 class Attention(lumen.nn.Module):
+    """Single-head softmax attention with q, k and v projections."""
+
     wq: lumen.Tensor
     wk: lumen.Tensor
     wv: lumen.Tensor
 
     def __call__(self, x):
+        """Attends `x` to itself."""
         q, k, v = (
             F.matmul(x, self.wq, "float32", x.dtype),
             F.matmul(x, self.wk, "float32", x.dtype),
@@ -1070,6 +1131,7 @@ class Heads(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
+        """Causal flash attention of the projections over 4 heads of 16."""
         q, k, v = (F.matmul(x, w.t(), "float32", x.dtype).reshape(2, 32, 4, 16) for w in (self.wq, self.wk, self.wv))
         return F.flash_attention(q, k, v, is_causal=True).reshape(64, 64)
 
@@ -1107,6 +1169,7 @@ class QKV(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, x):
+        """The three projections of `x`."""
         return [F.matmul(x, w.t(), "float32", x.dtype) for w in (self.wq, self.wk, self.wv)]
 
 
@@ -1115,6 +1178,7 @@ class MixedQKV(QKV):
     bfloat16 where the matmuls read them, the result float32."""
 
     def __call__(self, x):
+        """The three projections in bfloat16 with a float32 result."""
         return [F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") for w in (self.wq, self.wk, self.wv)]
 
 
@@ -1127,6 +1191,7 @@ def test_gradients_through_a_rounding_are_written_wide():
     n, d = 16, 32
 
     def step(model, x):
+        """Gradients of the summed squares of the projections for `x` and each weight."""
         F.sum(sum(F.sum(y * y) for y in model(x))).backward()
         return x.grad, model.wq.grad, model.wk.grad, model.wv.grad
 
@@ -1158,6 +1223,7 @@ class SwiGLU(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x, mixed=False, gate=False):
+        """The gated value, plus the gate when `gate`; `mixed` uses bfloat16 operands."""
         if mixed:
             g = F.matmul(x.bfloat16(), self.w1.t().bfloat16(), "float32", "float32")
             u = F.matmul(x.bfloat16(), self.w3.t().bfloat16(), "float32", "float32")
@@ -1191,6 +1257,7 @@ def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_
             model = SwiGLU(meta(hidden, d), meta(hidden, d))
 
             def f(model, x):
+                """Runs the model with the case's `mixed` and `gate` flags."""
                 return model(x, mixed, gate)
 
             g = lumen.compile(f, device=target)
@@ -1225,6 +1292,7 @@ class GatedMLP(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, inp, swiglu):
+        """Projects `inp`, then applies the ReGLU or SwiGLU MLP."""
         x = F.matmul(inp, self.w0.t().bfloat16(), "float32", "bfloat16")
         if swiglu:
             g = F.matmul(x, self.wg.t().bfloat16(), "float32", "float32")
@@ -1264,6 +1332,7 @@ def test_gated_pair_backward_merges_its_gradients_dots(device, swiglu, triton_on
     x = rand(m, d, seed=4)
 
     def step(model, x):
+        """Gradients of the summed squared output for every weight."""
         y = model(x.bfloat16(), swiglu).float()
         F.sum(y * y).backward()
         return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
@@ -1302,6 +1371,7 @@ class _GatedMLPFunction(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, wg, wu, wd):
+        """The gated MLP's output, saving its inputs and pre-activations."""
         g = F.matmul(x, wg.t().bfloat16(), "float32", "float32")
         u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
         ctx.save_for_backward(x, g, u, wg, wu, wd)
@@ -1309,6 +1379,7 @@ class _GatedMLPFunction(lumen.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
+        """Hand-written gradients of `x` and the three weights."""
         x, g, u, wg, wu, wd = ctx.saved_tensors
         s = F.sigmoid(g)
         dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
@@ -1343,12 +1414,16 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs(device, triton_on_
     x = rand(m, d, seed=4)
 
     def autodiff(x, wg, wu, wd):
+        """The same gated MLP for autodiff to differentiate."""
         g = F.matmul(x, wg.t().bfloat16(), "float32", "float32")
         u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
         return F.matmul((F.sigmoid(g) * u).bfloat16(), wd.t().bfloat16(), "float32", "bfloat16")
 
     def step(mlp):
+        """A training step running `mlp` after an input projection."""
+
         def f(model, x):
+            """Gradients of the summed squared output for every weight."""
             x = F.matmul(x.bfloat16(), model.w0.t().bfloat16(), "float32", "bfloat16")
             y = mlp(x, model.wg, model.wu, model.w2).float()
             F.sum(y * y).backward()
@@ -1390,6 +1465,7 @@ class ProjectedAttention(lumen.nn.Module):
     wv: lumen.Tensor
 
     def __call__(self, inp, batch, heads):
+        """Projects `inp`, then attends its q, k and v over `heads` heads per batch."""
         x = F.matmul(inp, self.w0.t().bfloat16(), "float32", "bfloat16")
         tokens, dim = x.shape
         q, k, v = (
@@ -1424,6 +1500,7 @@ def test_qkv_backward_merges_its_gradients_dots(device, deterministic, triton_on
     x = rand(m, d, seed=4)
 
     def step(model, x):
+        """Gradients of the summed squared attention output for every weight."""
         y = model(x.bfloat16(), batch, heads)
         F.sum(y * y).backward()
         return model.w0.grad, model.wq.grad, model.wk.grad, model.wv.grad
@@ -1486,6 +1563,7 @@ class _SavedNarrowMLP(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, wg, wu, wd):
+        """The gated MLP's output, saving the gate and up values rounded to bfloat16."""
         s = F.sigmoid(F.matmul(x, wg.t().bfloat16(), "float32", "float32"))
         u = F.matmul(x, wu.t().bfloat16(), "float32", "float32")
         ctx.save_for_backward(x, s.bfloat16(), u.bfloat16(), wg, wu, wd)
@@ -1493,6 +1571,7 @@ class _SavedNarrowMLP(lumen.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
+        """Hand-written gradients reading the saved bfloat16 values."""
         x, s, u, wg, wu, wd = ctx.saved_tensors
         s, u = s.float(), u.float()
         dh = F.matmul(dy, wd.bfloat16(), "float32", "float32")
@@ -1525,6 +1604,7 @@ def test_values_saved_narrower_are_written_narrower(device, triton_on_cuda):
     x = rand(m, d, seed=4)
 
     def step(model, x):
+        """Gradients through the saved-narrow MLP after an input projection."""
         x = F.matmul(x.bfloat16(), model.w0.t().bfloat16(), "float32", "bfloat16")
         y = _SavedNarrowMLP.apply(x, model.wg, model.wu, model.w2).float()
         F.sum(y * y).backward()
@@ -1563,6 +1643,7 @@ def test_projections_of_several_inputs_each_read_one_block(device, module, trito
         pytest.skip(str(e))
 
     def f(model, x1, x2):
+        """relu of each projection of both inputs."""
         return [F.relu(v) for v in [*model(x1), *model(x2)]]
 
     if device == "mps":
@@ -1598,6 +1679,7 @@ class GatedPair(lumen.nn.Module):
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """SwiGLU of `x`."""
         g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
         return g * F.sigmoid(g) * u
 
@@ -1621,6 +1703,7 @@ def test_gated_pairs_weights_are_interleaved(device, triton_on_cuda):
         assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
 
     def step(model, x):
+        """One SGD step on the sum of the outputs; returns the loss."""
         loss = F.sum(model(x))
         loss.backward()
         for w in (model.w1, model.w2):
@@ -1657,6 +1740,7 @@ class GatedMLP2(lumen.nn.Module):
     w3: lumen.Tensor
 
     def __call__(self, x):
+        """Down projection of the SwiGLU of `x`."""
         g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
         return F.matmul(g * F.sigmoid(g) * u, self.w3.t(), "float32", x.dtype)
 
@@ -1676,6 +1760,7 @@ def test_gated_pairs_backward_is_interleaved(device, triton_on_cuda):
     h, d, m = 64, 32, 16
 
     def step(model, x):
+        """The loss and the gradients of `x` and every weight."""
         loss = F.sum(model(x))
         loss.backward()
         return loss, x.grad, model.w1.grad, model.w2.grad, model.w3.grad
@@ -1707,12 +1792,16 @@ def test_gated_pairs_backward_is_interleaved(device, triton_on_cuda):
 
 
 class Projections(lumen.nn.Module):
+    """Projections of `x` by `ws`, combined in consecutive `groups`; `left` multiplies by the weights
+    on the left and `mixed` in bfloat16."""
+
     ws: list
     groups: list
     mixed: bool = False
     left: bool = False
 
     def __call__(self, x):
+        """One value per group: the negated first projection, gated by each later one in turn."""
         cast = (lambda t: t.bfloat16()) if self.mixed else (lambda t: t)
         if self.left:
             p = [F.matmul(cast(w), cast(x), "float32", "float32") for w in self.ws]
@@ -1806,11 +1895,14 @@ def test_dots_of_one_operand_share_one_interleaved_block(
 
 
 class SharedOperand(lumen.nn.Module):
+    """Projections of `x` sharing it as an operand, combined in consecutive `groups`."""
+
     ws: list
     groups: list
     left: bool = False
 
     def __call__(self, x):
+        """One value per group: silu of its first projection plus the others."""
         if self.left:
             p = [F.matmul(w, x, "float32", "float32") for w in self.ws]
         else:
@@ -1826,16 +1918,19 @@ class SharedOperand(lumen.nn.Module):
 
 
 def _gated_inference(model, x):
+    """Forward only."""
     return model(x)
 
 
 def _gated_gradients(model, x):
+    """The summed squared outputs, `x`'s gradient and every weight's."""
     loss = sum(F.sum(o * o) for o in model(x))
     loss.backward()
     return [loss, x.grad] + [w.grad for w in model.ws]
 
 
 def _gated_training(model, x):
+    """One SGD step on the summed squared outputs; returns the loss."""
     loss = sum(F.sum(o * o) for o in model(x))
     loss.backward()
     for w in model.ws:
@@ -1944,6 +2039,7 @@ def test_triton_dots_sharing_an_operand_merge(device, groups, left, step, triton
         pytest.skip(str(e))
 
     def make():
+        """A fresh meta model of the case's shapes."""
         return SharedOperand([meta(h, d) for _ in range(n)], groups, left)
 
     graph = lumen.make_graph(step)(make(), meta(*shape))
@@ -2018,11 +2114,14 @@ def test_triton_merged_regions_fuse(device, make, n, left, triton_on_cuda):
 
 
 class Returned(lumen.nn.Module):
+    """Projections of `x`, returned each on its own, or with the first two summed."""
+
     ws: list
     summed: bool
     left: bool = False
 
     def __call__(self, x):
+        """The projections, the first two added when `summed`."""
         if self.left:
             p = [F.matmul(w, x, "float32", "float32") for w in self.ws]
         else:
@@ -2094,6 +2193,7 @@ def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cud
         pytest.skip(str(e))
 
     def step(model, x, c):
+        """One SGD step on a loss combining q, k and v; returns the loss."""
         q, k, v = model(x)
         loss = F.sum((q * k + v) * c)
         loss.backward()
@@ -2130,9 +2230,12 @@ def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cud
 
 
 class Linear(lumen.nn.Module):
+    """Matmul by `w`."""
+
     w: lumen.Tensor
 
     def __call__(self, x):
+        """`x @ w`."""
         return F.matmul(x, self.w, "float32", x.dtype)
 
 
@@ -2175,6 +2278,7 @@ def test_softmax_traces_to_its_primitives(device, triton_on_cuda):
         pytest.skip(str(e))
 
     def scaled(t):
+        """Softmax of half of `t` over the last dim."""
         return F.softmax(t * 0.5, -1)
 
     graph = lumen.make_graph(scaled)(t)
@@ -2198,10 +2302,13 @@ def test_softmax_traces_to_its_primitives(device, triton_on_cuda):
 
 
 class Norm(lumen.nn.Module):
+    """RMS norm through `F.rms_norm`."""
+
     weight: lumen.Tensor
     eps: float
 
     def __call__(self, x):
+        """Normalizes `x` over the weight's shape."""
         return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
@@ -2218,6 +2325,7 @@ def test_rms_norm(device, triton_on_cuda):
         pytest.skip(str(e))
 
     def expected(x, w, eps):
+        """numpy RMS norm of `x`, scaled by `w` if given."""
         y = x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         return y * w if w is not None else y
 
@@ -2274,10 +2382,13 @@ def test_sqrt(device, triton_on_cuda):
 
 
 class ScaledNorm(lumen.nn.Module):
+    """RMS norm written out by hand."""
+
     weight: lumen.Tensor
     eps: float
 
     def __call__(self, x):
+        """Normalizes `x` over its last dim and scales it."""
         return self.weight * (x / F.sqrt(F.mean(x * x, -1, keepdim=True) + self.eps))
 
 
@@ -2290,6 +2401,7 @@ def test_float_fields_are_runtime_scalars(device, triton_on_cuda):
     traces = []
 
     def forward(m, a):
+        """Counts the trace and applies `m`."""
         traces.append(1)
         return m(a)
 
@@ -2382,6 +2494,7 @@ class UpcastNorm(lumen.nn.Module):
     eps: float
 
     def __call__(self, x):
+        """Normalizes `x` in float32 and scales it in `x`'s dtype."""
         h = x.float()
         h = h / F.sqrt(F.mean(h * h, -1, keepdim=True) + self.eps)
         return self.weight * h.to(dtype=x.dtype)
@@ -2452,6 +2565,7 @@ def test_split_reduction_converts_its_input_once():
 
 
 def _layer_norm(a, w):
+    """Layer norm of `a` over its last dim, scaled by `w`."""
     xc = a - F.mean(a, -1, keepdim=True)
     return xc / F.sqrt(F.mean(xc * xc, -1, keepdim=True) + 1e-5) * w
 
@@ -2542,6 +2656,7 @@ def test_cross_entropy_is_one_row_kernel(device, n, vocab, triton_on_cuda):
     c = rng.standard_normal(n).astype(np.float32)
 
     def step(x, t, c):
+        """Per-row losses and the logits' gradient of their weighted sum."""
         loss = F.cross_entropy(x, t)
         F.sum(loss * c).backward()
         return loss, x.grad
@@ -2585,6 +2700,7 @@ def test_cross_entropy_gradient_reading_the_losses(device, n, vocab, rows_read, 
     of = {"its own": lambda loss: F.sum(loss * loss), "every row's": lambda loss: F.mean(loss) * F.mean(loss)}
 
     def step(x, t):
+        """The losses and the logits' gradient of the case's loss reduction."""
         loss = F.cross_entropy(x, t)
         of[rows_read](loss).backward()
         return loss, x.grad
@@ -2632,9 +2748,11 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype, triton_on_cuda):
     c = rng.standard_normal(n).astype(np.float32)
 
     def loss(h, w, t):
+        """Per-row cross entropy of the logits `h @ w.t()`."""
         return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
 
     def step(h, w, t, c):
+        """The losses and the gradients of `h` and `w` for their weighted sum."""
         losses = loss(h, w, t)
         F.sum(losses * c).backward()
         return losses, h.grad, w.grad
@@ -2675,9 +2793,11 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab, 
     t = rng.integers(0, vocab, n).astype(np.int64)
 
     def loss(h, w, t):
+        """Per-row cross entropy of float32 logits from a bfloat16 head."""
         return F.cross_entropy(F.matmul(h, w.t().bfloat16(), "float32", "float32"), t)
 
     def both(h, w, t):
+        """The losses and the logits too."""
         logits = F.matmul(h, w.t().bfloat16(), "float32", "float32")
         return F.cross_entropy(logits, t), logits
 
@@ -2737,7 +2857,10 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
     c = (rng.random(n) / n).astype(np.float32)
 
     def trained(f):
+        """A training step reducing the losses of `f` as the case says."""
+
         def step(h, w, t, c):
+            """The reduced loss and the gradients of `h` and `w`."""
             losses = f(h, w, t)
             of = {
                 "mean": lambda: F.mean(losses),
@@ -2751,6 +2874,7 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
         return step
 
     def unfused(h, w, t):
+        """The cross entropy of the matmul's logits, written without the fused path."""
         w = w.bfloat16() if head == "float32" else w
         return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
 
@@ -2810,6 +2934,7 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
     x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
 
     def step(x, w, c):
+        """The loss and the gradients of `x` and `w`."""
         loss = F.sum(F.rms_norm(x, 300, w) * c)
         loss.backward()
         return loss, x.grad, w.grad
@@ -2951,10 +3076,13 @@ def test_ops_are_functions():
 
 
 class _ScaledMatmul(lumen.nn.Module):
+    """Matmul by `w`, scaled by the runtime scalar `s`."""
+
     w: lumen.Tensor
     s: float
 
     def __call__(self, x):
+        """`x @ w * s`."""
         return F.matmul(x, self.w, "float32", x.dtype) * self.s
 
 
@@ -3022,6 +3150,7 @@ def _rms_block(x, wo, r, norm, w1):
 
 
 def _layer_norm_block(x, wo, r, norm, w1):
+    """A residual projection, a layer norm, then the next projection."""
     x = r + F.matmul(x.bfloat16(), wo.t().bfloat16(), "float32", "float32")
     c = x - F.mean(x, -1, keepdim=True)
     h = (c / F.sqrt(F.mean(c * c, -1, keepdim=True) + 1e-5) * norm).bfloat16()
@@ -3029,6 +3158,7 @@ def _layer_norm_block(x, wo, r, norm, w1):
 
 
 def _softmax_block(x, wo, r, norm, w1):
+    """A residual projection, a scaled softmax, then the next projection."""
     x = r + F.matmul(x.bfloat16(), wo.t().bfloat16(), "float32", "float32")
     return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
 
@@ -3090,6 +3220,7 @@ class _NormedBlock(lumen.nn.Module):
     w1: lumen.Tensor
 
     def __call__(self, a, r):
+        """Adds the projection to the stream, normalizes it and adds the next projection."""
         x = r + F.matmul(a.bfloat16(), self.wo.t().bfloat16(), "float32", "float32")
         h = F.rms_norm(x.bfloat16().float(), x.shape[-1], self.norm).bfloat16()
         return x + F.matmul(h, self.w1.t().bfloat16(), "float32", "float32")
@@ -3116,11 +3247,13 @@ def test_trained_matmul_epilogue_normalizes_its_rows(device, triton_on_cuda):
     a, r = (lumen.from_numpy(v).to(device) for v in a_r)
 
     def step(model, a, r):
+        """Gradients of the summed squared output for the three weights."""
         y = model(a, r)
         F.sum(y * y).backward()
         return model.wo.grad, model.norm.grad, model.w1.grad
 
     def run(target=device):
+        """The step's gradients compiled for `target`, on the test's values."""
         model = _NormedBlock(meta(d, d), meta(d), meta(d, d))
         f = lumen.compile(step, device=target)
         f(model, meta(m, d), meta(m, d))
@@ -3169,9 +3302,11 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
     product = lumen.to_numpy(a.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(b.to(dtype="float32"))
 
     def plain(a, b):
+        """float32 matmul."""
         return F.matmul(a, b, "float32", "float32")
 
     def fused(a, b):
+        """relu of the float32 matmul."""
         return F.relu(plain(a, b))
 
     for tuned in (False, True):
@@ -3216,6 +3351,7 @@ def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k,
 
 
 def _silu(h):
+    """silu of `h`."""
     return h * F.sigmoid(h)
 
 
@@ -3281,12 +3417,14 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         pytest.skip(str(e))
 
     def rounded(x, w):
+        """The float32 matmul rounded to bfloat16."""
         y = F.matmul(x, w, "float32", "float32")
         return y.bfloat16()
 
     both = lambda x, w: (rounded(x, w), F.matmul(x, w, "float32", "float32"))  # noqa: E731
 
     def dots(f, *args):
+        """Each MPS plan step of `f`'s graph as its matmul description, or its text."""
         return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
     lumen.config.compiler.mps.contraction_epilogues = False
@@ -3358,17 +3496,23 @@ def test_matmul_epilogue_takes_runtime_scalars_by_value(device, triton_on_cuda):
 
 
 class _Gated(lumen.nn.Module):
+    """Gated MLP projection `relu(x @ w1) * (x @ w3)`."""
+
     w1: lumen.Tensor
     w3: lumen.Tensor
 
     def __call__(self, x):
+        """Applies the gated projection to `x`."""
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
 class _Relu(lumen.nn.Module):
+    """relu of a matmul."""
+
     w1: lumen.Tensor
 
     def __call__(self, x):
+        """`relu(x @ w1)`."""
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype))
 
 
@@ -3440,6 +3584,7 @@ def test_rounding_a_contraction_then_widening_it_warns():
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
 
     def scores(x):
+        """Scores of `x` against itself in its dtype, scaled and widened to float32."""
         s = F.matmul(x, x.t(), "float32", x.dtype) * 0.5
         return s.float()
 
@@ -3463,6 +3608,8 @@ def test_rounding_a_contraction_then_widening_it_warns():
 
 
 class _Counter(lumen.nn.Module):
+    """A step counter and a weight the step updates."""
+
     n: lumen.Tensor
     w: lumen.Tensor
 
@@ -3474,6 +3621,7 @@ def test_copy_into_a_weight_is_written_back():
     counter = _Counter(lumen.empty([], device="meta"), lumen.empty([3], device="meta"))
 
     def step(c, x):
+        """Increments the counter and adds `x` times it to the weight."""
         c.n.copy_(c.n + 1.0)
         c.w.copy_(c.w + x * c.n)
         return c.n * 1.0
@@ -3489,6 +3637,8 @@ def test_copy_into_a_weight_is_written_back():
 
 
 class _Steps(lumen.nn.Module):
+    """A weight, a float step count and a tuple of learning rates."""
+
     w: lumen.Tensor
     t: float
     lrs: tuple
@@ -3501,6 +3651,7 @@ def test_copy_into_a_modules_float_is_written_back():
     steps = _Steps(lumen.empty([2], device="meta"), 0.0, (0.5,))
 
     def step(s):
+        """Increments the step and adds it to the weight."""
         s.t.copy_(s.t + 1.0)
         s.w.copy_(s.w + s.t)
         return s.t * 1.0
@@ -3512,6 +3663,7 @@ def test_copy_into_a_modules_float_is_written_back():
     np.testing.assert_array_equal(lumen.to_numpy(lumen.compile(lambda s: s.w * 1.0)(steps)), [6.0, 6.0])
 
     def assign_tuple(s):
+        """Assigns a float inside a tuple field, which raises."""
         s.lrs[0].copy_(s.lrs[0] * 2.0)
         return s.w * 1.0
 
@@ -3520,6 +3672,8 @@ def test_copy_into_a_modules_float_is_written_back():
 
 
 class _Scalars(lumen.nn.Module):
+    """A weight with float, int and bool fields."""
+
     w: lumen.Tensor
     lr: float
     step: int
@@ -3538,6 +3692,7 @@ def test_scalar_fields_are_assigned_as_python_values(device, triton_on_cuda):
     traces = []
 
     def step(s, x):
+        """Counts the trace, updates the step and learning rate, and uses every field."""
         traces.append(1)
         s.step = s.step + 1
         s.lr = s.lr * 0.5
@@ -3572,6 +3727,8 @@ def test_scalar_fields_are_assigned_as_python_values(device, triton_on_cuda):
 
 
 class _Seen(lumen.nn.Module):
+    """A weight, a float set from the device and a step counter."""
+
     w: lumen.Tensor
     seen: float
     step: int
@@ -3585,6 +3742,7 @@ def test_scalars_written_from_scalars_alone_run_on_the_host():
     from lumen.graph import tracer
 
     def step(s, x):
+        """Increments the step on the host and sets `seen` from the device."""
         s.step = s.step + 1
         s.seen = F.sum(x * s.w)
         return x * 1.0
@@ -3612,10 +3770,13 @@ def test_float64_runtime_scalars_are_exact():
 
 
 class _ReluMLP(lumen.nn.Module):
+    """Two-layer relu MLP."""
+
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """`relu(x @ w1) @ w2`."""
         return F.matmul(F.relu(F.matmul(x, self.w1, "float32", x.dtype)), self.w2, "float32", x.dtype)
 
 
@@ -3630,6 +3791,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
     x = rng.standard_normal((48, 64)).astype(np.float32)
 
     def step(m, x):
+        """The loss and every parameter's gradient."""
         loss = F.sum(F.tanh(m(x)))
         loss.backward()
         return loss, [p.grad for p in m.parameters()]
@@ -3695,6 +3857,7 @@ def test_cpu_inside_a_compiled_function(device, triton_on_cuda):
     devices = []
 
     def f(x):
+        """Moves values to the host inside the trace and records each one's device."""
         y = x * 2.0
         h = y.cpu()
         devices.extend([x.device, h.device, (h + 1.0).device, h.to(device).device])
@@ -3734,6 +3897,7 @@ def test_cpu_inside_a_compiled_function_transfers(device, triton_on_cuda):
     device (``to_device``)."""
 
     def mid(x):
+        """Device work, a copy to the host, then host work."""
         return (x * 3.0).cpu() * 2.0 + 1.0
 
     x = lumen.tensor([1.0, 2.0])

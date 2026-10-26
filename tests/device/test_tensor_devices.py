@@ -1,3 +1,5 @@
+"""Tests of tensor placement, copies, fills and factories on CPU, MPS, CUDA and TPU."""
+
 import numpy as np
 import pytest
 
@@ -9,6 +11,7 @@ TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def _require(device):
+    """Skips the test when a tensor can't be placed on `device`."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -16,23 +19,27 @@ def _require(device):
 
 
 def test_default_device_is_cpu():
+    """Factories place tensors on `cpu:0` by default."""
     assert lumen.zeros([2]).device == "cpu:0"
     assert lumen.tensor([1, 2]).device == "cpu:0"
 
 
 @pytest.mark.parametrize("device", ["cpu", lumen.device("cpu"), None])
 def test_cpu_device_forms(device):
+    """String, `lumen.device` and `None` all place on the CPU."""
     t = lumen.arange(3, device=device)
     assert t.device == "cpu:0"
     assert t.tolist() == [0.0, 1.0, 2.0]
 
 
 def test_to_same_device_shares_storage():
+    """Moving a tensor to its own device returns a view of the same storage."""
     t = lumen.arange(4)
     assert t.to("cpu").shares_storage_with(t)
 
 
 def test_invalid_device_arguments():
+    """Unknown device strings raise `ValueError`, non-device types `TypeError`."""
     with pytest.raises(ValueError):
         lumen.zeros([1], device="gpu")
     with pytest.raises(TypeError):
@@ -40,6 +47,7 @@ def test_invalid_device_arguments():
 
 
 def test_unavailable_cuda_raises_runtime_error():
+    """`cuda:0` either works or raises a `RuntimeError` saying it isn't available."""
     try:
         t = lumen.zeros([1], device="cuda:0")
     except RuntimeError as e:
@@ -50,6 +58,7 @@ def test_unavailable_cuda_raises_runtime_error():
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_tensor_on_device(device):
+    """Device tensors support element writes, indexing and views sharing storage."""
     _require(device)
     t = lumen.tensor([[1, 2, 3], [4, 5, 6]], device=device)
     assert t.device.startswith(device)
@@ -62,6 +71,7 @@ def test_tensor_on_device(device):
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_to_and_back(device):
+    """A strided CPU tensor copies to the device and back with its values, in new storage."""
     _require(device)
     cpu = lumen.arange(6).reshape([2, 3]).transpose(0, 1)
     moved = cpu.to(lumen.device(device))
@@ -76,6 +86,7 @@ def test_to_and_back(device):
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_factories_on_device(device):
+    """`zeros`, `ones` and `full` fill device tensors with the right values and dtype."""
     _require(device)
     assert lumen.zeros([2], dtype=lumen.int32, device=device).tolist() == [0, 0]
     assert lumen.ones([2], device=device).tolist() == [1.0, 1.0]
@@ -84,6 +95,7 @@ def test_factories_on_device(device):
 
 @pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 def test_fill_and_zero_in_place(device):
+    """`fill_` and `zero_` write in place through contiguous rows and strided views."""
     if device != "cpu":
         _require(device)
     t = lumen.arange(6, device=device).reshape([2, 3])
@@ -99,6 +111,7 @@ def test_fill_and_zero_in_place(device):
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_fill_strided_higher_rank(device):
+    """`fill_` on permuted rank-3 and rank-4 views and a narrowed view writes exactly the viewed elements."""
     _require(device)
     for shape, perm, value in [
         ([2, 3, 4], [2, 0, 1], -1.5),
@@ -114,6 +127,7 @@ def test_fill_strided_higher_rank(device):
         flat = view.to("cpu").tolist()
 
         def flatten(xs):
+            """Yields the scalars of a nested list in order."""
             for x in xs:
                 if isinstance(x, list):
                     yield from flatten(x)
@@ -129,6 +143,7 @@ def test_fill_strided_higher_rank(device):
 
 @pytest.mark.cuda
 def test_cuda_fill_launches_on_the_tensors_device():
+    """Fills on each of two CUDA devices land while the other device is current."""
     _require("cuda")
     try:
         lumen.zeros([1], device="cuda:1")
@@ -143,6 +158,7 @@ def test_cuda_fill_launches_on_the_tensors_device():
 
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_empty_and_ones_on_device(device):
+    """`empty` tensors can be zeroed in place and `ones` defaults to float32."""
     _require(device)
     e = lumen.empty([2, 2], dtype=lumen.int64, device=device)
     assert e.device.startswith(device)
@@ -154,6 +170,7 @@ def test_empty_and_ones_on_device(device):
 @pytest.mark.parametrize("shape", [[1], [128], [129], [10, 100]])
 @pytest.mark.parametrize("device", [MPS, CUDA, TPU])
 def test_copies_round_trip_without_touching_their_neighbours(device, shape):
+    """Adjacent device tensors copy to and from the host exactly, including bfloat16."""
     _require(device)
     rng = np.random.default_rng(0)
     hosts = [rng.standard_normal(shape, dtype=np.float32) for _ in range(3)]

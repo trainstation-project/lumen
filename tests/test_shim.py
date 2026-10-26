@@ -1,9 +1,12 @@
+"""Tests of the Python shim over the native tensor: re-exports, dtypes, factories and NumPy interop."""
+
 import lumen
 from lumen import Tensor
 from lumen.tensor import _C
 
 
 def test_shim_reexports_native_tensor():
+    """`lumen.Tensor` is the native tensor class, presented under the `lumen` module."""
     assert _C.__name__ == "lumen.tensor._C"
     assert lumen.Tensor is _C.Tensor
     assert Tensor.__module__ == "lumen"
@@ -11,6 +14,7 @@ def test_shim_reexports_native_tensor():
 
 
 def test_dtype_constants():
+    """Dtype constants are their names, and every dtype can build a tensor."""
     assert lumen.float32 == "float32"
     assert lumen.bfloat16 == "bfloat16"
     assert lumen.int64 == "int64"
@@ -35,6 +39,7 @@ def test_dtype_constants():
 
 
 def test_factories():
+    """Tensor factories produce the expected dtypes, shapes and values."""
     assert lumen.tensor([1, 2, 3]).dtype == "int64"
     assert lumen.zeros([2, 3]).tolist() == [[0.0] * 3] * 2
     assert lumen.ones([2, 2]).tolist() == [[1.0, 1.0], [1.0, 1.0]]
@@ -44,6 +49,7 @@ def test_factories():
 
 
 def test_numpy_roundtrip():
+    """Tensors convert to NumPy arrays and back, including 0-d arrays."""
     np = __import__("numpy")
     t = lumen.arange(6).reshape([2, 3])
     a = lumen.to_numpy(t)
@@ -60,6 +66,7 @@ def test_numpy_roundtrip():
 
 
 def test_np_array_protocol():
+    """`np.array` accepts a tensor through the array protocol."""
     np = __import__("numpy")
     t = lumen.tensor([1, 2, 3])
     a = np.array(t)
@@ -68,6 +75,7 @@ def test_np_array_protocol():
 
 
 def test_from_numpy_dtypes():
+    """Every NumPy dtype maps to its lumen dtype."""
     np = __import__("numpy")
     for np_dtype, lumen_dtype in [
         (np.float16, "float16"),
@@ -88,6 +96,7 @@ def test_from_numpy_dtypes():
 
 
 def test_shim_tensor_keeps_storage_semantics():
+    """Indexing returns a view sharing storage, so writes show in the base tensor."""
     t = lumen.arange(6).reshape([2, 3])
     row = t[1]
     row[0] = -1.0

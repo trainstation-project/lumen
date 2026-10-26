@@ -1,3 +1,5 @@
+"""Tests of lumen's Philox random number generation: draws, distributions, dropout and generator state."""
+
 import math
 
 import numpy as np
@@ -17,6 +19,7 @@ def _philox(key, counter):
     for r in range(10):
         if r:
             k = [(k[0] + 0x9E3779B9) & mask, (k[1] + 0xBB67AE85) & mask]
+        # Philox's two multiplies: each product's high word mixes with the other words and the key.
         p0, p1 = 0xD2511F53 * c[0], 0xCD9E8D57 * c[2]
         c = [(p1 >> 32) ^ c[1] ^ k[0], p1 & mask, (p0 >> 32) ^ c[3] ^ k[1], p0 & mask]
     return c
@@ -31,6 +34,7 @@ def _bits(seed, counters):
 
 
 def test_python_philox_matches_random123():
+    """The Python Philox reference reproduces Random123's known-answer vectors."""
     assert _philox([0, 0], [0] * 4) == [0x6627E8D5, 0xE169C58D, 0xBC57AC4C, 0x9B00DBD8]
     assert _philox([0xA4093822, 0x299F31D0], [0x243F6A88, 0x85A308D3, 0x13198A2E, 0x03707344]) == [
         0xD16CFE09,
@@ -89,6 +93,7 @@ def test_devices_draw_the_same_numbers():
     bit, ``randn`` to float32 rounding (its log and sqrt)."""
 
     def draws(x):
+        """A uniform, a normal and a dropout draw of 2000 elements."""
         return lumen.rand([2000]), lumen.randn([2000]), F.dropout(lumen.ones([2000]), 0.3)
 
     results = []
@@ -111,6 +116,7 @@ def test_randn_is_standard_normal(device):
     (z,) = f()
     assert np.isfinite(z).all()
     assert abs(z.mean()) < 0.01 and abs(z.std() - 1) < 0.01
+    # randn's uniforms: 23 bits mapped to odd multiples of 2**-23 in (-1, 1).
     m = _bits(5, range(64)) >> 9
     u = (2 * m + 1).astype(np.float64) * 2.0**-23 - 1
     erf = np.array([math.erf(v / math.sqrt(2)) for v in z[:64].astype(np.float64)])
@@ -130,6 +136,7 @@ def test_dropout(device):
         pytest.skip(str(e))
 
     def drop(x):
+        """Dropout at ``p``, without training, and at ``p`` 0 and 1."""
         return F.dropout(x, p), F.dropout(x, p, training=False), F.dropout(x, 0.0), F.dropout(x, 1.0)
 
     lumen.manual_seed(9)
@@ -158,6 +165,7 @@ def test_dropout_backward_recomputes_its_mask(device):
         pytest.skip(str(e))
 
     def step(x, w):
+        """Dropout then backward of ``sum(y * w)``; returns ``y`` and ``x``'s gradient."""
         y = F.dropout(x, 0.5)
         F.sum(y * w).backward()
         return y, x.grad
@@ -197,6 +205,7 @@ def test_errors():
 
 
 def _dropout_read_early_and_late(a, w):
+    """Dropout whose output is read by an early matmul and again at the very end."""
     h = F.dropout(F.matmul(a, w, "float32", "float32"), 0.5)
     b = F.matmul(h, w, "float32", "float32")
     e = F.matmul(F.matmul(b, w, "float32", "float32"), b, "float32", "float32")
@@ -279,6 +288,8 @@ def test_uniform_initializes_a_weight(device):
     the weight's dtype, written back into the weight after the call."""
 
     class Linear(lumen.nn.Module):
+        """A module holding one weight."""
+
         w: lumen.Tensor
 
     model = Linear(lumen.empty([64, 32], device="meta"))
@@ -330,6 +341,7 @@ def test_fork_rng():
     np.testing.assert_array_equal(f()[0], first)
 
     def forked(x):
+        """Draws inside a forked generator, then after it."""
         with fork_rng():
             inside = lumen.rand([5])
         return inside, lumen.rand([5])

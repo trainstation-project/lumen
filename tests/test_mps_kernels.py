@@ -1,3 +1,5 @@
+"""Tests for user Metal kernels and custom ops that launch or encode work on the MPS stream."""
+
 import ctypes
 import sys
 
@@ -14,12 +16,14 @@ pytestmark = pytest.mark.mps
 if sys.platform != "darwin":
     pytest.skip("Metal kernels run on macOS only", allow_module_level=True)
 
+# One kernel: y += a * x over one thread per element.
 AXPY = """
 kernel void axpy(device const float *x [[buffer(0)]], device float *y [[buffer(1)]],
                  constant float &a [[buffer(2)]], uint i [[thread_position_in_grid]]) {
     y[i] += a * x[i];
 }
 """
+# Two kernels, so a name must be chosen: a 16x16-threadgroup iota and an `axpy` that zeroes y.
 TWO = """
 kernel void iota(device int *out [[buffer(0)]], uint2 g [[threadgroup_position_in_grid]],
                  uint2 t [[thread_position_in_threadgroup]]) {
@@ -31,6 +35,7 @@ kernel void axpy(device float *y [[buffer(0)]], uint i [[thread_position_in_grid
 
 @pytest.fixture(scope="module")
 def kernels():
+    """The compiled AXPY kernel and TWO's iota kernel, or skip when Metal can't compile."""
     try:
         return MetalKernel(AXPY), MetalKernel(TWO, "iota")
     except RuntimeError as e:
@@ -38,6 +43,7 @@ def kernels():
 
 
 def _mps(values, dtype=np.float32):
+    """``values`` as a ``dtype`` tensor on the MPS device."""
     return lumen.from_numpy(np.asarray(values, dtype)).to("mps")
 
 
@@ -62,6 +68,7 @@ def test_launch_runs_a_kernel_in_the_stream(kernels):
 
 
 def test_compile_and_launch_errors(kernels):
+    """Ambiguous or missing kernel names, compile errors, bad launch shapes and wrong devices raise."""
     axpy, _ = kernels
     x = _mps([0.0])
     with pytest.raises(ValueError, match="several kernels"):
@@ -91,9 +98,11 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
 
     @custom_op("test::mps_axpy", mutates_args=("y",))
     def axpy(a: float, x: lumen.Tensor, y: lumen.Tensor) -> None:
+        """Adds ``a * x`` into ``y`` with the user kernel, launched on lumen's stream."""
         kernel.launch([x, y], [np.float32(a)], grid=(y.numel,))
 
     def step(x, y):
+        """Doubles ``x``, runs the custom op, then multiplies ``y`` by ``exp(0)`` so a step reads its result."""
         x = x * 2.0
         axpy(3.0, x, y)
         return F.exp(y * 0.0) * y
@@ -116,16 +125,20 @@ def test_custom_op_kernel_runs_in_order_without_waiting(kernels):
     assert names == ["mul", "axpy", "mul → exp → mul"], names
 
 
+# Objective-C runtime, for sending Metal messages to the stream's command buffer from Python.
 _objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
 _objc.sel_registerName.restype = ctypes.c_void_p
 _objc.sel_registerName.argtypes = [ctypes.c_char_p]
 
 
 class _NSRange(ctypes.Structure):
+    """Foundation's ``NSRange`` (location, length)."""
+
     _fields_ = [("location", ctypes.c_ulong), ("length", ctypes.c_ulong)]
 
 
 def _send(restype, receiver, selector, *args, argtypes=()):
+    """Sends Objective-C message ``selector`` to ``receiver`` through ``objc_msgSend`` cast to the given signature."""
     send = ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(
         ctypes.cast(_objc.objc_msgSend, ctypes.c_void_p).value
     )
@@ -156,6 +169,7 @@ def test_custom_op_encodes_into_the_command_buffer():
     runs between the function's steps, and ``synchronize`` waits for it."""
 
     def step(x):
+        """Adds 1, overwrites the result with 7 by the blit custom op, then doubles it."""
         y = x + 1
         fill(y, 7)
         return y * 2
@@ -174,6 +188,7 @@ def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
         pytest.skip("no MPS device")
     compiler = lumen.config.compiler.mps
     try:
+        # Lengths that are not multiples of any elements-per-thread choice, plus one large power of two.
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
             x = (
                 lumen.from_numpy(np.random.default_rng(n).uniform(-1, 1, n).astype(np.float32))

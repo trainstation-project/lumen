@@ -1,3 +1,5 @@
+"""Tests of the host `Tensor`: construction, dtypes, factories, strided views sharing storage, indexing, conversion and numpy export."""
+
 import numpy as np
 import pytest
 
@@ -6,6 +8,7 @@ from lumen import Tensor
 
 
 def test_construct_and_infer_dtype():
+    """The constructor infers float32, int64 and bool from Python data and places the tensor on the CPU."""
     t = Tensor([[0.0, 1.0], [2.0, 3.0]])
     assert t.shape == [2, 2]
     assert t.dtype == "float32"
@@ -19,12 +22,14 @@ def test_construct_and_infer_dtype():
 
 
 def test_explicit_dtype():
+    """An explicit dtype converts the given values."""
     t = Tensor([1, 2, 3], dtype="float32")
     assert t.dtype == "float32"
     assert t.tolist() == [1.0, 2.0, 3.0]
 
 
 def test_extended_dtypes():
+    """Every integer width, float16 and bfloat16 store and read back values."""
     for dt in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]:
         t = Tensor([-1, 2] if dt.startswith("int") else [1, 2], dtype=dt)
         assert t.dtype == dt
@@ -40,6 +45,7 @@ def test_extended_dtypes():
 
 
 def test_zeros_full_arange():
+    """The `zeros`, `full` and `arange` factories, with float32 as arange's default dtype."""
     assert Tensor.zeros([2, 3]).tolist() == [[0.0] * 3] * 2
     assert Tensor.full([2, 2], 7).tolist() == [[7, 7], [7, 7]]
     assert Tensor.arange(5).tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
@@ -47,12 +53,14 @@ def test_zeros_full_arange():
 
 
 def test_strides_row_major():
+    """New tensors are contiguous with row-major strides."""
     t = Tensor.zeros([2, 3, 4])
     assert t.strides == [12, 4, 1]
     assert t.is_contiguous()
 
 
 def test_reshape_shares_storage():
+    """`reshape` of a contiguous tensor is a view of the same storage."""
     t = Tensor.arange(6)
     m = t.reshape([2, 3])
     assert t.shares_storage_with(m)
@@ -61,6 +69,7 @@ def test_reshape_shares_storage():
 
 
 def test_mutation_visible_through_aliases():
+    """A write through a reshape view is visible through the original."""
     t = Tensor.arange(6)
     m = t.reshape([2, 3])
     m[0, 1] = 99.0
@@ -68,6 +77,7 @@ def test_mutation_visible_through_aliases():
 
 
 def test_narrow_bumps_offset():
+    """`narrow` returns a view offset into the same storage."""
     t = Tensor.arange(10)
     v = t.narrow(0, 3, 4)
     assert v.storage_offset == 3
@@ -76,6 +86,7 @@ def test_narrow_bumps_offset():
 
 
 def test_getitem_view_and_scalar():
+    """Indexing with fewer indices than dimensions returns a view; with all of them, a scalar."""
     t = Tensor.arange(6).reshape([2, 3])
     row = t[1]
     assert isinstance(row, Tensor)
@@ -86,6 +97,7 @@ def test_getitem_view_and_scalar():
 
 
 def test_setitem():
+    """Item assignment writes through the tensor and through row views, with negative indices."""
     t = Tensor.zeros([2, 2])
     t[1, 1] = 5.0
     assert t.tolist() == [[0.0, 0.0], [0.0, 5.0]]
@@ -97,6 +109,7 @@ def test_setitem():
 
 
 def test_transpose_is_stride_swap():
+    """`transpose` swaps strides without copying."""
     t = Tensor.arange(6).reshape([2, 3])
     tt = t.transpose(0, 1)
     assert tt.shape == [3, 2]
@@ -107,6 +120,7 @@ def test_transpose_is_stride_swap():
 
 
 def test_permute():
+    """`permute` reorders shape and strides."""
     t = Tensor.zeros([2, 3, 4])
     p = t.permute([2, 0, 1])
     assert p.shape == [4, 2, 3]
@@ -114,12 +128,14 @@ def test_permute():
 
 
 def test_squeeze_unsqueeze():
+    """`squeeze` drops and `unsqueeze` inserts a size-1 dimension."""
     t = Tensor.zeros([2, 1, 3])
     assert t.squeeze(1).shape == [2, 3]
     assert t.unsqueeze(0).shape == [1, 2, 1, 3]
 
 
 def test_contiguous_copies():
+    """`contiguous` on a strided view copies into fresh row-major storage."""
     t = Tensor.arange(6).reshape([2, 3]).transpose(0, 1)
     c = t.contiguous()
     assert c.is_contiguous()
@@ -128,6 +144,7 @@ def test_contiguous_copies():
 
 
 def test_storage_outlives_original():
+    """A view keeps its storage alive after the original tensor is deleted."""
     t = Tensor.arange(4)
     v = t.narrow(0, 1, 2)
     sid = t.storage_id
@@ -137,6 +154,7 @@ def test_storage_outlives_original():
 
 
 def test_errors():
+    """Unknown dtypes, ragged data, mismatched shapes and out-of-range indices raise."""
     with pytest.raises(ValueError):
         Tensor([1, 2, 3], dtype="nope")
     with pytest.raises(ValueError):
@@ -148,18 +166,21 @@ def test_errors():
 
 
 def test_repr_and_len():
+    """`repr` shows the dtype and `len` is the first dimension's size."""
     t = Tensor.arange(6).reshape([2, 3])
     assert "dtype=f32" in repr(t)
     assert len(t) == 2
 
 
 def test_every_rust_factory_is_exposed():
+    """Every Rust tensor factory is exposed on `Tensor` and on `lumen`."""
     for name in ["empty", "zeros", "ones", "full", "arange"]:
         assert hasattr(Tensor, name), name
         assert callable(getattr(lumen, name)), name
 
 
 def test_empty_has_the_requested_shape_dtype_and_device():
+    """`empty` honours shape, dtype and device, defaults to float32, and can be filled."""
     t = lumen.empty([2, 3], dtype=lumen.int32)
     assert t.shape == [2, 3]
     assert t.dtype == "int32"
@@ -173,6 +194,7 @@ def test_empty_has_the_requested_shape_dtype_and_device():
 
 
 def test_ones_is_float32_by_default_like_torch():
+    """`ones` defaults to float32 and honours an explicit dtype."""
     assert lumen.ones([2]).dtype == "float32"
     assert Tensor.ones([2]).tolist() == [1.0, 1.0]
     assert lumen.ones([2], dtype=lumen.int64).dtype == "int64"

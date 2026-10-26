@@ -1,3 +1,5 @@
+"""End-to-end tests of a small bfloat16 transformer against a NumPy reference and across backends."""
+
 import numpy as np
 import pytest
 
@@ -11,15 +13,20 @@ BATCH, PASSES, LR = 8, 3, 3e-3
 
 
 class Embedding(lumen.nn.Module):
+    """Token embeddings plus learned positions, flattened to `[batch * seq, dim]` rows."""
+
     tokens: lumen.Tensor
     positions: lumen.Tensor
 
     def __call__(self, ids):
+        """Embeds `[batch, seq]` token ids into `[batch * seq, dim]` float32 rows."""
         batch, seq = ids.shape
         return (self.tokens[ids] + self.positions).reshape(batch * seq, self.tokens.shape[1])
 
 
 class Attention(lumen.nn.Module):
+    """Causal multi-head self-attention with bfloat16 projections; `norm` is the pre-attention RMSNorm scale."""
+
     norm: lumen.Tensor
     wq: lumen.Tensor
     wk: lumen.Tensor
@@ -27,6 +34,7 @@ class Attention(lumen.nn.Module):
     wo: lumen.Tensor
 
     def __call__(self, x, batch):
+        """Attends `[tokens, dim]` bfloat16 rows split into `batch` sequences; returns bfloat16 rows."""
         tokens, dim = x.shape
         q, k, v = (
             F.matmul(x.bfloat16(), w.t().bfloat16(), accum_dtype="float32", output_dtype="bfloat16").reshape(
@@ -39,20 +47,26 @@ class Attention(lumen.nn.Module):
 
 
 class MLP(lumen.nn.Module):
+    """ReLU feed-forward layer with bfloat16 matmuls; `norm` is the pre-MLP RMSNorm scale."""
+
     norm: lumen.Tensor
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Applies `w2(relu(w1(x)))` to bfloat16 rows."""
         h = F.relu(F.matmul(x, self.w1.t().bfloat16(), "float32", "bfloat16"))
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 
 class Block(lumen.nn.Module):
+    """Pre-norm transformer block: attention then MLP, each with a residual."""
+
     attn: Attention
     mlp: MLP
 
     def __call__(self, x, batch):
+        """Runs both sublayers on `[tokens, dim]` rows of `batch` sequences."""
         r = x
         x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
         x = r.bfloat16() + self.attn(x, batch)
@@ -62,12 +76,15 @@ class Block(lumen.nn.Module):
 
 
 class Transformer(lumen.nn.Module):
+    """Embedding, `LAYERS` blocks, final RMSNorm and a float32 vocabulary head."""
+
     embed: Embedding
     layers: list
     norm: lumen.Tensor
     head: lumen.Tensor
 
     def __call__(self, ids):
+        """Returns `[batch * seq, VOCAB]` float32 logits for `[batch, seq]` ids."""
         h = self.embed(ids)
         for layer in self.layers:
             h = layer(h, ids.shape[0])
@@ -76,6 +93,7 @@ class Transformer(lumen.nn.Module):
 
 
 def cross_entropy(logits, targets):
+    """Mean cross entropy of `logits` rows against the flattened `targets`."""
     return F.mean(F.cross_entropy(logits, targets.reshape(-1)))
 
 
@@ -92,6 +110,7 @@ class AdamW(lumen.nn.Module):
     weight_decay: float
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2, m=None, v=None, t=0):
+        """Optimizer over `params`; `m`, `v` default to meta float32 moments placed on first use."""
         params = list(params)
         fields = dict(
             params=params,
@@ -107,10 +126,12 @@ class AdamW(lumen.nn.Module):
             object.__setattr__(self, name, value)
 
     def zero_grad(self):
+        """Clears every parameter's gradient."""
         for p in self.params:
             p.grad = None
 
     def step(self):
+        """Applies one bias-corrected AdamW update in float32 and writes it back in each parameter's dtype."""
         b1, b2 = self.betas
         self.t = self.t + 1
         c1 = 1.0 / (1.0 - F.exp(self.t * F.log(b1)))
@@ -126,6 +147,7 @@ class AdamW(lumen.nn.Module):
 
 
 def train_step(model, opt, x, y):
+    """Accumulates `PASSES` backward passes, applies one optimizer step and returns the last loss."""
     opt.zero_grad()
     for _ in range(PASSES):
         loss = cross_entropy(model(x), y)
@@ -135,14 +157,17 @@ def train_step(model, opt, x, y):
 
 
 def predict(model, x):
+    """Returns the model's logits for `x`."""
     return model(x)
 
 
 def meta(*shape, dtype="float32"):
+    """Meta tensor of `shape` and `dtype`, a placeholder for tracing."""
     return lumen.empty(list(shape), dtype, device="meta")
 
 
 def _model():
+    """The test transformer with meta weights."""
     return Transformer(
         embed=Embedding(meta(VOCAB, DIM), meta(SEQ, DIM)),
         layers=[
@@ -171,6 +196,7 @@ def _weights(model, seed=0):
 
 
 def _ids(seed=1):
+    """Seeded `[BATCH, SEQ]` int64 token ids."""
     return np.random.default_rng(seed).integers(0, VOCAB, (BATCH, SEQ)).astype(np.int64)
 
 
@@ -192,10 +218,12 @@ def _bf16(a):
     """``a`` (float32) rounded to bfloat16 (nearest, ties to even), as
     float32."""
     bits = np.asarray(a, np.float32).view(np.uint32)
+    # Round to nearest even on the upper 16 bits: add 0x7FFF plus the lowest kept bit, then truncate.
     return ((bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000).astype(np.uint32).view(np.float32)
 
 
 def _rms_norm(x, w):
+    """NumPy RMSNorm of `x`'s rows scaled by `w`, with lumen's float32-epsilon default."""
     eps = 2.0**-23
     return x / np.sqrt(np.mean(x * x, -1, keepdims=True) + eps) * w
 
@@ -326,6 +354,7 @@ def test_transformer_optimizer_scalars_update(device, triton_on_cuda):
     traces = []
 
     def step(model, opt, x, y):
+        """Counts each trace of the training step before running it."""
         traces.append(1)
         return train_step(model, opt, x, y)
 

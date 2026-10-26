@@ -1,3 +1,5 @@
+"""Functionalization tests: in-place ops and assignments through views, write-back to arguments and weights, gradients and memory use."""
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,7 @@ def triton():
 
 
 def _run(f, *arrays, device="cpu"):
+    """Compiles `f`, runs it on float32 copies of `arrays` on `device` and returns its outputs as lists; skips when the device is unavailable."""
     try:
         args = [lumen.from_numpy(np.asarray(a, np.float32)).to(device) for a in arrays]
     except RuntimeError as e:
@@ -34,16 +37,19 @@ X = np.arange(4.0)
 
 
 def _add_one(t):
+    """Assigns `t + 1` to `t` in place."""
     t.copy_(t + 1.0)
 
 
 def assign_then_read(x):
+    """Reads a value after assigning it whole."""
     y = x * 2.0
     _add_one(y)
     return y * 10.0
 
 
 def reshape_view_reads_base(x):
+    """Reads a reshape view taken before its base is assigned."""
     y = x * 2.0
     z = y.reshape(2, 2)
     _add_one(y)
@@ -51,42 +57,49 @@ def reshape_view_reads_base(x):
 
 
 def base_reads_reshape_view(x):
+    """Reads a base after assigning through a reshape view of it."""
     y = x * 2.0
     _add_one(y.reshape(2, 2))
     return y * 1.0
 
 
 def base_reads_slice(x):
+    """Reads a base after assigning through a slice."""
     y = x * 2.0
     _add_one(y[1:3])
     return y * 1.0
 
 
 def base_reads_index(x):
+    """Reads a base after assigning through an indexed element."""
     y = x * 2.0
     _add_one(y[2])
     return y * 1.0
 
 
 def base_reads_narrow(x):
+    """Reads a base after assigning through `narrow`."""
     y = x * 2.0
     _add_one(y.narrow(0, 3, 1))
     return y * 1.0
 
 
 def base_reads_split_piece(x):
+    """Reads a base after assigning through a piece of `split`."""
     y = x * 2.0
     _add_one(y.split(2)[1])
     return y * 1.0
 
 
 def base_reads_transposed_row(x):
+    """Reads a base after assigning through a row of a transposed reshape."""
     y = x * 2.0
     _add_one(y.reshape(2, 2).t()[0])
     return y * 1.0
 
 
 def sibling_view(x):
+    """Reads a view of a base after assigning through a different, overlapping view."""
     y = x * 2.0
     a, b = y[0:2], y.reshape(2, 2)
     _add_one(a)
@@ -94,6 +107,7 @@ def sibling_view(x):
 
 
 def view_after_twice(x):
+    """Reads a reshape after assigning through two overlapping slices in turn."""
     y = x * 2.0
     _add_one(y[1:])
     _add_one(y[2:])
@@ -101,18 +115,21 @@ def view_after_twice(x):
 
 
 def permuted_reshape_copies(x):
+    """Assigns through a reshape of a transpose, which is a copy, so the base is unchanged."""
     y = x * 2.0
     _add_one(y.reshape(2, 2).t().reshape(4))
     return y * 1.0
 
 
 def both_returned(x):
+    """Returns both a base and the view assigned through."""
     y = x * 2.0
     v = y[1:3]
     _add_one(v)
     return y * 1.0, v * 1.0
 
 
+# each case and its expected outputs on X = [0, 1, 2, 3]
 CASES = {
     assign_then_read: [[10, 30, 50, 70]],
     reshape_view_reads_base: [[[1, 3], [5, 7]]],
@@ -132,6 +149,7 @@ CASES = {
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("f", list(CASES), ids=lambda f: f.__name__)
 def test_views_read_assignments(device, f):
+    """Each case reads the assigned values through its views and bases."""
     assert _run(f, X, device=device) == CASES[f]
 
 
@@ -147,6 +165,7 @@ def test_arguments_assigned_are_written_back(device):
         pytest.skip(str(e))
 
     def f(a, b):
+        """Adds `b` into a slice of argument `a`."""
         a[1:3].copy_(a[1:3] + b[1:3])
         return b * 2.0
 
@@ -165,6 +184,8 @@ def test_arguments_assigned_are_written_back(device):
 
 
 class _Weights(lumen.nn.Module):
+    """Module holding a single weight `w`."""
+
     w: lumen.Tensor
 
 
@@ -175,6 +196,7 @@ def test_weights_assigned_through_views_are_written_back(device):
     m = _Weights(lumen.empty([2, 3], device="meta"))
 
     def step(m):
+        """Increments row 1 of the weight and returns the weight."""
         m.w[1].copy_(m.w[1] + 1.0)
         return m.w * 1.0
 
@@ -195,6 +217,7 @@ def test_gradients_through_view_assignments(device):
     x, z, w = rng.standard_normal(5), rng.standard_normal(2), rng.standard_normal(5)
 
     def loss(x, z, w):
+        """Overwrites a slice of `2x` with `z` and returns its dot product with `w`."""
         y = x * 2.0
         y[1:3].copy_(z)
         return F.sum(y * w)
@@ -214,6 +237,7 @@ def test_weight_read_after_its_new_value(device):
     m = _Weights(lumen.empty([2, 3], device="meta"))
 
     def step(m):
+        """Assigns the weight `w + 1` after computing `3w` from its old value."""
         new = m.w + 1.0
         later = m.w * 3.0
         m.w.copy_(new)
@@ -235,6 +259,7 @@ def test_weight_assigned_in_place(device):
     m = _Weights(lumen.empty([2, 3], device="meta"))
 
     def step(m):
+        """Doubles the weight in place."""
         m.w.copy_(m.w * 2.0)
         return m.w * 1.0
 
@@ -251,25 +276,31 @@ def test_weight_assigned_in_place(device):
 
 
 def _iadd(t):
+    """Adds 2 with `+=`."""
     t += 2.0
 
 
 def _isub(t):
+    """Subtracts 2 with `-=`."""
     t -= 2.0
 
 
 def _imul(t):
+    """Multiplies by 3 with `*=`."""
     t *= 3.0
 
 
 def _idiv(t):
+    """Divides by 4 with `/=`."""
     t /= 4.0
 
 
 def _setitem(t):
+    """Sets element 0 to 7."""
     t[0] = 7.0
 
 
+# each in-place op and the numpy result it must assign
 INPLACE = {
     "add_": (lambda t: t.add_(1.5), lambda a: a + 1.5),
     "add_ alpha": (lambda t: t.add_(t * 1.0, alpha=2), lambda a: a + 2 * a),
@@ -306,11 +337,13 @@ def test_inplace_ops(device, op):
     x = np.array([0.5, 1.0, 2.0, 4.0], np.float32)
 
     def whole(x):
+        """Applies the op to a whole fresh value."""
         y = x * 1.0
         f(y)
         return y * 1.0
 
     def through_view(x):
+        """Applies the op through a slice of a fresh value."""
         y = x * 1.0
         f(y[1:3])
         return y * 1.0
@@ -324,7 +357,10 @@ def test_inplace_ops(device, op):
 
 
 def test_inplace_ops_return_their_tensor():
+    """In-place methods return the tensor they were called on, so they chain."""
+
     def f(x):
+        """Checks that `add_`, `mul_` and `clamp_` each return `y`."""
         y = x * 1.0
         assert y.add_(1.0) is y and y.mul_(2.0).clamp_(max=3.0) is y
         return y
@@ -337,6 +373,7 @@ def test_augmented_assignment_is_in_place():
     reads it: not ``y = y + 1`` (a new tensor)."""
 
     def f(x):
+        """Takes a view, then `+=` on its base, and reads the view."""
         y = x * 2.0
         z = y[0:2]
         y += 1.0
@@ -373,6 +410,7 @@ def test_inplace_ops_on_arguments_and_weights(device):
     m = _Weights(lumen.empty([2, 3], device="meta"))
 
     def step(m, a):
+        """Applies `+=` to an argument and assigns a weight row."""
         a += 1.0
         m.w[0] = 5.0
         return a * 1.0
@@ -398,6 +436,7 @@ def test_gradients_through_inplace_ops(device):
     x, z = rng.standard_normal(4), rng.standard_normal(())
 
     def loss(x, z):
+        """Computes `sum(y)` for `y = 2x; y *= x; y[0] = z`."""
         y = x * 2.0
         y *= x
         y[0] = z
@@ -411,6 +450,7 @@ def test_gradients_through_inplace_ops(device):
 
 
 def _meta(*shape):
+    """Returns a float32 meta tensor of `shape`."""
     return lumen.empty(list(shape), device="meta")
 
 
@@ -420,6 +460,7 @@ def test_inplace_code_costs_no_memory():
     workspace (each dead value's memory reused)."""
 
     def inplace(x, w):
+        """Computes the loss with in-place updates."""
         y = F.matmul(x, w, "float32", "float32")
         y += 1.0
         y *= 2.0
@@ -427,6 +468,7 @@ def test_inplace_code_costs_no_memory():
         return F.sum(y)
 
     def out_of_place(x, w):
+        """Computes the same loss out of place."""
         y = F.matmul(x, w, "float32", "float32")
         y = y + 1.0
         y = y * 2.0
@@ -447,6 +489,7 @@ def test_view_assignment_updates_its_base_in_place():
     base, the workspace no larger than the base and the part."""
 
     def f(x, w):
+        """Adds 1 to the first eight columns of a matmul result in place."""
         y = F.matmul(x, w, "float32", "float32")
         y[:, :8] += 1.0
         return F.sum(y)

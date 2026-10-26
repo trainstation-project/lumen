@@ -1,3 +1,5 @@
+"""Elementwise, comparison, reduction, cast and dot_general tests for lumen.pallas kernels on TPU, ported from JAX."""
+
 import itertools
 import math
 
@@ -31,6 +33,7 @@ _TOL = {
 
 
 def _ml_dtypes():
+    """Imports ml_dtypes, skipping the test when it isn't installed."""
     return pytest.importorskip("ml_dtypes")
 
 
@@ -61,6 +64,7 @@ def _tensor(a, dtype=None):
 
 
 def _numpy(t):
+    """Copies a tensor to the host as numpy, widening 16-bit floats to float32."""
     t = t.to("cpu")
     if t.dtype in ("bfloat16", "float16"):
         t = t.to(dtype="float32")
@@ -94,6 +98,7 @@ def _draw_shape_dtype(rng, *, min_rank, max_rank, min_size_exp, max_size_exp, va
 
 
 def _random_value(rng, shape, dtype):
+    """Small random values of `dtype`: standard normals for floats, integers in [-4, 4) otherwise."""
     if np.issubdtype(dtype, np.floating):
         return rng.standard_normal(shape).astype(dtype)
     return rng.integers(-4, 4, size=shape).astype(dtype)
@@ -145,16 +150,19 @@ _BITS = {"int2": 2, "uint2": 2, "int4": 4, "uint4": 4}
 
 
 def _np_dtype(name):
+    """Returns the numpy dtype for `name`, taking narrow and float8 types from ml_dtypes."""
     if name in _ML_DTYPES:
         return np.dtype(getattr(_ml_dtypes(), name))
     return np.dtype(name)
 
 
 def _is_int(name):
+    """Reports whether `name` is a signed or unsigned integer dtype."""
     return name.startswith(("int", "uint"))
 
 
 def _bits(name):
+    """Returns the bit width of dtype `name`, including the 2- and 4-bit integers."""
     return _BITS.get(name) or 8 * np.dtype(name).itemsize
 
 
@@ -208,6 +216,7 @@ def _reduce_precision(x, exponent_bits, mantissa_bits):
 
 
 def _clz(x):
+    """Counts leading zero bits of each element of integer array `x`."""
     bits = 8 * x.dtype.itemsize
     u = x.view(f"uint{bits}")
     return np.array([bits - int(v).bit_length() for v in u.ravel()], x.dtype).reshape(x.shape)
@@ -331,10 +340,12 @@ COMPARE_PARAMS = [
 
 
 def _scalar_dtype(v):
+    """Returns the numpy dtype a Python scalar compares as: int32 for ints, float32 otherwise."""
     return np.int32 if isinstance(v, int) else np.float32
 
 
 def _srl(x, y):
+    """Logical right shift of int32 arrays."""
     return (x.view(np.uint32) >> y.view(np.uint32)).view(np.int32)
 
 
@@ -353,7 +364,10 @@ def _srl(x, y):
     ],
 )
 def test_weak_dtype(fn, ref, dtype):
+    """Binary ops on refs of one dtype match numpy (weakly typed operands in JAX)."""
+
     def kernel(x_ref, y_ref, o_ref):
+        """Applies `fn` to the two loaded blocks."""
         o_ref[...] = fn(x_ref[...], y_ref[...])
 
     x = np.full((8, 128), 4, dtype=dtype)
@@ -371,6 +385,7 @@ def test_scalar_compare(params):
     """
 
     def kernel(x_ref, y_ref, o_ref):
+        """Writes each comparison of the SMEM scalars as 0/1 into its own output lane."""
         x = x_ref[0, 0]
         y = y_ref[0, 0]
         one = lumen.ones((), dtype="int32")
@@ -408,6 +423,7 @@ def test_array_compare(params):
     """
 
     def kernel(x_ref, y_ref, o_ref):
+        """Writes each comparison of the two blocks as 0/1 into its own output row."""
         x = x_ref[:]
         y = y_ref[:]
         one = lumen.ones([8, 128], dtype="int32")
@@ -428,6 +444,7 @@ def test_array_compare(params):
     result = _run(
         kernel,
         pl.ShapeDtypeStruct([6, 8, 128], "int32"),
+        # eight rows of 128 lanes: the smallest float32 VMEM tile
         _tensor(x),
         _tensor(y),
         in_specs=[pl.BlockSpec((8, 128), lambda *_: (0, 0)), pl.BlockSpec((8, 128), lambda *_: (0, 0))],
@@ -450,7 +467,10 @@ def test_array_compare(params):
     ],
 )
 def test_reduce_boolean(input_type, reduction_op, expected_result):
+    """`all` and `any` over a whole boolean block return the expected scalar."""
+
     def kernel(x_ref, ones_ref, o_ref):
+        """Reduces `x == ones` to a single boolean and stores it as 1.0/0.0 in SMEM."""
         bool_x = x_ref[...] == ones_ref[...]
         reduced_as_bool = reduction_op(bool_x, dim=(0, 1), keepdim=True)
         float_value = F.where(reduced_as_bool, 1.0, 0.0)
@@ -488,9 +508,11 @@ _REDUCTIONS = {
 
 @pytest.mark.parametrize("name", ["sum", "max", "min"])
 def test_reduce_float(name):
+    """Float sum, max and min of a whole block match numpy."""
     reduction_op, ref = _REDUCTIONS[name]
 
     def kernel(x_ref, o_ref):
+        """Reduces the block to a scalar in SMEM."""
         o_ref[0, 0] = reduction_op(x_ref[...])
 
     x = np.random.default_rng(0).standard_normal((8, 128)).astype(np.float32)
@@ -517,9 +539,11 @@ def test_reduce_float(name):
     ],
 )
 def test_reduce_int32(name, input_shape):
+    """Integer sum, max and min of a whole block match numpy, including shapes that aren't tile multiples."""
     reduction_op, ref = _REDUCTIONS[name]
 
     def kernel(x_ref, o_ref):
+        """Reduces the block to a scalar in SMEM."""
         o_ref[0, 0] = reduction_op(x_ref[...])
 
     x = np.random.default_rng(0).integers(-100, 100, size=input_shape).astype(np.int32)
@@ -558,10 +582,12 @@ def _select_n_args(rng, *, max_cases, min_rank, max_rank, min_size_exp, max_size
 
 @pytest.mark.parametrize("example", range(_EXAMPLES))
 def test_select_n(example):
+    """`pl.select_n` with a scalar or array predicate picks the same case as `np.choose`."""
     pred, *cases = _select_n_args(np.random.default_rng(example), max_cases=5, min_rank=2, max_rank=4, min_size_exp=1)
     scalar_pred = not pred.shape
 
     def kernel(*refs):
+        """Selects among the case blocks by the predicate, which is a captured constant when scalar."""
         if scalar_pred:
             *case_refs, o_ref = refs
             pred_ = pred
@@ -580,11 +606,13 @@ def test_select_n(example):
 @pytest.mark.parametrize("pred_dtype", ["int32", "uint32"])
 @pytest.mark.parametrize("n_cases", [3, 4, 5])
 def test_select_n_multi_case(n_cases, pred_dtype):
+    """`pl.select_n` with int32 and uint32 predicates over three to five cases."""
     shape = (8, 128)
     pred = np.arange(math.prod(shape), dtype=pred_dtype).reshape(shape) % n_cases
     cases = [np.full(shape, (i + 1) * 10.0, dtype=np.float32) for i in range(n_cases)]
 
     def kernel(pred_ref, *refs):
+        """Selects among the case blocks by the predicate block."""
         *case_refs, o_ref = refs
         vals = [case_ref[...] for case_ref in case_refs]
         o_ref[...] = pl.select_n(pred_ref[...], *vals)
@@ -596,6 +624,7 @@ def test_select_n_multi_case(n_cases, pred_dtype):
 
 @pytest.mark.parametrize("name, func, ref, valid_dtypes", [pytest.param(*f, id=f[0]) for f in UNARY_FUNCTIONS])
 def test_unary_primitives(name, func, ref, valid_dtypes):
+    """Each unary primitive matches its numpy reference on random shapes within a few float32 ulps."""
     tol = 0.0
     if name in ("exp2", "log2"):
         tol = 1e-6
@@ -603,6 +632,7 @@ def test_unary_primitives(name, func, ref, valid_dtypes):
         tol = 1e-6
 
     def kernel(x_ref, y_ref):
+        """Applies `func` to the block."""
         y_ref[...] = func(x_ref[...])
 
     for example in range(_EXAMPLES):
@@ -619,6 +649,7 @@ def test_unary_primitives(name, func, ref, valid_dtypes):
 
 
 def _cast_output(y, to_dtype):
+    """Returns kernel output `y` as bool when the cast's target is bool, which the kernel wrote as int32."""
     if to_dtype == "bool":
         return y.astype(bool)
     return y
@@ -627,6 +658,7 @@ def _cast_output(y, to_dtype):
 @pytest.mark.parametrize("to_dtype", _DTYPES)
 @pytest.mark.parametrize("from_dtype", _DTYPES_32BIT)
 def test_cast_from_32bit(from_dtype, to_dtype):
+    """Casts from 32-bit dtypes to every dtype match XLA's conversion rules bit for bit."""
     if from_dtype == to_dtype:
         pytest.skip("Unnecessary test")
     if to_dtype == "float16":
@@ -637,6 +669,7 @@ def test_cast_from_32bit(from_dtype, to_dtype):
         shape = (128, 128)
 
     def kernel(x_ref, y_ref):
+        """Casts the block, widening bool results to int32 for the output."""
         x = x_ref[...]
         y = x.to(to_dtype)
         if to_dtype == "bool":
@@ -676,6 +709,7 @@ def _from_bits(bits, from_dtype):
 @pytest.mark.parametrize("to_dtype", _DTYPES)
 @pytest.mark.parametrize("from_dtype", _DTYPES_SUB_32BIT)
 def test_cast_from_sub_32bit(from_dtype, to_dtype, randomize):
+    """Casts from sub-32-bit dtypes, over every bit pattern or a random block, match XLA's conversion rules."""
     if from_dtype == to_dtype:
         pytest.skip("Unnecessary test")
     if from_dtype == "float16" or to_dtype == "float16":
@@ -711,6 +745,7 @@ def test_cast_from_sub_32bit(from_dtype, to_dtype, randomize):
         x = x.astype(np.int32)
 
     def kernel(x_ref, y_ref):
+        """Casts the block, carrying bool as int32 on both sides."""
         x = x_ref[...]
         if from_dtype == "bool":
             x = x.to("bool")
@@ -735,7 +770,10 @@ def test_cast_from_sub_32bit(from_dtype, to_dtype, randomize):
 
 @pytest.mark.parametrize("dtype", ["bfloat16", "float8_e5m2", "float8_e4m3fn"])
 def test_scalar_downcast_float32(dtype):
+    """A float32 scalar extracted from a block downcasts exactly to bfloat16 and float8."""
+
     def kernel(x_ref, o_ref):
+        """Stores element `[0, 0]` cast to `dtype` into SMEM."""
         o_ref[0, 0] = x_ref[:][0, 0].to(dtype)
 
     x = np.random.default_rng(0).standard_normal((8, 128)).astype(np.float32)
@@ -753,7 +791,10 @@ def test_scalar_downcast_float32(dtype):
 @pytest.mark.parametrize("dtype", ["int32", "int16", "int8"])
 @pytest.mark.parametrize("shape", [(64,), (8, 8)])
 def test_scalar_map(shape, dtype):
+    """A per-element scalar loop over SMEM squares every value."""
+
     def kernel(x_ref, y_ref):
+        """Squares each element in int32 and casts back."""
         for idx in np.ndindex(shape):
             x = x_ref[idx].to("int32")
             y_ref[idx] = (x * x).to(y_ref.dtype)
@@ -770,7 +811,10 @@ def test_scalar_map(shape, dtype):
 
 
 def test_extract_scalar():
+    """Extracting element `[0, 0]` of a loaded block yields a scalar."""
+
     def kernel(x_ref, y_ref):
+        """Stores element `[0, 0]` of the block into SMEM."""
         y_ref[0, 0] = x_ref[:][0, 0]
 
     x = np.arange(1024, dtype=np.float32).reshape(8, 128) + 10
@@ -781,10 +825,12 @@ def test_extract_scalar():
 
 
 def test_concat_constant():
+    """Stacking constant rows built in the kernel fills the output in order."""
     axis = 0
     num_arrays = 16
 
     def kernel(out):
+        """Writes row `i` filled with `i` for every row."""
         result = []
         for i in range(num_arrays):
             result.append(lumen.full((1, 128), i, dtype="float32"))
@@ -818,12 +864,14 @@ def test_concat_constant():
     ],
 )
 def test_sign(dtype, value):
+    """`sign` matches numpy for ints and floats, including signed zeros, NaN and infinities."""
     if dtype.endswith("64"):
         pytest.skip("64-bit types require x64_enabled")
     if dtype == "float16":
         pytest.skip("f16 load not supported on TPU")
 
     def kernel(x_ref, o_ref):
+        """Stores the sign of each element."""
         o_ref[...] = F.sign(x_ref[...])
 
     x = _host(np.full((8, 128), value, np.float32 if dtype == "bfloat16" else dtype), dtype)
@@ -834,9 +882,11 @@ def test_sign(dtype, value):
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 def test_add_constant(dtype):
+    """Adding a Python int constant works for float, bfloat16 and int32 blocks."""
     shape = (256, 256)
 
     def kernel(x_ref, o_ref):
+        """Adds 1 to the block."""
         o_ref[...] = x_ref[...] + 1
 
     out = _run(kernel, pl.ShapeDtypeStruct(shape, dtype), _tensor(np.zeros(shape, np.float32), dtype))
@@ -846,9 +896,11 @@ def test_add_constant(dtype):
 @pytest.mark.parametrize("accurate", [False, True])
 @pytest.mark.parametrize("value", [-3.2, -1.0, -0.999517, -0.4, 0.0, 0.72, 0.999517, 1.0, 2.4])
 def test_erf_inv(value, accurate):
+    """`pl.erf_inv` matches scipy in both accuracy modes, including at and beyond +-1."""
     special = pytest.importorskip("scipy.special")
 
     def kernel(x_ref, o_ref):
+        """Stores the inverse error function of each element."""
         o_ref[...] = pl.erf_inv(x_ref[...], accurate=accurate)
 
     x = np.full((8, 128), value, dtype=np.float32)
@@ -862,12 +914,14 @@ IS_FINITE_TEST_VALUES = [-0.2, float("inf"), -float("inf"), float("nan"), 0.0, 1
 
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_is_finite(dtype):
+    """`isfinite` flags infinities and NaN in a vector block."""
     if dtype != "float32":
         pytest.skip("Not tested on TPU, todo for the respective team")
 
     size = len(IS_FINITE_TEST_VALUES)
 
     def kernel(x_ref, o_ref):
+        """Stores whether each element is finite."""
         o_ref[...] = F.isfinite(x_ref[...])
 
     x = _host(IS_FINITE_TEST_VALUES, dtype)
@@ -877,6 +931,7 @@ def test_is_finite(dtype):
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32", "int16"])
 def test_clamp(dtype):
+    """`clamp` with per-element bounds matches `np.clip`."""
     if dtype == "int16":
         pytest.skip("int16 is not supported on TPU")
 
@@ -889,6 +944,7 @@ def test_clamp(dtype):
     hi = np.maximum(lo_, hi_)
 
     def kernel(lo_ref, x_ref, hi_ref, o_ref):
+        """Clamps the block between the lower and upper bound blocks."""
         o_ref[...] = F.clamp(x_ref[...], lo_ref[...], hi_ref[...])
 
     out = _run(kernel, pl.ShapeDtypeStruct((8, 128), dtype), *[_tensor(a, dtype) for a in (lo, x, hi)])
@@ -899,9 +955,11 @@ def test_clamp(dtype):
 @pytest.mark.parametrize("exponent_bits", [4, 5, 6, 7, 8])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_reduce_precision(dtype, exponent_bits, mantissa_bits):
+    """`pl.reduce_precision` matches XLA's algorithm bit for bit across exponent and mantissa widths."""
     shape = (64, 128)
 
     def kernel(x_ref, o_ref):
+        """Rounds each element to the reduced float format."""
         o_ref[...] = pl.reduce_precision(x_ref[...], exponent_bits=exponent_bits, mantissa_bits=mantissa_bits)
 
     x = _host(np.random.default_rng(0).standard_normal(shape), dtype)
@@ -912,12 +970,14 @@ def test_reduce_precision(dtype, exponent_bits, mantissa_bits):
 
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_is_finite_scalar(dtype):
+    """`isfinite` on SMEM scalars flags infinities and NaN."""
     if dtype != "float32":
         pytest.skip("Not tested on TPU, todo for the respective team")
 
     size = len(IS_FINITE_TEST_VALUES)
 
     def kernel(x_ref, o_ref):
+        """Stores whether each of the eight scalars is finite."""
         for i in range(8):
             o_ref[i] = F.isfinite(x_ref[i])
 
@@ -934,6 +994,7 @@ def test_is_finite_scalar(dtype):
 
 @pytest.mark.parametrize("name, fn, ref, dtype", ELEMENTWISE_CASES)
 def test_elementwise_array(name, fn, ref, dtype):
+    """Each elementwise op on an `(8, 128)` block matches numpy rounded to the dtype."""
     if dtype.endswith("64"):
         pytest.skip("64-bit types require x64_enabled")
     if dtype == "float16":
@@ -942,6 +1003,7 @@ def test_elementwise_array(name, fn, ref, dtype):
         pytest.skip(f"{name} not implemented on TPU")
 
     def kernel(x_ref, o_ref):
+        """Applies `fn` to the block."""
         o_ref[:] = fn(x_ref[...])
 
     if name in ("exp", "exp2") and dtype == "bfloat16":
@@ -957,6 +1019,7 @@ def test_elementwise_array(name, fn, ref, dtype):
 
 @pytest.mark.parametrize("name, fn, ref, dtype", ELEMENTWISE_CASES)
 def test_elementwise_scalar(name, fn, ref, dtype):
+    """Each elementwise op on SMEM scalars matches numpy."""
     if dtype.endswith("64"):
         pytest.skip("64-bit types require x64_enabled")
     if dtype in ("bfloat16", "float16", "int16"):
@@ -967,6 +1030,7 @@ def test_elementwise_scalar(name, fn, ref, dtype):
         pytest.skip(f"{name} not implemented on TPU")
 
     def kernel(x_ref, o_ref):
+        """Applies `fn` to the two scalars."""
         o_ref[0] = fn(x_ref[0])
         o_ref[1] = fn(x_ref[1])
 
@@ -982,7 +1046,10 @@ def test_elementwise_scalar(name, fn, ref, dtype):
 
 
 def test_abs_weak_type():
+    """`abs` of a broadcast float32 input."""
+
     def kernel(x_ref, o_ref):
+        """Stores the absolute value of each element."""
         o_ref[...] = F.abs(x_ref[...])
 
     x = np.broadcast_to(np.float32(-3.2), (4, 4))
@@ -995,10 +1062,12 @@ def test_abs_weak_type():
     [("float32", "int32"), ("float64", "int32"), ("float32", "float32"), ("float64", "float64")],
 )
 def test_pow(x_dtype, y_dtype):
+    """`pow` with an integer or float exponent matches numpy."""
     if x_dtype == "float64":
         pytest.skip("64-bit types require x64_enabled")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Raises the base block to the exponent block."""
         o_ref[:] = F.pow(x_ref[...], y_ref[...])
 
     x = np.array([1, 2, 3, 4]).astype(x_dtype)
@@ -1009,7 +1078,10 @@ def test_pow(x_dtype, y_dtype):
 
 @pytest.mark.parametrize("y", [0, 1, 2, 3, 4, 5, -1, -2, -3])
 def test_integer_pow(y):
+    """`pl.integer_pow` matches repeated squaring, inverted for negative exponents."""
+
     def kernel(x_ref, o_ref):
+        """Raises the block to the static power `y`."""
         o_ref[:] = pl.integer_pow(x_ref[...], y)
 
     x = np.array([1, 2, 3, 4]).astype(np.float32) / 10
@@ -1034,10 +1106,12 @@ _NEXTAFTER_VALUES = (-3.2, -0.0, 0.0, 5.1, float("nan"), float("inf"), -float("i
     ],
 )
 def test_nextafter(dtype, x, y):
+    """`nextafter` matches numpy over signed zeros, NaN and infinities."""
     if dtype == "float64":
         pytest.skip("64-bit types require x64_enabled")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Stores the next float after each element towards the other operand."""
         o_ref[...] = F.nextafter(x_ref[...], y_ref[...])
 
     x = np.full((4,), x, dtype=dtype)
@@ -1062,6 +1136,7 @@ COMPARISON_CASES = [
 
 
 def _comparison_inputs(dtype):
+    """Returns the fixed pair of 128-element operands the comparison tests use."""
     x = np.tile(np.array([0, 3, -4, -6, 0, 5, 4, -7]).astype(dtype), 16)
     y = np.tile(np.array([3, 1, -4, -5, 0, -2, 2, 4]).astype(dtype), 16)
     return x, y
@@ -1069,10 +1144,12 @@ def _comparison_inputs(dtype):
 
 @pytest.mark.parametrize("fn, ref, dtype", COMPARISON_CASES)
 def test_comparison(fn, ref, dtype):
+    """Each comparison on vector blocks matches numpy."""
     if dtype == "float16":
         pytest.skip("float16 is not supported on TPU")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Stores each comparison as int32."""
         o_ref[:] = fn(x_ref[...], y_ref[...]).to("int32")
 
     x, y = _comparison_inputs(dtype)
@@ -1082,10 +1159,12 @@ def test_comparison(fn, ref, dtype):
 
 @pytest.mark.parametrize("fn, ref, dtype", COMPARISON_CASES)
 def test_comparison_scalar(fn, ref, dtype):
+    """Each comparison on SMEM scalars matches numpy."""
     if dtype == "float16":
         pytest.skip("float16 is not supported on TPU")
 
     def kernel(x_ref, y_ref, o_ref):
+        """Compares the 128 scalars one at a time."""
         for i in range(128):
             o_ref[i] = fn(x_ref[i], y_ref[i]).to("int32")
 
@@ -1102,7 +1181,10 @@ def test_comparison_scalar(fn, ref, dtype):
 
 
 def test_isnan():
+    """`isnan` flags the NaN element."""
+
     def isnan(x_ref, o_ref):
+        """Stores whether each element is NaN."""
         o_ref[:] = F.isnan(x_ref[...])
 
     x = np.arange(8.0, dtype=np.float32)
@@ -1112,10 +1194,12 @@ def test_isnan():
 
 
 def test_jnp_einsum_grad_y_pallas():
+    """An einsum contracting the leading dimension of both operands, as in the gradient of `y`."""
     x = np.arange(128 * 256, dtype=np.float32).reshape((128, 256))
     y = np.arange(256 * 128, dtype=np.float32).reshape((128, 256))
 
     def kernel(x_ref, y_ref, out_ref):
+        """Computes `x^T y` with float32 accumulation."""
         out_ref[...] = F.einsum("mk,mn->kn", x_ref[...], y_ref[...], accum_dtype="float32", output_dtype="float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((256, 256), "float32"), _tensor(x), _tensor(y))
@@ -1135,6 +1219,7 @@ def test_dot_dims_batched_simple_dot_general(dtype):
     numbers = (([2], [1]), ([0], [0]))
 
     def kernel(x_ref, y_ref, out_ref):
+        """Computes the batched `dot_general`."""
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((11, 16, 128), "float32"), _tensor(x, dtype), _tensor(y, dtype))
@@ -1165,12 +1250,14 @@ def test_dot_dims_batched_simple_dot_general(dtype):
 )
 @pytest.mark.parametrize("batch_size", [None, 1, 2])
 def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_numbers):
+    """`dot_general` with several free dimensions on either side, with and without a leading batch dimension."""
     x_shape, y_shape, dims_numbers = shapes_and_dims_numbers
     if batch_size is not None:
         x_shape = (batch_size,) + x_shape
         y_shape = (batch_size,) + y_shape
 
         def offset_by_one(x):
+            """Shifts dimension numbers past the added batch dimension."""
             return [a + 1 for a in x]
 
         dims_numbers = ((offset_by_one(dims_numbers[0]), offset_by_one(dims_numbers[1])), ([0], [0]))
@@ -1184,6 +1271,7 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
     expected = _dot_general(x, y, dims_numbers)
 
     def kernel(x_ref, y_ref, out_ref):
+        """Computes the `dot_general` with float32 accumulation."""
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))
@@ -1200,6 +1288,7 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
     ],
 )
 def test_dot_general_non_front_batch_dims(shapes_and_dims_numbers):
+    """`dot_general` with batch dimensions that aren't leading."""
     x_shape, y_shape, dims_numbers = shapes_and_dims_numbers
 
     rng = np.random.default_rng(0)
@@ -1209,6 +1298,7 @@ def test_dot_general_non_front_batch_dims(shapes_and_dims_numbers):
     expected = _dot_general(x, y, dims_numbers)
 
     def kernel(x_ref, y_ref, out_ref):
+        """Computes the `dot_general` with float32 accumulation."""
         out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))

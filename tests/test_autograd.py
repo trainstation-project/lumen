@@ -1,3 +1,6 @@
+"""Tests of automatic differentiation: grad, value_and_grad, jvp/vjp, torch-style backward, custom
+autograd Functions, and the attention and merged-dot nodes autodiff differentiates as one."""
+
 import numpy as np
 import pytest
 
@@ -23,6 +26,7 @@ def numeric_grad(f, xs, argnum, eps=1e-6):
 
 
 def arrays(*shapes, seed=0):
+    """Standard normal float64 arrays of `shapes`."""
     rng = np.random.default_rng(seed)
     return [rng.standard_normal(s) for s in shapes]
 
@@ -69,6 +73,7 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     run = lumen.compile(f)
 
     def value(*a):
+        """The compiled function's scalar value on float64 arrays."""
         return float(lumen.to_numpy(run(*map(lumen.from_numpy, a))))
 
     g = lumen.to_numpy(lumen.compile(lumen.grad(f, argnum))(*map(lumen.from_numpy, xs)))
@@ -91,6 +96,7 @@ def test_torch_and_jax_styles_agree(name, device, triton_on_cuda):
         pytest.skip(str(e))
 
     def torch_style(x, y):
+        """Calls `backward()` on the loss and returns the inputs' `.grad`."""
         f(x, y).backward()
         return x.grad, y.grad
 
@@ -117,9 +123,11 @@ def test_grad_on_a_device_agrees_with_the_cpu(name, device, triton_on_cuda):
 
 
 def test_value_and_grad_and_argnums():
+    """value_and_grad over both arguments returns the value and each argument's gradient."""
     x, y = arrays((3,), (3,))
 
     def f(x, y):
+        """Sum of `x * x * y`."""
         return F.sum(x * x * y)
 
     value, (gx, gy) = lumen.compile(lumen.value_and_grad(f, (0, 1)))(lumen.from_numpy(x), lumen.from_numpy(y))
@@ -140,6 +148,7 @@ def test_jvp_and_vjp():
     x, t, c = arrays((4,), (4,), (4,))
 
     def f(x, t, c):
+        """Value, forward tangent and pullback cotangent of `exp(a) * a`."""
         out, tangent = lumen.jvp(lambda a: F.exp(a) * a, (x,), (t,))
         _, pullback = lumen.vjp(lambda a: F.exp(a) * a, x)
         (cotangent,) = pullback(c)
@@ -153,10 +162,13 @@ def test_jvp_and_vjp():
 
 
 class _MLP(lumen.nn.Module):
+    """Two-layer ReLU MLP whose call returns the sum of its outputs."""
+
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Sum of the MLP's output on `x`."""
         return F.sum(F.matmul(F.relu(F.matmul(x, self.w1, "float32", "float32")), self.w2, "float32", "float32"))
 
 
@@ -184,6 +196,7 @@ def test_the_tangent_program_is_pruned():
 
 
 def test_transforms_check_their_inputs():
+    """grad needs a float scalar output, and transforms run only while tracing."""
     x = lumen.empty([3], device="meta")
     with pytest.raises(TypeError, match="float scalar"):
         lumen.make_graph(lumen.grad(lambda x: x * 2.0))(x)
@@ -197,12 +210,14 @@ class _Exp(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x):
+        """`exp(x)`, saving the output."""
         y = F.exp(x)
         ctx.save_for_backward(y)
         return y
 
     @staticmethod
     def backward(ctx, grad):
+        """`grad * exp(x)` from the saved output."""
         (y,) = ctx.saved_tensors
         return grad * y
 
@@ -213,11 +228,13 @@ class _ScaledSplit(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, scale):
+        """`x * scale` and `x + 1`, keeping `scale` on the context."""
         ctx.scale = scale
         return x * scale, x + 1.0
 
     @staticmethod
     def backward(ctx, ga, gb):
+        """A deliberately wrong gradient for `x`, and none for `scale`."""
         return ga * (2 * ctx.scale) + gb, None
 
 
@@ -226,14 +243,17 @@ class _StraightThrough(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x):
+        """`x` truncated toward zero, in its own dtype."""
         return x.to(dtype="int32").to(dtype=x.dtype)
 
     @staticmethod
     def backward(ctx, grad):
+        """Passes the gradient through unchanged."""
         return grad
 
     @staticmethod
     def jvp(ctx, t):
+        """Passes the tangent through unchanged."""
         return t
 
 
@@ -245,6 +265,7 @@ def test_function_has_its_own_derivative():
     np.testing.assert_allclose(lumen.to_numpy(g), np.exp(x) * x + np.exp(x))
 
     def f(x, y):
+        """Sum of the product of `_ScaledSplit`'s two outputs."""
         a, b = _ScaledSplit.apply(x * y, 3.0)
         return F.sum(a * b)
 
@@ -261,6 +282,7 @@ def test_function_forward_mode_and_grad_of_grad():
     x, t = arrays((4,), (4,))
 
     def f(x, t):
+        """Tangent of `2 * _StraightThrough(a)` along `t`."""
         return lumen.jvp(lambda a: _StraightThrough.apply(a) * 2.0, (x,), (t,))[1]
 
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(lumen.from_numpy(x), lumen.from_numpy(t))), 2 * t)
@@ -269,17 +291,22 @@ def test_function_forward_mode_and_grad_of_grad():
 
 
 def test_function_runs_while_tracing_and_checks_backward():
+    """Functions apply only while tracing, and a backward returning the wrong shape is reported."""
     (x,) = arrays((3,))
     with pytest.raises(RuntimeError, match="only while tracing"):
         _Exp.apply(lumen.from_numpy(x))
 
     class Wrong(lumen.autograd.Function):
+        """A Function whose backward returns a scalar for a vector input."""
+
         @staticmethod
         def forward(ctx, x):
+            """`2 * x`."""
             return x * 2.0
 
         @staticmethod
         def backward(ctx, grad):
+            """The summed gradient, the wrong shape for `x`."""
             return F.sum(grad)
 
     with pytest.raises(TypeError, match=r"Wrong.backward: returned float64\[\] for float64\[3\]"):
@@ -292,18 +319,21 @@ class _Affine(lumen.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, w, b=None, *, scale, shift=0.0):
+        """`(x * w + shift + b) * scale`, saving `x`, `w` and `scale`."""
         ctx.save_for_backward(x, w, scale)
         y = x * w + shift
         return (y if b is None else y + b) * scale
 
     @staticmethod
     def backward(ctx, grad):
+        """Gradients of `x` positionally, and of `w`, `b` and `scale` by name."""
         x, w, scale = ctx.saved_tensors
         g = grad * scale
         return g * w, {"w": g * x, "b": g, "scale": grad * (x * w)}
 
     @staticmethod
     def jvp(ctx, tx, tw, tb, *, scale, shift):
+        """Tangent along `x` only."""
         x, w, s = ctx.saved_tensors
         return tx * w * s
 
@@ -315,6 +345,7 @@ def test_function_takes_keyword_arguments():
     x, w, b, s = arrays((4,), (4,), (4,), (4,))
 
     def f(x, w, b, s):
+        """Sum of `_Affine` with keyword arguments, times `x`."""
         return F.sum(_Affine.apply(x, b=b, w=w, scale=s, shift=2.0) * x)
 
     gx, gw, gb, gs = lumen.compile(lumen.grad(f, (0, 1, 2, 3)))(*map(lumen.from_numpy, (x, w, b, s)))
@@ -328,6 +359,7 @@ def test_function_takes_keyword_arguments():
     np.testing.assert_allclose(lumen.to_numpy(out), (x * w + 1.0) * s)
 
     def tangent(x, w, s, tx):
+        """Tangent of `_Affine` along `x` with keyword-only `scale`."""
         return lumen.jvp(lambda x: _Affine.apply(x, w, scale=s), (x,), (tx,))[1]
 
     t = lumen.compile(tangent)(*map(lumen.from_numpy, (x, w, s, b)))
@@ -342,6 +374,7 @@ def test_tensor_backward():
     model = _MLP(lumen.empty([4, 8], device="meta"), lumen.empty([8, 3], device="meta"))
 
     def step(model, x):
+        """Runs the MLP, backpropagates its loss and returns the loss and every `.grad`."""
         loss = model(x)
         loss.backward()
         return loss, model.w1.grad, model.w2.grad, x.grad
@@ -355,6 +388,7 @@ def test_tensor_backward():
         np.testing.assert_allclose(lumen.to_numpy(got), lumen.to_numpy(w), rtol=1e-6, atol=1e-6)
 
     def twice(x, c):
+        """Backpropagates twice into `x.grad`: a scalar loss, then `exp(x)` with cotangent `c`."""
         y = F.exp(x)
         F.sum(y).backward()
         y.backward(c)
@@ -402,6 +436,7 @@ def test_attention_gradient_is_flash_attentions(attention, shapes):
     xs = [a.astype(np.float32) for a in arrays(*shapes)]
 
     def loss(q, k, v):
+        """Sum of tanh of the attention."""
         return F.sum(F.tanh(attention(q, k, v)))
 
     grad = lumen.grad(loss, (0, 1, 2))
@@ -424,6 +459,7 @@ def test_attention_read_elsewhere_keeps_autodiff():
     q = lumen.empty([1, 6, 2, 8], device="meta")
 
     def loss(q):
+        """Attention output summed plus its probabilities summed, so the probabilities are read twice."""
         s = F.matmul(q.transpose(1, 2), q.transpose(1, 2).transpose(-1, -2), "float32", "float32")
         p = F.softmax(s, -1)
         return F.sum(F.matmul(p, q.transpose(1, 2), "float32", "float32")) + F.sum(p)
@@ -432,11 +468,14 @@ def test_attention_read_elsewhere_keeps_autodiff():
 
 
 class _QKV(lumen.nn.Module):
+    """Three projections of one input combined into a scalar, so their dots share `x`."""
+
     wq: lumen.Tensor
     wk: lumen.Tensor
     wv: lumen.Tensor
 
     def __call__(self, x):
+        """Sum of `relu(x wq) * (x wk) + x wv`."""
         return F.sum(
             F.relu(F.matmul(x, self.wq, "float32", "float32")) * F.matmul(x, self.wk, "float32", "float32")
             + F.matmul(x, self.wv, "float32", "float32")
@@ -444,6 +483,7 @@ class _QKV(lumen.nn.Module):
 
 
 def _equal(a, b, device):
+    """Asserts `a` and `b` are equal: exactly, or to float32 rounding on CUDA."""
     if device == "cuda":
         np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
     else:
@@ -451,6 +491,7 @@ def _equal(a, b, device):
 
 
 def _qkv_step(m, x):
+    """Backpropagates `m`'s loss on `x` and returns the loss, `x`'s gradient and the weights'."""
     loss = m(x)
     loss.backward()
     return loss, x.grad, [p.grad for p in m.parameters()]
@@ -520,6 +561,7 @@ class _Projections(lumen.nn.Module):
     heads: int = 4
 
     def __call__(self, x):
+        """Sum of `tanh(q) * sigmoid(k) * v` over the heads of the three projections."""
         s, d = x.shape
         q, k, v = (
             F.matmul(x, w, "float32", "float32").reshape(s, self.heads, d // self.heads)
@@ -529,6 +571,7 @@ class _Projections(lumen.nn.Module):
 
 
 def _projections_step(m, x):
+    """Backpropagates `m`'s loss on `x` and returns the loss, `x`'s gradient and the weights'."""
     loss = m(x)
     loss.backward()
     return loss, x.grad, [p.grad for p in m.parameters()]

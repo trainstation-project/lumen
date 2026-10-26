@@ -1,3 +1,5 @@
+"""Tests for TPU kernels: dots and their merging and epilogues, flash attention, row and reduction kernels, loops, gathers and code dumps."""
+
 import numpy as np
 import pytest
 
@@ -9,12 +11,14 @@ pytestmark = pytest.mark.tpu
 
 
 def floats(t):
+    """Copies ``t`` to the host as a float32 numpy array."""
     return lumen.to_numpy(t.to("cpu").to(dtype="float32"))
 
 
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)])
 @pytest.mark.parametrize("g, x", [([128, 256], [128, 512]), ([4096, 1024], [4096, 2048])])
 def test_a_transposed_lhs(g, x, dtype, tol):
+    """A dot with a transposed left operand matches numpy in float32 and bfloat16."""
     rng = np.random.default_rng(0)
     a, b = (tpu(rng.standard_normal(s, dtype=np.float32), dtype) for s in (g, x))
     y = lumen.compile(lambda a, b: F.matmul(a.t(), b, "float32", a.dtype))(a, b)
@@ -31,6 +35,7 @@ def test_a_transposed_lhs(g, x, dtype, tol):
     ],
 )
 def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
+    """bfloat16 dots, 2-D and batched, give bfloat16 results matching numpy."""
     rng = np.random.default_rng(0)
     x, w = (tpu(rng.standard_normal(s, dtype=np.float32), "bfloat16") for s in (lhs, rhs))
     y = lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype))(x, w)
@@ -40,6 +45,7 @@ def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
 
 
 def test_a_dot_the_kernel_cannot_run_says_why():
+    """An int32 dot raises, saying the kernel needs float32 accumulation."""
     x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
     with pytest.raises(ValueError, match="accumulating in float32"):
         lumen.compile(lambda x, w: F.matmul(x, w, "int32", "int32"))(x, w)
@@ -81,21 +87,26 @@ def test_the_profiler_times_each_tpu_program():
 
 
 def test_a_sum_over_a_middle_dimension_says_so():
+    """A sum over a middle axis raises, saying it does not run on TPU yet."""
     x = lumen.ones([4, 64, 128]).to("tpu")
     with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
         lumen.compile(lambda x: lumen.functional.sum(x, 1))(x)
 
 
 class Projections(lumen.nn.Module):
+    """Several projections of one input, each negated."""
+
     ws: list
 
     def __call__(self, x):
+        """Returns ``-(x @ w.T)`` for each weight."""
         return [-F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
 
 
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-5), ("bfloat16", 1e-2)], ids=["float32", "bfloat16"])
 @pytest.mark.parametrize("sizes", [[256, 128, 128], [512, 512], [1024, 2048]], ids=["qkv", "pair", "wide"])
 def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
+    """Dots sharing an input and packable weights merge into one matmul with their epilogues, and match numpy."""
     d, m = 256, 64
     meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
     make = lambda: Projections([meta(h, d) for h in sizes])
@@ -120,6 +131,7 @@ def test_dots_of_one_input_merge_into_one_matmul(sizes, dtype, tol):
 
 
 def tpu(a, dtype="float32"):
+    """Returns numpy array ``a`` as a ``dtype`` tensor on the TPU."""
     return lumen.from_numpy(a).to(dtype=dtype).to("tpu")
 
 
@@ -148,6 +160,7 @@ def tpu(a, dtype="float32"):
     ids=["relu", "residual and cast", "the dot's value read too"],
 )
 def test_a_dots_elementwise_consumers_are_its_epilogue(f, expected, labels):
+    """Elementwise consumers of a dot (also when the dot's value is read too) run as its kernel's epilogue."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal([256, 512], dtype=np.float32), rng.standard_normal([512, 384], dtype=np.float32) / 16
     c = rng.standard_normal([256, 384], dtype=np.float32)
@@ -162,18 +175,24 @@ def test_a_dots_elementwise_consumers_are_its_epilogue(f, expected, labels):
 
 
 class GatedPair(lumen.nn.Module):
+    """SwiGLU gate ``silu(x @ w1.T) * (x @ w2.T)``."""
+
     w1: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Returns the gated product of the two projections of ``x``."""
         g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w2.t(), "float32", x.dtype)
         return g * lumen.functional.sigmoid(g) * u
 
 
 class Product(lumen.nn.Module):
+    """The elementwise product of three projections of one input."""
+
     ws: list
 
     def __call__(self, x):
+        """Returns ``(x @ w0.T) * (x @ w1.T) * (x @ w2.T)``."""
         q, k, v = (F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws)
         return q * k * v
 
@@ -196,6 +215,7 @@ class Product(lumen.nn.Module):
     ids=["swiglu", "three"],
 )
 def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, tol):
+    """Merged dots whose results combine elementwise run as one kernel with one epilogue, and match numpy."""
     d, h, m = 256, 512, 64
     meta = lambda *shape: lumen.empty(list(shape), dtype, "meta")
     model = make(meta, h, d)
@@ -222,17 +242,22 @@ def test_merged_members_combined_are_one_epilogue(make, steps, expected, dtype, 
 
 
 class QKV(lumen.nn.Module):
+    """Query, key and value projections of one input."""
+
     ws: list
 
     def __call__(self, x):
+        """Returns ``x @ w.T`` for each weight."""
         return [F.matmul(x, w.t(), "float32", x.dtype) for w in self.ws]
 
 
 def test_projections_backward_merges_into_two_dots():
+    """The backward of three projections merges into one dot for the weight gradients and one for the input's, without concatenates."""
     d, h, m = 256, 256, 128
     meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
 
     def step(model, x, g):
+        """Backpropagates ``g`` through ``q * k * v`` and returns the weight and input gradients."""
         q, k, v = model(x)
         (q * k * v).backward(g)
         return [w.grad for w in model.ws] + [x.grad]
@@ -260,20 +285,25 @@ def test_projections_backward_merges_into_two_dots():
 
 
 class SwiGLU(lumen.nn.Module):
+    """SwiGLU MLP ``(silu(x @ w1.T) * (x @ w3.T)) @ w2.T``."""
+
     w1: lumen.Tensor
     w3: lumen.Tensor
     w2: lumen.Tensor
 
     def __call__(self, x):
+        """Returns the SwiGLU MLP of ``x``."""
         g, u = F.matmul(x, self.w1.t(), "float32", x.dtype), F.matmul(x, self.w3.t(), "float32", x.dtype)
         return F.matmul(g * lumen.functional.sigmoid(g) * u, self.w2.t(), "float32", x.dtype)
 
 
 def test_a_swiglu_backward_merges_its_gate_and_up():
+    """A SwiGLU backward merges the gate and up projections' dots, without concatenates, and matches numpy."""
     d, h, m = 256, 512, 128
     meta = lambda *shape: lumen.empty(list(shape), "float32", "meta")
 
     def step(model, x, dy):
+        """Backpropagates ``dy`` through the MLP and returns the gradients of its weights and ``x``."""
         model(x).backward(dy)
         return [model.w1.grad, model.w3.grad, model.w2.grad, x.grad]
 
@@ -301,6 +331,7 @@ def test_a_swiglu_backward_merges_its_gate_and_up():
 
 
 def _attention_reference(q, k, v, causal):
+    """Numpy attention over ``[batch, seq, heads, head_dim]`` inputs, repeating key/value heads for grouped queries."""
     b, s, n, h = q.shape
     group = n // k.shape[2]
     k, v = np.repeat(k, group, axis=2), np.repeat(v, group, axis=2)
@@ -316,16 +347,19 @@ def _attention_reference(q, k, v, causal):
 @pytest.mark.parametrize("causal", [False, True], ids=["full", "causal"])
 @pytest.mark.parametrize("n, nkv", [(4, 4), (4, 2)], ids=["mha", "gqa"])
 def test_flash_attention_is_one_kernel_each_way(causal, n, nkv, dtype, tol):
+    """Flash attention forward is one kernel and its backward two, for full and causal, MHA and GQA; gradients match finite differences."""
     b, s, h = 2, 256, 128
     rng = np.random.default_rng(0)
     q, g = (tpu(rng.standard_normal([b, s, n * h], dtype=np.float32), dtype) for _ in range(2))
     k, v = (tpu(rng.standard_normal([b, s, nkv * h], dtype=np.float32), dtype) for _ in range(2))
 
     def attention(q, k, v):
+        """Returns flash attention over ``q``, ``k``, ``v`` split into heads of size ``h``, heads merged back."""
         heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
         return F.flash_attention(*heads, is_causal=causal).reshape(b, s, n * h)
 
     def step(q, k, v, g):
+        """Returns the attention output and the gradients of ``q``, ``k`` and ``v`` for cotangent ``g``."""
         o = attention(q, k, v)
         o.backward(g)
         return o, q.grad, k.grad, v.grad
@@ -340,6 +374,7 @@ def test_flash_attention_is_one_kernel_each_way(causal, n, nkv, dtype, tol):
     heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
     want = _attention_reference(*heads, causal).reshape(b, s, n * h)
     np.testing.assert_allclose(o, want, atol=tol * np.abs(want).max())
+    # Each gradient is checked along a random direction against a central difference.
     eps = 1e-3
     for x, got in ((0, dq), (1, dk), (2, dv)):
         args = [t.copy() for t in (q, k, v)]
@@ -352,11 +387,13 @@ def test_flash_attention_is_one_kernel_each_way(causal, n, nkv, dtype, tol):
 
 
 def _softmax(x):
+    """Numpy softmax over the last axis."""
     e = np.exp(x - x.max(-1, keepdims=True))
     return e / e.sum(-1, keepdims=True)
 
 
 def _layer_norm(x, w, b):
+    """Layer norm over the last axis with weight ``w`` and bias ``b``, in lumen ops."""
     mean = F.mean(x, -1, keepdim=True)
     centered = x - mean
     return centered / F.sqrt(F.mean(centered * centered, -1, keepdim=True) + 1e-5) * w + b
@@ -401,10 +438,12 @@ def test_a_normalization_is_one_row_kernel(f, expected, rounded):
 
 
 def test_a_softmax_backward_is_one_row_kernel():
+    """A softmax's backward runs as one row kernel and matches the analytic gradient."""
     rng = np.random.default_rng(0)
     x, dy = (rng.standard_normal([256, 512], dtype=np.float32) for _ in range(2))
 
     def grad(x, dy):
+        """Returns the gradient of ``sum(softmax(x) * dy)`` with respect to ``x``."""
         return lumen.grad(lambda x: F.sum(F.softmax(x, -1) * dy))(x)
 
     meta = lumen.empty([256, 512], "float32", "meta")
@@ -525,6 +564,7 @@ def test_independent_small_loops_are_one_kernel():
     xs = [rng.standard_normal([256, 512], dtype=np.float32) for _ in range(4)]
 
     def f(a, b, c, d):
+        """Returns four independent elementwise results of ``a``, ``b``, ``c`` and ``d``."""
         return a * 2.0 + 1.0, F.exp(b), c - d, d * d
 
     metas = [lumen.empty([256, 512], "float32", "meta")] * 4
@@ -547,10 +587,12 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
     g = g.to(dtype="float32")
 
     def attention(q, k, v):
+        """Returns causal flash attention over ``q``, ``k``, ``v``, heads merged, cast to float32 and halved."""
         heads = [t.reshape(b, s, n, h) for t in (q, k, v)]
         return F.flash_attention(*heads, is_causal=True).reshape(b, s, n * h).float() * 0.5
 
     def step(q, k, v, g):
+        """Returns the attention output, and in training also the input gradients for cotangent ``g``."""
         e = attention(q, k, v)
         if not training:
             return (e,)
@@ -572,6 +614,7 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
 
 
 def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
+    """``dump_code`` writes each launch's Mosaic MLIR and a Pallas script that rebuilds it."""
     x = lumen.ones([256, 512]).to("tpu")
     f = lumen.compile(lambda x: F.exp(x) * x)
     f(x)
@@ -592,6 +635,7 @@ def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     [(1000, 256, [64]), (20000, 512, [4, 256]), (300, 128, [2, 3]), (2048, 8192, [8, 128]), (100, 384, [3, 8, 16])],
 )
 def test_an_embeddings_lookup_is_its_rows_exactly(vocab, width, ids, dtype):
+    """An embedding lookup returns the table's rows bit for bit, NaNs, infinities and subnormals included."""
     rng = np.random.default_rng(0)
     table = rng.standard_normal([vocab, width], dtype=np.float32)
     table[:4, :2] = [[np.nan, -0.0], [np.inf, 0.0], [-np.inf, -1.0], [1e-40, -1e-40]]
@@ -610,6 +654,7 @@ def test_an_embeddings_lookup_is_its_rows_exactly(vocab, width, ids, dtype):
 
 
 def test_the_transformers_embedding_runs_on_tpu():
+    """A transformer's token-plus-position embedding runs on TPU and matches numpy exactly."""
     batch, seq, vocab, dim = 4, 128, 512, 256
     rng = np.random.default_rng(0)
     tokens, positions = rng.standard_normal([vocab, dim], dtype=np.float32), rng.standard_normal(
@@ -618,6 +663,7 @@ def test_the_transformers_embedding_runs_on_tpu():
     ids = rng.integers(0, vocab, [batch, seq]).astype(np.int32)
 
     def embed(t, p, i):
+        """Returns the embedded tokens ``i`` plus positions, flattened to ``[batch * seq, dim]``."""
         return (t[i] + p).reshape(batch * seq, dim)
 
     got = lumen.compile(embed)(tpu(tokens), tpu(positions), lumen.from_numpy(ids).to("tpu"))
@@ -635,6 +681,7 @@ def test_the_transformers_embedding_runs_on_tpu():
     ],
 )
 def test_32_bit_tables_are_gathered_on_the_sparse_core(dtype, width, ids, kernel, tmp_path):
+    """32-bit tables of moderate width are gathered by the SparseCore kernel, others by the TensorCore gather; values exact."""
     rng = np.random.default_rng(0)
     table = rng.standard_normal([2000, width], dtype=np.float32)
     index = rng.integers(0, 2000, ids).astype(np.int32)
@@ -649,6 +696,7 @@ def test_32_bit_tables_are_gathered_on_the_sparse_core(dtype, width, ids, kernel
 
 
 def _rms(x, w):
+    """Numpy RMS norm over the last axis with weight ``w``."""
     return x / np.sqrt((x * x).mean(-1, keepdims=True) + np.finfo(np.float32).eps) * w
 
 
@@ -679,6 +727,7 @@ def _rms(x, w):
     ids=["rms_norm", "softmax", "layer_norm bfloat16"],
 )
 def test_a_dots_row_diamond_is_its_epilogue(f, expected, dtype, shapes):
+    """A row normalization of a dot's result runs as the dot's epilogue and matches numpy."""
     rng = np.random.default_rng(0)
     arrays = [rng.standard_normal(s, dtype=np.float32) / (8 if i == 1 else 1) for i, s in enumerate(shapes)]
     metas = [lumen.empty(s, dtype, "meta") for s in shapes]
@@ -690,7 +739,10 @@ def test_a_dots_row_diamond_is_its_epilogue(f, expected, dtype, shapes):
 
 
 def test_a_dot_read_elsewhere_keeps_its_own_kernel():
+    """A dot whose result is also read by another consumer is not fused into the row kernel's epilogue."""
+
     def f(x, a, w):
+        """Returns the RMS norm of ``x @ a`` and the doubled product."""
         y = F.matmul(x, a, "float32", "float32")
         return F.rms_norm(y, 1024, w), y * 2.0
 

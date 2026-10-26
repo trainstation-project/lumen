@@ -1,3 +1,5 @@
+"""Tests of the per-device compiler settings in `lumen.config.compiler` and the passes each flag controls."""
+
 import numpy as np
 import pytest
 
@@ -18,11 +20,13 @@ def compiler():
 
 
 def _manual_softmax(a):
+    """Softmax over the last axis written out of primitives."""
     e = F.exp(a - F.amax(a, -1, keepdim=True))
     return e / F.sum(e, -1, keepdim=True)
 
 
 def _labels(f, *args, device="mps"):
+    """Step labels of `f` traced on `args` and planned for `device`, skipping when it is unavailable."""
     try:
         return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()]
     except RuntimeError as e:
@@ -89,6 +93,7 @@ def test_stub_defaults_are_the_compilers(compiler):
     classes = {c.name: c for c in stub.body if isinstance(c, ast.ClassDef)}
 
     def flags(name):
+        """Flag defaults the stub declares for class `name`, its base class's included."""
         fields = {a.target.id: ast.literal_eval(a.value) for a in classes[name].body if isinstance(a, ast.AnnAssign)}
         return {**(flags(classes[name].bases[0].id) if classes[name].bases else {}), **fields}
 
@@ -157,6 +162,7 @@ def test_compiler_flags_change_what_compiles(compiler):
 
 
 def _read_early_and_late(a, w):
+    """A chain of matmuls reading `h` early and again at the end, so it stays alive across the chain."""
     h = F.matmul(a, w, "float32", "float32")
     b = F.matmul(h, w, "float32", "float32")
     e = F.matmul(F.matmul(b, w, "float32", "float32"), b, "float32", "float32")
@@ -205,12 +211,14 @@ def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
     a, w = lumen.empty([512, 512], device="meta"), lumen.empty([512, 512], device="meta")
 
     def plan():
+        """Plans the chain for `device`, skipping when it is unavailable."""
         try:
             return lumen.graph_compiler.Plan(lumen.make_graph(_read_early_and_late)(a, w), device)
         except RuntimeError as e:
             pytest.skip(str(e))
 
     def dots(p):
+        """Number of dot steps in plan `p`."""
         return sum("dot_general" in s["label"] for s in p.steps())
 
     config = lumen.config.compiler.of(device)
@@ -293,6 +301,7 @@ def test_split_k_then_silu(compiler, dtype):
         pytest.skip(str(e))
 
     def f(x, w):
+        """SiLU of a float32-accumulated matmul, cast back to the input dtype."""
         y = F.matmul(x, w, accum_dtype=lumen.float32, output_dtype=lumen.float32)
         return (y * F.sigmoid(y)).to(dtype=x.dtype)
 
@@ -330,6 +339,7 @@ def test_online_softmax_agrees(compiler, n):
     f = lumen.compile(lambda a: F.softmax(a, -1))
 
     def run():
+        """Runs the softmax under the profiler, returning its output and the one GPU kernel it launched."""
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
             out = lumen.to_numpy(f(t))
         (kernel,) = [e["kernel"] for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]

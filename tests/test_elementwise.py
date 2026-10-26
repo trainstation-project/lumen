@@ -1,3 +1,5 @@
+"""Tests for elementwise primitives and functional ops: values against numpy, specials, and agreement across devices."""
+
 import math
 
 import numpy as np
@@ -13,12 +15,14 @@ TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
 def tensor(a, dtype=None, device="cpu"):
+    """`a` as a contiguous lumen tensor on `device`, cast to `dtype` if given."""
     t = lumen.from_numpy(np.ascontiguousarray(a))
     t = t if dtype is None or t.dtype == dtype else t.to(dtype=dtype)
     return t.to(device)
 
 
 def host(t):
+    """`t` as numpy on the host, half-precision floats widened to float32."""
     t = t.to("cpu")
     return lumen.to_numpy(t.to(dtype="float32") if t.dtype in ("bfloat16", "float16") else t)
 
@@ -123,6 +127,7 @@ def test_unary_integers(dtype):
 
 
 def test_unary_bools():
+    """`not` of bools."""
     b = tensor(np.array([True, False]))
     np.testing.assert_array_equal(run(prims.not_, b), [False, True])
 
@@ -185,6 +190,7 @@ def test_binary_integers(dtype):
 
 
 def test_binary_bools():
+    """and, or and xor of bools."""
     p, q = tensor(np.array([True, True, False, False])), tensor(np.array([True, False, True, False]))
     np.testing.assert_array_equal(run(prims.and_, p, q), [True, False, False, False])
     np.testing.assert_array_equal(run(prims.or_, p, q), [True, True, True, False])
@@ -368,6 +374,7 @@ def test_functional_float_functions():
 
 
 def test_functional_predicates_and_logic():
+    """isfinite, isnan and the logical ops (of ints, bools and Python scalars) as truth tables."""
     x = tensor(np.array([1.0, np.nan, np.inf, -2.0], np.float32))
     np.testing.assert_array_equal(run(F.isfinite, x), [True, False, False, True])
     np.testing.assert_array_equal(run(F.isnan, x), [False, True, False, False])
@@ -379,6 +386,7 @@ def test_functional_predicates_and_logic():
 
 
 def test_functional_pow_and_nextafter():
+    """F.pow of tensors and of a Python exponent, and F.nextafter: numpy's."""
     a = tensor(np.array([1.5, 2.0, 4.0], np.float32))
     b = tensor(np.array([2.0, -1.0, 0.5], np.float32))
     np.testing.assert_allclose(run(F.pow, a, b), [2.25, 0.5, 2.0], rtol=1e-6)
@@ -405,6 +413,7 @@ def test_functional_reductions():
 
 
 def test_functional_clamp_and_where():
+    """clamp with both or one bound, and where of float or int scalars (int64 for Python ints)."""
     a = np.array([-3.0, 0.5, 9.0], np.float32)
     x = tensor(a)
     np.testing.assert_array_equal(run(lambda t: F.clamp(t, -1.0, 1.0), x), np.clip(a, -1, 1))
@@ -531,6 +540,7 @@ def test_narrow_dtypes_through_numpy(dtype):
 @pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
 @pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
+    """add, mul, exp, sin (not on MPS) and less-than on each device match numpy for several shapes, scalars included."""
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
     x, y = tensor(a, device=device), tensor(b, device=device)
