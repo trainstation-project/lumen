@@ -337,6 +337,45 @@ impl Tensor {
         }
     }
 
+    /// A `dtype` view of `shape` with element `strides`, starting `byte_offset` bytes into this
+    /// contiguous tensor (a concatenate's operand slot, say).
+    pub(crate) fn view_strided(
+        &self,
+        byte_offset: usize,
+        dtype: DType,
+        shape: &[usize],
+        strides: &[usize],
+    ) -> Self {
+        let start = self.offset * self.dtype.size_of() + byte_offset;
+        let size = dtype.size_of();
+        assert!(
+            self.is_contiguous() && start.is_multiple_of(size),
+            "an aligned view"
+        );
+        // One past the furthest element the view reaches.
+        let extent = match shape.contains(&0) {
+            true => 0,
+            false => {
+                1 + shape
+                    .iter()
+                    .zip(strides)
+                    .map(|(&n, &s)| (n - 1) * s)
+                    .sum::<usize>()
+            }
+        };
+        assert!(
+            byte_offset + extent * size <= self.nbytes(),
+            "a view within the tensor"
+        );
+        Tensor {
+            storage: self.storage.clone(),
+            dtype,
+            shape: shape.to_vec(),
+            strides: strides.to_vec(),
+            offset: start / size,
+        }
+    }
+
     /// The tensor's dtype and shape.
     pub(crate) fn ty(&self) -> TensorType {
         TensorType::new(self.dtype, &self.shape)
