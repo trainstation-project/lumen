@@ -319,14 +319,11 @@ BACKWARD_CASES = [
 
 
 def backward_kernels(h, hv, dtype, deterministic=False, device="mps"):
-    """An attention backward's kernels: on MPS one adding dQ atomically, if
-    its blocks fit in threadgroup memory (codegen.rs's
-    ``backward_block_with_dq``) and not ``deterministic``; else (and on
-    CUDA) two."""
+    """An attention backward's kernels: one adding dQ atomically unless
+    ``deterministic`` (on MPS, if its blocks fit in threadgroup memory too:
+    codegen.rs's ``backward_block_with_dq``); else two."""
     t = {"float32": 4, "bfloat16": 2}[dtype]
-    if device == "cuda":
-        return ["flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"]
-    fits = any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16))
+    fits = device == "cuda" or any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16))
     if fits and not deterministic:
         return ["flash_attention_backward(dk, dv, dq)"]
     return ["flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"]
@@ -342,11 +339,11 @@ def backward_kernels(h, hv, dtype, deterministic=False, device="mps"):
 )
 def test_attention_backward_is_flash_attention(device, case, dtype, deterministic, triton_on_cuda):
     """The gradient of F.flash_attention: the forward one flash-attention
-    kernel (writing each row's log-sum-exp too), the backward on MPS one
-    adding dQ atomically by its dK and dV kernel (where its blocks fit), or
-    two (dK and dV, then dQ; ``deterministic``: the same bits each run; on
-    CUDA always), recomputing the probabilities; agreeing with the CPU's
-    (the same program, as traced)."""
+    kernel (writing each row's log-sum-exp too), the backward one adding dQ
+    atomically by its dK and dV kernel (on MPS where its blocks fit), or
+    two (dK and dV, then dQ; ``deterministic``: the same bits each run),
+    recomputing the probabilities; agreeing with the CPU's (the same
+    program, as traced)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
     shapes = (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv), (b, sq, n, hv)
     (q, k, v, w), arrays = tensors(device, dtype, *shapes)
@@ -356,8 +353,8 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
         return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
 
     grad = lumen.grad(loss, (0, 1, 2))
-    if device == "mps":
-        lumen.config.compiler.mps.deterministic = deterministic
+    config = lumen.config.compiler.of(device)
+    config.deterministic = deterministic
     try:
         labels = steps(grad, q, k, v, w, device=device)
         for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic, device)]:
@@ -369,7 +366,7 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
                 g, again = (lumen.to_numpy(t.to(dtype="float32").to("cpu")) for t in (g, again))
                 np.testing.assert_array_equal(g, again)
     finally:
-        lumen.config.compiler.mps.deterministic = False
+        config.deterministic = False
     cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
     want = lumen.compile(grad, device="cpu")(*cpu)
     tol = {"float32": 1e-5, "bfloat16": 2e-2}[dtype]

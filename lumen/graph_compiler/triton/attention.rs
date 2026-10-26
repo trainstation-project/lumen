@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use super::{Function, TritonModule, copy};
+use super::{Function, TritonModule, copy, fill};
 use crate::codegen::triton::{
     self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
@@ -14,7 +14,7 @@ use crate::graph_compiler::common::flash_attention::Attentions;
 use crate::graph_compiler::pass::CompilerPass;
 use crate::graph_compiler::plan::{Step, Tuned};
 use crate::tensor::contiguous_strides;
-use crate::{Tensor, TensorOptions};
+use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.
 const FORWARD: &str = "flash_attention";
@@ -86,7 +86,8 @@ impl Attentions for TritonModule<'_> {
     }
 }
 
-/// Pass replacing each attention backward with a dK/dV kernel and a dQ kernel.
+/// Pass replacing each attention backward with one kernel adding dQ atomically as it computes dK and
+/// dV, or, when `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
 pub(super) struct FlashAttentionBackward;
 
 impl CompilerPass<TritonModule<'_>> for FlashAttentionBackward {
@@ -95,9 +96,10 @@ impl CompilerPass<TritonModule<'_>> for FlashAttentionBackward {
         "flash_attention_backward"
     }
 
-    /// Fuses each backward into two kernels, so dQ is summed over key blocks in a fixed order.
+    /// Fuses each backward into one kernel, or two so dQ is summed over key blocks in a fixed order.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        m.graph = attention::fuse_backward(&m.graph, |_| false, |_| BACKWARD.into());
+        let deterministic = m.options.config.cuda.deterministic;
+        m.graph = attention::fuse_backward(&m.graph, |_| !deterministic, |_| BACKWARD.into());
         Ok(())
     }
 }
@@ -239,9 +241,13 @@ fn attention(
             ("LSE", &b.lse),
             ("DELTA", &b.delta),
         ];
+        // With dK and dV, dQ is added atomically into a zeroed float32 buffer as each key block computes it.
         let gradients = match (&b.dk_out, &b.dv_out, &b.dq_out) {
-            (Some(dk), Some(dv), _) => vec![("DK", dk), ("DV", dv)],
-            (_, _, Some(dq)) => vec![("DQ", dq)],
+            (Some(dk), Some(dv), dq) => [("STORE_DK", dk), ("STORE_DV", dv)]
+                .into_iter()
+                .chain(dq.as_ref().map(|dq| ("ADD_DQ", dq)))
+                .collect(),
+            (_, _, Some(dq)) => vec![("STORE_DQ", dq)],
             _ => return Err(format!("{}: computes no gradient", step.label)),
         };
         let mut tensors: Vec<Option<Tensor>> = operands
@@ -252,13 +258,21 @@ fn attention(
             .iter()
             .map(|(name, acc)| load(&format!("LOAD_{name}"), acc, &b.batch))
             .collect();
-        for (name, (node, acc)) in &gradients {
-            tensors.push(Some(output(body.nodes()[*node].output)));
-            functions.push(store(&format!("STORE_{name}"), acc, &b.batch));
+        for (param, (node, acc)) in &gradients {
+            let t = output(body.nodes()[*node].output);
+            let code = match *param {
+                "ADD_DQ" => {
+                    fill(&t, Scalar::Float(0.0))?;
+                    codegen::attention_atomic_add(acc, &b.batch)
+                }
+                _ => codegen::attention_store(acc, &b.batch),
+            };
+            tensors.push(Some(t));
+            functions.push(Function::new(*param, code));
         }
         functions.push(Function::new("SCORE", codegen::attention_score(&b.scores)));
         launch(&Launch {
-            kernel: if gradients.len() == 2 { "dkdv" } else { "dq" },
+            kernel: if b.dk_out.is_some() { "dkdv" } else { "dq" },
             tensors: &tensors,
             functions: &functions,
             sizes: [b.batch.iter().product(), b.sq, b.sk, b.h, b.hv],

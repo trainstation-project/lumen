@@ -69,6 +69,21 @@ pub(crate) fn attention_store(acc: &Access, batch: &[usize]) -> (String, String)
     )
 }
 
+/// A jit helper adding float32 `value` atomically to the tile at `rows` and `cols` of `acc`.
+pub(crate) fn attention_atomic_add(acc: &Access, batch: &[usize]) -> (String, String) {
+    let at = address(acc, batch);
+    named(
+        "attention_atomic_add",
+        formatdoc!(
+            "
+            @triton.jit
+            def NAME(ptr, b, rows, cols, value, mask):
+            {at}    tl.atomic_add(ptr + at, value, mask=mask, sem=\"relaxed\")
+            "
+        ),
+    )
+}
+
 /// A jit helper applying the traced score ops (rounding casts and scalings) to float32 `Q K^T`
 /// products, returning float32.
 pub(crate) fn attention_score(scores: &[Score]) -> (String, String) {
