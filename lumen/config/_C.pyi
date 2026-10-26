@@ -26,6 +26,7 @@ class CudaConfig(CompilerConfig):
     safe_kernels: bool = False
     horizontal_fusion: bool = True
     multi_output_fusion: bool = True
+    split_k: bool = True
 
 class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""
