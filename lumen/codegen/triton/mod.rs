@@ -119,7 +119,7 @@ pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
     let extra = (1..results.len())
         .map(|k| format!("out{k}"))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(",\n    ");
     let params = params(
         by_value,
         (!extra.is_empty()).then_some(extra.as_str()),
