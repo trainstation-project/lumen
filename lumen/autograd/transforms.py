@@ -1,5 +1,8 @@
+"""Autodiff transforms (jvp, linearize, vjp, grad) over the nodes recorded while tracing."""
+
 import functools
 
+# ``rules`` is imported for its side effect of registering every primitive's rules.
 from lumen.autograd import attention, cross_entropy, dots, rules
 from lumen.autograd.core import (
     UndefinedPrimal,
@@ -36,6 +39,7 @@ def _jvp_tape(tape, tangents, linearizing=False):
     base = list(tracer._SCOPES[-1])
 
     for name, inputs, params, out in tape:
+        # A Function node's tangents belong to the scope of its first output.
         forward = out[0] if name == _FUNCTION else out
         scope = tracer._backward_scope(forward, base) if linearizing else base
         with tracer._scope(scope):
@@ -68,6 +72,7 @@ def _jvp_node(graph, name, inputs, params, out, tangents, linearizing):
 
 
 def _check(fn_name, args):
+    """Raises unless tracing and ``args`` hold tensors; returns their leaves."""
     if not tracer._TRACES:
         raise RuntimeError(f"lumen.{fn_name} runs while tracing: call it inside a function passed to lumen.compile")
 
@@ -125,11 +130,13 @@ def _linearize_tape(tape, leaves):
     (``cross_entropy.substitute``); dots sharing an operand, one
     node differentiated as the one dot they run as (``dots.substitute``)."""
     tape = dots.substitute(cross_entropy.substitute(attention.substitute(tape)), leaves)
+    # Each float leaf's seed is a zero placeholder whose var marks the start of the linear program.
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
     _, lin_tape = _record(_jvp_tape, tape, tangents, True)
     linear_vars = set(seeds.values())
     linear = []
+    # Keep only nodes reachable from the seeds: the rest are primal computation.
     for node in lin_tape:
         if any(v in linear_vars for v in node[1]):
             linear_vars.update(node[3] if node[0] == _FUNCTION else [node[3]])
@@ -193,6 +200,7 @@ def vjp(fn, *primals):
     out, (seeds, linear, linear_vars, tangents) = linearize(fn, *primals)
 
     def vjp_fn(ct):
+        """Cotangents of ``primals`` given ``ct``, a cotangent of ``fn``'s output tree."""
         cts = {}
         for o, c in zip(tracer._tree_leaves(out), tracer._tree_leaves(ct)):
             if (c.dtype, c.shape) != (o.dtype, o.shape):
@@ -205,6 +213,7 @@ def vjp(fn, *primals):
         cts = backward_pass(linear, linear_vars, cts)
 
         def cotangent(p):
+            """``p``'s cotangent, zeros if nothing reached its seed."""
             seed = seeds.get(p.var)
             return _value(cts[seed]) if seed in cts else _full(p, 0)
 
@@ -220,9 +229,11 @@ def value_and_grad(fn, argnums=0):
     Like every op, it runs while tracing (inside ``lumen.compile``)."""
 
     def value_and_grad_fn(*args):
+        """Returns ``fn(*args)`` and its gradient with respect to the ``argnums`` arguments."""
         nums = (argnums,) if isinstance(argnums, int) else tuple(argnums)
 
         def f(*diff):
+            """``fn`` with the differentiated arguments replaced by ``diff``."""
             full = list(args)
             for i, d in zip(nums, diff):
                 full[i] = d
@@ -244,6 +255,7 @@ def grad(fn, argnums=0):
 
     @functools.wraps(fn)
     def grad_fn(*args):
+        """Returns only the gradient part of ``value_and_grad_fn``."""
         return value_and_grad_fn(*args)[1]
 
     return grad_fn

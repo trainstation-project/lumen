@@ -1,3 +1,5 @@
+"""User-defined differentiable ``Function``s and how they enter the autograd tape."""
+
 import inspect
 
 from lumen.autograd.core import _accumulate, _full, _value
@@ -8,22 +10,30 @@ _FUNCTION = "autograd.Function"
 
 
 class FunctionCtx:
+    """Per-call scratch object passed to a Function's forward, backward and jvp."""
+
     def save_for_backward(self, *tensors, **named):
+        """Stores tensors for backward, positionally in ``saved_tensors`` and by name in ``saved_named_tensors``."""
         self.saved_tensors = tensors
         self.saved_named_tensors = named
 
 
 class Function:
+    """Base class for an op with a hand-written derivative; subclasses define static ``forward``/``backward``/``jvp``."""
+
     @staticmethod
     def forward(ctx, *args):
+        """Computes the outputs from ``args`` using traced ops."""
         raise NotImplementedError("a Function defines forward(ctx, *args)")
 
     @staticmethod
     def backward(ctx, *grads):
+        """Returns the inputs' gradients given the outputs' cotangents."""
         raise NotImplementedError("a Function defines backward(ctx, *grads) for reverse mode")
 
     @staticmethod
     def jvp(ctx, *tangents, **kw_tangents):
+        """Returns the outputs' tangents given the inputs' tangents."""
         raise NotImplementedError("a Function defines jvp(ctx, *tangents, **kw_tangents) for forward mode")
 
     @classmethod
@@ -46,6 +56,7 @@ class Function:
         tracer.current_graph()
         ctx = FunctionCtx()
 
+        # Hide the outer tapes while forward runs so its inner ops are not recorded individually.
         tapes = tracer._TAPES[:]
         tracer._TAPES.clear()
 

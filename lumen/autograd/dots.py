@@ -1,3 +1,5 @@
+"""Merges dots that share an lhs and differ only in their weight's free dimension, for one backward."""
+
 from lumen.autograd.core import UndefinedPrimal, _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.autograd.rules import _dot_dims, _dot_general_transpose
@@ -28,10 +30,12 @@ def substitute(tape, leaves):
         free = _free(len(shape), rc, rb)
         if len(free) != 1:
             continue
+        # Group by lhs, dot params, weight dtype and weight shape with the free dimension wildcarded.
         rest = tuple(n if d != free[0] else None for d, n in enumerate(shape))
         key = (inputs[0], tuple(sorted(params.items())), dtype, rest)
         groups.setdefault(key, []).append(k)
     for ks in groups.values():
+        # Keep only the first dot of each distinct weight.
         ks = [k for i, k in enumerate(ks) if tape[k][1][1] not in {tape[j][1][1] for j in ks[:i]}]
         if len(ks) < 2:
             continue
@@ -46,6 +50,7 @@ def substitute(tape, leaves):
             tuple(tape[k][3] for k in ks),
         )
         tape = [node if i == ks[0] else e for i, e in enumerate(tape) if i not in ks[1:]]
+        # Restart so tape indices of the remaining groups stay valid.
         return substitute(tape, leaves)
     return tape
 
@@ -57,6 +62,7 @@ class _MergedDot(Function):
 
     @staticmethod
     def backward(ctx, *grads):
+        """Gradients of ``x`` and each ``w_i``, from one transposed dot over the concatenated weights."""
         p, x, ws = ctx.params, ctx.x, ctx.ws
         (_, rc), (_, rb) = _dot_dims(p)
         (dim,) = _free(ws[0].ndim, rc, rb)
@@ -65,6 +71,7 @@ class _MergedDot(Function):
         dx = _dot_general_transpose(g, UndefinedPrimal(x.shape, x.dtype), w, **p)[0]
         dw = _dot_general_transpose(g, x, UndefinedPrimal(w.shape, w.dtype), **p)[1]
         out, start = [dx], 0
+        # Split the merged weight gradient back into each weight's slice.
         for wi in ws:
             starts, limits = [0] * dw.ndim, list(dw.shape)
             starts[dim], limits[dim] = start, start + wi.shape[dim]

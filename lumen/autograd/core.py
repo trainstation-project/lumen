@@ -1,3 +1,5 @@
+"""Registries of primitive JVP and transpose rules, and helpers for defining them."""
+
 import functools
 
 from lumen.graph import prims, tracer
@@ -12,14 +14,17 @@ class UndefinedPrimal:
     (JAX's ``ad.UndefinedPrimal``)."""
 
     def __init__(self, shape, dtype):
+        """Records the operand's shape and dtype."""
         self.shape, self.dtype = tuple(shape), dtype
 
     @property
     def ndim(self):
+        """Number of dimensions."""
         return len(self.shape)
 
 
 def _is_float(dtype):
+    """Whether ``dtype`` is a floating-point dtype."""
     return tracer._is_float(dtype)
 
 
@@ -58,6 +63,7 @@ def deflinear(primitive, transpose_rule):
 
 
 def _value(var):
+    """Wraps graph variable ``var`` as a tensor in the graph being traced."""
     return TracedTensor(tracer.current_graph(), var)
 
 
