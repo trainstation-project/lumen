@@ -1,0 +1,299 @@
+//! Flash attention on Triton: the pass fusing attention backward into dK/dV and dQ kernels, and
+//! running the forward and backward fusions through the Python Triton kernels.
+
+use std::sync::OnceLock;
+
+use super::{Function, TritonModule, copy};
+use crate::codegen::triton::{
+    self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
+};
+use crate::graph::{Primitive, Var};
+use crate::graph_compiler::common::attention::{self, Access, Epilogues};
+use crate::graph_compiler::common::autotune::Kernels;
+use crate::graph_compiler::common::flash_attention::Attentions;
+use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::plan::{Step, Tuned};
+use crate::tensor::contiguous_strides;
+use crate::{Tensor, TensorOptions};
+
+/// Name of a forward flash-attention fusion.
+const FORWARD: &str = "flash_attention";
+
+/// Name of a backward flash-attention fusion.
+const BACKWARD: &str = "flash_attention_backward";
+
+/// One launch of a flash-attention kernel.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub struct Launch<'a> {
+    /// `forward`, `dkdv` or `dq`.
+    pub kernel: &'static str,
+    /// The kernel's tensors in parameter order; `None` for an optional one it doesn't read.
+    pub tensors: &'a [Option<Tensor>],
+    /// Generated loads, stores and score function, bound to the kernel's constexpr parameters.
+    pub functions: &'a [Function],
+    /// Flat batch count, query count, key count, and the head dims of Q/K and of V.
+    pub sizes: [usize; 5],
+    /// Causal diagonal: key `k` is seen by query `q` when `k <= q + causal` (plus a runtime offset).
+    pub causal: Option<i64>,
+    /// Scale of dS in the backward kernels.
+    pub scale: f64,
+    pub config: &'a AttentionConfig,
+}
+
+/// Launches a flash-attention kernel.
+pub type Attention = fn(&Launch) -> Result<(), String>;
+
+/// The flash-attention launcher installed from Python.
+static ATTENTION: OnceLock<Attention> = OnceLock::new();
+
+/// Installs the flash-attention launcher; later calls are ignored.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn set_attention(launch: Attention) {
+    let _ = ATTENTION.set(launch);
+}
+
+/// Flash-attention matching for Triton: no epilogues yet, runtime causal offsets (decode).
+impl Attentions for TritonModule<'_> {
+    /// Epilogues are not fused into the attention kernels yet.
+    fn contraction_epilogues(&self) -> bool {
+        false
+    }
+
+    /// Unused: epilogues are off.
+    fn epilogues(&self) -> Epilogues {
+        Epilogues {
+            leaves: |_, _| false,
+            reshaped: false,
+        }
+    }
+
+    /// Graph values of the by-value scalar inputs.
+    fn scalars(&self) -> Vec<Var> {
+        super::super::positions(&self.options.scalars)
+            .into_iter()
+            .map(|i| self.graph.inputs()[i])
+            .collect()
+    }
+
+    /// Every forward attention runs on the one forward kernel.
+    fn kernel(&mut self) -> String {
+        FORWARD.into()
+    }
+
+    /// The forward kernel reads a causal offset from a buffer at run time.
+    fn runtime_offsets(&self) -> bool {
+        true
+    }
+}
+
+/// Pass replacing each attention backward with a dK/dV kernel and a dQ kernel.
+pub(super) struct FlashAttentionBackward;
+
+impl CompilerPass<TritonModule<'_>> for FlashAttentionBackward {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "flash_attention_backward"
+    }
+
+    /// Fuses each backward into two kernels, so dQ is summed over key blocks in a fixed order.
+    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+        m.graph = attention::fuse_backward(&m.graph, |_| false, |_| BACKWARD.into());
+        Ok(())
+    }
+}
+
+/// Whether `p` is a flash-attention fusion.
+pub(crate) fn is_attention(p: &Primitive) -> bool {
+    matches!(p, Primitive::Fusion { name, .. } if name == FORWARD || name == BACKWARD)
+}
+
+/// A tuned flash-attention launch with its config baked in.
+type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
+
+/// Runs flash-attention `step` with its tuned config, or the untuned one for its head size.
+pub(super) fn run(
+    step: &Step,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+) -> Result<(), String> {
+    match step.launch::<Run>() {
+        Some(run) => run(step, inputs, out, outs),
+        None => attention(step, inputs, out, outs, None),
+    }
+}
+
+/// `t`, or a contiguous copy of it, since the kernels index operands by their contiguous layout.
+fn contiguous(t: &Tensor) -> Result<Tensor, String> {
+    if t.is_contiguous() {
+        return Ok(t.clone());
+    }
+    let options = TensorOptions::new().dtype(t.dtype()).device(t.device());
+    let c = unsafe { Tensor::empty(t.shape(), options) };
+    copy(&c, t)?;
+    Ok(c)
+}
+
+/// Where the forward kernel writes each query row's log-sum-exp: `[batch.., sq]`, contiguous.
+fn per_row(batch: &[usize], sq: usize) -> Access {
+    let mut shape = batch.to_vec();
+    shape.push(sq);
+    let strides = contiguous_strides(&shape);
+    Access {
+        base: 0,
+        offset: 0,
+        batch: strides[..batch.len()].iter().map(|&s| (s, 1)).collect(),
+        row: 1,
+        col: 0,
+    }
+}
+
+/// Runs the forward or backward flash-attention fusion `step` with tile `config`, or the untuned
+/// config for its head size.
+fn attention(
+    step: &Step,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+    config: Option<&AttentionConfig>,
+) -> Result<(), String> {
+    let launch = ATTENTION.get().ok_or(
+        "the Triton backend's flash attention is Python's (lumen.kernels.attention.triton): none is installed",
+    )?;
+    let Primitive::Fusion { name, body, .. } = &step.primitive else {
+        unreachable!("an attention fusion")
+    };
+    let inputs = inputs
+        .iter()
+        .map(contiguous)
+        .collect::<Result<Vec<_>, _>>()?;
+    let given: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
+    let written = given
+        .iter()
+        .map(|t| contiguous(t))
+        .collect::<Result<Vec<_>, _>>()?;
+    let input = |v: Var| {
+        let k = body.inputs().iter().position(|&u| u == v);
+        inputs[k.expect("an input of the attention")].clone()
+    };
+    let output = |v: Var| {
+        let k = body.outputs().iter().position(|&u| u == v);
+        written[k.expect("an output of the attention")].clone()
+    };
+    let load = |param: &str, acc: &Access, batch: &[usize]| {
+        Function::new(param, codegen::attention_load(acc, batch))
+    };
+    let store = |param: &str, acc: &Access, batch: &[usize]| {
+        Function::new(param, codegen::attention_store(acc, batch))
+    };
+    let tiles = |h: usize, hv: usize, dtype: crate::DType| match config {
+        Some(c) => *c,
+        None => untuned_attention(h.max(hv) * dtype.size_of()),
+    };
+    let dropout = format!(
+        "{}: dropout in attention has no Triton kernel (random_bits)",
+        step.label
+    );
+    if name == FORWARD {
+        let a = attention::of_body(body).ok_or("a forward flash attention")?;
+        if a.dropout.is_some() {
+            return Err(dropout);
+        }
+        let root = body.nodes()[a.root].output;
+        let lse = a.lse.map(|n| output(body.nodes()[n].output));
+        let tensors = [
+            Some(input(a.q.base)),
+            Some(input(a.k.base)),
+            Some(input(a.v.base)),
+            Some(output(root)),
+            lse,
+            a.offset.map(input),
+        ];
+        let functions = [
+            load("LOAD_Q", &a.q, &a.batch),
+            load("LOAD_K", &a.k, &a.batch),
+            load("LOAD_V", &a.v, &a.batch),
+            store("STORE_O", &a.out, &a.batch),
+            store("STORE_LSE", &per_row(&a.batch, a.sq), &a.batch),
+            Function::new("SCORE", codegen::attention_score(&a.scores)),
+        ];
+        launch(&Launch {
+            kernel: "forward",
+            tensors: &tensors,
+            functions: &functions,
+            sizes: [a.batch.iter().product(), a.sq, a.sk, a.h, a.hv],
+            causal: a.causal,
+            scale: 1.0,
+            config: &tiles(a.h, a.hv, a.dtype),
+        })?;
+    } else {
+        let b = attention::backward_of_body(body).ok_or("a backward flash attention")?;
+        if b.dropout.is_some() {
+            return Err(dropout);
+        }
+        let operands = [
+            ("Q", &b.q),
+            ("K", &b.k),
+            ("V", &b.v),
+            ("DO", &b.d_o),
+            ("LSE", &b.lse),
+            ("DELTA", &b.delta),
+        ];
+        let gradients = match (&b.dk_out, &b.dv_out, &b.dq_out) {
+            (Some(dk), Some(dv), _) => vec![("DK", dk), ("DV", dv)],
+            (_, _, Some(dq)) => vec![("DQ", dq)],
+            _ => return Err(format!("{}: computes no gradient", step.label)),
+        };
+        let mut tensors: Vec<Option<Tensor>> = operands
+            .iter()
+            .map(|(_, acc)| Some(input(acc.base)))
+            .collect();
+        let mut functions: Vec<Function> = operands
+            .iter()
+            .map(|(name, acc)| load(&format!("LOAD_{name}"), acc, &b.batch))
+            .collect();
+        for (name, (node, acc)) in &gradients {
+            tensors.push(Some(output(body.nodes()[*node].output)));
+            functions.push(store(&format!("STORE_{name}"), acc, &b.batch));
+        }
+        functions.push(Function::new("SCORE", codegen::attention_score(&b.scores)));
+        launch(&Launch {
+            kernel: if gradients.len() == 2 { "dkdv" } else { "dq" },
+            tensors: &tensors,
+            functions: &functions,
+            sizes: [b.batch.iter().product(), b.sq, b.sk, b.h, b.hv],
+            causal: b.causal,
+            scale: b.ds_scale,
+            config: &tiles(b.h, b.hv, b.dtype),
+        })?;
+    }
+    for (t, w) in given.iter().zip(&written) {
+        if t.data_ptr() != w.data_ptr() {
+            copy(t, w)?;
+        }
+    }
+    Ok(())
+}
+
+/// Autotuning candidates for flash-attention steps.
+pub(super) struct Tiles;
+
+impl Kernels for Tiles {
+    type Config = AttentionConfig;
+
+    /// Every attention config for an attention step, none otherwise.
+    fn configs(&self, step: &Step) -> Vec<AttentionConfig> {
+        match is_attention(&step.primitive) {
+            true => ATTENTION_CONFIGS.to_vec(),
+            false => Vec::new(),
+        }
+    }
+
+    /// A launch of `step` with `config`.
+    fn build(&mut self, _: &Step, config: AttentionConfig) -> Tuned {
+        let run: Run = Box::new(move |step, inputs, out, outs| {
+            attention(step, inputs, out, outs, Some(&config))
+        });
+        Tuned::new(format!("{config:?}"), run)
+    }
+}

@@ -335,10 +335,50 @@ fn triton_loop(
     .map_err(|e| e.to_string())
 }
 
+/// Launches one of lumen's Triton flash-attention kernels (`launch.kernel`) with its tile config.
+fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
+    let config = launch.config;
+    crate::kernels::launched::launched("flash_attention", || {
+        let template = format!(
+            "# @triton.jit: lumen/kernels/attention/triton.py's {} kernel, BLOCK_M={} BLOCK_N={} stages={} warps={}\n",
+            launch.kernel, config.block_m, config.block_n, config.stages, config.warps
+        );
+        Some(triton_code(&template, launch.functions))
+    });
+    let device = launch
+        .tensors
+        .iter()
+        .flatten()
+        .next()
+        .ok_or("an attention reads tensors")?;
+    current(device);
+    Python::attach(|py| {
+        let tensors: Vec<Option<PyTensor>> = launch
+            .tensors
+            .iter()
+            .map(|t| t.as_ref().map(|t| PyTensor::wrap(t.clone())))
+            .collect();
+        py.import("lumen.kernels.attention.triton")?
+            .getattr("attention")?
+            .call1((
+                launch.kernel,
+                tensors,
+                triton_functions(launch.functions),
+                launch.sizes,
+                launch.causal,
+                launch.scale,
+                (config.block_m, config.block_n, config.stages, config.warps),
+            ))
+            .map(|_| ())
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// Registers the Triton launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     super::triton::set_gemm(triton_gemm);
     super::triton::set_loop(triton_loop);
+    super::triton::set_attention(triton_attention);
     m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_kernel_source, m)?)?;

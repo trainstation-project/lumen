@@ -84,7 +84,7 @@ def _ids(cases):
 )
 def test_flash_attention(device, case, dtype, triton_on_cuda):
     """F.flash_attention agrees with attention in float64, on
-    the CPU (as traced) and on MPS (one flash-attention kernel)."""
+    the CPU (as traced) and on MPS and CUDA (one flash-attention kernel)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
     (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv))
 
@@ -97,8 +97,8 @@ def test_flash_attention(device, case, dtype, triton_on_cuda):
     np.testing.assert_allclose(
         lumen.to_numpy(out.to(dtype="float32")), reference(*arrays, causal=causal), rtol=TOL[dtype], atol=TOL[dtype]
     )
-    if device == "mps":
-        assert steps(f, q, k, v) == ["flash_attention"]
+    if device in ("mps", "cuda"):
+        assert steps(f, q, k, v, device=device) == ["flash_attention"]
 
 
 DECODE_CASES = [
@@ -118,7 +118,7 @@ DECODE_CASES = [
 )
 def test_attention_decode(device, case, dtype, triton_on_cuda):
     """Decode attention over a KV cache agrees with causal attention over its first `start + Sq` rows,
-    for several cache positions, and is one kernel on MPS."""
+    for several cache positions, and is one kernel on MPS and CUDA."""
     b, sq, sk, n, nkv, h = case
     (q, k, v), arrays = tensors(device, dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, h))
     q_, k_, v_ = arrays
@@ -135,14 +135,14 @@ def test_attention_decode(device, case, dtype, triton_on_cuda):
         seen = start + sq
         want = reference(q_, k_[:, :seen], v_[:, :seen], causal=True)
         np.testing.assert_allclose(lumen.to_numpy(out.to(dtype="float32")), want, rtol=TOL[dtype], atol=TOL[dtype])
-    if device == "mps":
-        assert steps(f, q, k, v, pos) == ["flash_attention"]
+    if device in ("mps", "cuda"):
+        assert steps(f, q, k, v, pos, device=device) == ["flash_attention"]
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
     """With ``flash_attention`` off, attention runs as traced (scores in
-    memory, several kernels); with it on (the default), one kernel on MPS,
+    memory, several kernels); with it on (the default), one kernel,
     agreeing to rounding."""
     (q, k, v), _ = tensors(device, "float16", (1, 64, 4, 32), (1, 64, 2, 32), (1, 64, 2, 32))
 
@@ -152,6 +152,7 @@ def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
 
     config = lumen.config.compiler.of(device)
     assert config.flash_attention is True
+    assert steps(f, q, k, v, device=device) == ["flash_attention"]
     flash = lumen.to_numpy(lumen.compile(f)(q, k, v).to(dtype="float32").to("cpu"))
     try:
         config.flash_attention = False
@@ -175,21 +176,19 @@ def _written(q, k, v):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_attention_written_out_is_one_kernel(device, triton_on_cuda):
-    """Attention written out (``_written``) is matched too on MPS: one
-    kernel, agreeing with the CPU; at a model's size too."""
+    """Attention written out (``_written``) is matched too: one kernel,
+    agreeing with the CPU; at a model's size too."""
     (q, k, v), arrays = tensors(device, "bfloat16", (2, 4, 24, 16), (2, 2, 24, 16), (2, 4, 24, 16))
-    if device == "mps":
-        assert steps(_written, q, k, v) == ["flash_attention"]
+    assert steps(_written, q, k, v, device=device) == ["flash_attention"]
     got = lumen.to_numpy(lumen.compile(_written)(q, k, v).to(dtype="float32").to("cpu"))
     cpu = [lumen.from_numpy(a).to(dtype="bfloat16") for a in arrays]
     want = lumen.to_numpy(lumen.compile(_written, device="cpu")(*cpu).to(dtype="float32"))
     np.testing.assert_allclose(got, want, rtol=3e-2, atol=3e-2)
-    if device == "mps":
-        big = [
-            lumen.empty(s, dtype="bfloat16", device="meta")
-            for s in ([2, 32, 1024, 128], [2, 8, 1024, 128], [2, 32, 1024, 128])
-        ]
-        assert steps(_written, *big) == ["flash_attention"]
+    big = [
+        lumen.empty(s, dtype="bfloat16", device="meta")
+        for s in ([2, 32, 1024, 128], [2, 8, 1024, 128], [2, 32, 1024, 128])
+    ]
+    assert steps(_written, *big, device=device) == ["flash_attention"]
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
@@ -319,11 +318,14 @@ BACKWARD_CASES = [
 ]
 
 
-def backward_kernels(h, hv, dtype, deterministic=False):
-    """An attention backward's kernels: one adding dQ atomically, if its
-    blocks fit in threadgroup memory (codegen.rs's
-    ``backward_block_with_dq``) and not ``deterministic``; else two."""
+def backward_kernels(h, hv, dtype, deterministic=False, device="mps"):
+    """An attention backward's kernels: on MPS one adding dQ atomically, if
+    its blocks fit in threadgroup memory (codegen.rs's
+    ``backward_block_with_dq``) and not ``deterministic``; else (and on
+    CUDA) two."""
     t = {"float32": 4, "bfloat16": 2}[dtype]
+    if device == "cuda":
+        return ["flash_attention_backward(dk, dv)", "flash_attention_backward(dq)"]
     fits = any(n * (h + hv) * t + 8 * n + 64 * h * t + 64 * n * t <= 28 << 10 for n in (32, 16))
     if fits and not deterministic:
         return ["flash_attention_backward(dk, dv, dq)"]
@@ -339,11 +341,11 @@ def backward_kernels(h, hv, dtype, deterministic=False):
     ids=[f"mps-{i}" for i in _ids(BACKWARD_CASES)] + [f"cuda-{i}" for i in _ids(BACKWARD_CASES)],
 )
 def test_attention_backward_is_flash_attention(device, case, dtype, deterministic, triton_on_cuda):
-    """The gradient of F.flash_attention on MPS: the forward one
-    flash-attention kernel (writing each row's log-sum-exp too), the
-    backward one adding dQ atomically by its dK and dV kernel (where its
-    blocks fit), or two (dK and dV, then dQ; ``deterministic``: the same
-    bits each run), recomputing the probabilities; agreeing with the CPU's
+    """The gradient of F.flash_attention: the forward one flash-attention
+    kernel (writing each row's log-sum-exp too), the backward on MPS one
+    adding dQ atomically by its dK and dV kernel (where its blocks fit), or
+    two (dK and dV, then dQ; ``deterministic``: the same bits each run; on
+    CUDA always), recomputing the probabilities; agreeing with the CPU's
     (the same program, as traced)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
     shapes = (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv), (b, sq, n, hv)
@@ -357,10 +359,9 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
     if device == "mps":
         lumen.config.compiler.mps.deterministic = deterministic
     try:
-        if device == "mps":
-            labels = steps(grad, q, k, v, w)
-            for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic)]:
-                assert kernel in labels, labels
+        labels = steps(grad, q, k, v, w, device=device)
+        for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic, device)]:
+            assert kernel in labels, labels
         compiled = lumen.compile(grad)
         got = [t.to("cpu") for t in compiled(q, k, v, w)]
         if deterministic:
@@ -455,7 +456,7 @@ def test_written_attention_trains_with_flash_attention():
 @pytest.mark.parametrize("scale", [1.0, 0.125], ids=["unscaled", "scaled"])
 def test_written_attention_backward_is_flash_attention(scale, device, triton_on_cuda):
     """Attention written out trains with flash attention's backward kernels
-    on MPS whether its scores are scaled or not (``* 1`` simplified away, dS
+    whether its scores are scaled or not (``* 1`` simplified away, dS
     has no scale to multiply by: 1); the gradients the CPU's."""
     (q, k, v), arrays = tensors(device, "float32", (2, 40, 32), (2, 40, 32), (2, 40, 32))
 
@@ -473,11 +474,10 @@ def test_written_attention_backward_is_flash_attention(scale, device, triton_on_
         )
 
     grad = lumen.grad(loss, (0, 1, 2))
-    if device == "mps":
-        labels = steps(grad, q, k, v)
-        kernels = [label.split(" → ")[0] for label in labels]
-        for kernel in ["flash_attention", *backward_kernels(32, 32, "float32")]:
-            assert kernel in kernels, labels
+    labels = steps(grad, q, k, v, device=device)
+    kernels = [label.split(" → ")[0] for label in labels]
+    for kernel in ["flash_attention", *backward_kernels(32, 32, "float32", device=device)]:
+        assert kernel in kernels, labels
     got = lumen.compile(grad)(q, k, v)
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
     for g, w in zip(got, want):
