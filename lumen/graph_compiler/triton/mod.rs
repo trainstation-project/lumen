@@ -1,6 +1,7 @@
 //! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
 //! through Triton kernels launched from Python.
 
+mod attention;
 mod fusion;
 mod gemm;
 mod horizontal;
@@ -11,6 +12,9 @@ use std::sync::OnceLock;
 
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::triton::Config;
+use attention::{FlashAttentionBackward, Tiles};
+#[cfg(feature = "python")]
+pub(crate) use attention::{Launch, set_attention};
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
@@ -20,6 +24,7 @@ use split_k::SplitK;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::clamp_indices::ClampIndices;
+use super::common::flash_attention::FlashAttention;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
@@ -161,6 +166,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
             },
         });
     }
+    if config.flash_attention {
+        pipeline.add(FlashAttention).add(FlashAttentionBackward);
+    }
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
@@ -215,6 +223,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
             timer: Events { device },
         };
         tuner.tune(&mut gemm::Gemms, &mut plan)?;
+        tuner.tune(&mut Tiles, &mut plan)?;
         tuner.tune(&mut Loops, &mut plan)?;
     }
     Ok(plan)
@@ -362,6 +371,7 @@ pub(crate) fn run(
     outs: &[Tensor],
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
+        (p, _) if attention::is_attention(p) => attention::run(step, inputs, out, outs),
         _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
         #[cfg(lumen_cuda_linked)]
         (
@@ -524,10 +534,11 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
 
 /// Whether the Triton kernel for `step` reads strided inputs directly.
 pub(crate) fn reads_strided(step: &Step) -> bool {
-    matches!(
-        step.primitive,
-        Primitive::DotGeneral { .. } | Primitive::Fusion { .. } | Primitive::Cumsum { .. }
-    )
+    !attention::is_attention(&step.primitive)
+        && matches!(
+            step.primitive,
+            Primitive::DotGeneral { .. } | Primitive::Fusion { .. } | Primitive::Cumsum { .. }
+        )
 }
 
 /// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits.

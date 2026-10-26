@@ -14,12 +14,17 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
+mod attention;
 mod config;
 mod gemm;
 mod indexing;
 mod reduction;
 
-pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
+pub(crate) use attention::{attention_load, attention_score, attention_store};
+pub(crate) use config::{
+    ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED,
+    UNTUNED_LOOP, untuned_attention,
+};
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
