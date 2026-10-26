@@ -7,14 +7,16 @@ use std::sync::OnceLock;
 pub(crate) use crate::codegen::triton::Config;
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
-pub(crate) use gemm::set_gemm;
+pub(crate) use gemm::{Epilogue, set_gemm};
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::clamp_indices::ClampIndices;
+use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
+use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
-use super::pass::{GraphModule, Pipeline};
+use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
-use super::{Options, Plan, cpu};
+use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
@@ -78,22 +80,95 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
+struct TritonModule<'a> {
+    graph: Graph,
+    options: &'a Options,
+    packed: Packs,
+    interleaved: Vec<Vec<usize>>,
+}
+
+impl Module for TritonModule<'_> {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn graph_mut(&mut self) -> &mut Graph {
+        &mut self.graph
+    }
+
+    fn options(&self) -> &Options {
+        self.options
+    }
+
+    fn config(&self) -> &dyn CompilerConfig {
+        &self.options.config.cuda
+    }
+}
+
+impl Blocks for TritonModule<'_> {
+    fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>) {
+        (&mut self.packed, &mut self.interleaved)
+    }
+}
+
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
-    let mut module = GraphModule {
+    let config = &options.config.cuda;
+    let mut module = TritonModule {
         graph: graph.clone(),
-        device,
         options,
+        packed: Vec::new(),
+        interleaved: Vec::new(),
     };
     let mut pipeline = Pipeline::new("triton");
-    if options.config.cuda.safe_kernels {
+    if config.merge_dots {
+        pipeline.add(MergeDotsBackward).add(MergeDots {
+            target: Target {
+                reads: codegen::fusible,
+                views: true,
+                lanes: 1,
+                columns: 8,
+            },
+        });
+    }
+    if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
     pipeline
         .add(Simplify { matched: true })
         .add(LoopFusion)
         .run(&mut module)?;
-    let mut plan = cpu::plan(&module.graph, device, options);
+    let TritonModule {
+        graph: fused,
+        packed,
+        interleaved,
+        ..
+    } = module;
+    let parameters = options.parameters.clone().map(|mut p| {
+        p.resize(fused.inputs().len(), true);
+        p
+    });
+    let first_block = fused.inputs().len() - packed.len();
+    let blocks = packed
+        .iter()
+        .enumerate()
+        .map(|(k, (members, _))| (first_block + k, members.clone()))
+        .collect();
+    let mut plan = Plan::compile_with(
+        &fused,
+        &PlanOptions {
+            scratch: None,
+            donate: options.donate.clone(),
+            donate_into: options.donate_into.clone(),
+            parameters,
+            scalars: positions(&options.scalars),
+            memory_limit: config.memory_limit(),
+            blocks,
+            layout: None,
+        },
+    );
+    plan.packed = packed;
+    plan.interleaved = interleaved;
     let kernels = plan.steps().iter().map(loop_kernel);
     plan.triton = Some(kernels.collect());
     if options.config.cuda.autotune {
@@ -179,7 +254,7 @@ struct Events {
 }
 
 impl Timer for Events {
-    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor);
+    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor, Vec<Tensor>);
 
     fn device(&self) -> Device {
         self.device
@@ -204,16 +279,21 @@ impl Timer for Events {
             Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
             _ => zeros(&step.output.1, self.device),
         };
-        Ok(Some((loop_kernel(step), inputs, out)))
+        let outs = step
+            .extra_outputs
+            .iter()
+            .map(|(_, ty)| zeros(ty, self.device))
+            .collect();
+        Ok(Some((loop_kernel(step), inputs, out, outs)))
     }
 
     fn run(
         &self,
-        (kernel, inputs, out): &Self::Buffers,
+        (kernel, inputs, out, outs): &Self::Buffers,
         step: &Step,
         _: usize,
     ) -> Result<(), String> {
-        run(kernel.as_ref(), step, inputs, out)
+        run(kernel.as_ref(), step, inputs, out, outs)
     }
 }
 
@@ -222,9 +302,10 @@ pub(crate) fn run(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
+    outs: &[Tensor],
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
-        _ if gemm::is_gemm(step) => gemm::run(step, inputs, out),
+        _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
         (
             Primitive::Fusion { .. }
             | Primitive::Cumsum { .. }

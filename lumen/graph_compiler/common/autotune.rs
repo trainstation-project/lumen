@@ -96,15 +96,22 @@ impl<T: Timer> Autotuner<T> {
             };
             let mut reps = vec![0; candidates.len()];
             let mut seconds = vec![f64::INFINITY; candidates.len()];
+            let mut runs = vec![true; candidates.len()];
             for _ in 0..PASSES {
                 for (k, candidate) in candidates.iter().enumerate() {
                     trial.tuned = Some(candidate.clone());
-                    if reps[k] == 0 {
-                        let warm = time(&self.timer, &buffers, &trial, 1)?;
-                        reps[k] =
-                            ((BUDGET_SECONDS / warm) as usize).clamp(*REPS.start(), *REPS.end());
+                    if reps[k] == 0 && runs[k] {
+                        match time(&self.timer, &buffers, &trial, 1) {
+                            Ok(warm) => {
+                                reps[k] = ((BUDGET_SECONDS / warm) as usize)
+                                    .clamp(*REPS.start(), *REPS.end())
+                            }
+                            Err(_) => runs[k] = false,
+                        }
                     }
-                    seconds[k] = seconds[k].min(time(&self.timer, &buffers, &trial, reps[k])?);
+                    if runs[k] {
+                        seconds[k] = seconds[k].min(time(&self.timer, &buffers, &trial, reps[k])?);
+                    }
                 }
             }
             let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));

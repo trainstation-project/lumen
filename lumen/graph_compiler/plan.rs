@@ -1194,7 +1194,8 @@ impl Plan {
                         })
                         .collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
-                    super::triton::run(kernel, step, &inputs, &view(&step.output))?;
+                    let outs: Vec<Tensor> = step.extra_outputs.iter().map(view).collect();
+                    super::triton::run(kernel, step, &inputs, &view(&step.output), &outs)?;
                 }
                 _ => {
                     let _ = scratch;
@@ -1242,6 +1243,9 @@ impl Plan {
                 let ty = &outputs[k].1;
                 match executor {
                     _ if !src.is_contiguous() => {
+                        out.copy_(src)?;
+                    }
+                    Device::Cuda(_) => {
                         out.copy_(src)?;
                     }
                     #[cfg(lumen_tpu_linked)]

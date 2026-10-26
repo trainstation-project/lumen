@@ -5,7 +5,12 @@ pub(crate) fn members(group: &[Option<usize>], root: usize) -> Vec<usize> {
     (0..=root).filter(|&j| group[j] == Some(root)).collect()
 }
 
-pub(crate) fn body(graph: &Graph, members: &[usize], root: usize) -> (Graph, Vec<Var>) {
+pub(crate) fn body(
+    graph: &Graph,
+    members: &[usize],
+    root: usize,
+    extra: &[Var],
+) -> (Graph, Vec<Var>) {
     let nodes = graph.nodes();
     let made: Vec<Var> = members.iter().map(|&j| nodes[j].output).collect();
     let mut reads: Vec<Var> = Vec::new();
@@ -27,8 +32,11 @@ pub(crate) fn body(graph: &Graph, members: &[usize], root: usize) -> (Graph, Vec
             .apply(nodes[j].primitive.clone(), &ins)
             .expect("a member of the loop");
     }
-    body.set_outputs(&[within[nodes[root].output]])
-        .expect("the loop's value");
+    let outputs: Vec<Var> = std::iter::once(nodes[root].output)
+        .chain(extra.iter().copied())
+        .map(|v| within[v])
+        .collect();
+    body.set_outputs(&outputs).expect("the loop's values");
     (body, reads)
 }
 
@@ -36,6 +44,7 @@ pub(crate) fn fused(
     graph: &Graph,
     group: &[Option<usize>],
     kind: impl Fn(usize, &[usize]) -> (&'static str, usize),
+    extra: impl Fn(usize) -> Vec<Var>,
 ) -> Graph {
     let nodes = graph.nodes();
     let mut out = Graph::new();
@@ -57,7 +66,8 @@ pub(crate) fn fused(
             }
             Some(g) if g == i => {
                 let members = members(group, i);
-                let (body, reads) = body(graph, &members, i);
+                let extra = extra(i);
+                let (body, reads) = body(graph, &members, i, &extra);
                 let label = label(graph, &producer, &members);
                 let (name, origin) = kind(i, &members);
                 out.set_origin(&nodes[origin]);
@@ -72,6 +82,15 @@ pub(crate) fn fused(
                         &reads,
                     )
                     .expect("a fusion typed as its root");
+                for (k, &v) in extra.iter().enumerate() {
+                    let ty = graph.type_of(v).clone();
+                    map[v] = out
+                        .apply(
+                            Primitive::FusionOutput { index: k + 1, ty },
+                            &[map[node.output]],
+                        )
+                        .expect("the fusion's output");
+                }
             }
             Some(_) => {}
         }

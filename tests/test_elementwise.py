@@ -529,8 +529,8 @@ def test_narrow_dtypes_through_numpy(dtype):
 
 
 @pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_elementwise_primitives_agree_with_numpy(device, shape):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
     x, y = tensor(a, device=device), tensor(b, device=device)

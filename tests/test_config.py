@@ -5,6 +5,9 @@ import lumen
 import lumen.functional as F
 from lumen.config._C import CompilerConfig
 
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+
 
 @pytest.fixture
 def compiler():
@@ -160,18 +163,20 @@ def _read_early_and_late(a, w):
     return F.sum(F.matmul(e, w, "float32", "float32") * h, -1)
 
 
-@pytest.mark.mps
-def test_dump_to_writes_each_pass(compiler, tmp_path):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
     ``--xla_dump_to``); the MPS pipeline's last passes generate the
-    kernels, then place the slices read in place."""
+    kernels, then place the slices read in place; the Triton pipeline's
+    fuses loops."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
-    lumen.config.compiler.cpu.dump_to = compiler.dump_to = str(tmp_path)
-    devices = ["cpu"] + (["mps"] if lumen.mps.is_available() else [])
-    for device in devices:
-        lumen.graph_compiler.Plan(graph, device)
+    lumen.config.compiler.cpu.dump_to = lumen.config.compiler.of(device).dump_to = str(tmp_path)
+    available = getattr(lumen, device).is_available()
+    devices = ["cpu"] + ([device] if available else [])
+    for d in devices:
+        lumen.graph_compiler.Plan(graph, d)
     steps = {p.name.split(".", 1)[1] for p in tmp_path.iterdir()}
     assert {"frontend.00.input.txt", "frontend.01.cse.txt", "frontend.02.simplify.txt"} <= steps
     assert "cpu.01.simplify.txt" in steps
@@ -182,13 +187,16 @@ def test_dump_to_writes_each_pass(compiler, tmp_path):
         assert (
             "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-2]))).read_text()
         )
+    if "cuda" in devices:
+        assert any(s.startswith("triton.") and ".loop_fusion." in s for s in steps), steps
     lumen.config.compiler.reset()
     count = len(list(tmp_path.iterdir()))
     lumen.graph_compiler.Plan(graph, "cpu")
     assert len(list(tmp_path.iterdir())) == count
 
 
-def test_memory_limit_recomputes(compiler):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
     """Under ``memory_limit``, a value read early and late is computed again
     for its late reader rather than kept alive (rematerialization): ``h``,
     alive with ``b``, ``b @ w`` and ``e`` where four values are, is
@@ -198,24 +206,29 @@ def test_memory_limit_recomputes(compiler):
 
     def plan():
         try:
-            return lumen.graph_compiler.Plan(lumen.make_graph(_read_early_and_late)(a, w), "mps")
+            return lumen.graph_compiler.Plan(lumen.make_graph(_read_early_and_late)(a, w), device)
         except RuntimeError as e:
             pytest.skip(str(e))
 
     def dots(p):
         return sum("dot_general" in s["label"] for s in p.steps())
 
+    config = lumen.config.compiler.of(device)
     kept = plan()
-    compiler.memory_limit = 1
+    config.memory_limit = 1
     recomputed = plan()
-    assert recomputed.workspace_bytes == kept.workspace_bytes - 512 * 512 * 4
-    assert dots(recomputed) == dots(kept) + 1
+    if device == "mps":
+        assert recomputed.workspace_bytes == kept.workspace_bytes - 512 * 512 * 4
+        assert dots(recomputed) == dots(kept) + 1
     rng = np.random.default_rng(0)
-    a, w = (lumen.from_numpy(rng.standard_normal((512, 512)).astype(np.float32) / 16).to("mps") for _ in range(2))
-    got = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w))
-    compiler.reset()
-    want = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w))
-    np.testing.assert_array_equal(got, want)
+    a, w = (lumen.from_numpy(rng.standard_normal((512, 512)).astype(np.float32) / 16).to(device) for _ in range(2))
+    got = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w).to("cpu"))
+    config.memory_limit = 0
+    want = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w).to("cpu"))
+    if device == "mps":
+        np.testing.assert_array_equal(got, want)
+    else:
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5 * np.abs(want).max())
 
 
 @pytest.mark.mps

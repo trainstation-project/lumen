@@ -5,12 +5,9 @@ import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = [
-    "cpu",
-    pytest.param("mps", marks=pytest.mark.mps),
-    pytest.param("cuda", marks=pytest.mark.cuda),
-    pytest.param("tpu", marks=pytest.mark.tpu),
-]
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+DEVICES = ["cpu", MPS, CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
 
 
 @pytest.fixture(autouse=True)
@@ -56,32 +53,32 @@ def test_gather(device, index_dtype, dtype, axis):
         np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("axis", [0, 1, 2])
-def test_gather_fuses(index_dtype, axis):
+def test_gather_fuses(device, index_dtype, axis):
     """A gather computes its elements in the kernel reading them (a loop
     fusion's, or a row kernel's: an embedding's lookup, its positions added,
     then normalized), reading the operand at each picked (clamped) index:
     no kernel of its own; the values the CPU's."""
     rng = np.random.default_rng(3)
     x = rng.standard_normal((4, 5, 3)).astype(np.float32)
-    xt, ids = _tensor(x, "mps"), _tensor(IDS.astype(index_dtype), "mps")
+    xt, ids = _tensor(x, device), _tensor(IDS.astype(index_dtype), device)
 
     def f(x, i):
         g = prims.gather(x * 2.0, i, axis) + 1.0
         return g, F.rms_norm(g, g.shape[-1])
 
-    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(xt, ids), "mps").steps()]
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(xt, ids), device).steps()]
     assert "gather" not in labels and any("gather" in label for label in labels), labels
     got = lumen.compile(f)(xt, ids)
     want = lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(IDS.astype(index_dtype)))
     for g, w in zip(got, want):
-        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.mps
-def test_gather_of_a_table_of_as_many_elements_as_rows():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_gather_of_a_table_of_as_many_elements_as_rows(device):
     """A lookup in a row kernel (an embedding, its positions added, then
     normalized) whose table has as many elements as the kernel has rows
     (16 x 64 entries, 32 x 32 tokens): read at its ids, not as a value a
@@ -98,11 +95,11 @@ def test_gather_of_a_table_of_as_many_elements_as_rows():
 
     grad = lumen.value_and_grad(loss, (0, 1))
     args = (table, positions, ids, c)
-    got = lumen.compile(grad)(*(_tensor(a, "mps") for a in args))
+    got = lumen.compile(grad)(*(_tensor(a, device) for a in args))
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in args))
     np.testing.assert_allclose(got[0].item(), want[0].item(), rtol=1e-5)
     for g, w in zip(got[1], want[1]):
-        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -159,16 +156,18 @@ def test_gather_checks_its_operands():
         lumen.make_graph(lambda x, i, u: prims.scatter_add(x, i, u, 0))(m([4, 6]), m([3], "int64"), m([3, 5]))
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("width, rows", [(64, 5), (7, 5)])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
-def test_scatter_add_on_mps_is_deterministic(dtype, width, rows):
-    """On MPS a scatter_add adds each element's updates in index order (a
+def test_scatter_add_is_deterministic(device, dtype, width, rows):
+    """A scatter_add adds each element's updates in index order (on MPS a
     thread an element scanning the indices, its SIMD group's lanes 32 at a
     time when they share a row: rows of 64; else one at a time: rows of 7;
-    of many rows and updates, a thread a column; no atomics): the CPU's result bit for bit, for any dtype
-    (bfloat16 too, each sum rounded as the reference rounds it), the same
-    each run; a lookup's gradient too (deterministic training)."""
+    of many rows and updates, a thread a column; on Triton a lane a column
+    walking the updates in order; no atomics): the CPU's result bit for bit,
+    for any dtype (bfloat16 too, each sum rounded as the reference rounds
+    it), the same each run; a lookup's gradient too (deterministic
+    training)."""
     rng = np.random.default_rng(4)
     x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
     ids = rng.integers(0, rows, (300,))
@@ -178,9 +177,9 @@ def test_scatter_add_on_mps_is_deterministic(dtype, width, rows):
         _tensor(a, device, dtype) if a.dtype == np.float32 else _tensor(a, device) for a in (x, ids, u)
     ]  # noqa: E731
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*on("cpu")).to(dtype="float32"))
-    mps = lumen.compile(f, device="mps")
+    compiled = lumen.compile(f, device=device)
     for _ in range(3):
-        got = lumen.to_numpy(mps(*on("mps")).to(dtype="float32"))
+        got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
         np.testing.assert_array_equal(got, want)
 
 

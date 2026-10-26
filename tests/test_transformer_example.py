@@ -4,6 +4,8 @@ import pytest
 import lumen
 import lumen.functional as F
 
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 16, 32, 64, 4, 256, 2
 BATCH, PASSES, LR = 8, 3, 3e-3
 
@@ -239,8 +241,8 @@ def _logits(w, ids):
     return _matmul(x, w["head"], out=lambda a: a)
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
-def test_transformer_forward_matches_numpy(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_transformer_forward_matches_numpy(device, triton_on_cuda):
     """The logits are the NumPy model's, to bfloat16's precision (the
     matmuls' and attention's accumulation orders differ); the predictions
     the same wherever two logits are not within that."""
@@ -259,9 +261,9 @@ def test_transformer_forward_matches_numpy(device):
     np.testing.assert_array_equal(got.argmax(-1)[clear], want.argmax(-1)[clear])
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("chunk", [None, 64, 8])
-def test_transformer_train_step_matches_cpu(chunk):
+def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
     """One training step (``PASSES`` accumulated backward passes, then
     AdamW) on MPS and on lumen's CPU backend, its cross entropy's gradient
     whole or a chunk of rows at a time
@@ -279,26 +281,25 @@ def test_transformer_train_step_matches_cpu(chunk):
     two 2% (at most 3.4%) from each other: rounded at different places (a
     fused kernel's, flash attention's), not wrongly."""
     results = {}
-    lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = (
-        lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size
-    ) = chunk
+    configs = (lumen.config.compiler.cpu, lumen.config.compiler.of(device))
+    for config in configs:
+        config.fused_linear_cross_entropy_chunk_size = chunk
     try:
-        for device in ("cpu", "mps"):
+        for on in ("cpu", device):
             model = _model()
             opt = AdamW(model.parameters(), lr=LR, weight_decay=0.0)
             ids_meta = meta(BATCH, SEQ, dtype="int64")
-            f = _compiled(train_step, device, model, opt, ids_meta, ids_meta)
+            f = _compiled(train_step, on, model, opt, ids_meta, ids_meta)
             model.load_state_dict({name: lumen.from_numpy(v) for name, v in _weights(model).items()})
             ids = _ids()
             targets = (ids + 1) % VOCAB
             loss = float(lumen.to_numpy(f(model, opt, lumen.from_numpy(ids), lumen.from_numpy(targets))))
-            state = {name: lumen.to_numpy(t._placed(device)) for name, t in opt.named_parameters()}
-            results[device] = loss, state
+            state = {name: lumen.to_numpy(t._placed(on).to("cpu")) for name, t in opt.named_parameters()}
+            results[on] = loss, state
     finally:
-        lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = (
-            lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size
-        ) = None
-    (cpu_loss, cpu), (mps_loss, mps) = results["cpu"], results["mps"]
+        for config in configs:
+            config.fused_linear_cross_entropy_chunk_size = None
+    (cpu_loss, cpu), (mps_loss, mps) = results["cpu"], results[device]
     assert mps_loss == pytest.approx(cpu_loss, rel=1e-2), (mps_loss, cpu_loss)
     assert cpu.keys() == mps.keys()
     for name in cpu:
@@ -314,8 +315,8 @@ def test_transformer_train_step_matches_cpu(chunk):
             assert error <= 5e-2, (name, error)
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
-def test_transformer_optimizer_scalars_update(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_transformer_optimizer_scalars_update(device, triton_on_cuda):
     """The optimizer's scalars across training steps: its step count ``t``
     (an int field, ``self.t = self.t + 1`` in the step) is written back
     after each step as an int, computed on the host (no read back from the
