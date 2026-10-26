@@ -136,7 +136,7 @@ fn build_mps_shim() {
 
 const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/kernels/mps/kernels.metal",
-    "lumen/kernels/reduce/mps/kernels.metal",
+    "lumen/kernels/reduction/mps/kernels.metal",
     "lumen/kernels/scan/mps/kernels.metal",
     "lumen/kernels/dot_general/mps/integer/matmul.metal",
     "lumen/kernels/dot_general/mps/integer/matmul_wide.metal",

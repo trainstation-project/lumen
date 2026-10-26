@@ -12,7 +12,7 @@ pub mod layout;
 pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod reduce;
+pub mod reduction;
 pub mod reference;
 pub(crate) mod row;
 pub mod scan;

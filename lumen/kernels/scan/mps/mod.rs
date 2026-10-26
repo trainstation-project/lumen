@@ -1,7 +1,7 @@
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, launch, u32_arg, u64_arg};
-use crate::kernels::reduce::mps::kernel_dtype;
+use crate::kernels::reduction::mps::kernel_dtype;
 use crate::{DType, Tensor};
 
 const ROW_THREADS: usize = 64;

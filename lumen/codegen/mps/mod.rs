@@ -11,7 +11,7 @@ use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
 use crate::graph_compiler::mps::fusion;
 use crate::kernels::mps::element_arg;
-use crate::kernels::reduce::mps as reduce;
+use crate::kernels::reduction::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
