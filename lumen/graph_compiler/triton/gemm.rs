@@ -15,9 +15,15 @@ pub type Gemm = fn(
     accum_dtype: DType,
     config: &Config,
     functions: &[Function],
-    extra: &[Tensor],
-    scalars: &[usize],
+    epilogue: &Epilogue,
 ) -> Result<(), String>;
+
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub struct Epilogue<'a> {
+    pub tensors: &'a [Tensor],
+    pub scalars: &'a [usize],
+    pub flags: codegen::EpilogueFlags,
+}
 
 static GEMM: OnceLock<Gemm> = OnceLock::new();
 
@@ -30,7 +36,13 @@ fn layout(t: &Tensor) -> (&[usize], &[usize]) {
     (t.shape(), t.strides())
 }
 
-fn gemm(step: &Step, inputs: &[Tensor], out: &Tensor, config: &Config) -> Result<(), String> {
+fn gemm(
+    step: &Step,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+    config: &Config,
+) -> Result<(), String> {
     let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
@@ -48,7 +60,15 @@ fn gemm(step: &Step, inputs: &[Tensor], out: &Tensor, config: &Config) -> Result
         ];
         let accum = accum_dtype(&step.primitive);
         let tensors = [&inputs[0], &inputs[1], out];
-        return launch(tensors, code.sizes, accum, config, &functions, &[], &[]);
+        let plain = Epilogue {
+            tensors: &[],
+            scalars: &[],
+            flags: codegen::EpilogueFlags {
+                group: 1,
+                ..codegen::EpilogueFlags::default()
+            },
+        };
+        return launch(tensors, code.sizes, accum, config, &functions, &plain);
     };
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let operand = |k: usize| {
@@ -71,7 +91,8 @@ fn gemm(step: &Step, inputs: &[Tensor], out: &Tensor, config: &Config) -> Result
         .collect();
     let layouts: Vec<_> = inputs.iter().map(layout).collect();
     let [_, rows, _, cols] = code.sizes;
-    let epilogue = codegen::epilogue(body, &by_value, dot, &layouts, layout(out), [rows, cols]);
+    let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
+    let epilogue = codegen::epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]);
     let functions = [
         Function::new("PROLOGUE_A", code.prologue_a),
         Function::new("PROLOGUE_B", code.prologue_b),
@@ -80,9 +101,13 @@ fn gemm(step: &Step, inputs: &[Tensor], out: &Tensor, config: &Config) -> Result
     let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| by_value[k]).collect();
     let accum = accum_dtype(&dot.primitive);
     let tensors = [lhs, rhs, out];
-    launch(
-        tensors, code.sizes, accum, config, &functions, inputs, &scalars,
-    )
+    let extra: Vec<Tensor> = inputs.iter().chain(outs).cloned().collect();
+    let fused = Epilogue {
+        tensors: &extra,
+        scalars: &scalars,
+        flags: codegen::gemm_flags(body, dot),
+    };
+    launch(tensors, code.sizes, accum, config, &functions, &fused)
 }
 
 fn accum_dtype(dot: &Primitive) -> DType {
@@ -100,12 +125,17 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
     }
 }
 
-type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor) -> Result<(), String> + Send + Sync>;
+type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
-pub(crate) fn run(step: &Step, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {
+pub(crate) fn run(
+    step: &Step,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+) -> Result<(), String> {
     match step.launch::<Run>() {
-        Some(run) => run(step, inputs, out),
-        None => gemm(step, inputs, out, &CONFIGS[UNTUNED]),
+        Some(run) => run(step, inputs, out, outs),
+        None => gemm(step, inputs, out, outs, &CONFIGS[UNTUNED]),
     }
 }
 
@@ -122,7 +152,8 @@ impl Kernels for Gemms {
     }
 
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
-        let run: Run = Box::new(move |step, inputs, out| gemm(step, inputs, out, &config));
+        let run: Run =
+            Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, &config));
         Tuned::new(format!("{config:?}"), run)
     }
 }

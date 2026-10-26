@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 pub(crate) use crate::codegen::triton::Config;
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
-pub(crate) use gemm::set_gemm;
+pub(crate) use gemm::{Epilogue, set_gemm};
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::clamp_indices::ClampIndices;
@@ -254,7 +254,7 @@ struct Events {
 }
 
 impl Timer for Events {
-    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor);
+    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor, Vec<Tensor>);
 
     fn device(&self) -> Device {
         self.device
@@ -279,16 +279,21 @@ impl Timer for Events {
             Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
             _ => zeros(&step.output.1, self.device),
         };
-        Ok(Some((loop_kernel(step), inputs, out)))
+        let outs = step
+            .extra_outputs
+            .iter()
+            .map(|(_, ty)| zeros(ty, self.device))
+            .collect();
+        Ok(Some((loop_kernel(step), inputs, out, outs)))
     }
 
     fn run(
         &self,
-        (kernel, inputs, out): &Self::Buffers,
+        (kernel, inputs, out, outs): &Self::Buffers,
         step: &Step,
         _: usize,
     ) -> Result<(), String> {
-        run(kernel.as_ref(), step, inputs, out)
+        run(kernel.as_ref(), step, inputs, out, outs)
     }
 }
 
@@ -297,9 +302,10 @@ pub(crate) fn run(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
+    outs: &[Tensor],
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
-        _ if gemm::is_gemm(step) => gemm::run(step, inputs, out),
+        _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
         (
             Primitive::Fusion { .. }
             | Primitive::Cumsum { .. }

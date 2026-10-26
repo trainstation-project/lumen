@@ -1,6 +1,8 @@
-use crate::codegen::triton::{fusible, pairs};
-use crate::graph::{Graph, Primitive};
+use crate::codegen::regions::gemm_regions;
+use crate::codegen::triton::fusible;
+use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::loops::fused;
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
 pub(super) struct LoopFusion;
@@ -12,12 +14,171 @@ impl<M: Module> CompilerPass<M> for LoopFusion {
 
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let graph = m.graph();
-        *m.graph_mut() = fused(graph, &groups(graph), |root, _| ("loop", root));
+        let (group, extra) = groups(graph);
+        *m.graph_mut() = fused(
+            graph,
+            &group,
+            |root, _| ("loop", root),
+            |root| extra[root].clone(),
+        );
         Ok(())
     }
 }
 
-fn groups(graph: &Graph) -> Vec<Option<usize>> {
+struct Claim {
+    members: Vec<usize>,
+    main: usize,
+    extra: Vec<Var>,
+}
+
+fn claims(graph: &Graph) -> Vec<Claim> {
+    let nodes = graph.nodes();
+    let n = graph.types.len();
+    let mut producer: Vec<Option<usize>> = vec![None; n];
+    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+        for &v in &node.inputs {
+            users[v].push(i);
+        }
+    }
+    let output = |v: Var| graph.outputs().contains(&v);
+    let mut claimed = vec![false; nodes.len()];
+    let mut found = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if !matches!(node.primitive, Primitive::DotGeneral { .. }) || claimed[i] {
+            continue;
+        }
+        let Some(regions) = gemm_regions(graph, node) else {
+            continue;
+        };
+        let mut sets: Vec<Vec<usize>> = regions
+            .iter()
+            .map(|c| {
+                let mut set = Vec::new();
+                for v in c.members() {
+                    let mut k = producer[v].expect("a slice of the dot");
+                    loop {
+                        if !set.contains(&k) {
+                            set.push(k);
+                        }
+                        match producer[nodes[k].inputs[0]] {
+                            Some(p) if p != i => k = p,
+                            _ => break,
+                        }
+                    }
+                }
+                set
+            })
+            .collect();
+        let mut region_of: Vec<Option<usize>> = vec![None; n];
+        for (r, set) in sets.iter().enumerate() {
+            for &k in set {
+                region_of[nodes[k].output] = Some(r);
+            }
+        }
+        let shape = &graph.type_of(node.output).shape;
+        let ends = |sets: &[Vec<usize>]| -> Option<(Vec<usize>, usize)> {
+            let mut ends = Vec::new();
+            for (c, set) in regions.iter().zip(sets) {
+                let size = graph.type_of(node.output).numel() / shape[c.axis] * c.size();
+                let before = ends.len();
+                for &k in set {
+                    let v = nodes[k].output;
+                    if output(v) || users[v].iter().any(|w| !set.contains(w)) {
+                        if graph.type_of(v).numel() != size {
+                            return None;
+                        }
+                        ends.push(k);
+                    }
+                }
+                if ends.len() == before {
+                    return None;
+                }
+            }
+            let main = *ends.iter().max()?;
+            let last = sets.iter().flatten().all(|&k| k <= main);
+            let read_after = ends.iter().all(|&k| {
+                users[nodes[k].output]
+                    .iter()
+                    .all(|&w| w > main || sets.iter().any(|set| set.contains(&w)))
+            });
+            (last && read_after).then_some((ends, main))
+        };
+        let mut best = ends(&sets).map(|e| (sets.clone(), e));
+        let mut depends = vec![false; n];
+        depends[node.output] = true;
+        for (u, un) in nodes.iter().enumerate().skip(i + 1) {
+            depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
+            if region_of[un.output].is_some() {
+                continue;
+            }
+            let mut of: Vec<usize> = un.inputs.iter().filter_map(|&v| region_of[v]).collect();
+            of.sort_unstable();
+            of.dedup();
+            let r = match of.as_slice() {
+                [] => continue,
+                [r] => *r,
+                _ => break,
+            };
+            let step =
+                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+            let reads = un
+                .inputs
+                .iter()
+                .all(|&v| region_of[v] == Some(r) || !depends[v]);
+            if !(fusible(graph, un) && step && reads && !claimed[u]) {
+                break;
+            }
+            sets[r].push(u);
+            region_of[un.output] = Some(r);
+            if let Some(e) = ends(&sets) {
+                best = Some((sets.clone(), e));
+            }
+        }
+        let Some((sets, (ends, main))) = best else {
+            continue;
+        };
+        let mut members: Vec<usize> = std::iter::once(i)
+            .chain(sets.into_iter().flatten())
+            .collect();
+        let mut k = 0;
+        while k < members.len() {
+            for &v in &nodes[members[k]].inputs {
+                let Some(p) = producer[v] else {
+                    continue;
+                };
+                let constant = matches!(
+                    nodes[p].primitive,
+                    Primitive::Full { .. }
+                        | Primitive::Iota { .. }
+                        | Primitive::BroadcastInDim { .. }
+                        | Primitive::Reshape { .. }
+                );
+                let only = !output(v) && users[v].iter().all(|w| members.contains(w));
+                if constant && only && !depends[v] && !claimed[p] && !members.contains(&p) {
+                    members.push(p);
+                }
+            }
+            k += 1;
+        }
+        members.sort_unstable();
+        members.iter().for_each(|&k| claimed[k] = true);
+        let extra = ends
+            .iter()
+            .filter(|&&k| k != main)
+            .map(|&k| nodes[k].output)
+            .collect();
+        found.push(Claim {
+            members,
+            main,
+            extra,
+        });
+    }
+    found
+}
+
+fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
@@ -28,11 +189,21 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         }
     }
     let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut extra: Vec<Vec<Var>> = vec![Vec::new(); nodes.len()];
+    let mut closed = vec![false; nodes.len()];
+    for claim in claims(graph) {
+        claim
+            .members
+            .iter()
+            .for_each(|&k| group[k] = Some(claim.main));
+        closed[claim.main] = true;
+        extra[claim.main] = claim.extra;
+    }
     let mut reduces = vec![false; nodes.len()];
     let mut dots = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate().rev() {
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. });
-        if !fusible(graph, node) && !dot {
+        if group[i].is_some() || (!fusible(graph, node) && !dot) {
             continue;
         }
         let mut joined = match readers[node.output].split_first() {
@@ -44,19 +215,11 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         let operand = readers[node.output]
             .iter()
             .any(|&r| matches!(nodes[r].primitive, Primitive::DotGeneral { .. }));
-        joined = joined.filter(|_| !operand);
+        joined = joined.filter(|&g| !operand && !closed[g]);
         let reduction = reduction(&node.primitive);
         if reduction || dot {
-            let starts = match dot.then(|| pairs(graph, node)).flatten() {
-                Some(members) => members,
-                None => vec![node.output],
-            };
             joined = joined.filter(|&g| {
-                !reduces[g]
-                    && !dots[g]
-                    && starts
-                        .iter()
-                        .all(|&v| epilogue(graph, &readers, &group, v, g))
+                !reduces[g] && !dots[g] && epilogue(graph, &readers, &group, node.output, g)
             });
         }
         if joined.is_none() && (dot || matches!(node.primitive, Primitive::Reshape { .. })) {
@@ -67,7 +230,7 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         reduces[g] |= reduction;
         dots[g] |= dot;
     }
-    group
+    (group, extra)
 }
 
 fn reduction(p: &Primitive) -> bool {

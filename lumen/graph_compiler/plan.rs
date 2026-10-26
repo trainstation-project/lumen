@@ -1194,7 +1194,8 @@ impl Plan {
                         })
                         .collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
-                    super::triton::run(kernel, step, &inputs, &view(&step.output))?;
+                    let outs: Vec<Tensor> = step.extra_outputs.iter().map(view).collect();
+                    super::triton::run(kernel, step, &inputs, &view(&step.output), &outs)?;
                 }
                 _ => {
                     let _ = scratch;

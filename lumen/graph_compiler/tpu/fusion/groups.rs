@@ -84,7 +84,7 @@ pub(super) fn planned(graph: &Graph) -> Groups {
                 .copied()
                 .filter(|&j| indexes(graph, j))
                 .collect();
-            if layouts.is_empty() || plan(&body(graph, &members, root).0, 0).is_ok() {
+            if layouts.is_empty() || plan(&body(graph, &members, root, &[]).0, 0).is_ok() {
                 continue;
             }
             changed = true;

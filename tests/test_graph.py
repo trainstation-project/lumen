@@ -909,8 +909,8 @@ def test_indexing_and_splitting_follow_numpy():
             lumen.compile(fn)(t)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_packed_weights_are_one_matmul(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_packed_weights_are_one_matmul(device, triton_on_cuda):
     """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
     matmul, on MPS the gate its epilogue (its halves a gated pair)."""
     x, w13 = rand(16, 32), rand(32, 128, seed=1)
@@ -930,6 +930,8 @@ def test_packed_weights_are_one_matmul(device):
     steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, device).steps()]
     if device == "mps":
         assert steps == ["dot_general → max → mul"], steps
+    elif device == "cuda":
+        assert len(steps) == 1, steps
     else:
         assert steps.count("dot_general") == 1
 
@@ -1940,6 +1942,53 @@ def test_triton_dots_sharing_an_operand_merge(device, groups, left, step, triton
     for merged, alone in zip(*got):
         assert np.isfinite(alone).all()
         np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize(
+    "make, n",
+    [
+        *[
+            (lambda ws, left, g=g: SharedOperand(ws, g, left), sum(g))
+            for g in ([2], [4], [8], [2, 2], [2, 1], [8, 4, 2, 1])
+        ],
+        (lambda ws, left: Returned(ws, True, left), 4),
+        (lambda ws, left: Returned(ws, False, left), 2),
+    ],
+    ids=["pair", "four", "eight", "two pairs", "pair and one", "eight four two one", "y = Ax + Bx, Cx, Dx", "Cx, Dx"],
+)
+@pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
+def test_triton_merged_regions_fuse(device, make, n, left, triton_on_cuda):
+    """A merged matmul's regions (interleaved groups, plain slices, results
+    returned as they are) run in its GEMM's epilogue on Triton, the weights
+    on either side: one step, each region writing its own output; the
+    values the unmerged program's."""
+    d, m, h = 32, 24, 64
+    params = list(range(1, n + 1))
+    shape = (d, m) if left else (m, d)
+    try:
+        x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    graph = lumen.make_graph(lambda model, x: model(x))(make([meta(h, d) for _ in range(n)], left), meta(*shape))
+    plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
+    assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+    values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.cuda.merge_dots = merge
+            model = make([meta(h, d) for _ in range(n)], left)
+            f = lumen.compile(lambda model, x: model(x), device=device)
+            f(model, meta(*shape))
+            model.load_state_dict(values)
+            out = f(model, x)
+            assert all(t.is_contiguous() for t in out)
+            got.append([lumen.to_numpy(t.to("cpu")) for t in out])
+    finally:
+        lumen.config.compiler.cuda.merge_dots = True
+    for merged, alone in zip(*got):
+        np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
 
 class Returned(lumen.nn.Module):
