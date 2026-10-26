@@ -5,15 +5,24 @@ import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+DEVICES = [
+    "cpu",
+    pytest.param("mps", marks=pytest.mark.mps),
+    pytest.param("cuda", marks=pytest.mark.cuda),
+    pytest.param("tpu", marks=pytest.mark.tpu),
+]
 
 
 @pytest.fixture(autouse=True)
 def safe_kernels():
-    """Each test with its indices clamped (out of range here too)."""
-    lumen.config.compiler.mps.safe_kernels = lumen.config.compiler.tpu.safe_kernels = True
+    """Each test with its indices clamped (out of range here too), CUDA's
+    programs on the Triton backend."""
+    compiler = lumen.config.compiler
+    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = True
+    compiler.cuda.use_triton_backend = True
     yield
-    lumen.config.compiler.mps.safe_kernels = lumen.config.compiler.tpu.safe_kernels = False
+    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = False
+    compiler.cuda.use_triton_backend = False
 
 
 def _tensor(a, device, dtype=None):

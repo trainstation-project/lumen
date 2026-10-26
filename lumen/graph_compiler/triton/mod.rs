@@ -10,6 +10,7 @@ use fusion::LoopFusion;
 pub(crate) use gemm::set_gemm;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
+use super::common::clamp_indices::ClampIndices;
 use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
@@ -84,7 +85,11 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         device,
         options,
     };
-    Pipeline::new("triton")
+    let mut pipeline = Pipeline::new("triton");
+    if options.config.cuda.safe_kernels {
+        pipeline.add(ClampIndices);
+    }
+    pipeline
         .add(Simplify { matched: true })
         .add(LoopFusion)
         .run(&mut module)?;
@@ -126,6 +131,15 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             let (name, source, lanes) =
                 codegen::scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
             (name, source, lanes, 1)
+        }
+        Primitive::DynamicUpdateSlice => {
+            let (name, source) = codegen::update(&step.inputs[0].1, &step.inputs[1].1, &by_value);
+            (name, source, 1, 1)
+        }
+        Primitive::ScatterAdd { axis } => {
+            let (name, source) =
+                codegen::scatter_add(&step.inputs[0].1, *axis, step.inputs[1].1.numel());
+            (name, source, 1, 1)
         }
         _ => return None,
     };
@@ -210,7 +224,13 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
         (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
-        (Primitive::Fusion { .. } | Primitive::Cumsum { .. }, Some(kernel)) => {
+        (
+            Primitive::Fusion { .. }
+            | Primitive::Cumsum { .. }
+            | Primitive::DynamicUpdateSlice
+            | Primitive::ScatterAdd { .. },
+            Some(kernel),
+        ) => {
             let loads: Vec<Function> = inputs
                 .iter()
                 .enumerate()
@@ -220,14 +240,33 @@ pub(crate) fn run(
                 })
                 .collect();
             let store = Function::new("STORE", codegen::store(out.shape(), out.strides()));
-            let functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
+            let mut functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
             let config = step
                 .launch::<LoopConfig>()
                 .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
             let n = match step.primitive {
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[axis]),
+                Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
+                Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[axis]),
                 _ => Some(out.numel()),
             };
+            if let Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } = step.primitive
+                && out.data_ptr() != inputs[0].data_ptr()
+            {
+                copy(out, &inputs[0])?;
+            }
+            if let Primitive::ScatterAdd { .. } = step.primitive {
+                if out.dtype() == DType::Bool {
+                    return Err(format!(
+                        "{}: booleans have no sum to scatter-add",
+                        step.label
+                    ));
+                }
+                functions.push(Function::new(
+                    "OUTLOAD",
+                    codegen::load(out.shape(), out.strides()),
+                ));
+            }
             let n = n.unwrap_or(0);
             if kernel.splits == 1 {
                 return launch(kernel, config, &functions, inputs, out, n);

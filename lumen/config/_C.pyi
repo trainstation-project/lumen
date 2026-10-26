@@ -23,6 +23,7 @@ class CudaConfig(CompilerConfig):
 
     use_triton_backend: bool = False
     autotune: bool = True
+    safe_kernels: bool = False
 
 class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""

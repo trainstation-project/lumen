@@ -4,6 +4,7 @@ device_config! {
     CudaConfig, PyCudaConfig, "CudaConfig", cuda, crate::Device::Cuda(0), {
         use_triton_backend, set_use_triton_backend: bool = false;
         autotune, set_autotune: bool = true;
+        safe_kernels, set_safe_kernels: bool = false;
     }
 }
 

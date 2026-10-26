@@ -12,10 +12,12 @@ use crate::{DType, Element, Scalar};
 
 mod config;
 mod gemm;
+mod indexing;
 mod reduction;
 
 pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
 pub(crate) use gemm::gemm;
+pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
@@ -66,6 +68,9 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Iota { .. }
             | ReduceSum { .. }
             | ReduceMax { .. }
+            | DynamicSlice { .. }
+            | Gather { .. }
+            | TakeAlongAxis { .. }
     );
     let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
@@ -636,6 +641,50 @@ impl<'a> Emitter<'a> {
                             Ok(_) => format!("tl.full([], {i}, {t})"),
                             Err(_) => format!("{i}.to({t})"),
                         }
+                    }
+                    DynamicSlice { slice_sizes } => {
+                        let x = body.type_of(node.inputs[0]);
+                        let (spans, strides) =
+                            (contiguous_strides(&ty.shape), contiguous_strides(&x.shape));
+                        let mut terms = Vec::new();
+                        for d in (0..ty.shape.len()).filter(|&d| x.shape[d] != 1) {
+                            let start = self.value(node.inputs[1 + d], "0".into());
+                            let most = x.shape[d] - slice_sizes[d];
+                            let coord = format!("({idx} // {}) % {}", spans[d], ty.shape[d]);
+                            terms.push(format!(
+                                "({coord} + tl.minimum(tl.maximum({start}.to(tl.int64), 0), {most})) * {}",
+                                strides[d]
+                            ));
+                        }
+                        let i = match terms.is_empty() {
+                            true => format!("{idx} * 0"),
+                            false => terms.join(" + "),
+                        };
+                        let i = self.index(i);
+                        return self.value(node.inputs[0], i);
+                    }
+                    Gather { axis } => {
+                        let (x, indices) =
+                            (body.type_of(node.inputs[0]), body.type_of(node.inputs[1]));
+                        let after: usize = x.shape[axis + 1..].iter().product();
+                        let picks = indices.numel();
+                        let at = self.index(format!("({idx} // {after}) % {picks}"));
+                        let k = self.value(node.inputs[1], at);
+                        let i = self.index(format!(
+                            "{idx} // {} * {} + {k}.to(tl.int64) * {after} + {idx} % {after}",
+                            picks * after,
+                            x.shape[*axis] * after
+                        ));
+                        return self.value(node.inputs[0], i);
+                    }
+                    TakeAlongAxis { axis } => {
+                        let x = body.type_of(node.inputs[0]);
+                        let mut strides = contiguous_strides(&x.shape);
+                        let along = std::mem::replace(&mut strides[*axis], 0);
+                        let k = self.value(node.inputs[1], idx.clone());
+                        let others = gather_index(&idx, &ty.shape, &strides);
+                        let i = self.index(format!("{others} + {k}.to(tl.int64) * {along}"));
+                        return self.value(node.inputs[0], i);
                     }
                     p => unreachable!("{p} is not loop-fusible"),
                 }

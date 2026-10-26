@@ -78,6 +78,9 @@ fn epilogue(
                 Primitive::BroadcastInDim { .. }
                     | Primitive::Transpose { .. }
                     | Primitive::Slice { .. }
+                    | Primitive::DynamicSlice { .. }
+                    | Primitive::Gather { .. }
+                    | Primitive::TakeAlongAxis { .. }
             ) {
                 return false;
             }
