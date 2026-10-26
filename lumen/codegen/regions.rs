@@ -173,20 +173,6 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     (covers && (grouped || returned) && windows).then_some(regions)
 }
 
-pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
-    let rank = body.type_of(dot.output).shape.len();
-    match gemm_regions(body, dot)?.as_slice() {
-        [
-            Columns {
-                axis,
-                region: Region::Group(members),
-                ..
-            },
-        ] if axis + 1 == rank && members.len() == 2 => Some((members[0], members[1])),
-        _ => None,
-    }
-}
-
 pub(crate) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
     body.nodes()
         .iter()

@@ -11,7 +11,21 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
-pub(crate) use crate::codegen::regions::{Columns, ROW_COLUMNS, Region, gemm_pair, gemm_regions};
+pub(crate) use crate::codegen::regions::{Columns, ROW_COLUMNS, Region, gemm_regions};
+
+pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
+    let rank = body.type_of(dot.output).shape.len();
+    match gemm_regions(body, dot)?.as_slice() {
+        [
+            Columns {
+                axis,
+                region: Region::Group(members),
+                ..
+            },
+        ] if axis + 1 == rank && members.len() == 2 => Some((members[0], members[1])),
+        _ => None,
+    }
+}
 
 pub(crate) fn gemm_group(body: &Graph, dot: &Node) -> Option<(usize, bool)> {
     let rank = body.type_of(dot.output).shape.len();
