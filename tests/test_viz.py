@@ -8,6 +8,9 @@ import lumen
 import lumen.functional as F
 from lumen import viz
 
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+
 
 def test_dump_graph(tmp_path):
     f = lumen.compile(lambda x, w: F.relu(F.matmul(x, w, "float32", x.dtype)))
@@ -55,15 +58,23 @@ def test_dump_code_writes_each_kernel_in_order(tmp_path):
     assert got.tolist() == f(x, w).tolist()
 
 
-@pytest.mark.mps
-def test_dump_code_of_mps_kernels(tmp_path):
-    x, w = lumen.zeros([64, 128]).to("mps"), lumen.zeros([128, 256]).to("mps")
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_dump_code_of_device_kernels(device, tmp_path, triton_on_cuda):
+    try:
+        x, w = lumen.zeros([64, 128]).to(device), lumen.zeros([128, 256]).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
     f = lumen.compile(lambda x, w: F.softmax(F.matmul(x, w, "float32", "float32"), -1) * 2.0)
     f(x, w)
-    matmul, row = f.dump_code(tmp_path)
-    assert matmul.suffix == ".metal" and "matmul" in matmul.read_text()
-    assert "kernel void" in row.read_text() and row.name.startswith("0001-reduce_max")
-    assert (tmp_path / "prelude.metal").exists()
+    written = f.dump_code(tmp_path)
+    if device == "mps":
+        matmul, row = written
+        assert matmul.suffix == ".metal" and "matmul" in matmul.read_text()
+        assert "kernel void" in row.read_text() and row.name.startswith("0001-reduce_max")
+        assert (tmp_path / "prelude.metal").exists()
+    else:
+        assert written and all(p.suffix == ".py" and "@triton.jit" in p.read_text() for p in written)
+        assert written[0].name.startswith("0000-dot_general") and "PROLOGUE_A" in written[0].read_text()
 
 
 B, S, N, H, V = 2, 64, 2, 64, 512
@@ -87,20 +98,31 @@ def _step_args(device):
     return [a.to(device) for a in args]
 
 
-@pytest.mark.mps
-def test_every_mps_kernel_dumps_its_source(tmp_path):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_every_device_kernel_dumps_its_source(device, tmp_path, triton_on_cuda):
     """A training step's kernels (an embedding's gather and its scatter-add,
     flash attention, the chunked cross entropy's update slices, matmuls,
-    each a generated GEMM): each a file of Metal, none the step's text in
-    its place."""
-    lumen.config.compiler.mps.fused_linear_cross_entropy = True
-    lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size = 32
+    each a generated GEMM): each a file of the device's source (Metal on
+    MPS, Triton on CUDA), none the step's text in its place."""
+    if device == "mps":
+        lumen.config.compiler.mps.fused_linear_cross_entropy = True
+    lumen.config.compiler.of(device).fused_linear_cross_entropy_chunk_size = 32
     try:
         f = lumen.compile(_step)
-        f(*_step_args("mps"))
+        try:
+            args = _step_args(device)
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        f(*args)
         written = f.dump_code(tmp_path)
     finally:
         lumen.config.compiler.reset()
+    if device == "cuda":
+        assert written and all(p.suffix == ".py" and "@triton.jit" in p.read_text() for p in written), [
+            p.name for p in written if p.suffix != ".py"
+        ]
+        assert any("PROLOGUE_A" in p.read_text() for p in written)
+        return
     assert written and all(p.suffix == ".metal" for p in written), [p.name for p in written if p.suffix != ".metal"]
     kernels = {p.name.split("-")[-1] for p in written}
     for name in ("scatter_add", "dynamic_update_slice"):

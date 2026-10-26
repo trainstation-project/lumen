@@ -6,6 +6,7 @@ import lumen.functional as F
 from lumen import prims
 
 MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
 TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 
@@ -75,14 +76,14 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 @pytest.mark.parametrize("name", list(CASES))
-def test_torch_and_jax_styles_agree(name, device):
+def test_torch_and_jax_styles_agree(name, device, triton_on_cuda):
     """loss.backward() and .grad (torch) give exactly lumen.grad's (jax)
     gradients: the same transformation of the same program."""
     f, shapes = CASES[name]
     dtype = np.float64 if device == "cpu" else np.float32
-    if device in ("mps", "tpu") and name in ("dot_general", "cast"):
+    if device != "cpu" and name in ("dot_general", "cast"):
         pytest.skip("float64 on the CPU only")
     try:
         xs = [lumen.from_numpy(a.astype(dtype)).to(device) for a in arrays(*shapes)]
@@ -95,24 +96,24 @@ def test_torch_and_jax_styles_agree(name, device):
 
     jax_style = lumen.grad(f, (0, 1))
     for got, want in zip(lumen.compile(torch_style)(*xs), lumen.compile(jax_style)(*xs)):
-        np.testing.assert_array_equal(lumen.to_numpy(got), lumen.to_numpy(want))
+        np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), lumen.to_numpy(want.to("cpu")))
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("name", ["matmul", "softmax", "rms_norm", "attention", "slice concatenate"])
-def test_grad_on_mps_agrees_with_the_cpu(name):
-    """Gradients compiled for MPS (fused, attention matched) agree with the
-    CPU's."""
+def test_grad_on_a_device_agrees_with_the_cpu(name, device, triton_on_cuda):
+    """Gradients compiled for MPS and CUDA (fused, attention matched) agree
+    with the CPU's."""
     f, shapes = CASES[name]
     xs = [a.astype(np.float32) for a in arrays(*shapes)]
     grad = lumen.grad(f, (0, 1))
     try:
-        got = lumen.compile(grad, device="mps")(*(lumen.from_numpy(a).to("mps") for a in xs))
+        got = lumen.compile(grad, device=device)(*(lumen.from_numpy(a).to(device) for a in xs))
     except RuntimeError as e:
         pytest.skip(str(e))
     want = lumen.compile(grad)(*map(lumen.from_numpy, xs))
     for g, w in zip(got, want):
-        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-4, atol=1e-4)
 
 
 def test_value_and_grad_and_argnums():
@@ -442,14 +443,21 @@ class _QKV(lumen.nn.Module):
         )
 
 
+def _equal(a, b, device):
+    if device == "cuda":
+        np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
+    else:
+        np.testing.assert_array_equal(a, b)
+
+
 def _qkv_step(m, x):
     loss = m(x)
     loss.backward()
     return loss, x.grad, [p.grad for p in m.parameters()]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_dots_sharing_an_operand_are_differentiated_as_one(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_dots_sharing_an_operand_are_differentiated_as_one(device, triton_on_cuda):
     """x @ wq, x @ wk, x @ wv run as one dot (merge_dots); before autodiff
     they become one node (lumen/autograd/dots.py), differentiated as that
     dot: x's gradient one dot of the cotangents side by side and the
@@ -471,32 +479,36 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device):
                 pytest.skip(str(e))
             model.load_state_dict(dict(zip(["wq", "wk", "wv"], map(lumen.from_numpy, ws))))
             loss, gx, gw = f(model, lumen.from_numpy(x).to(device))
-            results.append([lumen.to_numpy(t) for t in (loss, gx, *gw)])
+            results.append([lumen.to_numpy(t.to("cpu")) for t in (loss, gx, *gw)])
             graph = str(lumen.make_graph(_qkv_step)(model, lumen.from_numpy(x).to(device)))
             assert ("concatenate" in graph) == merge
         finally:
-            lumen.config.compiler.reset()
+            lumen.config.compiler.of(device).merge_dots = True
     (loss, gx, *gw), (loss_, gx_, *gw_) = results
-    np.testing.assert_array_equal(loss, loss_)
+    _equal(loss, loss_, device)
     for a, b in zip(gw, gw_):
-        np.testing.assert_array_equal(a, b)
+        _equal(a, b, device)
     np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.mps
-def test_merged_dots_backward_plan():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_merged_dots_backward_plan(device, triton_on_cuda):
     """On MPS: the forward one dot of the packed weights; the cotangents
     written side by side by the kernel writing them (the concatenate
     fused, no copy); x's gradient one dot of the same block; the weights'
-    one dot."""
+    one dot. On CUDA too the weights are packed into one block."""
     model = _QKV(*(lumen.empty([256, 128], device="meta") for _ in range(3)))
     graph = lumen.make_graph(_qkv_step)(model, lumen.empty([64, 256], device="meta"))
     params = list(range(1, len(graph.inputs())))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+    try:
+        plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
+    except RuntimeError as e:
+        pytest.skip(str(e))
     labels = [s["label"] for s in plan.steps()]
     assert plan.packed == [([1, 2, 3], 1)]
-    assert labels.count("3x dot_general") == 2 and "concatenate" not in labels, labels
-    assert any(label.endswith("→ concatenate") for label in labels), labels
+    if device == "mps":
+        assert labels.count("3x dot_general") == 2 and "concatenate" not in labels, labels
+        assert any(label.endswith("→ concatenate") for label in labels), labels
 
 
 class _Projections(lumen.nn.Module):
@@ -522,8 +534,8 @@ def _projections_step(m, x):
     return loss, x.grad, [p.grad for p in m.parameters()]
 
 
-@pytest.mark.mps
-def test_projections_backward_writes_cotangents_side_by_side():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_projections_backward_writes_cotangents_side_by_side(device, triton_on_cuda):
     """q, k, v projections in training: the forward one dot of the packed
     weights; their cotangents side by side ([dq | dk | dv], for x's and
     the weights' dots) written by the kernel computing them, no
@@ -535,31 +547,32 @@ def test_projections_backward_writes_cotangents_side_by_side():
     x = rng.standard_normal((32, 64)).astype(np.float32)
     results = []
     for merge in (True, False):
-        lumen.config.compiler.mps.merge_dots = merge
+        lumen.config.compiler.of(device).merge_dots = merge
         try:
             model = _Projections(*(lumen.empty([64, 64], device="meta") for _ in range(3)))
-            f = lumen.compile(_projections_step, device="mps")
+            f = lumen.compile(_projections_step, device=device)
             try:
                 f(model, lumen.empty([32, 64], device="meta"))
             except RuntimeError as e:
                 pytest.skip(str(e))
             model.load_state_dict(dict(zip(["wq", "wk", "wv"], map(lumen.from_numpy, ws))))
-            loss, gx, gw = f(model, lumen.from_numpy(x).to("mps"))
-            results.append([lumen.to_numpy(t) for t in (loss, gx, *gw)])
+            loss, gx, gw = f(model, lumen.from_numpy(x).to(device))
+            results.append([lumen.to_numpy(t.to("cpu")) for t in (loss, gx, *gw)])
             if merge:
                 graph = lumen.make_graph(_projections_step)(model, lumen.from_numpy(x))
                 params = list(range(1, len(graph.inputs())))
-                plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+                plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
                 labels = [s["label"] for s in plan.steps()]
                 assert plan.packed == [([1, 2, 3], 1)]
-                assert labels.count("3x dot_general") == 2, labels
-                (side_by_side,) = [label for label in labels if "concatenate" in label]
-                assert side_by_side != "concatenate" and "mul" in side_by_side, labels
-                assert not any("transpose" in label for label in labels), labels
+                if device == "mps":
+                    assert labels.count("3x dot_general") == 2, labels
+                    (side_by_side,) = [label for label in labels if "concatenate" in label]
+                    assert side_by_side != "concatenate" and "mul" in side_by_side, labels
+                    assert not any("transpose" in label for label in labels), labels
         finally:
-            lumen.config.compiler.reset()
+            lumen.config.compiler.of(device).merge_dots = True
     (loss, gx, *gw), (loss_, gx_, *gw_) = results
-    np.testing.assert_array_equal(loss, loss_)
+    _equal(loss, loss_, device)
     for a, b in zip(gw, gw_):
-        np.testing.assert_array_equal(a, b)
+        _equal(a, b, device)
     np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)

@@ -5,7 +5,18 @@ import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+MPS = pytest.param("mps", marks=pytest.mark.mps)
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+DEVICES = ["cpu", MPS, CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
+
+
+@pytest.fixture(autouse=True)
+def triton():
+    """CUDA's programs on the Triton backend."""
+    lumen.config.compiler.cuda.use_triton_backend = True
+    yield
+    lumen.config.compiler.cuda.use_triton_backend = False
+
 
 CASES = [((4, 1000), 1), ((1, 70000), 1), ((3000, 3), 0), ((3, 50, 7), 1), ((8, 3), -1), ((5, 0, 3), 1)]
 
@@ -89,11 +100,11 @@ def test_cumsum_gradient(device):
     )
 
 
-@pytest.mark.mps
-def test_cumsum_is_deterministic():
-    """Every scan on MPS adds in a fixed order, split ones too (no atomics):
-    the same bits each run."""
-    x = _tensor(np.random.default_rng(3).standard_normal((2, 300000)).astype(np.float32), "mps", "float32")
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_cumsum_is_deterministic(device):
+    """Every scan adds in a fixed order (on MPS split ones too; on Triton a
+    chunked scan with a carried sum; no atomics): the same bits each run."""
+    x = _tensor(np.random.default_rng(3).standard_normal((2, 300000)).astype(np.float32), device, "float32")
     f = lumen.compile(lambda x: F.cumsum(x, 1))
     first = lumen.to_numpy(f(x))
     for _ in range(5):

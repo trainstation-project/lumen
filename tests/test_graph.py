@@ -449,14 +449,14 @@ def test_triton_autotuned_loops_match_untuned_and_dump_their_launch(device, dtyp
         compiler.autotune = True
 
 
-@pytest.mark.mps
-def test_mps_reads_strided_inputs_in_place():
-    """A transposed or narrowed MPS input is read where it is, not copied
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_mps_reads_strided_inputs_in_place(device, triton_on_cuda):
+    """A transposed or narrowed MPS or CUDA input is read where it is, not copied
     first: its step's kernel is compiled again with that input's load
     prologue through its strides, once a layout. ``contiguous``, ``copy_``
     and ``fill_`` of strided views are loops on the GPU, not host copies."""
     a, b = rand(64, 96), rand(96, 64, seed=1)
-    x, w = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")
+    x, w = lumen.from_numpy(a).to(device), lumen.from_numpy(b).to(device)
     loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
     norm = lumen.compile(lambda u: u / F.sqrt(F.mean(u * u, -1, keepdim=True) + 1e-6))
     tol = {"rtol": 1e-5, "atol": 1e-5}
@@ -469,7 +469,7 @@ def test_mps_reads_strided_inputs_in_place():
         expected = a.T / np.sqrt((a.T.astype(np.float64) ** 2).mean(-1, keepdims=True) + 1e-6)
         np.testing.assert_allclose(lumen.to_numpy(out), expected, **tol)
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
-    y = lumen.zeros([96, 64], device="mps")
+    y = lumen.zeros([96, 64], device=device)
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         t = x.transpose(0, 1).contiguous()
         y.transpose(0, 1).copy_(x)
@@ -482,8 +482,8 @@ def test_mps_reads_strided_inputs_in_place():
     assert lumen.to_numpy(y).tolist() == expected.tolist()
 
 
-@pytest.mark.mps
-def test_mps_steps_replay_on_each_calls_buffers():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_mps_steps_replay_on_each_calls_buffers(device, triton_on_cuda):
     """An MPS plan's steps are encoded once and replayed after: each later
     call computes on its own inputs and workspace (a strided call between
     them too), as the first did."""
@@ -491,23 +491,23 @@ def test_mps_steps_replay_on_each_calls_buffers():
     expected = lambda a, b: np.maximum(a @ b, 0).sum(-1)  # noqa: E731
     for seed in range(3):
         a, b = rand(32, 64, seed=seed), rand(64, 48, seed=seed + 10)
-        x, w = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps")
+        x, w = lumen.from_numpy(a).to(device), lumen.from_numpy(b).to(device)
         np.testing.assert_allclose(lumen.to_numpy(f(x, w)), expected(a, b), rtol=1e-4, atol=1e-4)
-        t = lumen.from_numpy(np.ascontiguousarray(b.T)).to("mps").transpose(0, 1)
+        t = lumen.from_numpy(np.ascontiguousarray(b.T)).to(device).transpose(0, 1)
         np.testing.assert_allclose(lumen.to_numpy(f(x, t)), expected(a, b), rtol=1e-4, atol=1e-4)
     a = rand(4096)
-    graph = lumen.make_graph(lambda u: F.exp(u) * 2.0 + 1.0)(lumen.from_numpy(a).to("mps"))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[0])
-    workspaces = [lumen.Tensor.empty([plan.workspace_bytes], "uint8", "mps") for _ in range(2)]
+    graph = lumen.make_graph(lambda u: F.exp(u) * 2.0 + 1.0)(lumen.from_numpy(a).to(device))
+    plan = lumen.graph_compiler.Plan(graph, device, parameters=[0])
+    workspaces = [lumen.Tensor.empty([plan.workspace_bytes], "uint8", device) for _ in range(2)]
     for k in range(4):
         v = a + k
-        (out,) = plan.run_in(workspaces[k % 2], [lumen.from_numpy(v).to("mps")])
+        (out,) = plan.run_in(workspaces[k % 2], [lumen.from_numpy(v).to(device)])
         np.testing.assert_allclose(lumen.to_numpy(out), np.exp(v) * 2 + 1, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):
+def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cuda):
     """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
     free dimensions: dot strength reduction's product and row sum, in
     float32."""
@@ -520,9 +520,9 @@ def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):
     assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 @pytest.mark.parametrize("shape", [[64, 128], [2048, 2048], [3, 16, 256, 128], [8, 1024, 1000]])
-def test_sums_over_the_last_dimension(device, shape):
+def test_sums_over_the_last_dimension(device, shape, triton_on_cuda):
     """bfloat16 summed in float32 over its last dimension."""
     x = placed(shape, "bfloat16", device)
     out = lumen.compile(lambda x: F.sum(x.float(), -1))(x)
@@ -612,12 +612,12 @@ def test_results_on_input_device(device, triton_on_cuda):
     assert lumen.to_numpy(y).tolist() == [[8.0, 11.0], [16.0, 23.0]]
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
-def test_mps_kernels_match_cpu(dtype):
-    """Compiled functions on MPS (Metal kernels) agree with the CPU."""
+def test_mps_kernels_match_cpu(device, dtype, triton_on_cuda):
+    """Compiled functions on MPS (Metal kernels) and CUDA (Triton) agree with the CPU."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
 
@@ -633,10 +633,10 @@ def test_mps_kernels_match_cpu(dtype):
     cpu = [lumen.from_numpy(a) for a in arrays]
     fn = lumen.compile(lambda *xs: tuple(o.float() for o in block(*(x.to(dtype) for x in xs))))
     expected = [lumen.to_numpy(o) for o in fn(*cpu)]
-    actual = fn(*(t.to("mps") for t in cpu))
+    actual = fn(*(t.to(device) for t in cpu))
     tol = {"float32": 1e-4, "float16": 1e-2, "bfloat16": 5e-2}[dtype]
     for e, a in zip(expected, actual):
-        assert a.device == "mps:0"
+        assert a.device == f"{device}:0"
         np.testing.assert_allclose(lumen.to_numpy(a), e, rtol=tol, atol=tol)
 
 
@@ -688,20 +688,21 @@ def test_mps_plan_steps_and_profiled_kernels():
     assert plan.run([x])[0].tolist() == pytest.approx([float(np.tanh(3.0)) * 2048] * 64, rel=1e-5)
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n", [16, 64])
-def test_short_rows_reduce_several_a_threadgroup(n):
+def test_short_rows_reduce_several_a_threadgroup(device, n, triton_on_cuda):
     """Rows too short for a threadgroup each (an attention head's 16, a
     row of 64) are reduced as grouped lanes, several rows a threadgroup:
     the CPU's sums, the same each run."""
     x = rand(4096, n)
     try:
-        X = lumen.from_numpy(x).to("mps")
+        X = lumen.from_numpy(x).to(device)
     except RuntimeError as e:
         pytest.skip(str(e))
     f = lambda x: F.sum(F.tanh(x * 2.0 + 1.0), -1)  # noqa: E731
-    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X), "mps").steps()
-    assert "reduce_grouped" in step["fusion"]["source"]
+    if device == "mps":
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X), "mps").steps()
+        assert "reduce_grouped" in step["fusion"]["source"]
     got = [lumen.to_numpy(lumen.compile(f)(X)) for _ in range(2)]
     np.testing.assert_array_equal(got[0], got[1])
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x)))
@@ -747,17 +748,17 @@ def test_compiled_init_runs_once_per_call(tmp_path):
     assert data["inputs"] == [] and data["device"] == "cpu:0"
 
 
-@pytest.mark.mps
-def test_compiled_init_on_device(tmp_path):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_compiled_init_on_device(device, tmp_path, triton_on_cuda):
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    make = lumen.compile(lambda: (lumen.ones([4, 8]) * 2.0, lumen.arange(8)), device="mps")
+    make = lumen.compile(lambda: (lumen.ones([4, 8]) * 2.0, lumen.arange(8)), device=device)
     w, i = make()
-    assert (w.device, i.device) == ("mps:0", "mps:0")
+    assert (w.device, i.device) == (f"{device}:0", f"{device}:0")
     assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
-    assert lumen.compile(lambda x: x + 1.0, device="mps")(lumen.zeros([2])).tolist() == [1.0, 1.0]
+    assert lumen.compile(lambda x: x + 1.0, device=device)(lumen.zeros([2])).tolist() == [1.0, 1.0]
     data = make.dump_graph(tmp_path / "init.html")
     assert data["device"] == "mps:0" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
     f = lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype))
@@ -809,8 +810,8 @@ def test_modules_are_frozen_dataclasses_of_weights():
         m.load_state_dict({})
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_module_weights_are_placed_once_and_shared(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_module_weights_are_placed_once_and_shared(device, triton_on_cuda):
     """A module argument's tensors are the function's weights: placed
     (zeroed) on the device when it compiles (a call on meta tensors, which
     runs nothing), filled by load_state_dict, shared by every function
@@ -2130,8 +2131,8 @@ def test_packed_weights_are_read_in_place_elsewhere():
     assert "lumen::to_vec" not in {e["name"] for e in prof.events()}
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_softmax_traces_to_its_primitives(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_softmax_traces_to_its_primitives(device, triton_on_cuda):
     """softmax traces to its primitives (max, sub, exp, sum, div; no
     primitive of its own): over the last dimension the MPS compiler runs
     them, with the scale before them, as one row kernel (a chain of
@@ -2173,8 +2174,8 @@ class Norm(lumen.nn.Module):
         return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_rms_norm(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_rms_norm(device, triton_on_cuda):
     """F.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
     as primitives, which the MPS compiler recognizes, as it does an RMS norm
     written by hand, and fuses into one kernel (its reduction inside) with
@@ -2249,8 +2250,8 @@ class ScaledNorm(lumen.nn.Module):
         return self.weight * (x / F.sqrt(F.mean(x * x, -1, keepdim=True) + self.eps))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_float_fields_are_runtime_scalars(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_float_fields_are_runtime_scalars(device, triton_on_cuda):
     """A module's float field is a runtime scalar: another value runs the same
     plan (no trace, no kernel compiled), read by the kernel, not baked in; an
     RMS norm with it is still one kernel on MPS."""
@@ -2288,10 +2289,10 @@ def test_float_fields_are_runtime_scalars(device):
         assert "constant float &in1" in step["fusion"]["source"]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_programs_run_in_their_dtypes(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_programs_run_in_their_dtypes(device, triton_on_cuda):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
-    tanh, logistic, softmax) has no MPS kernel and raises there (the CPU's
+    tanh, logistic, softmax) has no MPS or Triton kernel and raises there (the CPU's
     reference rounds it once); a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
     program; `@` always float32; sum and mean in their input's dtype). A
@@ -2302,7 +2303,7 @@ def test_programs_run_in_their_dtypes(device):
     except RuntimeError as e:
         pytest.skip(str(e))
     for f in (F.exp, F.sqrt, lambda a: F.softmax(a, -1), F.tanh):
-        if device != "mps":
+        if device not in ("mps", "cuda"):
             assert lumen.compile(f)(x).dtype == "bfloat16"
             continue
         with pytest.raises(RuntimeError, match="convert to float32"):
@@ -2320,7 +2321,11 @@ def test_programs_run_in_their_dtypes(device):
     narrow = lumen.compile(lambda a, b: dot(a, b, "float32", "bfloat16"))(x, w)
     assert narrow.dtype == "bfloat16"
     np.testing.assert_allclose(lumen.to_numpy(narrow.to(dtype="float32")), a @ b, rtol=2**-8, atol=2**-8)
-    assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
+    if device == "cuda":
+        with pytest.raises(Exception, match="accumulates in float32 or float16"):
+            lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w)
+    else:
+        assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
     with pytest.raises(ValueError, match="output_dtype"):
         lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
     graph = lumen.make_graph(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w)
@@ -2566,11 +2571,11 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
     np.testing.assert_allclose(grad, g * (np.exp(xr - lse[:, None]) - hit), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 @pytest.mark.parametrize(
     "n, d, vocab, dtype", [(5, 16, 7, "float32"), (300, 64, 1000, "float32"), (128, 256, 32000, "bfloat16")]
 )
-def test_linear_cross_entropy(device, n, d, vocab, dtype):
+def test_linear_cross_entropy(device, n, d, vocab, dtype, triton_on_cuda):
     """``F.cross_entropy(F.matmul(h, w.t()), t)``, the MPS compiler's linear
     cross entropy where nothing else reads the logits (not trained): one
     step of two kernels: the matmul writing each row's
@@ -3443,8 +3448,8 @@ class _Scalars(lumen.nn.Module):
     heads: int
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS])
-def test_scalar_fields_are_assigned_as_python_values(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_scalar_fields_are_assigned_as_python_values(device, triton_on_cuda):
     """A module's float, int and bool fields are assigned as Python values,
     inside a compiled function (``s.step = s.step + 1``) and outside, and
     written back as their type. A float is a runtime scalar; an int or bool

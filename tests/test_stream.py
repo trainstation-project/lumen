@@ -7,7 +7,7 @@ def test_every_device_has_a_stream():
     """``lumen.Stream(device)``: the device's stream, which every device type
     has (the CPU's and the meta device's have no work to wait for); a
     device that is not present has none."""
-    for spec in ["cpu", "meta:0", "mps"]:
+    for spec in ["cpu", "meta:0", "mps", "cuda"]:
         try:
             stream = lumen.Stream(spec)
         except RuntimeError:
@@ -222,8 +222,10 @@ def test_wait_is_an_in_place_op():
     assert wait["inputs"] == wait["outputs"] == [("float32", [])]
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("mps", marks=pytest.mark.mps)])
-def test_wait_primitive(device):
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
+)
+def test_wait_primitive(device, triton_on_cuda):
     """``prims.wait``: its operand's value, in place (the plan's step reads
     and writes one buffer: no memory of its own), a step of its own (the
     host waits there: no fusion across it), its cotangent passed through."""

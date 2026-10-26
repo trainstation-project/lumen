@@ -7,6 +7,8 @@ import lumen.functional as F
 from lumen.graph._C import FUSION_SEPARATOR
 from lumen.profiler import ProfilerActivity, profile, record_function
 
+CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
+
 
 def _names(prof, kind=None):
     return [e["name"] for e in prof.events() if kind is None or e["kind"] == kind]
@@ -176,8 +178,8 @@ def test_kernels_record_their_steps_types():
     assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)
 
 
-@pytest.mark.parametrize("device", ["cpu", "mps"])
-def test_steps_record_their_accumulation_dtypes(device, tmp_path):
+@pytest.mark.parametrize("device", ["cpu", "mps", CUDA])
+def test_steps_record_their_accumulation_dtypes(device, tmp_path, triton_on_cuda):
     """With record_shapes each plan step records its inputs', outputs' and
     accumulation dtypes (``accum``): a dot's and a sum's accum_dtype, a
     max's dtype, a fusion's reductions'; none for elementwise steps. Its
@@ -369,9 +371,9 @@ def test_device_transfers_are_profiled():
 
 
 @pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
 )
-def test_record_function_inside_a_compiled_function(device, tmp_path):
+def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_cuda):
     """A ``record_function`` range inside a compiled function (with or as a
     decorator) holds the steps of the ops traced in it each time the plan
     runs, nested as traced, one range a call; a fused kernel is in its main
@@ -408,7 +410,7 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
     steps = {e["name"]: parent(e) for e in events if e["kind"] == "op" and not e["name"].startswith("lumen::")}
     want = (
         {"reduce_sum → exp → add": "outer"}
-        if device in ("mps", "tpu")
+        if device in ("mps", "cuda", "tpu")
         else {"reduce_sum": "outer", "exp": "outer", "add": None}
     )
     assert {k: steps.get(k, "missing") for k in ["dot_general", *want]} == {"dot_general": "inner", **want}, steps
@@ -422,9 +424,9 @@ def test_record_function_inside_a_compiled_function(device, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
 )
-def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
+def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, triton_on_cuda):
     """Each call of a ``record_function`` range is its own range when the
     plan runs, as uncompiled code's, even with no step between them (two
     layers' ``layer``), and so is each call's backward: steps keep the call
@@ -454,9 +456,9 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
 
 
 @pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
 )
-def test_record_function_holds_its_ops_gradients_as_backward(device):
+def test_record_function_holds_its_ops_gradients_as_backward(device, triton_on_cuda):
     """The gradient ops of what a ``record_function`` range traced run in
     ``name (backward)``, nested as the forward's (each range of the
     forward's scope), after the forward's ranges: the matmul's gradient in

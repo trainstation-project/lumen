@@ -192,12 +192,13 @@ def test_to_converts_dtypes_and_moves():
     assert (meta.device, meta.dtype) == ("meta:0", "float16")
     with pytest.raises(ValueError, match="device"):
         x.to("float16")
-    try:
-        m = x.to("mps", lumen.float16)
-    except RuntimeError:
-        return
-    assert (m.device, m.dtype) == ("mps:0", "float16")
-    assert m.to("cpu", "float32").tolist() == [1.0, 2.5, -3.69921875, float("inf")]
+    for device in ("mps", "cuda"):
+        try:
+            m = x.to(device, lumen.float16)
+        except RuntimeError:
+            continue
+        assert (m.device, m.dtype) == (f"{device}:0", "float16")
+        assert m.to("cpu", "float32").tolist() == [1.0, 2.5, -3.69921875, float("inf")]
 
 
 def test_item():
@@ -211,19 +212,21 @@ def test_item():
         lumen.tensor([1.0, 2.0]).item()
 
 
-@pytest.mark.mps
-def test_item_cpu_and_to_numpy_read_device_results():
-    """A compiled MPS function's results read on the host: ``item``,
+@pytest.mark.parametrize(
+    "device", [pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
+)
+def test_item_cpu_and_to_numpy_read_device_results(device, triton_on_cuda):
+    """A compiled device function's results read on the host: ``item``,
     ``cpu`` (one copy to the host) and ``to_numpy`` (that copy, through
     DLPack), each the result's values."""
     import lumen.functional as F
 
     a = np.arange(12, dtype=np.float32).reshape(3, 4)
     try:
-        y, total = lumen.compile(lambda x: (x * 2.0, F.sum(x)), device="mps")(lumen.from_numpy(a))
+        y, total = lumen.compile(lambda x: (x * 2.0, F.sum(x)), device=device)(lumen.from_numpy(a))
     except RuntimeError as e:
         pytest.skip(str(e))
-    assert y.device == "mps:0" and total.item() == 66.0
+    assert y.device == f"{device}:0" and total.item() == 66.0
     host = y.cpu()
     assert host.device == "cpu:0" and host.tolist() == (a * 2).tolist()
     np.testing.assert_array_equal(lumen.to_numpy(y), a * 2)
