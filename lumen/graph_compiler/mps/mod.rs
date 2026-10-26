@@ -62,7 +62,7 @@ const PRELUDE: &str = concat!(
         #define TEMPLATES_ONLY
         "
     ),
-    include_str!("../../kernels/reduce/mps/kernels.metal"),
+    include_str!("../../kernels/reduction/mps/kernels.metal"),
     include_str!("../../kernels/dot_general/mps/integer/matmul.metal"),
     include_str!("../../kernels/dot_general/mps/integer/matmul_wide.metal"),
     include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
@@ -793,7 +793,7 @@ pub(super) fn encode_with(
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
         let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));
-        return crate::kernels::reduce::mps::encode_reduction(
+        return crate::kernels::reduction::mps::encode_reduction(
             step,
             &root.primitive,
             x,
@@ -859,7 +859,7 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
             };
             let x = body.type_of(root.inputs[0]);
             let accum = body.type_of(root.output).dtype;
-            crate::kernels::reduce::mps::scratch_bytes(x, axes, accum)
+            crate::kernels::reduction::mps::scratch_bytes(x, axes, accum)
         }
         None => 0,
     }

@@ -223,7 +223,7 @@ pub(crate) fn encode(
         return encode(step, inputs, output, scratch, keep);
     }
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
-        return super::reduce::mps::encode(step, inputs, output, scratch, keep);
+        return super::reduction::mps::encode(step, inputs, output, scratch, keep);
     }
     if let Cumsum { .. } = step.primitive {
         return super::scan::mps::encode(step, inputs, output, scratch, keep);
@@ -289,8 +289,8 @@ pub(crate) fn encode(
 pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
     match p {
         Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
-            let accum = super::reduce::mps::accum_dtype(p, inputs[0].dtype);
-            super::reduce::mps::scratch_bytes(inputs[0], axes, accum)
+            let accum = super::reduction::mps::accum_dtype(p, inputs[0].dtype);
+            super::reduction::mps::scratch_bytes(inputs[0], axes, accum)
         }
         Primitive::Cumsum {
             axis, accum_dtype, ..

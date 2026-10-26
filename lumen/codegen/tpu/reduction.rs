@@ -225,7 +225,7 @@ pub(crate) fn encode(
             })
             .collect()
     };
-    let blocks = crate::kernels::reduce::tpu::blocks(&layout, &dtypes("in"), &dtypes("out"))
+    let blocks = crate::kernels::reduction::tpu::blocks(&layout, &dtypes("in"), &dtypes("out"))
         .map_err(|e| failed(&e))?;
     let spec = format!(
         "{}, \"blocks\": {blocks:?}, \"inputs\": [{}], \"prologue\": [{}], \"operand\": {}, \"reduce\": {}, \
@@ -252,7 +252,7 @@ pub(crate) fn encode(
     };
     let shown: Vec<String> = blocks.iter().map(usize::to_string).collect();
     let launched = Launch {
-        module: "lumen.kernels.reduce.tpu",
+        module: "lumen.kernels.reduction.tpu",
         kernel: format!("reduce_{kind}_{}_{}", x.dtype, shown.join("x")),
         spec,
         rows: &rows,
