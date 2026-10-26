@@ -1,7 +1,7 @@
 use indoc::formatdoc;
 
-use super::{gather_index, named};
-use crate::graph::Primitive;
+use super::{Emitter, at, gather_index, load, named, triton_type};
+use crate::graph::{Graph, Node, Primitive};
 
 pub(crate) struct GemmCode {
     pub(crate) sizes: [usize; 4],
@@ -93,10 +93,58 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
             formatdoc!(
                 "
                 @triton.jit
-                def NAME(ptr, l, m, n, value, mask):
+                def NAME(ptr, EXTRA, l, m, n, value, mask):
                     tl.store(ptr + {d}, value.to(ptr.dtype.element_ty), mask=mask)
                 "
             ),
         ),
     }
+}
+
+pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
+    body.nodes()
+        .iter()
+        .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+}
+
+pub(crate) fn epilogue(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    inputs: &[Layout],
+    out: Layout,
+    [rows, cols]: [usize; 2],
+) -> (String, String) {
+    let mut emitter = Emitter::new(body, by_value);
+    let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
+    emitter
+        .values
+        .insert((dot.output, "j".into()), "acc".into());
+    let result = emitter.value(body.outputs()[0], "j".into());
+    let loads: String = inputs
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| !by_value[k])
+        .map(|(k, &(shape, strides))| {
+            let (name, source) = load(shape, strides);
+            source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n"
+        })
+        .collect();
+    let unpacked: String = (0..inputs.len())
+        .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
+        .collect();
+    let (stored, lines) = (at("j", out.0, out.1), &emitter.lines);
+    named(
+        "epilogue",
+        formatdoc!(
+            "
+            {loads}@triton.jit
+            def NAME(ptr, EXTRA, l, m, n, value, mask):
+            {unpacked}    j = l * {} + m * {cols} + n
+                acc = value.to({t})
+            {lines}    tl.store(ptr + {stored}, {result}, mask=mask)
+            ",
+            rows * cols
+        ),
+    )
 }

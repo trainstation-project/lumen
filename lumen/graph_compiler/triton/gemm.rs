@@ -1,10 +1,12 @@
 use std::sync::OnceLock;
 
 use super::Function;
-use crate::codegen::triton::{CONFIGS, Config, UNTUNED};
+use crate::codegen::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::graph::Primitive;
 use crate::graph_compiler::common::autotune::Kernels;
+use crate::graph_compiler::plan::Buffer;
 use crate::graph_compiler::plan::{Step, Tuned};
+use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
 pub type Gemm = fn(
@@ -13,6 +15,8 @@ pub type Gemm = fn(
     accum_dtype: DType,
     config: &Config,
     functions: &[Function],
+    extra: &[Tensor],
+    scalars: &[usize],
 ) -> Result<(), String>;
 
 static GEMM: OnceLock<Gemm> = OnceLock::new();
@@ -22,45 +26,86 @@ pub(crate) fn set_gemm(gemm: Gemm) {
     let _ = GEMM.set(gemm);
 }
 
-fn gemm(
-    lhs: &Tensor,
-    rhs: &Tensor,
-    out: &Tensor,
-    dot: &Primitive,
-    config: &Config,
-) -> Result<(), String> {
+fn layout(t: &Tensor) -> (&[usize], &[usize]) {
+    (t.shape(), t.strides())
+}
+
+fn gemm(step: &Step, inputs: &[Tensor], out: &Tensor, config: &Config) -> Result<(), String> {
     let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
-    let Primitive::DotGeneral { accum_dtype, .. } = dot else {
-        unreachable!("a dot_general")
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        let code = codegen::gemm(
+            &step.primitive,
+            layout(&inputs[0]),
+            layout(&inputs[1]),
+            layout(out),
+        );
+        let functions = [
+            Function::new("PROLOGUE_A", code.prologue_a),
+            Function::new("PROLOGUE_B", code.prologue_b),
+            Function::new("EPILOGUE", code.epilogue),
+        ];
+        let accum = accum_dtype(&step.primitive);
+        let tensors = [&inputs[0], &inputs[1], out];
+        return launch(tensors, code.sizes, accum, config, &functions, &[], &[]);
     };
-    let code = crate::codegen::triton::gemm(
-        dot,
-        (lhs.shape(), lhs.strides()),
-        (rhs.shape(), rhs.strides()),
-        (out.shape(), out.strides()),
+    let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
+    let operand = |k: usize| {
+        let at = body.inputs().iter().position(|&v| v == dot.inputs[k]);
+        &inputs[at.expect("the dot's operands are the fusion's inputs")]
+    };
+    let (lhs, rhs) = (operand(0), operand(1));
+    let product = body.type_of(dot.output);
+    let contiguous = contiguous_strides(&product.shape);
+    let code = codegen::gemm(
+        &dot.primitive,
+        layout(lhs),
+        layout(rhs),
+        (&product.shape, &contiguous),
     );
+    let by_value: Vec<bool> = step
+        .inputs
+        .iter()
+        .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
+        .collect();
+    let layouts: Vec<_> = inputs.iter().map(layout).collect();
+    let [_, rows, _, cols] = code.sizes;
+    let epilogue = codegen::epilogue(body, &by_value, dot, &layouts, layout(out), [rows, cols]);
     let functions = [
         Function::new("PROLOGUE_A", code.prologue_a),
         Function::new("PROLOGUE_B", code.prologue_b),
-        Function::new("EPILOGUE", code.epilogue),
+        Function::new("EPILOGUE", epilogue),
     ];
+    let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| by_value[k]).collect();
+    let accum = accum_dtype(&dot.primitive);
+    let tensors = [lhs, rhs, out];
     launch(
-        [lhs, rhs, out],
-        code.sizes,
-        *accum_dtype,
-        config,
-        &functions,
+        tensors, code.sizes, accum, config, &functions, inputs, &scalars,
     )
 }
 
-type Run = Box<dyn Fn(&Step, &Tensor, &Tensor, &Tensor) -> Result<(), String> + Send + Sync>;
+fn accum_dtype(dot: &Primitive) -> DType {
+    let Primitive::DotGeneral { accum_dtype, .. } = dot else {
+        unreachable!("a dot_general")
+    };
+    *accum_dtype
+}
 
-pub(crate) fn run(step: &Step, lhs: &Tensor, rhs: &Tensor, out: &Tensor) -> Result<(), String> {
+pub(crate) fn is_gemm(step: &Step) -> bool {
+    match &step.primitive {
+        Primitive::DotGeneral { .. } => true,
+        Primitive::Fusion { body, .. } => codegen::gemm_dot(body).is_some(),
+        _ => false,
+    }
+}
+
+type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor) -> Result<(), String> + Send + Sync>;
+
+pub(crate) fn run(step: &Step, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {
     match step.launch::<Run>() {
-        Some(run) => run(step, lhs, rhs, out),
-        None => gemm(lhs, rhs, out, &step.primitive, &CONFIGS[UNTUNED]),
+        Some(run) => run(step, inputs, out),
+        None => gemm(step, inputs, out, &CONFIGS[UNTUNED]),
     }
 }
 
@@ -70,15 +115,14 @@ impl Kernels for Gemms {
     type Config = Config;
 
     fn configs(&self, step: &Step) -> Vec<Config> {
-        match step.primitive {
-            Primitive::DotGeneral { .. } => CONFIGS.to_vec(),
-            _ => Vec::new(),
+        match is_gemm(step) {
+            true => CONFIGS.to_vec(),
+            false => Vec::new(),
         }
     }
 
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
-        let run: Run =
-            Box::new(move |step, lhs, rhs, out| gemm(lhs, rhs, out, &step.primitive, &config));
+        let run: Run = Box::new(move |step, inputs, out| gemm(step, inputs, out, &config));
         Tuned::new(format!("{config:?}"), run)
     }
 }

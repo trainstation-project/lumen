@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 
-from lumen.codegen.triton import functions
+from lumen.codegen.triton import functions, scalar
 
 
 @triton.jit
@@ -9,6 +9,7 @@ def gemm_kernel(
     A_ptr,
     B_ptr,
     D_ptr,
+    EXTRA,
     M,
     K,
     N,
@@ -55,13 +56,13 @@ def gemm_kernel(
         D = tl.dot(A, B, D, input_precision="ieee", out_dtype=ACCUM_DTYPE)
         BLOCK_K += BLOCK_SIZE_K
 
-    EPILOGUE(D_ptr, BLOCK_ID_L, BLOCK_M[:, None], BLOCK_N[None, :], D, MASK_M[:, None] & MASK_N[None, :])
+    EPILOGUE(D_ptr, EXTRA, BLOCK_ID_L, BLOCK_M[:, None], BLOCK_N[None, :], D, MASK_M[:, None] & MASK_N[None, :])
 
 
 TL_DTYPES = {"float32": tl.float32, "float16": tl.float16, "bfloat16": tl.bfloat16}
 
 
-def dot_general(tensors, sizes, accum_dtype, config, specs):
+def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars):
     lhs, rhs, out = tensors
     if accum_dtype not in TL_DTYPES or (lhs.dtype, accum_dtype) == ("bfloat16", "bfloat16"):
         raise ValueError(f"dot_general: Triton's dot accumulates in float32 or float16, got {accum_dtype}")
@@ -73,6 +74,7 @@ def dot_general(tensors, sizes, accum_dtype, config, specs):
         A_ptr=lhs,
         B_ptr=rhs,
         D_ptr=out,
+        EXTRA=tuple(scalar(x) if k in scalars else x for k, x in enumerate(extra)),
         M=M,
         K=K,
         N=N,

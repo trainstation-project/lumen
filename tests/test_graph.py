@@ -331,6 +331,35 @@ def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cu
 
 
 @pytest.mark.parametrize("device", [CUDA])
+def test_triton_matmul_epilogues_fuse(device, triton_on_cuda):
+    """The elementwise ops applied to a matmul's result (a bias, an
+    activation, a transposed input, a cast, a reshape, a batched matmul's)
+    run in its GEMM's epilogue: one step, the CPU's values."""
+    a, w, b, r = rand(64, 96), rand(96, 80, seed=1), rand(80, seed=2), rand(80, 64, seed=3)
+    batched = rand(2, 32, 96, seed=4)
+
+    def mm(x, y):
+        return F.matmul(x, y, "float32", "float32")
+
+    fns = [
+        (lambda x, y, z, t: F.relu(mm(x, y) + z), [a, w, b, r]),
+        (lambda x, y, z, t: (mm(x, y) * 0.5 + t.t()).to(dtype="bfloat16"), [a, w, b, r]),
+        (lambda x, y, z, t: mm(x, y).reshape(8, 8, 80) - z, [a, w, b, r]),
+        (lambda x, y, z, t: F.tanh(mm(x, y) + z), [batched, w, b, r]),
+    ]
+    for f, arrays in fns:
+        triton_agrees(device, f, arrays, 1e-4)
+        plan = lumen.graph_compiler.Plan(
+            lumen.make_graph(f)(*(lumen.from_numpy(v).to(device) for v in arrays)), device
+        )
+        assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+    x, y = (lumen.from_numpy(v).to(device) for v in (a, w))
+    scaled = lumen.compile(lambda x, y, s: mm(x, y) * s)
+    for s in (0.5, -3.0):
+        np.testing.assert_allclose(lumen.to_numpy(scaled(x, y, s).to("cpu")), (a @ w) * s, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("device", [CUDA])
 def test_triton_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
     """Softmax, log-softmax and RMS norm, traced as reductions and loops,
     run on Triton as the CPU computes them."""

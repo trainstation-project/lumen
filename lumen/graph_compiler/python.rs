@@ -215,6 +215,8 @@ fn triton_gemm(
     accum_dtype: DType,
     config: &super::triton::Config,
     functions: &[super::triton::Function],
+    extra: &[crate::Tensor],
+    scalars: &[usize],
 ) -> Result<(), String> {
     crate::kernels::launched::launched("dot_general", || {
         let template = format!(
@@ -231,6 +233,7 @@ fn triton_gemm(
     current(tensors[2]);
     Python::attach(|py| {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
+        let extra: Vec<PyTensor> = extra.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         py.import("lumen.kernels.dot_general.triton")?
             .getattr("dot_general")?
             .call1((
@@ -246,6 +249,8 @@ fn triton_gemm(
                     config.warps,
                 ),
                 triton_functions(functions),
+                extra,
+                scalars,
             ))
             .map(|_| ())
     })

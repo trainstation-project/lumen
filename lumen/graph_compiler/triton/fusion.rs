@@ -29,8 +29,10 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
     }
     let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut reduces = vec![false; nodes.len()];
+    let mut dots = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate().rev() {
-        if !fusible(graph, node) {
+        let dot = matches!(node.primitive, Primitive::DotGeneral { .. });
+        if !fusible(graph, node) && !dot {
             continue;
         }
         let mut joined = match readers[node.output].split_first() {
@@ -39,17 +41,23 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
             }
             _ => None,
         };
+        let operand = readers[node.output]
+            .iter()
+            .any(|&r| matches!(nodes[r].primitive, Primitive::DotGeneral { .. }));
+        joined = joined.filter(|_| !operand);
         let reduction = reduction(&node.primitive);
-        if reduction {
-            joined = joined
-                .filter(|&g| !reduces[g] && epilogue(graph, &readers, &group, node.output, g));
+        if reduction || dot {
+            joined = joined.filter(|&g| {
+                !reduces[g] && !dots[g] && epilogue(graph, &readers, &group, node.output, g)
+            });
         }
-        if joined.is_none() && matches!(node.primitive, Primitive::Reshape { .. }) {
+        if joined.is_none() && (dot || matches!(node.primitive, Primitive::Reshape { .. })) {
             continue;
         }
         let g = joined.unwrap_or(i);
         group[i] = Some(g);
         reduces[g] |= reduction;
+        dots[g] |= dot;
     }
     group
 }

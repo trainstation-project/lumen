@@ -113,6 +113,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
     let (name, source, lanes, splits) = match &step.primitive {
+        Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
         Primitive::Fusion { body, .. } => match codegen::reduction_root(body) {
             Some(root) => {
                 let r = codegen::reduction(body, &by_value, root);
@@ -223,7 +224,7 @@ pub(crate) fn run(
     out: &Tensor,
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
-        (Primitive::DotGeneral { .. }, _) => gemm::run(step, &inputs[0], &inputs[1], out),
+        _ if gemm::is_gemm(step) => gemm::run(step, inputs, out),
         (
             Primitive::Fusion { .. }
             | Primitive::Cumsum { .. }
