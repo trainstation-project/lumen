@@ -934,8 +934,8 @@ def test_packed_weights_are_one_matmul(device):
         assert steps.count("dot_general") == 1
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_concatenate(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_concatenate(device, triton_on_cuda):
     a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
     try:
         args = [lumen.from_numpy(v).to(device) for v in (a, b, c)]
@@ -955,8 +955,8 @@ class Gated(lumen.nn.Module):
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU])
-def test_dots_sharing_an_operand_merge(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_dots_sharing_an_operand_merge(device, triton_on_cuda):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
     x and a block holding w1 and w3 interleaved (XLA's DotMerger, with the
     weights placed together instead of concatenated; a gated pair's columns
@@ -990,6 +990,9 @@ def test_dots_sharing_an_operand_merge(device):
             lumen.mps.synchronize()
         names = {(e["kind"], e["name"]) for e in prof.events()}
         assert {("op", "2x dot_general → max → mul"), ("gpu", "2x dot_general → max → mul")} <= names
+    elif device == "cuda":
+        assert plan.packed == [([1, 2], 1)] and model.w1._placed("cuda").shares_storage_with(model.w3._placed("cuda"))
+        assert plan.interleaved == [[2]] and len(steps) == 1, steps
     else:
         assert plan.packed == [] and [s.split(" → ")[0] for s in steps].count("dot_general") == 2
 
@@ -1886,6 +1889,57 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step)
             assert np.isfinite(alone).all()
             np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
     assert plans[0] == plans[1]
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize(
+    "groups",
+    [[1, 1, 1], [2], [4], [8], [2, 1], [8, 4, 2, 1]],
+    ids=["ones", "pair", "four", "eight", "pair and one", "eight four two one"],
+)
+@pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
+@pytest.mark.parametrize(
+    "step", [_gated_inference, _gated_gradients, _gated_training], ids=["inference", "gradients", "training"]
+)
+def test_triton_dots_sharing_an_operand_merge(device, groups, left, step, triton_on_cuda):
+    """On Triton, dots sharing an operand merge into one matmul over their
+    weights packed into one block, the weights on either side, forward and
+    backward: the values, gradients and trained weights the unmerged
+    program's."""
+    d, m, h = 32, 24, 64
+    n = sum(groups)
+    params = list(range(1, n + 1))
+    shape = (d, m) if left else (m, d)
+    try:
+        x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def make():
+        return SharedOperand([meta(h, d) for _ in range(n)], groups, left)
+
+    graph = lumen.make_graph(step)(make(), meta(*shape))
+    plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
+    assert sorted(k for members, _ in plan.packed for k in members) == params, plan.packed
+    values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
+    got = []
+    try:
+        for merge in (True, False):
+            lumen.config.compiler.cuda.merge_dots = merge
+            model = make()
+            f = lumen.compile(step, device=device)
+            f(model, meta(*shape))
+            model.load_state_dict(values)
+            for _ in range(2):
+                out = f(model, x)
+            out = out if isinstance(out, (list, tuple)) else [out]
+            tensors = list(out) + [w._placed(device) for w in model.ws]
+            got.append([lumen.to_numpy(t.to("cpu")) for t in tensors])
+    finally:
+        lumen.config.compiler.cuda.merge_dots = True
+    for merged, alone in zip(*got):
+        assert np.isfinite(alone).all()
+        np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
 
 
 class Returned(lumen.nn.Module):

@@ -16,7 +16,7 @@ mod indexing;
 mod reduction;
 
 pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
-pub(crate) use gemm::{epilogue, gemm, gemm_dot};
+pub(crate) use gemm::{epilogue, gemm, gemm_dot, pairs};
 pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 
@@ -71,6 +71,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | DynamicSlice { .. }
             | Gather { .. }
             | TakeAlongAxis { .. }
+            | Concatenate { .. }
     );
     let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
@@ -196,6 +197,7 @@ struct Emitter<'a> {
     values: HashMap<(Var, String), String>,
     indices: HashMap<String, String>,
     locals: usize,
+    mask: String,
 }
 
 impl<'a> Emitter<'a> {
@@ -213,6 +215,7 @@ impl<'a> Emitter<'a> {
             values: HashMap::new(),
             indices: HashMap::new(),
             locals: 0,
+            mask: "mask".into(),
         }
     }
 
@@ -556,7 +559,7 @@ impl<'a> Emitter<'a> {
                     }
                     (true, _) => format!("tl.full([], in{k}, {t})"),
                     (false, "0") => format!("LOAD{k}(in{k}, 0, None)"),
-                    (false, _) => format!("LOAD{k}(in{k}, {idx}, mask)"),
+                    (false, _) => format!("LOAD{k}(in{k}, {idx}, {})", self.mask),
                 }
             }
             Some(&i) => {
@@ -685,6 +688,41 @@ impl<'a> Emitter<'a> {
                         let others = gather_index(&idx, &ty.shape, &strides);
                         let i = self.index(format!("{others} + {k}.to(tl.int64) * {along}"));
                         return self.value(node.inputs[0], i);
+                    }
+                    Concatenate { dimension, .. } => {
+                        let d = *dimension;
+                        let spans = contiguous_strides(&ty.shape);
+                        let coord =
+                            self.index(format!("({idx} // {}) % {}", spans[d], ty.shape[d]));
+                        let outer = std::mem::take(&mut self.mask);
+                        let (mut start, mut parts) = (0, Vec::new());
+                        for &u in &node.inputs {
+                            let size = body.type_of(u).shape[d];
+                            if size == 0 {
+                                continue;
+                            }
+                            let mut strides = contiguous_strides(&body.type_of(u).shape);
+                            let along = std::mem::replace(&mut strides[d], 0);
+                            let others = gather_index(&idx, &ty.shape, &strides);
+                            let local = format!(
+                                "tl.minimum(tl.maximum({coord} - {start}, 0), {}) * {along}",
+                                size - 1
+                            );
+                            let i = self.index(format!("{others} + {local}"));
+                            let end = start + size;
+                            self.mask = self.local(format!(
+                                "{outer} & ({coord} >= {start}) & ({coord} < {end})"
+                            ));
+                            parts.push((end, self.value(u, i)));
+                            start = end;
+                        }
+                        self.mask = outer;
+                        match parts.pop() {
+                            Some((_, last)) => parts.iter().rev().fold(last, |rest, (end, v)| {
+                                format!("tl.where({coord} < {end}, {v}, {rest})")
+                            }),
+                            None => constant(ty.dtype, Scalar::Int(0)),
+                        }
                     }
                     p => unreachable!("{p} is not loop-fusible"),
                 }

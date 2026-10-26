@@ -1,7 +1,9 @@
+use std::fmt::Write;
+
 use indoc::formatdoc;
 
 use super::{Emitter, at, gather_index, load, named, triton_type};
-use crate::graph::{Graph, Node, Primitive};
+use crate::graph::{Graph, Node, Primitive, Var};
 
 pub(crate) struct GemmCode {
     pub(crate) sizes: [usize; 4],
@@ -101,6 +103,48 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     }
 }
 
+pub(crate) fn pairs(graph: &Graph, dot: &Node) -> Option<Vec<Var>> {
+    let shape = &graph.type_of(dot.output).shape;
+    let (&width, outer) = shape.split_last()?;
+    let readers = |v: Var| graph.nodes().iter().filter(move |n| n.inputs.contains(&v));
+    let mut tupling = readers(dot.output);
+    let (Some(tupling), None) = (tupling.next(), tupling.next()) else {
+        return None;
+    };
+    let Primitive::Reshape { new_sizes } = &tupling.primitive else {
+        return None;
+    };
+    let k = *new_sizes.last()?;
+    let fits = matches!(k, 2 | 4 | 8)
+        && new_sizes.len() == shape.len() + 1
+        && new_sizes[..outer.len()] == *outer
+        && new_sizes[outer.len()] * k == width
+        && !graph.outputs().contains(&dot.output)
+        && !graph.outputs().contains(&tupling.output);
+    if !fits {
+        return None;
+    }
+    let mut members: Vec<Option<Var>> = vec![None; k];
+    for member in readers(tupling.output) {
+        let Primitive::Slice {
+            start_indices,
+            limit_indices,
+            ..
+        } = &member.primitive
+        else {
+            return None;
+        };
+        let last = new_sizes.len() - 1;
+        let whole = (0..last).all(|d| start_indices[d] == 0 && limit_indices[d] == new_sizes[d]);
+        let t = start_indices[last];
+        if !whole || limit_indices[last] != t + 1 || members[t].is_some() {
+            return None;
+        }
+        members[t] = Some(member.output);
+    }
+    members.into_iter().collect()
+}
+
 pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
     body.nodes()
         .iter()
@@ -117,9 +161,50 @@ pub(crate) fn epilogue(
 ) -> (String, String) {
     let mut emitter = Emitter::new(body, by_value);
     let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
-    emitter
-        .values
-        .insert((dot.output, "j".into()), "acc".into());
+    let members = pairs(body, dot).unwrap_or_else(|| vec![dot.output]);
+    let k = members.len();
+    let mut split = String::new();
+    if k > 1 {
+        let twos = vec!["2"; k.ilog2() as usize].join(", ");
+        for x in ["value", "n", "mask"] {
+            writeln!(
+                split,
+                "    {x} = tl.reshape({x}, ({x}.shape[0], {x}.shape[1] // {k}, {twos}))"
+            )
+            .unwrap();
+        }
+        let mut parts = vec![("value".to_string(), 0)];
+        for level in 0..k.ilog2() {
+            parts = parts
+                .into_iter()
+                .flat_map(|(x, member)| {
+                    writeln!(split, "    {x}_0, {x}_1 = tl.split({x})").unwrap();
+                    [
+                        (format!("{x}_0"), member),
+                        (format!("{x}_1"), member + (1 << level)),
+                    ]
+                })
+                .collect();
+            writeln!(
+                split,
+                "    n, _ = tl.split(n)\n    mask, _ = tl.split(mask)"
+            )
+            .unwrap();
+        }
+        writeln!(split, "    n = n // {k}").unwrap();
+        for (x, member) in parts {
+            writeln!(split, "    acc{member} = {x}.to({t})").unwrap();
+            emitter
+                .values
+                .insert((members[member], "j".into()), format!("acc{member}"));
+        }
+    } else {
+        writeln!(split, "    acc0 = value.to({t})").unwrap();
+        emitter
+            .values
+            .insert((dot.output, "j".into()), "acc0".into());
+    }
+    let cols = cols / k;
     let result = emitter.value(body.outputs()[0], "j".into());
     let loads: String = inputs
         .iter()
@@ -140,8 +225,7 @@ pub(crate) fn epilogue(
             "
             {loads}@triton.jit
             def NAME(ptr, EXTRA, l, m, n, value, mask):
-            {unpacked}    j = l * {} + m * {cols} + n
-                acc = value.to({t})
+            {unpacked}{split}    j = l * {} + m * {cols} + n
             {lines}    tl.store(ptr + {stored}, {result}, mask=mask)
             ",
             rows * cols

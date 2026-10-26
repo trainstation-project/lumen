@@ -656,6 +656,10 @@ impl Tensor {
             copy_h2d(self, &host);
             return Ok(self);
         }
+        if let Device::Cuda(_) = self.device() {
+            crate::graph_compiler::triton::copy(self, &host.copy_to(self.device()))?;
+            return Ok(self);
+        }
         if !matches!(self.device(), Device::Cpu(_) | Device::Mps(_)) {
             return Err(format!(
                 "copy_: a strided view on {} is not supported",

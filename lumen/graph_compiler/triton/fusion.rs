@@ -1,4 +1,4 @@
-use crate::codegen::triton::fusible;
+use crate::codegen::triton::{fusible, pairs};
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::loops::fused;
 use crate::graph_compiler::pass::{CompilerPass, Module};
@@ -47,8 +47,16 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         joined = joined.filter(|_| !operand);
         let reduction = reduction(&node.primitive);
         if reduction || dot {
+            let starts = match dot.then(|| pairs(graph, node)).flatten() {
+                Some(members) => members,
+                None => vec![node.output],
+            };
             joined = joined.filter(|&g| {
-                !reduces[g] && !dots[g] && epilogue(graph, &readers, &group, node.output, g)
+                !reduces[g]
+                    && !dots[g]
+                    && starts
+                        .iter()
+                        .all(|&v| epilogue(graph, &readers, &group, v, g))
             });
         }
         if joined.is_none() && (dot || matches!(node.primitive, Primitive::Reshape { .. })) {
@@ -89,6 +97,7 @@ fn epilogue(
                     | Primitive::DynamicSlice { .. }
                     | Primitive::Gather { .. }
                     | Primitive::TakeAlongAxis { .. }
+                    | Primitive::Concatenate { .. }
             ) {
                 return false;
             }
