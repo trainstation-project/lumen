@@ -62,16 +62,19 @@ def gemm_kernel(
         A = PROLOGUE_A(A_ptr, BLOCK_ID_L, BLOCK_M[:, None], BLOCK_K[None, :], MASK_M[:, None] & MASK_K[None, :])
         B = PROLOGUE_B(B_ptr, BLOCK_ID_L, BLOCK_K[:, None], BLOCK_N[None, :], MASK_K[:, None] & MASK_N[None, :])
         D = tl.dot(A, B, D, input_precision="ieee", out_dtype=ACCUM_DTYPE)
-        if HALVES and not ROWS:
-            B_HALF = PROLOGUE_B(
-                B_ptr, BLOCK_ID_L, BLOCK_K[:, None], GRID_N + BLOCK_N[None, :], MASK_K[:, None] & MASK_N[None, :]
-            )
-            D_HALF = tl.dot(A, B_HALF, D_HALF, input_precision="ieee", out_dtype=ACCUM_DTYPE)
-        if HALVES and ROWS:
-            A_HALF = PROLOGUE_A(
-                A_ptr, BLOCK_ID_L, GRID_M + BLOCK_M[:, None], BLOCK_K[None, :], MASK_M[:, None] & MASK_K[None, :]
-            )
-            D_HALF = tl.dot(A_HALF, B, D_HALF, input_precision="ieee", out_dtype=ACCUM_DTYPE)
+
+        if HALVES:
+            if ROWS:
+                A_HALF = PROLOGUE_A(
+                    A_ptr, BLOCK_ID_L, GRID_M + BLOCK_M[:, None], BLOCK_K[None, :], MASK_M[:, None] & MASK_K[None, :]
+                )
+                D_HALF = tl.dot(A_HALF, B, D_HALF, input_precision="ieee", out_dtype=ACCUM_DTYPE)
+            else:
+                B_HALF = PROLOGUE_B(
+                    B_ptr, BLOCK_ID_L, BLOCK_K[:, None], GRID_N + BLOCK_N[None, :], MASK_K[:, None] & MASK_N[None, :]
+                )
+                D_HALF = tl.dot(A, B_HALF, D_HALF, input_precision="ieee", out_dtype=ACCUM_DTYPE)
+
         BLOCK_K += BLOCK_SIZE_K
 
     MASK = MASK_M[:, None] & MASK_N[None, :]
