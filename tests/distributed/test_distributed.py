@@ -357,6 +357,28 @@ def test_collective_primitives_type_and_print():
         lumen.make_graph(lambda y: prims.reduce_scatter(y, "sum", [0, 2]))(meta(3, 5))
 
 
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_collectives_overlap_the_work_independent_of_them(device):
+    """``lumen.distributed``'s collectives end in a ``device_wait``. The plan starts the collective as soon as
+    its operand exists and waits for it just before the first op that reads the result, with the work
+    independent of it in between. Until then it keeps the operand's buffer (which NCCL reads) to itself."""
+    import lumen.functional as F
+
+    def f(x, y):
+        """An all-reduce of ``2 x`` plus one, and ``sum(3 exp y)``, which doesn't need it."""
+        return prims.device_wait(prims.all_reduce(x * 2.0, "sum", [0, 1])) + 1.0, F.sum(F.exp(y) * 3.0)
+
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(meta(4), meta(4)), device).steps()
+    labels = [s["label"] for s in steps]
+    start, wait = labels.index("all_reduce"), labels.index("device_wait")
+    assert start < next(i for i, label in enumerate(labels) if label.startswith("exp")) < wait
+    assert labels[wait + 1] == "add" and steps[wait]["inputs"][0] == steps[wait]["output"]
+    operand = steps[start]["inputs"][0][0]
+    assert all(s["output"][0] != operand for s in steps[start + 1 : wait])
+    graph = str(lumen.make_graph(lambda x: all_reduce(x, group=[0, 1]))(meta(4)))
+    assert "all_reduce[op=sum ranks=(0, 1)]" in graph and "device_wait" in graph
+
+
 # Run in each process on its own GPU: every collective over the world in three dtypes, their gradients, and,
 # with 8 processes, all-reduces over a 2x4 mesh's slices.
 COLLECTIVES_PROGRAM = """

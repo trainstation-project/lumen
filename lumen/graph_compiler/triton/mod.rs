@@ -361,7 +361,15 @@ pub(crate) fn run(
             | Primitive::ReduceScatter { .. },
             _,
         ) => crate::distributed::nccl::run(&step.primitive, &inputs[0], out),
-        (Primitive::Wait, _) => {
+        (Primitive::DeviceWait, _) => {
+            #[cfg(lumen_cuda_linked)]
+            crate::distributed::nccl::device_wait(&inputs[0])?;
+            match out.data_ptr() == inputs[0].data_ptr() {
+                true => Ok(()),
+                false => copy(out, &inputs[0]),
+            }
+        }
+        (Primitive::HostWait, _) => {
             crate::stream::stream_for(out.device())?.synchronize();
             match out.data_ptr() == inputs[0].data_ptr() {
                 true => Ok(()),

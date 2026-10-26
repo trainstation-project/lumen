@@ -1,5 +1,8 @@
 //! Node schedulers that reorder a graph's nodes to keep less memory live.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use crate::graph::{Graph, Primitive, Var};
 
 /// Node-level dependency edges of a graph.
@@ -183,6 +186,72 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
             }
         }
     }
+    order
+}
+
+/// Overlap schedule: a topological reorder of `graph` that runs each collective, and the nodes it depends on,
+/// as early as possible, and each `device_wait`, and the nodes depending on it, as late as possible, so
+/// communication overlaps the compute independent of it; returns node indices, the identity when the graph
+/// has no collective.
+pub(crate) fn overlap(graph: &Graph) -> Vec<usize> {
+    let nodes = graph.nodes();
+    if !nodes.iter().any(|node| node.primitive.is_collective()) {
+        return (0..nodes.len()).collect();
+    }
+    let Deps { operands, users } = deps(graph);
+    let wait = |i: usize| matches!(nodes[i].primitive, Primitive::DeviceWait);
+    // Per node, whether a collective is it or depends on it.
+    let mut feeds: Vec<bool> = nodes
+        .iter()
+        .map(|node| node.primitive.is_collective())
+        .collect();
+    for i in (0..nodes.len()).rev() {
+        if feeds[i] {
+            operands[i].iter().for_each(|&o| feeds[o] = true);
+        }
+    }
+    // Per node, whether it is a `device_wait` or depends on one.
+    let mut waits = vec![false; nodes.len()];
+    for i in 0..nodes.len() {
+        waits[i] = wait(i) || operands[i].iter().any(|&o| waits[o]);
+    }
+    // Forward: among ready nodes, those feeding a collective first and those depending on a wait last, each
+    // kind in its current order.
+    let rank = |i: usize| Reverse((!feeds[i], waits[i], i));
+    let mut waiting: Vec<usize> = operands.iter().map(Vec::len).collect();
+    let mut ready: BinaryHeap<Reverse<(bool, bool, usize)>> = (0..nodes.len())
+        .filter(|&i| waiting[i] == 0)
+        .map(rank)
+        .collect();
+    let mut position = vec![0; nodes.len()];
+    let mut t = 0;
+    while let Some(Reverse((_, _, i))) = ready.pop() {
+        position[i] = t;
+        t += 1;
+        for &u in &users[i] {
+            waiting[u] -= 1;
+            if waiting[u] == 0 {
+                ready.push(rank(u));
+            }
+        }
+    }
+    // Backward: waits last among nodes whose users are placed, the rest in the forward order.
+    let mut waiting: Vec<usize> = users.iter().map(Vec::len).collect();
+    let mut ready: BinaryHeap<(bool, usize, usize)> = (0..nodes.len())
+        .filter(|&i| waiting[i] == 0)
+        .map(|i| (wait(i), position[i], i))
+        .collect();
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some((_, _, i)) = ready.pop() {
+        order.push(i);
+        for &o in &operands[i] {
+            waiting[o] -= 1;
+            if waiting[o] == 0 {
+                ready.push((wait(o), position[o], o));
+            }
+        }
+    }
+    order.reverse();
     order
 }
 

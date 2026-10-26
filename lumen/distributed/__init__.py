@@ -1,5 +1,6 @@
 """Process groups, device meshes, the TCP store and collectives (NCCL on CUDA), plus a helper that prepares
-single-host TPU launch variables."""
+single-host TPU launch variables. Each collective runs asynchronously and ends in a ``device_wait``, which
+the plan places just before the first op that reads the result."""
 
 import ctypes
 import importlib.util
@@ -114,7 +115,7 @@ def all_reduce(tensor, op="sum", group=None):
     from lumen.graph import prims
 
     ranks = _ranks(group)
-    return tensor if len(ranks) == 1 else prims.all_reduce(tensor, op, ranks)
+    return tensor if len(ranks) == 1 else prims.device_wait(prims.all_reduce(tensor, op, ranks))
 
 
 def all_gather(tensor, dim=0, group=None):
@@ -126,7 +127,7 @@ def all_gather(tensor, dim=0, group=None):
     if len(ranks) == 1:
         return tensor
     dim = dim % tensor.ndim
-    gathered = prims.all_gather(tensor, ranks)
+    gathered = prims.device_wait(prims.all_gather(tensor, ranks))
     # The gathered axis goes just before `dim`, then merges with it: rank r's rows come r-th along `dim`.
     order = [*range(1, dim + 1), 0, *range(dim + 1, tensor.ndim + 1)]
     moved = prims.transpose(gathered, order) if dim else gathered
@@ -150,4 +151,5 @@ def reduce_scatter(tensor, dim=0, op="sum", group=None):
     # Split `dim` into (process, block) and move the process axis first, where the primitive scatters it.
     split = prims.reshape(tensor, [*tensor.shape[:dim], n, tensor.shape[dim] // n, *tensor.shape[dim + 1 :]])
     order = [dim, *range(dim), *range(dim + 1, tensor.ndim + 1)]
-    return prims.reduce_scatter(prims.transpose(split, order) if dim else split, op, ranks)
+    rows = prims.transpose(split, order) if dim else split
+    return prims.device_wait(prims.reduce_scatter(rows, op, ranks))

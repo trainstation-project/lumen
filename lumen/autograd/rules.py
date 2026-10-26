@@ -60,7 +60,8 @@ def _cast_transpose(ct, x, new_dtype):
 
 deflinear(prims.cast, _cast_transpose)
 deflinear(prims.reshape, lambda ct, x, new_sizes: [prims.reshape(ct, x.shape)])
-deflinear(prims.wait, lambda ct, x: [ct])
+deflinear(prims.host_wait, lambda ct, x: [ct])
+deflinear(prims.device_wait, lambda ct, x: [ct])
 deflinear(prims.to_host, lambda ct, x: [prims.to_device(ct)])
 deflinear(prims.to_device, lambda ct, x: [prims.to_host(ct)])
 
@@ -93,30 +94,30 @@ def _summed(name, op):
 def _all_reduce_jvp(primals, tangents, out, op, ranks):
     """The tangents summed across ``ranks``, as the values are."""
     _summed("all_reduce", op)
-    return None if tangents[0] is None else prims.all_reduce(tangents[0], op, ranks)
+    return None if tangents[0] is None else prims.device_wait(prims.all_reduce(tangents[0], op, ranks))
 
 
 def _all_reduce_transpose(ct, x, op, ranks):
     """Every rank's cotangent summed across ``ranks``: each rank's value reached every result."""
     _summed("all_reduce", op)
-    return [prims.all_reduce(ct, op, ranks)]
+    return [prims.device_wait(prims.all_reduce(ct, op, ranks))]
 
 
 def _all_gather_transpose(ct, x, ranks):
     """Each rank's row of the gathered cotangent, summed across ``ranks``."""
-    return [prims.reduce_scatter(ct, "sum", ranks)]
+    return [prims.device_wait(prims.reduce_scatter(ct, "sum", ranks))]
 
 
 def _reduce_scatter_jvp(primals, tangents, out, op, ranks):
     """The tangents reduce-scattered, as the values are."""
     _summed("reduce_scatter", op)
-    return None if tangents[0] is None else prims.reduce_scatter(tangents[0], op, ranks)
+    return None if tangents[0] is None else prims.device_wait(prims.reduce_scatter(tangents[0], op, ranks))
 
 
 def _reduce_scatter_transpose(ct, x, op, ranks):
     """Every rank's cotangent gathered: each row of ``x`` reached the rank that kept it."""
     _summed("reduce_scatter", op)
-    return [prims.all_gather(ct, ranks)]
+    return [prims.device_wait(prims.all_gather(ct, ranks))]
 
 
 primitive_jvps[prims.all_reduce] = _all_reduce_jvp

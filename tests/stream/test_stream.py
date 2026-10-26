@@ -234,7 +234,7 @@ def test_wait_is_an_in_place_op():
     "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
 )
 def test_wait_primitive(device, triton_on_cuda):
-    """``prims.wait``: its operand's value, in place (the plan's step reads
+    """``prims.host_wait``: its operand's value, in place (the plan's step reads
     and writes one buffer: no memory of its own), a step of its own (the
     host waits there: no fusion across it), its cotangent passed through."""
     import numpy as np
@@ -244,17 +244,17 @@ def test_wait_primitive(device, triton_on_cuda):
 
     def f(x):
         """``sum(wait(2 exp x) * 3)``."""
-        return F.sum(prims.wait(F.exp(x) * 2.0) * 3.0)
+        return F.sum(prims.host_wait(F.exp(x) * 2.0) * 3.0)
 
     graph = lumen.make_graph(f)(lumen.empty([4], device="meta"))
     try:
         plan = lumen.graph_compiler.Plan(graph, device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    (wait,) = [s for s in plan.steps() if s["primitive"] == "wait"]
+    (wait,) = [s for s in plan.steps() if s["primitive"] == "host_wait"]
     assert wait["inputs"][0][0] == wait["output"][0]
     if device == "mps":
-        assert [s["label"] for s in plan.steps()] == ["exp → mul", "wait", "mul → reduce_sum"]
+        assert [s["label"] for s in plan.steps()] == ["exp → mul", "host_wait", "mul → reduce_sum"]
     x = np.array([0.0, 1.0, 2.0, 3.0], np.float32)
     compiled = lumen.compile(f, device=device)
     assert compiled(lumen.from_numpy(x)).item() == pytest.approx(float(np.sum(np.exp(x) * 6)), rel=1e-6)

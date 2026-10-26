@@ -75,7 +75,8 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             accum_dtype: dtype("accum_dtype")?,
             output_dtype: dtype("output_dtype")?,
         },
-        "wait" => Wait,
+        "host_wait" => HostWait,
+        "device_wait" => DeviceWait,
         "all_reduce" => AllReduce {
             op: reduction(&get("op")?.extract::<String>()?)?,
             ranks: dims("ranks")?,

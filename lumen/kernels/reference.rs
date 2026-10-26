@@ -858,7 +858,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 _ => unreachable!("operands of one dtype"),
             }
         }
-        Reshape { .. } | Wait | ToHost | ToDevice => args[0].clone(),
+        Reshape { .. } | HostWait | DeviceWait | ToHost | ToDevice => args[0].clone(),
         BroadcastInDim {
             broadcast_dimensions,
             ..

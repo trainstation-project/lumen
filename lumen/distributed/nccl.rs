@@ -1,6 +1,7 @@
 //! Collectives on CUDA through NCCL: `libnccl.so.2` loaded at run time (as PyTorch's wheels do), one
 //! communicator per group of ranks and device, created on first use from an id rank 0 shares through the
-//! default group's store.
+//! default group's store. Collectives run on a per-device NCCL stream after the work queued before them on
+//! lumen's stream; `device_wait` makes lumen's stream wait for them.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -8,6 +9,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::device::cuda::CUDA;
 use crate::graph::{Primitive, Reduction};
+use crate::stream::cuda::{EVENT_DISABLE_TIMING, ffi};
 use crate::{DType, Device, Tensor};
 
 /// An opaque `ncclComm_t`.
@@ -56,7 +58,7 @@ struct Nccl {
     get_error_string: unsafe extern "C" fn(c_int) -> *const c_char,
 }
 
-/// A `*mut c_void` communicator handle that may move between threads (NCCL's are not tied to one).
+/// A `*mut c_void` communicator, stream or event handle that may move between threads (none is tied to one).
 struct Handle(Comm);
 
 unsafe impl Send for Handle {}
@@ -177,7 +179,59 @@ fn red_op(op: Reduction) -> c_int {
     }
 }
 
-/// Runs the collective `primitive` from `x` into `out` (contiguous, on one CUDA device) on lumen's stream.
+/// `cudaStreamNonBlocking`: the stream doesn't implicitly synchronize with the legacy default stream.
+const STREAM_NON_BLOCKING: u32 = 1;
+
+/// Turns a `cudaError_t` into `Err` when it isn't `cudaSuccess`.
+fn cuda_checked(call: &str, device: usize, result: i32) -> Result<(), String> {
+    match result {
+        0 => Ok(()),
+        e => Err(format!("{call} on cuda:{device} failed (error {e})")),
+    }
+}
+
+/// The non-blocking stream collectives on CUDA device `device` run on, created on first use.
+fn stream(device: usize) -> Result<*mut c_void, String> {
+    static STREAMS: Mutex<Option<HashMap<usize, Handle>>> = Mutex::new(None);
+    let mut streams = STREAMS.lock().unwrap_or_else(PoisonError::into_inner);
+    let streams = streams.get_or_insert_with(HashMap::new);
+    if let Some(Handle(stream)) = streams.get(&device) {
+        return Ok(*stream);
+    }
+    let mut stream = std::ptr::null_mut();
+    cuda_checked("cudaStreamCreateWithFlags", device, unsafe {
+        ffi::cudaStreamCreateWithFlags(&mut stream, STREAM_NON_BLOCKING)
+    })?;
+    streams.insert(device, Handle(stream));
+    Ok(stream)
+}
+
+/// Per output buffer address, the event recorded when the collective writing it finishes.
+static DONE: Mutex<Option<HashMap<usize, Handle>>> = Mutex::new(None);
+
+/// Makes lumen's stream on `x`'s device wait, without blocking the host, for the collective writing `x`
+/// (nothing when no collective is pending on it).
+pub(crate) fn device_wait(x: &Tensor) -> Result<(), String> {
+    let Device::Cuda(device) = x.device() else {
+        return Ok(());
+    };
+    let done = DONE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .remove(&(x.data_ptr() as usize));
+    let Some(Handle(event)) = done else {
+        return Ok(());
+    };
+    CUDA.set_device(device);
+    // CUDA frees the destroyed event once the wait on it completes.
+    let waited = unsafe { ffi::cudaStreamWaitEvent(std::ptr::null_mut(), event, 0) };
+    unsafe { ffi::cudaEventDestroy(event) };
+    cuda_checked("cudaStreamWaitEvent", device, waited)
+}
+
+/// Starts the collective `primitive` from `x` into `out` (contiguous, on one CUDA device) on the device's
+/// NCCL stream once lumen's stream has produced `x`; `device_wait` on `out` waits for it.
 pub(crate) fn run(primitive: &Primitive, x: &Tensor, out: &Tensor) -> Result<(), String> {
     let Device::Cuda(device) = out.device() else {
         return Err(format!(
@@ -189,9 +243,9 @@ pub(crate) fn run(primitive: &Primitive, x: &Tensor, out: &Tensor) -> Result<(),
     let nccl = nccl()?;
     let dtype = data_type(x.dtype())?;
     let (send, recv) = (x.data_ptr().cast_const().cast(), out.data_ptr().cast());
-    // lumen's kernels run on the legacy default stream, so collectives there stay in program order.
-    let stream = std::ptr::null_mut();
-    match primitive {
+    let stream = stream(device)?;
+    crate::stream::cuda::wait(device, stream as usize);
+    let launched = match primitive {
         Primitive::AllReduce { op, ranks } => {
             let comm = communicator(nccl, ranks, device)?;
             checked(nccl, "ncclAllReduce", unsafe {
@@ -211,5 +265,18 @@ pub(crate) fn run(primitive: &Primitive, x: &Tensor, out: &Tensor) -> Result<(),
             })
         }
         p => Err(format!("{}: not an NCCL collective", p.name())),
-    }
+    };
+    launched?;
+    let mut event = std::ptr::null_mut();
+    cuda_checked("cudaEventCreateWithFlags", device, unsafe {
+        ffi::cudaEventCreateWithFlags(&mut event, EVENT_DISABLE_TIMING)
+    })?;
+    cuda_checked("cudaEventRecord", device, unsafe {
+        ffi::cudaEventRecord(event, stream)
+    })?;
+    DONE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(out.data_ptr() as usize, Handle(event));
+    Ok(())
 }

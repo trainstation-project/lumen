@@ -242,8 +242,11 @@ pub enum Primitive {
         accum_dtype: DType,
         output_dtype: DType,
     },
-    /// Returns its operand once the device work producing it has finished.
-    Wait,
+    /// Returns its operand once the device has finished all work queued before it: the host blocks.
+    HostWait,
+    /// Returns its operand once the asynchronous work producing it (a collective) has finished: the device's
+    /// compute waits for it, the host doesn't.
+    DeviceWait,
     /// Combines the operand across the processes `ranks` with `op`; each gets the result.
     AllReduce {
         op: Reduction,
@@ -379,6 +382,16 @@ impl Primitive {
         }
     }
 
+    /// Whether the op is a collective across processes, which runs asynchronously until its `device_wait`.
+    pub fn is_collective(&self) -> bool {
+        matches!(
+            self,
+            Primitive::AllReduce { .. }
+                | Primitive::AllGather { .. }
+                | Primitive::ReduceScatter { .. }
+        )
+    }
+
     /// The op's display name; fusions and custom calls use their label.
     pub fn name(&self) -> &'static str {
         use Primitive::*;
@@ -404,7 +417,8 @@ impl Primitive {
             ReduceMax { .. } => "reduce_max",
             Cumsum { .. } => "cumsum",
             DotGeneral { .. } => "dot_general",
-            Wait => "wait",
+            HostWait => "host_wait",
+            DeviceWait => "device_wait",
             AllReduce { .. } => "all_reduce",
             AllGather { .. } => "all_gather",
             ReduceScatter { .. } => "reduce_scatter",
@@ -544,7 +558,7 @@ impl Primitive {
                 }
                 Ok(x.clone())
             }
-            Wait | ToHost | ToDevice | AllReduce { .. } => Ok(args[0].clone()),
+            HostWait | DeviceWait | ToHost | ToDevice | AllReduce { .. } => Ok(args[0].clone()),
             AllGather { ranks } => {
                 let x = args[0];
                 let shape: Vec<usize> = std::iter::once(ranks.len())

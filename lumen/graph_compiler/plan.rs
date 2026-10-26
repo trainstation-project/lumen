@@ -248,7 +248,7 @@ fn replayable(step: &Step) -> bool {
     use Primitive::*;
     let launches = match &step.primitive {
         Fusion { name, .. } => !name.starts_with(crate::graph::NEURAL_ENGINE),
-        Wait | ToHost | ToDevice | CustomCall { .. } | PallasCall { .. } => false,
+        HostWait | DeviceWait | ToHost | ToDevice | CustomCall { .. } | PallasCall { .. } => false,
         _ => true,
     };
     launches
@@ -344,6 +344,7 @@ impl Plan {
     /// Compiles `graph` in its node order: aliases values onto shared buffers, assigns
     /// inputs and outputs, and packs the rest into the workspace by live range.
     fn compile_in_order(graph: &Graph, options: &PlanOptions) -> Self {
+        let graph = &graph.reordered(&super::schedule::overlap(graph));
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
         let is_reshape = |node: &Node| {
@@ -369,11 +370,27 @@ impl Plan {
                 }
             }
         }
+        // What each node reads: a `device_wait` also reads its collective's operands, which the collective
+        // reads asynchronously until the wait.
+        let mut producer: Vec<Option<&Node>> = vec![None; n];
+        for node in graph.nodes() {
+            producer[node.output] = Some(node);
+        }
+        let reads = |node: &Node| -> Vec<Var> {
+            let mut vars = node.inputs.clone();
+            if let Primitive::DeviceWait = node.primitive
+                && let Some(collective) = producer[node.inputs[0]]
+                && collective.primitive.is_collective()
+            {
+                vars.extend(&collective.inputs);
+            }
+            vars
+        };
         // For each value, the indices of the live nodes that read it.
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (t, node) in graph.nodes().iter().enumerate() {
             if live[node.output] {
-                node.inputs.iter().for_each(|&v| readers[v].push(t));
+                reads(node).into_iter().for_each(|v| readers[v].push(t));
             }
         }
 
@@ -395,7 +412,9 @@ impl Plan {
         let mut view: Vec<Option<View>> = vec![None; n];
         let mut written_at: Vec<Option<View>> = vec![None; n];
         for (t, node) in graph.nodes().iter().enumerate() {
-            if is_reshape(node) || matches!(node.primitive, Primitive::Wait) {
+            if is_reshape(node)
+                || matches!(node.primitive, Primitive::HostWait | Primitive::DeviceWait)
+            {
                 root[node.output] = root[node.inputs[0]];
             }
             // Outputs an updating op writes over one of its operands, with that operand's position.
@@ -459,7 +478,8 @@ impl Plan {
                     node.primitive,
                     Primitive::CustomCall { .. }
                         | Primitive::Reshape { .. }
-                        | Primitive::Wait
+                        | Primitive::HostWait
+                        | Primitive::DeviceWait
                         | Primitive::FusionOutput { .. }
                 );
             // Donated outputs are placed later, in the donor's buffer.
@@ -549,7 +569,7 @@ impl Plan {
         for (t, node) in nodes.iter().enumerate() {
             first[root[node.output]] = first[root[node.output]].min(t);
             last[root[node.output]] = t;
-            for &v in &node.inputs {
+            for v in reads(node) {
                 last[root[v]] = t;
             }
         }
