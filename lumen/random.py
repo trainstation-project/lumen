@@ -1,3 +1,5 @@
+"""The global counter-based random generator (a seed and a stream offset) and the traced random factories built on it."""
+
 import contextlib
 
 from lumen.graph import prims, tracer
@@ -13,6 +15,7 @@ __all__ = [
     "set_rng_state",
 ]
 
+# The generator: the seed and the position of the next unread 32-bit draw in its stream.
 _seed = 0
 _offset = 0
 
@@ -70,6 +73,7 @@ def fork_rng(devices=None, enabled=True, device_type=None):
     if not enabled:
         yield
         return
+    # Inside a trace, rewind the trace's draw count instead of the global offset.
     if tracer._TRACES:
         rng = tracer._RNG[-1]
         drawn = rng["drawn"]
@@ -92,6 +96,7 @@ def _set(seed, offset):
 
 
 def _between_calls(name):
+    """Raises if called while tracing, since ``name`` touches the generator outside the trace."""
     if tracer._TRACES:
         raise RuntimeError(
             f"{name} reads and writes the generator between calls: call it outside the compiled function"
@@ -138,6 +143,7 @@ def rand(shape, dtype=None, device=None):
     dtype = dtype or default_dtype
     k = min(_significand_bits(dtype), 32)
     bits = _bits(shape)
+    # Keep only the top k bits so every value is exact in the dtype.
     if k < 32:
         bits = prims.div(bits, prims.full(tuple(shape), 1 << (32 - k), "uint32"))
     return bits.to(dtype=dtype) * 2.0**-k
@@ -154,6 +160,7 @@ def randn(shape, dtype=None, device=None):
 
     dtype = dtype or default_dtype
     _significand_bits(dtype)
+    # Top 23 bits m, mapped to (2m + 1) * 2**-23 - 1, an odd multiple of 2**-23 in (-1, 1).
     m = prims.div(_bits(shape), prims.full(tuple(shape), 1 << 9, "uint32"))
     u = m.to(dtype="float32") * 2.0**-22 + (2.0**-23 - 1.0)
     z = _erfinv(u) * 2.0**0.5
@@ -192,6 +199,7 @@ def _erfinv(x):
     ]
 
     def horner(coefficients, t):
+        """Evaluates the polynomial with ``coefficients`` (highest power first) at ``t``."""
         p = coefficients[0]
         for c in coefficients[1:]:
             p = p * t + c
@@ -226,6 +234,7 @@ def randint(*args, size=None, dtype="int64", device=None):
     if span > 1 << 32:
         bits = bits * prims.full(size, 1 << 32, "uint64") + _bits(size).to(dtype="uint64")
     span_t = prims.full(size, span, "uint64")
+    # bits mod span, written as bits - (bits // span) * span.
     r = bits - prims.div(bits, span_t) * span_t
     return r.to(dtype=dtype) + low if low else r.to(dtype=dtype)
 

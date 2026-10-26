@@ -1,3 +1,5 @@
+"""The lumen package: tensors, devices, dtypes, tracing with ``lumen.compile``, autograd and RNG re-exported at top level."""
+
 from lumen import (
     _native,
     autograd,

@@ -3584,7 +3584,6 @@ def test_rounding_a_contraction_then_widening_it_warns():
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
 
     def scores(x):
-        """Scores of `x` against itself in its dtype, scaled and widened to float32."""
         s = F.matmul(x, x.t(), "float32", x.dtype) * 0.5
         return s.float()
 

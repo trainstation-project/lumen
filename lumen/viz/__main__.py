@@ -1,3 +1,5 @@
+"""Command line tool that writes the graph and plan of a compiled function as an HTML page."""
+
 import argparse
 import importlib
 import importlib.util
@@ -11,6 +13,7 @@ from .common import DTYPES
 
 
 def _examples():
+    """Built-in example functions with their default input specs, by name."""
     import lumen.functional as F
 
     def attention(x, wq, wk, wv, w1, w2):
@@ -25,6 +28,7 @@ def _examples():
         return x + F.matmul(F.relu(F.matmul(x, w1, "float32", "float32")), w2, "float32", "float32")
 
     def mlp(x, w1, w2):
+        """Two-layer ReLU MLP followed by a softmax."""
         return F.softmax(F.matmul(F.relu(F.matmul(x, w1, "float32", "float32")), w2, "float32", "float32"), -1)
 
     seq, dim, hidden = 128, 256, 1024
@@ -63,6 +67,7 @@ def _tensor(spec, device):
 
 
 def main():
+    """Parses the command line, compiles the function on ones-filled inputs and writes its HTML page."""
     parser = argparse.ArgumentParser(
         description="Write the graph and plan of a function compiled for a device as an HTML page.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

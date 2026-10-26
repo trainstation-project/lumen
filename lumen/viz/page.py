@@ -1,3 +1,5 @@
+"""Builds the data of the graph visualization page (traced graph, fused plan, kernel timings) and writes the HTML."""
+
 import datetime
 import html
 import json
@@ -33,6 +35,7 @@ def profile_steps(plan, run, runs, device):
     by_id = {e["id"]: e for e in events}
 
     def in_op(e):
+        """Whether event ``e`` is nested inside an op-level profiler range."""
         p = by_id.get(e["parent"])
         while p is not None:
             if p["kind"] == "op":
@@ -40,6 +43,7 @@ def profile_steps(plan, run, runs, device):
             p = by_id.get(p["parent"])
         return False
 
+    # Top-level op ranges are the plan's steps in launch order, nsteps per run; any other count can't be matched up.
     ranges = sorted(
         (e for e in events if e["kind"] == "op" and not in_op(e) and not e["name"].startswith("lumen::")),
         key=lambda e: e["start_us"],
@@ -63,6 +67,7 @@ def profile_steps(plan, run, runs, device):
 
 
 def _kernel_entries(kernels):
+    """``(name, us)`` kernels as dicts with the source file and anchor of each primitive kernel."""
     out = []
     for name, us in kernels:
         src = source_of(name)
@@ -76,6 +81,7 @@ def plan_view(plan, kernels):
     nodes, edges, writer = [], [], {}
 
     def node_for(buffer, dtype, shape):
+        """Node id of the latest writer of ``buffer``, adding an input or buffer node on first use."""
         if buffer not in writer:
             nodes.append(
                 {
@@ -149,6 +155,7 @@ def graph_view(graph, unfused, kernels):
             "scope": node["scope"],
             "sources": node["sources"],
         }
+        # Walk the unfused plan's steps in order to the next one computing this node; skipped steps' kernels are credited to it.
         added = []
         for t in range(s, len(steps)):
             if steps[t]["primitive"] == node["primitive"] and list(steps[t]["output"][1:]) == [dtype, list(shape)]:
@@ -240,4 +247,5 @@ def write(data, path, json_path=None, fragment=False):
         pathlib.Path(json_path).write_text(json.dumps(data, indent=1))
 
 
+# The page's HTML template, with __TITLE__ and __DATA__ placeholders.
 TEMPLATE = (pathlib.Path(__file__).parent / "page.html").read_text()

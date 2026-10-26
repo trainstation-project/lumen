@@ -1,3 +1,5 @@
+"""``Module``, a frozen-dataclass tree of weights, and helpers that walk, map and hash such trees for ``lumen.compile``."""
+
 import dataclasses
 
 from lumen.tensor._C import Tensor
@@ -14,11 +16,13 @@ class Module:
     they are runtime scalars or static (``lumen.compile``)."""
 
     def __init_subclass__(cls, **kwargs):
+        """Turns each subclass into a frozen dataclass whose scalar fields stay assignable."""
         super().__init_subclass__(**kwargs)
         dataclasses.dataclass(frozen=True, eq=False)(cls)
         frozen = cls.__setattr__
 
         def __setattr__(self, name, value):
+            """Assigns a scalar field after checking its kind; any other field raises as a frozen dataclass does."""
             kind = _scalar_fields(type(self)).get(name)
             if kind is None:
                 return frozen(self, name, value)
@@ -54,6 +58,7 @@ class Module:
                 params[path].copy_(t)
 
 
+# Annotations (types or their string forms under postponed evaluation) that mark a scalar field, mapped to its kind.
 _KINDS = {float: "float", int: "int", bool: "bool", "float": "float", "int": "int", "bool": "bool"}
 
 
@@ -70,6 +75,7 @@ def is_scalar(v):
     numpy real or bool scalar."""
     if type(v) in (float, int, bool):
         return True
+    # Imported lazily so numpy is only loaded when a non-Python scalar is checked.
     import numpy as np
 
     return isinstance(v, (np.bool_, np.integer, np.floating))
@@ -83,6 +89,7 @@ def _assigned(name, kind, value):
 
     from lumen.graph.tracer import TracedTensor
 
+    # Inside a trace, accept a 0-d tensor whose dtype family matches the field kind.
     if isinstance(value, TracedTensor) and len(value.shape) == 0:
         dtype = value.dtype
         if {"float": "float" in dtype, "int": "int" in dtype, "bool": dtype == "bool"}[kind]:
