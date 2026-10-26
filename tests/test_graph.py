@@ -1234,9 +1234,9 @@ class GatedMLP(lumen.nn.Module):
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
-def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
+def test_gated_pair_backward_merges_its_gradients_dots(device, swiglu, triton_on_cuda):
     """A gated pair's backward (``merge_dots_backward``): its input's gradient one
     dot of its cotangents and the forward's weight block, both interleaved
     (K twice as long, no copy of the weights), its weights' gradients one
@@ -1248,7 +1248,7 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
     its halves (which the backward reads) written by it too. The gradients
     the CPU's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     m, d, h = 384, 64, 256
@@ -1266,15 +1266,17 @@ def test_gated_pair_backward_merges_its_gradients_dots(swiglu):
         return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
 
     grads = {}
-    for device in ("cpu", "mps"):
+    for target in ("cpu", device):
         model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
-        f = lumen.compile(step, device=device)
+        f = lumen.compile(step, device=target)
         with pytest.warns(UserWarning, match="the rounding loses precision"):
             f(model, meta(m, d))
         model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
-        grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
-    for got, want in zip(grads["mps"], grads["cpu"]):
+        grads[target] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    for got, want in zip(grads[device], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    if device != "mps":
+        return
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step)(model, meta(m, d))
@@ -1316,8 +1318,8 @@ class _GatedMLPFunction(lumen.autograd.Function):
         return dx.bfloat16(), dwg, dwu, dwd
 
 
-@pytest.mark.mps
-def test_hand_written_merge_dots_backward_merges_as_autodiffs():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_hand_written_merge_dots_backward_merges_as_autodiffs(device, triton_on_cuda):
     """A gated pair's backward written by hand (a ``Function``, its
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
     transposes read as the dots' dimensions (no copies): the cotangents
@@ -1325,7 +1327,7 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     one dot of the block, the weights' one dot writing each apart. The
     gradients autodiff's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     m, d, h = 384, 64, 256
@@ -1354,13 +1356,15 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs():
     grads = []
     for mlp in (_GatedMLPFunction.apply, autodiff):
         model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
-        f = lumen.compile(step(mlp), device="mps")
+        f = lumen.compile(step(mlp), device=device)
         with pytest.warns(UserWarning, match="the rounding loses precision"):
             f(model, meta(m, d))
         model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
         grads.append([lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))])
     for got, want in zip(*grads):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    if device != "mps":
+        return
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step(_GatedMLPFunction.apply))(model, meta(m, d))
@@ -1395,9 +1399,9 @@ class ProjectedAttention(lumen.nn.Module):
         return F.matmul(F.softmax(s, dim=-1).bfloat16(), v, "float32", "float32")
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "deterministic"])
-def test_qkv_backward_merges_its_gradients_dots(deterministic):
+def test_qkv_backward_merges_its_gradients_dots(device, deterministic, triton_on_cuda):
     """Attention's q, k and v projections' backward (``merge_dots_backward``, a
     group of three): its input's gradient one dot of ``[dq | dk | dv]``
     and the forward's weight block (K three times as long), its weights'
@@ -1408,7 +1412,7 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
     kernel, adding dQ atomically in float32) dQ cast and laid out by a
     kernel of its own, into its place. The gradients the CPU's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     batch, seq, d, heads = 4, 32, 64, 4
@@ -1425,21 +1429,24 @@ def test_qkv_backward_merges_its_gradients_dots(deterministic):
     lumen.config.compiler.mps.deterministic = deterministic
     try:
         grads = {}
-        for device in ("cpu", "mps"):
+        for target in ("cpu", device):
             model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
-            f = lumen.compile(step, device=device)
+            f = lumen.compile(step, device=target)
             f(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
-            grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
-        with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-            f(model, lumen.from_numpy(x))
-        model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
-        graph = lumen.make_graph(step)(model, meta(m, d))
-        steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+            grads[target] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+        if device == "mps":
+            with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+                f(model, lumen.from_numpy(x))
+            model = ProjectedAttention(meta(d, d), meta(d, d), meta(d, d), meta(d, d))
+            graph = lumen.make_graph(step)(model, meta(m, d))
+            steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     finally:
         lumen.config.compiler.mps.deterministic = before
-    for got, want in zip(grads["mps"], grads["cpu"]):
+    for got, want in zip(grads[device], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    if device != "mps":
+        return
     labels = [s["label"] for s in steps]
     merged = [s for s in steps if s["label"].startswith("3x dot_general")]
     assert sorted(s["output"][2] for s in merged) == sorted([[m, 3 * d], [3 * d, d], [m, d]]), labels
@@ -1495,14 +1502,14 @@ class _SavedNarrowMLP(lumen.autograd.Function):
         return dx.bfloat16(), dwg, dwu, dwd
 
 
-@pytest.mark.mps
-def test_values_saved_narrower_are_written_narrower():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_values_saved_narrower_are_written_narrower(device, triton_on_cuda):
     """Values a matmul's epilogue computes that are read outside it only
     rounded narrower (a backward's saved bfloat16 halves of a gated pair):
     the epilogue writes the rounded values, as the program keeps them, not
     the float32 ones for the backward to round. The gradients the CPU's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     m, d, h = 384, 64, 256
@@ -1521,15 +1528,17 @@ def test_values_saved_narrower_are_written_narrower():
         return model.w0.grad, model.wg.grad, model.wu.grad, model.w2.grad
 
     grads = {}
-    for device in ("cpu", "mps"):
+    for target in ("cpu", device):
         model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
-        f = lumen.compile(step, device=device)
+        f = lumen.compile(step, device=target)
         with pytest.warns(UserWarning, match="the rounding loses precision"):
             f(model, meta(m, d))
         model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
-        grads[device] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
-    for got, want in zip(grads["mps"], grads["cpu"]):
+        grads[target] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
+    for got, want in zip(grads[device], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
+    if device != "mps":
+        return
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step)(model, meta(m, d))
@@ -1538,41 +1547,42 @@ def test_values_saved_narrower_are_written_narrower():
     assert [o[1:] for o in forward["extra_outputs"]] == [("bfloat16", [m, h])] * 2, forward["label"]
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
-def test_projections_of_several_inputs_each_read_one_block(module):
+def test_projections_of_several_inputs_each_read_one_block(device, module, triton_on_cuda):
     """The same weights projecting two inputs (a gradient accumulation's
     passes, each its own activations): one block of them, each input's
     three projections one matmul reading it (its chain, a bfloat16 copy,
     computed once), the values as unmerged."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
 
     def f(model, x1, x2):
         return [F.relu(v) for v in [*model(x1), *model(x2)]]
 
-    model = module(meta(64, 64), meta(64, 64), meta(64, 64))
-    graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
-    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
-    labels = [s["label"] for s in steps]
-    assert labels.count("3x dot_general") == 2, labels
-    blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
-    assert len(blocks) == 3, blocks
+    if device == "mps":
+        model = module(meta(64, 64), meta(64, 64), meta(64, 64))
+        graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
+        steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
+        labels = [s["label"] for s in steps]
+        assert labels.count("3x dot_general") == 2, labels
+        blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
+        assert len(blocks) == 3, blocks
     values = rand(64, 64), rand(64, 64, seed=1), rand(64, 64, seed=2)
-    xs = [lumen.from_numpy(rand(32, 64, seed=k)).to("mps") for k in (3, 4)]
+    xs = [lumen.from_numpy(rand(32, 64, seed=k)).to(device) for k in (3, 4)]
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.mps.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = module(meta(64, 64), meta(64, 64), meta(64, 64))
-            g = lumen.compile(f, device="mps")
+            g = lumen.compile(f, device=device)
             g(model, meta(32, 64), meta(32, 64))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in zip(["wq", "wk", "wv"], values)})
             got.append([lumen.to_numpy(v) for v in g(model, *xs)])
     finally:
-        lumen.config.compiler.reset()
+        getattr(lumen.config.compiler, device).merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_array_equal(merged, alone)
 
@@ -1589,8 +1599,8 @@ class GatedPair(lumen.nn.Module):
         return g * F.sigmoid(g) * u
 
 
-@pytest.mark.mps
-def test_gated_pairs_weights_are_interleaved():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_gated_pairs_weights_are_interleaved(device, triton_on_cuda):
     """Inference: a gated pair's two weights packed into one block
     interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
     pair one kernel (its products' pairs adjacent in a lane), the values as
@@ -1598,13 +1608,14 @@ def test_gated_pairs_weights_are_interleaved():
     update) interleaves them too: the update reads each weight as a view of
     the block."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    graph = lumen.make_graph(lambda m, x: m(x))(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2])
-    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
-    assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+    if device == "mps":
+        graph = lumen.make_graph(lambda m, x: m(x))(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2])
+        assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
+        assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
 
     def step(model, x):
         loss = F.sum(model(x))
@@ -1613,22 +1624,25 @@ def test_gated_pairs_weights_are_interleaved():
             w.copy_(w - 0.1 * w.grad)
         return loss
 
-    graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)])
-    assert plan.interleaved == [[2]], plan.interleaved
+    if device == "mps":
+        graph = lumen.make_graph(step)(GatedPair(meta(64, 32), meta(64, 32)), meta(16, 32))
+        plan = lumen.graph_compiler.Plan(
+            graph, "mps", parameters=[1, 2], packable=[1, 2], donate_into=[(1, 1), (2, 2)]
+        )
+        assert plan.interleaved == [[2]], plan.interleaved
     values = {"w1": lumen.from_numpy(rand(64, 32, seed=1)), "w2": lumen.from_numpy(rand(64, 32, seed=2))}
-    x = lumen.from_numpy(rand(16, 32, seed=3)).to("mps")
+    x = lumen.from_numpy(rand(16, 32, seed=3)).to(device)
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.mps.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = GatedPair(meta(64, 32), meta(64, 32))
-            f = lumen.compile(lambda m, x: m(x), device="mps")
+            f = lumen.compile(lambda m, x: m(x), device=device)
             f(model, meta(16, 32))
             model.load_state_dict(values)
             got.append(lumen.to_numpy(f(model, x)))
     finally:
-        lumen.config.compiler.reset()
+        getattr(lumen.config.compiler, device).merge_dots = True
     np.testing.assert_allclose(got[0], got[1], rtol=1e-5, atol=1e-6)
 
 
@@ -1644,8 +1658,8 @@ class GatedMLP2(lumen.nn.Module):
         return F.matmul(g * F.sigmoid(g) * u, self.w3.t(), "float32", x.dtype)
 
 
-@pytest.mark.mps
-def test_gated_pairs_backward_is_interleaved():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_gated_pairs_backward_is_interleaved(device, triton_on_cuda):
     """Gradients of a gated MLP: the pair's block interleaved through its
     backward too (``merge_dots``): its cotangents ``[dg | du]`` interleaved,
     written side by side by the down projection's gradient's epilogue (one
@@ -1653,7 +1667,7 @@ def test_gated_pairs_backward_is_interleaved():
     weights' one dot, each weight's its pairs. The gradients the unmerged
     program's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     h, d, m = 64, 32, 16
@@ -1664,26 +1678,27 @@ def test_gated_pairs_backward_is_interleaved():
         return loss, x.grad, model.w1.grad, model.w2.grad, model.w3.grad
 
     make = lambda: GatedMLP2(meta(h, d), meta(h, d), meta(d, h))
-    graph = lumen.make_graph(step)(make(), meta(m, d))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
-    assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
-    labels = [s["label"] for s in plan.steps()]
-    (cotangents,) = [label for label in labels if label.endswith("concatenate")]
-    assert cotangents.startswith("dot_general → "), labels
-    assert labels.count("2x dot_general") == 2, labels
+    if device == "mps":
+        graph = lumen.make_graph(step)(make(), meta(m, d))
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
+        assert (plan.packed, plan.interleaved) == ([([1, 2], 0)], [[2]])
+        labels = [s["label"] for s in plan.steps()]
+        (cotangents,) = [label for label in labels if label.endswith("concatenate")]
+        assert cotangents.startswith("dot_general → "), labels
+        assert labels.count("2x dot_general") == 2, labels
     values = {"w1": rand(h, d, seed=1) / 4, "w2": rand(h, d, seed=2) / 4, "w3": rand(d, h, seed=3) / 4}
-    x = lumen.from_numpy(rand(m, d, seed=4)).to("mps")
+    x = lumen.from_numpy(rand(m, d, seed=4)).to(device)
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.mps.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = make()
-            f = lumen.compile(step, device="mps")
+            f = lumen.compile(step, device=device)
             f(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
             got.append([lumen.to_numpy(t) for t in f(model, x)])
     finally:
-        lumen.config.compiler.reset()
+        getattr(lumen.config.compiler, device).merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5)
 
@@ -1710,7 +1725,7 @@ class Projections(lumen.nn.Module):
         return out
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "sizes, groups, mixed, interleaved, steps",
     [
@@ -1741,7 +1756,9 @@ class Projections(lumen.nn.Module):
     ],
 )
 @pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
-def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, interleaved, steps, left):
+def test_dots_of_one_operand_share_one_interleaved_block(
+    device, sizes, groups, mixed, interleaved, steps, left, triton_on_cuda
+):
     """Dots of one operand, combined in groups of K dividing the 8-column
     tile (``K`` values interleaved: SwiGLU's gate and up for K = 2) and any
     read alone: one block, each group a region of its own interleaved, each
@@ -1752,34 +1769,35 @@ def test_dots_of_one_operand_share_one_interleaved_block(sizes, groups, mixed, i
     interleave along the output's rows instead. The values the unmerged
     program's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     d, m = 32, 16
     n = len(sizes)
     make = lambda: Projections([meta(h, d) for h in sizes], groups, mixed, left)
     shape = (d, m) if left else (m, d)
-    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
-    params = list(range(1, n + 1))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
-    assert plan.interleaved == interleaved, plan.packed
-    labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
-    assert len(labels) == steps, labels
-    for regions in interleaved:
-        assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels
+    if device == "mps":
+        graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
+        params = list(range(1, n + 1))
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+        assert plan.interleaved == interleaved, plan.packed
+        labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
+        assert len(labels) == steps, labels
+        for regions in interleaved:
+            assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels
     values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k, h in enumerate(sizes)}
-    x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
+    x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.mps.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = make()
-            f = lumen.compile(lambda model, x: model(x), device="mps")
+            f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
             model.load_state_dict(values)
             got.append([lumen.to_numpy(t) for t in f(model, x)])
     finally:
-        lumen.config.compiler.reset()
+        getattr(lumen.config.compiler, device).merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-6)
 
@@ -1822,7 +1840,7 @@ def _gated_training(model, x):
     return loss
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "groups, h, interleaved",
     [
@@ -1853,14 +1871,14 @@ def _gated_training(model, x):
 @pytest.mark.parametrize(
     "step", [_gated_inference, _gated_gradients, _gated_training], ids=["inference", "gradients", "training"]
 )
-def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step):
+def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleaved, step, triton_on_cuda):
     """Dots sharing their operand merge the same whether the weights are
     the right operand (``x @ w.T``) or the left (``w @ x``): the same
     block layout and the same kernels, forward and backward, the left
     form's blocks interleaved along the output's rows, a pair too narrow
     to interleave read as row halves. The values the unmerged program's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     d, m = 32, 24
@@ -1870,30 +1888,32 @@ def test_weights_shared_on_either_side_merge_alike(groups, h, interleaved, step)
     for left in (False, True):
         shape = (d, m) if left else (m, d)
         make = lambda: SharedOperand([meta(h, d) for _ in range(n)], groups, left)
-        graph = lumen.make_graph(step)(make(), meta(*shape))
-        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
-        assert plan.interleaved == interleaved
-        plans.append(sorted(s["label"] for s in plan.steps()))
+        if device == "mps":
+            graph = lumen.make_graph(step)(make(), meta(*shape))
+            plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+            assert plan.interleaved == interleaved
+            plans.append(sorted(s["label"] for s in plan.steps()))
         values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
-        x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
+        x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
         got = []
         try:
             for merge in (True, False):
-                lumen.config.compiler.mps.merge_dots = merge
+                getattr(lumen.config.compiler, device).merge_dots = merge
                 model = make()
-                f = lumen.compile(step, device="mps")
+                f = lumen.compile(step, device=device)
                 f(model, meta(*shape))
                 model.load_state_dict(values)
                 for _ in range(2):
                     out = f(model, x)
                 out = out if isinstance(out, (list, tuple)) else [out]
-                got.append([lumen.to_numpy(t) for t in out] + [lumen.to_numpy(w._placed("mps")) for w in model.ws])
+                got.append([lumen.to_numpy(t) for t in out] + [lumen.to_numpy(w._placed(device)) for w in model.ws])
         finally:
-            lumen.config.compiler.reset()
+            getattr(lumen.config.compiler, device).merge_dots = True
         for merged, alone in zip(*got):
             assert np.isfinite(alone).all()
             np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
-    assert plans[0] == plans[1]
+    if device == "mps":
+        assert plans[0] == plans[1]
 
 
 @pytest.mark.parametrize("device", [CUDA])
@@ -2007,54 +2027,55 @@ class Returned(lumen.nn.Module):
         return (p[0] + p[1], *p[2:]) if self.summed else tuple(p)
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
 @pytest.mark.parametrize(
     "n, summed, interleaved",
     [(4, True, [[2, 1, 1]]), (2, False, [[1, 1]])],
     ids=["y = Ax + Bx, Cx, Dx", "Cx, Dx"],
 )
-def test_returned_dots_merge(n, summed, interleaved, left):
+def test_returned_dots_merge(device, n, summed, interleaved, left, triton_on_cuda):
     """Dots whose results are returned merge too: one matmul whose
     epilogue writes each returned result into its own contiguous output
     (``y = Ax + Bx`` from the interleaved pair, ``Cx`` and ``Dx`` from
     regions of their own), no copy after it. The values the unmerged
     program's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     h, d, m = 64, 32, 24
     shape = (d, m) if left else (m, d)
     params = list(range(1, n + 1))
     make = lambda: Returned([meta(h, d) for _ in range(n)], summed, left)
-    graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
-    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
-    assert plan.interleaved == interleaved
-    labels = [s["label"] for s in plan.steps()]
-    assert len(labels) == 1 and labels[0].startswith(f"{n}x dot_general"), labels
+    if device == "mps":
+        graph = lumen.make_graph(lambda model, x: model(x))(make(), meta(*shape))
+        plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
+        assert plan.interleaved == interleaved
+        labels = [s["label"] for s in plan.steps()]
+        assert len(labels) == 1 and labels[0].startswith(f"{n}x dot_general"), labels
     values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1)) for k in range(n)}
-    x = lumen.from_numpy(rand(*shape, seed=9)).to("mps")
+    x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.mps.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = make()
-            f = lumen.compile(lambda model, x: model(x), device="mps")
+            f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
             model.load_state_dict(values)
             out = f(model, x)
             assert all(t.is_contiguous() for t in out)
             got.append([lumen.to_numpy(t) for t in out])
     finally:
-        lumen.config.compiler.reset()
+        getattr(lumen.config.compiler, device).merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
-def test_trained_projections_merge_into_one_matmul(module):
+def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cuda):
     """Weights a training step assigns (its optimizer's update, written over
     them in place) merge too, as PyTorch's fused QKV weight: ``[out, in]``
     weights side by side along their first dimension, each a contiguous
@@ -2065,7 +2086,7 @@ def test_trained_projections_merge_into_one_matmul(module):
     from lumen.profiler import ProfilerActivity, profile
 
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
 
@@ -2081,21 +2102,26 @@ def test_trained_projections_merge_into_one_matmul(module):
     values = {n: lumen.from_numpy(rand(32, 32, seed=i + 1) / 4) for i, n in enumerate(("wq", "wk", "wv"))}
     trained = {}
     for merge in (True, False):
-        lumen.config.compiler.mps.merge_dots = merge
+        getattr(lumen.config.compiler, device).merge_dots = merge
         try:
             model = module(meta(32, 32), meta(32, 32), meta(32, 32))
-            f = lumen.compile(step, device="mps")
+            f = lumen.compile(step, device=device)
             f(model, meta(16, 32), meta(16, 32))
             model.load_state_dict(values)
-            with profile(activities=[ProfilerActivity.MPS]) as prof:
+            if device == "mps":
+                with profile(activities=[ProfilerActivity.MPS]) as prof:
+                    for _ in range(3):
+                        f(model, x, c)
+                    lumen.mps.synchronize()
+            else:
                 for _ in range(3):
                     f(model, x, c)
-                lumen.mps.synchronize()
         finally:
-            lumen.config.compiler.reset()
-        kernels = [e["name"] for e in prof.events() if e["kind"] == "gpu"]
-        assert ("3x dot_general" in kernels) == merge, kernels
-        trained[merge] = [lumen.to_numpy(w._placed("mps")) for w in (model.wq, model.wk, model.wv)]
+            getattr(lumen.config.compiler, device).merge_dots = True
+        if device == "mps":
+            kernels = [e["name"] for e in prof.events() if e["kind"] == "gpu"]
+            assert ("3x dot_general" in kernels) == merge, kernels
+        trained[merge] = [lumen.to_numpy(w._placed(device)) for w in (model.wq, model.wk, model.wv)]
     for merged, unmerged in zip(trained[True], trained[False]):
         np.testing.assert_allclose(merged, unmerged, rtol=1e-5, atol=1e-6)
 
@@ -2107,8 +2133,8 @@ class Linear(lumen.nn.Module):
         return F.matmul(x, self.w, "float32", x.dtype)
 
 
-@pytest.mark.mps
-def test_packed_weights_are_read_in_place_elsewhere():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_packed_weights_are_read_in_place_elsewhere(device, triton_on_cuda):
     """A weight another function packed into a block (a strided view of it)
     is read in place by the matmuls of a function using it alone, at its
     strides: no copy per call. Large enough to be tuned (a few rows, the
@@ -2117,12 +2143,12 @@ def test_packed_weights_are_read_in_place_elsewhere():
     from lumen.profiler import ProfilerActivity, profile
 
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     x, w1v, w3v = rand(16, 1024), rand(1024, 1024, seed=1), rand(1024, 1024, seed=2)
     gated = Gated(meta(1024, 1024), meta(1024, 1024))
-    run = lumen.compile(lambda model, x: model(x), device="mps")
+    run = lumen.compile(lambda model, x: model(x), device=device)
     run(gated, meta(16, 1024))
     gated.load_state_dict({"w1": lumen.from_numpy(w1v), "w3": lumen.from_numpy(w3v)})
     alone = Linear(gated.w1)
@@ -2425,6 +2451,7 @@ def _layer_norm(a, w):
     return xc / F.sqrt(F.mean(xc * xc, -1, keepdim=True) + 1e-5) * w
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f",
     [
@@ -2436,7 +2463,7 @@ def _layer_norm(a, w):
     ],
     ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"],
 )
-def test_normalizations_are_one_row_kernel(f):
+def test_normalizations_are_one_row_kernel(device, f, triton_on_cuda):
     """Whatever normalizes rows by reductions of them is a normalization
     diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
     written: one row kernel on MPS, its reductions inside, agreeing with the
@@ -2445,12 +2472,13 @@ def test_normalizations_are_one_row_kernel(f):
     output alone."""
     x, w = rand(64, 300), rand(300, seed=1)
     try:
-        X, W = lumen.from_numpy(x).to("mps"), lumen.from_numpy(w).to("mps")
+        X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
-    assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
-    assert step["extra_outputs"] == [], step["extra_outputs"]
+    if device == "mps":
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+        assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
+        assert step["extra_outputs"] == [], step["extra_outputs"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
 
@@ -2464,10 +2492,11 @@ NORMALIZATIONS = [
 ]
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
 )
-def test_normalizations_train_in_one_row_kernel(f):
+def test_normalizations_train_in_one_row_kernel(device, f, triton_on_cuda):
     """Trained, a normalization's forward is still one row kernel: the
     values of a row its backward reads (an RMS norm's sqrt(mean + eps)) and
     its value before its epilogue (``y`` of ``y * w``, for w's gradient)
@@ -2475,21 +2504,23 @@ def test_normalizations_train_in_one_row_kernel(f):
     never computed again; the gradients the CPU's."""
     x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
     try:
-        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
-    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
-    if "sqrt" in str(labels):
-        assert sum("sqrt" in label for label in labels) == 1, labels
+    if device == "mps":
+        labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
+        if "sqrt" in str(labels):
+            assert sum("sqrt" in label for label in labels) == 1, labels
     got = lumen.compile(grad)(X, W, C)
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n, vocab", [(64, 16), (16, 16), (300, 1000), (128, 32000)])
-def test_cross_entropy_is_one_row_kernel(n, vocab):
+def test_cross_entropy_is_one_row_kernel(device, n, vocab, triton_on_cuda):
     """``F.cross_entropy`` (``reduction="none"``): each row's ``logsumexp -
     logit[label]``. On MPS one row kernel reads the logits once (an online
     max and sum, and the label's logit picked by a one-hot sum, all one
@@ -2511,16 +2542,17 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
         return loss, x.grad
 
     try:
-        X, T, C = (lumen.from_numpy(a).to("mps") for a in (x, t, c))
+        X, T, C = (lumen.from_numpy(a).to(device) for a in (x, t, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    (forward,) = lumen.graph_compiler.Plan(lumen.make_graph(F.cross_entropy)(X, T), "mps").steps()
-    assert forward["output"][2] == [n] and "reduce_max" in forward["label"], forward["label"]
-    source = forward["fusion"]["source"]
-    assert source.count("for (uint c") + source.count("for (uint e = 0") == 1, source
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
-    assert [s["output"][2] for s in steps] == [[n, vocab]], [s["label"] for s in steps]
-    assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]], steps[0]["label"]
+    if device == "mps":
+        (forward,) = lumen.graph_compiler.Plan(lumen.make_graph(F.cross_entropy)(X, T), "mps").steps()
+        assert forward["output"][2] == [n] and "reduce_max" in forward["label"], forward["label"]
+        source = forward["fusion"]["source"]
+        assert source.count("for (uint c") + source.count("for (uint e = 0") == 1, source
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T, C), "mps").steps()
+        assert [s["output"][2] for s in steps] == [[n, vocab]], [s["label"] for s in steps]
+        assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]], steps[0]["label"]
     m = x.max(-1, keepdims=True).astype(np.float64)
     lse = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0]
     hit = np.zeros_like(x, dtype=np.float64)
@@ -2530,9 +2562,10 @@ def test_cross_entropy_is_one_row_kernel(n, vocab):
     np.testing.assert_allclose(grad, (np.exp(x - lse[:, None]) - hit) * c[:, None], rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("rows_read", ["its own", "every row's"])
 @pytest.mark.parametrize("n, vocab", [(64, 16), (128, 32000)])
-def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
+def test_cross_entropy_gradient_reading_the_losses(device, n, vocab, rows_read, triton_on_cuda):
     """A cross entropy whose gradient's ``g`` reads the losses. Each row's
     its own (``Σ loss²``, ``g = 2·loss``): computed once a row in its row
     kernel after the reductions, the gradient its second pass (one
@@ -2552,16 +2585,17 @@ def test_cross_entropy_gradient_reading_the_losses(n, vocab, rows_read):
         return loss, x.grad
 
     try:
-        X, T = (lumen.from_numpy(a).to("mps") for a in (x, t))
+        X, T = (lumen.from_numpy(a).to(device) for a in (x, t))
     except RuntimeError as e:
         pytest.skip(str(e))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T), "mps").steps()
-    labels = [s["label"] for s in steps]
-    if rows_read == "its own":
-        assert [s["output"][2] for s in steps] == [[n, vocab]], labels
-    else:
-        assert [s["output"][2] for s in steps] == [[n], [n], [n, vocab]], labels
-        assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[2]["label"], labels
+    if device == "mps":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, T), "mps").steps()
+        labels = [s["label"] for s in steps]
+        if rows_read == "its own":
+            assert [s["output"][2] for s in steps] == [[n, vocab]], labels
+        else:
+            assert [s["output"][2] for s in steps] == [[n], [n], [n, vocab]], labels
+            assert [o[2] for o in steps[0]["extra_outputs"]] == [[n]] and "reduce" not in steps[2]["label"], labels
     xr = x.astype(np.float64)
     m = xr.max(-1, keepdims=True)
     lse = (m + np.log(np.exp(xr - m).sum(-1, keepdims=True)))[:, 0]
@@ -2622,8 +2656,9 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype, triton_on_cuda):
     np.testing.assert_allclose(dw, dx.T @ hr, **tol)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n, d, vocab", [(64, 32, 16), (256, 128, 32000)])
-def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
+def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab, triton_on_cuda):
     """``F.cross_entropy`` of a matmul's float32 logits (an LM head's, its
     weight transposed and cast), nothing else reading them: the MPS
     compiler matches it as ``linear_cross_entropy`` (its pass, as flash
@@ -2642,15 +2677,16 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(n, d, vocab):
         return F.cross_entropy(logits, t), logits
 
     try:
-        H, W, T = (lumen.from_numpy(a).to("mps") for a in (h, w, t))
+        H, W, T = (lumen.from_numpy(a).to(device) for a in (h, w, t))
     except RuntimeError as e:
         pytest.skip(str(e))
     H = H.to(dtype="bfloat16")
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
-    assert "linear_cross_entropy" in [s["label"] for s in steps], [s["label"] for s in steps]
-    assert all(s["output"][2] != [n, vocab] for s in steps), [s["label"] for s in steps]
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(both)(H, W, T), "mps").steps()
-    assert "linear_cross_entropy" not in [s["label"] for s in steps], [s["label"] for s in steps]
+    if device == "mps":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(loss)(H, W, T), "mps").steps()
+        assert "linear_cross_entropy" in [s["label"] for s in steps], [s["label"] for s in steps]
+        assert all(s["output"][2] != [n, vocab] for s in steps), [s["label"] for s in steps]
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(both)(H, W, T), "mps").steps()
+        assert "linear_cross_entropy" not in [s["label"] for s in steps], [s["label"] for s in steps]
     hr = lumen.to_numpy(H.to(dtype="float32")).astype(np.float64)
     wr = lumen.to_numpy(W.to(dtype="bfloat16").to(dtype="float32")).astype(np.float64)
     x = hr @ wr.T
@@ -2758,7 +2794,8 @@ def test_chunked_linear_cross_entropy(n, d, vocab, chunk, reduce, head):
         np.testing.assert_allclose(g, e, rtol=2.0**-7, atol=2.0**-7 * np.abs(e).max())
 
 
-def test_rms_norm_backward_recomputes_its_normalized_input():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
     ``sqrt(mean + eps)``, not ``x / rms`` (``x̂``, w's gradient's): the
@@ -2773,18 +2810,20 @@ def test_rms_norm_backward_recomputes_its_normalized_input():
         return loss, x.grad, w.grad
 
     try:
-        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
-    (forward,) = [s for s in steps if "sqrt" in s["label"]]
-    assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
+    if device == "mps":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
+        (forward,) = [s for s in steps if "sqrt" in s["label"]]
+        assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
     got = lumen.compile(step)(X, W, C)
     want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f, kernels",
     [
@@ -2794,7 +2833,7 @@ def test_rms_norm_backward_recomputes_its_normalized_input():
     ],
     ids=["rms norm", "layer norm", "softmax"],
 )
-def test_normalization_backwards_are_row_kernels(f, kernels):
+def test_normalization_backwards_are_row_kernels(device, f, kernels, triton_on_cuda):
     """A normalization's backward reduces each row and applies the result
     to the row's values, not one producer's (``dx = g·w / rms - x ·
     Σ_row(…)``): beyond a diamond, a row fusion still, one row kernel for
@@ -2803,12 +2842,12 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
     CPU's."""
     x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
     try:
-        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
-    if kernels is not None:
+    if device == "mps" and kernels is not None:
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
         assert len(steps) == kernels, [s["label"] for s in steps]
     got = lumen.compile(grad)(X, W, C)
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
@@ -2816,6 +2855,7 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n", [16, 64])
 @pytest.mark.parametrize(
     "f",
@@ -2826,7 +2866,7 @@ def test_normalization_backwards_are_row_kernels(f, kernels):
     ],
     ids=["rms norm", "layer norm", "softmax"],
 )
-def test_short_rows_are_a_simd_group_each(f, n):
+def test_short_rows_are_a_simd_group_each(device, f, n, triton_on_cuda):
     """Row kernels of short rows (a model's width of 64, an attention
     head's 16) reduce each row in a SIMD group, eight a threadgroup (none
     left idle), forward and backward (its weight's gradient's blocks too,
@@ -2834,13 +2874,14 @@ def test_short_rows_are_a_simd_group_each(f, n):
     bits each run; rows not a multiple of eight too."""
     x, w, c = rand(1003, n), rand(n, seed=1), rand(1003, n, seed=2)
     try:
-        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
-    rows = [s for s in steps if s["fusion"] and "simd_sum" in s["fusion"]["source"]]
-    assert rows, [s["label"] for s in steps]
+    if device == "mps":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+        rows = [s for s in steps if s["fusion"] and "simd_sum" in s["fusion"]["source"]]
+        assert rows, [s["label"] for s in steps]
     got = [[lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)] for _ in range(2)]
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, a, e in zip(*got, want):
@@ -2848,6 +2889,7 @@ def test_short_rows_are_a_simd_group_each(f, n):
         np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f, sums",
     [
@@ -2856,7 +2898,7 @@ def test_short_rows_are_a_simd_group_each(f, n):
     ],
     ids=["rms norm", "layer norm"],
 )
-def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
+def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums, triton_on_cuda):
     """A normalization's weight's gradient (``Σ_rows g·y``), a sum over
     rows its backward's row kernel reads the values of: that kernel adds
     them as it goes (a threadgroup a block of rows, each column's sum in
@@ -2865,16 +2907,17 @@ def test_normalization_backwards_sum_weight_gradients_as_they_go(f, sums):
     the same bits every run, the gradients the CPU's."""
     x, w, c = rand(1024, 64), rand(64, seed=1), rand(1024, 64, seed=2)
     try:
-        X, W, C = (lumen.from_numpy(a).to("mps") for a in (x, w, c))
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
-    backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
-    assert len(backward) == 1, [s["label"] for s in steps]
-    assert len(backward[0]["extra_outputs"]) == sums
-    final = [s for s in steps if s["primitive"] == "reduce_sum"]
-    assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
+    if device == "mps":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+        backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
+        assert len(backward) == 1, [s["label"] for s in steps]
+        assert len(backward[0]["extra_outputs"]) == sums
+        final = [s for s in steps if s["primitive"] == "reduce_sum"]
+        assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
     got = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
     again = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
@@ -2910,7 +2953,7 @@ class _ScaledMatmul(lumen.nn.Module):
         return F.matmul(x, self.w, "float32", x.dtype) * self.s
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f, shapes, dtype",
     [
@@ -2931,16 +2974,28 @@ class _ScaledMatmul(lumen.nn.Module):
     ],
     ids=["bias relu", "batched residual", "folded residual", "relu cast", "times exp(y)", "silu in float32"],
 )
-def test_matmul_epilogues_fuse(f, shapes, dtype):
+def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     """The elementwise primitives after a matmul (a bias, a residual, an
     activation, a cast, a product with another fused value) run in its
     kernel as it writes each output (``contraction_epilogues``): one step,
-    exactly the unfused plan's result."""
+    exactly the unfused plan's result. On CUDA (Triton), the CPU's within
+    rounding; float16 math has no Triton kernel."""
     rng = np.random.default_rng(0)
     try:
-        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes]
+        arrays = [rng.standard_normal(s).astype(np.float32) for s in shapes]
+        args = [lumen.from_numpy(a).to(device).to(dtype=dtype) for a in arrays]
     except RuntimeError as e:
         pytest.skip(str(e))
+    if device == "cuda":
+        if dtype == "float16":
+            with pytest.raises(RuntimeError, match="convert to float32"):
+                lumen.compile(f)(*args)
+            return
+        got = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
+        cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
+        want = lumen.to_numpy(lumen.compile(f, device="cpu")(*cpu).to(dtype="float32"))
+        np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * np.abs(want).max())
+        return
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
@@ -2973,10 +3028,10 @@ def _softmax_block(x, wo, r, norm, w1):
     return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
 @pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128), (300, 200), (1000, 1000), (256, 4096)])
-def test_matmul_epilogue_normalizes_its_rows(f, m, d):
+def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
     """A normalization of a matmul's rows (a residual added first): rows no
     wider than its 64x64 tiles, the matmul's kernel normalizes each tile's
     rows from its accumulators (CODA's tile reductions), one kernel, the
@@ -2991,14 +3046,21 @@ def test_matmul_epilogue_normalizes_its_rows(f, m, d):
     rng = np.random.default_rng(0)
     shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
     try:
-        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32) / 4).to("mps") for s in shapes]
+        arrays = [rng.standard_normal(s).astype(np.float32) / 4 for s in shapes]
+        args = [lumen.from_numpy(a).to(device) for a in arrays]
     except RuntimeError as e:
         pytest.skip(str(e))
+    flatten = lambda out: [lumen.to_numpy(t) for t in (out if isinstance(out, tuple) else [out])]  # noqa: E731
+    if device == "cuda":
+        got = flatten(lumen.compile(f)(*args))
+        want = flatten(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)))
+        for g, w in zip(got, want):
+            np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2 * np.abs(w).max())
+        return
     steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
     wide = d > 64
     assert len(rows) == (not wide or f is not _softmax_block), [s["label"] for s in steps]
-    flatten = lambda out: [lumen.to_numpy(t) for t in (out if isinstance(out, tuple) else [out])]
     fused = flatten(lumen.compile(f)(*args))
     lumen.config.compiler.mps.contraction_epilogues = False
     try:
@@ -3028,13 +3090,14 @@ class _NormedBlock(lumen.nn.Module):
         return x + F.matmul(h, self.w1.t().bfloat16(), "float32", "float32")
 
 
-@pytest.mark.mps
-def test_trained_matmul_epilogue_normalizes_its_rows():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_trained_matmul_epilogue_normalizes_its_rows(device, triton_on_cuda):
     """Trained, a projection's residual and RMS norm one kernel still: its
     residual stream and the rounded copy the backward reads written by it
-    too, read after it. Its gradients exactly the unfused plan's."""
+    too, read after it. Its gradients exactly the unfused plan's; on CUDA
+    (Triton), the CPU's within rounding."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     m, d = 1000, 64
@@ -3044,19 +3107,26 @@ def test_trained_matmul_epilogue_normalizes_its_rows():
         "norm": 1 + rng.standard_normal(d) / 4,
         "w1": rng.standard_normal((d, d)) / 8,
     }
-    a, r = (lumen.from_numpy(rng.standard_normal((m, d)).astype(np.float32)).to("mps") for _ in range(2))
+    a_r = [rng.standard_normal((m, d)).astype(np.float32) for _ in range(2)]
+    a, r = (lumen.from_numpy(v).to(device) for v in a_r)
 
     def step(model, a, r):
         y = model(a, r)
         F.sum(y * y).backward()
         return model.wo.grad, model.norm.grad, model.w1.grad
 
-    def run():
+    def run(target=device):
         model = _NormedBlock(meta(d, d), meta(d), meta(d, d))
-        f = lumen.compile(step, device="mps")
+        f = lumen.compile(step, device=target)
         f(model, meta(m, d), meta(m, d))
         model.load_state_dict({k: lumen.from_numpy(v.astype(np.float32)) for k, v in values.items()})
-        return [lumen.to_numpy(g) for g in f(model, a, r)]
+        inputs = (a, r) if target == device else (lumen.from_numpy(v) for v in a_r)
+        return [lumen.to_numpy(g) for g in f(model, *inputs)]
+
+    if device == "cuda":
+        for g, w in zip(run(), run("cpu")):
+            assert np.linalg.norm(g - w) / np.linalg.norm(w) < 2e-2
+        return
 
     graph = lumen.make_graph(step)(_NormedBlock(meta(d, d), meta(d), meta(d, d)), meta(m, d), meta(m, d))
     labels = [s["label"] for s in lumen.graph_compiler.Plan(graph, "mps").steps()]
@@ -3113,11 +3183,11 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
             lumen.config.compiler.reset()
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize("m, k, n", [(512, 256, 512), (300, 200, 260), (5, 4096, 1000), (1, 4096, 4096)])
-def test_tuned_matmul_matches_numpy_in_every_layout(dtype, lhs_k, rhs_k, m, k, n):
+def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k, m, k, n, triton_on_cuda):
     """Tuned, a float matmul of 64K or more outputs, or of a few rows,
     runs on whichever candidate was fastest: lumen's simdgroup kernels,
     where Metal Performance Primitives compile ``matmul_mpp``, and for a
@@ -3125,11 +3195,11 @@ def test_tuned_matmul_matches_numpy_in_every_layout(dtype, lhs_k, rhs_k, m, k, n
     (contracting its first dimension rather than its last, or its last
     rather than its first), tiles may be left partial at the edges (300 x
     260 of 64-wide tiles, 5 rows of 8-row ones), and the result may round
-    to bfloat16. Each matches NumPy."""
+    to bfloat16. Each matches NumPy, on CUDA (Triton's GEMM) too."""
     rng = np.random.default_rng(0)
     shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
     try:
-        a, b = (lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype=dtype) for s in shapes)
+        a, b = (lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to(device).to(dtype=dtype) for s in shapes)
     except RuntimeError as e:
         pytest.skip(str(e))
     x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
@@ -3235,15 +3305,15 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         lumen.config.compiler.reset()
 
 
-@pytest.mark.mps
-def test_matmul_epilogue_reads_the_rounded_output():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_matmul_epilogue_reads_the_rounded_output(device, triton_on_cuda):
     """A fused epilogue reads the matmul's output as its dtype rounds it
     (bf16, then cast up for a silu in float32), as traced; silu of the
     float32 accumulator is a dot_general with output_dtype float32."""
     rng = np.random.default_rng(0)
     try:
         x, w = (
-            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype="bfloat16")
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to(device).to(dtype="bfloat16")
             for s in ((64, 96), (96, 80))
         )
     except RuntimeError as e:
@@ -3259,14 +3329,14 @@ def test_matmul_epilogue_reads_the_rounded_output():
     assert not np.array_equal(rounded, accum)
 
 
-@pytest.mark.mps
-def test_matmul_epilogue_takes_runtime_scalars_by_value():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_matmul_epilogue_takes_runtime_scalars_by_value(device, triton_on_cuda):
     """A module's float in a matmul's epilogue is a kernel argument: a new
     value runs the same kernel."""
     rng = np.random.default_rng(0)
     w, x = rng.standard_normal((32, 48)).astype(np.float32), rng.standard_normal((16, 32)).astype(np.float32)
     weight = lumen.empty([32, 48], device="meta")
-    f = lumen.compile(lambda m, a: m(a), device="mps")
+    f = lumen.compile(lambda m, a: m(a), device=device)
     try:
         f(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
     except RuntimeError as e:
@@ -3275,6 +3345,8 @@ def test_matmul_epilogue_takes_runtime_scalars_by_value():
     for s in (0.5, 3.0):
         out = lumen.to_numpy(f(_ScaledMatmul(weight, s), lumen.from_numpy(x)))
         np.testing.assert_allclose(out, (x @ w) * s, rtol=1e-5, atol=1e-5)
+    if device != "mps":
+        return
     graph = lumen.make_graph(lambda m, a: m(a))(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
     (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     assert ("s1", "float32", []) in step["inputs"] and "constant float &in" in step["fusion"]["source"]
@@ -3295,15 +3367,15 @@ class _Relu(lumen.nn.Module):
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype))
 
 
-@pytest.mark.mps
-def test_matmul_epilogue_reads_packed_weights_in_place():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_matmul_epilogue_reads_packed_weights_in_place(device, triton_on_cuda):
     """A weight placed side by side with another (where dots merge) is a
     strided view; a matmul with its epilogue reads it in place, as the
     matmul alone does: no copy each call."""
     from lumen.profiler import ProfilerActivity, profile
 
     w1, w3 = lumen.empty([32, 48], device="meta"), lumen.empty([32, 48], device="meta")
-    gated, relu = lumen.compile(lambda m, x: m(x), device="mps"), lumen.compile(lambda m, x: m(x), device="mps")
+    gated, relu = lumen.compile(lambda m, x: m(x), device=device), lumen.compile(lambda m, x: m(x), device=device)
     try:
         gated(_Gated(w1, w3), lumen.empty([16, 32], device="meta"))
     except RuntimeError as e:
@@ -3313,7 +3385,7 @@ def test_matmul_epilogue_reads_packed_weights_in_place():
     w = rng.standard_normal((32, 48)).astype(np.float32)
     _Gated(w1, w3).load_state_dict({"w1": lumen.from_numpy(w), "w3": lumen.from_numpy(w)})
     x = rng.standard_normal((16, 32)).astype(np.float32)
-    xt = lumen.from_numpy(x).to("mps")
+    xt = lumen.from_numpy(x).to(device)
     np.testing.assert_allclose(lumen.to_numpy(relu(_Relu(w1), xt)), np.maximum(x @ w, 0), rtol=1e-5, atol=1e-5)
     with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         relu(_Relu(w1), xt)
@@ -3542,11 +3614,12 @@ class _ReluMLP(lumen.nn.Module):
         return F.matmul(F.relu(F.matmul(x, self.w1, "float32", x.dtype)), self.w2, "float32", x.dtype)
 
 
-@pytest.mark.mps
-def test_matmul_epilogue_writes_values_the_backward_reads():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda):
     """In a training step relu's backward reads x @ w1: the relu still runs
     in the matmul's kernel, which writes x @ w1 too (XLA's GELU_AUX); the
-    step agrees exactly with the unfused one."""
+    step agrees exactly with the unfused one. On CUDA (Triton), the CPU's
+    within rounding."""
     rng = np.random.default_rng(0)
     w1, w2 = (rng.standard_normal(s).astype(np.float32) * 0.1 for s in ((64, 96), (96, 32)))
     x = rng.standard_normal((48, 64)).astype(np.float32)
@@ -3556,6 +3629,21 @@ def test_matmul_epilogue_writes_values_the_backward_reads():
         loss.backward()
         return loss, [p.grad for p in m.parameters()]
 
+    if device == "cuda":
+        results = []
+        for target in (device, "cpu"):
+            model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
+            f = lumen.compile(step, device=target)
+            try:
+                f(model, lumen.empty([48, 64], device="meta"))
+            except RuntimeError as e:
+                pytest.skip(str(e))
+            model.load_state_dict({"w1": lumen.from_numpy(w1), "w2": lumen.from_numpy(w2)})
+            loss, grads = f(model, lumen.from_numpy(x).to(target))
+            results.append([lumen.to_numpy(t) for t in (loss, *grads)])
+        for a, b in zip(*results):
+            np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4 * np.abs(b).max())
+        return
     results = []
     for epilogues in (True, False):
         lumen.config.compiler.mps.contraction_epilogues = epilogues
@@ -3579,15 +3667,15 @@ def test_matmul_epilogue_writes_values_the_backward_reads():
         np.testing.assert_array_equal(a, b)
 
 
-@pytest.mark.mps
-def test_concatenate_runs_unfused():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_concatenate_runs_unfused(device, triton_on_cuda):
     """With fusion off, a concatenate (alone a fusion on MPS) still runs."""
     try:
-        a = lumen.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3)).to("mps")
+        a = lumen.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3)).to(device)
     except RuntimeError as e:
         pytest.skip(str(e))
     graph = lumen.make_graph(lambda a: prims.concatenate([a, a * 2.0], 1))(a)
-    plan = lumen.graph_compiler.Plan(graph, "mps", fuse=False)
+    plan = lumen.graph_compiler.Plan(graph, device, fuse=False)
     (out,) = plan.run([a])
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
 
@@ -3632,8 +3720,8 @@ def test_python_values_inside_a_compiled_function_raise():
             lumen.compile(body)(lumen.tensor([1.0]))
 
 
-@pytest.mark.mps
-def test_cpu_inside_a_compiled_function_transfers():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_cpu_inside_a_compiled_function_transfers(device, triton_on_cuda):
     """``.cpu()`` inside a compiled MPS function splits it into stages: the
     ops before it on the device, then its copy to the host (``to_host``:
     ``lumen::copy_d2h``, its ``lumen::wait`` inside), then the ops reading
@@ -3647,23 +3735,26 @@ def test_cpu_inside_a_compiled_function_transfers():
 
     x = lumen.tensor([1.0, 2.0])
     try:
-        f = lumen.compile(mid, device="mps")
+        f = lumen.compile(mid, device=device)
         f(x)
     except RuntimeError as e:
         pytest.skip(str(e))
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+    if device == "mps":
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
+            y = f(x)
+        events = prof.events()
+        by_id = {e["id"]: e for e in events}
+        assert [e["name"] for e in events if e["kind"] == "gpu"] == ["copy_h2d", "mul"]
+        (copy,) = [e for e in events if e["name"] == "lumen::copy_d2h"]
+        names = []
+        while copy.get("parent") in by_id:
+            copy = by_id[copy["parent"]]
+            names.append(copy["name"])
+        assert "to_host" in names
+    else:
         y = f(x)
-    events = prof.events()
-    by_id = {e["id"]: e for e in events}
-    assert [e["name"] for e in events if e["kind"] == "gpu"] == ["copy_h2d", "mul"]
-    (copy,) = [e for e in events if e["name"] == "lumen::copy_d2h"]
-    names = []
-    while copy.get("parent") in by_id:
-        copy = by_id[copy["parent"]]
-        names.append(copy["name"])
-    assert "to_host" in names
     assert y.device == "cpu:0" and y.tolist() == [7.0, 13.0]
     with pytest.raises(RuntimeError, match="Expected all tensors to be on the same device"):
-        lumen.compile(lambda x: x.cpu() + x, device="mps")(x)
-    grad = lumen.compile(lumen.grad(lambda x: F.sum((x * 3.0).cpu() * 5.0).to("mps")), device="mps")(x)
-    assert grad.device == "mps:0" and grad.tolist() == [15.0, 15.0]
+        lumen.compile(lambda x: x.cpu() + x, device=device)(x)
+    grad = lumen.compile(lumen.grad(lambda x: F.sum((x * 3.0).cpu() * 5.0).to(device)), device=device)(x)
+    assert grad.device == f"{device}:0" and grad.tolist() == [15.0, 15.0]
