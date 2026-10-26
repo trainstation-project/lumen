@@ -1,4 +1,5 @@
-//! Horizontal fusion of independent small elementwise `loop` fusions into one Triton launch.
+//! Horizontal fusion of independent small elementwise `loop` fusions into one Triton launch;
+//! members of one element count share a grid range, others get their own.
 
 use super::TritonModule;
 use crate::codegen::triton as codegen;
@@ -12,7 +13,7 @@ const MAX_ELEMENTS: usize = 1 << 20;
 /// Most tensors one horizontally fused kernel may read and write.
 const MAX_BUFFERS: usize = 64;
 
-/// Horizontal fusion target that merges small elementwise Triton `loop` fusions of one element count.
+/// Horizontal fusion target that merges small elementwise Triton `loop` fusions.
 struct Loops;
 
 impl Target for Loops {
@@ -29,9 +30,9 @@ impl Target for Loops {
             && codegen::gemm_dot(body).is_none()
     }
 
-    /// Groups candidates by element count, the one flat grid every output shares.
-    fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
-        vec![graph.type_of(node.output).numel()]
+    /// Groups every candidate together: members of different element counts split the grid.
+    fn key(&self, _: &Graph, _: &Node) -> Vec<usize> {
+        Vec::new()
     }
 
     /// Caps the tensor count at `MAX_BUFFERS`.
@@ -50,7 +51,7 @@ impl Target for Loops {
     }
 }
 
-/// Merges independent small elementwise `loop` fusions with the same element count.
+/// Merges independent small elementwise `loop` fusions.
 pub(super) struct HorizontalFusion;
 
 impl CompilerPass<TritonModule<'_>> for HorizontalFusion {

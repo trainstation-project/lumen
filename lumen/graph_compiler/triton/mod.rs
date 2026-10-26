@@ -39,6 +39,9 @@ pub struct Kernel {
     pub lanes: usize,
     /// Programs per output of a split reduction; 1 otherwise.
     pub splits: usize,
+    /// Element counts of a horizontal fusion's grid segments, each on its own programs; empty
+    /// when every output has one element count.
+    pub segments: Vec<usize>,
 }
 
 /// A jit helper bound to a kernel's constexpr parameter.
@@ -244,12 +247,23 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         }
         _ => return None,
     };
+    let segments = match &step.primitive {
+        Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => {
+            codegen::segments(body)
+        }
+        _ => Vec::new(),
+    };
+    let segments = match segments.len() {
+        0 | 1 => Vec::new(),
+        _ => segments.into_iter().map(|(numel, _)| numel).collect(),
+    };
     Some(Kernel {
         name,
         source,
         by_value,
         lanes,
         splits,
+        segments,
     })
 }
 
@@ -423,6 +437,7 @@ pub(crate) fn run(
                 by_value: [kernel.by_value.as_slice(), &[false]].concat(),
                 lanes: kernel.splits.next_power_of_two(),
                 splits: 1,
+                segments: Vec::new(),
             };
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
             launch(&last, config, &functions, &inputs, out, n)
@@ -440,6 +455,7 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
         by_value: vec![true],
         lanes: 1,
         splits: 1,
+        segments: Vec::new(),
     };
     let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
     let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
@@ -465,6 +481,7 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         by_value: vec![false],
         lanes: 1,
         splits: 1,
+        segments: Vec::new(),
     };
     let functions = [
         Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
@@ -500,6 +517,9 @@ fn launch(
     let launch = LOOP.get().ok_or(
         "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
     )?;
-    let programs = n.div_ceil(config.block_size / kernel.lanes) * kernel.splits;
+    let programs = match kernel.segments.as_slice() {
+        [] => n.div_ceil(config.block_size / kernel.lanes) * kernel.splits,
+        segments => segments.iter().map(|s| s.div_ceil(config.block_size)).sum(),
+    };
     launch(kernel, config, functions, inputs, out, n, programs)
 }

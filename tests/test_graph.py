@@ -358,26 +358,27 @@ def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cu
 
 @pytest.mark.parametrize("device", [CUDA])
 def test_triton_independent_loops_are_one_kernel(device, triton_on_cuda):
-    """Independent loop fusions of as many elements (of other shapes, one
-    reading a transpose, one a lone cast) run as one Triton kernel writing
-    every output, each what it was alone, bit for bit; with
-    ``horizontal_fusion`` off, a kernel each."""
+    """Independent loop fusions (of other shapes, one reading a transpose,
+    one a lone cast, two of other element counts) run as one Triton kernel
+    writing every output, each what it was alone, bit for bit: members of
+    one element count share a range of programs, the others get their own.
+    With ``horizontal_fusion`` off, a kernel each."""
 
-    def f(a, b, c):
-        """Three independent elementwise computations of 2048 elements each."""
-        return F.exp(a) * 2.0 + 1.0, (b.t() - 3.0) * b.t(), c.bfloat16()
+    def f(a, b, c, d, e):
+        """Three independent elementwise computations of 2048 elements each, one of 1000 and one of 72."""
+        return F.exp(a) * 2.0 + 1.0, (b.t() - 3.0) * b.t(), c.bfloat16(), d * 5.0 - 7.0, e * e
 
-    arrays = rand(64, 32), rand(64, 32, seed=1), rand(16, 128, seed=2)
+    arrays = rand(64, 32), rand(64, 32, seed=1), rand(16, 128, seed=2), rand(40, 25, seed=3), rand(8, 9, seed=4)
     try:
         args = [lumen.from_numpy(v).to(device) for v in arrays]
     except RuntimeError as e:
         pytest.skip(str(e))
     steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
-    assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 2, [s["label"] for s in steps]
+    assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 4, [s["label"] for s in steps]
     got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
     lumen.config.compiler.cuda.horizontal_fusion = False
     try:
-        assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()) == 3
+        assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()) == 5
         alone = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
     finally:
         lumen.config.compiler.cuda.horizontal_fusion = True
