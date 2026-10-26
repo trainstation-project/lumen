@@ -6,6 +6,7 @@ use super::Plan;
 use super::plan::Buffer;
 use crate::DType;
 use crate::device::python::resolve_device;
+use crate::device::Device;
 use crate::graph::python::{PyGraph, primitive_dict, scope_names};
 use crate::graph::{Primitive, TensorType};
 use crate::tensor::python::{PyTensor, dtype_name};
@@ -202,6 +203,12 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
     [passed.join("\n"), kernel.to_owned()].join("\n")
 }
 
+fn current(t: &crate::Tensor) {
+    if let Device::Cuda(index) = t.device() {
+        crate::device::cuda::CUDA.set_device(index);
+    }
+}
+
 fn triton_gemm(
     tensors: [&crate::Tensor; 3],
     sizes: [usize; 4],
@@ -221,6 +228,7 @@ fn triton_gemm(
         );
         Some(triton_code(&template, functions))
     });
+    current(tensors[2]);
     Python::attach(|py| {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
         py.import("lumen.kernels.dot_general.triton")?
@@ -260,6 +268,7 @@ fn triton_loop(
         );
         Some(triton_code(&source, functions))
     });
+    current(out);
     Python::attach(|py| {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         let scalars: Vec<usize> = (0..inputs.len()).filter(|&k| kernel.by_value[k]).collect();
