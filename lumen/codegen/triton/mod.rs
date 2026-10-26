@@ -19,6 +19,7 @@ mod config;
 mod gemm;
 mod indexing;
 mod reduction;
+mod row;
 
 pub(crate) use attention::{
     attention_atomic_add, attention_load, attention_score, attention_store,
@@ -30,6 +31,7 @@ pub(crate) use config::{
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
+pub(crate) use row::{row, row_fits};
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
@@ -312,6 +314,8 @@ struct Emitter<'a> {
     locals: usize,
     /// Mask expression guarding loads at the current point.
     mask: String,
+    /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
+    reduced: HashMap<Var, String>,
 }
 
 impl<'a> Emitter<'a> {
@@ -331,6 +335,7 @@ impl<'a> Emitter<'a> {
             indices: HashMap::new(),
             locals: 0,
             mask: "mask".into(),
+            reduced: HashMap::new(),
         }
     }
 
@@ -683,7 +688,7 @@ impl<'a> Emitter<'a> {
     /// Name of a local holding `v` at flat index `idx`, emitting the statements that compute it.
     fn value(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
-        if let Some(name) = self.values.get(&key) {
+        if let Some(name) = self.values.get(&key).or_else(|| self.reduced.get(&v)) {
             return name.clone();
         }
         let body = self.body;

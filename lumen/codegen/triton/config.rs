@@ -143,3 +143,6 @@ pub(super) const SPLIT_BELOW: usize = 1024;
 pub(super) const SPLIT_SPAN: usize = 8192;
 /// Upper bound on splits per output.
 pub(super) const MOST_SPLITS: usize = 512;
+/// Widest row a normalization row kernel holds in registers (the largest loop `BLOCK_SIZE`); wider
+/// rows run as their reductions and loops.
+pub(super) const MOST_ROW_COLUMNS: usize = 8192;

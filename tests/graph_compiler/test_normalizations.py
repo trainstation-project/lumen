@@ -45,9 +45,9 @@ class UpcastNorm(lumen.nn.Module):
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n", [300, 1024, 4096])
 def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
-    """On MPS an RMS norm in float32 of a bfloat16 input, cast back and
-    scaled by its weight, is one row kernel: the cast and the weight run in
-    its last pass (an epilogue). Rows of up to 8 elements a thread read x
+    """An RMS norm in float32 of a bfloat16 input, cast back and scaled by
+    its weight, is one row kernel: the cast and the weight run in its last
+    pass (an epilogue). On MPS rows of up to 8 elements a thread read x
     once, keeping x.float() (its traced dtype) in registers for the last
     pass. It agrees with the CPU to a bfloat16 rounding."""
     try:
@@ -55,13 +55,13 @@ def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
     except RuntimeError as e:
         pytest.skip(str(e))
     weight = lumen.empty([n], dtype="bfloat16", device="meta")
+    graph = lumen.make_graph(lambda m, a: m(a))(
+        UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
+    )
+    (step,) = lumen.graph_compiler.Plan(graph, device, parameters=[2], scalars=[1]).steps()
+    assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
     if device == "mps":
-        graph = lumen.make_graph(lambda m, a: m(a))(
-            UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
-        )
-        (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
         source = step["fusion"]["source"]
-        assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
         cached = n <= 8 * 256
         assert ("float kept0[" in source) == cached
         assert source.count("_load0(in0, j)") == (1 if cached else 2), source
@@ -98,7 +98,7 @@ def _layer_norm(a, w):
 def test_normalizations_are_one_row_kernel(device, f, triton_on_cuda):
     """Whatever normalizes rows by reductions of them is a normalization
     diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
-    written: one row kernel on MPS, its reductions inside, agreeing with the
+    written: one row kernel, its reductions inside, agreeing with the
     CPU. Nothing matches any one normalization. With no backward to read
     its values of a row (an RMS norm's sqrt(mean + eps)), it writes its
     output alone."""
@@ -107,10 +107,9 @@ def test_normalizations_are_one_row_kernel(device, f, triton_on_cuda):
         X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
     except RuntimeError as e:
         pytest.skip(str(e))
-    if device == "mps":
-        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
-        assert step["fusion"] is not None and "reduce_" in step["label"], step["label"]
-        assert step["extra_outputs"] == [], step["extra_outputs"]
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), device).steps()
+    assert "reduce_" in step["label"], step["label"]
+    assert step["extra_outputs"] == [], step["extra_outputs"]
     expected = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(X, W)), expected, rtol=1e-5, atol=1e-5)
 
@@ -140,10 +139,9 @@ def test_normalizations_train_in_one_row_kernel(device, f, triton_on_cuda):
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
-    if device == "mps":
-        labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()]
-        if "sqrt" in str(labels):
-            assert sum("sqrt" in label for label in labels) == 1, labels
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), device).steps()]
+    if "sqrt" in str(labels):
+        assert sum("sqrt" in label for label in labels) == 1, labels
     got = lumen.compile(grad)(X, W, C)
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
@@ -170,10 +168,9 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
         X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
-    if device == "mps":
-        steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), "mps").steps()
-        (forward,) = [s for s in steps if "sqrt" in s["label"]]
-        assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
+    (forward,) = [s for s in steps if "sqrt" in s["label"]]
+    assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
     got = lumen.compile(step)(X, W, C)
     want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
@@ -203,8 +200,8 @@ def test_normalization_backwards_are_row_kernels(device, f, kernels, triton_on_c
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    if device == "mps" and kernels is not None:
-        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
+    if kernels is not None:
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), device).steps()
         assert len(steps) == kernels, [s["label"] for s in steps]
     got = lumen.compile(grad)(X, W, C)
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))

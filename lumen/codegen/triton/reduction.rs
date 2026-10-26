@@ -85,7 +85,7 @@ impl Tile {
 }
 
 /// Combine expression of `a` and `b` for a sum or a max; bool max is `or`, float max propagates NaN.
-fn combine(sum: bool, dtype: DType) -> &'static str {
+pub(super) fn combine(sum: bool, dtype: DType) -> &'static str {
     match (sum, dtype) {
         (true, _) => "a + b",
         (false, DType::Bool) => "a | b",
@@ -95,7 +95,7 @@ fn combine(sum: bool, dtype: DType) -> &'static str {
 }
 
 /// Identity of max for `dtype`: `-inf` for floats, the minimum for signed ints, 0 otherwise.
-fn lowest(dtype: DType) -> String {
+pub(super) fn lowest(dtype: DType) -> String {
     match dtype {
         d if d.is_float() => "float(\"-inf\")".into(),
         DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
