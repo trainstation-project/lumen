@@ -4,11 +4,15 @@ use crate::codegen::regions::gemm_regions;
 use crate::codegen::triton::fusible;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::loops::fused;
+use crate::graph_compiler::common::multi_output::Readers;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::graph_compiler::{constant, elementwise};
 
 /// Compiler pass fusing nodes into Triton loop kernels.
-pub(super) struct LoopFusion;
+pub(super) struct LoopFusion {
+    /// Whether a loop's value read outside it too is written by the loop reading it first.
+    pub(super) multi_output: bool,
+}
 
 impl<M: Module> CompilerPass<M> for LoopFusion {
     /// Pass name used in profiler ranges and dumps.
@@ -19,7 +23,7 @@ impl<M: Module> CompilerPass<M> for LoopFusion {
     /// Replaces each group with a `loop` fusion rooted at its last node.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let graph = &recomputed_constants(m.graph());
-        let (group, extra) = groups(graph);
+        let (group, extra) = groups(graph, self.multi_output);
         *m.graph_mut() = fused(
             graph,
             &group,
@@ -268,7 +272,7 @@ fn claims(graph: &Graph) -> Vec<Claim> {
 
 /// Assigns each node the root of its loop group (claims first, then joining readers' groups going
 /// backwards), and the extra outputs of each root.
-fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
+fn groups(graph: &Graph, multi_output: bool) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     for (i, node) in nodes.iter().enumerate() {
@@ -323,7 +327,65 @@ fn groups(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
         reduces[g] |= reduction;
         dots[g] |= dot;
     }
+    if multi_output {
+        let loops: Vec<bool> = (0..nodes.len())
+            .map(|g| !reduces[g] && !dots[g] && !closed[g])
+            .collect();
+        merge_read_outside(graph, &readers, &mut group, &mut extra, &loops);
+    }
     (group, extra)
+}
+
+/// Multi-output loop fusion: a loop group whose value is also read outside the loop reading it
+/// first (by other groups, or as a program output) joins that loop, which writes the value as an
+/// extra output instead of a kernel of its own writing it. Both are plain loops (`loops`), and the
+/// choice is the backends' shared one (`Readers::host`).
+fn merge_read_outside(
+    graph: &Graph,
+    readers: &[Vec<usize>],
+    group: &mut [Option<usize>],
+    extra: &mut [Vec<Var>],
+    loops: &[bool],
+) {
+    let nodes = graph.nodes();
+    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+    }
+    let shared = Readers {
+        graph,
+        producer: &producer,
+        users: readers,
+    };
+    for p in (0..nodes.len()).rev() {
+        if group[p] != Some(p) || !loops[p] || !extra[p].is_empty() {
+            continue;
+        }
+        let value = nodes[p].output;
+        let mut consumers: Vec<usize> = readers[value]
+            .iter()
+            .map(|&r| group[r].unwrap_or(r))
+            .collect();
+        consumers.sort_unstable();
+        consumers.dedup();
+        if consumers.len() < 2 && !graph.outputs().contains(&value) {
+            continue;
+        }
+        let fusion_of = |reader: usize| {
+            let g = group[reader].unwrap_or(reader);
+            (g, g)
+        };
+        let member = |g: usize, k: usize| group[k] == Some(g);
+        let hostable = |g: usize, _: usize| group[g] == Some(g) && loops[g];
+        let Some(g) = shared.host(p, fusion_of, member, hostable) else {
+            continue;
+        };
+        group[..=p]
+            .iter_mut()
+            .filter(|m| **m == Some(p))
+            .for_each(|m| *m = Some(g));
+        extra[g].push(value);
+    }
 }
 
 /// Whether `p` is a sum or max reduction.

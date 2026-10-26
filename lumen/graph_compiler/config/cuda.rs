@@ -8,6 +8,7 @@ device_config! {
         autotune, set_autotune: bool = true;
         safe_kernels, set_safe_kernels: bool = false;
         horizontal_fusion, set_horizontal_fusion: bool = true;
+        multi_output_fusion, set_multi_output_fusion: bool = true;
     }
 }
 
