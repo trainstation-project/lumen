@@ -357,38 +357,6 @@ def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cu
 
 
 @pytest.mark.parametrize("device", [CUDA])
-def test_triton_independent_loops_are_one_kernel(device, triton_on_cuda):
-    """Independent loop fusions (of other shapes, one reading a transpose,
-    one a lone cast, two of other element counts) run as one Triton kernel
-    writing every output, each what it was alone, bit for bit: members of
-    one element count share a range of programs, the others get their own.
-    With ``horizontal_fusion`` off, a kernel each."""
-
-    def f(a, b, c, d, e):
-        """Three independent elementwise computations of 2048 elements each, one of 1000 and one of 72."""
-        return F.exp(a) * 2.0 + 1.0, (b.t() - 3.0) * b.t(), c.bfloat16(), d * 5.0 - 7.0, e * e
-
-    arrays = rand(64, 32), rand(64, 32, seed=1), rand(16, 128, seed=2), rand(40, 25, seed=3), rand(8, 9, seed=4)
-    try:
-        args = [lumen.from_numpy(v).to(device) for v in arrays]
-    except RuntimeError as e:
-        pytest.skip(str(e))
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
-    assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 4, [s["label"] for s in steps]
-    got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
-    lumen.config.compiler.cuda.horizontal_fusion = False
-    try:
-        assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()) == 5
-        alone = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(f)(*args)]
-    finally:
-        lumen.config.compiler.cuda.horizontal_fusion = True
-    want = lumen.compile(f)(*(lumen.from_numpy(v) for v in arrays))
-    for g, a, w in zip(got, alone, want):
-        np.testing.assert_array_equal(g, a)
-        np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
-
-
-@pytest.mark.parametrize("device", [CUDA])
 def test_triton_matmul_epilogues_fuse(device, triton_on_cuda):
     """The elementwise ops applied to a matmul's result (a bias, an
     activation, a transposed input, a cast, a reshape, a batched matmul's)
@@ -1275,7 +1243,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_
     tile holding each pair's columns side by side, ``GROUP`` 2), neither
     projection written out; the values the CPU's. One whose gate is an
     output too is paired as well, the epilogue writing the gate out
-    beside the product; its values the CPU's."""
+    beside the product; its values the CPU's. In mixed precision the
+    input's and the block's casts to bfloat16 are one kernel before it."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -1303,8 +1272,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_
                 dots = [s["label"] for s in steps if "dot_general" in s["label"]]
                 assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
                 if not gate:
-                    assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
-                    (merged,) = [s for s in steps if s["label"].startswith("2x")]
+                    assert len(steps) == (2 if mixed else 1), [s["label"] for s in steps]
+                    (merged,) = [s for s in steps if s["label"].startswith("2x dot_general")]
                     code = open(__file__).read().splitlines()
                     traced = "\n".join(code[line - 1] for file, line in merged["sources"] if file == __file__)
                     assert "self.w1.t()" in traced and "self.w3.t()" in traced, merged["sources"]
@@ -1905,7 +1874,7 @@ def test_dots_of_one_operand_share_one_interleaved_block(
         params = list(range(1, n + 1))
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
         assert plan.interleaved == interleaved, plan.packed
-        labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
+        labels = [s["label"] for s in plan.steps() if not re.match(r"(\d+x )?cast", s["label"])]
         assert len(labels) == steps, labels
         for regions in interleaved:
             assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels

@@ -4,8 +4,8 @@ use crate::codegen::regions::gemm_regions;
 use crate::codegen::triton::fusible;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::common::loops::fused;
-use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
+use crate::graph_compiler::{constant, elementwise};
 
 /// Compiler pass fusing nodes into Triton loop kernels.
 pub(super) struct LoopFusion;
@@ -18,7 +18,7 @@ impl<M: Module> CompilerPass<M> for LoopFusion {
 
     /// Replaces each group with a `loop` fusion rooted at its last node.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        let graph = m.graph();
+        let graph = &recomputed_constants(m.graph());
         let (group, extra) = groups(graph);
         *m.graph_mut() = fused(
             graph,
@@ -34,6 +34,73 @@ impl<M: Module> CompilerPass<M> for LoopFusion {
         );
         Ok(())
     }
+}
+
+/// `graph` with each fusible constant (a `full` and the layout or elementwise ops on constants
+/// only) recomputed for every node reading it, so a constant several loops share joins each loop
+/// instead of running as a kernel of its own.
+fn recomputed_constants(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+    }
+    let shared = |v: Var| {
+        constant(graph, &producer, v) && producer[v].is_some_and(|p| fusible(graph, &nodes[p]))
+    };
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    // Emits a fresh copy of constant `v`'s chain, or returns the value already mapped.
+    fn read(
+        v: Var,
+        graph: &Graph,
+        producer: &[Option<usize>],
+        shared: &dyn Fn(Var) -> bool,
+        map: &[Var],
+        out: &mut Graph,
+    ) -> Var {
+        if !shared(v) {
+            return map[v];
+        }
+        let node = &graph.nodes()[producer[v].expect("a constant's producer")];
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&u| read(u, graph, producer, shared, map, out))
+            .collect();
+        out.set_origin(node);
+        let copy = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("a constant typed as the original");
+        out.set_label(copy, node.label);
+        copy
+    }
+    for node in nodes {
+        if shared(node.output) {
+            continue;
+        }
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&u| read(u, graph, &producer, &shared, &map, &mut out))
+            .collect();
+        out.set_origin(node);
+        map[node.output] = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("a node typed as the original");
+        out.set_label(map[node.output], node.label);
+    }
+    let outputs: Vec<Var> = graph
+        .outputs()
+        .iter()
+        .map(|&v| read(v, graph, &producer, &shared, &map, &mut out))
+        .collect();
+    out.set_outputs(&outputs)
+        .expect("outputs are values of the graph");
+    out
 }
 
 /// A GEMM with an epilogue over its output column regions, claimed before ordinary grouping.

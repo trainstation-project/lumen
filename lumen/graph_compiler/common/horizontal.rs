@@ -294,6 +294,21 @@ pub(crate) fn fuse(graph: &Graph, scalars: &[Var], target: &mut impl Target) -> 
     out
 }
 
+/// A fused body's outputs grouped by element count, in order of first appearance: each group's
+/// element count and output positions. A kernel runs each group on its own range of the grid, so
+/// a horizontal fusion of several element counts is one launch.
+pub(crate) fn segments(body: &Graph) -> Vec<(usize, Vec<usize>)> {
+    let mut segments: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (k, &v) in body.outputs().iter().enumerate() {
+        let numel = body.type_of(v).numel();
+        match segments.iter_mut().find(|(n, _)| *n == numel) {
+            Some((_, outputs)) => outputs.push(k),
+            None => segments.push((numel, vec![k])),
+        }
+    }
+    segments
+}
+
 /// Display label of a node, using a fusion's own label.
 fn label(graph: &Graph, node: &Node) -> &'static str {
     match &node.primitive {
