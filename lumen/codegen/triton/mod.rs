@@ -16,7 +16,7 @@ mod indexing;
 mod reduction;
 
 pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
-pub(crate) use gemm::gemm;
+pub(crate) use gemm::{epilogue, gemm, gemm_dot};
 pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 
