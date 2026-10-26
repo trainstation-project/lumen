@@ -28,20 +28,61 @@ fn groups(graph: &Graph) -> Vec<Option<usize>> {
         }
     }
     let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut reduces = vec![false; nodes.len()];
     for (i, node) in nodes.iter().enumerate().rev() {
         if !fusible(graph, node) {
             continue;
         }
-        let joined = match readers[node.output].split_first() {
+        let mut joined = match readers[node.output].split_first() {
             Some((&first, rest)) if !graph.outputs().contains(&node.output) => {
                 group[first].filter(|&g| rest.iter().all(|&r| group[r] == Some(g)))
             }
             _ => None,
         };
+        let reduction = reduction(&node.primitive);
+        if reduction {
+            joined = joined
+                .filter(|&g| !reduces[g] && epilogue(graph, &readers, &group, node.output, g));
+        }
         if joined.is_none() && matches!(node.primitive, Primitive::Reshape { .. }) {
             continue;
         }
-        group[i] = Some(joined.unwrap_or(i));
+        let g = joined.unwrap_or(i);
+        group[i] = Some(g);
+        reduces[g] |= reduction;
     }
     group
+}
+
+fn reduction(p: &Primitive) -> bool {
+    matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. })
+}
+
+fn epilogue(
+    graph: &Graph,
+    readers: &[Vec<usize>],
+    group: &[Option<usize>],
+    reduced: usize,
+    g: usize,
+) -> bool {
+    let nodes = graph.nodes();
+    let mut stack = vec![reduced];
+    while let Some(v) = stack.pop() {
+        for &r in &readers[v] {
+            if group[r] != Some(g) {
+                continue;
+            }
+            let p = &nodes[r].primitive;
+            if matches!(
+                p,
+                Primitive::BroadcastInDim { .. }
+                    | Primitive::Transpose { .. }
+                    | Primitive::Slice { .. }
+            ) {
+                return false;
+            }
+            stack.push(nodes[r].output);
+        }
+    }
+    true
 }

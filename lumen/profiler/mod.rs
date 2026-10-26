@@ -11,7 +11,7 @@ pub(crate) mod tpu;
 
 pub use summary::{EventAvg, Profile, SortBy};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -107,6 +107,22 @@ thread_local! {
     static STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static THREAD_ID: u64 = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
     static NEXT_LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
+    static UNTRACED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn untraced<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNTRACED.set(self.0);
+        }
+    }
+    let _restore = Restore(UNTRACED.replace(true));
+    f()
+}
+
+pub(crate) fn traced() -> bool {
+    !UNTRACED.get()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -143,7 +159,10 @@ pub(crate) fn now_ns() -> u64 {
 }
 
 fn flags() -> u8 {
-    FLAGS.load(Ordering::Relaxed)
+    match traced() {
+        true => FLAGS.load(Ordering::Relaxed),
+        false => 0,
+    }
 }
 
 pub fn is_enabled() -> bool {

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use crate::device::Device;
 use crate::graph::Primitive;
 use crate::graph_compiler::Plan;
 use crate::graph_compiler::plan::{Step, Tuned};
+use crate::stream::{event_for, hold};
 
 pub(crate) trait Kernels {
     type Config;
@@ -17,8 +19,30 @@ pub(crate) trait Kernels {
 pub(crate) trait Timer {
     type Buffers;
 
+    fn device(&self) -> Device;
     fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String>;
-    fn time(&self, buffers: &Self::Buffers, step: &Step, reps: usize) -> Result<f64, String>;
+    fn run(&self, buffers: &Self::Buffers, step: &Step, rep: usize) -> Result<(), String>;
+}
+
+fn time<T: Timer>(
+    timer: &T,
+    buffers: &T::Buffers,
+    step: &Step,
+    reps: usize,
+) -> Result<f64, String> {
+    timer.run(buffers, step, 0)?;
+    let device = timer.device();
+    let mut start = event_for(device, true)?;
+    let mut end = event_for(device, true)?;
+    let held = hold(device)?;
+    start.record()?;
+    for rep in 0..reps {
+        timer.run(buffers, step, rep)?;
+    }
+    end.record()?;
+    drop(held);
+    end.synchronize()?;
+    Ok(start.elapsed_time(end.as_ref())? / 1e3 / reps as f64)
 }
 
 pub(crate) struct Autotuner<T> {
@@ -40,6 +64,10 @@ fn key(step: &Step) -> String {
 
 impl<T: Timer> Autotuner<T> {
     pub(crate) fn tune<K: Kernels>(&self, kernels: &mut K, plan: &mut Plan) -> Result<(), String> {
+        crate::profiler::untraced(|| self.tune_untraced(kernels, plan))
+    }
+
+    fn tune_untraced<K: Kernels>(&self, kernels: &mut K, plan: &mut Plan) -> Result<(), String> {
         let mut same: HashMap<String, usize> = HashMap::new();
         let mut jobs: Vec<(Vec<usize>, Vec<Tuned>)> = Vec::new();
         for (i, step) in plan.steps().iter().enumerate() {
@@ -72,11 +100,11 @@ impl<T: Timer> Autotuner<T> {
                 for (k, candidate) in candidates.iter().enumerate() {
                     trial.tuned = Some(candidate.clone());
                     if reps[k] == 0 {
-                        let warm = self.timer.time(&buffers, &trial, 1)?;
+                        let warm = time(&self.timer, &buffers, &trial, 1)?;
                         reps[k] =
                             ((BUDGET_SECONDS / warm) as usize).clamp(*REPS.start(), *REPS.end());
                     }
-                    seconds[k] = seconds[k].min(self.timer.time(&buffers, &trial, reps[k])?);
+                    seconds[k] = seconds[k].min(time(&self.timer, &buffers, &trial, reps[k])?);
                 }
             }
             let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));

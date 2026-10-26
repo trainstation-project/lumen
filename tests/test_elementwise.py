@@ -276,8 +276,8 @@ def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cu
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
     """The functions whose value is exact in its dtype run in bfloat16 on
-    MPS and CUDA, bit for bit the CPU's; bfloat16 sin, as exp, has no MPS
-    kernel, and on CUDA is float32's, rounded once."""
+    MPS and CUDA, bit for bit the CPU's; bfloat16 sin and exp have no
+    kernel on either, nor float16 ones on CUDA: none is run in float32."""
     rng = np.random.default_rng(1)
     x = np.concatenate([SPAN, SPECIALS]).astype(np.float32)
     a, b = (rng.standard_normal(100).astype(np.float32) * 3 for _ in range(2))
@@ -287,12 +287,22 @@ def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
     for f in [prims.min, prims.rem, prims.nextafter]:
         got, expected = on(device, f, a, b, dtype="bfloat16")
         np.testing.assert_array_equal(got, expected)
-    if device == "mps":
+    halves = ["bfloat16"] + ["float16"] * (device == "cuda")
+    for dtype, f in [(dtype, f) for dtype in halves for f in (prims.sin, F.exp)]:
         with pytest.raises(RuntimeError, match="convert to float32"):
-            on(device, prims.sin, a, dtype="bfloat16")
-    else:
-        got, expected = on(device, prims.sin, a, dtype="bfloat16")
-        np.testing.assert_allclose(got, expected, rtol=2**-8, atol=2**-8)
+            on(device, f, a, dtype=dtype)
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("exponent", ["int64", "uint32", "uint64"])
+def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
+    """A float raised to an integer exponent too wide for int32 is the CPU's,
+    not that of the exponent wrapped to 32 bits."""
+    bases = np.array([2.0, 0.5, -1.0, -1.0, 1.0001, 0.9999], np.float32)
+    exponents = np.array([1 << 31, 3 << 30, (1 << 31) + 1, (1 << 32) - 2, 1 << 31, (1 << 31) + 1], exponent)
+    for dtype in ["float32", "float64"]:
+        got, expected = on(device, prims.pow, bases.astype(dtype), exponents)
+        np.testing.assert_array_equal(got, expected)
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])

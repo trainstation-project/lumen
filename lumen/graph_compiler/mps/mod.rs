@@ -200,40 +200,11 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     p
 }
 
-fn transcendental(p: &Primitive) -> bool {
-    use crate::graph::{BinaryOp, UnaryOp::*};
-    use Primitive::*;
-    match p {
-        Exp | Log | Sqrt | Tanh | Logistic | Binary(BinaryOp::Pow) => true,
-        Unary(op) => matches!(
-            op,
-            Sin | Cos
-                | Tan
-                | Asin
-                | Acos
-                | Atan
-                | Sinh
-                | Cosh
-                | Asinh
-                | Acosh
-                | Atanh
-                | Log1p
-                | Expm1
-                | Exp2
-                | Log2
-                | Rsqrt
-                | Cbrt
-                | ErfInv
-        ),
-        _ => false,
-    }
-}
-
 fn unsupported(graph: &Graph) -> Result<(), String> {
     use Primitive::*;
     for node in graph.nodes() {
         let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
-        if transcendental(&node.primitive) && x.dtype == DType::BF16 {
+        if node.primitive.is_transcendental() && x.dtype == DType::BF16 {
             return Err(format!(
                 "{}: has no bfloat16 kernel on MPS, got {x}: convert to float32 first (x.to(dtype=float32))",
                 node.primitive.name()

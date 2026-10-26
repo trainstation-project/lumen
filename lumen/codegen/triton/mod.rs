@@ -12,9 +12,11 @@ use crate::{DType, Element, Scalar};
 
 mod config;
 mod gemm;
+mod reduction;
 
 pub(crate) use config::{CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED, UNTUNED_LOOP};
 pub(crate) use gemm::gemm;
+pub(crate) use reduction::{reduction, reduction_root, scan};
 
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
     use DType::*;
@@ -62,40 +64,33 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Slice { .. }
             | Full { .. }
             | Iota { .. }
+            | ReduceSum { .. }
+            | ReduceMax { .. }
     );
     let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
-pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
-    let mut emitter = Emitter {
-        body,
-        by_value,
-        producer: body
-            .nodes()
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.output, i))
-            .collect(),
-        lines: String::new(),
-        values: HashMap::new(),
-        indices: HashMap::new(),
-        locals: 0,
-    };
-    let result = emitter.value(body.outputs()[0], "j".into());
-    let inputs = (0..body.inputs().len()).map(|k| format!("in{k}"));
-    let loads = (0..body.inputs().len())
+fn params(by_value: &[bool], extra: Option<&str>, store: bool) -> String {
+    let inputs = (0..by_value.len())
+        .map(|k| format!("in{k}"))
+        .chain(extra.map(String::from));
+    let loads = (0..by_value.len())
         .filter(|&k| !by_value[k])
         .map(|k| format!("LOAD{k}: tl.constexpr"));
-    let params: String = inputs
+    inputs
         .chain(["out".into(), "n".into()])
         .chain(loads)
-        .chain([
-            "STORE: tl.constexpr".into(),
-            "BLOCK_SIZE: tl.constexpr".into(),
-        ])
+        .chain(store.then(|| "STORE: tl.constexpr".into()))
+        .chain(["BLOCK_SIZE: tl.constexpr".into()])
         .map(|p| format!("    {p},\n"))
-        .collect();
+        .collect()
+}
+
+pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
+    let mut emitter = Emitter::new(body, by_value);
+    let result = emitter.value(body.outputs()[0], "j".into());
+    let params = params(by_value, None, true);
     let lines = &emitter.lines;
     let source = formatdoc!(
         "
@@ -198,7 +193,24 @@ struct Emitter<'a> {
     locals: usize,
 }
 
-impl Emitter<'_> {
+impl<'a> Emitter<'a> {
+    fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
+        Emitter {
+            body,
+            by_value,
+            producer: body
+                .nodes()
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.output, i))
+                .collect(),
+            lines: String::new(),
+            values: HashMap::new(),
+            indices: HashMap::new(),
+            locals: 0,
+        }
+    }
+
     fn fresh(&mut self, prefix: &str) -> String {
         self.locals += 1;
         format!("{prefix}{}", self.locals - 1)
@@ -292,7 +304,22 @@ impl Emitter<'_> {
         if operand.is_float() {
             let (a, _) = self.computed(&x, operand);
             let value = match op {
-                Pow if !other.is_float() => format!("libdevice.pow({a}, {y}.to(tl.int32))"),
+                Pow if !other.is_float() && (other.bits() < 32 || other == DType::I32) => {
+                    format!("libdevice.pow({a}, {y}.to(tl.int32))")
+                }
+                Pow if !other.is_float() && operand == DType::F64 => {
+                    format!("libdevice.pow({a}, {y}.to(tl.float64))")
+                }
+                Pow if !other.is_float() => {
+                    let most = (1u32 << 31) - 2;
+                    let low = match other {
+                        DType::I64 => format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})"),
+                        _ => y.clone(),
+                    };
+                    format!(
+                        "libdevice.pow({a}, tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32))"
+                    )
+                }
                 Pow => format!("libdevice.pow({a}, {})", self.computed(&y, operand).0),
                 Rem => format!("libdevice.fmod({a}, {})", self.computed(&y, operand).0),
                 Min => {
@@ -560,12 +587,8 @@ impl Emitter<'_> {
                     }
                     Neg => format!("-{}", self.value(node.inputs[0], idx)),
                     Exp | Log | Sqrt | Tanh | Logistic => {
-                        let x = self.value(node.inputs[0], idx);
-                        let a = match half {
-                            true => format!("{x}.to(tl.float32)"),
-                            false => x,
-                        };
-                        let f = match &node.primitive {
+                        let a = self.value(node.inputs[0], idx);
+                        match &node.primitive {
                             Exp => format!("libdevice.exp({a})"),
                             Log => format!("libdevice.log({a})"),
                             Sqrt if ty.dtype == DType::F64 => format!("libdevice.sqrt({a})"),
@@ -575,10 +598,6 @@ impl Emitter<'_> {
                                 format!("1.0 / (1.0 + libdevice.exp(-{a}))")
                             }
                             _ => format!("tl.div_rn(1.0, 1.0 + libdevice.exp(-{a}))"),
-                        };
-                        match half {
-                            true => format!("({f}).to({t})"),
-                            false => f,
                         }
                     }
                     Cast { .. } => {

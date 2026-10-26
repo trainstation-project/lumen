@@ -45,3 +45,24 @@ pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
         _ => unreachable!("{device} is never available without its backend"),
     })
 }
+
+pub(crate) struct Hold(Option<Box<dyn FnOnce() + Send>>);
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
+pub(crate) fn hold(device: Device) -> Result<Hold, String> {
+    device.check()?;
+    Ok(Hold(match device {
+        #[cfg(lumen_cuda_linked)]
+        Device::Cuda(index) => Some(cuda::hold(index)?),
+        #[cfg(lumen_mps_linked)]
+        Device::Mps(_) => Some(mps::hold()?),
+        _ => None,
+    }))
+}

@@ -260,6 +260,27 @@ void lumen_mps_stream_mark(lumen_mps_completion done, void *context) {
     os_unfair_lock_unlock(&lock);
 }
 
+void *lumen_mps_stream_hold(void) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)lumen_mps_stream_queue();
+    if (queue == nil) {
+        return nullptr;
+    }
+    id<MTLSharedEvent> gate = [queue.device newSharedEvent];
+    os_unfair_lock_lock(&lock);
+    open_commands(queue);
+    if (encoder != nil) {
+        end_encoder();
+    }
+    [commands encodeWaitForEvent:gate value:1];
+    os_unfair_lock_unlock(&lock);
+    return (__bridge_retained void *)gate;
+}
+
+void lumen_mps_stream_release(void *gate) {
+    id<MTLSharedEvent> event = (__bridge_transfer id<MTLSharedEvent>)gate;
+    event.signaledValue = 1;
+}
+
 double lumen_mps_stream_host_time(void) {
     static mach_timebase_info_data_t timebase;
     static dispatch_once_t once;

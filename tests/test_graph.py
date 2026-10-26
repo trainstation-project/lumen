@@ -222,12 +222,18 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, trit
 def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
     """With ``use_triton_backend``, each loop fusion on CUDA (elementwise
     ops, broadcasts, transposes, slices, iota and constants) is one generated
-    Triton kernel computing what the CPU does."""
+    Triton kernel computing what the CPU does; bfloat16's functions are
+    float32's, cast as the program asks."""
     a, b = rand(48, 80), rand(80, 48, seed=1)
+
+    def wide(f):
+        return lambda v: f(v.to(dtype="float32")).to(dtype=v.dtype)
+
+    exp, tanh, sqrt, sigmoid, log = map(wide, (F.exp, F.tanh, F.sqrt, F.sigmoid, F.log))
     fns = [
-        lambda x, y: F.exp(x) * 2.0 + F.tanh(y.t()),
-        lambda x, y: F.where(x > y.t(), F.sqrt(F.relu(x)), F.sigmoid(-x)) / (F.maximum(x, y.t()) + 3.0),
-        lambda x, y: F.log(x * x + 1.0)[:, 8:40] - y.t()[:, :32] + prims.iota(x.dtype, (48, 32), 1),
+        lambda x, y: exp(x) * 2.0 + tanh(y.t()),
+        lambda x, y: F.where(x > y.t(), sqrt(F.relu(x)), sigmoid(-x)) / (F.maximum(x, y.t()) + 3.0),
+        lambda x, y: log(x * x + 1.0)[:, 8:40] - y.t()[:, :32] + prims.iota(x.dtype, (48, 32), 1),
         lambda x, y: (x < y.t(), (x * 4.0).to(dtype="int32")),
     ]
     tol = {"float32": 1e-5, "bfloat16": 2**-7}[dtype]
@@ -248,6 +254,104 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
     for s in (0.5, -3.0):
         out = lumen.to_numpy(scaled(on_device[0], s).to(dtype="float32"))
         np.testing.assert_allclose(out, lumen.to_numpy(scaled(on_cpu[0], s).to(dtype="float32")), rtol=tol)
+
+
+def triton_agrees(device, f, arrays, tol):
+    on_cpu = [lumen.from_numpy(np.ascontiguousarray(v)) for v in arrays]
+    try:
+        on_device = [v.to(device) for v in on_cpu]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    expected, got = lumen.compile(f)(*on_cpu), lumen.compile(f)(*on_device)
+    assert got.device == f"{device}:0" and got.dtype == expected.dtype
+    e, g = (
+        lumen.to_numpy(r.to(dtype="float32") if r.dtype in ("bfloat16", "float16") else r) for r in (expected, got)
+    )
+    if tol:
+        np.testing.assert_allclose(g, e, rtol=tol, atol=tol)
+    else:
+        np.testing.assert_array_equal(g, e)
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("shape", [(37, 300), (300, 37), (5, 70, 9), (1, 1), (2, 0, 3)])
+def test_triton_reductions_match_the_cpu(device, shape, triton_on_cuda):
+    """With ``use_triton_backend``, sums and maxima over any axes (rows,
+    columns, middle, several, all; lengths no tile divides, empty ones)
+    are one Triton kernel each, accumulating in the reduction's dtype:
+    float32 and bfloat16, integers wrapping, NaN propagating through max."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(shape).astype(np.float32)
+    x.flat[::7] = np.nan
+    ints = rng.integers(-100, 100, shape).astype(np.int8)
+    axes_list = [(d,) for d in range(len(shape))] + [tuple(range(len(shape)))]
+    if len(shape) == 3:
+        axes_list += [(0, 2)]
+    bf16 = lambda v: v.to(dtype="bfloat16")  # noqa: E731
+    for axes in axes_list:
+        triton_agrees(device, lambda v: prims.reduce_max(v, axes), [x], 0)
+        triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [np.nan_to_num(x)], 1e-5)
+        triton_agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "float32"), [np.nan_to_num(x)], 1e-5)
+        triton_agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "bfloat16"), [np.nan_to_num(x)], 2e-1)
+        triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "int8"), [ints], 0)
+        triton_agrees(device, lambda v: prims.reduce_max(v, axes), [ints], 0)
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("shape, axes", [((3_000_001,), (0,)), ((7, 200_003), (1,)), ((90_001, 5), (0,))])
+def test_triton_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_cuda):
+    """A reduction to few outputs over many elements runs in two passes,
+    partial results in the reduction's dtype and then their combination and
+    epilogue: the CPU's sum, mean and max, integers exactly."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(shape).astype(np.float32)
+    ints = rng.integers(-100, 100, shape).astype(np.int32)
+    triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [x], 1e-3)
+    triton_agrees(device, lambda v: F.mean(F.exp(v), axes[0]) * 2.0, [x], 1e-3)
+    triton_agrees(device, lambda v: prims.reduce_max(v, axes).to(dtype="bfloat16"), [x], 0)
+    triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "int32"), [ints], 0)
+
+
+@pytest.mark.parametrize("device", [CUDA])
+def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
+    """The elementwise ops feeding a reduction and those applied to its
+    result run in the reduction's kernel: one step, the CPU's value."""
+    a, b = rand(64, 96), rand(96, seed=1)
+    fns = [
+        lambda x, y: F.sum(F.exp(x) * 2.0 - y, -1) * 0.5 + 1.0,
+        lambda x, y: F.amax(x.t() + y.reshape(96, 1), 0).to(dtype="bfloat16"),
+        lambda x, y: F.mean(x * x, 1) + y[:64],
+    ]
+    for f in fns:
+        triton_agrees(device, f, [a, b], 1e-5)
+        plan = lumen.graph_compiler.Plan(
+            lumen.make_graph(f)(*(lumen.from_numpy(v).to(device) for v in (a, b))), device
+        )
+        assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+
+
+@pytest.mark.parametrize("device", [CUDA])
+def test_triton_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
+    """Softmax, log-softmax and RMS norm, traced as reductions and loops,
+    run on Triton as the CPU computes them."""
+    x, w = rand(33, 1000), rand(1000, seed=1)
+    triton_agrees(device, lambda v: F.softmax(v, -1), [x], 1e-6)
+    triton_agrees(device, lambda v: F.log_softmax(v, 0), [x], 1e-5)
+    triton_agrees(device, lambda v, g: F.rms_norm(v, 1000, g), [x, w], 1e-5)
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("shape, axis", [((1000,), 0), ((7, 300), 1), ((300, 7), 0), ((4, 33, 5), 1), ((3, 0), 1)])
+def test_triton_cumsum_matches_the_cpu(device, shape, axis, triton_on_cuda):
+    """Cumulative sums along any axis, forwards and reversed, on Triton:
+    the CPU's, integers exactly, bfloat16 widened to float32 as it is read."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(shape).astype(np.float32)
+    ints = rng.integers(-100, 100, shape).astype(np.int32)
+    for reverse in (False, True):
+        triton_agrees(device, lambda v: prims.cumsum(v, axis, reverse, "float32"), [x], 1e-4)
+        triton_agrees(device, lambda v: prims.cumsum(v, axis, reverse, "int32"), [ints], 0)
+        triton_agrees(device, lambda v: prims.cumsum(v.to(dtype="bfloat16"), axis, reverse, "float32"), [x], 1e-4)
 
 
 @pytest.mark.parametrize("device", [CUDA])
