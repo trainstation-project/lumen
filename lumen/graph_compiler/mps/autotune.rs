@@ -1,7 +1,6 @@
 //! MPS autotuning backends: candidate tunings for loop fusions and GEMM configs, and the timer that runs them.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ops::RangeInclusive;
 use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
@@ -22,8 +21,6 @@ pub(super) struct Tunable {
     pub views: HashMap<usize, (usize, Vec<usize>)>,
 }
 
-/// Output sizes, in elements, for which loop fusions are worth tuning.
-const TUNED_ELEMENTS: RangeInclusive<usize> = (64 << 10)..=(16 << 20);
 /// Byte alignment of each buffer carved out of the timing scratch.
 const ALIGNMENT: usize = 256;
 
@@ -52,7 +49,9 @@ impl Kernels for Loops<'_> {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             return Vec::new();
         };
-        match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+        match self.tunable.contains_key(name)
+            && codegen::TUNED_ELEMENTS.contains(&step.output.1.numel())
+        {
             true => codegen::tunings_of(body),
             false => Vec::new(),
         }

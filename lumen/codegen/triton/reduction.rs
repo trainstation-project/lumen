@@ -1,20 +1,10 @@
 //! Triton sources for fused reductions (sum/max, optionally split across programs) and cumulative sums.
 
+use super::config::{
+    COLUMN_LANES, MOST_SPLITS, ROW_LANES, SPLIT_BELOW, SPLIT_ROW_LANES, SPLIT_SPAN,
+};
 use super::*;
 use crate::graph::TensorType;
-
-/// Most lanes per output when the reduced axis is innermost.
-const ROW_LANES: usize = 256;
-/// Most lanes per output for a split reduction over the innermost axis.
-const SPLIT_ROW_LANES: usize = 512;
-/// Most lanes per output when the reduced axis is strided (outputs are contiguous instead).
-const COLUMN_LANES: usize = 16;
-/// Reductions with fewer outputs than this are split across programs to fill the GPU.
-const SPLIT_BELOW: usize = 1024;
-/// Reduced elements each split aims to cover.
-const SPLIT_SPAN: usize = 8192;
-/// Upper bound on splits per output.
-const MOST_SPLITS: usize = 512;
 
 /// A generated reduction kernel and its launch shape.
 pub(crate) struct Reduction {
