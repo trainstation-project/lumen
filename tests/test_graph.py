@@ -760,12 +760,15 @@ def test_compiled_init_on_device(device, tmp_path, triton_on_cuda):
     assert w.tolist() == [[2.0] * 8] * 4 and i.tolist() == list(map(float, range(8)))
     assert lumen.compile(lambda x: x + 1.0, device=device)(lumen.zeros([2])).tolist() == [1.0, 1.0]
     data = make.dump_graph(tmp_path / "init.html")
-    assert data["device"] == "mps:0" and any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+    assert data["device"] == f"{device}:0"
+    if device == "mps":
+        assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
     f = lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype))
     meta = lumen.empty([2, 4], device="meta"), lumen.empty([4, 3], device="meta")
-    data = f.dump_graph(tmp_path / "f.html", *meta, device="mps")
-    assert data["device"] == "mps:0" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
-    assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
+    data = f.dump_graph(tmp_path / "f.html", *meta, device=device)
+    assert data["device"] == f"{device}:0" and data["inputs"] == ["f32[2,4]", "f32[4,3]"]
+    if device == "mps":
+        assert any(n.get("kernels") for n in data["views"]["fused"]["nodes"])
 
 
 class Affine(lumen.nn.Module):
@@ -2384,37 +2387,39 @@ class UpcastNorm(lumen.nn.Module):
         return self.weight * h.to(dtype=x.dtype)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("n", [300, 1024, 4096])
-def test_upcast_rms_norm_is_one_kernel(n):
+def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
     """On MPS an RMS norm in float32 of a bfloat16 input, cast back and
     scaled by its weight, is one row kernel: the cast and the weight run in
     its last pass (an epilogue). Rows of up to 8 elements a thread read x
     once, keeping x.float() (its traced dtype) in registers for the last
     pass. It agrees with the CPU to a bfloat16 rounding."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     weight = lumen.empty([n], dtype="bfloat16", device="meta")
-    graph = lumen.make_graph(lambda m, a: m(a))(
-        UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
-    )
-    (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
-    source = step["fusion"]["source"]
-    assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
-    cached = n <= 8 * 256
-    assert ("float kept0[" in source) == cached
-    assert source.count("_load0(in0, j)") == (1 if cached else 2), source
+    if device == "mps":
+        graph = lumen.make_graph(lambda m, a: m(a))(
+            UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
+        )
+        (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
+        source = step["fusion"]["source"]
+        assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
+        cached = n <= 8 * 256
+        assert ("float kept0[" in source) == cached
+        assert source.count("_load0(in0, j)") == (1 if cached else 2), source
     x, w = rand(8, n), rand(n, seed=1)
     out = {}
-    for device in ("cpu", "mps"):
-        f = lumen.compile(lambda m, a: m(a), device=device)
+    for target in ("cpu", device):
+        f = lumen.compile(lambda m, a: m(a), device=target)
         norm = UpcastNorm(weight, 1e-6)
         f(norm, lumen.empty([8, n], dtype="bfloat16", device="meta"))
         norm.load_state_dict({"weight": lumen.from_numpy(w).to(dtype="bfloat16")})
         y = f(norm, lumen.from_numpy(x).to(dtype="bfloat16"))
-        out[device] = lumen.to_numpy(y.to(dtype="float32"))
-    np.testing.assert_allclose(out["mps"], out["cpu"], rtol=2**-7, atol=2**-7)
+        out[target] = lumen.to_numpy(y.to(dtype="float32"))
+    np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
 
 
 @pytest.mark.mps
@@ -3680,10 +3685,8 @@ def test_concatenate_runs_unfused(device, triton_on_cuda):
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
-)
-def test_cpu_inside_a_compiled_function(device):
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+def test_cpu_inside_a_compiled_function(device, triton_on_cuda):
     """``x.cpu()`` (and ``x.to("cpu")``, with a dtype too) inside a compiled
     function, as in PyTorch: a traced tensor has a device (the plan's, or
     ``cpu`` once on the host), and ``cpu()`` of a CPU tensor is the tensor
