@@ -1014,19 +1014,19 @@ class Attention(lumen.nn.Module):
         return F.matmul(F.softmax(F.matmul(q, k.t(), "float32", x.dtype), -1), v, "float32", x.dtype)
 
 
-@pytest.mark.mps
-def test_attention_projections_merge_into_one_matmul():
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_attention_projections_merge_into_one_matmul(device, triton_on_cuda):
     """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
     of the three weights; the attention (one flash-attention kernel) reads
     them in place. As traced, the matmuls reading q, k and v read them in
     place, strided views of its result (k's transpose read as the dot's
     dimensions)."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     model = Attention(meta(32, 32), meta(32, 32), meta(32, 32))
-    f = lumen.compile(lambda model, x: model(x), device="mps")
+    f = lumen.compile(lambda model, x: model(x), device=device)
     f(model, meta(16, 32))
     values = [rand(32, 32, seed=i + 1) / 4 for i in range(3)]
     model.load_state_dict({n: lumen.from_numpy(v) for n, v in zip(("wq", "wk", "wv"), values)})
@@ -1035,6 +1035,8 @@ def test_attention_projections_merge_into_one_matmul():
     s = np.exp(q @ k.T - (q @ k.T).max(-1, keepdims=True))
     expected = (s / s.sum(-1, keepdims=True)) @ v
     np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), expected, rtol=1e-4, atol=1e-4)
+    if device != "mps":
+        return
     graph = lumen.make_graph(lambda model, x: model(x))(model, lumen.from_numpy(x))
     plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     merged, attention = plan.steps()
@@ -1163,10 +1165,10 @@ class SwiGLU(lumen.nn.Module):
         return (z, g) if gate else z
 
 
-@pytest.mark.mps
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("mixed", [False, True], ids=["float32", "mixed precision"])
 @pytest.mark.parametrize("hidden", [256, 344], ids=["even tiles", "ragged"])
-def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
+def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_on_cuda):
     """Two projections of one input combined elementwise (SwiGLU's gate and
     value): one matmul of their block whose epilogue computes the gate (its
     tile holding each pair's columns side by side, ``GROUP`` 2), neither
@@ -1174,7 +1176,7 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
     output too is paired as well, the epilogue writing the gate out
     beside the product; its values the CPU's."""
     try:
-        lumen.zeros([1], device="mps")
+        lumen.zeros([1], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     m, d = 300, 128
@@ -1182,18 +1184,18 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
     x = rand(m, d, seed=2)
     for gate in (False, True):
         out = {}
-        for device in ("cpu", "mps"):
+        for target in ("cpu", device):
             model = SwiGLU(meta(hidden, d), meta(hidden, d))
 
             def f(model, x):
                 return model(x, mixed, gate)
 
-            g = lumen.compile(f, device=device)
+            g = lumen.compile(f, device=target)
             g(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v.astype(np.float32)) for k, v in values.items()})
             result = g(model, lumen.from_numpy(x))
-            out[device] = [lumen.to_numpy(v) for v in (result if gate else [result])]
-            if device == "mps":
+            out[target] = [lumen.to_numpy(v) for v in (result if gate else [result])]
+            if target == "mps":
                 graph = lumen.make_graph(f)(model, meta(m, d))
                 steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2], packable=[1, 2]).steps()
                 dots = [s["label"] for s in steps if "dot_general" in s["label"]]
@@ -1205,7 +1207,7 @@ def test_gated_pair_is_its_merged_matmul_epilogue(mixed, hidden):
                     traced = "\n".join(code[line - 1] for file, line in merged["sources"] if file == __file__)
                     assert "self.w1.t()" in traced and "self.w3.t()" in traced, merged["sources"]
         tol = 2e-2 if mixed else 1e-5
-        for got, want in zip(out["mps"], out["cpu"]):
+        for got, want in zip(out[device], out["cpu"]):
             np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())
 
 
