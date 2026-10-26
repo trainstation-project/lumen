@@ -160,7 +160,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
-    pipeline.add(Simplify { matched: true }).add(LoopFusion);
+    pipeline.add(Simplify { matched: true }).add(LoopFusion {
+        multi_output: config.multi_output_fusion,
+    });
     if config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }

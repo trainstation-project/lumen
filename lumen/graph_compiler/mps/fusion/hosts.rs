@@ -3,10 +3,10 @@
 use super::analysis::Analysis;
 use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
-use super::{elementwise, expensive, is_reduction};
-use crate::graph::{Graph, Var};
+use super::{expensive, is_reduction};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
+use crate::graph_compiler::common::multi_output::Readers;
 
 /// Whether each node ends a fusion and must be materialized: unfusible nodes, reductions outside
 /// epilogues, epilogue ends, row roots, outputs, values read by unfusible nodes and shared expensive ops.
@@ -71,6 +71,11 @@ pub(super) fn hosts(
     let epilogue = &reductions.epilogue;
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     let mut host: Vec<Option<usize>> = dot_aux;
+    let readers = Readers {
+        graph,
+        producer,
+        users,
+    };
     for (i, node) in nodes.iter().enumerate().rev() {
         let candidate = config.multi_output_fusion
             && live[i]
@@ -81,29 +86,26 @@ pub(super) fn hosts(
             && dot_of[i].is_none()
             && epilogue[i].is_none()
             && !rows.iter().any(|r| r.root == i && !r.outputs.is_empty());
-        let Some(&first) = users[node.output].first().filter(|_| candidate) else {
+        if !candidate {
             continue;
-        };
+        }
         // Follow single-reader non-roots to the fusion that will consume this value.
-        let reader = first;
-        let mut first = first;
-        while !root[first] && users[nodes[first].output].len() == 1 {
-            first = users[nodes[first].output][0];
-        }
-        let fusion = ends[first].unwrap_or(first);
-        let after = users[node.output]
-            .iter()
-            .all(|&u| u == reader || u > fusion);
-        if root[fusion]
-            && after
-            && fusible[first]
-            && !row_root(first)
-            && dot_of[fusion].is_none()
-            && host[fusion].is_none()
-            && at_index(graph, producer, root, first, node.output)
-        {
-            host[i] = Some(fusion);
-        }
+        let fusion_of = |reader: usize| {
+            let mut first = reader;
+            while !root[first] && users[nodes[first].output].len() == 1 {
+                first = users[nodes[first].output][0];
+            }
+            (first, ends[first].unwrap_or(first))
+        };
+        let member = |first: usize, p: usize| p == first || !root[p];
+        let hostable = |first: usize, fusion: usize| {
+            root[fusion]
+                && fusible[first]
+                && !row_root(first)
+                && dot_of[fusion].is_none()
+                && host[fusion].is_none()
+        };
+        host[i] = readers.host(i, fusion_of, member, hostable);
     }
 
     for row in rows {
@@ -112,25 +114,4 @@ pub(super) fn hosts(
         }
     }
     host
-}
-
-/// Whether `v` is reached from fusion root `r` (or its reduction input) through elementwise ops of
-/// the same fusion, so the host can write it at the index it already computes.
-fn at_index(graph: &Graph, producer: &[Option<usize>], root: &[bool], r: usize, v: Var) -> bool {
-    let nodes = graph.nodes();
-    let start = match is_reduction(&nodes[r]) {
-        true => nodes[r].inputs[0],
-        false => nodes[r].output,
-    };
-    let mut stack = vec![start];
-    while let Some(x) = stack.pop() {
-        if x == v {
-            return true;
-        }
-        let Some(p) = producer[x] else { continue };
-        if (p == r || !root[p]) && elementwise(&nodes[p].primitive) {
-            stack.extend(&nodes[p].inputs);
-        }
-    }
-    false
 }

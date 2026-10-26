@@ -172,3 +172,47 @@ def test_split_reduction_converts_its_input_once():
     assert last["kernel"] == "reduce_sum_rows_f32"
     assert last["inputs"] == first["outputs"] and last["inputs"][0][0] == "float32"
     np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_values_read_outside_a_loop_are_its_extra_outputs(device, triton_on_cuda):
+    """A loop's value that is also returned is written by the loop reading
+    it, as an extra output (``multi_output_fusion``): one step, each value
+    as with the flag off, where it is a step of its own. A value two loops
+    read: MPS recomputes it in each and runs both as one horizontal kernel;
+    Triton writes it once from the first loop, which the second reads."""
+    compiler = getattr(lumen.config.compiler, device)
+    a, b = rand(64, 32), rand(32, seed=1)
+    try:
+        args = [lumen.from_numpy(v).to(device) for v in (a, b)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def returned(x, y):
+        """`exp(x) * 3`, returned and read by a loop."""
+        v = F.exp(x) * 3.0
+        return v, v * 2.0 + 1.0
+
+    def shared(x, y):
+        """`exp(x) * 3` read by two loops."""
+        v = F.exp(x) * 3.0
+        return v * 2.0, F.tanh(v) + y
+
+    for f, steps, extra in [(returned, 1, 1), (shared, 1 if device == "mps" else 2, 1)]:
+        plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
+        assert len(plan) == steps and sum(len(s["extra_outputs"]) for s in plan) == extra, [s["label"] for s in plan]
+        fused = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+        compiler.multi_output_fusion = False
+        try:
+            alone = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+        finally:
+            compiler.multi_output_fusion = True
+        want = lumen.compile(f)(*(lumen.from_numpy(v) for v in (a, b)))
+        for g, u, w in zip(fused, alone, want):
+            np.testing.assert_array_equal(g, u)
+            np.testing.assert_allclose(g, lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
+    compiler.multi_output_fusion = False
+    try:
+        assert len(lumen.graph_compiler.Plan(lumen.make_graph(returned)(*args), device).steps()) == 2
+    finally:
+        compiler.multi_output_fusion = True
