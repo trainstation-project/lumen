@@ -5,7 +5,20 @@ import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("tpu", marks=pytest.mark.tpu)]
+DEVICES = [
+    "cpu",
+    pytest.param("mps", marks=pytest.mark.mps),
+    pytest.param("cuda", marks=pytest.mark.cuda),
+    pytest.param("tpu", marks=pytest.mark.tpu),
+]
+
+
+@pytest.fixture(autouse=True)
+def triton():
+    """CUDA's programs on the Triton backend."""
+    lumen.config.compiler.cuda.use_triton_backend = True
+    yield
+    lumen.config.compiler.cuda.use_triton_backend = False
 
 
 def _tensor(a, device, dtype=None):
