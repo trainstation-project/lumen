@@ -241,13 +241,12 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, trit
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
-    """With ``use_triton_backend``, each loop fusion on CUDA (elementwise
-    ops, broadcasts, transposes, slices, iota and constants) is one generated
-    Triton kernel computing what the CPU does; bfloat16's functions are
-    float32's, cast as the program asks."""
+def test_loops_match_the_cpu(device, dtype, triton_on_cuda):
+    """Each loop fusion (elementwise ops, broadcasts, transposes, slices,
+    iota and constants) is one generated kernel computing what the CPU
+    does; bfloat16's functions are float32's, cast as the program asks."""
     a, b = rand(48, 80), rand(80, 48, seed=1)
 
     def wide(f):
@@ -281,7 +280,7 @@ def test_triton_loops_match_the_cpu(device, dtype, triton_on_cuda):
         np.testing.assert_allclose(out, lumen.to_numpy(scaled(on_cpu[0], s).to(dtype="float32")), rtol=tol)
 
 
-def triton_agrees(device, f, arrays, tol):
+def agrees(device, f, arrays, tol):
     """`f` compiled on `device` and on the CPU gives the same dtype and values within `tol` (exactly when 0)."""
     on_cpu = [lumen.from_numpy(np.ascontiguousarray(v)) for v in arrays]
     try:
@@ -299,12 +298,11 @@ def triton_agrees(device, f, arrays, tol):
         np.testing.assert_array_equal(g, e)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("shape", [(37, 300), (300, 37), (5, 70, 9), (1, 1), (2, 0, 3)])
-def test_triton_reductions_match_the_cpu(device, shape, triton_on_cuda):
-    """With ``use_triton_backend``, sums and maxima over any axes (rows,
-    columns, middle, several, all; lengths no tile divides, empty ones)
-    are one Triton kernel each, accumulating in the reduction's dtype:
+def test_reductions_match_the_cpu(device, shape, triton_on_cuda):
+    """Sums and maxima over any axes (rows, columns, middle, several, all;
+    lengths no tile divides, empty ones) accumulating in the reduction's dtype:
     float32 and bfloat16, integers wrapping, NaN propagating through max."""
     rng = np.random.default_rng(0)
     x = rng.standard_normal(shape).astype(np.float32)
@@ -315,148 +313,80 @@ def test_triton_reductions_match_the_cpu(device, shape, triton_on_cuda):
         axes_list += [(0, 2)]
     bf16 = lambda v: v.to(dtype="bfloat16")  # noqa: E731
     for axes in axes_list:
-        triton_agrees(device, lambda v: prims.reduce_max(v, axes), [x], 0)
-        triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [np.nan_to_num(x)], 1e-5)
-        triton_agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "float32"), [np.nan_to_num(x)], 1e-5)
-        triton_agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "bfloat16"), [np.nan_to_num(x)], 2e-1)
-        triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "int8"), [ints], 0)
-        triton_agrees(device, lambda v: prims.reduce_max(v, axes), [ints], 0)
+        agrees(device, lambda v: prims.reduce_max(v, axes), [x], 0)
+        agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [np.nan_to_num(x)], 1e-5)
+        agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "float32"), [np.nan_to_num(x)], 1e-5)
+        agrees(device, lambda v: prims.reduce_sum(bf16(v), axes, "bfloat16"), [np.nan_to_num(x)], 2e-1)
+        agrees(device, lambda v: prims.reduce_sum(v, axes, "int8"), [ints], 0)
+        agrees(device, lambda v: prims.reduce_max(v, axes), [ints], 0)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("shape, axes", [((3_000_001,), (0,)), ((7, 200_003), (1,)), ((90_001, 5), (0,))])
-def test_triton_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_cuda):
+def test_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_cuda):
     """A reduction to few outputs over many elements runs in two passes,
     partial results in the reduction's dtype and then their combination and
     epilogue: the CPU's sum, mean and max, integers exactly."""
     rng = np.random.default_rng(0)
     x = rng.standard_normal(shape).astype(np.float32)
     ints = rng.integers(-100, 100, shape).astype(np.int32)
-    triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [x], 1e-3)
-    triton_agrees(device, lambda v: F.mean(F.exp(v), axes[0]) * 2.0, [x], 1e-3)
-    triton_agrees(device, lambda v: prims.reduce_max(v, axes).to(dtype="bfloat16"), [x], 0)
-    triton_agrees(device, lambda v: prims.reduce_sum(v, axes, "int32"), [ints], 0)
+    agrees(device, lambda v: prims.reduce_sum(v, axes, "float32"), [x], 1e-3)
+    agrees(device, lambda v: F.mean(F.exp(v), axes[0]) * 2.0, [x], 1e-3)
+    agrees(device, lambda v: prims.reduce_max(v, axes).to(dtype="bfloat16"), [x], 0)
+    agrees(device, lambda v: prims.reduce_sum(v, axes, "int32"), [ints], 0)
 
 
-@pytest.mark.parametrize("device", [CUDA])
-def test_triton_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
     """The elementwise ops feeding a reduction and those applied to its
-    result run in the reduction's kernel: one step, the CPU's value."""
+    result run in the reduction's kernel: one step, the CPU's value. On
+    MPS an epilogue reads only the reduction and constants, so one adding
+    another tensor runs as a step of its own."""
     a, b = rand(64, 96), rand(96, seed=1)
     fns = [
-        lambda x, y: F.sum(F.exp(x) * 2.0 - y, -1) * 0.5 + 1.0,
-        lambda x, y: F.amax(x.t() + y.reshape(96, 1), 0).to(dtype="bfloat16"),
-        lambda x, y: F.mean(x * x, 1) + y[:64],
+        (lambda x, y: F.sum(F.exp(x) * 2.0 - y, -1) * 0.5 + 1.0, 1),
+        (lambda x, y: F.amax(x.t() + y.reshape(96, 1), 0).to(dtype="bfloat16"), 1),
+        (lambda x, y: F.mean(x * x, 1) + y[:64], 2 if device == "mps" else 1),
     ]
-    for f in fns:
-        triton_agrees(device, f, [a, b], 1e-5)
+    for f, steps in fns:
+        agrees(device, f, [a, b], 1e-5)
         plan = lumen.graph_compiler.Plan(
             lumen.make_graph(f)(*(lumen.from_numpy(v).to(device) for v in (a, b))), device
         )
-        assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
+        assert len(plan.steps()) == steps, [s["label"] for s in plan.steps()]
 
 
-@pytest.mark.parametrize("device", [CUDA])
-def test_triton_matmul_epilogues_fuse(device, triton_on_cuda):
-    """The elementwise ops applied to a matmul's result (a bias, an
-    activation, a transposed input, a cast, a reshape, a batched matmul's)
-    run in its GEMM's epilogue: one step, the CPU's values."""
-    a, w, b, r = rand(64, 96), rand(96, 80, seed=1), rand(80, seed=2), rand(80, 64, seed=3)
-    batched = rand(2, 32, 96, seed=4)
-
-    def mm(x, y):
-        """float32 matmul."""
-        return F.matmul(x, y, "float32", "float32")
-
-    fns = [
-        (lambda x, y, z, t: F.relu(mm(x, y) + z), [a, w, b, r]),
-        (lambda x, y, z, t: (mm(x, y) * 0.5 + t.t()).to(dtype="bfloat16"), [a, w, b, r]),
-        (lambda x, y, z, t: mm(x, y).reshape(8, 8, 80) - z, [a, w, b, r]),
-        (lambda x, y, z, t: F.tanh(mm(x, y) + z), [batched, w, b, r]),
-    ]
-    for f, arrays in fns:
-        triton_agrees(device, f, arrays, 1e-4)
-        plan = lumen.graph_compiler.Plan(
-            lumen.make_graph(f)(*(lumen.from_numpy(v).to(device) for v in arrays)), device
-        )
-        assert len(plan.steps()) == 1, [s["label"] for s in plan.steps()]
-    x, y = (lumen.from_numpy(v).to(device) for v in (a, w))
-    scaled = lumen.compile(lambda x, y, s: mm(x, y) * s)
-    for s in (0.5, -3.0):
-        np.testing.assert_allclose(lumen.to_numpy(scaled(x, y, s).to("cpu")), (a @ w) * s, rtol=1e-4, atol=1e-4)
-
-
-@pytest.mark.parametrize("device", [CUDA])
-def test_triton_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
     """Softmax, log-softmax and RMS norm, traced as reductions and loops,
-    run on Triton as the CPU computes them."""
+    run as the CPU computes them."""
     x, w = rand(33, 1000), rand(1000, seed=1)
-    triton_agrees(device, lambda v: F.softmax(v, -1), [x], 1e-6)
-    triton_agrees(device, lambda v: F.log_softmax(v, 0), [x], 1e-5)
-    triton_agrees(device, lambda v, g: F.rms_norm(v, 1000, g), [x, w], 1e-5)
+    agrees(device, lambda v: F.softmax(v, -1), [x], 1e-6)
+    agrees(device, lambda v: F.log_softmax(v, 0), [x], 1e-5)
+    agrees(device, lambda v, g: F.rms_norm(v, 1000, g), [x, w], 1e-5)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("shape, axis", [((1000,), 0), ((7, 300), 1), ((300, 7), 0), ((4, 33, 5), 1), ((3, 0), 1)])
-def test_triton_cumsum_matches_the_cpu(device, shape, axis, triton_on_cuda):
-    """Cumulative sums along any axis, forwards and reversed, on Triton:
+def test_cumsum_matches_the_cpu(device, shape, axis, triton_on_cuda):
+    """Cumulative sums along any axis, forwards and reversed:
     the CPU's, integers exactly, bfloat16 widened to float32 as it is read."""
     rng = np.random.default_rng(0)
     x = rng.standard_normal(shape).astype(np.float32)
     ints = rng.integers(-100, 100, shape).astype(np.int32)
     for reverse in (False, True):
-        triton_agrees(device, lambda v: prims.cumsum(v, axis, reverse, "float32"), [x], 1e-4)
-        triton_agrees(device, lambda v: prims.cumsum(v, axis, reverse, "int32"), [ints], 0)
-        triton_agrees(device, lambda v: prims.cumsum(v.to(dtype="bfloat16"), axis, reverse, "float32"), [x], 1e-4)
+        agrees(device, lambda v: prims.cumsum(v, axis, reverse, "float32"), [x], 1e-4)
+        agrees(device, lambda v: prims.cumsum(v, axis, reverse, "int32"), [ints], 0)
+        agrees(device, lambda v: prims.cumsum(v.to(dtype="bfloat16"), axis, reverse, "float32"), [x], 1e-4)
 
 
-@pytest.mark.parametrize("device", [CUDA])
-def test_triton_reads_strided_inputs_in_place(device, triton_on_cuda):
-    """With ``use_triton_backend``, a transposed, narrowed or permuted CUDA
-    input is read where it is, through a generated load prologue (a loop's
-    ``LOAD``, the GEMM's ``PROLOGUE_A``/``PROLOGUE_B``), not copied first;
-    ``contiguous`` and ``copy_`` between strided views run on the GPU."""
-    import lumen.codegen.triton as triton
-
-    a, b, c = rand(64, 96), rand(96, 64, seed=1), rand(2, 3, 96, seed=2)
-    try:
-        x, w, z = (lumen.from_numpy(v).to(device) for v in (a, b, c))
-    except RuntimeError as e:
-        pytest.skip(str(e))
-    loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
-    dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
-
-    def strided(kind, run):
-        """Runs `run`, checking a new `kind` kernel indexes its input with strides; returns the result."""
-        before = set(triton.kernels)
-        out = lumen.to_numpy(run())
-        new = [triton.compiled(name, None) for name in set(triton.kernels) - before if name.startswith(kind)]
-        assert any("//" in f.src or "*" in f.src for f in new)
-        return out
-
-    tol = {"rtol": 1e-5, "atol": 1e-5}
-    out = strided("load_", lambda: loop(x.transpose(0, 1), w))
-    np.testing.assert_allclose(out, np.exp(a.T) * 2 + b, **tol)
-    out = loop(x.narrow(1, 8, 32), w.narrow(0, 8, 64).narrow(1, 0, 32))
-    np.testing.assert_allclose(lumen.to_numpy(out), np.exp(a[:, 8:40]) * 2 + b[8:72, :32], **tol)
-    out = strided("prologue_", lambda: dot(x.transpose(0, 1), x))
-    np.testing.assert_allclose(out, a.T @ a, rtol=1e-4, atol=1e-4)
-    out = strided("prologue_", lambda: dot(z.transpose(0, 1), w))
-    np.testing.assert_allclose(out, c.transpose(1, 0, 2) @ b, rtol=1e-4, atol=1e-4)
-    t = x.transpose(0, 1).contiguous()
-    assert t.is_contiguous() and lumen.to_numpy(t).tolist() == a.T.tolist()
-    y = lumen.zeros([96, 64], device=device)
-    y.transpose(0, 1).copy_(x)
-    assert lumen.to_numpy(y).tolist() == a.T.tolist()
-
-
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_triton_autotuned_loops_match_untuned_and_dump_their_launch(device, dtype, tmp_path, triton_on_cuda):
-    """A Triton loop the compiler autotunes computes what the untuned loop
-    does, at lengths no ``BLOCK_SIZE`` divides, and its dumped source carries
+def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
+    """A loop the compiler autotunes computes what the untuned loop does, at
+    lengths no block size divides. A Triton loop's dumped source carries
     the ``BLOCK_SIZE`` and warps it picked."""
-    compiler = lumen.config.compiler.cuda
+    compiler = getattr(lumen.config.compiler, device)
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
             try:
@@ -469,6 +399,8 @@ def test_triton_autotuned_loops_match_untuned_and_dump_their_launch(device, dtyp
                 y = lumen.compile(lambda x: -x * 2)(x)
                 results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
             assert np.array_equal(results[0], results[1]), n
+        if device != "cuda":
+            return
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
         source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.py"))
         assert re.search(r"# BLOCK_SIZE=\d+ warps=\d+", source)
@@ -478,13 +410,15 @@ def test_triton_autotuned_loops_match_untuned_and_dump_their_launch(device, dtyp
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
-def test_mps_reads_strided_inputs_in_place(device, triton_on_cuda):
-    """A transposed or narrowed MPS or CUDA input is read where it is, not copied
+def test_reads_strided_inputs_in_place(device, triton_on_cuda):
+    """A transposed or narrowed input is read where it is, not copied
     first: its step's kernel is compiled again with that input's load
-    prologue through its strides, once a layout. ``contiguous``, ``copy_``
-    and ``fill_`` of strided views are loops on the GPU, not host copies."""
-    a, b = rand(64, 96), rand(96, 64, seed=1)
-    x, w = lumen.from_numpy(a).to(device), lumen.from_numpy(b).to(device)
+    prologue through its strides, once a layout. A matmul reads transposed
+    and permuted operands too (on Triton through the GEMM's
+    ``PROLOGUE_A``/``PROLOGUE_B``). ``contiguous``, ``copy_`` and ``fill_``
+    of strided views are loops on the GPU, not host copies."""
+    a, b, c = rand(64, 96), rand(96, 64, seed=1), rand(2, 3, 96, seed=2)
+    x, w, z = (lumen.from_numpy(v).to(device) for v in (a, b, c))
     loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
     norm = lumen.compile(lambda u: u / F.sqrt(F.mean(u * u, -1, keepdim=True) + 1e-6))
     tol = {"rtol": 1e-5, "atol": 1e-5}
@@ -497,6 +431,17 @@ def test_mps_reads_strided_inputs_in_place(device, triton_on_cuda):
         expected = a.T / np.sqrt((a.T.astype(np.float64) ** 2).mean(-1, keepdims=True) + 1e-6)
         np.testing.assert_allclose(lumen.to_numpy(out), expected, **tol)
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
+    dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
+    if device == "cuda":
+        import lumen.codegen.triton as triton
+
+        before = set(triton.kernels)
+    np.testing.assert_allclose(lumen.to_numpy(dot(x.transpose(0, 1), x)), a.T @ a, rtol=1e-4, atol=1e-4)
+    out = lumen.to_numpy(dot(z.transpose(0, 1), w))
+    np.testing.assert_allclose(out, c.transpose(1, 0, 2) @ b, rtol=1e-4, atol=1e-4)
+    if device == "cuda":
+        new = [triton.compiled(n, None) for n in set(triton.kernels) - before if n.startswith("prologue_")]
+        assert any("//" in f.src or "*" in f.src for f in new)
     y = lumen.zeros([96, 64], device=device)
     with profile(activities=[ProfilerActivity.CPU]) as prof:
         t = x.transpose(0, 1).contiguous()
@@ -511,7 +456,7 @@ def test_mps_reads_strided_inputs_in_place(device, triton_on_cuda):
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
-def test_mps_steps_replay_on_each_calls_buffers(device, triton_on_cuda):
+def test_steps_replay_on_each_calls_buffers(device, triton_on_cuda):
     """An MPS plan's steps are encoded once and replayed after: each later
     call computes on its own inputs and workspace (a strided call between
     them too), as the first did."""
@@ -647,7 +592,7 @@ def test_results_on_input_device(device, triton_on_cuda):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
-def test_mps_kernels_match_cpu(device, dtype, triton_on_cuda):
+def test_compiled_blocks_match_cpu(device, dtype, triton_on_cuda):
     """Compiled functions on MPS (Metal kernels) and CUDA (Triton) agree with the CPU."""
     try:
         lumen.zeros([1], device=device)
@@ -1975,7 +1920,8 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
     the right operand (``x @ w.T``) or the left (``w @ x``): the same
     block layout and the same kernels, forward and backward, the left
     form's blocks interleaved along the output's rows, a pair too narrow
-    to interleave read as row halves. The values the unmerged program's."""
+    to interleave read as row halves. Every weight is packed. The values,
+    gradients and trained weights the unmerged program's."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -1987,9 +1933,10 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
     for left in (False, True):
         shape = (d, m) if left else (m, d)
         make = lambda: SharedOperand([meta(h, d) for _ in range(n)], groups, left)
+        graph = lumen.make_graph(step)(make(), meta(*shape))
+        plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
+        assert sorted(k for members, _ in plan.packed for k in members) == params, plan.packed
         if device == "mps":
-            graph = lumen.make_graph(step)(make(), meta(*shape))
-            plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
             assert plan.interleaved == interleaved
             plans.append(sorted(s["label"] for s in plan.steps()))
         values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
@@ -2015,59 +1962,7 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
         assert plans[0] == plans[1]
 
 
-@pytest.mark.parametrize("device", [CUDA])
-@pytest.mark.parametrize(
-    "groups",
-    [[1, 1, 1], [2], [4], [8], [2, 1], [8, 4, 2, 1]],
-    ids=["ones", "pair", "four", "eight", "pair and one", "eight four two one"],
-)
-@pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
-@pytest.mark.parametrize(
-    "step", [_gated_inference, _gated_gradients, _gated_training], ids=["inference", "gradients", "training"]
-)
-def test_triton_dots_sharing_an_operand_merge(device, groups, left, step, triton_on_cuda):
-    """On Triton, dots sharing an operand merge into one matmul over their
-    weights packed into one block, the weights on either side, forward and
-    backward: the values, gradients and trained weights the unmerged
-    program's."""
-    d, m, h = 32, 24, 64
-    n = sum(groups)
-    params = list(range(1, n + 1))
-    shape = (d, m) if left else (m, d)
-    try:
-        x = lumen.from_numpy(rand(*shape, seed=9)).to(device)
-    except RuntimeError as e:
-        pytest.skip(str(e))
-
-    def make():
-        """A fresh meta model of the case's shapes."""
-        return SharedOperand([meta(h, d) for _ in range(n)], groups, left)
-
-    graph = lumen.make_graph(step)(make(), meta(*shape))
-    plan = lumen.graph_compiler.Plan(graph, device, parameters=params, packable=params)
-    assert sorted(k for members, _ in plan.packed for k in members) == params, plan.packed
-    values = {f"ws.{k}": lumen.from_numpy(rand(h, d, seed=k + 1) / 4) for k in range(n)}
-    got = []
-    try:
-        for merge in (True, False):
-            lumen.config.compiler.cuda.merge_dots = merge
-            model = make()
-            f = lumen.compile(step, device=device)
-            f(model, meta(*shape))
-            model.load_state_dict(values)
-            for _ in range(2):
-                out = f(model, x)
-            out = out if isinstance(out, (list, tuple)) else [out]
-            tensors = list(out) + [w._placed(device) for w in model.ws]
-            got.append([lumen.to_numpy(t.to("cpu")) for t in tensors])
-    finally:
-        lumen.config.compiler.cuda.merge_dots = True
-    for merged, alone in zip(*got):
-        assert np.isfinite(alone).all()
-        np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
-
-
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "make, n",
     [
@@ -2081,9 +1976,9 @@ def test_triton_dots_sharing_an_operand_merge(device, groups, left, step, triton
     ids=["pair", "four", "eight", "two pairs", "pair and one", "eight four two one", "y = Ax + Bx, Cx, Dx", "Cx, Dx"],
 )
 @pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
-def test_triton_merged_regions_fuse(device, make, n, left, triton_on_cuda):
+def test_merged_regions_fuse(device, make, n, left, triton_on_cuda):
     """A merged matmul's regions (interleaved groups, plain slices, results
-    returned as they are) run in its GEMM's epilogue on Triton, the weights
+    returned as they are) run in its GEMM's epilogue, the weights
     on either side: one step, each region writing its own output; the
     values the unmerged program's."""
     d, m, h = 32, 24, 64
@@ -2100,7 +1995,7 @@ def test_triton_merged_regions_fuse(device, make, n, left, triton_on_cuda):
     got = []
     try:
         for merge in (True, False):
-            lumen.config.compiler.cuda.merge_dots = merge
+            getattr(lumen.config.compiler, device).merge_dots = merge
             model = make([meta(h, d) for _ in range(n)], left)
             f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
@@ -2109,7 +2004,7 @@ def test_triton_merged_regions_fuse(device, make, n, left, triton_on_cuda):
             assert all(t.is_contiguous() for t in out)
             got.append([lumen.to_numpy(t.to("cpu")) for t in out])
     finally:
-        lumen.config.compiler.cuda.merge_dots = True
+        getattr(lumen.config.compiler, device).merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
@@ -3105,15 +3000,36 @@ class _ScaledMatmul(lumen.nn.Module):
             [(64, 96), (96, 80), (64, 80)],
             "bfloat16",
         ),
+        (
+            lambda x, w, y: (F.matmul(x, w, "float32", "float32") * 0.5 + y.t()).bfloat16(),
+            [(64, 96), (96, 80), (80, 64)],
+            "float32",
+        ),
+        (
+            lambda x, w, y: F.matmul(x, w, "float32", "float32").reshape(8, 8, 80) - y,
+            [(64, 96), (96, 80), (80,)],
+            "float32",
+        ),
+        (lambda x, w, y: F.tanh(F.matmul(x, w, "float32", "float32") + y), [(2, 32, 96), (96, 80), (80,)], "float32"),
     ],
-    ids=["bias relu", "batched residual", "folded residual", "relu cast", "times exp(y)", "silu in float32"],
+    ids=[
+        "bias relu",
+        "batched residual",
+        "folded residual",
+        "relu cast",
+        "times exp(y)",
+        "silu in float32",
+        "transposed residual",
+        "reshaped",
+        "batched by a matrix",
+    ],
 )
 def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     """The elementwise primitives after a matmul (a bias, a residual, an
     activation, a cast, a product with another fused value) run in its
     kernel as it writes each output (``contraction_epilogues``): one step,
-    exactly the unfused plan's result. On CUDA (Triton), the CPU's within
-    rounding; float16 math has no Triton kernel."""
+    exactly the unfused plan's result. On CUDA (Triton), one step too, the
+    CPU's within rounding; float16 math has no Triton kernel."""
     rng = np.random.default_rng(0)
     try:
         arrays = [rng.standard_normal(s).astype(np.float32) for s in shapes]
@@ -3125,6 +3041,8 @@ def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
             with pytest.raises(RuntimeError, match="convert to float32"):
                 lumen.compile(f)(*args)
             return
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
+        assert len(steps) == 1, [s["label"] for s in steps]
         got = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
         cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
         want = lumen.to_numpy(lumen.compile(f, device="cpu")(*cpu).to(dtype="float32"))
