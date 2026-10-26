@@ -1,4 +1,5 @@
-// Shared Metal prelude: dtype traits, XLA-semantics scalar ops, Philox RNG, element loops and simdgroup fragment helpers.
+// Shared Metal prelude: dtype traits, XLA-semantics scalar ops, Philox RNG, element loops and simdgroup fragment
+// helpers.
 #include <metal_stdlib>
 
 using namespace metal;
@@ -35,7 +36,8 @@ RANGE(short, -32768, 32767)
 RANGE(int, -2147483647 - 1, 2147483647)
 RANGE(long, -9223372036854775807l - 1, 9223372036854775807l)
 
-/// Converts a float to `D` with XLA semantics: nonzero is true for bool, NaN is 0 and out-of-range saturates for integers.
+/// Converts a float to `D` with XLA semantics: nonzero is true for bool, NaN is 0 and out-of-range saturates for
+/// integers.
 template <typename D> inline D from_float(float f) {
     if (is_bool_t<D>()) {
         return D(f != 0.0f);
@@ -314,7 +316,8 @@ template <typename A> inline A population_count_op(A a) { return A(popcount(a));
 /// Number of leading zero bits.
 template <typename A> inline A clz_op(A a) { return A(clz(a)); }
 
-/// Rounds a float to `exponent_bits` exponent and `mantissa_bits` mantissa bits (round-to-nearest-even), like XLA's ReducePrecision.
+/// Rounds a float to `exponent_bits` exponent and `mantissa_bits` mantissa bits (round-to-nearest-even), like XLA's
+/// ReducePrecision.
 template <typename A> inline A reduce_precision_op(A a, uint exponent_bits, uint mantissa_bits) {
     float x = float(a);
     if (isnan(x)) {
@@ -374,7 +377,8 @@ template <typename A> inline A or_op(A x, A y) { return A(x | y); }
 /// Bitwise xor.
 template <typename A> inline A xor_op(A x, A y) { return A(x ^ y); }
 
-/// True when shift amount `y` (read as signed) is negative or at least the bit width, which XLA defines as shifting everything out.
+/// True when shift amount `y` (read as signed) is negative or at least the bit width, which XLA defines as shifting
+/// everything out.
 template <typename A> inline bool shift_out(A y) {
     return ulong(typename bits_of<A>::signed_type(y)) >= ulong(sizeof(A) * 8);
 }
@@ -506,7 +510,8 @@ inline uint offset_of32(uint idx, uint ndim, constant uint *sizes, constant uint
     X(A, B, bf16, bfloat)     \
     X(A, B, f32, float)
 
-/// Type lists for instantiating kernels: all types, floats, floats with native math, and one unsigned type per byte width.
+/// Type lists for instantiating kernels: all types, floats, floats with native math, and one unsigned type per byte
+/// width.
 #define FOR_ALL(X) X(bool, bool) FOR_NUMERIC(X)
 #define FOR_FLOAT(X) X(f16, half) X(bf16, bfloat) X(f32, float)
 #define FOR_MATH_FLOAT(X) X(f16, half) X(f32, float)
