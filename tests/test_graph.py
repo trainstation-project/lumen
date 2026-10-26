@@ -1275,7 +1275,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_
     tile holding each pair's columns side by side, ``GROUP`` 2), neither
     projection written out; the values the CPU's. One whose gate is an
     output too is paired as well, the epilogue writing the gate out
-    beside the product; its values the CPU's."""
+    beside the product; its values the CPU's. In mixed precision the
+    input's and the block's casts to bfloat16 are one kernel before it."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -1303,8 +1304,8 @@ def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_
                 dots = [s["label"] for s in steps if "dot_general" in s["label"]]
                 assert len(dots) == 1 and dots[0].startswith("2x dot_general → logistic → mul → mul"), dots
                 if not gate:
-                    assert len(steps) == (3 if mixed else 1), [s["label"] for s in steps]
-                    (merged,) = [s for s in steps if s["label"].startswith("2x")]
+                    assert len(steps) == (2 if mixed else 1), [s["label"] for s in steps]
+                    (merged,) = [s for s in steps if s["label"].startswith("2x dot_general")]
                     code = open(__file__).read().splitlines()
                     traced = "\n".join(code[line - 1] for file, line in merged["sources"] if file == __file__)
                     assert "self.w1.t()" in traced and "self.w3.t()" in traced, merged["sources"]
@@ -1905,7 +1906,7 @@ def test_dots_of_one_operand_share_one_interleaved_block(
         params = list(range(1, n + 1))
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=params, packable=params)
         assert plan.interleaved == interleaved, plan.packed
-        labels = [s["label"] for s in plan.steps() if not s["label"].startswith("cast")]
+        labels = [s["label"] for s in plan.steps() if not re.match(r"(\d+x )?cast", s["label"])]
         assert len(labels) == steps, labels
         for regions in interleaved:
             assert any(label.startswith(f"{sum(regions)}x dot_general") for label in labels), labels

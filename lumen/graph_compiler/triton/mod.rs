@@ -24,6 +24,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType};
+use crate::graph_compiler::common::horizontal::segments;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
 /// A generated Triton loop kernel for one plan step.
@@ -248,9 +249,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         _ => return None,
     };
     let segments = match &step.primitive {
-        Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => {
-            codegen::segments(body)
-        }
+        Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => segments(body),
         _ => Vec::new(),
     };
     let segments = match segments.len() {

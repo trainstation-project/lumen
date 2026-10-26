@@ -8,6 +8,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::formatdoc;
 
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
+use crate::graph_compiler::common::horizontal::segments;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
@@ -103,20 +104,6 @@ fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> String {
         .chain(["BLOCK_SIZE: tl.constexpr".into()])
         .map(|p| format!("    {p},\n"))
         .collect()
-}
-
-/// The body's outputs grouped by element count, in order of first appearance: each group's
-/// element count and output positions. A kernel computes each group over its own range of programs.
-pub(crate) fn segments(body: &Graph) -> Vec<(usize, Vec<usize>)> {
-    let mut segments: Vec<(usize, Vec<usize>)> = Vec::new();
-    for (k, &v) in body.outputs().iter().enumerate() {
-        let numel = body.type_of(v).numel();
-        match segments.iter_mut().find(|(n, _)| *n == numel) {
-            Some((_, outputs)) => outputs.push(k),
-            None => segments.push((numel, vec![k])),
-        }
-    }
-    segments
 }
 
 /// Generates the elementwise kernel computing every output of the body at each flat index `j`.

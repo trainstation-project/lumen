@@ -97,12 +97,27 @@ def test_fusions_of_different_record_function_calls_are_not_fused():
     assert len(_steps(lambda a, b: (F.exp(a) * 2.0, F.exp(b) * 2.0), *args)) == 1
 
 
-def test_different_sizes_are_not_fused():
-    """Fusions of different element counts stay apart (no concatenated
-    buffer, XLA's other form)."""
-    args = _device(rand(64, 32), rand(16, 16, seed=1))
-    steps = _steps(lambda a, b: (a * 2.0 + 1.0, b * 3.0 - 1.0), *args)
-    assert len(steps) == 2, [s["label"] for s in steps]
+def test_different_sizes_split_the_grid(compiler):
+    """Fusions of different element counts are one kernel too: each count
+    runs on its own range of threads, each output what it was alone, bit for
+    bit, under every loop tuning."""
+
+    def f(a, b, c, d):
+        """Two computations of 2048 elements, one of 256 and one of 7."""
+        return a * 2.0 + 1.0, F.exp(b), c * 3.0 - 1.0, d * d
+
+    args = _device(rand(64, 32), rand(32, 64, seed=1), rand(16, 16, seed=2), rand(7, seed=3))
+    steps = _steps(f, *args)
+    assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 3, [s["label"] for s in steps]
+    got = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+    compiler.autotune = False
+    untuned = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+    compiler.horizontal_fusion = False
+    assert len(_steps(f, *args)) == 4
+    alone = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+    for g, u, a in zip(got, untuned, alone):
+        np.testing.assert_array_equal(g, a)
+        np.testing.assert_array_equal(u, a)
 
 
 def test_dependent_fusions_are_not_fused():

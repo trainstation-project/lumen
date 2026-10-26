@@ -35,6 +35,7 @@ use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
+use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::kernels::dot_general::mps::GemmConfig;
@@ -320,28 +321,70 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             Buffer::Input(i) if i >= first_block => Some(i - first_block),
             b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
         });
-        let output = step.output.0;
-        derived.retain(|(d, _)| *d != output);
+        let outputs: Vec<Buffer> = std::iter::once(&step.output)
+            .chain(&step.extra_outputs)
+            .map(|(b, _)| *b)
+            .collect();
+        derived.retain(|(d, _)| !outputs.contains(d));
         let gemm = matches!(&step.primitive, Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some());
         if matches!(step.primitive, Primitive::DotGeneral { .. }) || gemm {
             if let Some((k, rest)) = block.zip(step.label.strip_prefix("dot_general")) {
                 step.label =
                     crate::graph::intern(format!("{}x dot_general{rest}", packed[k].0.len()));
             }
-        } else if let Some(k) = block {
-            let n = step.output.1.numel();
-            let of_block = step
-                .inputs
-                .iter()
-                .all(|(_, ty)| ty.numel() == n || ty.numel() == 1);
-            if of_block {
-                derived.push((output, k));
+        } else if block.is_some() {
+            // Each output (a horizontal fusion's of several sizes too) derives from the block
+            // when the inputs it is computed from are the block or same-sized.
+            let types = std::iter::once(&step.output).chain(&step.extra_outputs);
+            let mut found = Vec::new();
+            for (p, (buffer, ty)) in types.enumerate() {
+                let reads = feeding(&step.primitive, p, step.inputs.len());
+                let n = ty.numel();
+                let of_block = reads.iter().all(|&i| {
+                    let m = step.inputs[i].1.numel();
+                    m == n || m == 1
+                });
+                let block = reads
+                    .iter()
+                    .filter(|&&i| step.views[i].is_none())
+                    .find_map(|&i| match step.inputs[i].0 {
+                        Buffer::Input(i) if i >= first_block => Some(i - first_block),
+                        b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
+                    });
+                if let Some(k) = block.filter(|_| of_block) {
+                    found.push((*buffer, k));
+                }
             }
+            derived.extend(found);
         }
     }
     plan.packed = packed;
     plan.interleaved = interleaved;
     Ok(plan)
+}
+
+/// Positions of the step inputs that output `p` of `primitive` is computed from: those its fusion
+/// body reads for that output, or every input of another primitive.
+fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
+    let Primitive::Fusion { body, .. } = primitive else {
+        return (0..inputs).collect();
+    };
+    let mut producer = vec![None; body.types.len()];
+    for node in body.nodes() {
+        producer[node.output] = Some(node);
+    }
+    let (mut seen, mut stack) = (vec![false; body.types.len()], vec![body.outputs()[p]]);
+    let mut reads = Vec::new();
+    while let Some(v) = stack.pop() {
+        if std::mem::replace(&mut seen[v], true) {
+            continue;
+        }
+        match producer[v] {
+            Some(node) => stack.extend(&node.inputs),
+            None => reads.extend(body.inputs().iter().position(|&i| i == v)),
+        }
+    }
+    reads
 }
 
 /// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
@@ -892,10 +935,12 @@ pub(super) fn encode_with(
     else {
         unreachable!("a loop's tuning")
     };
-    let grid = Grid::Elementwise {
-        threads: n.div_ceil(per_thread),
-        group,
-    };
+    // A horizontal fusion of several element counts runs each on its own range of threads.
+    let threads = segments(body)
+        .iter()
+        .map(|(numel, _)| numel.div_ceil(per_thread))
+        .sum();
+    let grid = Grid::Elementwise { threads, group };
     let buffers: Vec<*const u8> = inputs
         .iter()
         .copied()

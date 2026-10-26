@@ -50,14 +50,12 @@ impl Target for Horizontal<'_> {
         }
     }
 
-    /// Groups by output size and tiling, and by exact shape for tiled kernels.
+    /// Groups loops of any size together (they split the grid), and tiled kernels by exact shape.
     fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
-        let ty = graph.type_of(node.output);
-        let mut key = vec![ty.numel(), usize::from(tiled(node))];
-        if tiled(node) {
-            key.extend(&ty.shape);
+        match tiled(node) {
+            true => graph.type_of(node.output).shape.clone(),
+            false => Vec::new(),
         }
-        key
     }
 
     /// Whether a group stays under the buffer limit and, for tiled kernels, the transpose limit.
